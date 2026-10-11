@@ -1,0 +1,131 @@
+[[row]]
+item = "mirroring"
+page = "docs/in-depth/indices.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "indices"
+page = "docs/in-depth/indices.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "activation-elvish-guard"
+page = "docs/in-depth/shell-integration.md"
+action = "moved"
+home = "troubleshooting/shell.mdx#repair"
+
+[[row]]
+item = "activation-project-created-in-place"
+page = "docs/in-depth/shell-integration.md"
+action = "moved"
+home = "troubleshooting/shell.mdx#diagnostics"
+
+[[row]]
+item = "shell-integration"
+page = "docs/in-depth/shell-integration.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--flag"
+page = "docs/in-depth/shell-integration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "--no-flag"
+page = "docs/in-depth/shell-integration.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "running-shape"
+page = "docs/in-depth/project.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec"
+
+[[row]]
+item = "running-scope"
+page = "docs/in-depth/project.md"
+action = "moved"
+home = "guides/run-project-tools.mdx#exec"
+
+[[row]]
+item = "running-exit-codes"
+page = "docs/in-depth/project.md"
+action = "moved"
+home = "reference/exit-codes.md"
+
+[[row]]
+item = "env-composition"
+page = "docs/in-depth/environments.md"
+action = "moved"
+home = "explanation/environments.mdx"
+
+[[row]]
+item = "--mode"
+page = "docs/in-depth/environments.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "cosign-interop"
+page = "docs/in-depth/signing.md"
+action = "moved"
+home = "explanation/cosign-parity.mdx#cosign-interop"
+
+[[row]]
+item = "self-hosted"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "self-hosted-policy"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "ci"
+page = "docs/in-depth/signing.md"
+action = "moved"
+home = "publishing/sign-a-release.md#ci"
+
+[[row]]
+item = "attestations"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "offline-verification"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "duplicate"
+
+[[row]]
+item = "signing"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "cosign-parity"
+page = "docs/in-depth/cosign-parity.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "storage"
+page = "docs/in-depth/storage.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "deferred-tools"
+page = "docs/in-depth/lazy-loading.md"
+action = "deleted"
+reason = "obsolete"

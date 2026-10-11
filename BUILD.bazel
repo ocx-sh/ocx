@@ -83,6 +83,12 @@ exports_files(
     visibility = ["//crates:__subpackages__"],
 )
 
+# The docs changelog page includes this file at build time.
+exports_files(
+    ["CHANGELOG.md"],
+    visibility = ["//website:__pkg__"],
+)
+
 # ---------------------------------------------------------------------------
 # Root-package files acceptance modules read (plan_test_speed_tiers.md C-020).
 #

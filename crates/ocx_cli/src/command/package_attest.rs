@@ -43,9 +43,10 @@ pub struct PackageAttest {
     )]
     platform: Option<ocx_oci::Platform>,
 
-    /// Predicate document to attach (JSON).
+    /// Predicate document to attach (JSON), at most 15 MiB; on Unix a symlink at PATH is refused
     ///
-    /// Read before any network call, so a bad path costs no round-trip.
+    /// A larger file exits 65 (`predicate_too_large`). Read before any network call, so a bad path
+    /// costs no round-trip.
     ///
     /// Security: on Unix the file is opened without following symlinks, and a
     /// symlink at this path is refused. Whatever a link points at would
@@ -54,10 +55,10 @@ pub struct PackageAttest {
     #[clap(long = "predicate", required = true, value_name = "PATH")]
     predicate: std::path::PathBuf,
 
-    /// Predicate type: an alias or a full URI.
+    /// Predicate type: an alias (cyclonedx, spdx, spdxjson, slsaprovenance1, link, vuln, openvex, custom) or a full URI. `custom` wraps the predicate in cosign's Data/Timestamp envelope; `slsaprovenance` and `slsaprovenance02` exit 64, so pass `slsaprovenance1`
     ///
-    /// Aliases: cyclonedx, spdx, spdxjson, slsaprovenance, slsaprovenance02,
-    /// slsaprovenance1, link, vuln, openvex, custom. Anything else must be an
+    /// `slsaprovenance` and `slsaprovenance02` are refused before any request (exit 64,
+    /// `provenance_version_unsupported`); pass `slsaprovenance1` instead. Anything else must be an
     /// absolute URI, stored exactly as spelled.
     #[clap(long = "type", required = true, value_name = "TYPE")]
     predicate_type: PredicateType,

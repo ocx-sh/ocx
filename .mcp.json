@@ -8,8 +8,9 @@
       }
     },
     "context7": {
-      "command": "bunx",
+      "command": "npx",
       "args": [
+        "-y",
         "@upstash/context7-mcp"
       ]
     }

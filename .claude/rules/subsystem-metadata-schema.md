@@ -2,12 +2,12 @@
 paths:
   - crates/ocx_package/src/metadata/**
   - crates/ocx_schema/**
-  - website/src/docs/reference/metadata.md
+  - website/src/content/docs/reference/metadata/**
 ---
 
 # Metadata Schema
 
-`metadata.json` format defined by Rust types in `crates/ocx_package/src/metadata/`, documented at `website/src/docs/reference/metadata.md`. JSON Schema generated from types by `ocx_schema` crate.
+`metadata.json` format defined by Rust types in `crates/ocx_package/src/metadata/`, documented under `website/src/content/docs/reference/metadata/`. JSON Schema generated from types by `ocx_schema` crate.
 
 ## Source of Truth
 
@@ -17,7 +17,7 @@ Rust types = single source of truth. JSON Schema + docs page = derived artifacts
 |---|---|---|
 | Rust types | `crates/ocx_package/src/metadata/**/*.rs` | Manual |
 | JSON Schema | `website/src/public/schemas/metadata/v1.json` | `task schema:generate` |
-| Docs page | `website/src/docs/reference/metadata.md` | Manual |
+| Docs pages | `website/src/content/docs/reference/metadata/` | Manual |
 
 ## When Modifying Metadata Types
 
@@ -25,7 +25,7 @@ Change any file under `crates/ocx_package/src/metadata/`:
 
 1. **Ensure `JsonSchema` derives are present.** Every `Serialize`/`Deserialize` struct + enum needs `#[derive(schemars::JsonSchema)]`. Types with custom `Deserialize` or constrained value sets need manual `impl schemars::JsonSchema` (see `Version`) or a `#[schemars(schema_with = "...")]` field attribute (see `Var.visibility`).
 2. **Regenerate schema.** Run `task schema:generate`, verify output.
-3. **Update docs page.** Added/removed/renamed fields → update `website/src/docs/reference/metadata.md` — tables, examples, descriptions.
+3. **Update docs page.** Added/removed/renamed fields → update the pages under `website/src/content/docs/reference/metadata/` — tables, examples, descriptions.
 4. **Add doc comments.** Every public field needs `///` doc comment — schemars uses as `description` in JSON Schema.
 
 ## Schema Generation

@@ -76,7 +76,7 @@ Clear type: pass `issueTypeId: null` via `-F i=<id> -F t=`.
 | `area/cli` | CLI commands, API surface |
 | `area/mirror` | Mirror tool, bundling |
 | `area/tests` | Acceptance test infrastructure |
-| `area/website` | VitePress docs site |
+| `area/website` | Astro/Starlight docs site |
 | `area/ci` | GitHub Actions, release pipeline |
 
 ### Priority labels — only ends of spectrum

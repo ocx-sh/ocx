@@ -1,0 +1,101 @@
+{
+  "/docs/authoring/": {
+    "to": "/docs/publishing/"
+  },
+  "/docs/authoring/announcing/": {
+    "to": "/docs/publishing/announce/"
+  },
+  "/docs/authoring/building-pushing/": {
+    "to": "/docs/publishing/build-and-push/"
+  },
+  "/docs/authoring/bundle-anatomy/": {
+    "to": "/docs/publishing/bundle-anatomy/"
+  },
+  "/docs/authoring/dependencies/": {
+    "to": "/docs/publishing/declare-dependencies/"
+  },
+  "/docs/authoring/entry-points/": {
+    "to": "/docs/publishing/entry-points/"
+  },
+  "/docs/authoring/env-surface/": {
+    "to": "/docs/publishing/env-surface/"
+  },
+  "/docs/authoring/migration/": {
+    "to": "/docs/publishing/repackage-releases/"
+  },
+  "/docs/authoring/multi-platform/": {
+    "to": "/docs/publishing/multi-platform/"
+  },
+  "/docs/authoring/testing/": {
+    "to": "/docs/publishing/test-locally/"
+  },
+  "/docs/docker/": {
+    "to": "/docs/integration/docker/"
+  },
+  "/docs/faq/": {
+    "to": "/docs/troubleshooting/platforms/"
+  },
+  "/docs/getting-started/": {
+    "to": "/docs/getting-started/first-package/"
+  },
+  "/docs/in-depth/ci/": {
+    "to": "/docs/integration/github-actions/"
+  },
+  "/docs/in-depth/configuration/": {
+    "to": "/docs/explanation/configuration/"
+  },
+  "/docs/in-depth/cosign-parity/": {
+    "to": "/docs/explanation/cosign-parity/"
+  },
+  "/docs/in-depth/dependencies/": {
+    "to": "/docs/explanation/dependencies/"
+  },
+  "/docs/in-depth/entry-points/": {
+    "to": "/docs/explanation/entry-points/"
+  },
+  "/docs/in-depth/environments/": {
+    "to": "/docs/explanation/environments/"
+  },
+  "/docs/in-depth/indices/": {
+    "to": "/docs/explanation/indices/"
+  },
+  "/docs/in-depth/lazy-loading/": {
+    "to": "/docs/explanation/deferred-packages/"
+  },
+  "/docs/in-depth/project/": {
+    "to": "/docs/explanation/project-toolchain/"
+  },
+  "/docs/in-depth/self-hosted-sigstore/": {
+    "to": "/docs/guides/self-hosted-sigstore/"
+  },
+  "/docs/in-depth/shell-integration/": {
+    "to": "/docs/explanation/shell-integration/"
+  },
+  "/docs/in-depth/signing/": {
+    "to": "/docs/explanation/signing/"
+  },
+  "/docs/in-depth/storage/": {
+    "to": "/docs/explanation/storage/"
+  },
+  "/docs/in-depth/versioning/": {
+    "to": "/docs/explanation/versioning/"
+  },
+  "/docs/installation/": {
+    "to": "/docs/getting-started/install-ocx/"
+  },
+  "/docs/user-guide/": {
+    "to": "/docs/guides/choose-versions/"
+  },
+  "/docs/user-guide/attestations/": {
+    "to": "/docs/publishing/attest-and-sbom/"
+  },
+  "/docs/user-guide/patches/": {
+    "to": "/docs/guides/patch-packages/"
+  },
+  "/docs/user-guide/promoting-packages/": {
+    "to": "/docs/publishing/promote-packages/"
+  },
+  "/docs/user-guide/snapshot-tracks/": {
+    "to": "/docs/publishing/snapshot-tracks/"
+  }
+}

@@ -1,0 +1,65 @@
+{
+ "anchors": [
+  "compatibility",
+  "compatibility-relation",
+  "compatibility-scoring",
+  "grammar",
+  "grammar-escaping",
+  "platforms",
+  "see-also",
+  "shared-digests",
+  "supported-pairs"
+ ],
+ "commands": [
+  "ocx package create"
+ ],
+ "flags": [
+  "--platform"
+ ],
+ "env": [],
+ "config_keys": [
+  "tool.platforms"
+ ],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "../authoring/multi-platform.md",
+  "../authoring/multi-platform.md#libc",
+  "../authoring/multi-platform.md#wasm",
+  "../in-depth/project.md#lock-format",
+  "./command-line.md#exit-codes",
+  "./command-line.md#package-create",
+  "./command-line.md#package-create-libc-check",
+  "./command-line.md#package-install",
+  "./metadata.md#dependencies",
+  "https://github.com/opencontainers/image-spec/blob/main/image-index.md",
+  "https://support.apple.com/en-us/HT211861"
+ ],
+ "fences": [
+  "text:6d1769a3: os/arch[/variant][+feature[,feature...]]      |      any",
+  "text:97a53090: platform      = \"any\" | specific ;"
+ ],
+ "facts": [
+  "Every OCX package targets a platform, which is an OS and architecture pair, a refinement, a feature requirement, or any. [L7]",
+  "One string form serves the --platform flag, the ocx.lock per-platform digest map and the build receipt written beside a bundle. [L9]",
+  "A platform is either the literal any, or an os/arch pair optionally refined by a CPU variant and a feature list. [L16]",
+  "The first fence gives the one-line shape: os/arch, optional variant, optional plus feature list, or any. [L19]",
+  "The os set is closed to linux, darwin, windows, wasip1 and wasip2. [L27]",
+  "any means platform-agnostic, with no OS, architecture or feature requirement. [L43]",
+  "A slash introduces the variant and a single plus introduces the feature list, so the two slots cannot be confused. [L45]",
+  "A pair must name a buildable artifact, so OCX enforces an explicit list rather than the cross product. [L52]",
+  "Six native pairs are supported: linux, darwin and windows, each on amd64 and arm64. [L58]",
+  "A pairing outside the list is refused while parsing, and the refusal lists the supported pairs. [L73]",
+  "OCX percent-escapes the four structural characters wherever they appear inside a registry-controlled value. [L85]",
+  "Parsing and re-rendering a platform string always yields the identical string, an injective round trip. [L98]",
+  "A manifest published as linux/amd64+libc.musl does not match a glibc host, because the relation decides, not equality. [L107]",
+  "An any offer satisfies every requirement, because a platform-agnostic artifact runs anywhere. [L122]",
+  "An any requirement is satisfied only by an any offer, so an undetectable host never runs a Specific binary. [L124]",
+  "os.features inverts: every feature the offer declares must be among the host capabilities the requirement offers. [L127]",
+  "variant is strict equality, and an offer that leaves variant unset imposes no constraint. [L130]",
+  "A tie is reported as ambiguous with exit 65 rather than guessed, and the caller must pass --platform. [L165]",
+  "Rosetta 2 is the canonical case, letting a darwin/amd64-only build serve darwin/arm64 hosts. [L177]",
+  "The callout notes that a shared digest is not a publishing mistake, since index entries are content-addressed. [L184]"
+ ],
+ "lines": 223
+}

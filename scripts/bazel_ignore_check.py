@@ -60,7 +60,7 @@ from bazel_gate_proofs import CRATE_PACKAGES, REPO_ROOT, Finding, report
 
 BAZELIGNORE = REPO_ROOT / ".bazelignore"
 
-IGNORE_ENTRY_FLOOR = 16
+IGNORE_ENTRY_FLOOR = 18
 """The 16 directories `.bazelignore` lists today.
 
 The floor is what makes an emptied or unreadable file a red rather than a sweep

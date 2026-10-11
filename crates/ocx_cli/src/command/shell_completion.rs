@@ -21,15 +21,15 @@ pub struct ShellCompletion {
     /// then `completions` under `[shell]` in config.toml, then whether the
     /// session is interactive.
     ///
-    /// https://ocx.sh/docs/in-depth/shell-integration
+    /// https://ocx.sh/docs/explanation/shell-integration/
     // The `env.sh` and `env.elv` shims pass it; renaming it breaks their completion injection.
     #[clap(long = "if-enabled")]
     if_enabled: bool,
 
-    /// The shell to generate the completions for: bash, elvish, fish, powershell or zsh.
+    /// The shell to generate the completions for: bash, elvish, fish, powershell or zsh. Omitted, it is detected from the parent shell
     ///
-    /// Takes the same shell names as every other `--shell`; the shells
-    /// without completion support are refused.
+    /// Detection failure exits 1. Other shell names are
+    /// accepted by `--shell` elsewhere but refused here with exit 64.
     #[clap(long, value_enum, hide_possible_values = true)]
     shell: Option<shell::Shell>,
 

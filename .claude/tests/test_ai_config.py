@@ -485,8 +485,8 @@ class TestCrateSplitSweep:
         "AGENTS.md",
         ".agents/memory/hex.md",
         ".claude/rules/product-context.md",
-        "website/src/docs/authoring/migration.md",
-        "website/src/docs/in-depth/project.md",
+        "website/src/content/docs/authoring/migration.md",
+        "website/src/content/docs/in-depth/project.md",
     )
 
     DEAD_PATH = "crates/" + "ocx_lib"
@@ -2558,7 +2558,7 @@ class TestBazelGateProse:
     _PROSE = (
         "CLAUDE.md",
         ".claude/rules/subsystem-taskfiles.md",
-        "website/src/docs/contributing/bazel.md",
+        "website/src/content/docs/contributing/bazel.md",
     )
     #: The files that state the gate *count* in words. A count is the one part
     #: of this prose a containment check cannot catch: adding a seventh gate to

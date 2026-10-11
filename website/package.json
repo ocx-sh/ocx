@@ -1,11 +1,29 @@
 {
-  "devDependencies": {
-    "vitepress": "^2.0.0-alpha.16"
+  "name": "ocx-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev --host",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "node --test \"plugins/*.test.mjs\" \"scripts/*.test.mjs\"",
+    "lighthouse": "node scripts/lighthouse.mjs"
   },
   "dependencies": {
-    "@vueuse/core": "^14.2.1",
-    "asciinema-player": "^3.15.1",
-    "reka-ui": "^2.9.2",
-    "vitepress-plugin-group-icons": "^1.7.1"
+    "@astrojs/markdown-remark": "7.3.2",
+    "@astrojs/starlight": "0.42.4",
+    "@ocx-sh/theme": "0.1.1",
+    "asciinema-player": "^3.17.0",
+    "astro": "7.3.5",
+    "unist-util-visit": "^5.1.0"
+  },
+  "devDependencies": {
+    "@lhci/cli": "0.15.1",
+    "lighthouse": "12.6.1",
+    "playwright-core": "^1.63.0",
+    "remark-mdx": "^3.1.1",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5",
+    "vfile": "^6.0.3"
   }
 }

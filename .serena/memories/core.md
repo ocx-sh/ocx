@@ -40,4 +40,4 @@ Each has a path-scoped rule in `.claude/rules/subsystem-*.md` that auto-loads on
 - `.claude/rules.md` — rule catalog (by concern / by language / by subsystem / by auto-load path).
 - `.claude/rules/product-context.md` — vision, positioning, "why not Homebrew/Nix/ORAS/mise".
 - `.claude/rules/arch-principles.md` — design principles, glossary, ADR index.
-- `website/src/docs/user-guide.md` — three-store architecture, versioning, locking, auth.
+- `website/src/content/docs/user-guide.mdx` — three-store architecture, versioning, locking, auth.

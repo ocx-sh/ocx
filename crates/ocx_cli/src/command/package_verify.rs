@@ -21,6 +21,7 @@ use crate::command::package_sign_common;
 use crate::options;
 
 #[derive(Parser, Clone)]
+#[clap(mut_arg("signature_format", options::signature_format::read_side))]
 pub struct PackageVerify {
     /// Narrow into one platform of an image index.
     ///
@@ -89,7 +90,7 @@ pub struct PackageVerify {
     #[clap(long = "attestation")]
     attestation: bool,
 
-    /// Restrict to one predicate type (for example cyclonedx or spdx).
+    /// Restrict to one predicate type (for example cyclonedx or spdx); requires `--attestation`.
     ///
     /// Narrowing is by the signed payload, never by a referrer annotation.
     #[clap(long = "type", value_name = "TYPE", requires = "attestation")]
@@ -112,15 +113,14 @@ pub struct PackageVerify {
     #[clap(long = "no-cache")]
     no_cache: bool,
 
-    /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
-    /// trusted_root.json), named by a bare path or a file:// one.
+    /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74
     ///
     /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
     /// for air-gapped verification against a local trust-root mirror. No TUF
     /// network fetch is performed. Takes precedence over the
     /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
     /// config.toml. See
-    /// https://ocx.sh/docs/in-depth/self-hosted-sigstore
+    /// https://ocx.sh/docs/guides/self-hosted-sigstore/
     #[clap(long = "sigstore-trusted-root", value_name = "PATH")]
     trusted_root: Option<std::path::PathBuf>,
 

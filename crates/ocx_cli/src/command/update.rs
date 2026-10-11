@@ -19,7 +19,7 @@ use crate::options;
 /// Arguments for `ocx update`; its help text lives on `Command::Update`.
 #[derive(Parser, Clone)]
 pub struct Update {
-    /// Verify the candidate lock would match the predecessor and exit.
+    /// Verify the candidate lock would match the predecessor and exit; exits 65 when a pin would change.
     ///
     /// Re-resolves the selected scope (every declared tag, or only the
     /// bindings named by `-g`/positional names), prints the bindings that

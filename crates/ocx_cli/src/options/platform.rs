@@ -13,7 +13,7 @@ pub struct PlatformOption {
     /// features are a subset of the value you pass, so `+libc.glibc` or
     /// `+libc.musl` forces a specific libc variant. WebAssembly targets
     /// (`wasip1/wasm`, `wasip2/wasm`) are reachable only by naming them here.
-    /// Defaults to the host platform. <https://ocx.sh/docs/authoring/multi-platform>
+    /// Defaults to the host platform. <https://ocx.sh/docs/publishing/multi-platform/>
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     pub platform: Option<ocx_oci::Platform>,
 }

@@ -1,0 +1,393 @@
+---
+title: "Pin a project's packages"
+description: "Declare a project toolchain in ocx.toml with groups, per-package settings and environment values."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+Declare the packages a repository needs in a committed `ocx.toml`, lock them in `ocx.lock`, and scope them with groups, per-package settings and environment values.
+
+## Declare the toolchain \{#project\}
+
+A repository's contributors and CI runners need the same package versions, such as `cmake 3.28`, `shellcheck 0.11` and `goreleaser 2.0`. They should not argue over chat or pipe installers into a shell. The mechanisms in [Lock and reproduce][lock-guide] pin a single invocation. None of them describes what the project itself expects.
+
+A committed `ocx.toml` plus its sibling `ocx.lock` does. The pair makes the packages a project needs a piece of source code. It is reviewable, mergeable, reproducible across machines and resolvable offline once the lock is fetched.
+
+```toml
+# ocx.toml
+[tools]
+cmake      = "ocx.sh/kitware/cmake:3.28"
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
+```
+
+Each line of the `[tools]` table is a *binding*. The name on the left is the local name the package answers to. The value on the right is a fully qualified [OCI identifier][oci-identifier], `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected, so the file is unambiguous whatever the default-registry config says.
+
+An identifier with no tag at all is the one form OCX completes for you. [`ocx add ocx.sh/kitware/cmake`][cmd-add] writes `cmake = "ocx.sh/kitware/cmake:latest"`, the same default [`docker pull`][docker-images] applies. The written entry is always explicit, so the file never leaves a reader guessing which tag it meant. The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor autocompletion.
+
+## Fresh clone \{#project-fresh-clone\}
+
+Just checked out a repo that already has an `ocx.toml` and `ocx.lock`? Warm the local object store with [`ocx pull`][cmd-pull]:
+
+\<\<\< @/_scripts/user-guide/fresh-clone.sh\{sh\}
+
+Then run [`direnv allow`][direnv] once to re-evaluate `.envrc`. `ocx direnv export` then puts the locked binaries on `PATH`. No re-resolution happens and no registry is written to, because the lock is the only input.
+
+## Start a project \{#project-init\}
+
+[`ocx init`][cmd-init] writes a minimal `ocx.toml` into the project directory: a `#:schema` directive and an empty `[tools]` table. Once the file exists, [`ocx add`][cmd-add] appends bindings, or you edit it directly. Comments and declaration order survive every mutation.
+
+\<\<\< @/_scripts/user-guide/project-lifecycle.sh\{sh\}
+
+`ocx init` refuses to overwrite. If `ocx.toml` already exists, or a symlink sits at that path, it exits 64 and leaves the file alone. Pass `--project <dir>` before the subcommand to scaffold `<dir>/ocx.toml` from anywhere, as in `ocx --project "$CI_PROJECT_DIR" init`. A path that does not exist exits 79 and is not created. `ocx --global init` scaffolds `$OCX_HOME/ocx.toml`, which the global mutators also create on first use.
+
+It also records a [consent stamp][in-depth-shell-integration-consent] for the new project, so the next shell prompt in that directory applies it. The stamp records an empty source set because the project has no lock yet, and the first `ocx add` records the real one. `--no-consent` skips the stamp, and `OCX_NO_CONSENT` makes that the default for every command in a pipeline. The flag outranks the variable, so `--consent` stamps even where the variable is set. Under `--global` no stamp is written, because the ocx home toolchain is always consented.
+
+To move the pinned versions later, see [Update the pinned tools][update-guide].
+
+## Add and remove bindings \{#project-add-remove\}
+
+[`ocx add`][cmd-add] appends a binding to the nearest `ocx.toml`, resolves only the new bindings into `ocx.lock` and installs them. Every existing lock entry is carried forward unchanged. The command walks up from the working directory and exits 64 when it finds no `ocx.toml`. It never scaffolds one.
+
+Several identifiers may be added in one call. They are staged together and committed atomically. If one is invalid, or its name is already bound to a different identifier, nothing is written. `--group` applies to the whole batch.
+
+Adding a binding the group already declares with the same identifier is a no-op and not a failure. `ocx.toml` stays byte-identical, and a repeat inside one batch collapses the same way. The binding is re-locked only when `ocx.lock` has no entry for it, so `ocx add` never moves a version.
+
+Each already-declared binding prints ``Unchanged: <name> is already added; use `ocx update <name>` to move it`` on stderr. Packages are pulled on every path, so re-running after an interrupted download finishes the install. Naming a bound key with a different identifier exits 64 and names both identifiers.
+
+The same name may sit in `[tools]` and in any named group, because binding identity is `(group, name)`:
+
+```shell
+ocx add shfmt/shfmt:3.13              # adds to default [tools]
+ocx add --group ci shfmt/shfmt:3.13   # also legal: coexists in [group.ci]
+```
+
+### Binding names \{#project-add-names\}
+
+Without `NAME=`, the binding key is the repository basename. Two packages that share a basename collide under that default. `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists". Prefix an identifier with `NAME=` to bind it under a distinct key:
+
+```shell
+ocx add gh=ocx.sh/github/cli:2.40
+ocx add glab=ocx.sh/gitlab/cli:1.30
+```
+
+Both bindings coexist. `ocx exec gh`, `ocx exec glab`, `ocx remove glab` and the `ocx.lock` entry all key on the name you gave and not on the repository path.
+
+`NAME` must be non-empty and contain only `[A-Za-z0-9._-]`. An invalid name exits 64.
+
+[`ocx remove`][cmd-remove] (alias `rm`) drops bindings from `ocx.toml`, rewrites `ocx.lock` and uninstalls their packages. An argument is a bare name (`cmake`), a name with a tag (`kitware/cmake:3.28`) or a fully qualified identifier. The identifier forms are reduced to the repository basename and matched against the TOML key. A binding added as `glab=…` is therefore removed with `ocx remove glab` and not by its identifier.
+
+An argument that matches no binding exits 79. Removals are staged together, so `ocx.toml` is left unchanged in that case.
+
+When a name appears in more than one group, `ocx remove` cannot tell which entry to drop. It exits 64 until `--group` names one:
+
+```shell
+ocx remove cmake                  # ok: unambiguous
+ocx remove --group ci shellcheck  # removes from [group.ci] only
+ocx remove shellcheck             # error 64: ambiguous, use --group
+```
+
+## Read the project state \{#project-state\}
+
+[`ocx status`][cmd-status] reports what `ocx.toml` and `ocx.lock` say without resolving anything. It is offline and read-only. No registry is contacted, no platform is selected and no package metadata is read.
+
+It answers on projects other commands refuse. A missing `ocx.lock` exits 78 for `pull` and `exec`, and a drifted one exits 65. `status` reports both as payload and exits 0. That makes it the command to reach for when a project is broken.
+
+For what the declarations resolve to on this host, use [`ocx inspect`][cmd-inspect]. It selects the bindings in the requested groups, narrows them to any names given, and reports each one without installing anything. By default each binding lists the platform candidates `ocx.lock` pins. The report is then a pure projection of the two project files, and no registry is contacted.
+
+`--resolve` selects this host's leaf and adds the OCI resolution chain. `--closure` computes each binding's dependency closure from metadata alone. It reports collisions between different packages before either is installed. `inspect` needs a current lock, so it exits 78 when the lock is absent and 65 when it no longer matches `ocx.toml`.
+
+```shell
+# What does the default group pin, per platform? (offline)
+ocx --format json inspect | jq -r '.packages[] | .name as $n | .candidates[] | "\($n) \(.platform) \(.pinned)"'
+
+# What does it pin on this host?
+ocx --format json inspect --resolve | jq -r '.packages[] | "\(.name) \(.pinned_identifier)"'
+
+# What would the whole toolchain put on PATH, without installing it?
+ocx --format json inspect -g all --closure | jq '.packages[].closure.surface.interface.binaries'
+
+# Which packages collide on an entrypoint name before I install them?
+ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.conflicts.entrypoints != [])'
+```
+
+## Name the project \{#project-discovery\}
+
+By default a command walks up from the working directory to the nearest `ocx.toml`. The walk stops at the first directory that holds a `.git` entry. Three settings change which file is found.
+
+[`--project`][arg-project] and [`OCX_PROJECT`][env-ocx-project] name the file outright, or the directory that holds it, and bypass the walk. The precedence is `--project`, then `OCX_PROJECT`, then the walk. Setting `OCX_PROJECT` to the empty string reads as unset. These exit codes apply to an explicit path:
+
+- A path that does not exist exits 79.
+- A directory that holds no `ocx.toml` is no project and exits 64, the code `ocx exec` and its siblings use whenever they have no project to act on.
+- A path that exists but cannot be read exits 74. The cause is a permission problem or a candidate that is not a regular file.
+
+Explicit paths follow symlinks, while the walk rejects a symlinked `ocx.toml`. Naming the path is how you opt a symlinked file in.
+
+[`OCX_CEILING_PATH`][env-ocx-ceiling-path] bounds the walk where no repository marks the edge, such as a CI workspace mounted under a shared parent. The walk probes the ceiling directory and never ascends above it. A project file at the ceiling is found, and one in a parent is not. A relative value joins onto the working directory the walk starts from. An explicit `--project` or `OCX_PROJECT` is not bounded by it, and the variable is not forwarded to child `ocx` processes.
+
+[`OCX_NO_PROJECT`][env-ocx-no-project] prunes the walk and `OCX_PROJECT` for a hermetic run. See [the kill switch][in-depth-configuration-kill-switch].
+
+## Keep rendered toolchains out of the checkout \{#project-toolchain_dir\}
+
+By default, `ocx pull` renders directly into the project. `<project>/.ocx/toolchain/` fills up with launcher trampolines and directory links to package roots, right beside your source. `ocx` [gitignores][in-depth-storage-toolchain] that tree, which keeps `git status` clean. The directory still exists inside the checkout, and some sites forbid any tool from writing there. A build may run against a read-only mount, an immutable CI workspace or a bind-mount shared across containers.
+
+[`toolchain_dir`][config-toolchain_dir] relocates every project's rendered tree under one root you choose, so nothing lands under the checkout at all:
+
+```toml
+# $OCX_HOME/config.toml, not ocx.toml: the project file rejects this key (exit 78)
+toolchain_dir = "~/.cache/ocx/toolchains"
+```
+
+A project's tree then lands at `<root>/<project-key>/toolchain/`. `<project-key>` is a stable 16-hex key derived from the project's canonical directory, so one root holds every project you work in without collisions. The global toolchain ignores this key. It is always `$OCX_HOME/toolchain`.
+
+The key sits at the root of `config.toml`, outside every section. It is not an `ocx.toml` key, and writing it there is a parse error (exit 78).
+
+Because it lives in `config.toml`, it also travels through the [`[managed]`][config-managed] tier. One [centrally published config][managed-config-guide] update moves every host's project trees onto a chosen volume, with no per-machine edit. The directory does not have to exist yet. OCX creates it the first time it renders a toolchain into it, and resolving the key writes nothing.
+
+[`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain_dir] is the **weaker** tier, consulted only when no config file sets the key. An empty value reads as absent at both tiers, so `OCX_TOOLCHAIN_DIR=""` does not erase a configured root. The setting moves where the `links/<group>/<entry>` links and the `shells/default/bin` trampolines live, so it is forwarded to child `ocx` processes. When the parent resolved no root, the forward removes any inherited value. A stale export in your shell then cannot outrank the outer ocx's parsed state.
+
+**Expansion.** A leading `~` expands against the home directory (`%USERPROFILE%` on Windows). `~user` is not supported, and a `~` in any later component is a literal directory name. Nothing else expands, so `%VAR%` and `$VAR` are taken literally on every platform.
+
+On Windows, `'%LOCALAPPDATA%\ocx\toolchain'` therefore names a relative path whose first component is the literal text `%LOCALAPPDATA%`. It is refused. Spell the path out in a [TOML][toml] literal string, where single quotes keep the backslashes:
+
+```toml
+toolchain_dir = '~\AppData\Local\ocx\toolchains'
+```
+
+**Refusals.** The resolved root must be a directory beneath your home directory or beneath [`$OCX_HOME`][env-ocx-home]. Every refusal exits 78 (`ConfigError`) and names the tier that declared the value, `config.toml` `toolchain_dir` or `OCX_TOOLCHAIN_DIR`. An exported variable is never blamed on a file. The checks apply in this order:
+
+1. A leading `~` that cannot be expanded, such as `~user` or no resolvable home directory.
+2. A relative value, tested after `~` expansion, because a relative root would resolve a different home from every working directory.
+3. Any `..` component.
+4. A filesystem root, or a path inside one of 23 system locations such as `/usr`, `/etc`, `/opt` and the `/var` subtrees, and `%SystemRoot%` and `%ProgramFiles%` on Windows. There is no opt-out.
+5. A root that is one of the two anchors itself, or that lies outside both. Name a directory beneath the home directory or `$OCX_HOME`.
+6. A root at or under `$OCX_HOME/toolchain`. There `<project-key>` would be indistinguishable from a group directory, and a bare global [`ocx pull`][cmd-pull] would prune other projects' trees as orphan groups.
+7. A path chain that cannot be inspected (`EACCES`, `ELOOP` and their kin), or a path that exists and is not a directory.
+8. **Linux and macOS only:** a directory that is not owned by the invoking user, or that grants write to group or world.
+
+When the root does not exist yet, the ownership and permission checks run against its **nearest existing ancestor**. That is the directory OCX will create under, and its permissions decide whether another account could plant a launcher in a tree that lands on `PATH`. The ownership checks do not run on Windows, because a directory's permissions there are an ACL. On Windows the guarantees are containment, the system-location set, directory-ness and that the path can be inspected.
+
+A refused value in a managed payload is still exit 78 and still reported as `config.toml` `toolchain_dir`. The remedy is to edit the payload, which is a `config.toml` like any other. See [Publishing to a fleet][in-depth-configuration-managed-publish].
+
+## Groups \{#groups\}
+
+CI needs `shellcheck` and `shfmt`, a release pipeline needs `goreleaser`, and daily development needs neither. Named groups scope subsets so workstations do not download release tooling on first checkout:
+
+```toml
+[tools]
+cmake = "ocx.sh/kitware/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck/shellcheck:0.11"
+
+[group.release.tools]
+goreleaser = "ocx.sh/goreleaser/goreleaser:2.0"
+```
+
+\<\<\< @/_scripts/user-guide/project-groups.sh\{sh\}
+
+The same binding name may appear in `[tools]` and any `[group.*.tools]` table, because identity is `(group, name)`. A project can pin one `shfmt` for daily use and a different one in `ci` without conflict.
+
+Each named group is a table with exactly two optional sub-tables. `tools` is the same binding-name-to-identifier map as the top-level `[tools]`, and `env` is covered in [Environment variables][env-section]. A group with neither is a valid, empty group. A binding declared directly under `[group.<name>]` and not inside `tools` is a parse error (exit 78) that names the group and points at the fix. An unrecognized sub-table such as `[group.ci.tolos]` is rejected the same way:
+
+```
+error: group `ci` declares bindings directly
+  --> ocx.toml
+   |
+   |  [group.ci]
+   |  bar = "ocx.sh/bar:1"
+   |
+   = tool bindings belong under `[group.ci.tools]`
+   = `[group.ci]` holds only the `tools` and `env` sub-tables
+```
+
+A group also accepts an optional `lazy-mode` scalar. It overrides the [`lazy-mode` ladder][in-depth-lazy-loading-ladder] for every binding under the group, as in `[group.ci] lazy-mode = "always"`. There is no group-level `lazy-report`, for the reason given in [Per-package settings][package-section]. The `[tools]`, `[group.<name>]`, `[env]` and `[package."<id>"]` declarations parse the same way in the `--global` tier file at `$OCX_HOME/ocx.toml`.
+
+`ocx.toml` is a different file from `config.toml`, with a different lifecycle. Two personal sections are refused in it by name, `[shell]` and `[update]`, and either one fails the parse. `toolchain_dir` and `extra_ca_certs` are `config.toml` keys, so writing them in `ocx.toml` fails too.
+
+## Names and reserved words \{#project-names\}
+
+Group names and binding names both become **path components** of the rendered [toolchain tree][storage-toolchain] (`<home>/links/<group>/<entry>/`). In link-following mode [`ocx env`][cmd-env-root] emits those paths as environment values, so the grammar is a validation rule and not a style preference. Every name sits one level below the tree's own directory names, under `links/`, so none can collide with the tree's structure. A group named `links` renders at `links/links/<entry>`, and a binding named `bin` at `links/default/bin`.
+
+Every `[group.<name>]` name, `[tools]` key and `[group.<name>.tools]` key must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` and be at most 64 bytes. That is wider than an OCX slug by uppercase and `.`, because these names read like the binaries they bind, such as `MSBuild` or `python3.13`. A name that breaks either half is refused at parse (exit 78), and the message says which half:
+
+```
+error: [tools] name 'my tool' must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 64 bytes (the character set is wrong)
+```
+
+Two names are reserved, as **group names only**. `default` names the implicit top-level `[tools]` table, and `all` is the CLI keyword that expands to every declared group. Both stay legal as binding names, so `[tools] default = "ocx.sh/x:1"` parses. The comparison folds ASCII case, so `[group.Default]`, `[group.DEFAULT]` and `[group.default]` are one reservation and all three are refused. The reservation exists to stop a `[group.Default]` from quietly coexisting beside the implicit default group.
+
+## Per-package settings \{#project-package\}
+
+`[package."<id>"]` holds resolve-time settings for one package, keyed by the canonical `registry/repository[:tag]` string. Every field matches by canonical `registry/repository` with tag and digest stripped. An entry therefore follows every tag of that package, not just the one in the key.
+
+```toml
+[package."ocx.sh/kitware/cmake:3.28"]
+no-patches  = true
+lazy-mode   = "always"
+lazy-report = "progress"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `no-patches` | boolean | `false` | Decline the site-tier [patch][patches-guide] companion overlay for this base, see [Per-package opt-out][patches-no-patches] |
+| `lazy-mode` | `"never"` \| `"always"` | inherit | Package-tier override of the `lazy-mode` ladder: the most specific config tier, outranked only by `--lazy-mode` |
+| `lazy-report` | `"silent"` \| `"progress"` | inherit | Package-tier override of the `lazy-report` ladder |
+
+All three are **excluded from `declaration_hash`**. They change *when* or *how loudly* a package materializes and never *which* digest resolves, so editing one does not invalidate `ocx.lock`.
+
+`lazy-report` is settable per package although no group tier exists for it. The reason is timing. `lazy-mode` resolves while composing, when the selected group is known.
+
+`lazy-report` resolves later, inside the separate `ocx launcher shim` process that a generated shim execs into on first invocation. That process receives only a pinned identifier and a basename. It cannot learn which group composed the package. See [Deferred Packages][in-depth-lazy-loading] for the ladders and lifecycle.
+
+## Environment variables \{#project-env\}
+
+A binding pins *which binary* runs. It says nothing about the environment that binary needs. Examples are a `SOURCE_DATE_EPOCH` for reproducible builds, a `NODE_ENV`, and a `node_modules/.bin` directory that has no publisher. The project file is the channel for these values.
+
+The ambient shell cannot carry them for a Windows caller or for any caller that builds an argv array. [Project and group env][in-depth-project-env] explains why.
+
+`[env]` declares project-wide constants, and `[group.<name>.env]` scopes them to a group the same way `[group.<name>.tools]` scopes bindings:
+
+```toml
+[env]
+SOURCE_DATE_EPOCH = "0"
+
+[group.ci.env]
+CI = "1"
+```
+
+Running with `-g ci` composes both: `SOURCE_DATE_EPOCH` from the project and `CI` from the group. It is the same layering [Groups][groups-section] uses for bindings.
+
+Each entry is either a bare string or a table with an explicit `type`. A bare string is a **constant** that replaces any earlier value for the key.
+
+| `type` | Behavior |
+|--------|----------|
+| `constant` (implicit for the bare string) | Replaces any earlier value for the key |
+| `path` | Prepends to the key (typically `PATH`). A relative `value` resolves against the project root, and an absolute one passes through unchanged |
+| `list` | Appends to the key, joined by `separator`, removing any earlier occurrence of the same contribution first |
+
+```toml
+[env]
+CI = "1"                                            # string, same as a constant
+JAVA_OPTS = { type = "constant", value = "-Xmx2g" }
+GODEBUG = { type = "list", separator = ",", value = "gctrace=1" }
+PATH = { type = "path", value = "node_modules/.bin" }
+```
+
+A relative `path` value resolves against the **project root**, the directory holding `ocx.toml`, and not the shell's current directory. `ocx exec` finds `node_modules/.bin` the same way from the repo root or a subdirectory.
+
+`separator` is valid only alongside `list`. A `separator` next to `constant` or `path` is rejected (exit 78). When given, it must be non-empty and must not contain `=`, a newline or a carriage return. The error names the field and not a byte offset.
+
+Omit `separator` to inherit whatever separator another contributor to the same key already declared. That contributor can be a package's own `list` entry, another group's, or [`--env`][cmd-run]. A single space applies only when nothing established one. The per-key agreement rule is in [Env Composition][env-composition-list].
+
+There is no interpolation. Every value is literal, and the `path` type makes a project-local directory expressible without a `${projectRoot}` token.
+
+Two key classes are rejected everywhere `[env]` can appear: the project table, every `[group.<name>.env]` and the `--env` flag.
+
+- A key that is not a POSIX environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+- A key starting `OCX_` or `__OCX_`.
+
+Without that rejection, a checked-in `ocx.toml` could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE` or any other resolution-affecting variable. It would reconfigure how `ocx` resolves for everyone who clones the repository. Rejection happens at parse for the tables (exit 78) and at flag-parse for `--env` (exit 64). The value grammar is in the [environment reference][env-composition-project-env].
+
+`[env]` entries carry no visibility axis, so the project-tier commands have no `--self` flag. A project is never a dependency of anything.
+
+:::note[Comparable tools]
+[Cargo][cargo]'s `.cargo/config.toml` has its own `[env]` table, and [GitHub Actions][github-actions-docs] has a workflow-level `env:` block. Both declare environment beside the package bindings and not in a separate script. The `path` type mirrors [direnv][direnv]'s `PATH_add` and [mise][mise]'s `_.path`. Each is an idempotent prepend and not a hand-rolled `PATH="$X:$PATH"` string, which breaks across shells and double-prepends on re-entry.
+:::
+
+### One-off override \{#project-env-flag\}
+
+For an override that should not go in the committed file, `--env KEY[:TYPE[:SEP]]=VALUE` wins over everything else. `TYPE` is `constant` (the default), `path` or `list`, the same three kinds `[env]` supports. So `--env PATH:path=node_modules/.bin` prepends instead of replacing.
+
+A relative `path` value in the flag resolves against the **current directory**. A checked-in file must mean the same thing from any subdirectory. A flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute.
+
+The flag is on every command that composes an environment, not just `ocx exec`. `ocx exec` replaces itself with the child and never prints, so ask a command that emits to see what it would run with:
+
+```shell
+ocx exec --env PATH:path=node_modules/.bin -- vitest        # execute in it
+ocx env --env PATH:path=node_modules/.bin --shell=bash     # print the same thing
+```
+
+The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec]. Those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx exec`][cmd-run] documents the full precedence order.
+
+## Shell activation \{#project-shell\}
+
+A project's binaries should land on `PATH` the moment you `cd` into the project and leave again when you `cd` back out. That should need no separate `eval` step and no leak into whatever else the shell does afterward.
+
+In bash, zsh, fish, PowerShell and elvish, this rides the same per-prompt hook the [global toolchain][global-shell] uses. `cd` into a project OCX has consent to activate, and its locked binaries land on `PATH` at the very next prompt. No `.envrc` and no `direnv allow` are needed. `cd` back out and they revert.
+
+A project nested inside another one is a *switch* and not a stack. Only the nearest `ocx.toml` is in effect, so `cd` into the inner project and the outer one's binaries leave `PATH` until you come back. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested]. The same [`OCX_NO_HOOK`][env-ocx-no-hook] and `ocx self setup --no-hook` switch turns the hook off.
+
+[`ocx pull`][cmd-pull] renders the toolchain the lock describes. From then on the binary answers to its own name, resolved through the project's toolchain and not through whatever the machine has installed. The recording composes the environment explicitly with [`ocx env`][cmd-env-root], because a recorded shell has no prompt to hook. In your own shell the hook does that step at the next prompt, and the rest is identical:
+
+<Terminal src="/casts/user-guide/toolchain-activation.cast" title="A locked toolchain reaches the shell" collapsed />
+
+**A fresh clone stays inert until consented.** The global toolchain is always trusted, because `$OCX_HOME/ocx.toml` is your own file. A project's `ocx.toml` can name any OCI registry, so OCX will not put its binaries on `PATH` just because you `cd`'d in. The first `ocx add`, `ocx lock`, `ocx update`, `ocx pull` or `ocx exec` you run against a project records consent automatically.
+
+An operator can also pre-authorize a checkout path or a whole namespace of registries in advance. That is how a devcontainer or a fleet skips the per-project prompt entirely. See [Shell Integration → Consent grants][in-depth-shell-integration-consent] for the full predicate and where each kind of grant can live.
+
+Nushell, the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point. A project scope on those shells needs an explicit entry point:
+
+- [`ocx direnv export`][cmd-direnv-export] is stateless and exports only. It installs a missing package unless `--no-pull` is passed or ocx runs offline, so run [`ocx pull`][cmd-pull] first to keep the export offline.
+- [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry.
+- [`ocx exec`][cmd-run] suits CI and scripts, and needs no hook at all.
+
+:::tip[Learn more]
+[Project Toolchain In Depth][in-depth-project] covers schema details and declaration-hash canonicalization (RFC 8785 JCS). It also covers the lock concurrency model, per-group binding semantics, multi-project GC retention and the SLSA roadmap.
+
+[Shell Integration][in-depth-shell-integration] covers the per-shell coverage table, the consent grants and the diagnostic role of `ocx shell state`. It also covers how OCX yields to a live direnv or mise session.
+:::
+
+[mise]: https://mise.jdx.dev/
+[toml]: https://toml.io/
+[cargo]: https://doc.rust-lang.org/cargo/
+[docker-images]: https://hub.docker.com/search?image_filter=official
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[oci-identifier]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
+[taplo]: https://taplo.tamasfe.dev/
+[direnv]: https://direnv.net/
+[schema-project]: https://ocx.sh/schemas/project/v1.json
+[cmd-run]: ../reference/command-line/commands.md#exec
+[cmd-package-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[cmd-add]: ../reference/command-line/commands.md#add
+[cmd-remove]: ../reference/command-line/commands.md#remove
+[cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-init]: ../reference/command-line/commands.md#init
+[cmd-status]: ../reference/command-line/commands.md#status
+[cmd-inspect]: ../reference/command-line/commands.md#inspect
+[cmd-direnv-export]: ../reference/command-line/direnv.md#direnv-export
+[cmd-direnv-init]: ../reference/command-line/direnv.md#direnv-init
+[arg-project]: ../reference/command-line/index.md#arg-project
+[env-ocx-project]: ../reference/environment.md#ocx-project
+[env-ocx-ceiling-path]: ../reference/environment.md#ocx-ceiling-path
+[env-ocx-no-project]: ../reference/environment.md#ocx-no-project
+[env-ocx-no-hook]: ../reference/environment.md#ocx-no-hook
+[env-ocx-home]: ../reference/environment.md#ocx-home
+[config-managed]: ../reference/configuration.md#keys-managed
+[env-composition-project-env]: ../reference/env-composition.md#project-env
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
+[in-depth-storage-toolchain]: ../explanation/toolchain-tree.md#toolchain-location
+[in-depth-shell-integration]: ../explanation/shell-integration.mdx
+[in-depth-shell-integration-consent]: ../explanation/shell-integration.mdx#consent
+[in-depth-shell-integration-nested]: ../explanation/shell-integration.mdx#activation-nested-projects
+[in-depth-project]: ../explanation/project-toolchain.md
+[in-depth-configuration-kill-switch]: ../explanation/configuration.mdx#kill-switch
+[env-ocx-toolchain_dir]: ../reference/environment.md#ocx-toolchain_dir
+[in-depth-configuration-managed-publish]: ../explanation/managed-configuration.md#managed-publish
+[env-composition-list]: ../reference/env-composition.md#composition-order-list
+[storage-toolchain]: ../explanation/toolchain-tree.md#toolchain
+[patches-guide]: ./patch-packages.mdx
+[patches-no-patches]: ./patch-packages.mdx#patches-no-patches
+[in-depth-lazy-loading]: ../explanation/deferred-packages.mdx
+[in-depth-lazy-loading-ladder]: ../explanation/deferred-packages.mdx#deferred-tools-ladder
+[lock-guide]: ./lock-and-reproduce.mdx
+[update-guide]: ./update-tools.mdx
+[managed-config-guide]: ./manage-config-centrally.mdx#managed-config
+[global-shell]: ./global-toolchain.mdx#global-toolchain-shell
+[env-section]: #project-env
+[in-depth-project-env]: ../explanation/project-toolchain.md#running-project-env
+[package-section]: #project-package
+[groups-section]: #groups

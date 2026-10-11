@@ -6,6 +6,10 @@
 use ocx_schema::schema_for;
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("docs") {
+        std::process::exit(ocx_schema::docs::run_cli(&args[1..]));
+    }
     let schema_type = std::env::args().nth(1).unwrap_or_else(|| "metadata".to_string());
 
     match schema_for(&schema_type) {

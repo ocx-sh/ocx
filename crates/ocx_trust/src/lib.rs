@@ -72,8 +72,8 @@ pub struct SigstoreTrust {
     /// `trusted_root.json`.
     ///
     /// A relative path resolves against the directory of the `config.toml`
-    /// that declared it — rewritten to absolute at load time, so the same
-    /// value means the same file regardless of the process working directory.
+    /// that declared it. It is rewritten to absolute at load time, so the same
+    /// value names the same file whatever the working directory.
     /// Mutually exclusive with `trusted_root_json`.
     #[serde(default)]
     pub trusted_root: Option<PathBuf>,
@@ -98,13 +98,10 @@ pub struct SigstoreTrust {
 
     // Off by default, unlike cosign: on, it would irreversibly publish a private artifact's digest and signer to the
     // public Rekor on first run.
-    /// Fleet-wide default for uploading a **key-mode** signature to the
-    /// transparency log, when neither `--rekor-upload` nor `--no-rekor-upload`
-    /// is given.
+    /// Fleet-wide default for uploading a key-mode signature to the transparency log, when neither
+    /// `--rekor-upload` nor `--no-rekor-upload` is given.
     ///
-    /// Absent means off. **Key mode only**: keyless signing always uploads, and ignores this
-    /// field without a warning. `rekor_url` defaults to the **public** Rekor, where an upload
-    /// publishes the artifact's digest and signer to a world-readable log.
+    /// Absent means off; keyless signing always uploads and ignores this field.
     // Keyless must upload: a Fulcio cert lives ~ten minutes and the Rekor timestamp proves signing inside it.
     // Ignored under keyless without a warning, or a fleet-wide `false` would break the default signing path.
     #[serde(default)]
@@ -371,18 +368,12 @@ impl std::fmt::Display for ScopeSpec {
 pub struct TrustPolicy {
     /// Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.
     ///
-    /// A pattern with no `*` matches the target's canonical `registry/repository` on `/`-separated
-    /// path-segment boundaries: `ghcr.io/acme/tool` matches that exact repo and any sub-path under it
-    /// (`ghcr.io/acme/tool/plugin`), but **not** a sibling that merely shares the prefix text, such as
-    /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string `*` is a literal-prefix
-    /// substring glob.
+    /// A pattern matches on `/`-separated path-segment boundaries, and an absent scope is a catch-all.
     ///
     /// ```toml
     /// scope = "ghcr.io/acme/*"
     /// scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
     /// ```
-    ///
-    /// Absent reads exactly like `""`: a catch-all, as is an empty `include` with no `exclude`.
     #[serde(default)]
     pub scope: Option<ScopeSpec>,
 
@@ -403,9 +394,8 @@ pub struct TrustPolicy {
     /// ]
     /// ```
     ///
-    /// **Every entry added here widens what verifies**: a new signer is a new way to pass, never a new
-    /// condition to satisfy. Absent reads as empty, and an empty set is a **configuration error**, not a
-    /// catch-all. A mis-spelled entry leaves no signer behind and fails closed the same way.
+    /// **Every added entry widens what verifies**, and an empty set is a configuration error, not a
+    /// catch-all.
     // Never read an empty set as a catch-all: a deleted line would become a silent bypass.
     #[serde(default)]
     pub signers: Vec<SignerSpec>,
@@ -487,11 +477,7 @@ pub struct KeyMatcher {
     // Relative resolution is not a containment check: the author owns that filesystem.
     /// A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.
     ///
-    /// Mutually exclusive with `key_pem`. Unrestricted in a local tier (project, operator or user
-    /// config on the author's own disk), where a relative reference resolves against the directory of
-    /// the config file that declared it. Refused in a managed-config payload: publishing fails with an
-    /// error naming `key_pem` as the fix, and a payload an older ocx published anyway has this field
-    /// dropped at load time rather than read.
+    /// Mutually exclusive with `key_pem`, and refused in a managed-config payload.
     // The managed-payload refusal is `ocx_package_manager`'s `validate_managed_config_payload`.
     #[serde(default)]
     pub key: Option<String>,

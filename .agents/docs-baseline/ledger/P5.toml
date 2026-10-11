@@ -1,0 +1,384 @@
+[[row]]
+item = "ocx add"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx direnv init"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx env"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx package env"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx package exec"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx run"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--ci"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--clean"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--format"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--global"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--offline"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "--remote"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The hero tagline says ocx turns any OCI registry into a cross-platform binary distribution platform with zero extra infrastructure. [L8]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The hero actions link to Get Started, Install and User Guide pages. [L10]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The OCI-Native feature says a Docker Hub, GHCR, ECR or Harbor registry serves as the package server. [L23]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The Cross-Platform feature says one identifier resolves to the right binary on Linux, macOS, Windows or FreeBSD. [L28]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The Reproducible feature says a local index snapshot locks every resolution and gives the same result offline. [L33]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The Automation-First feature says ocx has JSON output, clean environments and composable commands for CI. [L38]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The Shell install command pipes a setup script from setup.ocx.sh into sh. [L52]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Install commands are provided for PowerShell, Nushell, fish and Elvish as well as the POSIX shell. [L53]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The installation page holds pinned versions, manual downloads and CI setup. [L68]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Opening a new terminal and running ocx --remote --global add uv:0.10 installs the first package. [L70]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The VS Code extension is available from the VS Marketplace and from Open VSX. [L81]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The GitHub Action setup-ocx installs ocx, pulls the project toolchain and exports its environment in one step. [L82]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx direnv init writes an envrc so direnv activates the project toolchain on cd. [L83]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Packages install straight from any OCI registry, with no taps, no formulas and no Artifactory. [L97]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "One command installs and activates a package, and every install is content-addressed by SHA-256 digest. [L99]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "OCI multi-platform manifests resolve the right build for the OS and architecture, with no mapping tables. [L109]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The same ocx add astral-sh uv command works on macOS, Linux CI runners and Windows machines. [L111]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx package exec layers package variables over the shell, and with --clean it strips everything else. [L121]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Passing --clean gives a hermetic scope, which suits CI pipelines and build systems. [L123]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Two tags resolving to the same build share one directory on disk, so storage scales with distinct builds. [L133]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Pinning a package to a digest gives a lockfile-free guarantee with no registry or index lookups. [L135]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Every command returns structured JSON with --format json, and there is no interactive prompt. [L145]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "ocx package env prints variables for build systems, and ocx env --ci writes CI runtime files directly. [L147]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Every install is a self-contained directory, so the store can be copied to a USB drive or CI cache. [L157]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The local index snapshot and object store are all ocx --offline needs to run a bundled toolchain. [L159]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The roadmap card links to what is being built next. [L174]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The package catalog card links to index.ocx.sh for browsing public packages. [L181]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The Discord card links to the community server for questions and feedback. [L188]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The GitHub card links to the ocx repository for starring, issues and contributions. [L195]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The closing line states ocx is free to use, fork and extend. [L205]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Feature card icons are tinted with CSS filter chains, with separate dark mode variants. [L209]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The quick-start header is centred while its body is left aligned, with wider padding at 640px and 960px. [L250]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Quick-start body padding grows at the 640px and 960px breakpoints. [L278]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The CTA cards form a four-column grid, which drops to two columns at 768px and one at 480px. [L354]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Feature section images are capped at 240px wide and scale to their container. [L477]"
+page = "index.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The page uses the page layout in its front matter. [L2]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The members list holds two entries, Michael Herwig and Katherine Draheim, each with avatar, name, title and links. [L12]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Michael Herwig is titled Creator and Maintainer and uses his GitHub avatar image. [L14]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Icon names in the link entries come from Simple Icons, as the code comment states. [L17]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Michael Herwig's links cover LinkedIn, GitHub, GitLab and Spotify. [L19]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Katherine Draheim uses a local avatar image and is titled Marketing and Community Lead. [L26]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "Katherine Draheim's links cover LinkedIn and GitHub. [L30]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"
+
+[[row]]
+item = "The page renders a team page with the title Team and a members component bound to the list. [L37]"
+page = "team.md"
+action = "moved"
+home = ".agents/upstream/ocx-website.md"
+reason = "upstream-patch"

@@ -14,6 +14,9 @@ const MAX_TAGS_FILE_BYTES: u64 = 128 * 1024;
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct TagsOpt {
     /// Tags to sweep. Repeatable, and accepts a comma-separated list.
+    ///
+    /// Each tag is acted on as the index it resolves to, in the repository the
+    /// identifier names. Refused alongside `--platform` (exit 64).
     #[clap(long = "tags", value_name = "TAG", value_delimiter = ',')]
     tags: Vec<String>,
 

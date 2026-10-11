@@ -1,0 +1,18 @@
+{
+ "anchors": [
+  "changelog"
+ ],
+ "commands": [],
+ "flags": [],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [],
+ "fences": [],
+ "facts": [
+  "The page uses the outline deep setting for its table of contents. [L2]",
+  "The page includes the repository CHANGELOG.md from its third line onward, so its content is generated, not written here. [L7]"
+ ],
+ "lines": 8
+}

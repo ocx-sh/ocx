@@ -1,0 +1,77 @@
+{
+ "anchors": [
+  "ci-github-actions",
+  "ci-github-actions-oci",
+  "ci-github-actions-toolchain",
+  "ci-gitlab",
+  "ci-gitlab-oci",
+  "ci-gitlab-stdout",
+  "ci-gitlab-toolchain",
+  "ci-integration"
+ ],
+ "commands": [
+  "ocx env",
+  "ocx package env"
+ ],
+ "flags": [
+  "--ci",
+  "--export-file",
+  "--shell",
+  "--version"
+ ],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [
+  "78"
+ ],
+ "slugs": [],
+ "links": [
+  "../reference/environment.md#external-github-actions",
+  "../reference/environment.md#external-github-env",
+  "../reference/environment.md#external-github-path",
+  "../reference/environment.md#external-gitlab-ci",
+  "../reference/metadata.md#env-list",
+  "https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
+  "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow",
+  "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#adding-a-system-path",
+  "https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-an-environment-variable",
+  "https://docs.gitlab.com/ci/functions/create/",
+  "https://docs.gitlab.com/ee/ci/",
+  "https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv",
+  "https://github.com/ocx-sh/setup-ocx",
+  "https://setup.ocx.sh/sh"
+ ],
+ "fences": [
+  "json:1be5fa62: {\"name\":\"KEY\",\"value\":\"VALUE\"}",
+  "yaml:01df2fe7: jobs:",
+  "yaml:4a4cd24e: - name: Set up toolchain",
+  "yaml:6e319843: jobs:",
+  "yaml:b56f3a8b: build:",
+  "yaml:c2c60fdf: test:",
+  "yaml:c51cb9a8: jobs:"
+ ],
+ "facts": [
+  "Running OCX in CI has one core challenge: shell environment changes do not cross step boundaries. [L6]",
+  "A fresh process in the next step resets PATH and loses variables, so packages installed in step one are invisible. [L8]",
+  "ocx env --ci and ocx package env --ci write the composed environment into the CI system's persistence channel. [L10]",
+  "--shell exports lines for the current step only, while --ci makes the environment available to every later step. [L13]",
+  "GITHUB_PATH entries are prepended to PATH for later steps, so OCX package directories land leftmost. [L20]",
+  "GITHUB_ENV receives KEY=VALUE lines, with heredoc blocks for multiline values, exported to all later steps. [L21]",
+  "ocx env --ci=github reads the runner's file paths from its own variables and appends the results directly, with no jq. [L23]",
+  "Only the literal PATH variable goes to GITHUB_PATH; other path variables go to GITHUB_ENV with OCX directories prepended. [L25]",
+  "List-type variables also go to GITHUB_ENV, but OCX appends their contribution instead of prepending it. [L25]",
+  "Running --ci=github outside a GitHub Actions runner exits 78, a configuration error. [L27]",
+  "The setup-ocx action installs OCX and replays the project toolchain from ocx.lock, pinned by commit SHA in the example. [L31]",
+  "The turnkey workflow example runs cmake and ninja version checks after the setup step. [L33]",
+  "A bare --ci also auto-detects GitHub Actions, because the runner sets GITHUB_ACTIONS to true. [L95]",
+  "--ci=gitlab targets the GitLab step runner, is experimental, and is incompatible with traditional script jobs. [L100]",
+  "The step runner persists variables through an export file, with one JSON object per line. [L102]",
+  "ocx env --ci=gitlab writes that JSON-lines format to the export file or to stdout when none is given. [L108]",
+  "GitLab flattens path entries into one joined value, prepending package directories to the current PATH. [L110]",
+  "The export file persists variables to later steps within the same job, not across separate jobs. [L115]",
+  "Traditional script jobs cannot read the JSON format, and OCX does not emit the dotenv format they need. [L117]",
+  "Without --export-file, output goes to stdout, which must be redirected with an append to the export file. [L143]",
+  "With --export-file OCX opens the file in append mode, so no redirect is needed. [L150]"
+ ],
+ "lines": 194
+}

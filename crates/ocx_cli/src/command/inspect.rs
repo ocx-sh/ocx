@@ -22,12 +22,12 @@ use crate::{conventions, options};
 
 /// Inspect what the project toolchain resolves to, without installing.
 ///
-/// Reports the `ocx package inspect` view per selected binding, keyed by
-/// binding name, then the project `[env]`, group envs and `--env` overrides in
-/// application order. Read-only. By default lists the platform candidates
-/// `ocx.lock` pins; `--resolve` selects this host's leaf, and `--closure` adds
-/// the transitive dependency set and `PATH` surface, reporting collisions
-/// between packages before either is installed (exit 65, still in full).
+/// Reports the `ocx package inspect` view per selected binding, then the
+/// project `[env]`, group envs and `--env` overrides in application order.
+/// Read-only. By default lists the platform candidates `ocx.lock` pins, with no
+/// `media_type`, `size`, `pinned_identifier` or `pinned_digest`; `--resolve`
+/// selects this host's leaf, and `--closure` adds the dependency set and `PATH`
+/// surface, reporting collisions between packages (exit 65, still in full).
 /// Needs a current `ocx.lock` (78 absent, 65 stale); `ocx status` shows the
 /// declaration itself.
 #[derive(Parser)]

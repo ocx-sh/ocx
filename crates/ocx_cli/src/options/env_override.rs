@@ -10,7 +10,7 @@ use ocx_package::metadata::env::entry::Entry;
 /// Read it through `EnvOverride::entries`, never the raw strings.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct EnvOverride {
-    /// Set an environment variable for this invocation, or pass one by name.
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64.
     ///
     /// Repeatable; a later `--env` for the same key wins. Applied last, so it overrides package variables and, for the
     /// project toolchain, the project and group `[env]` tables. Splits on the FIRST `=` (`--env FOO=a=b` sets `FOO` to
@@ -19,7 +19,7 @@ pub struct EnvOverride {
     /// resolved against the current directory) or `list` (append, joined by `SEP`); `PATH` without `:path` replaces the
     /// composed `PATH`, dropping every package directory. `OCX_*`/`__OCX_*` keys and a qualified key with no value are
     /// rejected; every failure exits 64. Full grammar, including the `SEP` default:
-    /// <https://ocx.sh/docs/reference/command-line#exec>
+    /// <https://ocx.sh/docs/reference/command-line/commands/#exec>
     #[arg(long = "env", value_name = "NAME|KEY[:TYPE[:SEP]]=VALUE")]
     env: Vec<String>,
 }

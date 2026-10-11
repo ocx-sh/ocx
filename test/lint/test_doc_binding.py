@@ -394,8 +394,8 @@ def test_nc4_no_region_fragment_in_transclusion(page: Path) -> None:
 
     Under ADR H-2 the published file is the pre-rendered region body.  A
     correct doc-author ``<<<`` reference never names a region.  Any
-    ``#region`` fragment is the exact shape that triggers the VitePress GH
-    #4625 silent whole-file fallback.
+    ``#region`` fragment is the exact shape that triggers the former site generator's silent
+    whole-file fallback (upstream issue 4625).
 
     Contract reference: §6h NC4.
     """
@@ -454,8 +454,8 @@ def test_nc4b_unclosed_region_raises_render_error(tmp_path: Path) -> None:
     """NC4b: the publish render hard-errors on a ``# doc:`` script with an
     unclosed ``# region cast`` (no matching ``# endregion cast``).
 
-    An unclosed region causes VitePress to silently return the entire file
-    (GH #4625 whole-file dump).  The render layer must detect this and raise
+    An unclosed region makes the former site generator silently return the entire file
+    (upstream issue 4625, whole-file dump).  The render layer must detect this and raise
     :class:`RenderError` before writing any output.
 
     Contract reference: §6h NC4b(a).
@@ -512,7 +512,7 @@ def test_nc4b_duplicate_region_render_error(tmp_path: Path) -> None:
     """NC4b: a ``# doc:`` script passed with a ``cast_region`` pointing into
     a valid non-empty region renders correctly; this test verifies the
     :class:`RenderError` is raised by the empty-region branch (NC4b(a)) which
-    is the publish task's guard against the VitePress whole-file fallback.
+    is the publish task's guard against the whole-file fallback.
 
     Additionally tests that a fixture with a ``$REGISTRY`` var in the region
     (NC4b overlapping with RN5) raises :class:`RenderError` with the

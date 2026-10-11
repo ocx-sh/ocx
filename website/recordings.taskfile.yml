@@ -97,7 +97,7 @@ tasks:
     desc: Render every cast to a GIF and run the Bazel render proof (requires agg)
     # The ONE consumer of the 42 GIF targets in `//test/doc_scripts`, all of
     # which are tagged `manual`: nothing in this repo reads a rendered GIF —
-    # the site plays the `.cast` files through `Terminal.vue`, and the GIFs are
+    # the site plays the `.cast` files through `Terminal.astro`, and the GIFs are
     # for README and social embeds — so they are out of `//...` and out of
     # `bazel test //...`, reachable by label alone. `gif.bzl`'s `manual`
     # section is the other half of this task, and a `manual` proof that no task

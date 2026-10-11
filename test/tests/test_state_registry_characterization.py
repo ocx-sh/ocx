@@ -82,9 +82,9 @@ pytestmark = pytest.mark.command(
 
 
 def test_setups_registry_has_all_expected_keys() -> None:
-    """SETUPS must contain the 14 canonical setup names."""
+    """SETUPS must contain the 15 canonical setup names."""
     expected = {
-        "basic", "multi-version", "full-catalog", "variants", "dependencies",
+        "basic", "multi-version", "cmake-versions", "full-catalog", "variants", "dependencies",
         "deps-visibility", "publisher", "patches-consumer", "patches-maintainer",
         "managed-config-onboard", "managed-config-ci", "signing", "promotion",
         "cosign-parity",

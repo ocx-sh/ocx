@@ -61,15 +61,12 @@ pub struct Env {
     #[clap(required = true, num_args = 1.., value_name = "PACKAGE")]
     packages: Vec<options::Identifier>,
 
-    /// Target shell for eval-safe export lines.
+    /// Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable.
     ///
-    /// Must be supplied with `=` (`--shell=bash`).  Bare `--shell` (no `=`)
-    /// triggers autodetection from `$SHELL`/parent process; exit 64 if
-    /// undetectable.
+    /// Must be supplied with `=` (`--shell=bash`). `--shell=sh` is an alias for `--shell=dash` (POSIX strict).
     ///
     /// When absent, output uses the context-level format (root `--format` flag;
     /// default plain). Use `ocx --format json package env` for JSON.
-    /// `--shell=sh` is an alias for `--shell=dash` (POSIX strict).
     #[arg(
         long,
         value_enum,
@@ -79,9 +76,9 @@ pub struct Env {
     )]
     shell: Option<Option<Shell>>,
 
-    /// Write the composed environment into a CI system's persistence channel.
+    /// Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found.
     #[arg(long_help = "\
-        Write the composed environment into a CI system's persistence channel.\n\n\
+        Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found.\n\n\
         `--ci=github` appends package dirs and vars to `$GITHUB_PATH` / `$GITHUB_ENV`; \
         `--ci=gitlab` writes JSON-lines to `--export-file` (or stdout). Bare `--ci` autodetects the \
         provider from CI environment variables; exit 64 if none is detected. Must be supplied with \

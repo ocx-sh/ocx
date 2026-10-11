@@ -1,0 +1,194 @@
+{
+ "docs/authoring/announcing.md": {
+  "must": 44,
+  "should": 54
+ },
+ "docs/authoring/building-pushing.md": {
+  "must": 40,
+  "should": 67
+ },
+ "docs/authoring/bundle-anatomy.md": {
+  "must": 13,
+  "should": 22
+ },
+ "docs/authoring/dependencies.md": {
+  "must": 11,
+  "should": 36
+ },
+ "docs/authoring/entry-points.md": {
+  "must": 20,
+  "should": 41
+ },
+ "docs/authoring/env-surface.md": {
+  "must": 18,
+  "should": 41
+ },
+ "docs/authoring/index.md": {
+  "must": 11,
+  "should": 24
+ },
+ "docs/authoring/migration.md": {
+  "must": 11,
+  "should": 13
+ },
+ "docs/authoring/multi-platform.md": {
+  "must": 40,
+  "should": 59
+ },
+ "docs/authoring/testing.md": {
+  "must": 16,
+  "should": 45
+ },
+ "docs/changelog.md": {
+  "must": 1,
+  "should": 0
+ },
+ "docs/contributing/bazel.md": {
+  "must": 43,
+  "should": 66
+ },
+ "docs/docker.md": {
+  "must": 11,
+  "should": 23
+ },
+ "docs/faq.md": {
+  "must": 25,
+  "should": 63
+ },
+ "docs/getting-started.md": {
+  "must": 9,
+  "should": 36
+ },
+ "docs/in-depth/ci.md": {
+  "must": 7,
+  "should": 19
+ },
+ "docs/in-depth/configuration.md": {
+  "must": 35,
+  "should": 81
+ },
+ "docs/in-depth/cosign-parity.md": {
+  "must": 37,
+  "should": 62
+ },
+ "docs/in-depth/dependencies.md": {
+  "must": 18,
+  "should": 54
+ },
+ "docs/in-depth/entry-points.md": {
+  "must": 31,
+  "should": 54
+ },
+ "docs/in-depth/environments.md": {
+  "must": 20,
+  "should": 61
+ },
+ "docs/in-depth/indices.md": {
+  "must": 110,
+  "should": 207
+ },
+ "docs/in-depth/lazy-loading.md": {
+  "must": 20,
+  "should": 30
+ },
+ "docs/in-depth/project.md": {
+  "must": 37,
+  "should": 91
+ },
+ "docs/in-depth/self-hosted-sigstore.md": {
+  "must": 19,
+  "should": 42
+ },
+ "docs/in-depth/shell-integration.md": {
+  "must": 100,
+  "should": 140
+ },
+ "docs/in-depth/signing.md": {
+  "must": 56,
+  "should": 122
+ },
+ "docs/in-depth/storage.md": {
+  "must": 41,
+  "should": 99
+ },
+ "docs/in-depth/versioning.md": {
+  "must": 10,
+  "should": 49
+ },
+ "docs/installation.md": {
+  "must": 17,
+  "should": 41
+ },
+ "docs/reference/command-line.md": {
+  "must": 745,
+  "should": 1078
+ },
+ "docs/reference/configuration.md": {
+  "must": 210,
+  "should": 410
+ },
+ "docs/reference/dependencies.md": {
+  "must": 1,
+  "should": 0
+ },
+ "docs/reference/env-composition.md": {
+  "must": 70,
+  "should": 111
+ },
+ "docs/reference/environment.md": {
+  "must": 180,
+  "should": 350
+ },
+ "docs/reference/execution-records.md": {
+  "must": 90,
+  "should": 106
+ },
+ "docs/reference/machine-interface.md": {
+  "must": 0,
+  "should": 1
+ },
+ "docs/reference/metadata.md": {
+  "must": 85,
+  "should": 182
+ },
+ "docs/reference/platforms.md": {
+  "must": 17,
+  "should": 31
+ },
+ "docs/reference/script-host-api.md": {
+  "must": 7,
+  "should": 25
+ },
+ "docs/roadmap.md": {
+  "must": 1,
+  "should": 0
+ },
+ "docs/user-guide.md": {
+  "must": 148,
+  "should": 400
+ },
+ "docs/user-guide/attestations.md": {
+  "must": 40,
+  "should": 65
+ },
+ "docs/user-guide/patches.md": {
+  "must": 32,
+  "should": 46
+ },
+ "docs/user-guide/promoting-packages.md": {
+  "must": 14,
+  "should": 21
+ },
+ "docs/user-guide/snapshot-tracks.md": {
+  "must": 0,
+  "should": 6
+ },
+ "index.md": {
+  "must": 2,
+  "should": 14
+ },
+ "team.md": {
+  "must": 1,
+  "should": 0
+ }
+}

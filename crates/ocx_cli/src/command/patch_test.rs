@@ -45,8 +45,7 @@ pub struct PatchTestArgs {
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
-    /// Path to a local archive for a companion package, allowing the companion
-    /// to be materialized without a registry round-trip. Repeatable.
+    /// Path to a local archive for a companion package, read without a registry round-trip; needs a `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor lists. Repeatable.
     ///
     /// The archive's sidecar metadata file, `<archive-stem>-metadata.json`,
     /// must carry an "identifier" field naming a companion the descriptor lists

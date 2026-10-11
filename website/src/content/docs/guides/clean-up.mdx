@@ -1,0 +1,71 @@
+---
+title: "Remove packages and clean up"
+description: "Remove packages and reclaim disk space."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Use this page to remove a package you no longer need and to reclaim the disk space that unreferenced packages hold.
+
+## Remove a package \{#cleanup\}
+
+[`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary when no [other reference][in-depth-storage-gc] remains.
+
+## Sweep the store \{#cleanup-sweep\}
+
+[`ocx clean`][cmd-clean] sweeps the whole store in one pass. It removes every package that has no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package. Layers and blobs that become unreachable go with them.
+
+Projects that share one `OCX_HOME` also share the store. `ocx clean` keeps every package referenced by any registered project's `ocx.lock`, not just the active one. A project is registered whenever `ocx add`, `ocx remove`, `ocx lock`, `ocx update` or `ocx upgrade` writes its lockfile. Browse `$OCX_HOME/projects/` to see which projects are registered.
+
+Deleting a project's directory makes its packages collectable at the next clean, with no warning. Pass `--force` to bypass the project registry. Live install symlinks are always honoured.
+
+`ocx clean` also garbage-collects [consent][in-depth-shell-integration-consent]. A project's stamp is removed once its directory is confirmed gone, the same way its packages become collectable. A project you move or delete loses both its held packages and its consent in the same pass. Moving a checkout back re-consents it, as a fresh clone would, at the next [`ocx add`][cmd-add], [`ocx lock`][cmd-lock], [`ocx pull`][cmd-pull] or [`ocx exec`][cmd-run].
+
+:::tip[Learn more]
+[Storage In Depth, Garbage Collection][in-depth-storage-gc] covers the full reachability walk across `refs/symlinks/`, `refs/deps/`, `refs/layers/` and `refs/blobs/`.
+[Dependencies In Depth, Garbage Collection][in-depth-dependencies-gc] explains why dependents protect their dependencies and back-references do not.
+[Project Toolchain In Depth, Multi-project retention][in-depth-project-multi-project-retention] covers the symlink ledger and the browsable `$OCX_HOME/projects/` directory.
+:::
+
+## Preview a clean \{#cleanup-dry-run\}
+
+`ocx clean --dry-run` lists what a live run would remove and changes nothing. An object counts as unreferenced when four things hold:
+
+- No candidate or current symlink points at it.
+- No other installed package depends on it.
+- No registered project's `ocx.lock` pins it.
+- It is not a [patch companion][patches-user-guide] held by a registered project's lock.
+
+When any entry is held back, the table gains a `Held By` column:
+
+```text
+Type    Held By                     Path
+object  /home/alice/dev/proj-a      /home/alice/.ocx/packages/.../
+object                              /home/alice/.ocx/packages/.../
+temp                                /home/alice/.ocx/temp/abc.../
+```
+
+A blank cell means the entry is unreferenced and will be collected. A filled cell names the project directories that hold the package. `temp` entries are never governed by the project ledger and never show a value. A live run prints only `Type | Path`, because held entries are never collected.
+
+### Limits \{#cleanup-limits\}
+
+Do not run `clean` while other ocx commands run. A concurrent install may reference an object that `clean` is about to remove, and the install then fails.
+
+The rendered toolchain tree under `<home>/toolchain/` sits outside the reference graph. It is derived state that `ocx pull` rewrites, so `clean` never walks it. The packages its links point at stay live through the project's own lock.
+
+The consent sweep runs on every `ocx clean`, including `--dry-run` and `--force`. A stamp is removed only when its recorded project directory is confirmed absent. A dangling symlink where the directory used to be still counts as present. An unreadable, malformed or unrecognised-version stamp is retained. A run whose object-store picture is already untrustworthy retains everything, consent stamps included.
+
+Each swept stamp is reported as a `consent` entry, and `--dry-run` names the stamps a live run would sweep.
+
+[cmd-run]: ../reference/command-line/commands.md#exec
+[cmd-clean]: ../reference/command-line/commands.md#clean
+[cmd-package-uninstall]: ../reference/command-line/package-consuming.md#package-uninstall
+[cmd-add]: ../reference/command-line/commands.md#add
+[cmd-lock]: ../reference/command-line/commands.md#lock
+[cmd-pull]: ../reference/command-line/commands.md#pull
+[in-depth-storage-packages]: ../explanation/storage.mdx#packages
+[in-depth-storage-gc]: ../explanation/storage.mdx#gc
+[in-depth-dependencies-gc]: ../explanation/dependencies.mdx#gc
+[in-depth-shell-integration-consent]: ../explanation/shell-integration.mdx#consent
+[in-depth-project-multi-project-retention]: ../explanation/project-toolchain.md#multi-project-retention
+[patches-user-guide]: ./patch-packages.mdx

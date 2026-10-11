@@ -1,0 +1,74 @@
+{
+ "anchors": [
+  "bundle-anatomy",
+  "compression",
+  "see-also",
+  "sidecars",
+  "stable",
+  "strip-components",
+  "what-goes-in"
+ ],
+ "commands": [
+  "ocx package create",
+  "ocx package push"
+ ],
+ "flags": [
+  "--extract",
+  "--strip-components"
+ ],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "../in-depth/storage.md",
+  "../in-depth/storage.md#layers",
+  "../reference/command-line.md#package-create",
+  "../reference/command-line.md#package-push",
+  "../reference/metadata.md#extraction-strip-components",
+  "../reference/metadata.md#format-top-level",
+  "./building-pushing.md",
+  "./building-pushing.md#layer-reuse",
+  "./migration.md",
+  "./multi-platform.md",
+  "/casts/authoring/package-create.cast",
+  "https://github.com/ocx-sh/ocx-mirror",
+  "https://github.com/opencontainers/image-spec/blob/v1.1.0/media-types.md",
+  "https://www.gnu.org/software/tar/manual/html_section/transform.html"
+ ],
+ "fences": [
+  "json:69a34459: {",
+  "sh:573db44a: ocx package create build -p linux/amd64 -m metadata.json -o ",
+  "sh:b5017af9: ocx package create build -p linux/amd64 -m metadata.json -o ",
+  "sh:d0fc4486: ocx package create build -i mytool:1.0.0 -p linux/amd64 -m m"
+ ],
+ "facts": [
+  "A package manager needs a flat surface so the declared PATH entry lands consumers' bin without knowing upstream naming. [L10]",
+  "Publishers either pre-flatten the tree before bundling, or keep the upstream layout and strip the wrapper at install time. [L12]",
+  "Repackaging upstream archives unchanged avoids re-bundling cost and keeps the release pipeline a thin wrapper. [L12]",
+  "OCX assembles installed packages under content, which is the post-install layout and not an archive requirement. [L14]",
+  "The common convention is bin plus runtime data, and a single pre-built binary can use strip_components 0. [L14]",
+  "Archive creation sorts entries by filename, but file mtimes are embedded, so a rebuild gives different bytes and a different digest. [L18]",
+  "Treat an archive digest as a property of one specific run, not of the source tree. [L18]",
+  "Layer reuse depends on digest equality, so bundling the same content twice creates two layers and no dedup. [L20]",
+  "The fix is to capture the digest after the first push and reference that digest on later pushes. [L20]",
+  "Computing a local sha256 of the archive yields the same digest the registry stores for the layer. [L28]",
+  "A later release reuses the layer by digest, without re-bundling or re-uploading. [L31]",
+  "The sha256 colon form with the archive extension is the supported way to point a new manifest at an existing layer. [L34]",
+  "The archive extension picks the codec: tar.xz (LZMA, the default), tar.gz (Gzip), or tar.zst (Zstandard). [L40]",
+  "LZMA gives smaller archives for binary payloads, while Zstandard decompresses several times faster at similar sizes. [L40]",
+  "Gzip decompresses faster on tiny archives where CPU time dominates. [L40]",
+  "Compression level trades publish-time CPU for archive size, and the threads flag parallelises LZMA and Zstandard only. [L42]",
+  "A thread count of zero auto-detects up to 16 cores. [L42]",
+  "Stick with tar.xz at the default level unless a measurement justifies the best level. [L44]",
+  "Passing -m copies the metadata file as a sidecar next to the output archive, named after the archive. [L50]",
+  "A push without -m looks next to the first file layer for a stem-metadata.json sidecar. [L65]",
+  "With a directory as output and identifier and platform given, the output filename is inferred. [L70]",
+  "The inferred name is name-tag-os-arch.tar.xz, where name is the last repository segment, and the codec is always LZMA. [L82]",
+  "Pass an explicit filename to output to choose a different codec. [L82]",
+  "strip_components mirrors tar's flag and removes that many leading segments while extracting each layer; the default is zero. [L86]",
+  "The metadata strip_components field re-applies on every consumer install, while the create flag runs once at authoring time. [L96]",
+  "The create flag strips the input archive only under extract, before the content is compressed into the published archive. [L98]"
+ ],
+ "lines": 129
+}

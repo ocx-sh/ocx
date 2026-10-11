@@ -40,11 +40,10 @@ project_name: "ocx"
 languages:
 - rust         # crates/**/*.rs — primary, also fallback
 - python       # test/**/*.py (acceptance suite, uv + pytest)
-- typescript   # website/**/*.ts (VitePress + theme)
-- vue          # website/.vitepress/theme/**/*.vue
+- typescript   # website/**/*.{ts,mjs} (Astro config + plugins)
 - bash         # taskfiles, hooks, scripts (set -euo pipefail)
 - yaml         # taskfile.yml, .github/workflows/**, .claude/agents/**
-- markdown     # docs-heavy repo (website/src/docs, .claude/rules, ADRs)
+- markdown     # docs-heavy repo (website/src/content/docs, .claude/rules, ADRs)
 
 # the encoding used by text files in the project
 # For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings

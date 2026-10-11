@@ -17,15 +17,38 @@ use crate::options;
 #[derive(Parser)]
 #[command(long_about = "\
     Re-point a package's rolling tags at the content its versions imply.\n\n\
-    Rebuilds the whole index for every rolling tag `cascade check` reports as wrong and pushes it, \
-    using only content the registry already serves - a repair publishes nothing new, it re-points. \
-    The full plan is computed first and every manifest it references is checked to still exist, so \
-    a run that cannot be completed writes nothing at all.\n\n\
-    Repairing the registry does not update the public index. Pass `--tags-file PATH` to append the \
-    tags this run moved, one per line, then hand that file to `ocx package announce --tags-file PATH`.\n\n\
-    Exits 0 when every attempted write succeeded, 65 when a finding remains (including a tag that \
-    cannot be fixed without publishing new content), and 64 when a package names a digest or a tag \
-    that is not a version, or when `--tags-file` is given more than one package.")]
+    Rebuilds the whole index for every rolling tag `cascade check` reports as wrong and pushes \
+    it, using only content the registry already serves. A repair publishes nothing new and only \
+    re-points. The full plan is computed first, and every manifest it references is checked to \
+    still exist. A run that cannot be completed therefore writes nothing at all.\n\n\
+    Repairing the registry does not update the public index. Pass `--tags-file PATH` to append \
+    the tags this run moved, one per line, then hand that file to `ocx package announce \
+    --tags-file PATH`.\n\n\
+    Exits 0 when every attempted write succeeded. Exits 65 when a finding remains, including a tag \
+    that cannot be fixed without publishing new content. Exits 64 when a package names a digest \
+    or a tag that is not a version, or when `--tags-file` is given more than one package.\n\n\
+    `repair` writes by default, since `check` is already the read-only preview; `--dry-run` \
+    computes and reports the same plan. Identifier forms and scope are those of `check`.\n\n\
+    For each broken alias it rebuilds the whole platform index entry from the same fold \
+    `check` diffs against. It preserves every observed entry the fold does not supersede. That includes annotations already on the index, non-platform entries such as attestations, and \
+    orphaned alias tags whose child manifests still exist. A missing referenced manifest is \
+    dropped only if every entry naming that digest is an orphan slot. Otherwise the whole \
+    alias is refused and reported while other aliases still write.\n\n\
+    Writes are batched after the whole plan is built and run concurrently per tag.\n\n\
+    After each write `repair` re-reads the tag and warns when the digest disagrees, which is \
+    evidence of a concurrent publisher. An outcome is `raced` only when nothing was written \
+    because the tag moved between read and write.\n\n\
+    There is no conditional-request guard, so avoid repairing a repository with a publish in \
+    flight. An index-staleness finding is never something `repair` writes. Reaching the public \
+    index with the fix is a second hop through `ocx package announce`. Refreshing one \
+    machine's local copy is `ocx index update`'s job.\n\n\
+    `--tags-file` records exactly the tags whose write landed (not `raced`, `refused` or \
+    `failed` ones), unioned with every tag an index-staleness finding names, so one file \
+    covers both hops. It is written on every run, empty included, so a workflow can feed it to \
+    `announce` unconditionally. A preview contributes no landed tag, and its plan is in the \
+    JSON report as each entry's `planned`.\n\n\
+    A follow-up `announce` updates or creates the listed aliases; a repair never produces a \
+    removal.")]
 pub struct PackageCascadeRepair {
     /// Compute and print the same plan without writing anything.
     #[arg(long)]

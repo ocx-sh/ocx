@@ -14,7 +14,7 @@ use crate::options;
 
 #[derive(Parser)]
 pub struct PackageCopy {
-    /// Rewrite only the registry host, keeping the repository path and tag.
+    /// Rewrite only the registry host, keeping the repository path and tag. Conflicts with `--identifier`.
     ///
     /// The promotion shape: `dev.example.com/team/tool:1.4.2` to
     /// `prod.example.com` lands at `prod.example.com/team/tool:1.4.2`.
@@ -22,7 +22,7 @@ pub struct PackageCopy {
     #[clap(long = "to", value_name = "REGISTRY", conflicts_with = "identifier")]
     to: Option<String>,
 
-    /// Full target reference, when the repository path or tag changes too.
+    /// Full target reference, when the repository path or tag changes too; required when SOURCE names a digest. Conflicts with `--to`.
     ///
     /// Required when the source names a digest: a digest carries no tag for
     /// `--to` to preserve.
@@ -76,7 +76,11 @@ pub struct PackageCopy {
     #[clap(long = "annotation", value_name = "KEY=VALUE", value_parser = super::package_push::parse_annotation)]
     annotation: Vec<(String, String)>,
 
-    /// Report what would be copied and write nothing.
+    /// Report what would be copied and write nothing. The cascade and keep-tag moves are not computed, so those report fields stay empty
+    ///
+    /// The preview covers only the per-platform disposition: the rolling-tag
+    /// moves of `--cascade` and the keep-tag writes are never computed, so those
+    /// report fields stay empty regardless of what a real run would write.
     #[clap(long = "dry-run")]
     dry_run: bool,
 

@@ -1,0 +1,9 @@
+{
+  "/docs/reference/env-composition/": {
+    "fragments": {
+      "toolchain-activation-trampolines": "/docs/explanation/toolchain-activation/#trampolines",
+      "toolchain-activation-collisions": "/docs/explanation/toolchain-activation/#collisions",
+      "composition-order-list-separator": "/docs/explanation/environments/#last-wins-lists-separator"
+    }
+  }
+}

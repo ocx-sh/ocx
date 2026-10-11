@@ -19,29 +19,50 @@ use crate::options;
     long_about = "\
     Delete tags from a package's registry repository, guarded by the index.\n\n\
     Name the tags to delete, or pass `--prerelease` to select every build of one pre-release \
-    (`0.5.0-canary_<build>`) plus its rolling tag (`0.5.0-canary`). A pre-release build cascades \
-    only into its own pre-release, so a family never touches `x.y`, `x` or `latest`. \
+    (`0.5.0-canary_<build>`) plus its rolling tag (`0.5.0-canary`). A pre-release build \
+    cascades only into its own pre-release, so a family never touches `x.y`, `x` or `latest`. \
+    `--prerelease` selects from the registry's tag listing, never from the index.\n\n\
     `--keep-builds N` keeps the newest N builds and the rolling tag. Newest is version order, \
     which compares build ids as text, so build ids must be fixed-width: push with \
-    `--build-timestamp=datetime`. `=date` is not enough, since two builds on one day share a tag.\n\n\
-    For a namespace with an index, prune reads the package's root from the configured index URL, \
-    never a mirror, to find the registry repository. Before any delete it refuses the whole run \
-    if a selected tag is listed without the ephemeral marker (exit 81) or is in the registry but \
-    not yet in the index (exit 75). `--force` deletes such tags anyway and is required for a \
-    namespace with no index. A tag already gone from the registry is reported as absent.\n\n\
+    `--build-timestamp=datetime`.\n\n\
+    `=date` is not enough, since two builds on one day share a tag.\n\n\
+    For a namespace with an index, prune reads the package's root from the configured index \
+    URL, never a mirror, to find the registry repository. Before any delete it refuses the \
+    whole run in two cases. One is a selected tag listed without the ephemeral marker (exit 81). The other is a selected tag in the \
+    registry but not yet in the index (exit 75).\n\n\
+    `--force` deletes such tags anyway and is required for a namespace with no index. A tag \
+    already gone from the registry is reported as absent.\n\n\
     Prune deletes registry tags only: never a digest, a platform manifest, a keep tag or a \
-    referrer, and it never writes the index. A keep tag pins the manifest past the tag's deletion: \
-    push ephemeral builds with `--no-keep-tag`, or prune frees no storage. Pass `--tags-file PATH` \
-    to append each gone tag the index lists, then publish the removal with \
-    `ocx package announce --tags-file PATH`.\n\n\
-    Exits 0 when every selected tag is gone or kept; 64 on a usage error; 69 when the index or \
-    registry fails in a way a rerun will not change; 74 when the tags file cannot be written; 75 \
-    when either is briefly unreachable, or a tag is not in the index yet or is still present after \
-    its delete; 78 when the index points at a forbidden host; \
-    79 when the index has no such package; 80 when the credential cannot delete; 81 for a durable \
-    tag, a namespace with no index, or `--offline`; 82 when the registry does not delete tags. \
-    A dry run exits 81 or 75 exactly as the real run would; 80 and 82 surface only on a real delete.\n\n\
-    Details: <https://ocx.sh/docs/reference/command-line#package-prune>"
+    referrer, and it never writes the index. A keep tag pins the manifest past the tag's \
+    deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.\n\n\
+    Pass `--tags-file PATH` to append each gone tag the index lists, then publish the removal \
+    with `ocx package announce --tags-file PATH`.\n\n\
+    Builds are deleted oldest first and the rolling tag last. After each delete prune confirms \
+    the tag is gone with a manifest read (three tries, 250 ms apart). A tag still present \
+    exits 75. Deleting a repository's last tag may remove the repository on some \
+    registries, which the confirmation accepts.\n\n\
+    A delete is not conditional. A push that cascades into the rolling tag at the same moment \
+    can lose to it, so serialize the jobs of one track. Tag deletion is optional in the OCI \
+    distribution spec. A registry that refuses it fails the first delete with exit 82 before \
+    anything is deleted, and 82 is never worth retrying.\n\n\
+    The read of the root commits nothing to the local index.\n\n\
+    Under `--format json` each tag row carries an `action`: `deleted`, `absent`, `would_delete`, \
+    `kept`, `refused` or `not_attempted`. A kept row's `reason` is `newest` or `rolling`. A refused \
+    row's `reason` is `durable` or `not_in_index`.\n\n\
+    Rows are in processing order, builds oldest first and the rolling tag last. A run that failed \
+    after entering the safeguard still prints this document alone on stdout, and the exit code \
+    is the status. A routing failure prints the envelope alone, since the repository is not yet \
+    known.\n\n\
+    Exits 0 when every selected tag is gone or kept, and 64 on a usage error. Exits 69 when the \
+    index or registry fails in a way a rerun will not change. Exits 74 when the tags file \
+    cannot be written. Exits 75 when either is briefly unreachable, or a tag is not in the \
+    index yet or is still present after its delete.\n\n\
+    Exits 78 when the index points at a forbidden host, and 79 when the index has no such \
+    package. Exits 80 when the credential cannot delete. Exits 81 for a durable tag, a \
+    namespace with no index, or `--offline`. Exits 82 when the registry does not delete tags. \
+    A dry run exits 81 or 75 exactly as the real run would, while 80 and 82 surface only on a \
+    real delete.\n\n\
+    Details: <https://ocx.sh/docs/reference/command-line/package-consuming/#package-prune>"
 )]
 // Exactly one selection mode: both is a conflict, neither a missing argument, each exit 64.
 #[clap(group(
@@ -54,6 +75,9 @@ use crate::options;
 #[clap(group(clap::ArgGroup::new("family").args(["prerelease"])))]
 pub struct PackagePrune {
     /// Select every build of this pre-release and its rolling tag, e.g. `0.5.0-canary`.
+    ///
+    /// The value must be a pre-release with no build: `0.5.0` and
+    /// `0.5.0-canary_<build>` are usage errors. Conflicts with `[TAG]...`.
     #[arg(long, value_name = "VERSION", value_parser = prune::parse_prerelease_family)]
     prerelease: Option<Version>,
 
@@ -66,13 +90,14 @@ pub struct PackagePrune {
     )]
     keep_builds: Option<u32>,
 
-    /// Delete tags the index does not mark ephemeral, or with no index to ask.
+    /// Delete tags the index does not mark ephemeral, or with no index to ask. A forced tag's index row stays until a reviewed announce removes it.
     #[arg(long)]
     force: bool,
 
     /// Append each gone tag the index lists, one per line, for `ocx package announce --tags-file`.
     /// Creates the file if absent and keeps the tags already in it. Written on every run that
-    /// gets past selection, empty included, never on a dry run.
+    /// gets past selection, empty included and even when the run then fails partway, never on a
+    /// dry run. A forced delete of a tag the index does not list writes nothing.
     #[arg(long = "tags-file", value_name = "PATH")]
     tags_file: Option<PathBuf>,
 
@@ -322,7 +347,7 @@ mod tests {
             "--tags-file",
             "--force",
             "80 and 82 surface only on a real delete",
-            "https://ocx.sh/docs/reference/command-line#package-prune",
+            "https://ocx.sh/docs/reference/command-line/package-consuming/#package-prune",
         ] {
             assert!(help.contains(needle), "long help must mention {needle}:\n{help}");
         }

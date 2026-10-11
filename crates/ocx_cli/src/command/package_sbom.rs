@@ -31,6 +31,7 @@ use crate::options;
 
 /// List the SBOM attestations a published package carries, verified or not.
 #[derive(Parser, Clone)]
+#[clap(mut_arg("signature_format", options::signature_format::read_side))]
 pub struct PackageSbom {
     /// Narrow into one platform of an image index.
     ///
@@ -41,12 +42,13 @@ pub struct PackageSbom {
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     platform: Option<ocx_oci::Platform>,
 
-    /// Write the SBOM document to PATH ("-" for stdout).
+    /// Write the SBOM document to PATH ("-" for stdout). Several candidates exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest
     ///
     /// The bytes are exactly what was attached, never a re-serialization.
     /// Under --no-verify nothing was checked, so the document is written
-    /// with a warning on stderr saying so. More than one candidate of the
-    /// requested type is a refusal, not a choice: narrow with --type.
+    /// with a warning on stderr naming the referrer digest. More than one
+    /// candidate of the requested type is a refusal (`multiple_attestations`)
+    /// naming every candidate, not a choice: narrow with --type.
     /// Writing raw predicate bytes to a terminal is refused - redirect to a
     /// file or a pipe.
     #[clap(long = "output", short = 'o', value_name = "PATH", conflicts_with = "summary")]
@@ -104,15 +106,14 @@ pub struct PackageSbom {
     #[clap(flatten)]
     signature_format: options::signature_format::SignatureFormatOpt,
 
-    /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
-    /// trusted_root.json), named by a bare path or a file:// one.
+    /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74
     ///
     /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
     /// for air-gapped verification against a local trust-root mirror. No TUF
     /// network fetch is performed. Takes precedence over the
     /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
     /// config.toml. See
-    /// https://ocx.sh/docs/in-depth/self-hosted-sigstore
+    /// https://ocx.sh/docs/guides/self-hosted-sigstore/
     #[clap(long = "sigstore-trusted-root", value_name = "PATH")]
     trusted_root: Option<PathBuf>,
 

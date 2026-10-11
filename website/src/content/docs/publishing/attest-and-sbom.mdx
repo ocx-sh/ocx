@@ -1,0 +1,197 @@
+---
+title: "Attach attestations and SBOMs"
+description: "Publish an SBOM or other signed attestation with a package, and read it back."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+Attach an SBOM, provenance record or other attestation to a package, and read it back with or without verification.
+
+A signature tells you who published a package. It does not tell you what is inside it. A CI pipeline can sign every binary with the right identity and still ship a bundled library with a known CVE.
+
+An attestation closes that gap. It is a structured statement about a package, bound to the exact manifest digest the signature already covers. Typical statements are an SBOM that lists every component, a provenance record that names the build, or a vulnerability scan result.
+
+[`ocx package attest`][cmd-package-attest] publishes one through the same keyless pipeline [signing][in-depth-signing] uses. [`ocx package push --sbom`][cmd-package-push] is shorthand for the CycloneDX case. [`ocx package sbom`][cmd-package-sbom] reads either kind back. Under `--offline`, `attest` refuses with exit 81 (`offline_attest_refused`), as `sign` does.
+
+## Attach an SBOM \{#attestations-attach\}
+
+The common case is a CycloneDX SBOM generated right after a build. Not every build runs where a signing identity exists. Think of a laptop, a local script or a CI job without OIDC.
+
+The SBOM still needs to travel with the package for whatever reads it later. That may be a dependency scanner, an auditor or the next pipeline stage. Demanding a stronger floor for that metadata than for the executable beside it would be backwards.
+
+So `attach` has two shapes, and OCX picks one from what it sees in the environment. You do not pass a flag to choose:
+
+:::note[Two shapes, one command]
+`ocx package attest` and `ocx package push --sbom` **sign** when a signing identity is visible. That means an override token or a detected CI platform such as GitHub Actions. They **attach the document raw** when nothing is visible. The rule mirrors `ocx package push`: either there is a credential to act on or there is not. The command says which happened instead of degrading silently.
+:::
+
+### Signed attach \{#attestations-attach-signed\}
+
+With an identity available, [`ocx package push --sbom <PATH>`][cmd-package-push] attaches the SBOM in the same step as the push. It is shorthand for `attest --type cyclonedx` against the digest the push just wrote:
+
+```shell
+cyclonedx-cli ... > sbom.json
+ocx package push -p linux/amd64 --sbom sbom.json -i registry.example/pkg:1.0 pkg.tar.gz
+```
+
+Use [`ocx package attest`][cmd-package-attest] directly for any of these cases:
+
+- attaching a predicate on its own
+- attaching an SPDX SBOM, because `push --sbom` is CycloneDX-only (use `attest --type spdx` or `spdxjson`)
+- attaching more than one predicate type to the same manifest
+- attesting something this invocation did not just publish
+
+```shell
+ocx package attest -p linux/amd64 --predicate sbom.json --type cyclonedx registry.example/pkg:1.0
+```
+
+`--predicate` names the file whose bytes the attestation wraps verbatim. `--type` is one of the cosign-compatible aliases (see [Predicate types](#attestations-types)) or any absolute predicate-type URI.
+
+With a signing identity present, the command wraps that predicate in a [DSSE][dsse]-enveloped [in-toto][in-toto] Statement. The Statement names the target manifest digest as its subject. The command signs it through the keyless pipeline that [`sign`][cmd-package-sign] uses. That pipeline needs an ephemeral key, a [Fulcio][fulcio] certificate bound to your OIDC identity and a [Rekor][rekor] transparency-log entry. The command then pushes the bundle as a referrer.
+
+This recording runs against a real, self-hosted Sigstore stack. It signs a CycloneDX SBOM, lists it and extracts it back out:
+
+<Terminal src="/casts/user-guide/attestations.cast" title="Attaching a signed SBOM attestation and reading it back" collapsed />
+
+### Unsigned attach \{#attestations-attach-unsigned\}
+
+With no signing identity visible, `attest` and `push --sbom` still succeed. They publish the SBOM document itself as the referrer's payload, typed by its own media type. That is `application/vnd.cyclonedx+json` for CycloneDX, and `application/spdx+json` or `text/spdx` for SPDX. There is no [DSSE][dsse] envelope, no Fulcio certificate and no Rekor entry.
+
+This is the wire shape [`oras attach`][oras-attach] writes. It is also the shape [`cosign attach sbom`][cosign-attach-sbom] writes under `--registry-referrers-mode oci-1-1`. An SBOM that ocx attached unsigned reads back with those tools, and one they attached reads back with `ocx package sbom`.
+
+The **default** mode of cosign writes a `sha256-<hex>.sbom` tag instead of a referrer. ocx reads that shape too, though it never writes it. Neither shape is signed, so both list only under `--no-verify`. See [Read it back](#attestations-read).
+
+An unsigned SBOM carries exactly the trust of the unsigned package it describes. It has the same repository, the same set of people who can push to it and the same registry access controls. It is not a weaker copy of the signed case. It is a different claim.
+
+A signed attestation says that an identity vouches for the document. An unsigned attach says only that the document was published alongside the package. That is already true of the package's binary layers.
+
+The check asks one question: is a signing identity visible? It never makes a network call and never opens the interactive browser sign-in. That sign-in is a *prompt for* an identity, not *evidence of* one.
+
+Suppose an identity *is* visible but acquiring the certificate then fails. Fulcio may be unreachable, or an ambient CI token may be rejected. That is a hard error with no fallback to the unsigned form. A CI job set up to sign that silently published unsigned would look identical on the wire to a job that never meant to sign. The fallback would hide the exact misconfiguration an operator needs to see.
+
+One predicate type is refused in unsigned mode outright: SLSA provenance. Without a DSSE envelope, no builder identity is attached to the statement, so an unsigned provenance record carries no attribution at all. `attest --type slsaprovenance1` with no signing identity visible exits 64 (`unsigned_type_unsupported`) before any network call. OCX will not publish a document that looks like provenance and proves nothing.
+
+The same recording, run again with no signing identity present, attaches a second SBOM unsigned. It then reads both documents back with `ocx package sbom --no-verify`, the reading mode covered in [Read it back](#attestations-read):
+
+<Terminal src="/casts/user-guide/attestations-unsigned.cast" title="Attaching an unsigned SBOM and reading it back permissively" collapsed />
+
+## Read it back \{#attestations-read\}
+
+Attaching and reading answer two separate questions. Attaching asks whether a signing identity is *visible*. If one is, OCX signs. If none is, it attaches raw (see [Attach an SBOM](#attestations-attach)).
+
+Reading asks whether verification is *demanded*. If it is, OCX runs the full pipeline and refuses anything unsigned. If not, it runs no cryptography and reads whatever is there. [`ocx package sbom`][cmd-package-sbom] answers this second question.
+
+A consumer auditing a dependency has usually configured nothing. There is no `[[trust.policy]]` and no certificate identity to check against. Refusing to hand them an SBOM until they set up Sigstore turns a read into a wall.
+
+A consumer who *did* configure a policy, or who typed `--certificate-identity` expecting a check, gets a different answer. They must never receive an unsigned document dressed up as if it passed. That would make the policy decorative.
+
+`ocx package sbom` resolves one of two modes per invocation and states which one it used:
+
+- **Demand**: every listed document carries a signature that passed the full pipeline. That covers referrer discovery, the Fulcio, Rekor and identity chain, and the Statement's subject-digest binding. OCX **refuses** an unsigned attach and never lists it. The policy names who must have signed, and a raw attachment has no signer at all.
+- **Permissive**: nothing is checked and no cryptography runs. OCX extracts a signed bundle's [DSSE][dsse] payload exactly as it reads a raw attachment's bytes. It reports both as `verified: false` with no signer identity, because none was checked. The command is usable with no Sigstore setup at all, and the consumer above gets the SBOM either way.
+
+The mode follows from what you asked for and what your environment already resolves to. There is never a silent default with no way to see which one you got:
+
+| You pass | A `[[trust.policy]]` covers the package? | Mode |
+|---|---|---|
+| nothing | no | Permissive |
+| nothing | yes | Demand |
+| `--certificate-identity` + `--certificate-oidc-issuer` | *(overrides policy either way)* | Demand |
+| `--verify` | no, and no identity flags either | **Error**, exit 64 |
+| `--verify` | yes, or identity flags given | Demand |
+| `--no-verify` | *(any)* | Permissive |
+
+`--verify` and `--no-verify` last-win when both are typed, like every `--x`/`--no-x` pair in ocx. Combining them is not an error.
+
+`--no-verify` **does** conflict with the certificate flags. Supplying an identity while refusing to check it is contradictory, so that combination is a usage error in either order. `--verify` with nothing to verify against is also a usage error (`no_identity_provided`, exit 64). It never falls back silently to permissive, because an operator who typed `--verify` must not have it quietly ignored.
+
+:::note[Reading the reader's own polarity]
+Attach and read mirror each other on purpose. **Attach** signs when a signing identity is *visible*. **Read** demands verification when an identity *source*, meaning flags or policy, is visible. Neither side downgrades silently when a check that should run then fails. Both fail loudly.
+:::
+
+A verified entry carries `verified: true` plus the certificate identity, issuer and signed-at timestamp that vouch for it. An unverified entry carries `verified: false` and **omits** those three fields. OCX never emits them empty, because an empty identity would read as a verification that failed to render, not as "there was nothing to verify."
+
+The listing's own `summary.verification` field (`verified` or `unverified`) names which mode produced the whole run. A script never has to infer it from the rows. Under Demand mode an unverified row cannot occur, and under Permissive mode nothing else can.
+
+`--output <PATH|->` extracts one predicate's bytes, byte-exact as the publisher wrote them, from the candidate the mode's own trust class resolved to:
+
+```shell
+ocx package sbom -p linux/amd64 --type cyclonedx --output sbom.json registry.example/pkg:1.0
+```
+
+More than one matching candidate is refused rather than guessed. The error names every colliding referrer digest and every distinct predicate type in the set, so `--type` has a value to narrow with.
+
+Under Permissive mode, writing a document nothing vouched for prints one line to stderr: `SBOM is unverified: no signature over referrer <digest> was checked, so nothing vouches for what it says`. The bytes written to `PATH` (or stdout) are unaffected. A script that pipes `--output -` into a file still gets exactly the predicate's bytes, and the warning stays visible separately.
+
+For a CycloneDX predicate, `--summary` adds the spec version, the component count and the top-level component name to the listing. It augments the listing rather than replacing it, so you can read a document quickly without piping it through `jq`. `--format json` output also gains a `serial_number` field, which the plain-text form omits. `--summary` reads a document the same way in every mode, because whether anyone vouches for a component list says nothing about whether the list parses.
+
+:::note[Attestations vs. plain verification]
+[`ocx package verify --attestation`][cmd-package-verify-attestations] runs the same cryptographic pipeline as Demand mode. It answers only one question: does a validly signed attestation of this type exist? It never returns the predicate's content, and it never treats an unsigned referrer as a candidate, in either mode. Use `verify --attestation` in a policy gate that needs only a pass or fail on signed attestations. Use `sbom` when you need the SBOM itself, however it was attached.
+:::
+
+## Predicate types \{#attestations-types\}
+
+`--type` accepts the same short aliases [cosign][cosign] uses, so a predicate produced for one keyless-signing tool reads the same in the other:
+
+| Alias | Resolves to |
+|---|---|
+| `cyclonedx` | `https://cyclonedx.org/bom` |
+| `spdx`, `spdxjson` | the SPDX JSON predicate type |
+| `slsaprovenance` | SLSA provenance v0.2. `attest` refuses to publish this (exit 64, `provenance_version_unsupported`), so pass `slsaprovenance1` |
+| `slsaprovenance02` | SLSA provenance v0.2, explicit spelling. Refused the same way as `slsaprovenance`, so pass `slsaprovenance1` |
+| `slsaprovenance1` | SLSA provenance v1 |
+| `link`, `vuln`, `openvex` | in-toto link, vulnerability-scan and [OpenVEX][openvex] predicates |
+| `custom` | wraps the predicate bytes in cosign's `{Data, Timestamp}` envelope before signing |
+
+Any other value is taken as an absolute predicate-type URI and stored byte-exact. Attesting a predicate type OCX has no built-in alias for costs nothing but the full URI. The [`attest` reference][cmd-package-attest] lists the exit codes and the 15 MiB predicate size bound.
+
+A larger file is refused with exit 65. A symlink is refused with exit 74, as an I/O error. The report's `predicate_type` echoes the resolved URI, so `cyclonedx` reports the `cyclonedx.org` bom URI. A literal URI passes through unchanged.
+
+:::caution[Unsigned attach is SBOM-only]
+The raw, unsigned wire shape exists for the three SBOM media types only: CycloneDX and both SPDX serializations. Every other type in the table has no signing identity to fall back from. That covers provenance, `link`, `vuln`, `openvex` and `custom`. With no identity visible, `attest` refuses those types outright (exit 64, `unsigned_type_unsupported`) instead of publishing an untyped or attribution-free document. Signing them normally is unaffected.
+:::
+
+## Verification and trust floors \{#attestations-verification\}
+
+Demand mode keeps the rule that [automatic verification][guide-auto-verify] states for signatures. It cannot return an unverified result for a signed candidate, because an unverified attestation is no different from a text file an attacker wrote. Three failures each fail the read for that candidate:
+
+- a registry that cannot prove referrer support
+- a Rekor instance that will not confirm an inclusion proof
+- a certificate identity that does not match your policy
+
+None of them falls back to "here is the content anyway." An unsigned attach under Demand mode gets the same treatment. It is refused, not silently listed.
+
+Permissive mode is not a hole in that rule. It is a floor the reader chooses, either because no identity source is on the table or explicitly with `--no-verify`. OCX never picks it *for* an operator who demanded verification. The mode table above has exactly one row that resolves to Permissive with an identity source present, and it requires typing `--no-verify` by hand. Every document Permissive mode returns is labeled `verified: false`, every time, with no path that upgrades it into looking checked.
+
+Verification proves an attestation is authentic and unmodified as of when it was signed. It does not prove the attestation is current. A later SBOM or provenance record can exist for the same package. Nothing protects against rollback, so a registry could serve an earlier, still validly signed attestation instead.
+
+That caveat applies inside Demand mode only. Permissive mode proves nothing about authenticity either way, so freshness was never on the table there.
+
+:::tip[Learn more]
+[`attest` reference][cmd-package-attest]: full options, exit codes and the `--type` alias table.
+[`sbom` reference][cmd-package-sbom]: listing, extraction, `--summary` and the JSON envelope for both modes.
+[`package verify` reference][cmd-package-verify-attestations]: the `--attestation` and `--type` verification-only mode.
+[Signing][in-depth-signing]: the keyless pipeline `attest` shares with `sign`, trust root mechanics and offline verification.
+:::
+
+[dsse]: https://github.com/secure-systems-lab/dsse
+[in-toto]: https://github.com/in-toto/attestation
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor
+[cosign]: https://github.com/sigstore/cosign
+[cosign-attach-sbom]: https://github.com/sigstore/cosign/blob/main/doc/cosign_attach_sbom.md
+[oras-attach]: https://oras.land/docs/commands/oras_attach/
+[openvex]: https://openvex.dev/spec
+
+
+[cmd-package-attest]: ../reference/command-line/package-publishing.md#package-attest
+[cmd-package-sbom]: ../reference/command-line/package-consuming.md#package-sbom
+[cmd-package-sign]: ../reference/command-line/package-publishing.md#package-sign
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-package-verify-attestations]: ../reference/command-line/package-consuming.md#package-verify
+
+
+[in-depth-signing]: ../explanation/signing.mdx
+[guide-auto-verify]: ../guides/verify-installs.mdx#supply-chain-auto-verify

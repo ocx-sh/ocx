@@ -2,7 +2,7 @@
 paths:
   - "**/vite.config.*"
   - "**/vitest.config.*"
-  - "**/.vitepress/config.*"
+  - "**/astro.config.*"
 ---
 
 # Vite Build Tool Quality
@@ -19,8 +19,8 @@ Project-independent, shareable.
 
 1. **Hardcoded credentials or secrets** in `vite.config.*` — use env vars, never commit.
 2. **`VITE_` prefix on server-only env vars** — exposes to client bundle at build. Never prefix secrets `VITE_`.
-3. **Browser API at module scope** in components used in VitePress/SSR — `window`, `document`, `localStorage` at import time crash pre-render. Guard `import.meta.env.SSR` or `<ClientOnly>` wrapper.
-4. **`vite.config.ts` at root alongside `.vitepress/config.ts`** — VitePress ignores root config; split = silent override bugs.
+3. **Browser API at module scope** in components used in Astro/SSR — `window`, `document`, `localStorage` at import time crash pre-render. Move it into a client `<script>` or guard `import.meta.env.SSR`.
+4. **`vite.config.ts` at root alongside `astro.config.mjs`** — Astro takes Vite options from the `vite` key and ignores root `vite.config.ts`; split = silent override bugs.
 5. **`build.target: "es5"`** with Rolldown (Vite 8) — not supported. Rolldown = modern JS only.
 6. **Mixing SSR and client globals** in shared modules — pre-render crash.
 7. **Missing env var validation** at config load — validate `zod`/`valibot`; fail build on invalid env.
@@ -30,7 +30,7 @@ Project-independent, shareable.
 - Missing `base` option for non-root deployments
 - `optimizeDeps.include` as workaround instead of fixing underlying ESM incompat
 - `vite-plugin-*` wrappers duplicating Vite 8 built-ins (e.g., `vite-tsconfig-paths` now built-in)
-- Missing `.vitepress/cache` in `.gitignore`
+- Missing `.astro` cache dir in `.gitignore`
 - Experimental `fullBundleMode` in production — not stable
 - No explicit `build.outDir` — defaults differ between app mode and library mode
 - `resolve.alias` with absolute paths — use `fileURLToPath(new URL(..., import.meta.url))` for portability
@@ -67,20 +67,18 @@ const env = z.object({
 
 ---
 
-## VitePress-Specific Gotchas
+## Astro-Specific Gotchas
 
-1. **SSR compat mandatory** — VitePress pre-renders in Node at build. Any browser API at import time crashes build. Pattern: guard `import.meta.env.SSR` or dynamic imports in `mounted()` hooks.
-2. **`<ClientOnly>` wrapper** for components that can't be SSR-safe (third-party charting libs, etc.).
-3. **`defineClientComponent`**: VitePress helper for importing Vue components using browser APIs — avoids dynamic-import boilerplate.
-4. **Vite config lives in `.vitepress/config.ts`**, not root. `vite` key inside VitePress config accepts same `UserConfig` shape. Don't create separate `vite.config.ts` at root — VitePress ignores.
-5. **Full typing**: use `defineConfig` from `vitepress` — catches malformed nav/sidebar/theme configs at author time.
+1. **Pre-render runs in Node** — any browser API at import time crashes `astro build`. Use a client `<script>` (runs in the browser only) or guard `import.meta.env.SSR`.
+2. **Vite options live under the `vite` key of `astro.config.*`**, same `UserConfig` shape. No separate root `vite.config.ts` — Astro ignores it.
+3. **Full typing**: `defineConfig` from `astro/config` catches malformed integration/sidebar config at author time.
 
 ---
 
 ## Config Structure Recommendations
 
 ```typescript
-// vite.config.ts or .vitepress/config.ts — typed, minimal
+// vite.config.ts or the `vite` key of astro.config.mjs — typed, minimal
 import { defineConfig } from "vite";
 
 export default defineConfig(({ command, isSsrBuild }) => ({
@@ -104,10 +102,10 @@ See `quality-core.md` for universal checklist. Vite-specific additions:
 - [ ] No `VITE_` prefix on server-only env vars
 - [ ] Env vars validated at config load (zod/valibot)
 - [ ] `base` option set for non-root deployments
-- [ ] Browser API access guarded for SSR if VitePress
-- [ ] No duplicate config files (root `vite.config.ts` + `.vitepress/config.ts`)
+- [ ] Browser API access guarded for SSR if Astro
+- [ ] No duplicate config files (root `vite.config.ts` + `astro.config.*`)
 - [ ] `build.outDir` specified explicitly
-- [ ] `.vitepress/cache` in `.gitignore`
+- [ ] `.astro` cache dir in `.gitignore`
 - [ ] Target set to `'baseline-widely-available'` or explicit browserslist
 
 ---
@@ -119,5 +117,4 @@ Authoritative refs used in this rule:
 - [Vite 8.0 announcement](https://vite.dev/blog/announcing-vite8)
 - [Vite 7.0 announcement](https://vite.dev/blog/announcing-vite7)
 - [Rolldown integration guide](https://v7.vite.dev/guide/rolldown)
-- [VitePress SSR Compatibility](https://vitepress.dev/guide/ssr-compat)
-- [VitePress Configuration reference](https://vitepress.dev/reference/site-config)
+- [Astro configuration reference](https://docs.astro.build/en/reference/configuration-reference/)

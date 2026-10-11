@@ -963,7 +963,7 @@ CACHE_ENDPOINT = f"https://{CACHE_HOST}/"
 #: The read credential's variable. It is exported only where it is meant to be used,
 #: so its presence is this suite's opt-in to touching the network at all.
 READ_CREDENTIAL = "BAZEL_CACHE_READ_AUTH"
-#: The cache host sits behind Cloudflare, which rejects the default `Python-urllib/*`
+#: The cache host sits behind a CDN edge, which rejects the default `Python-urllib/*`
 #: signature with **403 and body `error code: 1010`** before the request reaches nginx.
 #: Measured 2026-09-21: `Python-urllib` -> 403 from the edge; `bazel/9.2.0`, `curl/8.5.0`
 #: and a browser string all -> `401 WWW-Authenticate: Basic realm="bazel cache"` from the
@@ -3238,13 +3238,13 @@ def test_the_remote_cache_serves_the_read_credential() -> None:
             f"{unreachable!r}. That is a transport failure, not a verdict on the realm — "
             f"S-008 is the assertion that an unreachable cache is survivable."
         )
-    # nginx's `auth_basic` always offers a challenge; Cloudflare's signature block does
+    # nginx's `auth_basic` always offers a challenge; the CDN edge's signature block does
     # not. Without this the probe reports the edge's verdict under the realm's name.
     if status == 403 and "WWW-Authenticate" not in headers:
         pytest.skip(
             f"{CACHE_ENDPOINT} answered 403 with no `WWW-Authenticate` challenge "
             f"(CF-RAY={headers.get('CF-RAY')!r}, server={headers.get('Server')!r}) — the "
-            f"Cloudflare edge refused this client before nginx saw it, so this is not a "
+            f"CDN edge refused this client before nginx saw it, so this is not a "
             f"verdict on the reader realm. Probe from a host the edge admits."
         )
     assert status not in (401, 403), (
@@ -3413,3 +3413,80 @@ def test_cross_compile_scans_its_release_build() -> None:
     builds = [index for index, run in steps if "cargo xwin build --release" in run]
     assert scans, "verify-deep.yml `cross-compile` has no `release_provenance_check.py --scan` step"
     assert builds and min(scans) > min(builds), f"--scan at step {scans}, build at step {builds}"
+
+
+# ---------------------------------------------------------------------------
+# deploy-docs.yml
+# ---------------------------------------------------------------------------
+
+DEPLOY_DOCS = ROOT / ".github" / "workflows" / "deploy-docs.yml"
+DEPLOY_ACTION = "ocx-sh/website/.github/actions/deploy"
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def _deploy_steps() -> list[dict]:
+    jobs = _load(DEPLOY_DOCS)["jobs"]
+    return [
+        step
+        for job in jobs.values()
+        for step in job.get("steps") or []
+        if str(step.get("uses", "")).startswith(f"{DEPLOY_ACTION}@")
+    ]
+
+
+def test_deploy_docs_deploys_docs_and_schemas_with_a_pinned_action() -> None:
+    """exactly two deploy steps, `/docs/` and `/schemas/`, the action pinned by full SHA."""
+    steps = _deploy_steps()
+    paths = sorted((step.get("with") or {}).get("path") for step in steps)
+    assert paths == ["/docs/", "/schemas/"], f"deploy-docs.yml deploys {paths}"
+    pairs = {(step["with"]["path"], step["with"]["dist"]) for step in steps}
+    assert pairs == {("/docs/", "dist/docs"), ("/schemas/", "dist/schemas")}, f"deploy-docs.yml dist -> path pairs: {pairs}"
+    for step in steps:
+        ref = step["uses"].split("@", 1)[1].split()[0]
+        assert FULL_SHA.fullmatch(ref), f"{DEPLOY_ACTION} is pinned by {ref!r}, not a 40-hex SHA"
+        assert (step.get("with") or {}).get("storage-key") == "${{ secrets.BUNNY_STORAGE_KEY }}"
+
+
+def test_deploy_docs_runs_in_the_ocx_sh_environment_under_one_concurrency_group() -> None:
+    """the deploy job sits in environment `ocx.sh`; whole runs serialise on `ocx-sh-deploy`."""
+    document = _load(DEPLOY_DOCS)
+    jobs = document["jobs"]
+    deploy_steps = _deploy_steps()
+    [deploy] = [job for job in jobs.values() if any(step in deploy_steps for step in job["steps"])]
+    environment = deploy.get("environment")
+    name = environment.get("name") if isinstance(environment, dict) else environment
+    assert name == "ocx.sh", f"deploy environment is {name!r}"
+    concurrency = document.get("concurrency") or {}
+    assert concurrency.get("group") == "ocx-sh-deploy", f"workflow concurrency is {concurrency}"
+    assert concurrency.get("cancel-in-progress") is False, f"workflow concurrency is {concurrency}"
+    assert "concurrency" not in deploy, "concurrency belongs at workflow level, not on the deploy job"
+
+
+def test_deploy_docs_checks_the_built_site_before_uploading_it() -> None:
+    """the build job runs `task website:check` and the doc-script drift gate before the artifact upload."""
+    steps = _load(DEPLOY_DOCS)["jobs"]["build"]["steps"]
+    runs = [str(step.get("run", "")).strip() for step in steps]
+    uploads = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1, f"build job has {len(uploads)} upload steps"
+    for command in ("task website:build", "task website:check", "task test:doc-scripts:drift"):
+        assert command in runs, f"build job never runs `{command}`"
+    assert runs.index("task website:build") < runs.index("task website:check") < uploads[0]
+    assert runs.index("task test:doc-scripts:drift") < uploads[0]
+
+
+def test_deploy_docs_grants_nothing_at_the_top_and_triggers_on_main_and_dispatch() -> None:
+    """top-level `permissions: {}`, push to `main` plus `workflow_dispatch`, nothing else."""
+    document = _load(DEPLOY_DOCS)
+    assert document.get("permissions") == {}, f"top-level permissions is {document.get('permissions')!r}"
+    triggers = _on(DEPLOY_DOCS)
+    assert isinstance(triggers, dict), f"deploy-docs.yml `on:` is {triggers!r}"
+    assert set(triggers) == {"push", "workflow_dispatch"}, f"deploy-docs.yml triggers on {sorted(triggers)}"
+    assert triggers["push"]["branches"] == ["main"], f"push trigger is {triggers['push']}"
+
+
+def test_the_retired_pages_deploy_workflows_are_gone() -> None:
+    """the Pages deploy and its release dispatcher are deleted, with the release job that called it."""
+    for name in ("deploy-website.yml", "deploy-website-release.yml"):
+        assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is back"
+    jobs = _load(ROOT / ".github" / "workflows" / "release.yml")["jobs"]
+    assert "custom-deploy-website-release" not in jobs

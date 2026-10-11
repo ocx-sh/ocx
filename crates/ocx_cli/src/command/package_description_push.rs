@@ -14,12 +14,15 @@ use crate::options;
 
 /// Push or update description metadata for a package repository.
 ///
-/// Pushes a README, optional logo, and catalog annotations to the __ocx.desc tag.
-/// When updating an existing description, only the provided fields are changed -
-/// omitted fields are preserved from the current description.
+/// Pushes a README, optional logo, and catalog annotations to the __ocx.desc tag. When updating an
+/// existing description, only the provided fields are changed. Omitted fields are preserved from
+/// the current description, so a `--title`-only push does not blank the README.
+///
+/// At least one metadata option, or `--from`, is required. `--from` cannot be combined with the
+/// field options. The identifier names the repository; a tag on it is ignored.
 #[derive(Parser)]
 pub struct PackageDescriptionPush {
-    /// Copy the whole description from another package repository.
+    /// Copy the whole description from another package repository; a source with no description or no repository exits 79 and leaves the target untouched.
     ///
     /// Promotes README, logo and catalog annotations verbatim, so a staging
     /// repository's catalog page can be published to production without
@@ -28,11 +31,11 @@ pub struct PackageDescriptionPush {
     #[clap(long = "from", value_name = "SOURCE", conflicts_with_all = ["readme", "logo", "title", "description", "keywords"])]
     from: Option<options::Identifier>,
 
-    /// Path to the README markdown file.
+    /// Path to the README markdown file; required on the first push to a repository with no description.
     #[clap(long)]
     readme: Option<std::path::PathBuf>,
 
-    /// Path to an optional logo image (PNG or SVG).
+    /// Path to an optional logo image (PNG or SVG); bytes that do not match the extension exit 65 and leave the published description untouched.
     ///
     /// The file's bytes must be the format its extension names. A file that is not
     /// a real PNG or SVG fails the command without touching the published

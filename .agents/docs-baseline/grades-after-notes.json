@@ -1,0 +1,1768 @@
+{
+ "method": "scripted docs-review (doc_declaration, prose, page_type, landing_check); must = DOC-PLAIN-02/-08/-13 + DOC-TYPE/DISC/PAGE, should = remaining findings; same counting as grades.json",
+ "baseline_total": {
+  "must": 2514,
+  "should": 4588
+ },
+ "after_total": {
+  "must": 183,
+  "should": 533
+ },
+ "pages_graded": 110,
+ "worse_than_baseline": [],
+ "new_pages_without_baseline": [
+  "explanation/execution-records.md",
+  "explanation/integrations.md",
+  "explanation/launcher-forwarding.md",
+  "explanation/managed-configuration.md",
+  "explanation/project-groups.md",
+  "explanation/records-and-sbom.md",
+  "explanation/records-launcher-frames.md",
+  "explanation/shell-consent.mdx",
+  "explanation/toolchain-activation.md",
+  "explanation/toolchain-render.md",
+  "guides/find-packages.mdx",
+  "index.mdx",
+  "integration/bazel.md",
+  "integration/devcontainers-and-editors.md",
+  "integration/index.md",
+  "integration/proxy-and-ca.md",
+  "integration/publisher-ci.md",
+  "integration/python.md",
+  "integration/registry-auth-recipes.md",
+  "integration/scripts-and-json.md",
+  "integration/unattended-ci.md",
+  "publishing/sign-a-release.md"
+ ],
+ "comparison": {
+  "changelog.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 1,
+    "should": 0
+   },
+   "source": [
+    "changelog.md"
+   ],
+   "verdict": "ok"
+  },
+  "contributing/bazel.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 43,
+    "should": 66
+   },
+   "source": [
+    "contributing/bazel.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/configuration.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 35,
+    "should": 81
+   },
+   "source": [
+    "in-depth/configuration.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/cosign-parity.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 37,
+    "should": 62
+   },
+   "source": [
+    "in-depth/cosign-parity.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/deferred-packages.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 20,
+    "should": 30
+   },
+   "source": [
+    "in-depth/lazy-loading.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/dependencies.mdx": {
+   "after": {
+    "must": 0,
+    "should": 1
+   },
+   "baseline": {
+    "must": 18,
+    "should": 54
+   },
+   "source": [
+    "in-depth/dependencies.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/entry-points.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 31,
+    "should": 54
+   },
+   "source": [
+    "in-depth/entry-points.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/environments.mdx": {
+   "after": {
+    "must": 0,
+    "should": 52
+   },
+   "baseline": {
+    "must": 20,
+    "should": 61
+   },
+   "source": [
+    "in-depth/environments.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/execution-records.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/indices.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 110,
+    "should": 207
+   },
+   "source": [
+    "in-depth/indices.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/integrations.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/launcher-forwarding.md": {
+   "after": {
+    "must": 0,
+    "should": 5
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/local-index.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 110,
+    "should": 207
+   },
+   "source": [
+    "in-depth/indices.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/managed-configuration.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/patches.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 32,
+    "should": 46
+   },
+   "source": [
+    "user-guide/patches.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/project-groups.md": {
+   "after": {
+    "must": 0,
+    "should": 6
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/project-toolchain.md": {
+   "after": {
+    "must": 0,
+    "should": 56
+   },
+   "baseline": {
+    "must": 37,
+    "should": 91
+   },
+   "source": [
+    "in-depth/project.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/public-index.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 110,
+    "should": 207
+   },
+   "source": [
+    "in-depth/indices.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/records-and-sbom.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/records-launcher-frames.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/shell-consent.mdx": {
+   "after": {
+    "must": 0,
+    "should": 7
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/shell-integration.mdx": {
+   "after": {
+    "must": 0,
+    "should": 50
+   },
+   "baseline": {
+    "must": 100,
+    "should": 140
+   },
+   "source": [
+    "in-depth/shell-integration.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/signing.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 56,
+    "should": 122
+   },
+   "source": [
+    "in-depth/signing.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/storage.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 41,
+    "should": 99
+   },
+   "source": [
+    "in-depth/storage.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/toolchain-activation.md": {
+   "after": {
+    "must": 0,
+    "should": 5
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/toolchain-render.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "explanation/toolchain-tree.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 41,
+    "should": 99
+   },
+   "source": [
+    "in-depth/storage.md"
+   ],
+   "verdict": "ok"
+  },
+  "explanation/versioning.mdx": {
+   "after": {
+    "must": 0,
+    "should": 1
+   },
+   "baseline": {
+    "must": 10,
+    "should": 49
+   },
+   "source": [
+    "in-depth/versioning.md"
+   ],
+   "verdict": "ok"
+  },
+  "getting-started/first-package.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 9,
+    "should": 36
+   },
+   "source": [
+    "getting-started.md"
+   ],
+   "verdict": "ok"
+  },
+  "getting-started/first-project.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 9,
+    "should": 36
+   },
+   "source": [
+    "getting-started.md"
+   ],
+   "verdict": "ok"
+  },
+  "getting-started/install-ocx.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 17,
+    "should": 41
+   },
+   "source": [
+    "installation.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/authenticate.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/choose-versions.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/clean-up.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/configure-ocx.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/corporate-mirror.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/find-packages.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "guides/global-toolchain.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/lock-and-reproduce.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/manage-config-centrally.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/patch-packages.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 32,
+    "should": 46
+   },
+   "source": [
+    "user-guide/patches.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/pin-signer-identity.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/project-toolchain.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/run-project-tools.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/run-with-dependencies.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/self-hosted-sigstore.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 19,
+    "should": 42
+   },
+   "source": [
+    "in-depth/self-hosted-sigstore.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/serve-an-index.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 110,
+    "should": 207
+   },
+   "source": [
+    "in-depth/indices.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/stable-paths.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/update-ocx.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/update-tools.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/verify-installs.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "guides/work-offline.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 148,
+    "should": 400
+   },
+   "source": [
+    "user-guide.md"
+   ],
+   "verdict": "ok"
+  },
+  "index.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/bazel.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/devcontainers-and-editors.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/docker.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 11,
+    "should": 23
+   },
+   "source": [
+    "docker.md"
+   ],
+   "verdict": "ok"
+  },
+  "integration/github-actions.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 7,
+    "should": 19
+   },
+   "source": [
+    "in-depth/ci.md"
+   ],
+   "verdict": "ok"
+  },
+  "integration/gitlab-ci.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 7,
+    "should": 19
+   },
+   "source": [
+    "in-depth/ci.md"
+   ],
+   "verdict": "ok"
+  },
+  "integration/index.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/proxy-and-ca.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/publisher-ci.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/python.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/registry-auth-recipes.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/scripts-and-json.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "integration/unattended-ci.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "publishing/announce-from-ci.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 44,
+    "should": 54
+   },
+   "source": [
+    "authoring/announcing.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/announce.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 44,
+    "should": 54
+   },
+   "source": [
+    "authoring/announcing.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/attest-and-sbom.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 40,
+    "should": 65
+   },
+   "source": [
+    "user-guide/attestations.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/build-and-push.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 40,
+    "should": 67
+   },
+   "source": [
+    "authoring/building-pushing.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/bundle-anatomy.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 13,
+    "should": 22
+   },
+   "source": [
+    "authoring/bundle-anatomy.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/declare-dependencies.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 11,
+    "should": 36
+   },
+   "source": [
+    "authoring/dependencies.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/entry-points.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 20,
+    "should": 41
+   },
+   "source": [
+    "authoring/entry-points.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/env-surface.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 18,
+    "should": 41
+   },
+   "source": [
+    "authoring/env-surface.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/index.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 11,
+    "should": 24
+   },
+   "source": [
+    "authoring/index.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/libc-variants.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 40,
+    "should": 59
+   },
+   "source": [
+    "authoring/multi-platform.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/maintain-patches.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 32,
+    "should": 46
+   },
+   "source": [
+    "user-guide/patches.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/multi-platform.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 40,
+    "should": 59
+   },
+   "source": [
+    "authoring/multi-platform.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/promote-packages.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 14,
+    "should": 21
+   },
+   "source": [
+    "user-guide/promoting-packages.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/repackage-releases.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 11,
+    "should": 13
+   },
+   "source": [
+    "authoring/migration.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/script-tests.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 16,
+    "should": 45
+   },
+   "source": [
+    "authoring/testing.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/sign-a-release.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": null,
+   "source": [],
+   "verdict": "new page, no baseline"
+  },
+  "publishing/snapshot-tracks.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 0,
+    "should": 6
+   },
+   "source": [
+    "user-guide/snapshot-tracks.md"
+   ],
+   "verdict": "ok"
+  },
+  "publishing/test-locally.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 16,
+    "should": 45
+   },
+   "source": [
+    "authoring/testing.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/command-line/commands.md": {
+   "after": {
+    "must": 27,
+    "should": 34
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/config.md": {
+   "after": {
+    "must": 6,
+    "should": 4
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/direnv.md": {
+   "after": {
+    "must": 2,
+    "should": 4
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/index-commands.md": {
+   "after": {
+    "must": 13,
+    "should": 10
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/index.md": {
+   "after": {
+    "must": 3,
+    "should": 9
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/package-2.md": {
+   "after": {
+    "must": 34,
+    "should": 38
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/package.md": {
+   "after": {
+    "must": 46,
+    "should": 32
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/patch.md": {
+   "after": {
+    "must": 5,
+    "should": 6
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/self.md": {
+   "after": {
+    "must": 15,
+    "should": 15
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/command-line/shell.md": {
+   "after": {
+    "must": 7,
+    "should": 6
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/configuration.md": {
+   "after": {
+    "must": 10,
+    "should": 36
+   },
+   "baseline": {
+    "must": 210,
+    "should": 410
+   },
+   "source": [
+    "reference/configuration.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/env-composition.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 70,
+    "should": 111
+   },
+   "source": [
+    "reference/env-composition.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/environment.md": {
+   "after": {
+    "must": 13,
+    "should": 107
+   },
+   "baseline": {
+    "must": 180,
+    "should": 350
+   },
+   "source": [
+    "reference/environment.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/execution-records.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 90,
+    "should": 106
+   },
+   "source": [
+    "reference/execution-records.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/exit-codes.md": {
+   "after": {
+    "must": 0,
+    "should": 3
+   },
+   "baseline": {
+    "must": 745,
+    "should": 1078
+   },
+   "source": [
+    "reference/command-line.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/machine-interface.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 0,
+    "should": 1
+   },
+   "source": [
+    "reference/machine-interface.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/metadata/dependencies.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 85,
+    "should": 182
+   },
+   "source": [
+    "reference/metadata.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/metadata/entry-points.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 85,
+    "should": 182
+   },
+   "source": [
+    "reference/metadata.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/metadata/env.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 85,
+    "should": 182
+   },
+   "source": [
+    "reference/metadata.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/metadata/index.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 85,
+    "should": 182
+   },
+   "source": [
+    "reference/metadata.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/metadata/integrations.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 85,
+    "should": 182
+   },
+   "source": [
+    "reference/metadata.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/platforms.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 17,
+    "should": 31
+   },
+   "source": [
+    "reference/platforms.md"
+   ],
+   "verdict": "ok"
+  },
+  "reference/project-file.md": {
+   "after": {
+    "must": 2,
+    "should": 16
+   },
+   "baseline": {
+    "must": 210,
+    "should": 410
+   },
+   "source": [
+    "reference/configuration.md"
+   ],
+   "verdict": "generated: must>0, B1"
+  },
+  "reference/script-host-api.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 7,
+    "should": 25
+   },
+   "source": [
+    "reference/script-host-api.md"
+   ],
+   "verdict": "ok"
+  },
+  "roadmap.md": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 1,
+    "should": 0
+   },
+   "source": [
+    "roadmap.md"
+   ],
+   "verdict": "ok"
+  },
+  "troubleshooting/platforms.mdx": {
+   "after": {
+    "must": 0,
+    "should": 0
+   },
+   "baseline": {
+    "must": 25,
+    "should": 63
+   },
+   "source": [
+    "faq.md"
+   ],
+   "verdict": "ok"
+  },
+  "troubleshooting/shell.mdx": {
+   "after": {
+    "must": 0,
+    "should": 30
+   },
+   "baseline": {
+    "must": 100,
+    "should": 140
+   },
+   "source": [
+    "in-depth/shell-integration.md"
+   ],
+   "verdict": "ok"
+  }
+ },
+ "generated_must_findings_for_B1": {
+  "reference/command-line/commands.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 30,
+    "DOC-PLAIN-11": 4,
+    "DOC-PLAIN-02": 27
+   },
+   "must_at": [
+    "reference/command-line/commands.md:10 DOC-PLAIN-02",
+    "reference/command-line/commands.md:12 DOC-PLAIN-02",
+    "reference/command-line/commands.md:61 DOC-PLAIN-02",
+    "reference/command-line/commands.md:86 DOC-PLAIN-02",
+    "reference/command-line/commands.md:113 DOC-PLAIN-02",
+    "reference/command-line/commands.md:117 DOC-PLAIN-02",
+    "reference/command-line/commands.md:119 DOC-PLAIN-02",
+    "reference/command-line/commands.md:125 DOC-PLAIN-02",
+    "reference/command-line/commands.md:150 DOC-PLAIN-02",
+    "reference/command-line/commands.md:152 DOC-PLAIN-02",
+    "reference/command-line/commands.md:169 DOC-PLAIN-02",
+    "reference/command-line/commands.md:173 DOC-PLAIN-02",
+    "reference/command-line/commands.md:195 DOC-PLAIN-02",
+    "reference/command-line/commands.md:199 DOC-PLAIN-02",
+    "reference/command-line/commands.md:203 DOC-PLAIN-02",
+    "reference/command-line/commands.md:224 DOC-PLAIN-02",
+    "reference/command-line/commands.md:242 DOC-PLAIN-02",
+    "reference/command-line/commands.md:252 DOC-PLAIN-02",
+    "reference/command-line/commands.md:277 DOC-PLAIN-02",
+    "reference/command-line/commands.md:281 DOC-PLAIN-02",
+    "reference/command-line/commands.md:283 DOC-PLAIN-02",
+    "reference/command-line/commands.md:297 DOC-PLAIN-02",
+    "reference/command-line/commands.md:297 DOC-PLAIN-02",
+    "reference/command-line/commands.md:315 DOC-PLAIN-02",
+    "reference/command-line/commands.md:323 DOC-PLAIN-02",
+    "reference/command-line/commands.md:325 DOC-PLAIN-02",
+    "reference/command-line/commands.md:356 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/config.md": {
+   "by_id": {
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-01": 3,
+    "DOC-PLAIN-02": 6
+   },
+   "must_at": [
+    "reference/command-line/config.md:18 DOC-PLAIN-02",
+    "reference/command-line/config.md:40 DOC-PLAIN-02",
+    "reference/command-line/config.md:62 DOC-PLAIN-02",
+    "reference/command-line/config.md:62 DOC-PLAIN-02",
+    "reference/command-line/config.md:68 DOC-PLAIN-02",
+    "reference/command-line/config.md:70 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/direnv.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 4,
+    "DOC-PLAIN-02": 2
+   },
+   "must_at": [
+    "reference/command-line/direnv.md:20 DOC-PLAIN-02",
+    "reference/command-line/direnv.md:24 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/index-commands.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 10,
+    "DOC-PLAIN-02": 13
+   },
+   "must_at": [
+    "reference/command-line/index-commands.md:55 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:65 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:77 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:79 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:79 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:81 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:81 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:85 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:87 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:107 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:109 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:113 DOC-PLAIN-02",
+    "reference/command-line/index-commands.md:119 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/index.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 8,
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-02": 3
+   },
+   "must_at": [
+    "reference/command-line/index.md:36 DOC-PLAIN-02",
+    "reference/command-line/index.md:59 DOC-PLAIN-02",
+    "reference/command-line/index.md:129 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/package-2.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 35,
+    "DOC-PLAIN-11": 3,
+    "DOC-PLAIN-02": 34
+   },
+   "must_at": [
+    "reference/command-line/package-2.md:14 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:18 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:18 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:42 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:48 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:50 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:73 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:97 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:105 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:107 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:107 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:111 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:153 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:157 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:159 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:205 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:207 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:211 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:257 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:259 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:263 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:265 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:267 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:295 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:297 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:301 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:345 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:349 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:351 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:353 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:353 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:357 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:361 DOC-PLAIN-02",
+    "reference/command-line/package-2.md:365 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/package.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 31,
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-02": 46
+   },
+   "must_at": [
+    "reference/command-line/package.md:18 DOC-PLAIN-02",
+    "reference/command-line/package.md:22 DOC-PLAIN-02",
+    "reference/command-line/package.md:30 DOC-PLAIN-02",
+    "reference/command-line/package.md:32 DOC-PLAIN-02",
+    "reference/command-line/package.md:34 DOC-PLAIN-02",
+    "reference/command-line/package.md:38 DOC-PLAIN-02",
+    "reference/command-line/package.md:40 DOC-PLAIN-02",
+    "reference/command-line/package.md:72 DOC-PLAIN-02",
+    "reference/command-line/package.md:74 DOC-PLAIN-02",
+    "reference/command-line/package.md:76 DOC-PLAIN-02",
+    "reference/command-line/package.md:78 DOC-PLAIN-02",
+    "reference/command-line/package.md:80 DOC-PLAIN-02",
+    "reference/command-line/package.md:118 DOC-PLAIN-02",
+    "reference/command-line/package.md:126 DOC-PLAIN-02",
+    "reference/command-line/package.md:128 DOC-PLAIN-02",
+    "reference/command-line/package.md:130 DOC-PLAIN-02",
+    "reference/command-line/package.md:142 DOC-PLAIN-02",
+    "reference/command-line/package.md:142 DOC-PLAIN-02",
+    "reference/command-line/package.md:146 DOC-PLAIN-02",
+    "reference/command-line/package.md:150 DOC-PLAIN-02",
+    "reference/command-line/package.md:150 DOC-PLAIN-02",
+    "reference/command-line/package.md:156 DOC-PLAIN-02",
+    "reference/command-line/package.md:158 DOC-PLAIN-02",
+    "reference/command-line/package.md:175 DOC-PLAIN-02",
+    "reference/command-line/package.md:185 DOC-PLAIN-02",
+    "reference/command-line/package.md:189 DOC-PLAIN-02",
+    "reference/command-line/package.md:193 DOC-PLAIN-02",
+    "reference/command-line/package.md:195 DOC-PLAIN-02",
+    "reference/command-line/package.md:197 DOC-PLAIN-02",
+    "reference/command-line/package.md:199 DOC-PLAIN-02",
+    "reference/command-line/package.md:199 DOC-PLAIN-02",
+    "reference/command-line/package.md:224 DOC-PLAIN-02",
+    "reference/command-line/package.md:232 DOC-PLAIN-02",
+    "reference/command-line/package.md:234 DOC-PLAIN-02",
+    "reference/command-line/package.md:236 DOC-PLAIN-02",
+    "reference/command-line/package.md:262 DOC-PLAIN-02",
+    "reference/command-line/package.md:264 DOC-PLAIN-02",
+    "reference/command-line/package.md:270 DOC-PLAIN-02",
+    "reference/command-line/package.md:278 DOC-PLAIN-02",
+    "reference/command-line/package.md:278 DOC-PLAIN-02",
+    "reference/command-line/package.md:282 DOC-PLAIN-02",
+    "reference/command-line/package.md:282 DOC-PLAIN-02",
+    "reference/command-line/package.md:315 DOC-PLAIN-02",
+    "reference/command-line/package.md:343 DOC-PLAIN-02",
+    "reference/command-line/package.md:345 DOC-PLAIN-02",
+    "reference/command-line/package.md:362 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/patch.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 5,
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-02": 5
+   },
+   "must_at": [
+    "reference/command-line/patch.md:34 DOC-PLAIN-02",
+    "reference/command-line/patch.md:64 DOC-PLAIN-02",
+    "reference/command-line/patch.md:66 DOC-PLAIN-02",
+    "reference/command-line/patch.md:80 DOC-PLAIN-02",
+    "reference/command-line/patch.md:106 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/self.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 10,
+    "DOC-PLAIN-11": 5,
+    "DOC-PLAIN-02": 15
+   },
+   "must_at": [
+    "reference/command-line/self.md:20 DOC-PLAIN-02",
+    "reference/command-line/self.md:20 DOC-PLAIN-02",
+    "reference/command-line/self.md:22 DOC-PLAIN-02",
+    "reference/command-line/self.md:24 DOC-PLAIN-02",
+    "reference/command-line/self.md:26 DOC-PLAIN-02",
+    "reference/command-line/self.md:44 DOC-PLAIN-02",
+    "reference/command-line/self.md:46 DOC-PLAIN-02",
+    "reference/command-line/self.md:56 DOC-PLAIN-02",
+    "reference/command-line/self.md:58 DOC-PLAIN-02",
+    "reference/command-line/self.md:58 DOC-PLAIN-02",
+    "reference/command-line/self.md:68 DOC-PLAIN-02",
+    "reference/command-line/self.md:98 DOC-PLAIN-02",
+    "reference/command-line/self.md:100 DOC-PLAIN-02",
+    "reference/command-line/self.md:104 DOC-PLAIN-02",
+    "reference/command-line/self.md:108 DOC-PLAIN-02"
+   ]
+  },
+  "reference/command-line/shell.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 6,
+    "DOC-PLAIN-02": 7
+   },
+   "must_at": [
+    "reference/command-line/shell.md:20 DOC-PLAIN-02",
+    "reference/command-line/shell.md:55 DOC-PLAIN-02",
+    "reference/command-line/shell.md:75 DOC-PLAIN-02",
+    "reference/command-line/shell.md:75 DOC-PLAIN-02",
+    "reference/command-line/shell.md:83 DOC-PLAIN-02",
+    "reference/command-line/shell.md:85 DOC-PLAIN-02",
+    "reference/command-line/shell.md:85 DOC-PLAIN-02"
+   ]
+  },
+  "reference/configuration.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 34,
+    "DOC-PLAIN-12": 1,
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-02": 10
+   },
+   "must_at": [
+    "reference/configuration.md:16 DOC-PLAIN-02",
+    "reference/configuration.md:30 DOC-PLAIN-02",
+    "reference/configuration.md:40 DOC-PLAIN-02",
+    "reference/configuration.md:120 DOC-PLAIN-02",
+    "reference/configuration.md:210 DOC-PLAIN-02",
+    "reference/configuration.md:225 DOC-PLAIN-02",
+    "reference/configuration.md:234 DOC-PLAIN-02",
+    "reference/configuration.md:354 DOC-PLAIN-02",
+    "reference/configuration.md:395 DOC-PLAIN-02",
+    "reference/configuration.md:488 DOC-PLAIN-02"
+   ]
+  },
+  "reference/environment.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 106,
+    "DOC-PLAIN-11": 1,
+    "DOC-PLAIN-02": 13
+   },
+   "must_at": [
+    "reference/environment.md:12 DOC-PLAIN-02",
+    "reference/environment.md:37 DOC-PLAIN-02",
+    "reference/environment.md:132 DOC-PLAIN-02",
+    "reference/environment.md:249 DOC-PLAIN-02",
+    "reference/environment.md:294 DOC-PLAIN-02",
+    "reference/environment.md:333 DOC-PLAIN-02",
+    "reference/environment.md:498 DOC-PLAIN-02",
+    "reference/environment.md:512 DOC-PLAIN-02",
+    "reference/environment.md:529 DOC-PLAIN-02",
+    "reference/environment.md:693 DOC-PLAIN-02",
+    "reference/environment.md:724 DOC-PLAIN-02",
+    "reference/environment.md:751 DOC-PLAIN-02",
+    "reference/environment.md:764 DOC-PLAIN-02"
+   ]
+  },
+  "reference/project-file.md": {
+   "by_id": {
+    "DOC-PLAIN-01": 16,
+    "DOC-PLAIN-02": 2
+   },
+   "must_at": [
+    "reference/project-file.md:184 DOC-PLAIN-02",
+    "reference/project-file.md:277 DOC-PLAIN-02"
+   ]
+  }
+ }
+}

@@ -1,0 +1,4 @@
+/docs/getting-started/
+/docs/installation/
+/docs/installation/#cli
+/docs/reference/environment/#ocx-home

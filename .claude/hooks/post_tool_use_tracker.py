@@ -75,23 +75,18 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "the website Taskfile",
     ),
     (
-        "website/.vitepress/theme/components/*",
+        "website/src/components/*",
         (
-            "- .claude/rules/subsystem-website.md (Custom Vue Components section)\n"
-            "- .claude/rules/docs-style.md (Vue Components Available section)\n"
-            "- .claude/skills/docs/SKILL.md (Vue Components section)"
+            "- .claude/rules/subsystem-website.md (Custom Components section)\n"
+            "- .claude/rules/docs-style.md (Components Available section)\n"
+            "- .claude/skills/docs/SKILL.md (Components section)"
         ),
-        "a Vue component — update props/slots in AI config if the component API changed",
+        "a site component — update props/slots in AI config if the component API changed",
     ),
     (
-        "website/.vitepress/config.mts",
-        "- .claude/rules/subsystem-website.md (VitePress Configuration section)",
-        "the VitePress config",
-    ),
-    (
-        "website/.vitepress/theme/index.mts",
-        "- .claude/rules/subsystem-website.md (check component registration list)",
-        "the theme registration file — if you added/removed components, update AI config",
+        "website/astro.config.mjs",
+        "- .claude/rules/subsystem-website.md (Astro Configuration section)",
+        "the Astro config",
     ),
     (
         ".github/workflows/*",

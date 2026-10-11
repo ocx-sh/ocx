@@ -1,0 +1,23 @@
+[[row]]
+item = "migrating"
+page = "docs/authoring/env-surface.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "migrating-diff"
+page = "docs/authoring/env-surface.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "How do I retrofit an older metadata.json for entry visibility?"
+page = "docs/authoring/index.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "Comparison: how other tools handle this"
+page = "docs/authoring/multi-platform.md"
+action = "deleted"
+reason = "obsolete"

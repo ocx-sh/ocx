@@ -17,11 +17,11 @@ pub struct Install {
     #[clap(short = 's', long = "select")]
     select: bool,
 
-    /// Also link the installed package at PATH, which keeps it from `ocx clean` while the link exists.
+    /// Also link the installed package at PATH, which keeps it from `ocx clean`. PATH must be absent or an earlier `--link`, else exit 65; takes one package
     ///
-    /// Takes exactly one package. PATH must be absent or a link an earlier `--link` wrote; anything else is
-    /// refused (exit 65). Delete the link to release the package. Read it back with `--link` on
-    /// `package which`, `package env` or `package exec`.
+    /// PATH must be absent or a link an earlier `--link` wrote. A file, a directory, a foreign link
+    /// or a path inside `OCX_HOME` exits 65 and is left untouched. Delete the link to release the
+    /// package. Read it back with `--link` on `package which`, `package env` or `package exec`.
     #[clap(long = "link", value_name = "PATH")]
     link: Option<PathBuf>,
 

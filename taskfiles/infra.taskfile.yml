@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 #
-# Cloudflare infra plumbing for the ocx.sh migration (server → Pages/Workers).
+# Cloudflare infra plumbing for the ocx.sh migration (server → Bunny).
 # Credentials: ~/.config/ocx-infra/cf.env (gitignored) — CLOUDFLARE_API_TOKEN.
 # All tasks are idempotent check-then-act against the Cloudflare v4 API.
 

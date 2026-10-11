@@ -1,0 +1,115 @@
+---
+title: "Install your first package"
+description: "Run a tool once, install two versions side by side, switch between them and remove them again."
+---
+{/* doc_type: tutorial */}
+{/* doc_tier: first-steps */}
+
+By the end of this page you have run CMake without installing it, installed two versions side by side, switched between them and removed both. It assumes ocx is [installed][installation]. Package names such as `kitware/cmake` resolve against the default registry, `ocx.sh`.
+
+## Run a package once \{#quick-start\}
+
+Run CMake straight from the registry. The first call downloads the package. Later calls with the same version reuse the download.
+
+\<\<\< @/_scripts/first-package/exec.sh\{sh\}
+
+```text
+cmake version 3.31.12
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+```
+
+The command ran inside an isolated environment that holds only the variables the package declares. Nothing else persists on your machine: no install, no symlink. The patch number you see depends on the current 3.31 release.
+
+## Install it \{#installing\}
+
+Make the download permanent and give it a stable path. The paths on this page assume the default home directory, `~/.ocx`:
+
+\<\<\< @/_scripts/first-package/install.sh\{sh\}
+
+```text
+Package             Version                    Path
+kitware/cmake:3.31  ocx.sh/kitware/cmake:3.31  ~/.ocx/symlinks/ocx.sh/kitware/cmake/candidates/3.31
+```
+
+The `Path` column is a candidate symlink. It always points at the 3.31 build you installed, so an editor or script can use it as a fixed path.
+
+## Switch versions \{#switching-versions\}
+
+Install a second version and mark it as the one you use. The `--select` flag creates a `current` symlink next to the candidates:
+
+\<\<\< @/_scripts/first-package/install-select.sh\{sh\}
+
+```text
+Package            Version                   Path
+kitware/cmake:4.0  ocx.sh/kitware/cmake:4.0  ~/.ocx/symlinks/ocx.sh/kitware/cmake/current
+```
+
+Run the binary through `current`. The path has no version in it:
+
+```sh
+~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake --version
+```
+
+```text
+cmake version 4.0.7
+```
+
+Point `current` back at 3.31, then run the same path again:
+
+\<\<\< @/_scripts/first-package/select-back.sh\{sh\}
+
+```sh
+~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake --version
+```
+
+```text
+cmake version 3.31.12
+```
+
+The path stayed the same and the version behind it changed. Installing with `--select` does not put a bare `cmake` on your `PATH`. The [next steps](#next-steps) show how to get that.
+
+## See the environment \{#environment\}
+
+A package can declare environment variables, such as the `PATH` entry for its `bin` directory. List what the installed package declares:
+
+\<\<\< @/_scripts/first-package/env.sh\{sh\}
+
+The output is a table with the columns `Key`, `Type` and `Value`. Each value is resolved against the install location. `ocx package exec` injects exactly these variables into the child process.
+
+## Remove the packages \{#uninstalling\}
+
+Remove the selected version, clear the `current` pointer and delete the package data in one command:
+
+\<\<\< @/_scripts/first-package/uninstall.sh\{sh\}
+
+```text
+Package             Status
+kitware/cmake:3.31  removed
+kitware/cmake:3.31  purged
+```
+
+A plain uninstall removes the candidate symlink and keeps the package data. Uninstall 4.0 that way, then let `ocx clean` delete every package nothing references anymore:
+
+\<\<\< @/_scripts/first-package/clean.sh\{sh\}
+
+The last command prints one line for each object it deletes. Both versions are gone.
+
+## Next steps \{#next-steps\}
+
+- Pin the tools of one repository in [your first project][first-project].
+- Put a tool on your `PATH` in every shell with the [global toolchain][global-toolchain], or let [shell integration][shell-integration] do it per project.
+- Learn how [version tags][versions] work, so you know why `3.31` and `4.0` pick the builds they do.
+- Look up flags in the [`ocx package` reference][cmd-package] and the [environment reference][env-ref].
+
+A tag that does not exist in the registry fails with exit code 79. On a fresh install the [local index][local-index] is empty, so index commands need `--remote` until a package is installed. List the tags a repository publishes with `ocx --remote index list kitware/cmake`. Global flags such as `--remote` go before the subcommand.
+
+
+[installation]: ./install-ocx.mdx
+[first-project]: ./first-project.mdx
+[global-toolchain]: ../guides/global-toolchain.mdx
+[shell-integration]: ../explanation/shell-integration.mdx
+[versions]: ../explanation/versioning.mdx
+[local-index]: ../explanation/local-index.md#local
+[cmd-package]: ../reference/command-line/package-publishing.md#package
+[env-ref]: ../reference/environment.md

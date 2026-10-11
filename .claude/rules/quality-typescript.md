@@ -32,7 +32,7 @@ standard for new projects:
     "exactOptionalPropertyTypes": true,        // ? means absent, not undefined
     "noPropertyAccessFromIndexSignature": true,
     "verbatimModuleSyntax": true,              // type imports stay type-only in emit
-    "moduleResolution": "Bundler",             // for Vite/Bun/esbuild projects
+    "moduleResolution": "Bundler",             // for Vite/Astro/esbuild projects
     "module": "ESNext",
     "isolatedModules": true                    // safe for single-file transforms
   }
@@ -105,8 +105,8 @@ function handle(msg: Message): Result {
 ## Module System (ESM-only in 2026)
 
 - `"type": "module"` in `package.json`
-- **`verbatimModuleSyntax: true`** — forces `import type` for type-only imports; what you write = what emitted. Load-bearing for single-file transpilers (esbuild, SWC, Bun) without type-aware elision.
-- **`moduleResolution: "Bundler"`** for Vite, Bun, esbuild — do NOT use `"node16"` unless targeting Node without bundler.
+- **`verbatimModuleSyntax: true`** — forces `import type` for type-only imports; what you write = what emitted. Load-bearing for single-file transpilers (esbuild, SWC) without type-aware elision.
+- **`moduleResolution: "Bundler"`** for Vite, Astro, esbuild — do NOT use `"node16"` unless targeting Node without bundler.
 - `.mts` / `.cts` extensions: only when mixing ESM and CJS in same package. Unnecessary in bundler-only contexts.
 
 ---
@@ -132,8 +132,7 @@ function handle(msg: Message): Result {
 | **Biome** | Recommended default | New projects, single binary, 10-25x faster, ~85% ESLint rule coverage |
 | **ESLint + `@typescript-eslint`** | Still required | Type-aware rules, framework-specific plugins (react, vue, svelte), custom rules |
 | **Oxlint** | Emerging | Experimental speed option; keep alongside ESLint for rule coverage |
-| **tsc** | Type checking only | Never build tool in Vite/Bun projects — use `tsc --noEmit` in CI |
-| **Bun** | Type-stripping runtime | Pair with `tsc --noEmit` in CI for actual type checking |
+| **tsc** | Type checking only | Never build tool in Vite/Astro projects — use `tsc --noEmit` in CI |
 | **SWC** | Transpilation | Mature alternative to esbuild; no type checking |
 
 2026 rec: **Biome** for formatting + basic linting, **`tsc --noEmit`** in CI for full type checking. Keep ESLint only when need its plugin ecosystem (e.g., `eslint-plugin-react`).

@@ -1,0 +1,481 @@
+---
+title: "Install ocx"
+description: "Install ocx on Linux, macOS or Windows with one command or from a downloaded binary, then check that it works."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: first-steps */}
+
+import Tabs from '@ocx-sh/theme/components/Tabs.astro'
+
+import TabItem from '@ocx-sh/theme/components/TabItem.astro'
+
+import PlatformIcons from '@ocx-sh/theme/components/PlatformIcons.astro'
+
+
+This page installs ocx and puts it on your `PATH`. Pick your shell and paste the command:
+
+<Tabs syncKey="shell">
+
+<TabItem label={"Shell"} icon="shell">
+
+```sh
+curl -fsSL https://setup.ocx.sh/sh | sh
+```
+
+
+</TabItem>
+
+<TabItem label={"PowerShell"} icon="powershell">
+
+```powershell
+Invoke-RestMethod 'https://setup.ocx.sh/pwsh' | Invoke-Expression
+```
+
+
+</TabItem>
+
+<TabItem label={"Nushell"} icon="nushell">
+
+```nushell
+curl -fsSL https://setup.ocx.sh/nu | nu
+```
+
+
+</TabItem>
+
+<TabItem label={"fish"} icon="fish">
+
+```fish
+curl -fsSL https://setup.ocx.sh/fish | fish
+```
+
+
+</TabItem>
+
+<TabItem label={"Elvish"} icon="elvish">
+
+```sh
+curl -fsSL https://setup.ocx.sh/elvish | elvish
+```
+
+</TabItem>
+
+</Tabs>
+
+
+Open a new terminal and check the install with [`ocx about`][cmd-about]. It prints the installed version, the detected platform and the detected shell:
+
+\<\<\< @/_scripts/install-ocx/about.sh\{sh\}
+
+Prefer not to pipe a script into your shell? Download the binary and run [`ocx self setup`][cmd-self-setup] instead, as described under [Manual installation][manual].
+
+## With script \{#with-script\}
+
+The one-liners above are thin per-shell bootstraps served by [setup.ocx.sh][setup-home]. Each one detects your platform and resolves the latest release from the [`dist.json`][setup-dist] manifest, with no GitHub API call in the install path. It downloads the archive and verifies its SHA-256 against the manifest. Then it hands off to [`ocx self setup`][cmd-self-setup].
+
+That command does the [content-addressed][fs-objects] self-install and writes the per-shell `$OCX_HOME/env.*` shims. It also adds a managed activation block to your shell profile. Last, it registers a [session `PATH`][cmd-self-setup-session-path] for the processes no profile reaches.
+
+:::note[Linux zsh in a GUI terminal]
+GUI terminal emulators such as GNOME Terminal, Alacritty and Kitty usually open non-login shells, and a non-login zsh does not read `~/.zprofile`. If `ocx` is not found after the installer ran, add `source ~/.zprofile` to your `~/.zshrc`.
+:::
+
+There is one installer per shell. A bash-only one-liner either fails to parse in [fish][fish], [Nushell][nushell], [Elvish][elvish] or [PowerShell][powershell], or leaves the profile unwired. Each script is written in its own shell's dialect, so the one-liner parses natively and the managed block lands in the right profile file.
+
+:::caution[Old wget (&#60;1.17) is rejected by the POSIX installer]
+The [`setup.ocx.sh/sh`][setup-sh] installer fails closed when only `wget` before 1.17 is available. The strict TLS flags it relies on arrived in wget 1.17 (2015), and downgrading would silently weaken the download integrity check. Alpine edge and some minimal Docker base images still ship builds that old. Upgrade `wget` (`apk add --upgrade wget` on Alpine) or rely on `curl`, which the installer prefers whenever it is present.
+:::
+
+### Options \{#script-options\}
+
+The installer takes a few knobs. Pass them as flags after `-s --` (POSIX `sh`), or as environment variables that work across every shell's argument-passing quirks.
+
+**Skip every PATH modification.** If you manage your `PATH` yourself, in a CI environment or a dotfile framework, pass `--no-modify-path`. The installer then touches neither your shell profile nor the [session `PATH`][cmd-self-setup-session-path]:
+
+```sh
+curl -fsSL https://setup.ocx.sh/sh | sh -s -- --no-modify-path
+```
+
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add the two directories the installer would have registered to your `PATH` yourself, toolchain bin first: `~/.ocx/toolchain/active/bin`, then `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`.
+
+The flag persists. It writes `[shell] modify_path = false` to `config.toml`, so a later `ocx self setup` run skips both surfaces too until you change the key by hand.
+
+The setting resolves through a four-rung ladder, most specific first:
+
+1. `--no-modify-path` on `ocx self setup`.
+2. `OCX_NO_MODIFY_PATH`, where a truthy value turns modification off.
+3. `[shell] modify_path` in `config.toml`.
+4. The floor, where modification is allowed.
+
+There is deliberately no `--modify-path` flag. The opt-out fails safe toward touching less of the machine, so setup only ever writes this key as `false`. To turn modification back on, set the key to `true` or remove it by hand.
+
+The key gates the managed activation block in your profiles and the session `PATH` registration. It does not gate the env shims (`$OCX_HOME/env.*`), which are written regardless. It merges scalar-wins-if-set across tiers: the nearest tier that sets it wins, in either direction. A [managed][config-managed] tier therefore overrides your own `$OCX_HOME/config.toml`.
+
+```toml
+[shell]
+modify_path = false
+```
+
+The opt-out suppresses both PATH surfaces on all three platforms. One surface is the managed activation block in your shell profiles. The other is the [session-level registration][cmd-self-setup-session-path]: the Windows user environment, a systemd [`environment.d`][systemd-environment-d] drop-in on Linux and a login [LaunchAgent][launchd-agents] on macOS. The writers are never called. Each location still appears in the run summary with outcome `skipped_opt_out`, so you can see what was not touched.
+
+`OCX_NO_MODIFY_PATH` follows the truthy rules. Only `1`, `y`, `yes`, `on` and `true`, case-insensitive, enable it. An unrecognized non-empty value such as `skip` logs a warning and is read as `false`, so both PATH surfaces are written. An empty string is also `false`.
+
+With the opt-out set, you give up reaching what no profile reaches. Activation through `$OCX_HOME/env.*` takes effect only in interactive PowerShell and POSIX shell sessions that source the login profile. The `cmd.exe` shell, desktop launchers, IDEs and background services never do. To make ocx-managed binaries visible to those, put the two directories above on `PATH` yourself. Use System Properties or Group Policy on Windows, an `environment.d` drop-in on Linux, or a LaunchAgent on macOS.
+
+**Leave completions to another framework.** Set `OCX_NO_COMPLETION=1` and `ocx self activate` skips the shell-completion injection at every shell start. The `PATH` prepend and the global toolchain environment still run. Use it when completions come from a framework such as [oh-my-zsh][oh-my-zsh] or a Nix-generated completion store that OCX should not overwrite.
+
+`ocx shell completion` generates the script regardless, unless it is called with `--if-enabled`. In that case this variable is the first rung of the policy that decides whether anything is printed.
+
+**Choose the profile files.** `--profile PATH` (repeatable) names the shell profiles that receive the managed activation block. `--no-profile` writes none. The choice resolves through three rungs: the flags, then `[shell] profiles`, then the floor, which auto-detects the usual profile files for the current shell.
+
+Absence and an empty list are different answers. An unset key re-detects the profiles on every run. An empty list, the shape `--no-profile` writes, means no profile blocks at all. A set list *replaces* auto-detection and is never unioned with it.
+
+Passing either flag writes the key, so the choice applies to every later `ocx self setup` run, not only the one that typed the flag. `--no-profile` does not suppress the env shims or the session `PATH` registration. Only `modify_path = false` (or `--no-modify-path`) does that. Tiers merge list-wins-if-set: the nearest tier that sets `profiles` replaces the whole list, a managed tier included. A tier that leaves the key unset never clears a list a lower tier set.
+
+```toml
+[shell]
+profiles = ["/home/alice/.bashrc", "/home/alice/.zshrc"]
+```
+
+**Pin a version.** The `OCX_INSTALL_VERSION` env knob is the portable way to install an exact release. `<VERSION>` is the semver string with no leading `v`:
+
+```sh
+OCX_INSTALL_VERSION=0.5.0 curl -fsSL https://setup.ocx.sh/sh | sh
+```
+
+For CI, the pinned, immutable URL is the most explicit form:
+
+```sh
+curl -fsSL https://setup.ocx.sh/sh/0.5.0 | sh
+```
+
+PowerShell needs the script compiled to a scriptblock so `-Version` binds to its parameter:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod 'https://setup.ocx.sh/pwsh'))) -Version 0.5.0
+```
+
+**Track prereleases.** To follow prereleases instead of stable, use the `next` channel on any per-shell prefix, such as `https://setup.ocx.sh/sh/next` or `https://setup.ocx.sh/pwsh/next`.
+
+**Behind a corporate CA.** The `OCX_INSTALL_CA_BUNDLE` env knob points the installer at a corporate root for its own downloads. Export [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] beside it. Then [`ocx self setup`][cmd-self-setup] persists the certificate text as [`extra_ca_certs_pem`][config-extra-ca-certs] in `config.toml`, so every later command trusts it too:
+
+<Tabs syncKey="shell">
+
+<TabItem label={"Shell"} icon="shell">
+
+```sh
+export OCX_INSTALL_CA_BUNDLE=/etc/pki/corp-root.pem OCX_EXTRA_CA_CERTS=/etc/pki/corp-root.pem
+curl --cacert "$OCX_INSTALL_CA_BUNDLE" -fsSL https://setup.ocx.sh/sh | sh
+```
+
+
+</TabItem>
+
+<TabItem label={"PowerShell"} icon="powershell">
+
+```powershell
+$env:OCX_EXTRA_CA_CERTS = 'C:\pki\corp-root.pem'
+irm https://setup.ocx.sh/pwsh | iex
+```
+
+</TabItem>
+
+</Tabs>
+
+
+The PowerShell installer's own bootstrap download has no CA-bundle option. Unlike the POSIX installer's `--cacert` above, nothing on the PowerShell side hands the corporate root to the script's HTTPS fetch of the release archive. An `OCX_INSTALL_CA_BUNDLE` set for it only draws a warning, because the script forwards it as `SSL_CERT_FILE`, which no Windows client reads. That is why the block above does not set it.
+
+Behind an intercepting proxy, install the root into the machine certificate store for that one download. Or use [Manual installation][manual] to fetch the binary yourself and run `ocx self setup` directly. `OCX_EXTRA_CA_CERTS` still reaches `ocx self setup` in either case, by ordinary environment inheritance. `Invoke-Expression`/`iex` runs the downloaded script in the current session, so a variable set with `$env:` beforehand is visible to it ([ocx-sh/www-setup#23](https://github.com/ocx-sh/www-setup/issues/23)).
+
+### Supported shells \{#shells\}
+
+[setup.ocx.sh][setup-home] serves a separate installer per shell. Pipe each URL to its matching interpreter: `| sh`, `| nu`, `| fish`, `| elvish`, or `irm … | iex` for [PowerShell][powershell]. The POSIX `sh` installer covers every Bourne-family shell with one script.
+
+| Shell | Installer URL | Platforms |
+|---|---|---|
+| POSIX `sh` (bash, zsh, ash, ksh, dash) | [`setup.ocx.sh/sh`][setup-sh] | <PlatformIcons mode="os" platforms={['linux','darwin']} /> |
+| [PowerShell][powershell] | `setup.ocx.sh/pwsh` | <PlatformIcons mode="os" platforms={['windows','linux','darwin']} /> |
+| [Nushell][nushell] | `setup.ocx.sh/nu` | <PlatformIcons mode="os" platforms={['linux','darwin','windows']} /> |
+| [fish][fish] | `setup.ocx.sh/fish` | <PlatformIcons mode="os" platforms={['linux','darwin']} /> |
+| [Elvish][elvish] | `setup.ocx.sh/elvish` | <PlatformIcons mode="os" platforms={['linux','darwin','windows']} /> |
+
+## Manual installation \{#manual\}
+
+Security-conscious environments often forbid piping a network script into an interpreter. The downloaded binary is the answer. Pre-built binaries for every supported platform are published to [GitHub Releases][releases].
+
+Download the archive for your platform, extract it and run [`ocx self setup`][cmd-self-setup]. You reach exactly the same managed state the install script produces. That state is the content-addressed self-install, the `$OCX_HOME/env.*` shims, the managed shell-profile block and the [session `PATH`][cmd-self-setup-session-path]. No shell script is piped from the network.
+
+| Platform | Architecture | Archive |
+|---|---|---|
+| Linux | x86_64 | [`ocx-x86_64-unknown-linux-gnu.tar.gz`][dl-linux-x64] |
+| Linux | aarch64 | [`ocx-aarch64-unknown-linux-gnu.tar.gz`][dl-linux-arm64] |
+| Linux (static) | x86_64 | [`ocx-x86_64-unknown-linux-musl.tar.gz`][dl-linux-musl-x64] |
+| Linux (static) | aarch64 | [`ocx-aarch64-unknown-linux-musl.tar.gz`][dl-linux-musl-arm64] |
+| macOS | Apple Silicon | [`ocx-aarch64-apple-darwin.tar.gz`][dl-macos-arm64] |
+| macOS | Intel | [`ocx-x86_64-apple-darwin.tar.gz`][dl-macos-x64] |
+| Windows | x86_64 | [`ocx-x86_64-pc-windows-msvc.zip`][dl-win-x64] |
+| Windows | ARM64 | [`ocx-aarch64-pc-windows-msvc.zip`][dl-win-arm64] |
+
+Each release also includes a `sha256.sum` file for checksum verification.
+
+```sh
+# Download the archive and checksums
+curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ocx-sh/ocx/releases/latest/download/sha256.sum
+
+# Verify checksum
+sha256sum --check --ignore-missing sha256.sum
+
+# Extract and run the managed setup
+tar xf ocx-x86_64-unknown-linux-gnu.tar.gz
+./ocx-x86_64-unknown-linux-gnu/ocx self setup
+```
+
+On Windows, extract the zip and run the setup from the extracted directory in PowerShell. Then reload your profile:
+
+```powershell
+.\ocx.exe self setup
+. $PROFILE
+```
+
+If PowerShell's execution policy is `Restricted`, the sourced `env.ps1` file does not run even after setup completes. Setup reports a non-fatal advisory when it detects this. To fix it, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. Setup never changes the execution policy itself, because that is a user security decision.
+
+### What the setup command does \{#install-bare-binary-what\}
+
+`ocx self setup` performs four steps in strict order:
+
+1. **Bootstraps itself.** It installs `ocx.sh/ocx/cli`, the stable release unless you pass a version, into the content-addressed package store and wires the `current` symlink. The loose binary you downloaded is only needed for this step. Afterwards the managed copy in `~/.ocx/` takes over.
+2. **Writes the env shims.** It creates `$OCX_HOME/env.sh`, `env.fish`, `env.ps1`, `env.nu` and `env.elv`. These files are byte-identical across users.
+3. **Injects a source line.** It adds a fenced block marker to each detected shell profile. Re-running setup is safe, because the fence is idempotent.
+4. **Registers a session `PATH`.** It writes `$OCX_HOME/toolchain/active/bin` and the ocx installation's `bin` directory behind it into the [session store](#session-path) of your platform.
+
+If the bootstrap fails, for example because the registry is unreachable, the command returns a non-zero exit code and writes nothing.
+
+Besides the flags covered under [Options](#script-options), `ocx self setup` accepts these:
+
+| Flag | Effect |
+|------|--------|
+| `--toolchain-activate MODE` | Writes `activate = "MODE"` into `$OCX_HOME/ocx.toml`. `MODE` is `env`, `bin` or `none`, and it decides how the global toolchain reaches your shell. The file is created with only this key if it does not exist yet. |
+| `--dry-run` | Shows what would be written without writing anything. Use it to preview which profiles are detected. |
+| `--force` | Overwrites a fenced block whose contents were edited by hand. |
+
+:::note[The musl builds are fully statically linked]
+The `musl` variants have no runtime dependency on glibc. Use them in Alpine containers, minimal Docker images, or any environment where libc compatibility is uncertain.
+:::
+
+### Pinned versions \{#manual-pinned\}
+
+When a job needs the same ocx build on every run, pass a version to [`ocx self setup`][cmd-self-setup]. The version can be a tag, a content digest, or both:
+
+```text
+# Pin by tag (resolves once, installs that release):
+ocx self setup 0.9.2
+
+# Pin by content digest (no tag resolution):
+ocx self setup sha256:ab12cd34ef56...
+
+# Pin by tag and assert the exact content (immutability assertion):
+ocx self setup 0.9.2@sha256:ab12cd34ef56...
+```
+
+The `tag@digest` form is the strongest guarantee. If the tag ever resolves to different content, for example because a digest was republished, the command fails with exit 65 and names both digests. There is no silent drift.
+
+:::caution[Digest pins are platform-specific]
+A `sha256:` digest pin selects the platform-specific package digest. The same tag resolves to a different digest on each OS and architecture. For CI matrices, pin by tag, so each runner resolves its own platform digest, or supply a per-platform digest map. Never share one digest value across different platforms.
+:::
+
+To get the digest for a version you trust, capture it from a prior run's JSON output:
+
+```text
+digest=$(ocx --format json self setup 0.9.2 | jq -r .bootstrap.digest)
+# Then write the full pin into your CI config:
+echo "ocx self setup 0.9.2@$digest"
+```
+
+That digest round-trips. The next `ocx self setup 0.9.2@<digest>` call succeeds immediately (`already_present`) if the same version is already installed. Otherwise it downloads and verifies the exact content. When the requested version is already installed, `ocx self setup` is a no-op and exits 0. It rewrites the shims and profile blocks only when their content has drifted.
+
+`jq .status` returns the overall run outcome. The bootstrap outcome sits under `bootstrap.status` and is `already_present`, `pulled` or `would_pull`.
+
+Under `--frozen`, a tag-only pin resolves from the local index, and exits 81 if the tag is absent. Run `ocx index update <package>` without `--frozen` first, because an index update is refused under `--frozen` too. A digest-only pin works when the blobs are already cached. Both suit hermetic CI where the index is pre-populated.
+
+## Session PATH \{#session-path\}
+
+A shell profile reaches login shells. It does not reach an IDE, a desktop launcher or a background service started outside any shell. Those inherit their environment from the session, and a `PATH` written into `~/.zshrc` never gets there. So [`ocx self setup`][cmd-self-setup] writes a session-level registration too, co-primary with the profile block rather than a fallback for it.
+
+Two directories are registered, in this order. A global toolchain that pins `ocx` is what a session resolves, and the installed binary is the floor beneath it:
+
+1. `$OCX_HOME/toolchain/active/bin`, the global toolchain's trampolines.
+2. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin`, the directory the installed `ocx` itself resolves from.
+
+### Where it is written \{#session-path-stores\}
+
+Each platform has exactly one store:
+
+| Platform | Store | Mechanism |
+|----------|-------|-----------|
+| Windows | `HKCU\Environment`, value `Path` | Written as `REG_EXPAND_SZ`, then a [`WM_SETTINGCHANGE`][wm-settingchange] broadcast so running applications pick the change up. |
+| Linux | `$XDG_CONFIG_HOME/environment.d/ocx.conf` (`~/.config/environment.d/ocx.conf` when `XDG_CONFIG_HOME` is unset) | One [`environment.d`][systemd-environment-d] line, `PATH=…:$PATH`. It is a prepend, so nothing another tool put on `PATH` is displaced. |
+| macOS | `~/Library/LaunchAgents/sh.ocx.path.plist` | A `RunAtLoad` [LaunchAgent][launchd-agents] labelled `sh.ocx.path`, published at mode `0644` (launchd refuses an agent with "dubious permissions") and bootstrapped into the current GUI domain. |
+
+The registration is idempotent by presence test, never by append. A second `ocx self setup` reports `unchanged` and the stored value does not grow.
+
+A write failure is a warning, not an exit code. A store that cannot be written is reported and warned about, and setup still exits 0. Re-running retries it.
+
+The one fatal refusal is an `$OCX_HOME` this platform's format cannot spell. On Windows that is a `%` or `;`. For `environment.d` it is a character the format cannot carry, and for the plist it is a `"`. That is checked before anything is written, so a refused run leaves the machine byte-identical and exits `78`.
+
+`environment.d` is read only by processes started under `systemd --user`. That is confirmed for GNOME and KDE Plasma Wayland. Neither LightDM (by default), SDDM nor a non-systemd desktop reads it. A Flatpak- or Snap-sandboxed application takes its `PATH` from the sandbox instead.
+
+`~/.pam_environment` is deliberately not written, since it has been deprecated since pam_env 1.5.0. On every platform, terminals and applications that are already open see nothing until they are restarted.
+
+:::note["sh" in macOS Login Items]
+macOS names a login item that is not an app bundle after the program it runs. System Settings, General, Login Items, **Allow in the Background** therefore lists this agent as **sh**, and setup prints a note saying so. That entry is `sh.ocx.path`: a short `/bin/sh` script that puts the two directories on the session `PATH` at login. Turned off, GUI applications started after the next login no longer get them. To remove it, see [Removing the session PATH](#session-path-removal).
+:::
+
+### Removing the session PATH \{#session-path-removal\}
+
+There is no `ocx self uninstall` yet ([#413][issue-413]), so the registration is reversed by hand. One location per platform:
+
+:::caution[Edit, never delete]
+On Windows the registry value is shared. `HKCU\Environment\Path` holds every other user `PATH` entry too. Remove ocx's two segments from the value, and do not delete the value.
+
+The same rule is why `launchctl unsetenv PATH` must never be used on macOS. It deletes the whole session-wide value rather than ocx's contribution to it. That strips every other tool's segment from every GUI application launched afterwards. ocx has no wrapper for it, deliberately.
+:::
+
+<Tabs syncKey="os">
+
+<TabItem label={"Windows"} icon="powershell">
+
+```powershell
+# Open the built-in editor, remove the two ocx segments from the user Path, and
+# save. Saving preserves the value's type and broadcasts the settings change,
+# which is why this is the recommended route.
+rundll32 sysdm.cpl,EditEnvironmentVariables
+
+# Or from PowerShell, through the registry API rather than [Environment]:
+# [Environment]::SetEnvironmentVariable(..., 'User') always writes REG_SZ,
+# no matter what type the value had before. That is a permanent downgrade:
+# no %VAR% any tool adds to Path later will ever expand again. The registry
+# API below reads the value unexpanded and writes back the same type it read.
+# Unlike the built-in editor, it does not broadcast WM_SETTINGCHANGE, so
+# already-open terminals need a restart.
+# Read $root from a guarded expression, never bare $env:OCX_HOME: an empty
+# prefix would match every segment and strip the whole PATH.
+$root = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $HOME '.ocx' }
+$key  = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$path = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+$kept = ($path -split ';' |
+  Where-Object { $_ -and -not $_.StartsWith($root, 'OrdinalIgnoreCase') }) -join ';'
+$key.SetValue('Path', $kept, 'ExpandString')
+$key.Close()
+```
+
+</TabItem>
+
+<TabItem label={"Linux"} icon="shell">
+
+```sh
+rm ~/.config/environment.d/ocx.conf
+# Or $XDG_CONFIG_HOME/environment.d/ocx.conf when that variable is set.
+# Takes effect at the next login; the current session keeps its PATH.
+```
+
+</TabItem>
+
+<TabItem label={"macOS"} icon="shell">
+
+```sh
+# Boot out the *service*, then delete its plist.
+launchctl bootout "gui/$(id -u)/sh.ocx.path"
+rm ~/Library/LaunchAgents/sh.ocx.path.plist
+```
+
+</TabItem>
+
+</Tabs>
+
+:::danger[`gui/<uid>` is not `gui/<uid>/sh.ocx.path`]
+`launchctl bootout gui/$(id -u)` names the domain, not the service. It tears down your entire GUI login session. The service target, the one above with `/sh.ocx.path` on the end, is what removes this one agent. Booting out an agent that is not loaded is not an error, so the command is safe to run twice.
+:::
+
+ocx's own writer does not treat the two directions the same way. Registering the entries (`ocx self setup`) always writes `REG_EXPAND_SZ`, even over an existing `REG_SZ` value, because [rustup once shipped `REG_SZ` here and broke `%VAR%` expansion for every other entry already on `Path`][rustup-261]. Deregistering them preserves whatever type it read. Removal never promises to upgrade or downgrade a value it is not otherwise touching.
+
+Both directions read the value unexpanded, so a foreign `%…%` reference already on `Path` is never flattened into whatever it resolves to at that moment. The built-in editor is the one form that both preserves the type and broadcasts the change.
+
+Reversing the session PATH does not remove ocx. The managed shell-profile block, the `$OCX_HOME/env.*` shims and `$OCX_HOME` itself stay in place. The [uninstall recipe][uninstalling] covers them. Neither recipe touches a project's own rendered toolchain. Delete `.ocx/toolchain/`, or the [`toolchain_dir`][config-toolchain_dir] root if one is configured, in every project where you have run [`ocx pull`][cmd-pull].
+
+## Dev builds \{#dev-builds\}
+
+Binaries published from the `deploy-dev` workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. These are pre-release snapshots, not stable releases.
+
+To identify whether your installed binary is a dev build, run:
+
+\<\<\< @/_scripts/install-ocx/version-verbose.sh\{sh\}
+
+The `channel: dev` line appears in the verbose output when present. For scripting, read the report as JSON and pipe it through `jq .channel`:
+
+\<\<\< @/_scripts/install-ocx/version-json.sh\{sh\}
+
+The `channel` field reads `"dev"` for dev builds and is absent for stable releases, so `jq .channel` prints `null` there. Include this output when filing bug reports. It helps distinguish issues introduced between stable releases.
+
+## Next steps \{#next-steps\}
+
+- **[Your first package][first-package]** installs a tool, switches versions and removes it again.
+- **[Update or uninstall ocx][update-ocx]** covers `ocx self update` and the full removal recipe.
+- **[Docker images][docker-guide]** and **[CI setup][ci-indepth]** cover container builds and GitHub Actions.
+- **[Environment reference][env-ref]** lists every variable ocx reads, including [`OCX_HOME`][env-home].
+
+
+[setup-home]: https://setup.ocx.sh
+[setup-sh]: https://setup.ocx.sh/sh
+[setup-dist]: https://setup.ocx.sh/dist
+[releases]: https://github.com/ocx-sh/ocx/releases/latest
+[powershell]: https://learn.microsoft.com/en-us/powershell/
+[nushell]: https://www.nushell.sh/
+[fish]: https://fishshell.com/
+[elvish]: https://elv.sh/
+
+
+[dl-linux-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.gz
+[dl-linux-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-gnu.tar.gz
+[dl-linux-musl-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-musl.tar.gz
+[dl-linux-musl-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-unknown-linux-musl.tar.gz
+[dl-macos-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-apple-darwin.tar.gz
+[dl-macos-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-apple-darwin.tar.gz
+[dl-win-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-pc-windows-msvc.zip
+[dl-win-arm64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-aarch64-pc-windows-msvc.zip
+
+
+[docker-guide]: ../integration/docker.md
+[first-package]: ./first-package.mdx
+[update-ocx]: ../guides/update-ocx.mdx
+[uninstalling]: ../guides/update-ocx.mdx#uninstalling
+[env-ref]: ../reference/environment.md
+[ci-indepth]: ../integration/github-actions.md
+
+
+[cmd-about]: ../reference/command-line/commands.md#about
+[cmd-self-setup]: ../reference/command-line/self.md#self-setup
+[cmd-self-setup-session-path]: #session-path
+[cmd-pull]: ../reference/command-line/commands.md#pull
+
+
+[systemd-environment-d]: https://www.freedesktop.org/software/systemd/man/latest/environment.d.html
+[wm-settingchange]: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange
+[rustup-261]: https://github.com/rust-lang/rustup/issues/261
+[issue-413]: https://github.com/ocx-sh/ocx/issues/413
+[launchd-agents]: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
+[oh-my-zsh]: https://ohmyz.sh/
+[env-home]: ../reference/environment.md#ocx-home
+[env-no-modify-path]: ../reference/environment.md#ocx-no-modify-path
+[env-ocx-extra-ca-certs]: ../reference/environment.md#ocx-extra-ca-certs
+
+
+[config-extra-ca-certs]: ../integration/proxy-and-ca.md
+[config-managed]: ../explanation/configuration.mdx#managed
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
+
+
+[manual]: #manual
+
+
+[fs-objects]: ../explanation/storage.mdx#stores
+

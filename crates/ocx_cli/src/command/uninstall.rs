@@ -16,7 +16,7 @@ use clap::Parser;
 /// To clean up all unreferenced objects at once use `ocx clean`.
 #[derive(Parser)]
 pub struct Uninstall {
-    /// Also remove the current symlink (equivalent to also running `ocx deselect`).
+    /// Also remove the current symlink (equivalent to also running `ocx package deselect`).
     #[clap(short = 'd', long = "deselect")]
     deselect: bool,
 

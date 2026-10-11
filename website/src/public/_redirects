@@ -1,3 +1,0 @@
-/catalog https://index.ocx.sh/ 302
-/catalog.html https://index.ocx.sh/ 302
-/catalog/* https://index.ocx.sh/:splat 302

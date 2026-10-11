@@ -1,0 +1,238 @@
+---
+title: "Troubleshoot a shell that does not pick up tools"
+description: "Find out why a project's tools are missing from PATH, switch the hook and completions, resolve a clash with direnv or mise, and repair a stuck shell."
+---
+{/* doc_type: troubleshooting */}
+
+import Terminal from '../../../components/Terminal.astro';
+
+Use this page when a project's tools are missing from `PATH` or the per-prompt hook behaves unexpectedly. Use it too when direnv or mise is hooked into the same shell. Each entry names the symptom, the cause and the command that settles it. [Shell Integration](../explanation/shell-integration.mdx) explains the mechanism behind them.
+
+## Error: the hook or completions are not loaded \{#commands\}
+
+This issue occurs when the `[shell] hook` or `[shell] completions` switch resolves to off for the shell you are in. It also occurs when you changed a switch in a shell that is already running, because both are read once, at shell start.
+
+Two independent switches decide whether the reconciler and shell completions are installed at shell start. `[shell] hook` (a boolean, unset by default) governs the per-prompt reconciler. That reconciler recomposes `PATH` and the rest of a project's `[env]` on `cd`, after a lock change or after `ocx update`, without a fresh login shell. It resolves through a four-rung ladder, most specific first:
+
+1. `--hook` or `--no-hook` on [`ocx self activate`][cmd-self-activate], a one-shot override for this shell start only.
+2. [`OCX_NO_HOOK`][env-ocx-no-hook], where a truthy value forces the hook off.
+3. `[shell] hook`.
+4. Auto: on for an interactive shell, off otherwise. [`ocx self activate`][cmd-self-activate] describes how a shim states its own interactivity.
+
+Nothing in that ladder keys off `CI`, deliberately. Rung 4 is the shell's own interactivity. An ordinary CI step is already a non-interactive shell, so the hook is off there without a dedicated rung.
+
+A `CI`-keyed rung would be redundant for that case. It would also turn the hook off inside an *interactive* debugging shell started in a CI container, exactly where it is wanted. Set `[shell] hook = false`, or export `OCX_NO_HOOK`, to force it off regardless of interactivity.
+
+`OCX_NO_HOOK` is a boolean, not a tri-state: there is no `OCX_HOOK=0|1|auto`, matching every other `OCX_NO_*` toggle. The positive channel is the `--hook` flag, and an unset variable already means auto. It is read once, at shell start, and never on the per-prompt path.
+
+Exporting it mid-session therefore takes effect at the *next* shell start, because the reconciler's budget forbids reading configuration or environment toggles on every prompt. Setting it still leaves `PATH` prepend, completions and the global toolchain evaluation running. Only the per-prompt registration is skipped, so nothing recomposes on `cd`, on a lock change or after `ocx update`.
+
+`OCX_NO_HOOK=1` is also the one gesture that makes a shell wholly inert. [`OCX_NO_CONFIG`][env-ocx-no-config] empties the discovered configuration chain and suppresses the managed tier. An explicit `--config` or `OCX_CONFIG` file and the [`OCX_CONSENT_PATHS`][env-ocx-consent-paths] and [`OCX_CONSENT_NAMESPACES`][env-ocx-consent-namespaces] grants can still activate the hook for a consented project.
+
+`[shell] completions` decides whether [`ocx self activate`][cmd-self-activate] injects shell-completion definitions at shell start. It follows the identical ladder, evaluated completely independently: `--completion` or `--no-completion`, then [`OCX_NO_COMPLETION`][env-ocx-no-completion], then `[shell] completions`, then auto. `OCX_NO_HOOK` never reaches the completions ladder, and `OCX_NO_COMPLETION` never reaches the hook's.
+
+[`ocx self setup`][cmd-self-setup] is the one way to set either key without hand-editing. Its `--hook`/`--no-hook` and `--completion`/`--no-completion` pairs write the key to `$OCX_HOME/config.toml` and leave the rest of that file, comments included, untouched. Both keys merge scalar-wins-if-set: the nearest tier that sets one wins, in either direction, including a [managed tier][config-managed] over your own `$OCX_HOME/config.toml`.
+
+`[shell]` is valid in every `config.toml` tier: system, user, `$OCX_HOME`, and an explicit `--config` or `OCX_CONFIG` file. For `hook`, `completions`, `modify_path` and `profiles`, it is also valid in the managed tier unconditionally. It is **never read from `ocx.toml`**. A `[shell]` block in the project file is a parse error, because a project-writable consent grant would let a clone consent to itself. The `modify_path` and `profiles` keys, which govern what `ocx self setup` may write rather than what the hook does, are described under [installation options][install-options].
+
+Set either key from the command line:
+
+```sh
+ocx self setup --hook --completion       # write [shell] hook = true, completions = true
+ocx self setup --no-hook                 # write [shell] hook = false
+```
+
+[`ocx self activate`][cmd-self-activate] (the command your shim already calls at shell start) accepts the same `--hook` / `--no-hook` pair for a one-off override. It reads `[shell]` once, at shell start, and never reads configuration again on the per-prompt path. That reserved budget is what keeps an unchanged prompt effectively free.
+
+A shell that does not use the shim can load completions itself:
+
+The activation shim injects completions for you. A shell that does not use the shim can load them with [`ocx shell completion`][cmd-shell-completion]. The `--shell` value is one of `bash`, `zsh`, `fish`, `elvish` or `powershell`, auto-detected from the parent shell when omitted. The other shell names `ocx env --shell` accepts exit 64 because no completion backend serves them. This does not affect `ocx env --shell=nushell` activation, which works independently.
+
+Without `--if-enabled` the script is always printed, which is what redirecting it into a file wants. With it, the ladder above decides whether anything prints: [`OCX_NO_COMPLETION`][env-ocx-no-completion], then `completions` under `[shell]`, then whether the session is interactive. The `env.sh` and `env.elv` shims pass it.
+
+```sh
+# bash: add to ~/.bashrc
+source <(ocx shell completion --shell bash)
+
+# zsh: write into the first fpath entry, then run `compinit`
+ocx shell completion --shell zsh > "${fpath[1]}/_ocx"
+
+# fish: load for the current session, or save under ~/.config/fish/completions/ocx.fish
+ocx shell completion --shell fish | source
+```
+
+```powershell
+# PowerShell: add to $PROFILE
+ocx shell completion --shell powershell | Out-String | Invoke-Expression
+```
+
+[`ocx shell state`][cmd-shell-state] is the read-only counterpart to every switch above. It changes nothing and reports what all of them decided. It also reports the resolved toolchain home and the two effective toolchain settings a tool integrating with OCX needs. See [Diagnosing a shell](#diagnostics).
+
+## Error: a project's tools are not on PATH \{#diagnostics\}
+
+This issue occurs when no consent grant covers the project, the lock outgrew its consent stamp, or a config tier turned the hook off. It also occurs when direnv or mise is live. [`ocx shell state`][cmd-shell-state] names which one.
+
+The hook is deliberately quiet and logs at debug. An absent ledger is the ordinary first-prompt case. An inert project prints one hint line at most. A yielded scope prints one info line. That is right for a path that runs at every prompt, and wrong when you are staring at a missing binary.
+
+[`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything (no stamp, no ledger repair, no plan) and it exits `0` in every state it reports, including every flavor of "not active."
+
+By default it answers the question you actually asked, in a handful of lines. It shows where `$OCX_HOME` is, which project is in effect, which toolchain home that resolves to and how it activates, and whether the integration is active.
+
+When it is not active, it says *why*, plus the one line that says what to do about it. The reason is one of an enumerated set.
+
+A consent stamp is missing, or a stamp is present but the lock outgrew it. The hook is disabled, and the report names the config tier that decided that. Another is a [yield to direnv or mise](#coexistence) naming the live signal it saw. It can also be a ledger reduced to a marker because it went over the size cap, or an `ocx.lock` that will not parse.
+
+```sh
+ocx shell state
+```
+
+```
+ocx home: /home/you/.ocx
+project: /work/acme/api
+toolchain: /work/acme/api/.ocx/toolchain
+  bin: /work/acme/api/.ocx/toolchain/active/bin
+  activate: env
+  pinned: no
+
+active: no
+reason: no consent stamp, and no matching grant
+  derived sources:
+    - ocx.sh/acme
+  paths tested:
+    - /work/other
+  namespaces tested:
+    - ocx.sh/other
+fix: run `ocx shell allow` here, or add this directory to [shell.consent] paths
+```
+
+The verdict, the reason and the fix are highlighted when stdout is a terminal. Redirected to a file or a pipe, the same text arrives without the escapes.
+
+A `[shell.consent] paths` entry can be wrong in two different ways, and `ocx shell state` tells them apart. An entry that differs from the canonical directory only by ASCII case would grant the project under a looser comparison. It earns a near-miss row naming the entry and the directory it almost matched. That row is a case-sensitive-filesystem answer: on Windows, ASCII case is folded as part of the match, so such an entry simply grants.
+
+An entry that can never grant *any* project, regardless of directory, earns a different row instead, naming the defect directly. The defects are:
+
+- a `*` inside a path component, or a `*` that is not the entry's last component
+- a bare `*` on its own
+- a `..`, or a relative entry
+- a `~user/…` form
+- a leading `~` on a machine with no resolvable home directory
+
+The row reads:
+
+```
+note: a paths entry can never match any project
+  entry: /w/*/tools
+  problem: '*' is a wildcard only as the entry's last component; write '<directory>/*' to grant a subtree
+```
+
+Neither shape is a TOML syntax error. Without these rows a broken entry just sits in `[shell.consent] paths` granting nothing. It is indistinguishable from an entry that was never meant to cover this project at all.
+
+**`--verbose` adds the evidence behind the answer.** It is the material for a support conversation rather than for an "is it working" question:
+
+- the decoded ledger, as fields rather than base64: what the ledger records as applied, per scope, and how many of the carrier's 16 KiB it takes
+- fingerprint status: the watch set OCX is comparing against, each member's size and mtime, and whether the fold still matches what is recorded
+- whether the priors needed to restore a constant on scope exit are still intact
+- the project's state key and whether a consent stamp exists for it
+- which rung of the [`[shell] hook` ladder](#commands) decided the hook's enablement, and in which config tier.
+
+```sh
+ocx shell state --verbose
+```
+
+**The carrier's byte count is ocx's own budget, not the shell's.** `bytes: N of 16384` measures what OCX contributes through `__OCX_ENV_STATE` and nothing else. The real ceiling on a process environment is the operating system's combined `argv` + `envp` limit, which OCX does not account for and cannot. A shell whose environment is already near that limit fails at `execve` with `E2BIG`. That failure surfaces through the ordinary spawn-failure path rather than as anything this report can predict.
+
+`--verbose` is a rendering tier, not a payload. The structured form carries every field at every verbosity:
+
+```sh
+ocx --format json shell state   # complete, with or without --verbose
+```
+
+Four of its fields are a contract other tools read rather than a diagnostic a person reads. They are the supported way for an editor, a [devcontainer feature][devcontainer-features] or a CI step to discover a toolchain from outside ocx:
+
+| Field | What it carries |
+|---|---|
+| `toolchain_home` | The resolved toolchain home: `<project>/.ocx/toolchain`, or `<toolchain_dir>/<project-key>/toolchain` when [`toolchain_dir`][config-toolchain_dir] relocates it, or `$OCX_HOME/toolchain` when no project resolves. Always present, never `null` — a `toolchain_dir` the containment rules refuse is rejected at config load, so a report that exists at all has a spellable home. |
+| `toolchain_bin` | The directory to put on `PATH` for that same home — the trampolines [`bin` mode][config-project-activate] exposes. Present exactly when `toolchain_home` is, so no consumer has to branch, and it names a path that need not exist yet: a home that has never been pulled reports the directory it *would* hold. **Read this field rather than joining anything onto `toolchain_home`.** The two are not one path component apart, and a hand-built join produces a plausible string that names nothing — silently, because the tool that consumed it will not fail until several steps later. |
+| `activate` | The mode the project in effect resolves to — `env`, `bin` or `none` — through that project's own [`activate` key][config-project-activate] and then the environment, never one tier's raw value. With no project in effect the file tier is absent and the environment answers. |
+| `pinned` | The boolean, resolved through the same two tiers. `true` means a composing emitter yields digest paths and consults no `links/<group>/<entry>` link; `false` means it follows the rendered links, so an [`ocx update`][cmd-update] takes effect with no re-render. |
+
+Without `toolchain_home` the only route to that directory is re-deriving a 16-hex project key. The caller would also have to canonicalize the path exactly the way ocx does. All four appear in the human rendering too, at both verbosity tiers: where a toolchain lives is an answer, not a diagnostic.
+
+<Terminal src="/casts/in-depth/shell-integration/toolchain-state.cast" title="Reading the toolchain state" collapsed />
+
+Its output is never `eval`-able, on purpose: no line is valid shell-assignment syntax in any supported shell, at either detail tier, coloured or not. `ocx self activate` emits text meant to be evaluated. `ocx shell state` emits text meant to be read. A surface where those two are interchangeable is one copy-paste away from evaluating a diagnostic dump into your live shell.
+
+Exit code `0` covers every reportable state. The only non-zero exit is `74`, and only when `$OCX_HOME` itself cannot be read.
+
+**A project created where you already stand.** The prompt guard watches a set of files fixed when the hook was last emitted. It adds one live check: an `ocx.toml` in the current directory that was modified after the freshness stamp. So [`ocx init`][cmd-init], or a `git checkout` that brings a project in, reaches the very next prompt, and so does the [`ocx shell allow`][cmd-shell-allow] that consents to it.
+
+A project file that appears in a *parent* directory waits for the next `cd`. A file that [`OCX_PROJECT`][env-ocx-project] names but that does not exist yet is picked up at the next prompt once it appears. Exporting or re-pointing `OCX_PROJECT` in a running shell takes effect at your next `cd`.
+
+## Warning: direnv or mise is also hooked in this shell \{#coexistence\}
+
+This issue occurs when `DIRENV_DIR`, `MISE_SHELL` or `__MISE_ORIG_PATH` shows that another tool prepends to `PATH` from its own per-prompt hook.
+
+[direnv][direnv] and [mise][mise-security] both prepend to `PATH` from a per-prompt hook of their own. The documentation of mise is upfront that combining the two is not a supported configuration. Two hooks racing to reorder the same `PATH` have no well-defined outcome. OCX's mechanism is the same shape, so it is the same class of collision, and OCX does not try to referee it. Instead, it yields.
+
+The yield check looks at **live session state**, never a file on disk: `DIRENV_DIR` naming the current project, or `MISE_SHELL` / `__MISE_ORIG_PATH`. A `.envrc` or `mise.toml` checked into a repository whose owner is not actually hooked into *this* shell is not evidence of a live hook. It is evidence of someone else's workflow. Treating it as a yield signal would leave the project silently managed by nobody.
+
+When either tool is genuinely active for the current directory, OCX narrows to the global toolchain only. It reverts any project scope it had already applied and prints one info line naming the tool it yielded to.
+
+Hook registration order relative to direnv's or mise's own entries is unspecified and deliberately not refereed: no reordering logic, no cross-tool coordination, no retry. If ocx's hook runs first on the prompt where the other tool activates, the project scope may apply and then revert within that one prompt. The shell is converged by the next prompt.
+
+:::note[direnv and mise are not mutually aware either]
+This is not a gap unique to OCX: [direnv's stdlib][direnv] and [mise's own hooks][mise-security] make no attempt to detect each other. The same "two hooks, one PATH" ordering question exists between them already. OCX's yield rule keeps it a two-party problem instead of a three-party one.
+:::
+
+:::tip[Ordering with powerlevel10k's instant prompt]
+OCX's hook prints nothing at shell startup. What can still reach [powerlevel10k][p10k]'s `POWERLEVEL9K_INSTANT_PROMPT` capture is the *first prompt*. Its diagnostics ride the same `eval`'d `--reconcile` stream the hook always uses, appended via `add-zsh-hook precmd`.
+
+So a `.zshrc` that sources the ocx activation line before p10k's instant-prompt preamble puts that `precmd` ahead of p10k's own file-descriptor restore. Then p10k flags it the same way it flags [direnv, mise and nvm][p10k-instant-prompt]. Source the activation line after the instant-prompt preamble instead, and the ordering resolves the same way it already does for direnv and mise.
+:::
+
+## Error: the shell's ledger is out of sync \{#repair\}
+
+This issue occurs when a write landed inside the filesystem-timestamp granularity of OCX's change-detection window, or when the carrier itself looks corrupted.
+
+The repair gesture is `unset __OCX_ENV_STATE`. Clearing the variable makes the next prompt see an absent ledger. The reconciler already handles that state in full. It rebuilds the desired environment from the project files on disk and removes anything under `$OCX_HOME` it no longer recognizes. It leaves any other constant alone rather than guessing at it.
+
+**Its cost, stated plainly.** Clearing the ledger destroys the recorded *priors*, the values OCX saw before it applied anything. If you had, say, a hand-set `JAVA_HOME` before entering a project, the priors remember that value.
+
+Leaving the project then restores it. After `unset __OCX_ENV_STATE`, that memory is gone: `JAVA_HOME` keeps whatever the project set for the rest of that shell's life, because nothing records what it was before. A brand-new shell is the clean floor whenever one is cheap to open, because it starts with no priors and has nothing to lose.
+
+The gesture is silent by construction. OCX cannot distinguish a deliberately cleared ledger from the ordinary absence on a shell's first prompt. That first-prompt case logs at debug by design. [`ocx shell state`](#diagnostics) is how you confirm the repair actually took.
+
+**Elvish.** Elvish registers its reconcile on `$edit:before-readline` and cannot compare file mtimes, because `os:stat` in elvish 0.21 exposes no timestamps. Its guard has two terms: the private carrier [`__OCX_ENV_STATE`][env-ocx-env-state] being empty, and the current directory differing from the last reconciled one. The `ocx` wrapper clears the recorded directory after every `ocx` command run in that same shell, so the next prompt reconciles.
+
+Anything that changes by neither route waits for the next `cd` or the next `ocx` command in that shell. Examples are a hand edit of `ocx.toml` or `ocx.lock`, an `ocx add --global` in another terminal, a `git checkout` that swaps `ocx.lock`, a hand-edited config file, and `ocx self update` run elsewhere. The guard of bash, zsh, fish and PowerShell compares file mtimes directly, so they notice all of these at the very next prompt. An external `test -nt` would add a process spawn to every quiet prompt, which is the cost this design avoids.
+
+Elvish keeps one private variable, `__OCX_ENV_PWD`, because its activation stream reaches the shell through `eval`, whose assignments cannot be relied on to escape. It holds the shell's pid, its `$pwd`, the three direnv and mise yield sentinels and the two consent-grant variables, space-joined: `<pid> <pwd> <DIRENV_DIR> <MISE_SHELL> <__MISE_ORIG_PATH> <OCX_CONSENT_PATHS> <OCX_CONSENT_NAMESPACES>`. An unset variable contributes an empty field.
+
+The pid keeps a child elvish from reading its own first prompt as reconciled. The sentinel tail makes a [direnv or mise takeover](#coexistence), or exporting a consent variable in a running shell, reconcile at the next prompt like a `cd`. It is not a repair gesture.
+
+Whether a shell has already registered its hook is read off the registered closure's own source, scanned for a sentinel comment. A shell that replaces its process image with `exec elvish` therefore still registers correctly.
+
+
+[mise-security]: https://mise.jdx.dev/
+[direnv]: https://direnv.net/
+[devcontainer-features]: https://containers.dev/implementors/features/
+[p10k]: https://github.com/romkatv/powerlevel10k
+[p10k-instant-prompt]: https://github.com/romkatv/powerlevel10k/issues/1023
+[cmd-self-setup]: ../reference/command-line/self.md#self-setup
+[cmd-self-activate]: ../reference/command-line/self.md#self-activate
+[cmd-shell-completion]: ../reference/command-line/shell.md#shell-completion
+[cmd-init]: ../reference/command-line/commands.md#init
+[cmd-update]: ../reference/command-line/commands.md#update
+[cmd-shell-state]: ../reference/command-line/shell.md#shell-state
+[config-managed]: ../reference/configuration.md#keys-managed
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
+[config-project-activate]: ../explanation/toolchain-activation.md#activate
+[env-ocx-env-state]: ../reference/environment.md#ocx-env-state
+[env-ocx-no-completion]: ../reference/environment.md#ocx-no-completion
+[install-options]: ../getting-started/install-ocx.mdx#script-options
+[env-ocx-no-hook]: ../reference/environment.md#ocx-no-hook
+[env-ocx-no-config]: ../reference/environment.md#ocx-no-config
+[env-ocx-project]: ../reference/environment.md#ocx-project
+[cmd-shell-allow]: ../reference/command-line/shell.md#shell-allow
+[env-ocx-consent-paths]: ../reference/environment.md#ocx-consent-paths
+[env-ocx-consent-namespaces]: ../reference/environment.md#ocx-consent-namespaces

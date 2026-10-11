@@ -1,0 +1,77 @@
+{
+ "anchors": [
+  "promoting",
+  "promoting-dry-run",
+  "promoting-how",
+  "promoting-in-depth",
+  "promoting-platform",
+  "promoting-scope",
+  "promoting-walkthrough"
+ ],
+ "commands": [
+  "ocx package copy",
+  "ocx package description push",
+  "ocx package verify"
+ ],
+ "flags": [
+  "--cascade",
+  "--dry-run",
+  "--format",
+  "--from",
+  "--identifier",
+  "--keep-tag",
+  "--no-referrers",
+  "--platform",
+  "--to",
+  "--with-description"
+ ],
+ "env": [],
+ "config_keys": [
+  "patches"
+ ],
+ "exit_codes": [
+  "64",
+  "82"
+ ],
+ "slugs": [],
+ "links": [
+  "../in-depth/project.md#lock-format",
+  "../in-depth/signing.md",
+  "../in-depth/versioning.md",
+  "../reference/command-line.md#package-copy",
+  "./patches.md",
+  "/casts/user-guide/promoting-packages.cast",
+  "https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers",
+  "https://github.com/opencontainers/image-spec/blob/main/image-index.md"
+ ],
+ "fences": [
+  "sh:087293de: ocx package copy \\",
+  "sh:619f8215: ocx package description push --from staging.example.com/acme",
+  "sh:6f27a2f2: ocx package copy --to prod.example.com --platform linux/amd6",
+  "sh:8265cc66: # dev -> staging",
+  "sh:ccf83f90: ocx package copy --to prod.example.com --dry-run staging.exa",
+  "sh:d1de6ba5: ocx package verify -p linux/amd64 prod.example.com/acme/myto"
+ ],
+ "facts": [
+  "Example scenario has three registries, dev, staging and prod, and only QA-approved builds reach prod. [L7]",
+  "A rebuild yields different bytes because compression is not byte-stable and archive timestamps move, so the digest changes. [L12]",
+  "A Sigstore signature's subject is the platform manifest digest, and every ocx.lock entry pins that digest. [L14]",
+  "A rebuilt production package silently breaks the staging signature and downstream locks while the release job reports success. [L16]",
+  "ocx package copy transfers platform manifests and blobs verbatim, so the digest stays the same across registries. [L20]",
+  "The image index merges one platform at a time, so promoting linux/amd64 never removes a darwin/arm64 entry the target has. [L38]",
+  "Rolling tags are recomputed against the target's own tag list and are never carried over from the source. [L39]",
+  "Promoting 1.4.1 into production must not move 1.4 backwards, because the target's release state decides rolling tags. [L45]",
+  "The --to flag rewrites only the registry host and keeps the repository path and tag. [L56]",
+  "Each copy run reports one row per platform saying what happened to it. [L67]",
+  "Result rows are added, unchanged, replaced, or kept (not in source) for a platform the source does not offer. [L71]",
+  "Promoting a platform subset into a registry offering more is legitimate but a common mistake, and only the row list tells them apart. [L76]",
+  "Re-running a finished promotion is idempotent but not free, because manifests and referrers are re-verified and re-PUT. [L80]",
+  "Signatures, SBOMs and attestations travel by default, following referrer chains recursively through the Referrers API. [L89]",
+  "A target registry without the Referrers API is refused with exit 82, since referrers would otherwise be lost silently. [L98]",
+  "Descriptions do not travel by default, because catalog prose is repository-level and may legitimately differ per environment. [L103]",
+  "A copy is not a re-sign: the signature still names the source identity, so sign again at the target if policy requires it. [L113]",
+  "Against a digest, --platform declares the platform and exactly one is required, because a platform manifest carries none. [L127]",
+  "Under dry-run, JSON shows empty tag arrays regardless of cascade, a dry-run limitation rather than a report that nothing moves. [L157]"
+ ],
+ "lines": 179
+}

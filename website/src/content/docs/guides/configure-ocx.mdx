@@ -1,0 +1,70 @@
+---
+title: "Configure OCX defaults"
+description: "Change the tool's defaults with a configuration file."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Change OCX defaults, such as the default registry or the mirror map, with a TOML configuration file.<a id="configuration"></a>
+
+OCX reads settings from three layers: config files, environment variables and CLI flags. A higher layer wins, so a CLI flag overrides an environment variable, which overrides a config file.
+
+## Where the config files live \{#configuration-files\}
+
+Config files are in [TOML][toml] format and come from three tiers:
+
+| Tier | Path |
+|------|------|
+| System | `/etc/ocx/config.toml` |
+| User (Linux) | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` |
+| User (macOS) | `~/Library/Application Support/ocx/config.toml` (`XDG_CONFIG_HOME` is not consulted on macOS) |
+| OCX home | [`$OCX_HOME`][env-ocx-home]`/config.toml` (default: `~/.ocx/config.toml`) |
+
+OCX loads the files from lowest to highest and merges them. It skips missing files silently, and no config file is required.
+
+## Add a file or skip the discovered ones \{#configuration-explicit\}
+
+**Explicit additions.** [`--config FILE`][arg-config] or [`OCX_CONFIG`][env-config]`=/path/to/file.toml` layers an extra file on top of the discovered chain. This refines ambient config without rewriting it.
+
+Set both and `--config` sits at the highest file-tier precedence. The specified file must exist. To disable an ambient `OCX_CONFIG` without unsetting it, set it to the empty string.
+
+**Kill switch.** [`OCX_NO_CONFIG`][env-no-config]`=1` skips the discovered chain (system, user, `$OCX_HOME`) but leaves explicit paths intact. Combine it with `--config` for a fully hermetic CI load: `OCX_NO_CONFIG=1 ocx --config ci.toml ...`.
+
+## Change a default \{#configuration-change\}
+
+Put the setting in a file of one of the tiers above, for example `$OCX_HOME/config.toml` (you create the file). This content makes `ghcr.io` the registry for bare package names, from the next command on:
+
+```toml
+[registry]
+default = "ghcr.io"
+```
+
+Check that OCX reads a file the way you meant before you install it. [`ocx config test`][cmd-config-test] only previews: it merges the file onto this machine's config, prints the result and applies nothing. The report has a `Default registry` row that reads `ghcr.io`, and it lists any key OCX did not recognize:
+
+```sh
+ocx config test ./config.toml
+```
+
+Every key, its type and its default are in the [configuration reference][config-ref]. The registry setting is [`registry.default`][config-registry-default].
+
+## Next steps \{#configuration-next\}
+
+- [Route traffic through a corporate mirror](./corporate-mirror.mdx) sets the `[mirrors]` table.
+- [Authenticate with a private registry](./authenticate.mdx) gives OCX credentials.
+- [Manage configuration for a fleet](./manage-config-centrally.mdx) publishes one config to every host.
+
+:::tip[Learn more]
+[Configuration reference][config-ref]: every config key, type, default and error string.
+[Configuration In Depth][in-depth-configuration]: discovery tier rationale, merge semantics and worked examples (Docker base image, hermetic CI, portable install).
+:::
+
+[toml]: https://toml.io/
+[arg-config]: ../reference/command-line/index.md#arg-config
+[env-ocx-home]: ../reference/environment.md#ocx-home
+[env-config]: ../reference/environment.md#ocx-config
+[env-no-config]: ../reference/environment.md#ocx-no-config
+[xdg-basedir]: ../reference/environment.md#external-xdg-config-home
+[config-ref]: ../reference/configuration.md
+[config-registry-default]: ../reference/configuration.md#keys-registry-default
+[cmd-config-test]: ../reference/command-line/config.md#config-test
+[in-depth-configuration]: ../explanation/configuration.mdx

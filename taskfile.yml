@@ -105,9 +105,10 @@ tasks:
         test:lint (ruff over the acceptance suite), test:lint:structure (the
         lint tier: test/lint/'s structural sweeps, uncached, floored and
         budgeted), test:rows:check (the scoped gate's coverage guard over
-        test/scoped_rows.toml and the `command` markers), website:lint:links,
+        test/scoped_rows.toml and the `command` markers),
         bazel:pin:check (the Bazel pin authority; it reads text and one
-        `bazel --version`, loads no graph, and so belongs in the parallel leg)
+        `bazel --version`, loads no graph, and so belongs in the parallel leg),
+        website:test (the docs site's node tests)
       Phase 2 (sequential, .verify:build-test): rust:license:check,
         rust:license:deps, rust:license:notice:check,
         scripts:suite-census, scripts:dead-path-sweep, rust:clippy:check
@@ -116,6 +117,8 @@ tasks:
         rather than beside phase 1's other checks), rust:doc:ratchet (the
         same shape for rustdoc: one cached Bazel aspect pass, ratcheted per
         file against rustdoc-warn-baseline.json), rust:build,
+        website:reference:check (the generated reference pages match what the
+        sources render; after rust:build, which builds the generator),
         bazel:build:nobuild, then bazel:build:drift and bazel:tag:guard,
         which read the graph that step proves loadable, then bazel:lint
         (buildifier over every BUILD/.bzl file) and bazel:mod:check
@@ -223,6 +226,7 @@ tasks:
       ROUTE_SCRIPTS: '{{(fromJson .PLAN).routes.scripts | join " "}}'
       ROUTE_MANIFESTS: '{{(fromJson .PLAN).routes.manifests | join " "}}'
       ROUTE_TASKFILES: '{{(fromJson .PLAN).routes.taskfiles | join " "}}'
+      ROUTE_DOCS: '{{(fromJson .PLAN).routes.docs | join " "}}'
       WORKFLOW_TEST_CMD: '{{(fromJson .PLAN).workflow_test_cmd}}'
     # Every step is a `cmds:` entry, never a precondition: `--force` skips
     # preconditions, and a gate must not be silently skippable.
@@ -279,6 +283,13 @@ tasks:
       # The scoped arm runs the same check in `.verify:scoped:cargo`.
       - if: '[ "{{.DECISION}}" = routed ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
         cmd: cargo check --workspace --all-targets --locked
+      # A docs edit: the lint tier already ran above (routed) or in the lanes
+      # (scoped); the site's node tests run, and the generated reference must
+      # still match its sources.
+      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_DOCS}}" ]'
+        task: website:test
+      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_DOCS}}" ]'
+        task: website:reference:check
       # Everything else the scoped arm runs, as concurrent lanes.
       - if: '[ "{{.DECISION}}" = scoped ]'
         task: .verify:scoped:lanes
@@ -439,7 +450,11 @@ tasks:
       # as well as on the scoped arm, because an escalated run is how a new
       # command file or test module usually arrives.
       - task: test:rows:check
-      - task: website:lint:links
+      # The docs site's node tests (plugins, scripts; tests/ skip without dist).
+      - task: website:test
+      # `website:lint:links` is not here: it reads the built site, so it runs in
+      # the deploy-docs build job (`task website:check`, also by hand after
+      # `task website:build`), not in the parallel leg.
       # The one Bazel gate that loads no graph: `bazel --version` against
       # `.bazelversion`, plus the `rust-toolchain.toml` ↔ `MODULE.bazel` twin.
       # The other five are sequential and live in phase 2, behind the step
@@ -479,6 +494,10 @@ tasks:
       # A cached Bazel aspect pass too, so it sits beside clippy's.
       - task: rust:doc:ratchet
       - task: rust:build
+      # The generated reference pages match what the sources render. After
+      # `rust:build`, which builds the generator, so its Bazel build is cached
+      # here instead of contending with phase 1's Bazel queries.
+      - task: website:reference:check
       # The Bazel gates (plan_bazel_build_adoption.md C-010, C-011, C-014), in
       # this order because the other two read a graph and this step is what
       # proves there is one: a loading or analysis error surfaces here by its

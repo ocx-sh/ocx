@@ -21,19 +21,57 @@ use crate::{api::data::announce::AnnounceReport, command::deprecated, options};
 const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_registry", "refresh"];
 
 /// Observe an owner-curated set of registry tags and publish the rebuilt entry into the index.
-///
-/// Reads the committed index entry, re-observes the given tags, and writes the rebuilt entry
-/// to a local directory (`--output`) or opens a pull or merge request against the index
-/// repository: from a fork with `--fork`, else from a branch on the index repository itself,
-/// which needs push access there. A run that changes nothing reports as unchanged and commits
-/// nothing; it opens a request only to recover one an earlier run left unopened.
-///
-/// A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under
-/// `--transport git` inside a GitLab job. Writing to `--output` works without one.
 //
 // `override_usage`: a required `ArgGroup` renders every member regardless of `Arg::hide`, so without
 // it `--help` advertises the deprecated `--package`.
 #[derive(Parser)]
+#[command(long_about = "\
+    Observe an owner-curated set of registry tags and publish the rebuilt entry into the index.\n\n\
+    Reads the committed index entry, re-observes the given tags, and writes the rebuilt entry to \
+    a local directory (`--output`). Otherwise it opens a pull or merge request against the index repository. The request comes \
+    from a fork with `--fork`, else from a branch on the index repository itself, which needs \
+    push access there. A run that changes nothing reports as unchanged and commits nothing; it \
+    opens a request only to recover one an earlier run left unopened.\n\n\
+    A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport \
+    git` inside a GitLab job. Writing to `--output` works without one.\n\n\
+    GitHub and GitLab are both supported, on public hosts and self-hosted instances; on GitLab \
+    the change arrives as a merge request. A self-hosted host must name its forge with `--forge` \
+    (exit 64 otherwise). A hostname gives no reliable signal, and a wrong guess would send \
+    the credential to the wrong API.\n\n\
+    GitLab groups nest, so `--index-repo gitlab.example.com/acme/platform/tooling/index` names \
+    project `index` in group path `acme/platform/tooling`, and `--fork` takes the same form; a \
+    nested namespace is rejected on GitHub. A dotted top-level group is ambiguous \
+    (`acme.team/platform/index` reads as host `acme.team`), so write the host out.\n\n\
+    An instance mounted under a path prefix is not supported.\n\n\
+    `announce` never commits to the index's default branch. Both forges use `OCX_ANNOUNCE_TOKEN`; \
+    under `--transport git` the push can be split onto `OCX_ANNOUNCE_GIT_TOKEN`, and inside a \
+    GitLab job with neither set the job's `CI_JOB_TOKEN` carries both.\n\n\
+    Running `announce` again for a package already announced from the same branch updates the \
+    existing request in place. When the index's default branch has moved since it opened, the \
+    branch is rebuilt on the current base as a single commit. That commit carries every tag already \
+    announced, so the request stays mergeable.\n\n\
+    An unchanged run opens no request, with two exceptions. A branch still carrying commits the \
+    index lacks gets a request opened or reused. An unchanged run whose open request can no \
+    longer merge fails with exit 65 naming the branch (close the request or delete the branch). \
+    `--output` writes the whole entry on every run, unchanged included, except for a \
+    `--tags-file` that lists no tag, which exits 0 before writing anything.\n\n\
+    Every run also observes the description published by `ocx package description push`. When its \
+    artifact has moved, the entry's description block (title, summary, keywords, \
+    content-addressed README and logo) is rebuilt and `desc_status` reads `updated`. A \
+    description the index records but the registry no longer serves stops the run.\n\n\
+    A package with no committed entry exits 79: the first-time claim is `ocx package claim`.\n\n\
+    The following are dropped from the set and reported in `reserved_tags_dropped`. They are a tag that is not a version, the OCX-internal `__ocx` namespace (which carries the keep tag), and the legacy `sha256.<hex>` keep tag. `--tags-from-registry` filters them silently. A `--tags` set that \
+    resolves to nothing but reserved tags exits 64.\n\n\
+    A `--tags-file` that lists no tag, or only reserved ones, exits 0 before any registry or \
+    forge work unless `--yank` or `--unyank` was given. A pipeline can therefore feed it the empty file \
+    `ocx package prune` writes.\n\n\
+    Announce observes only the tags it is given and reads the canonical registry, never a \
+    `[mirrors]` entry or a cache. A committed row it is not given is carried through unchanged, \
+    in committed order.\n\n\
+    A given tag the registry reports as `MANIFEST_UNKNOWN` is gone; a removed row's `o/` object \
+    is deleted with it unless another row still references it. `--tags` keeps replace semantics, \
+    so a committed tag it does not name is dropped.\n\n\
+    Additions and removals travel in one announce, so a pipeline makes one index change.")]
 #[command(override_usage = "ocx package announce [OPTIONS] <PACKAGE>")]
 // 0.7 removal: goes with `command/deprecated.rs`. `.required(true)` alone is exactly-one: both spellings
 // is `ArgumentConflict`, neither `MissingRequiredArgument`, both exit 64.

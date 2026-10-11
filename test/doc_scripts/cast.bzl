@@ -190,7 +190,7 @@ visibility("private")
 # The manifest. Generated from `test/scripts/doc_scripts_list.py`;
 # `:manifest_drift` is what keeps it that way. Key is the file name under
 # `test/doc_scripts/`, value is the `# doc:` slug, which is both the cast's
-# output path and the `<Terminal src="/casts/<slug>.cast">` the website reads.
+# output path and the `<Terminal src="/docs/casts/<slug>.cast">` the website reads.
 # ---------------------------------------------------------------------------
 
 CAST_SCRIPTS = {

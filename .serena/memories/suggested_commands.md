@@ -52,8 +52,8 @@ cargo fmt                       # always run before commit
 ## Website
 
 ```sh
-task website:serve   # VitePress dev server
-task website:build   # full build (schema + recordings + sbom + catalog + vitepress)
+task website:serve   # Astro dev server
+task website:build   # full build (schema + doc scripts + recordings + sbom + astro) -> website/dist
 ```
 
 ## Checkpoint / commit / land

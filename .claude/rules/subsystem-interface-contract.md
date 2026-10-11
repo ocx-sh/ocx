@@ -11,8 +11,8 @@ paths:
   - crates/ocx_exit_derive/**
   - crates/ocx_schema/**
   - crates/ocx_sdkgen/**
-  - website/src/docs/reference/environment.md
-  - website/src/docs/reference/command-line.md
+  - website/src/content/docs/reference/environment.md
+  - website/src/content/docs/reference/command-line/**
 ---
 
 # Machine-Interface Contract: Sync Rule
@@ -52,8 +52,8 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 
 | You change | Also change | Held by |
 |---|---|---|
-| An env declaration in `ocx_env` | its heading in `environment.md` | `test/lint/test_env_reference_coverage.py` |
-| A flag, argument or command | its entry in `command-line.md` | `test/lint/test_doc_command_reference.py` |
+| An env declaration in `ocx_env` | regenerate `reference/environment.md` (`task website:reference:generate`) | `task website:reference:check`, `crates/ocx_schema/tests/docs.rs` |
+| A flag, argument or command | regenerate `reference/command-line/**` (`task website:reference:generate`) | `task website:reference:check`, `crates/ocx_schema/tests/docs.rs` |
 | A report field or root | the schema golden under `crates/ocx_schema/tests/golden/` | golden byte test |
 | An error slug or exit code | the `error.detail` docs and the registry | registry tests, `ocx_exit` tests |
 | A command's stdout | its `CONTRACT` entry (`command/contract.rs`) | the `CONTRACT` consistency test |

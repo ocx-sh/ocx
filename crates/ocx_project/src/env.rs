@@ -317,11 +317,11 @@ impl schemars::JsonSchema for ProjectEnv {
                         "type": modifier_kind,
                         "separator": {
                             "type": "string",
-                            "description": "For `list` only: the string this contribution is joined to the variable's existing value with. Omit it to inherit whatever separator another contributor to the same key declared, or a single space if none did."
+                            "description": "For `list` only: the string this contribution is joined to the variable's existing value with. Omit it to inherit whatever separator another contributor to the same key declared, or a single space if none did. It must be non-empty and free of `=`, newline and carriage return. A separator on a non-list entry, an unusable one, or a list value that starts or ends with it is a parse error (exit 78)."
                         },
                         "value": {
                             "type": "string",
-                            "description": "The literal value. For `path`, a relative value resolves against the project root; an absolute one passes through."
+                            "description": "The literal value. For `path`, a relative value resolves against the project root; an absolute one passes through. A `path` value containing the platform path separator is a data error (exit 65): declare one directory per entry."
                         }
                     },
                     "required": ["type", "value"],

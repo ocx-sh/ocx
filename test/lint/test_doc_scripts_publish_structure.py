@@ -109,13 +109,13 @@ def test_pt6_no_test_path_literal_in_website_files() -> None:
         if not p.is_file():
             continue
         # Skip node_modules (third-party JS packages — not website source) and
-        # the gitignored VitePress build output. `dist/` is generated HTML and JS
+        # the gitignored Astro build output and cache. `dist/` is generated HTML and JS
         # carrying every source page inline, so it re-reports each finding a
         # second and third time — and, worse, it makes this gate's verdict depend
         # on whether anyone has run a site build in this checkout rather than on
         # what the tree says. A build artefact cannot hardcode a path; the page
         # it was rendered from can, and that page is already in the corpus.
-        if "node_modules" in p.parts or ".vitepress" in p.parts:
+        if {"node_modules", "dist", ".astro"} & set(p.parts):
             continue
         # Skip binary / lock / generated files
         if p.suffix in (".lock", ".cast", ".json", ".png", ".svg", ".ico", ".webmanifest"):
@@ -170,14 +170,14 @@ def test_pt6_publish_task_consumes_list_export() -> None:
 
 
 # ===========================================================================
-# PT7 — ordering: publish before vitepress build, independent of recordings
+# PT7 — ordering: publish before astro build, independent of recordings
 # ===========================================================================
 
 
-def test_pt7_publish_before_vitepress_independent_of_recordings() -> None:
+def test_pt7_publish_before_astro_independent_of_recordings() -> None:
     """PT7: parse ``website/taskfile.yml`` and assert ordering invariants.
 
-    - The publish task appears in ``build.cmds`` BEFORE ``bunx vitepress build``.
+    - The publish task appears in ``build.cmds`` BEFORE ``astro build``.
     - The publish task is NOT listed as a ``deps:`` dependency of
       ``recordings:parallel`` (they are independent output sets).
 
@@ -229,20 +229,20 @@ def test_pt7_publish_before_vitepress_independent_of_recordings() -> None:
 
     assert build_cmds, (
         "PT7: no cmds found in 'build' task of website/taskfile.yml. "
-        "The publish task must be listed in build.cmds before 'bunx vitepress build'."
+        "The publish task must be listed in build.cmds before 'astro build'."
     )
 
     cmd_texts = [text for _, text in build_cmds]
 
-    # Find the vitepress build command
-    vitepress_idx: int | None = None
+    # Find the astro build command
+    astro_idx: int | None = None
     for idx, text in enumerate(cmd_texts):
-        if "vitepress build" in text:
-            vitepress_idx = idx
+        if "astro build" in text:
+            astro_idx = idx
             break
 
-    assert vitepress_idx is not None, (
-        "PT7: 'bunx vitepress build' not found in build.cmds of website/taskfile.yml"
+    assert astro_idx is not None, (
+        "PT7: 'astro build' not found in build.cmds of website/taskfile.yml"
     )
 
     # Find the publish task invocation
@@ -254,13 +254,13 @@ def test_pt7_publish_before_vitepress_independent_of_recordings() -> None:
 
     assert publish_idx is not None, (
         "PT7: publish task not found in build.cmds of website/taskfile.yml. "
-        "It must appear before 'bunx vitepress build'. "
+        "It must appear before 'astro build'. "
         "Current cmds:\n" + "\n".join(f"  [{i}] {t}" for i, t in enumerate(cmd_texts))
     )
 
-    assert publish_idx < vitepress_idx, (
+    assert publish_idx < astro_idx, (
         f"PT7: publish task (index {publish_idx}) must appear before "
-        f"'bunx vitepress build' (index {vitepress_idx}) in build.cmds. "
+        f"'astro build' (index {astro_idx}) in build.cmds. "
         f"Current order:\n" + "\n".join(f"  [{i}] {t}" for i, t in enumerate(cmd_texts))
     )
 
@@ -307,7 +307,7 @@ def test_pt8_no_website_path_literal_in_test_files() -> None:
     excluded by ``_OUTPUT_PATH_SEGMENTS``.
 
     Specifically excluded from this scan:
-    - Paths under ``website/src/docs/`` (walkthrough pages read for NC1–NC3
+    - Paths under ``website/src/content/docs/`` (walkthrough pages read for NC1–NC3
       checks, command-line reference checks, project-toolchain tests).
     - Paths under ``website/src/public/schemas/`` (schema generation tests that
       read the generated file at a known location).
@@ -346,7 +346,7 @@ def test_pt8_no_website_path_literal_in_test_files() -> None:
     # WRITE target (casts/) rather than a read-only source reference.
     #
     # Allowed patterns that reference website/ as a READ-ONLY source:
-    #   - website/src/docs/…        (NC1–NC3, command-line ref, project tests)
+    #   - website/src/content/docs/…        (NC1–NC3, command-line ref, project tests)
     #   - website/src/public/schemas/… (schema generation tests)
     #   - website/src/_scripts/…   (manifest read for NC2)
     #
@@ -366,7 +366,7 @@ def test_pt8_no_website_path_literal_in_test_files() -> None:
     # Build an allowlist regex; if the line matches allowlist it is skipped.
     _allowed_website_re = re.compile(
         r"""(
-            website/src/docs/
+            website/src/content/docs/
           | website/src/public/schemas/
           | website/src/_scripts
           | website/taskfile\.yml          # taskfile reference by name

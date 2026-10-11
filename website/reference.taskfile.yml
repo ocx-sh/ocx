@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  DOCS_DIR: "{{.TASKFILE_DIR}}/src/content/docs"
+  DOCS_TARGET: //crates/ocx_schema:docs
+  GENERATOR_TARGET: //crates/ocx_schema:ocx_schema_bin
+
+tasks:
+  generate:
+    desc: >-
+      Generate the CLI, environment, configuration, project-file and exit-code
+      reference pages from //crates/ocx_schema:docs into src/content/docs/reference/.
+    # The repository root, because `ocx exec` resolves `bazel` from the nearest
+    # `ocx.toml`. No `sources:`: Bazel is the cache.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # A nested `task`, not `task: :bazel:bootstrap` (see schema.taskfile.yml).
+      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
+      - ocx exec bazel -- bazel build {{.DOCS_TARGET}}
+      - cmd: |
+          set -eu
+          files=$(ocx exec bazel -- bazel cquery --output=files {{.DOCS_TARGET}} 2>/dev/null)
+          [ "$(printf '%s\n' "$files" | wc -l)" -eq 1 ] && [ -f "$files" ] || {
+            echo "reference:generate: {{.DOCS_TARGET}} does not report exactly docs.tar" >&2; exit 1; }
+          # The generator owns this directory; drop it so a removed command leaves no page behind.
+          rm -rf '{{.DOCS_DIR}}/reference/command-line'
+          tar -xf "$files" -C '{{.DOCS_DIR}}' --no-same-owner --no-same-permissions
+          chmod -R u+w '{{.DOCS_DIR}}/reference'
+
+  check:
+    desc: Fail when a generated reference page differs from what the sources render
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
+      - ocx exec bazel -- bazel build {{.GENERATOR_TARGET}}
+      - cmd: |
+          set -eu
+          bin=$(ocx exec bazel -- bazel cquery --output=files {{.GENERATOR_TARGET}} 2>/dev/null)
+          [ "$(printf '%s\n' "$bin" | wc -l)" -eq 1 ] && [ -x "$bin" ] || {
+            echo "reference:check: {{.GENERATOR_TARGET}} does not report exactly one binary" >&2; exit 1; }
+          "$bin" docs --check --out '{{.DOCS_DIR}}' || {
+            echo "reference:check: the pages above drifted; run 'task website:reference:generate'" >&2; exit 1; }
+
+  default:
+    desc: Generate the reference pages
+    cmds:
+      - task: generate

@@ -2,30 +2,18 @@
 # Copyright 2026 The OCX Authors
 """Documentation contract tests for the Project Toolchain pages.
 
-Pure file-content checks. After main's user-guide redesign
-(``docs(website): redesign user guide as use-case-driven walkthrough``),
-the canonical home for project-toolchain depth moved from
-``website/src/docs/user-guide.md`` (single deep section) to
-``website/src/docs/in-depth/project.md`` (dedicated In Depth page) with a
-short use-case stub in ``user-guide.md`` linking into it.
+Pure file-content checks over markdown, no subprocess and no registry. The
+depth lives in ``explanation/project-toolchain.md`` (``ocx.toml``, the lock,
+activation, the global toolchain and reproducibility), ``explanation/project-groups.md``
+holds the groups section, and the how-to ``guides/project-toolchain.mdx``
+links into the explanation page. The tests enforce:
 
-These tests therefore enforce two contracts:
-
-* **In Depth page** — required H2 anchors in declared order, locking
+* **Explanation page** - required H2 anchors in declared order, the locking
   callout (machine-generated lockfile, ``ocx.lock merge=union``
-  ``.gitattributes`` guidance), and SLSA framing that is forward-looking
-  only (no level claim, ``v2``-tagged attestation deferral).
-* **User guide** — has a use-case section that mentions project tooling
-  and links to the In Depth page so readers can find the depth.
-
-The original Phase-10 anchor scheme used ``project-toolchain-*`` prefixes
-because the section was nested under an H2 in ``user-guide.md``. Now that
-the deep content lives in a standalone page, anchors are short
-(``#toml``, ``#lock``) per the convention used by the other In Depth
-pages (``storage.md`` uses ``#packages``, not ``#storage-packages``).
-
-No subprocess; no registry. The test reads markdown directly and asserts
-on substrings, anchors, and TODO markers.
+  ``.gitattributes`` guidance), and SLSA framing that is forward-looking only
+  (no level claim, ``v2``-tagged attestation deferral).
+* **Groups page** - owns the ``{#groups}`` anchor.
+* **How-to guide** - mentions ``ocx.toml`` and links to the explanation page.
 """
 from __future__ import annotations
 
@@ -37,17 +25,19 @@ import pytest
 # Project root is two directories above this test file:
 # test/lint/test_doc_project_toolchain.py → repo root.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-USER_GUIDE = PROJECT_ROOT / "website" / "src" / "docs" / "user-guide.md"
-IN_DEPTH = PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "project.md"
+DOCS = PROJECT_ROOT / "website" / "src" / "content" / "docs"
+USER_GUIDE = DOCS / "guides" / "project-toolchain.mdx"
+IN_DEPTH = DOCS / "explanation" / "project-toolchain.md"
+GROUPS = DOCS / "explanation" / "project-groups.md"
 
 
-# Required anchors in their declared order on the In Depth page. The
+# Required anchors in their declared order on the explanation page. The
 # old slsa→reproducibility rename remains a hard constraint.
 #
 # Living Design — anchor rename by ``adr_global_toolchain_tier.md``
 # §Decision 1: the implicit ``$OCX_HOME/ocx.toml`` home-tier fallback was
 # DELETED and replaced by the explicit ``--global`` toolchain tier. The
-# In Depth page's ``## Home tier {#home-tier}`` section was rewritten to
+# explanation page's ``## Home tier {#home-tier}`` section was rewritten to
 # ``## Global toolchain {#global-toolchain}`` accordingly (the page now
 # states verbatim "Unlike the old home-tier fallback, the global
 # toolchain is never discovered implicitly"). This is a sanctioned
@@ -59,7 +49,6 @@ REQUIRED_ANCHORS_IN_ORDER = [
     "{#toml}",
     "{#lock}",
     "{#pull-exec}",
-    "{#groups}",
     "{#activation}",
     "{#global-toolchain}",
     "{#reproducibility}",
@@ -68,15 +57,15 @@ REQUIRED_ANCHORS_IN_ORDER = [
 
 @pytest.fixture(scope="module")
 def in_depth_text() -> str:
-    """Read in-depth/project.md once per module."""
-    assert IN_DEPTH.exists(), f"in-depth/project.md missing at {IN_DEPTH}"
+    """Read explanation/project-toolchain.md once per module."""
+    assert IN_DEPTH.exists(), f"explanation/project-toolchain.md missing at {IN_DEPTH}"
     return IN_DEPTH.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
 def user_guide_text() -> str:
-    """Read user-guide.md once per module."""
-    assert USER_GUIDE.exists(), f"user-guide.md missing at {USER_GUIDE}"
+    """Read guides/project-toolchain.mdx once per module."""
+    assert USER_GUIDE.exists(), f"guides/project-toolchain.mdx missing at {USER_GUIDE}"
     return USER_GUIDE.read_text(encoding="utf-8")
 
 
@@ -106,10 +95,17 @@ def _slice_section(text: str, anchor: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_in_depth_has_project_toolchain_h1(in_depth_text: str) -> None:
-    """The dedicated In Depth page is titled `# Project Toolchain`."""
-    assert "# Project Toolchain" in in_depth_text, (
-        "in-depth/project.md must declare the H1 `# Project Toolchain`"
+def test_in_depth_is_titled_project_toolchain(in_depth_text: str) -> None:
+    """The explanation page is titled `Project Toolchain` in its front matter."""
+    assert 'title: "Project Toolchain"' in in_depth_text.split("---")[1], (
+        "explanation/project-toolchain.md must declare the title `Project Toolchain`"
+    )
+
+
+def test_groups_anchor_lives_on_the_groups_page() -> None:
+    """The groups section moved to its own page and keeps the `{#groups}` anchor."""
+    assert "{#groups}" in GROUPS.read_text(encoding="utf-8"), (
+        "explanation/project-groups.md must carry the `{#groups}` anchor"
     )
 
 
@@ -121,7 +117,7 @@ def test_in_depth_has_all_required_subsection_anchors(
     for anchor in REQUIRED_ANCHORS_IN_ORDER:
         idx = in_depth_text.find(anchor, cursor)
         assert idx != -1, (
-            f"required anchor {anchor} missing from in-depth/project.md "
+            f"required anchor {anchor} missing from explanation/project-toolchain.md "
             f"(or out of order — searched from offset {cursor})"
         )
         cursor = idx + len(anchor)
@@ -149,7 +145,7 @@ def test_in_depth_has_no_phase10_todo_markers(in_depth_text: str) -> None:
     pattern = re.compile(r"<!--\s*TODO:?\s*Phase\s*10[^\n]*-->", re.IGNORECASE)
     leftover = pattern.findall(in_depth_text)
     assert not leftover, (
-        f"in-depth/project.md still has {len(leftover)} unimplemented "
+        f"explanation/project-toolchain.md still has {len(leftover)} unimplemented "
         f"Phase 10 TODO markers: {leftover[:3]} (showing first 3)"
     )
 
@@ -267,22 +263,22 @@ def test_reproducibility_section_makes_no_slsa_level_claim(
 
 
 # ---------------------------------------------------------------------------
-# User guide: has a stub linking into the In Depth page
+# User guide: has a stub linking into the explanation page
 # ---------------------------------------------------------------------------
 
 
 def test_user_guide_links_to_in_depth_project(user_guide_text: str) -> None:
-    """The use-case section in the user guide must link into the In Depth
+    """The how-to guide must link into the explanation
     page so readers find the depth. The ref-style label
-    ``in-depth-project`` resolves to ``./in-depth/project.md`` per the
+    ``in-depth-project`` resolves to ``../explanation/project-toolchain.md`` per the
     user-guide link block."""
-    assert "[in-depth-project]: ./in-depth/project.md" in user_guide_text, (
-        "user-guide.md must define the `in-depth-project` reference link "
-        "pointing at `./in-depth/project.md` so the use-case section can "
-        "deep-link into the dedicated In Depth page"
+    assert "[in-depth-project]: ../explanation/project-toolchain.md" in user_guide_text, (
+        "guides/project-toolchain.mdx must define the `in-depth-project` reference link "
+        "pointing at `../explanation/project-toolchain.md` so the use-case section can "
+        "deep-link into the dedicated explanation page"
     )
     assert "[in-depth-project]" in user_guide_text or "[Project Toolchain In Depth][in-depth-project]" in user_guide_text, (
-        "user-guide.md must reference the in-depth project page via the "
+        "guides/project-toolchain.mdx must reference the in-depth project page via the "
         "`in-depth-project` ref-style link in a `Learn more` callout"
     )
 
@@ -292,7 +288,7 @@ def test_user_guide_mentions_project_toolchain(user_guide_text: str) -> None:
     can find it from the use-case-driven entry point. Phrasing is
     flexible; the literal `ocx.toml` is the most reliable signal."""
     assert "ocx.toml" in user_guide_text, (
-        "user-guide.md must mention `ocx.toml` (the project toolchain "
+        "guides/project-toolchain.mdx must mention `ocx.toml` (the project toolchain "
         "manifest) somewhere in the use-case sections so readers can "
         "discover it"
     )

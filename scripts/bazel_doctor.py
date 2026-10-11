@@ -37,7 +37,7 @@ last, which stays the right place for a genuinely per-checkout experiment.
    check is not a regex over the value — it is `shlex.split` over the line,
    which is the same tokenization Bazel performs, so the detector cannot
    disagree with the thing it detects.
-2. *`Python-urllib/*` gets a Cloudflare 403 on `*.ocx.sh`.* A verdict of "any
+2. *`Python-urllib/*` gets a CDN-edge 403 on `*.ocx.sh`.* A verdict of "any
    non-401 means the credential works" reads that 403 as a **pass** — measured:
    the naive probe returned 403 with a valid credential, with no credential, and
    with a deliberately wrong one, identically. So the probe sends a real
@@ -631,7 +631,7 @@ def credential_verdict(status: int | str) -> Check:
     not something bazel-remote synthesises — 404 for `/v1/cas/<zeros>`, 401 for
     no or wrong credential, and **403 for a valid credential sent with urllib's
     default User-Agent**. That 403 came back *identically* with a valid
-    credential, with none, and with a deliberately wrong one: it is Cloudflare
+    credential, with none, and with a deliberately wrong one: it is the CDN edge
     refusing the agent before nginx sees the request, so it settles nothing
     about the credential and gets its own FAIL saying so. `!= 401` would report
     that edge block as a working credential, which is why the green side is

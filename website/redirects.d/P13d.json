@@ -1,0 +1,96 @@
+{
+  "/docs/in-depth/configuration/": {
+    "fragments": {
+      "configuration": "/docs/explanation/configuration/",
+      "managed-forward-compat": "/docs/explanation/managed-configuration/#managed-forward-compat",
+      "managed-offline": "/docs/explanation/managed-configuration/#managed-offline",
+      "managed-position": "/docs/explanation/managed-configuration/#managed-position",
+      "managed-refresh": "/docs/explanation/managed-configuration/#managed-refresh",
+      "managed-update": "/docs/explanation/managed-configuration/#managed-update"
+    }
+  },
+  "/docs/in-depth/cosign-parity/": {
+    "fragments": {
+      "cosign-parity": "/docs/explanation/cosign-parity/"
+    }
+  },
+  "/docs/in-depth/environments/": {
+    "fragments": {
+      "env-composition": "/docs/explanation/environments/",
+      "launcher-embedding": "/docs/explanation/launcher-forwarding/#launcher-embedding",
+      "ocx-forwarding": "/docs/explanation/launcher-forwarding/#ocx-forwarding"
+    }
+  },
+  "/docs/in-depth/indices/": {
+    "fragments": {
+      "fresh-machine": "/docs/explanation/local-index/#fresh-machine",
+      "indices": "/docs/explanation/indices/",
+      "local": "/docs/explanation/local-index/#local",
+      "local-crash-safety": "/docs/explanation/local-index/#local-crash-safety",
+      "local-dispatch": "/docs/explanation/local-index/#local-dispatch",
+      "local-layout": "/docs/explanation/local-index/#local-layout",
+      "mirroring": "/docs/guides/corporate-mirror/",
+      "public-index": "/docs/explanation/public-index/#public-index",
+      "public-index-caching": "/docs/explanation/public-index/#public-index-caching",
+      "public-index-declared-names": "/docs/explanation/public-index/#public-index-declared-names",
+      "public-index-layout": "/docs/explanation/public-index/#public-index-layout",
+      "public-index-pipeline": "/docs/explanation/public-index/#public-index-pipeline",
+      "public-index-status": "/docs/explanation/public-index/#public-index-status",
+      "servable": "/docs/guides/serve-an-index/#servable",
+      "servable-air-gap": "/docs/guides/serve-an-index/#servable-air-gap",
+      "servable-consuming": "/docs/guides/serve-an-index/#servable-consuming",
+      "servable-defect": "/docs/guides/serve-an-index/#servable-defect",
+      "servable-regenerate": "/docs/guides/serve-an-index/#servable-regenerate",
+      "update-modes": "/docs/explanation/local-index/#update-modes"
+    }
+  },
+  "/docs/in-depth/project/": {
+    "fragments": {
+      "groups": "/docs/explanation/project-groups/#groups",
+      "groups-binding-identity": "/docs/explanation/project-groups/#groups-binding-identity",
+      "project-toolchain": "/docs/explanation/project-toolchain/",
+      "pull-dry-run": "/docs/explanation/toolchain-render/#pull-dry-run",
+      "pull-render": "/docs/explanation/toolchain-render/#pull-render",
+      "pull-render-skipped": "/docs/explanation/toolchain-render/#pull-render-skipped",
+      "running-exit-codes": "/docs/reference/exit-codes/",
+      "running-scope": "/docs/guides/run-project-tools/#exec",
+      "running-shape": "/docs/guides/run-project-tools/#exec"
+    }
+  },
+  "/docs/in-depth/self-hosted-sigstore/": {
+    "fragments": {
+      "self-hosted-sigstore": "/docs/guides/self-hosted-sigstore/"
+    }
+  },
+  "/docs/in-depth/shell-integration/": {
+    "fragments": {
+      "activation-elvish-guard": "/docs/troubleshooting/shell/#repair",
+      "activation-project-created-in-place": "/docs/troubleshooting/shell/#diagnostics",
+      "coexistence": "/docs/troubleshooting/shell/#coexistence",
+      "commands": "/docs/troubleshooting/shell/#commands",
+      "consent-tiers": "/docs/explanation/shell-consent/#consent-tiers",
+      "diagnostics": "/docs/troubleshooting/shell/#diagnostics",
+      "repair": "/docs/troubleshooting/shell/#repair"
+    }
+  },
+  "/docs/in-depth/signing/": {
+    "fragments": {
+      "attestations": "/docs/publishing/attest-and-sbom/",
+      "ci": "/docs/publishing/sign-a-release/#ci",
+      "ci-credentials": "/docs/publishing/sign-a-release/#ci-credentials",
+      "cosign-interop": "/docs/explanation/cosign-parity/#cosign-interop",
+      "offline-verification": "/docs/guides/verify-installs/#supply-chain-offline",
+      "self-hosted": "/docs/guides/self-hosted-sigstore/#components",
+      "self-hosted-policy": "/docs/guides/self-hosted-sigstore/#issuers-policies",
+      "signing": "/docs/explanation/signing/"
+    }
+  },
+  "/docs/in-depth/storage/": {
+    "fragments": {
+      "toolchain": "/docs/explanation/toolchain-tree/#toolchain",
+      "toolchain-gc": "/docs/explanation/toolchain-tree/#toolchain-gc",
+      "toolchain-location": "/docs/explanation/toolchain-tree/#toolchain-location",
+      "toolchain-stamp": "/docs/explanation/toolchain-tree/#toolchain-stamp"
+    }
+  }
+}

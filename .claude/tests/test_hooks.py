@@ -555,7 +555,7 @@ class TestPostToolUseTrackerMarkdownInfra:
     def test_website_docs_have_no_config_reminder(self) -> None:
         """Website docs are not AI config — no reminder entry should match."""
         assert post_tool_use_tracker.check_config_reminder(
-            "website/src/docs/user-guide.md"
+            "website/src/content/docs/user-guide.md"
         ) is None
 
     def test_is_ai_config_markdown_rules(self) -> None:
@@ -567,7 +567,7 @@ class TestPostToolUseTrackerMarkdownInfra:
     def test_is_ai_config_markdown_website_doc(self) -> None:
         """Website docs are not AI config markdown."""
         assert post_tool_use_tracker._is_ai_config_markdown(
-            "website/src/docs/foo.md"
+            "website/src/content/docs/foo.md"
         ) is False
 
     def test_is_ai_config_markdown_changelog(self) -> None:

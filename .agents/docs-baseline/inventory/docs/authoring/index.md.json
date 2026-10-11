@@ -1,0 +1,78 @@
+{
+ "anchors": [
+  "authoring",
+  "decisions",
+  "journey",
+  "see-also",
+  "tldr"
+ ],
+ "commands": [
+  "ocx package create",
+  "ocx package install",
+  "ocx package push"
+ ],
+ "flags": [
+  "--cascade",
+  "--keep",
+  "--transport"
+ ],
+ "env": [],
+ "config_keys": [
+  "env"
+ ],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "../in-depth/environments.md",
+  "../in-depth/storage.md",
+  "../reference/command-line.md#package",
+  "../reference/command-line.md#package-install",
+  "../reference/command-line.md#package-push",
+  "../reference/metadata.md",
+  "../user-guide.md",
+  "./announcing.md",
+  "./announcing.md#announcing-claim",
+  "./announcing.md#announcing-postures",
+  "./building-pushing.md",
+  "./building-pushing.md#cascade",
+  "./building-pushing.md#layer-reuse",
+  "./bundle-anatomy.md",
+  "./bundle-anatomy.md#strip-components",
+  "./dependencies.md",
+  "./dependencies.md#name-field",
+  "./entry-points.md",
+  "./entry-points.md#when",
+  "./env-surface.md",
+  "./env-surface.md#migrating",
+  "./env-surface.md#visibility",
+  "./migration.md",
+  "./migration.md#describe",
+  "./multi-platform.md",
+  "./testing.md",
+  "/casts/authoring/package-push.cast",
+  "https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases",
+  "https://github.com/opencontainers/distribution-spec",
+  "https://github.com/opencontainers/image-spec/blob/main/image-index.md",
+  "https://github.com/opencontainers/image-spec/blob/main/manifest.md#image-manifest"
+ ],
+ "fences": [
+  "json:54df1869: {",
+  "sh:dde49f60: ocx package create build -p linux/amd64 -m metadata.json -o "
+ ],
+ "facts": [
+  "Publishing to OCX has three layers: build a deterministic archive, attach metadata declaring the environment, then push to any OCI registry. [L6]",
+  "The shortest path is three steps: lay out a bin directory, add a metadata sidecar that puts bin on PATH, then bundle and push. [L10]",
+  "The metadata sidecar is not bundled into the archive; ocx package push uploads it as the manifest config blob. [L12]",
+  "At install time OCX restores the sidecar as a sibling of content, not inside it. [L12]",
+  "The working directory layout puts bundle contents under build and the metadata.json sidecar next to it. [L14]",
+  "The sidecar declares one public env entry that prepends the package's bin directory to PATH. [L31]",
+  "Bundling build into a deterministic archive and pushing attaches metadata.json as the config blob, with no copy inside the archive. [L49]",
+  "The terminal recording shows bundling and pushing mytool 1.0.0. [L57]",
+  "Consumers install with ocx package install and the binary lands on their PATH. [L59]",
+  "For scripted runtimes, declare the interpreter as a dependency and ship a named entry point rather than relying on ambient python3. [L61]",
+  "The publisher journey splits into eight decisions, from bundle anatomy through to migration patterns. [L67]",
+  "Testing locally runs the install pipeline in a temp directory, with no registry round trip and no new digest. [L75]",
+  "A pushed package that cannot be resolved as namespace/package needs the namespace claimed through the announcing page. [L92]"
+ ],
+ "lines": 147
+}

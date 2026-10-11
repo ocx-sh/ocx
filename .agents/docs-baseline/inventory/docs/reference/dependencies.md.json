@@ -1,0 +1,19 @@
+{
+ "anchors": [
+  "dependencies"
+ ],
+ "commands": [],
+ "flags": [],
+ "env": [],
+ "config_keys": [],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "https://cyclonedx.org/"
+ ],
+ "fences": [],
+ "facts": [
+  "Lists the third-party dependencies compiled into the ocx binary, generated from the CycloneDX SBOM at build time and rendered by the DependencyExplorer component. [L7]"
+ ],
+ "lines": 13
+}

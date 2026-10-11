@@ -45,26 +45,57 @@ pub type Setting<T> = Result<T, Rejected>;
 pub struct UpdateConfig {
     /// What ocx does when a newer ocx is published: `apply` installs it after the command
     /// finishes, `notify` (default) prints a notice, `manual` never checks.
+    /// Overridden by the `OCX_SELF_UPDATE` environment variable.
     #[serde(rename = "self", default)]
     // `with` drops the derived `"default": null` the published schema carries.
-    #[schemars(with = "Option<RefreshPolicy>", extend("default" = null))]
+    #[schemars(with = "Option<RefreshPolicy>", extend("default" = "notify"))]
     pub self_policy: Option<Setting<RefreshPolicy>>,
 
     /// What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,
     /// `manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.
+    /// Overridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.
     #[serde(default)]
-    // `with` drops the derived `"default": null` the published schema carries.
-    #[schemars(with = "Option<RefreshPolicy>", extend("default" = null))]
+    // `schema_with` drops the derived `"default": null` and words `apply` as the `notify` it is read as.
+    #[schemars(schema_with = "toolchain_policy_schema", extend("default" = "notify"))]
     pub toolchain: Option<Setting<RefreshPolicy>>,
 
     /// Minimum time between two checks, `\d+[smhd]?` (bare digits = seconds); `"0"` checks on
-    /// every command. Defaults to `"1d"`.
-    #[schemars(with = "Option<String>")]
+    /// every command. Defaults to `"1d"`. Overridden by the `OCX_UPDATE_CHECK_INTERVAL`
+    /// environment variable.
+    #[schemars(with = "Option<String>", extend("default" = "1d"))]
     pub interval: Option<Setting<Duration>>,
 
     /// Set when `update` was written as something other than a table.
     #[schemars(skip)]
     pub section: Option<Rejected>,
+}
+
+/// `RefreshPolicy` for `toolchain`, which reads `apply` as `notify`; the shared enum's `apply` text would say otherwise.
+fn toolchain_policy_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            {
+                "oneOf": [
+                    {
+                        "description": "Read as `notify`: only `ocx update` moves a pin.",
+                        "type": "string",
+                        "const": "apply"
+                    },
+                    {
+                        "description": "A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.",
+                        "type": "string",
+                        "const": "notify"
+                    },
+                    {
+                        "description": "The background check is skipped entirely; only an explicit command refreshes.",
+                        "type": "string",
+                        "const": "manual"
+                    }
+                ]
+            },
+            { "type": "null" }
+        ]
+    })
 }
 
 impl<'de> Deserialize<'de> for UpdateConfig {
@@ -260,6 +291,24 @@ fn warn_rejected(key: &str, rejected: &Rejected, expected: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `toolchain_policy_schema` hand-copies `RefreshPolicy`'s variants to reword `apply`; a variant
+    /// added to the enum must not go missing from the published `update.toolchain` schema.
+    #[test]
+    fn toolchain_policy_schema_lists_exactly_the_refresh_policy_variants() {
+        let mut generator = schemars::SchemaGenerator::default();
+        let schema = toolchain_policy_schema(&mut generator).to_value();
+        let mut spelled: Vec<&str> = schema["anyOf"][0]["oneOf"]
+            .as_array()
+            .expect("the policy branch is a oneOf")
+            .iter()
+            .map(|variant| variant["const"].as_str().expect("every variant is a string const"))
+            .collect();
+        let mut variants: Vec<&str> = RefreshPolicy::ALL.iter().map(|policy| policy.as_str()).collect();
+        spelled.sort_unstable();
+        variants.sort_unstable();
+        assert_eq!(spelled, variants);
+    }
 
     const DAY: Duration = Duration::from_secs(86_400);
 

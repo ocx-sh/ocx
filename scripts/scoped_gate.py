@@ -19,6 +19,8 @@ The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
      any other `.claude/` path escalates (a taskfile excepted),
      so a new subtree is loud until someone routes it) → `task
      claude:tests`;
+     `website/**` and `.claude/rules/docs-*` → the `docs` route
+     (`test:lint:structure`, `website:test` and `website:reference:check`);
      `.github/**` → actionlint plus `.claude/tests/test_workflows.py`; an
      existing `test/tests/test_<f>.py` → `task test:parallel --
      tests/test_<f>.py`; `scripts/**` → `task scripts:self-test`; every
@@ -139,6 +141,8 @@ CLAUDE_TESTS_READS = (
     ".claude/templates/",
     ".claude/tests/",
 )
+# Rules that govern the docs site: an edit also runs the `docs` route.
+DOCS_RULES = (".claude/rules/docs-",)
 WORKFLOW_TEST = Path(".claude") / "tests" / "test_workflows.py"
 # A crate directory's workspace-structure surface: what it declares to the
 # workspace rather than what it compiles. `crates/<crate>/Cargo.toml` carries
@@ -1004,6 +1008,7 @@ class Plan:
             "scripts": [],
             "taskfiles": [],
             "manifests": [],
+            "docs": [],
         }
     )
     workflow_test_cmd: str = ""
@@ -1075,10 +1080,17 @@ def classify(
             # like `.claude/**`, and `claude:tests` is the cheapest gate
             # that reads it — an escalation to the full run bought nothing.
             plan.routes["claude"].append(path)
+            if path.startswith(DOCS_RULES):
+                plan.routes["docs"].append(path)
         elif parts[-1] == "taskfile.yml" or parts[-1].endswith(".taskfile.yml"):
             # Root and nested taskfiles: a parse/listing (`task --list-all`)
             # is the cheap check; the full verify runs only at a run's gates.
             plan.routes["taskfiles"].append(path)
+        elif parts[0] == "website":
+            # The docs content, its plugins and its tests: the structural
+            # sweeps and the generated-reference drift check certify an edit;
+            # the full verify runs only at a run's gates.
+            plan.routes["docs"].append(path)
         elif parts[0] == ".github":
             plan.routes["workflows"].append(path)
         elif parts[0] == "scripts":
@@ -1402,6 +1414,30 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             and plan.escalate == []
             and plan.decision == "routed",
             f"routing wrong: {plan.as_json()}",
+        )
+
+    def docs_route_without_escalating() -> str | None:
+        # Docs content and the docs rules ride the `docs` route; a docs rule
+        # still reaches `claude:tests`, and a website taskfile stays a taskfile.
+        plan = _plan_for(
+            ["website/src/content/docs/getting-started.mdx", ".claude/rules/docs-style.md", "website/sbom.taskfile.yml"],
+            ws,
+            root,
+        )
+        return expect(
+            plan.decision == "routed"
+            and plan.escalate == []
+            and plan.routes["docs"] == [".claude/rules/docs-style.md", "website/src/content/docs/getting-started.mdx"]
+            and plan.routes["claude"] == [".claude/rules/docs-style.md"]
+            and plan.routes["taskfiles"] == ["website/sbom.taskfile.yml"],
+            f"website/** and docs rules must route to docs, not escalate: {plan.as_json()}",
+        )
+
+    def a_non_docs_rule_does_not_run_the_docs_route() -> str | None:
+        plan = _plan_for([".claude/rules/quality-rust.md"], ws, root)
+        return expect(
+            plan.routes["docs"] == [] and plan.routes["claude"] == [".claude/rules/quality-rust.md"],
+            f"only docs-* rules may reach the docs route: {plan.as_json()}",
         )
 
     def taskfiles_route_without_escalating() -> str | None:
@@ -2495,6 +2531,8 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("reverse-dependent counts", rdeps),
         ("hub predicate", hubs),
         ("routing table", routes),
+        ("docs route without escalating", docs_route_without_escalating),
+        ("a non-docs rule does not run the docs route", a_non_docs_rule_does_not_run_the_docs_route),
         ("taskfiles route without escalating", taskfiles_route_without_escalating),
         ("unlisted .claude/ subtree escalates", unlisted_claude_subtree_escalates),
         ("scripts/** routes to the self-tests without escalating", scripts_route_without_escalating),

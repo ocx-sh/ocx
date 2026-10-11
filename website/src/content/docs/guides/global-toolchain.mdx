@@ -1,0 +1,223 @@
+---
+title: "Keep everyday packages available everywhere"
+description: "Keep a personal set of tools on PATH in every shell."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+Keep a personal set of packages such as `ripgrep`, `cmake` and `shellcheck` on `PATH` in every shell you open, without letting any of them leak into a project build.
+
+This guide assumes ocx is already [installed][install-ocx], with the installer's shell wiring.
+
+Those two goals conflict unless a hard boundary separates them. The global toolchain is that boundary. It gives you an `apt`-style set of packages you always want around, and none of it reaches a project's resolved environment.
+
+## Add packages to the global toolchain \{#global-toolchain-add\}
+
+Use the root `--global` flag (before the subcommand) to target `$OCX_HOME/ocx.toml`:
+
+\<\<\< @/_scripts/user-guide/global-add.sh\{sh\}
+
+`ocx --global add` records the binding in `$OCX_HOME/ocx.toml`, re-locks, installs and selects the package in one step. A package's binaries must be on PATH to be useful globally, so select is always implied.
+
+The same root `--global` flag works with `remove`, `lock`, `update` and `pull`:
+
+\<\<\< @/_scripts/user-guide/global-manage.sh\{sh\}
+
+The global file lives at `$OCX_HOME/ocx.toml` (default `~/.ocx/ocx.toml`). Mutators create it on first use, so no `ocx init` step is required.
+
+:::caution[`--global` and `--project` are mutually exclusive]
+Both flags pick a project file. Passing them together exits with code 64 (`UsageError`).
+:::
+
+## Shell activation for global packages \{#global-toolchain-shell\}
+
+Adding a package with [`ocx --global add`][user-guide-global-add] puts it on `PATH` in every shell you have open, not just new ones. The OCX installer writes a thin shim file, `$OCX_HOME/env.sh`, and a marked block in your shell profiles. The shim calls [`ocx self activate`][cmd-self-activate] at runtime. Its content is byte-identical across users and survives `OCX_HOME` changes without re-running the installer.
+
+At **shell start**, `ocx self activate` emits three things:
+
+- Two `PATH` prepends: OCX's own binary directory, and `$OCX_HOME/toolchain/active/bin` in front of it.
+- Shell completions, unless [`OCX_NO_COMPLETION=1`][env-ocx-no-completion].
+- An `eval "$(ocx --global env --shell=sh)"` call, when the global toolchain's [`activate`][config-project-activate] is `env`.
+
+The prepends happen in every mode. Only the `eval` is the mode's to withhold.
+
+In bash, zsh, fish, PowerShell and elvish, `ocx self activate` also registers a per-prompt hook. The hook re-checks a small watch set, the global `ocx.toml` and the selected binary, and re-runs only when something changed. Elvish is the exception: its guard checks only the carrier and the working directory, not a watch-set stat. An unchanged prompt costs a stat comparison and not a re-resolve. So `ocx --global add ripgrep` followed by `rg --version` in the same terminal works at the very next prompt.
+
+`nushell`'s directory-change hook keeps the global toolchain live the same way. The strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe hook point in their prompt machinery. They refresh only at shell start. See [Shell Integration][in-depth-shell-integration] for the per-shell coverage table and the mechanism underneath it.
+
+Disable the per-prompt hook for one shell or every shell with [`OCX_NO_HOOK`][env-ocx-no-hook] or `ocx self setup --no-hook`. `PATH`, completions and the global-toolchain `eval` at shell start are unaffected, and only the per-prompt re-check turns off.
+
+The installer appends a marked block to the shell profiles, so re-running it is idempotent:
+
+```sh
+# >>> ocx v1 <hash> >>>
+if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
+    . "${OCX_HOME:-$HOME/.ocx}/env.sh"
+fi
+# <<< ocx <<<
+```
+
+You can inspect what the global env exports:
+
+\<\<\< @/_scripts/user-guide/global-env.sh\{sh\}
+
+`--shell` is the only eval-safe output channel. Do not `eval "$(ocx --global env)"`, because plain table output is not sourceable.
+
+## Binaries on PATH, nothing else composed \{#global-toolchain-bin\}
+
+You want the toolchain's binaries reachable, and you want your shell to stop there. That means no per-prompt environment envelope, and no variables applied on the way into a directory and reverted on the way out. On a machine where you already manage your own environment, composing one for you is more than you asked for.
+
+`activate = "bin"` is that narrower contract. A toolchain in `bin` mode contributes its `active/bin` directory to `PATH` and composes nothing else. Each binary still gets **its own package's** environment. Its [launcher trampoline][in-depth-entry-points] applies that when the binary runs, instead of your shell applying it at every prompt.
+
+A trampoline does not carry the `ocx.toml`'s own `[env]` block. Those variables are composed for a shell, and `bin` mode composes nothing for a shell. If you rely on an `[env]` such as `SSL_CERT_FILE` or `CARGO_HOME`, `env` mode applies it. [`ocx exec`][cmd-run] (with `--global` for the global toolchain) is the explicit route that composes it whatever `activate` says.
+
+The key lives in an `ocx.toml`, and each file decides for its own toolchain. A project's file decides for that project:
+
+```toml
+# <project>/ocx.toml
+activate = "bin"
+
+[tools]
+cmake = "ocx.sh/kitware/cmake:3.28"
+```
+
+`ocx self setup --toolchain-activate bin` writes the same key into `$OCX_HOME/ocx.toml`, and the global toolchain reads it. A shell then gets `$OCX_HOME/toolchain/active/bin` on `PATH` and no global environment envelope at all. That is the clean shell you asked for, with your global packages still one name away.
+
+For the global toolchain, `none` gives you the same `PATH` as `bin`. `ocx self setup` registers `$OCX_HOME/toolchain/active/bin` once, and a prompt never withdraws it. Under either value the global packages' binaries stay reachable through their trampolines, and nothing else is composed.
+
+The two values part company only for a project's toolchain, whose `active/bin` directory a prompt does add and remove. Setting a *project's* `activate = "none"` withdraws even the trampolines. The shell then runs no `active/bin` prompt hook and no `[env]` composition, and does nothing on its own.
+
+That is the contract for a project whose binaries you reach only explicitly. You might reach them through [`ocx exec`][cmd-run], or through absolute paths that a devcontainer or a Dockerfile already bakes onto `PATH`. Choose it when you want no per-prompt hook to touch your shell's `PATH` at all, not even to add one directory.
+
+Commands you type are never gated by the key. [`ocx --global env`][cmd-env-root] and [`ocx --global exec`][cmd-run] compose the global toolchain in full whatever it says. `activate` decides what happens to your shell *without* you asking.
+
+There is deliberately no `--activate` flag on the composing commands, because the choice belongs in a file and not in one invocation. The [configuration reference][config-project-activate] lists the three values and the tier order. [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] is the weakest tier of all, consulted only when no file sets the key.
+
+**Render before you expect a project on `PATH`.** In `bin` mode a shell emits a *project's* `active/bin` directory only when two conditions hold. A render stamp must exist for that toolchain home, and the directory must still hold exactly what the stamp recorded.
+
+That gate is not bureaucracy. The directory lives inside the repository's own tree, so anything the checkout carries can write there. Putting it on `PATH` because it exists would run a committed `active/bin/cmake` ahead of the real one. [`ocx pull`][cmd-pull] writes the stamp (see [toolchain render][cmd-pull-render]), so run it first, after a fresh clone and after any change to the lock:
+
+\<\<\< @/_scripts/user-guide/bin-mode-render.sh\{sh\}
+
+Until then the prompt withholds the directory and prints the line that names the fix:
+
+```
+ocx: /work/acme/api: its toolchain has not been rendered for this lock; run `ocx pull` here
+```
+
+Nothing is deleted while that line stands. The stale trampolines stay on disk untouched, and the next [`ocx pull`][cmd-pull] reconciles them. A prompt never prunes a directory the repository can write.
+
+The whole of `bin` mode is one directory of launchers and the `PATH` entry that reaches them. The recording below shows the export a prompt does for you. `cmake` then resolves to `<home>/toolchain/active/bin/cmake`, and that launcher applies the package's own environment as the binary starts, not your shell:
+
+<Terminal src="/casts/user-guide/toolchain-bin-mode.cast" title="Binaries on PATH, nothing else composed" collapsed />
+
+## Reach what no profile reaches \{#global-toolchain-session-path\}
+
+Your editor, your desktop launcher and your background services never source `.zshrc`. They inherit their environment from the session that started them, so a `PATH` written into a shell profile does not reach them. That explains a binary that works in the terminal and is "not found" in the IDE's own run configuration.
+
+So `ocx self setup` writes a second, session-level registration alongside the profile block. It goes in the one store per platform that a whole login session reads, and it holds two directories: `$OCX_HOME/toolchain/active/bin`, then the ocx installation's `bin` directory. The toolchain leads, so pinning `ocx` itself in the global toolchain takes effect. The installed binary is what a session falls back to when nothing pins the name. [Session PATH][cmd-self-setup-session-path] in the installation guide carries the store, the mechanism and the failure semantics for each platform.
+
+Both directories are session-level facts and not activation decisions. The [per-prompt reconciler][in-depth-shell-integration-session-path] keeps them in every `activate` mode, `none` included. Turning activation off does not take the installed `ocx` off your `PATH`.
+
+**Six things this registration does not promise.** Each is a limit stated rather than worked around, and each is something you can act on:
+
+| Platform | Limit | What to do |
+|---|---|---|
+| Windows | An already-open terminal or IDE does not see the change. | Restart it. |
+| Windows | The machine-wide **System** `PATH` always precedes the user `PATH`, and no write order changes that. | Remove the competing System entry, or invoke the binary by absolute path. |
+| Linux | A desktop session that is neither a `systemd --user` session nor profile-sourcing sees neither directory. A bare i3 or sway started outside any Xsession wrapper is an example. | Start the session from a login shell, or add the two directories in that session's own startup file. |
+| Linux | A [Flatpak][flatpak]- or [Snap][snap]-sandboxed application takes its `PATH` from the sandbox, not from the session. | Set `PATH` inside the sandbox, with that runtime's own mechanism. |
+| macOS | A GUI application that was already running when the launch agent loaded keeps the environment it started with. | Quit and relaunch it. |
+| macOS | Another tool that calls `launchctl setenv PATH` later in the same session wins by running last. | Order the two, or stop the other tool from setting `PATH` wholesale. |
+
+### Point the IDE at the resolved home \{#global-toolchain-ide\}
+
+A workspace setting reads a directory and not a mechanism. When [`toolchain_dir`][config-toolchain_dir] relocates project homes, that directory is not under the repository at all. [`ocx shell state`][cmd-shell-state] answers where it is. Its JSON form is the supported query contract for editors, devcontainer features and CI steps:
+
+\<\<\< @/_scripts/user-guide/toolchain-home-query.sh\{sh\}
+
+One field is usually all a setting needs, so pipe the report through [jq][jq]: `ocx --format json shell state | jq -r .toolchain_bin`.
+
+`toolchain_bin` is the directory to put on `PATH`: the trampolines, resolved for the project in effect. Paste it into the setting. In [Visual Studio Code][vscode-settings] that is `.vscode/settings.json` under [`terminal.integrated.env.<platform>`][vscode-terminal-profiles].
+
+`toolchain_home`, beside it, is the home itself, which is `$OCX_HOME/toolchain` when no project resolves. Both are always present and never `null`. Two more fields travel with them, resolved past the whole ladder and not read off one tier. `activate` is the effective mode, and `pinned` is the effective boolean.
+
+**Read the field and do not build the path.** `toolchain_bin` is not `toolchain_home` plus a fixed suffix. A setting that holds a hand-joined path is the failure that costs the most to find. The join succeeds, `jq` exits 0 and the editor accepts any string. Three steps later, `cmake: command not found` surfaces with no ocx process anywhere in the trace.
+
+[`ocx pull`][cmd-pull] runs first for the same reason it does everywhere else on this page. The query reports the home even when nothing was ever rendered into it. A setting that points at an empty directory looks exactly like a broken one.
+
+## Undo the session registration \{#global-toolchain-session-path-undo\}
+
+There is no `ocx self uninstall` yet ([#413][gh-self-uninstall]), so you reverse the session-level registration by hand. One location per platform:
+
+- **Windows:** remove ocx's two segments from the `HKCU\Environment\Path` value.
+- **Linux:** delete `~/.config/environment.d/ocx.conf` (or `$XDG_CONFIG_HOME/environment.d/ocx.conf`).
+- **macOS:** run `launchctl bootout gui/<uid>/sh.ocx.path`, then delete `~/Library/LaunchAgents/sh.ocx.path.plist`.
+
+[Removing the session PATH][cmd-self-setup-session-path-removal] carries the copy-pasteable recipe for each.
+
+:::caution[Two shortcuts that take your whole PATH with them]
+On Windows, **edit** the `HKCU\Environment\Path` value to drop ocx's two segments, and never delete the value. It holds every other user `PATH` entry too, and deleting it removes every entry any other installer ever put there.
+
+On macOS the `launchctl bootout` target is the **service**, `gui/<uid>/sh.ocx.path`. The bare domain `gui/$(id -u)` tears down your entire GUI login session. Never reach for `launchctl unsetenv PATH` either. It deletes the whole session-wide value and not only ocx's contribution to it. That strips every other tool's segment from every GUI application launched afterwards.
+:::
+
+## OCI-tier package operations \{#global-toolchain-oci\}
+
+The individual package primitives that manage candidate and `current` symlinks are grouped under `ocx package`:
+
+\<\<\< @/_scripts/user-guide/oci-primitives.sh\{sh\}
+
+These are OCI-tier operations. They work on identifiers directly and never read `ocx.toml`.
+
+## Strict isolation, the hard boundary \{#global-toolchain-isolation\}
+
+The global toolchain is a **shell convenience tier only**. Project builds are hermetic. The project toolchain wins by PATH precedence when you `cd` into a project, and `ocx exec` never consults the global file without `--global`.
+
+:::note[Why hard isolation, not gap-fill?]
+[Volta][volta] pioneered this model for Node.js tooling. The alternative fills in packages the project does not declare from the global set, and [mise][mise] and [asdf][asdf] do this. It opens the reproducibility hole that OCX is designed to avoid. A collaborator without the same `$OCX_HOME/ocx.toml` gets different resolved packages. Volta puts its side of the trade this way: "Volta covers its tracks … your npm/Yarn scripts never see what's in your toolchain."
+:::
+
+Two commands are always hermetic regardless of context:
+
+\<\<\< @/_scripts/user-guide/isolation.sh\{sh\}
+
+A project's `ocx exec` cannot resolve a binding that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug. The project declared its dependencies, and anything else is ambient noise.
+
+:::tip[Learn more]
+[Command-line reference → root `--global` flag][cmd-add-global] covers the root flag before the subcommand, which affects the toolchain-tier commands `add`, `remove`, `lock`, `update`, `pull`, `exec` and `env`.
+[Env-composition reference → Strict isolation][env-composition-strict-isolation] is the reference-level statement of the no-composition rule.
+[Command-line reference → `ocx env`][cmd-env-root] covers the toolchain env exporter, the format options and the `--shell` safety rule.
+:::
+
+[jq]: https://jqlang.github.io/jq/
+[volta]: https://volta.sh/
+[mise]: https://mise.jdx.dev/
+[asdf]: https://asdf-vm.com/
+[flatpak]: https://docs.flatpak.org/en/latest/sandbox-permissions.html
+[snap]: https://snapcraft.io/docs/snap-confinement/
+[vscode-settings]: https://code.visualstudio.com/docs/configure/settings
+[vscode-terminal-profiles]: https://code.visualstudio.com/docs/terminal/profiles
+[gh-self-uninstall]: https://github.com/ocx-sh/ocx/issues/413
+[cmd-add-global]: ../reference/command-line/index.md#global-flag
+[cmd-self-activate]: ../reference/command-line/self.md#self-activate
+[cmd-run]: ../reference/command-line/commands.md#exec
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-shell-state]: ../reference/command-line/shell.md#shell-state
+[cmd-self-setup-session-path]: ../getting-started/install-ocx.mdx#session-path
+[cmd-self-setup-session-path-removal]: ../getting-started/install-ocx.mdx#session-path-removal
+[cmd-pull-render]: ../explanation/toolchain-render.md#pull-render
+[env-ocx-no-completion]: ../reference/environment.md#ocx-no-completion
+[env-ocx-no-hook]: ../reference/environment.md#ocx-no-hook
+[env-ocx-toolchain-activate]: ../reference/environment.md#ocx-toolchain-activate
+[env-composition-strict-isolation]: ../reference/env-composition.md#strict-isolation
+[user-guide-global-add]: #global-toolchain-add
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
+[config-project-activate]: ../explanation/toolchain-activation.md#activate
+[in-depth-shell-integration]: ../explanation/shell-integration.mdx
+[in-depth-shell-integration-session-path]: ../explanation/shell-integration.mdx#session-path
+[in-depth-entry-points]: ../explanation/entry-points.md
+[install-ocx]: ../getting-started/install-ocx.mdx

@@ -14,7 +14,7 @@ pub struct Verification {
     #[clap(long = "verify", overrides_with = "no_verify")]
     verify: bool,
 
-    /// List documents without verifying anything.
+    /// List documents without verifying anything; `--output` still writes the document, with one stderr warning naming the referrer digest.
     ///
     /// Reads signed and unsigned SBOMs alike and marks every one unverified.
     /// No signer identity is reported, because none was checked. Cannot be

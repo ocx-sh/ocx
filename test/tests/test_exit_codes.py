@@ -150,8 +150,8 @@ class TestExitCodes:
 #   78  `verify-malformed-ocx-toml` — the file was read fine and its *contents*
 #       are not valid TOML. A config-parse failure, not an I/O failure.
 #   79  `control-config-test-missing` — an explicitly named config path that is
-#       absent is `NotFound` by documented contract (`reference/command-line.md`:
-#       "A missing explicit path exits with code 79"), not an I/O error.
+#       absent is `NotFound` by documented contract (`explanation/configuration.mdx`:
+#       "A missing file is an error, because explicit paths represent deliberate intent"), not an I/O error.
 #
 # `_ALLOWED_CODES` survives the tightening, one job smaller: it no longer decides
 # a run, it constrains what a row may be PINNED to. That keeps the family

@@ -1,0 +1,98 @@
+{
+ "anchors": [
+  "build-auth",
+  "copy-from",
+  "docker",
+  "frozen",
+  "mini-project",
+  "project-toolchain",
+  "tags"
+ ],
+ "commands": [
+  "ocx exec",
+  "ocx lock",
+  "ocx pull",
+  "ocx version"
+ ],
+ "flags": [
+  "--from",
+  "--frozen",
+  "--mount",
+  "--offline",
+  "--rm",
+  "--secret"
+ ],
+ "env": [
+  "OCX_HOME",
+  "OCX_INDEX",
+  "OCX_NO_UPDATE_CHECK"
+ ],
+ "config_keys": [
+  "registry.example.com",
+  "tools",
+  "tools.shellcheck",
+  "tools.shfmt"
+ ],
+ "exit_codes": [],
+ "slugs": [],
+ "links": [
+  "#copy-from",
+  "#project-toolchain",
+  "./in-depth/ci.md",
+  "./in-depth/indices.md#bundled",
+  "./in-depth/project.md",
+  "./reference/command-line.md#arg-frozen",
+  "./reference/command-line.md#arg-offline",
+  "./reference/command-line.md#exec",
+  "./reference/command-line.md#lock",
+  "./reference/command-line.md#pull",
+  "./reference/environment.md#ocx-auth-registry-token",
+  "./reference/environment.md#ocx-index",
+  "./reference/environment.md#ocx-no-update-check",
+  "https://alpinelinux.org/",
+  "https://bazel.build/",
+  "https://docs.astral.sh/uv/guides/integration/docker/",
+  "https://docs.docker.com/build/building/secrets/",
+  "https://docs.docker.com/trusted-content/official-images/",
+  "https://docs.github.com/en/actions",
+  "https://github.com/ocx-sh/ocx/releases/latest",
+  "https://hub.docker.com/_/alpine",
+  "https://hub.docker.com/_/debian",
+  "https://www.debian.org/"
+ ],
+ "fences": [
+  "dockerfile:49f9f3ae: ENV OCX_AUTH_registry_example_com_TYPE=bearer",
+  "dockerfile:5cbbff05: COPY --from=ghcr.io/ocx-sh/ocx:0.9.2-alpine /usr/local/bin/o",
+  "dockerfile:6b904bf5: FROM ghcr.io/ocx-sh/ocx:0.9.2",
+  "sh:a7491cfa: docker run --rm ghcr.io/ocx-sh/ocx ocx version",
+  "sh:b3a1a299: docker build --secret id=ocx_token,env=REGISTRY_TOKEN .",
+  "toml:82d5af62: # ocx.toml"
+ ],
+ "facts": [
+  "Official images at ghcr.io/ocx-sh/ocx hold the release binary on a slim base, bit-identical to that release's archive. [L7]",
+  "Images are multi-platform manifests for linux amd64 and arm64, so docker pull picks the right architecture. [L7]",
+  "The example runs ocx version inside the official image as a smoke check. [L9]",
+  "Images bake in OCX_NO_UPDATE_CHECK=1 because the image tag already pins the ocx version. [L13]",
+  "Two variants: the default trixie rides Debian for glibc, while alpine carries a static musl build and stays small. [L17]",
+  "Trixie suits apt additions or glibc tools; alpine suits small images or serves as a universal COPY --from source. [L21]",
+  "Tags follow the Docker official images convention, and unsuffixed tags alias the default trixie variant. [L24]",
+  "Date-stamped tags are immutable and never move, so digests they reference are never garbage-collected. [L31]",
+  "All rolling tags, including full X.Y.Z tags, are re-pointed by a weekly rebuild, and only the latest release is rebuilt. [L33]",
+  "Images rebuild silently when the base changes, so a version tag means this ocx version on the current base. [L36]",
+  "Reproducible builds should pin a date-stamped tag or a digest, since rolling tags can move. [L40]",
+  "The lightest use is to copy the binary out with COPY --from rather than basing the image on the ocx image. [L45]",
+  "The alpine binary is fully static and runs on any base including scratch, while the trixie binary needs a glibc base. [L51]",
+  "A project's toolchain should be pulled at build time and run offline, not resolved when the container starts. [L55]",
+  "The example Dockerfile copies the lockfile first, runs ocx pull, then runs task serve through ocx --offline exec. [L57]",
+  "ocx pull downloads every digest-pinned package for the image platform and needs only the two files. [L69]",
+  "ocx exec replaces itself with the child process, so no wrapper lingers in the process tree. [L69]",
+  "A plain ocx pull resolves tags to whatever they point to now, so drift can succeed with an untested version. [L73]",
+  "--frozen refuses tags missing from the lockfile but is not a network ban, since digest-pinned blobs still download. [L75]",
+  "Bare tags can resolve deterministically without a lockfile by bundling an index snapshot pointed to by OCX_INDEX. [L81]",
+  "Never bake credentials in with ENV or ARG, because both persist in image history; use BuildKit secrets instead. [L85]",
+  "The variable name encodes the registry host with dots as underscores, and the auth type can stay a plain ENV. [L97]",
+  "Single packages can be bootstrapped with a minimal ocx.toml and the same pull-at-build pattern. [L101]",
+  "ocx exec puts the bootstrapped binaries on PATH for one command, and a persistent global install is planned, not yet available. [L110]"
+ ],
+ "lines": 144
+}

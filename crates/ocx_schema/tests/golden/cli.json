@@ -496,7 +496,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Set an environment variable for this invocation, or pass one by name"
+            "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
           },
           {
             "id": "shell",
@@ -566,7 +566,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Target shell for eval-safe export lines"
+            "help": "Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable"
           },
           {
             "id": "ci",
@@ -604,7 +604,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Write the composed environment into a CI system's persistence channel"
+            "help": "Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found"
           },
           {
             "id": "export_file",
@@ -1124,7 +1124,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Adopt (or clear) this managed-config source"
+                "help": "Adopt this managed-config source; an empty string clears the seed and deletes the snapshot"
               },
               {
                 "id": "dry_run",
@@ -1285,7 +1285,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`)"
+                "help": "Pause the background refresh for a duration (e.g. `4h`, `3d`; max `7d`); an update without `--pause` clears it"
               },
               {
                 "id": "resume",
@@ -1578,7 +1578,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Overwrite an existing `.envrc` in the current directory"
+                "help": "Overwrite an existing `.envrc` in the current directory. Without it, an existing file exits 78 and is left untouched"
               }
             ],
             "groups": [],
@@ -1650,7 +1650,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "pull",
@@ -2082,7 +2082,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Print the packages this would refresh, and refresh none of them"
+                "help": "Print the packages this would refresh and refresh none; nothing is written, not even `config.json`, and no `[patches]` sync runs"
               }
             ],
             "groups": [],
@@ -2662,7 +2662,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Verify the candidate lock would match the predecessor and exit"
+            "help": "Verify the candidate lock would match the predecessor and exit; exits 65 when a pin would change"
           },
           {
             "id": "verbose",
@@ -3782,7 +3782,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Predicate document to attach (JSON)"
+                "help": "Predicate document to attach (JSON), at most 15 MiB; on Unix a symlink at PATH is refused"
               },
               {
                 "id": "predicate_type",
@@ -3807,7 +3807,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Predicate type: an alias or a full URI"
+                "help": "Predicate type: an alias (cyclonedx, spdx, spdxjson, slsaprovenance1, link, vuln, openvex, custom) or a full URI. `custom` wraps the predicate in cosign's Data/Timestamp envelope; `slsaprovenance` and `slsaprovenance02` exit 64, so pass `slsaprovenance1`"
               },
               {
                 "id": "fulcio_url",
@@ -4012,7 +4012,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Signature wire format: bundle (default), simplesigning, or both"
+                "help": "Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer, never replacing one; `attest` with no signing identity refuses it (exit 64)"
               },
               {
                 "id": "key",
@@ -4761,7 +4761,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Rewrite only the registry host, keeping the repository path and tag"
+                "help": "Rewrite only the registry host, keeping the repository path and tag. Conflicts with `--identifier`"
               },
               {
                 "id": "identifier",
@@ -4789,7 +4789,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Full target reference, when the repository path or tag changes too"
+                "help": "Full target reference, when the repository path or tag changes too; required when SOURCE names a digest. Conflicts with `--to`"
               },
               {
                 "id": "platform",
@@ -4961,7 +4961,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Carry the signatures, SBOMs and attestations anchored to each manifest (default)"
+                "help": "Carry the signatures, SBOMs and attestations anchored to each manifest, plus the cosign `.sig`, `.att` and `.sbom` sidecar tags (default). A sidecar tag the target holds under a different manifest is reported, never overwritten, and the exit is 65. A target without the OCI 1.1 Referrers API exits 82"
               },
               {
                 "id": "no_referrers",
@@ -5101,7 +5101,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Report what would be copied and write nothing"
+                "help": "Report what would be copied and write nothing. The cascade and keep-tag moves are not computed, so those report fields stay empty"
               },
               {
                 "id": "source",
@@ -5530,7 +5530,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Treat PATH as an archive and bundle what it extracts to"
+                "help": "Treat PATH as an archive (tar, gzip, xz, zstd, bzip2 or zip, read from the file name) and bundle what it extracts to"
               },
               {
                 "id": "strip_components",
@@ -5619,7 +5619,7 @@
                     "last": false,
                     "trailing_var_arg": false,
                     "stdin_secret": false,
-                    "help": "Copy the whole description from another package repository"
+                    "help": "Copy the whole description from another package repository; a source with no description or no repository exits 79 and leaves the target untouched"
                   },
                   {
                     "id": "readme",
@@ -5646,7 +5646,7 @@
                     "last": false,
                     "trailing_var_arg": false,
                     "stdin_secret": false,
-                    "help": "Path to the README markdown file"
+                    "help": "Path to the README markdown file; required on the first push to a repository with no description"
                   },
                   {
                     "id": "logo",
@@ -5673,7 +5673,7 @@
                     "last": false,
                     "trailing_var_arg": false,
                     "stdin_secret": false,
-                    "help": "Path to an optional logo image (PNG or SVG)"
+                    "help": "Path to an optional logo image (PNG or SVG); bytes that do not match the extension exit 65 and leave the published description untouched"
                   },
                   {
                     "id": "title",
@@ -5931,7 +5931,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Copy the whole description from another package repository"
+                "help": "Copy the whole description from another package repository; a source with no description or no repository exits 79 and leaves the target untouched"
               },
               {
                 "id": "readme",
@@ -5958,7 +5958,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Path to the README markdown file"
+                "help": "Path to the README markdown file; required on the first push to a repository with no description"
               },
               {
                 "id": "logo",
@@ -5985,7 +5985,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Path to an optional logo image (PNG or SVG)"
+                "help": "Path to an optional logo image (PNG or SVG); bytes that do not match the extension exit 65 and leave the published description untouched"
               },
               {
                 "id": "title",
@@ -6462,7 +6462,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "platform",
@@ -6706,7 +6706,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Target shell for eval-safe export lines"
+                "help": "Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable"
               },
               {
                 "id": "ci",
@@ -6744,7 +6744,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Write the composed environment into a CI system's persistence channel"
+                "help": "Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found"
               },
               {
                 "id": "export_file",
@@ -6879,7 +6879,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "resolve",
@@ -7031,7 +7031,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Also link the installed package at PATH, which keeps it from `ocx clean` while the link exists"
+                "help": "Also link the installed package at PATH, which keeps it from `ocx clean`. PATH must be absent or an earlier `--link`, else exit 65; takes one package"
               },
               {
                 "id": "platform",
@@ -7245,7 +7245,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Delete tags the index does not mark ephemeral, or with no index to ask"
+                "help": "Delete tags the index does not mark ephemeral, or with no index to ask. A forced tag's index row stays until a reviewed announce removes it"
               },
               {
                 "id": "tags_file",
@@ -7270,7 +7270,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Append each gone tag the index lists, one per line, for `ocx package announce --tags-file`. Creates the file if absent and keeps the tags already in it. Written on every run that gets past selection, empty included, never on a dry run"
+                "help": "Append each gone tag the index lists, one per line, for `ocx package announce --tags-file`. Creates the file if absent and keeps the tags already in it. Written on every run that gets past selection, empty included and even when the run then fails partway, never on a dry run. A forced delete of a tag the index does not list writes nothing"
               },
               {
                 "id": "dry_run",
@@ -7675,7 +7675,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Append a UTC build-metadata segment to the published tag"
+                "help": "Append a UTC build-metadata segment to the published tag, which must be `X.Y.Z` (variant or pre-release allowed) with no build metadata yet"
               },
               {
                 "id": "metadata",
@@ -7812,7 +7812,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "After the push, attest this CycloneDX SBOM against the pushed manifest"
+                "help": "After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not undo the push, is recorded in the report and sets the exit code"
               },
               {
                 "id": "sign",
@@ -7839,7 +7839,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Sign each platform manifest this push writes, inline"
+                "help": "Sign each platform manifest this push writes, inline. A failure does not undo the push, is recorded in the report and sets the exit code"
               },
               {
                 "id": "fulcio_url",
@@ -7936,7 +7936,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Signature wire format: bundle (default), simplesigning, or both"
+                "help": "Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer, never replacing one; `attest` with no signing identity refuses it (exit 64)"
               },
               {
                 "id": "key",
@@ -8264,7 +8264,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Write the SBOM document to PATH (\"-\" for stdout)"
+                "help": "Write the SBOM document to PATH (\"-\" for stdout). Several candidates exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest"
               },
               {
                 "id": "summary",
@@ -8409,45 +8409,6 @@
                 "help": "Sign or verify with a key pair instead of keyless Sigstore"
               },
               {
-                "id": "signature_format",
-                "long": "signature-format",
-                "value": {
-                  "type": "choice",
-                  "choices": [
-                    {
-                      "value": "bundle",
-                      "hidden": false
-                    },
-                    {
-                      "value": "simplesigning",
-                      "hidden": false
-                    },
-                    {
-                      "value": "both",
-                      "hidden": false
-                    }
-                  ]
-                },
-                "required": false,
-                "required_unless": [],
-                "num_args": {
-                  "min": 1,
-                  "max": 1
-                },
-                "global": false,
-                "hidden": false,
-                "default": [],
-                "requires": [],
-                "conflicts": [],
-                "overrides": [],
-                "require_equals": false,
-                "allow_hyphen_values": false,
-                "last": false,
-                "trailing_var_arg": false,
-                "stdin_secret": false,
-                "help": "Signature wire format: bundle (default), simplesigning, or both"
-              },
-              {
                 "id": "trusted_root",
                 "long": "sigstore-trusted-root",
                 "value": {
@@ -8470,7 +8431,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one"
+                "help": "Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74"
               },
               {
                 "id": "rekor_url",
@@ -8583,7 +8544,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "List documents without verifying anything"
+                "help": "List documents without verifying anything; `--output` still writes the document, with one stderr warning naming the referrer digest"
               },
               {
                 "id": "identifier",
@@ -8609,6 +8570,45 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Package identifier to read (`registry/repo:tag[@digest]`)"
+              },
+              {
+                "id": "signature_format",
+                "long": "signature-format",
+                "value": {
+                  "type": "choice",
+                  "choices": [
+                    {
+                      "value": "bundle",
+                      "hidden": false
+                    },
+                    {
+                      "value": "simplesigning",
+                      "hidden": false
+                    },
+                    {
+                      "value": "both",
+                      "hidden": false
+                    }
+                  ]
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Signature wire format to accept: bundle or simplesigning"
               }
             ],
             "groups": [],
@@ -8990,7 +8990,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Signature wire format: bundle (default), simplesigning, or both"
+                "help": "Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer, never replacing one; `attest` with no signing identity refuses it (exit 64)"
               },
               {
                 "id": "key",
@@ -9374,7 +9374,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "identifier",
@@ -9481,7 +9481,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Write a JUnit XML report for the scripted run to PATH"
+                "help": "Write a JUnit XML report for the scripted run to PATH, truncating an existing file, even on a red run; needs `--script`, and an unwritable path exits 74"
               },
               {
                 "id": "command",
@@ -9647,45 +9647,6 @@
                 "help": "Sign or verify with a key pair instead of keyless Sigstore"
               },
               {
-                "id": "signature_format",
-                "long": "signature-format",
-                "value": {
-                  "type": "choice",
-                  "choices": [
-                    {
-                      "value": "bundle",
-                      "hidden": false
-                    },
-                    {
-                      "value": "simplesigning",
-                      "hidden": false
-                    },
-                    {
-                      "value": "both",
-                      "hidden": false
-                    }
-                  ]
-                },
-                "required": false,
-                "required_unless": [],
-                "num_args": {
-                  "min": 1,
-                  "max": 1
-                },
-                "global": false,
-                "hidden": false,
-                "default": [],
-                "requires": [],
-                "conflicts": [],
-                "overrides": [],
-                "require_equals": false,
-                "allow_hyphen_values": false,
-                "last": false,
-                "trailing_var_arg": false,
-                "stdin_secret": false,
-                "help": "Signature wire format: bundle (default), simplesigning, or both"
-              },
-              {
                 "id": "rekor_url",
                 "long": "rekor-url",
                 "value": {
@@ -9762,7 +9723,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Restrict to one predicate type (for example cyclonedx or spdx)"
+                "help": "Restrict to one predicate type (for example cyclonedx or spdx); requires `--attestation`"
               },
               {
                 "id": "allow_unlogged_signature",
@@ -9841,7 +9802,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one"
+                "help": "Trust-root override: a Sigstore trusted-root JSON (or a directory holding trusted_root.json), named by a bare path or a file:// one. A file over 1 MiB or unreadable exits 74"
               },
               {
                 "id": "identifier",
@@ -9867,6 +9828,45 @@
                 "trailing_var_arg": false,
                 "stdin_secret": false,
                 "help": "Package identifier to verify (`registry/repo:tag[@digest]`)"
+              },
+              {
+                "id": "signature_format",
+                "long": "signature-format",
+                "value": {
+                  "type": "choice",
+                  "choices": [
+                    {
+                      "value": "bundle",
+                      "hidden": false
+                    },
+                    {
+                      "value": "simplesigning",
+                      "hidden": false
+                    },
+                    {
+                      "value": "both",
+                      "hidden": false
+                    }
+                  ]
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Signature wire format to accept: bundle or simplesigning"
               }
             ],
             "groups": [],
@@ -9992,7 +9992,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "platform",
@@ -10290,7 +10290,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Also remove the current symlink (equivalent to also running `ocx deselect`)"
+                "help": "Also remove the current symlink (equivalent to also running `ocx package deselect`)"
               },
               {
                 "id": "purge",
@@ -10878,7 +10878,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Path to a local archive for a companion package, allowing the companion to be materialized without a registry round-trip. Repeatable"
+                "help": "Path to a local archive for a companion package, read without a registry round-trip; needs a `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor lists. Repeatable"
               },
               {
                 "id": "base",
@@ -10981,7 +10981,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Set an environment variable for this invocation, or pass one by name"
+                "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
               },
               {
                 "id": "command",
@@ -11472,7 +11472,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Set an environment variable for this invocation, or pass one by name"
+            "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
           },
           {
             "id": "lazy_mode",
@@ -11818,7 +11818,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Set an environment variable for this invocation, or pass one by name"
+            "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
           },
           {
             "id": "lazy_mode",
@@ -12231,7 +12231,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "The shell to generate the completions for: bash, elvish, fish, powershell or zsh"
+                "help": "The shell to generate the completions for: bash, elvish, fish, powershell or zsh. Omitted, it is detected from the parent shell"
               },
               {
                 "id": "interactive",
@@ -12411,7 +12411,7 @@
               "activate"
             ],
             "version": 1,
-            "summary": "Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`), and evaluates the global toolchain env. Safe to re-source: the PATH updates are idempotent (move-to-front), so a re-source never duplicates an entry",
+            "summary": "Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source never duplicates an entry",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -12485,7 +12485,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Target shell for activation output"
+                "help": "Target shell for activation output (`sh` is `dash`, `pwsh` is `powershell`, `nu` is `nushell`)"
               },
               {
                 "id": "completion",
@@ -13049,7 +13049,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Adopt (or clear) the corporate managed-config tier"
+                "help": "Adopt the corporate managed-config tier; an empty value (`--managed-config \"\"`) clears the seed and deletes the snapshot"
               },
               {
                 "id": "handoff",
@@ -13088,7 +13088,7 @@
               "update"
             ],
             "version": 1,
-            "summary": "Update ocx itself to the latest released version. Without `--check`, downloads the newest release and activates it. With `--check`, reports the result without installing",
+            "summary": "Update ocx itself to the latest released version. Without `--check`, downloads the newest release and activates it; with `--check`, reports the result without installing",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -13278,7 +13278,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Set an environment variable for this invocation, or pass one by name"
+            "help": "Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64"
           },
           {
             "id": "resolve",
@@ -13556,7 +13556,7 @@
       "name": "OCX_PATCH_SNAPSHOT",
       "value": "path",
       "visibility": "public",
-      "summary": " Path to the active patch snapshot file, whose pinned digests win over live tag lookups.",
+      "summary": " Path to the patch snapshot file `ocx patch freeze` writes, whose pinned digests win over live tag lookups.",
       "secret": false,
       "on_invalid": "default"
     },
@@ -13729,7 +13729,7 @@
       "name": "OCX_LOG_LEVEL",
       "value": "string",
       "visibility": "public",
-      "summary": " Log level, as `--log-level` accepts it; the flag wins.",
+      "summary": " Log level, as `--log-level` accepts it; the flag wins. Defaults to `info`.",
       "flag": "--log-level",
       "secret": false,
       "on_invalid": "default"
@@ -13884,7 +13884,7 @@
         "bearer"
       ],
       "visibility": "public",
-      "summary": " Authentication type for one registry; `{REGISTRY}` is the registry slug.",
+      "summary": " Authentication type for one registry.",
       "secret": false,
       "on_invalid": "default"
     },
@@ -13892,7 +13892,7 @@
       "name": "OCX_AUTH_{REGISTRY}_USER",
       "value": "string",
       "visibility": "public",
-      "summary": " User name for one registry; `{REGISTRY}` is the registry slug.",
+      "summary": " User name for one registry; `<REGISTRY>` is the registry slug.",
       "secret": false,
       "on_invalid": "default"
     },
@@ -13900,7 +13900,7 @@
       "name": "OCX_AUTH_{REGISTRY}_TOKEN",
       "value": "string",
       "visibility": "public",
-      "summary": " Registry token for one registry; `{REGISTRY}` is the registry slug.",
+      "summary": " Registry token for one registry; `<REGISTRY>` is the registry slug.",
       "secret": true,
       "on_invalid": "default"
     },
@@ -13924,7 +13924,7 @@
       "name": "CI",
       "value": "bool",
       "visibility": "foreign",
-      "summary": " Set by most CI providers; enables CI behaviour.",
+      "summary": " Set by most CI providers. When truthy, the background update check and the managed-config",
       "secret": false,
       "on_invalid": "default"
     },

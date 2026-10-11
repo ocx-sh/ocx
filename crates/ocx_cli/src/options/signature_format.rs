@@ -8,14 +8,26 @@ use ocx_sign::sign::SignatureFormat;
 // Read only through `write_format`/`pin`: a direct read lets `both` reach a verify, which must pin one shape.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct SignatureFormatOpt {
-    /// Signature wire format: bundle (default), simplesigning, or both.
+    /// Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer, never replacing one; `attest` with no signing identity refuses it (exit 64).
     ///
     /// `bundle` writes an OCI 1.1 referrer carrying a Sigstore bundle.
     /// `simplesigning` writes the cosign `sha256-<hex>.sig` sidecar tag
-    /// instead. `both` writes each of them. When verifying, this pins the one
-    /// shape to accept, and `both` is not a pin.
+    /// instead. `both` writes each of them.
+    ///
+    /// Verifying or listing SBOMs, this pins the one shape to accept. Omitted, a bundle is tried
+    /// first, then the sidecar. There `both` is a usage error (exit 64).
     #[clap(long = "signature-format", value_enum, value_name = "FORMAT")]
     signature_format: Option<SignatureFormat>,
+}
+
+/// Help for a command that reads signatures: it accepts one shape, so `both` is not offered.
+pub fn read_side(arg: clap::Arg) -> clap::Arg {
+    arg.hide_possible_values(true)
+        .help("Signature wire format to accept: bundle or simplesigning")
+        .long_help(
+            "Signature wire format to accept: bundle or simplesigning.\n\n\
+             Pins the one shape to accept. Omitted, a bundle is tried first, then the sidecar.",
+        )
 }
 
 impl SignatureFormatOpt {

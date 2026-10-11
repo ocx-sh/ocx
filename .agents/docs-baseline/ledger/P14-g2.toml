@@ -1,0 +1,17 @@
+[[row]]
+item = "ocx ci export"
+page = "docs/authoring/env-surface.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx ci"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ocx ci export"
+page = "docs/user-guide.md"
+action = "deleted"
+reason = "obsolete"

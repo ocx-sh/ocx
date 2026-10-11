@@ -1,0 +1,5 @@
+[[row]]
+item = "ci-integration"
+page = "docs/in-depth/ci.md"
+action = "moved"
+home = "integration/github-actions.md"

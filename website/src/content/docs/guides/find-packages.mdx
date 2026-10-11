@@ -1,0 +1,76 @@
+---
+title: "Find packages and versions"
+description: "List the repositories and tags a registry or index offers, and read package names."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+Use this page to find which packages and versions a registry offers before you install anything.
+
+## Browse the catalog \{#find-catalog\}
+
+[`ocx index catalog`][cmd-index-catalog] lists the repositories of a registry. Put the root flag `--remote` before the subcommand to ask the registry itself instead of your local index. Your local index holds only the packages you have refreshed, so the remote form is the one that shows everything:
+
+```sh
+ocx --remote index catalog
+```
+
+Each name carries its registry, as in `ocx.sh/kitware/cmake`. Without an argument the command uses your default registry, `ocx.sh` unless `OCX_DEFAULT_REGISTRY` says otherwise. Name another registry as an argument to list that one instead.
+
+Add `--with-tags` to print the tags of every repository in the same run. The listing can be long, so pipe it to a pager or use `--format json` for scripts.
+
+A plain OCI registry answers a catalog request only if its `_catalog` endpoint is enabled. Docker Hub disables it, and GHCR allows it only with a suitably scoped token. When the endpoint is closed, name the package you want and list its tags instead.
+
+## List the versions of a package \{#find-versions\}
+
+[`ocx index list`][cmd-index-list] prints the tags of one or more packages:
+
+```sh
+ocx --remote index list kitware/cmake
+```
+
+A tag in the identifier filters the list, so `kitware/cmake:3.28` shows only that tag. In a tag listing, a digest in the identifier is refused because it narrows nothing. `--platforms` accepts one, as shown below. Read [Choose between versions][guide-choose-versions] to decide which of the tags to install.
+
+Without `--remote` the command answers from the local index, which holds only the packages you have refreshed with [`ocx index update`][cmd-index-update]. Neither form writes to the local index.
+
+## Check variants and platforms \{#find-variants-platforms\}
+
+Two flags narrow the question without downloading a package. Each one replaces the tag list, and you cannot combine them.
+
+`--variants` lists the variant names found in the tags, such as `debug` or `slim`. The default variant shows as an empty entry. Use the name as a tag prefix, as explained in [Versioning][in-depth-versioning-variants].
+
+`--platforms` lists the platforms of one tag. It uses the tag from the identifier, or `latest` when you give none:
+
+```sh
+ocx --remote index list --platforms kitware/cmake:3.28
+```
+
+## Read a package description \{#find-description\}
+
+[`ocx package description pull`][cmd-description-pull] shows the title, description and keywords that a repository publishes. Use it to confirm that a name is the package you meant:
+
+```sh
+ocx --remote package description pull kitware/cmake
+```
+
+Pass `--save-readme README.md` or `--save-logo logo.png` with a single package to save its README or logo. Each flag takes a file or a directory. A repository without a published description prints `No description found`.
+
+## Read a package name \{#namespaces\}
+
+The repository half of an [identifier][oci-identifier] is a path, not a single word: `registry/namespace…/name`. OCX uses the path to separate what it ships from what it mirrors.
+
+Every package on `ocx.sh` has exactly two segments, a namespace and a name. A mirrored upstream package takes the namespace of the project that publishes it upstream, such as `kitware/cmake`, `astral-sh/uv`, `oven-sh/bun` or `go-task/task`. OCX's own binaries live under the reserved `ocx/` namespace: the CLI is `ocx/cli` and the mirror tool is `ocx/mirror`. The namespace is the provenance. It names who stands behind the bits upstream, and an `ocx/` name is OCX itself.
+
+The two segments are not decoration. The [index][in-depth-indices] addresses a package at `p/<namespace>/<name>.json`. A single-segment name has nowhere to live there, so it cannot be published or announced on `ocx.sh`. On a registry you control the shape is yours to choose, because the requirement belongs to the `ocx.sh` index and not to OCI.
+
+Slash-nested names are ordinary OCI repositories. `ocx package install ocx/mirror:1` resolves exactly like `ocx package install kitware/cmake:3.28`. The extra segment reaches the filesystem too: a repository is two directories under the [symlink farm][in-depth-storage-symlinks], `symlinks/ocx.sh/kitware/cmake/`, not one.
+
+[cmd-index-catalog]: ../reference/command-line/index-commands.md#index-catalog
+[cmd-index-list]: ../reference/command-line/index-commands.md#index-list
+[cmd-index-update]: ../reference/command-line/index-commands.md#index-update
+[cmd-description-pull]: ../reference/command-line/package-publishing.md#package-description-pull
+[guide-choose-versions]: ./choose-versions.mdx
+[in-depth-versioning-variants]: ../explanation/versioning.mdx#variants
+[oci-identifier]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
+[in-depth-storage-symlinks]: ../explanation/storage.mdx#symlinks
+[in-depth-indices]: ../explanation/indices.md

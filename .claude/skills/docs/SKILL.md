@@ -1,11 +1,11 @@
 ---
 name: docs
-description: Use when authoring or editing OCX documentation — user guide, reference pages, website content under `website/src/docs/`, VitePress pages, or doc narrative structure.
+description: Use when authoring or editing OCX documentation — user guide, reference pages, website content under `website/src/content/docs/`, Starlight pages, or doc narrative structure.
 ---
 
 # OCX Documentation
 
-Role: write user-facing docs for OCX website (`website/src/docs/`, VitePress).
+Role: write user-facing docs for OCX website (`website/src/content/docs/`, Astro + Starlight).
 
 ## Workflow
 
@@ -23,27 +23,27 @@ Role: write user-facing docs for OCX website (`website/src/docs/`, VitePress).
 - **No marketing tone** — examples make case
 - **Reference-style links only** — never inline `[text](url)`; definitions at file bottom
 - **Every external tool hyperlinked** — every occurrence, not first
-- **Analogies in `:::info` callout boxes**, not inline
+- **Analogies in `:::note` callout boxes**, not inline
 - **Custom anchors on every heading** — `{#parent-subsection}`
 
 ## Relevant Rules (load explicitly for planning)
 
 - `.claude/rules/docs-style.md` — OCX narrative + linking + anchor conventions
-- `.claude/rules/subsystem-website.md` — VitePress config, Vue component catalog (`<Tooltip>`, `<Tree>`, `<Steps>`, `<Terminal>`, `<Frame>`, `<Description>`, etc.), styling, markdown extensions, frontmatter, generated content pipeline (auto-loads on `website/**`)
+- `.claude/rules/subsystem-website.md` — Astro/Starlight layout, theme component imports (`<Tooltip>`, `<Tree>`, `<Tabs>`, `<Steps>`, `<Terminal>`, etc.), styling, markdown extensions, generated content pipeline (auto-loads on `website/**`)
 - `.claude/rules/product-context.md` — positioning, differentiators, competitive landscape
 - `.claude/rules/quality-vite.md` — build tool conventions (if touching config)
 
 ## Tool Preferences
 
 - **WebFetch / WebSearch** — real-world examples from other package managers before comparisons
-- **`task website:serve`** — VitePress dev server (localhost:5173) for live preview
-- **`task website:build`** — full build (schema → recordings → SBOM → VitePress)
+- **`task website:serve`** — Astro dev server for live preview
+- **`task website:build`** — full build (schema → doc scripts → recordings → SBOM → Astro) into `website/dist/{docs,schemas}`
 
 ## Constraints
 
 - NEVER edit generated content (`dependencies.md`, `.cast` files, schema JSON) — build pipeline overwrites
 - NEVER inline links — reference-style only
-- NEVER hardcode colors — use VitePress CSS variables (see `subsystem-website.md` styling)
+- NEVER hardcode colors — use the Starlight/theme CSS variables (see `subsystem-website.md` styling)
 - ALWAYS read source before documenting; never memory
 
 ## Handoff

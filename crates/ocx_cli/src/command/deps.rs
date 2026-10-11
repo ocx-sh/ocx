@@ -27,6 +27,23 @@ use crate::{api, conventions, options};
 ///
 /// Operates on locally-present packages only — no auto-install.
 #[derive(Parser)]
+#[command(long_about = "\
+Show the dependency tree for one or more packages.\n\n\
+Default output is a logical tree showing declared dependencies. A package reached by several \
+paths is marked `(*)` and its subtree is not expanded again.\n\n\
+Use `--flat` for the resolved evaluation order, the same order as `ocx exec`:\n\n\
+```\n\
+Package                    Digest\n\
+ocx.sh/gcc:13              sha256:ddd0a1b2…\n\
+ocx.sh/kitware/cmake:3.28  sha256:ccc7d8e9…\n\
+ocx.sh/java:21             sha256:bbb4e5f6…\n\
+myapp:1.0                  sha256:aaa1b2c3…\n\
+```\n\n\
+Use `--why <dep>` to trace why a dependency is pulled in:\n\n\
+```\n\
+myapp:1.0 → ocx.sh/kitware/cmake:3.28 → ocx.sh/gcc:13\n\
+```\n\n\
+Operates on locally-present packages only, with no auto-install.")]
 pub struct Deps {
     /// Expose the package's full dep set, including private (self-only)
     /// edges. Affects `--flat`. See `ocx exec --help` for the full surface

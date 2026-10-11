@@ -79,9 +79,15 @@ Thumbs.db
 website/src/public/licensed/
 
 # =============================================================================
-# VitePress Build (stray output from root-level builds)
+# Astro site (website/) build output and installs
 # =============================================================================
-src/.vitepress/
+website/dist/
+website/.astro/
+website/node_modules/
+website/src/public/casts/
+website/src/public/data/
+website/src/public/schemas/
+website/src/content/docs/reference/dependencies.md
 
 # =============================================================================
 # Taskfile

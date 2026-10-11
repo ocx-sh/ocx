@@ -1,0 +1,1277 @@
+[[row]]
+item = "add"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::add"
+
+[[row]]
+item = "add-binding-names"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::add"
+
+[[row]]
+item = "clean"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::clean"
+
+[[row]]
+item = "deps"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::deps"
+
+[[row]]
+item = "deselect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::deselect"
+
+[[row]]
+item = "package-deselect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::deselect"
+
+[[row]]
+item = "package-select"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::select"
+
+[[row]]
+item = "package-install"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::install"
+
+[[row]]
+item = "package-uninstall"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::uninstall"
+
+[[row]]
+item = "package-pull"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::pull"
+
+[[row]]
+item = "env-root"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::env"
+
+[[row]]
+item = "env"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::env"
+
+[[row]]
+item = "package-env"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::env"
+
+[[row]]
+item = "exec"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::exec"
+
+[[row]]
+item = "package-exec"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::exec"
+
+[[row]]
+item = "which"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::which"
+
+[[row]]
+item = "install"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::install"
+
+[[row]]
+item = "select"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::select"
+
+[[row]]
+item = "uninstall"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::uninstall"
+
+[[row]]
+item = "direnv"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::direnv"
+
+[[row]]
+item = "direnv-init"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/direnv.rs::init"
+
+[[row]]
+item = "direnv-export"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/direnv.rs::export"
+
+[[row]]
+item = "index-catalog"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::catalog"
+
+[[row]]
+item = "index-list"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::list"
+
+[[row]]
+item = "index"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::index"
+
+[[row]]
+item = "index-update"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::update"
+
+[[row]]
+item = "index-sync"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::sync"
+
+[[row]]
+item = "index-regenerate"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/index.rs::regenerate"
+
+[[row]]
+item = "about"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::about"
+
+[[row]]
+item = "status"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::status"
+
+[[row]]
+item = "inspect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::inspect"
+
+[[row]]
+item = "init"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::init"
+
+[[row]]
+item = "lock"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::lock"
+
+[[row]]
+item = "update"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::update"
+
+[[row]]
+item = "upgrade"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::upgrade"
+
+[[row]]
+item = "update-report"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/update-tools.mdx#project-update-report"
+
+[[row]]
+item = "upgrade-report"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/update-tools.mdx#project-upgrade-report"
+
+[[row]]
+item = "login"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::login"
+
+[[row]]
+item = "logout"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::logout"
+
+[[row]]
+item = "pull"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::pull"
+
+[[row]]
+item = "remove"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::remove"
+
+[[row]]
+item = "shell"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/shell.rs::shell"
+
+[[row]]
+item = "shell-completion"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/shell.rs::completion"
+
+[[row]]
+item = "shell-state"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/shell.rs::state"
+
+[[row]]
+item = "shell-allow"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/shell.rs::allow"
+
+[[row]]
+item = "shell-revoke"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/shell.rs::revoke"
+
+[[row]]
+item = "self"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/self_group.rs::self"
+
+[[row]]
+item = "self-setup"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/self_group.rs::setup"
+
+[[row]]
+item = "self-setup-session-path"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#session-path"
+
+[[row]]
+item = "self-setup-session-path-removal"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#session-path-removal"
+
+[[row]]
+item = "self-activate"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/self_group.rs::activate"
+
+[[row]]
+item = "self-update"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/self_group.rs::update"
+
+[[row]]
+item = "version"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command.rs::version"
+
+[[row]]
+item = "pull-render"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-render.md#pull-render"
+
+[[row]]
+item = "pull-dry-run"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/toolchain-render.md#pull-dry-run"
+
+[[row]]
+item = "select-entry-point-collision"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/entry-points.md#collisions"
+
+[[row]]
+item = "package-create"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::create"
+
+[[row]]
+item = "package-create-receipt"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::create"
+
+[[row]]
+item = "package-create-libc-check"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::create"
+
+[[row]]
+item = "package-inspect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::inspect"
+
+[[row]]
+item = "package-push"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::push"
+
+[[row]]
+item = "package-test"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::test"
+
+[[row]]
+item = "package-push-annotations"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_push.rs::annotation"
+
+[[row]]
+item = "package-push-layout"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_push.rs::layers"
+
+[[row]]
+item = "package-copy"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::copy"
+
+[[row]]
+item = "package-description"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::description"
+
+[[row]]
+item = "package-description-push"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_description_push.rs::push"
+
+[[row]]
+item = "package-description-pull"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_description_pull.rs::pull"
+
+[[row]]
+item = "package-receipt"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::receipt"
+
+[[row]]
+item = "package-prune"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-prune-selecting"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-prune-locating"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-prune-safeguard"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-prune-deleting"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-prune-registry-support"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_prune.rs::prune"
+
+[[row]]
+item = "package-sign"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::sign"
+
+[[row]]
+item = "package-verify"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::verify"
+
+[[row]]
+item = "package-verify-attestations"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::verify"
+
+[[row]]
+item = "package-attest"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::attest"
+
+[[row]]
+item = "package-sbom"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::sbom"
+
+[[row]]
+item = "package-announce"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_announce.rs::announce"
+
+[[row]]
+item = "package-claim"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_claim.rs::claim"
+
+[[row]]
+item = "package-cascade"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::cascade"
+
+[[row]]
+item = "package-cascade-check"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_cascade_check.rs::check"
+
+[[row]]
+item = "package-cascade-repair"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package_cascade_repair.rs::repair"
+
+[[row]]
+item = "patch"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch.rs::patch"
+
+[[row]]
+item = "patch-freeze"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch_freeze.rs::freeze"
+
+[[row]]
+item = "patch-sync"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch_sync.rs::sync"
+
+[[row]]
+item = "patch-publish"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch_publish.rs::publish"
+
+[[row]]
+item = "patch-test"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch_test.rs::test"
+
+[[row]]
+item = "patch-why"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/patch_why.rs::why"
+
+[[row]]
+item = "config"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/config.rs::config"
+
+[[row]]
+item = "config-setup"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/config.rs::config-setup"
+
+[[row]]
+item = "config-test"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/config_test.rs::test"
+
+[[row]]
+item = "config-push"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/config_push.rs::push"
+
+[[row]]
+item = "config-update"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/config.rs::config-update"
+
+[[row]]
+item = "package-verify-identity"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "crates/ocx_cli/src/command/package.rs::verify"
+
+[[row]]
+item = "shell-hook"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "shell-env"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "shell-init"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ci"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "ci-export"
+page = "docs/reference/command-line.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "login"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/authenticate.mdx"
+
+[[row]]
+item = "inspect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-state"
+
+[[row]]
+item = "self-setup"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/update-ocx.mdx#uninstalling"
+
+[[row]]
+item = "self-setup"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#with-script"
+
+[[row]]
+item = "shell-completion"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/shell-integration.mdx"
+
+[[row]]
+item = "self-activate"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/shell-integration.mdx#activation"
+
+[[row]]
+item = "package-create"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/build-and-push.mdx#create"
+
+[[row]]
+item = "package-inspect"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "explanation/environments.mdx#closure-surfaces"
+
+[[row]]
+item = "package-push-annotations"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/build-and-push.mdx#source-annotation"
+
+[[row]]
+item = "package-push-layout"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/build-and-push.mdx#layer-layout"
+
+[[row]]
+item = "package-test"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/test-locally.mdx#basic"
+
+[[row]]
+item = "package-prune"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/snapshot-tracks.md#snapshot-tracks-teardown"
+
+[[row]]
+item = "package-copy"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/promote-packages.mdx#promoting-walkthrough"
+
+[[row]]
+item = "package-verify"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/verify-installs.mdx#supply-chain-verification"
+
+[[row]]
+item = "package-verify-identity"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "guides/pin-signer-identity.mdx#supply-chain-trust-policy"
+
+[[row]]
+item = "package-announce"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/announce.md#announcing-entry"
+
+[[row]]
+item = "package-claim"
+page = "docs/reference/command-line.md"
+action = "moved"
+home = "publishing/announce.md#announcing-claim"
+
+[[row]]
+item = "ocx-binary-pin"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_BINARY_PIN"
+
+[[row]]
+item = "ocx-binary-pin"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/entry-points.md#runtime"
+
+[[row]]
+item = "ocx-offline"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_OFFLINE"
+
+[[row]]
+item = "ocx-offline"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/work-offline.mdx#offline-modes"
+
+[[row]]
+item = "ocx-frozen"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_FROZEN"
+
+[[row]]
+item = "ocx-frozen"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/lock-and-reproduce.mdx#lock-frozen"
+
+[[row]]
+item = "ocx-remote"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_REMOTE"
+
+[[row]]
+item = "ocx-remote"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/work-offline.mdx#offline-modes"
+
+[[row]]
+item = "ocx-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_CONFIG"
+
+[[row]]
+item = "ocx-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/configuration.mdx#explicit"
+
+[[row]]
+item = "ocx-no-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_CONFIG"
+
+[[row]]
+item = "ocx-no-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/configuration.mdx#kill-switch"
+
+[[row]]
+item = "ocx-project"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_PROJECT"
+
+[[row]]
+item = "ocx-project"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-discovery"
+
+[[row]]
+item = "ocx-no-project"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_PROJECT"
+
+[[row]]
+item = "ocx-no-project"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/configuration.mdx#kill-switch"
+
+[[row]]
+item = "ocx-ceiling-path"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_CEILING_PATH"
+
+[[row]]
+item = "ocx-ceiling-path"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-discovery"
+
+[[row]]
+item = "ocx-no-consent"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_CONSENT"
+
+[[row]]
+item = "ocx-no-consent"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-integration.mdx#consent"
+
+[[row]]
+item = "ocx-global"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_GLOBAL"
+
+[[row]]
+item = "ocx-global"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/project-toolchain.md#global-toolchain"
+
+[[row]]
+item = "ocx-index"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_INDEX"
+
+[[row]]
+item = "ocx-index"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/work-offline.mdx#offline-modes"
+
+[[row]]
+item = "ocx-default-registry"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_DEFAULT_REGISTRY"
+
+[[row]]
+item = "ocx-default-registry"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/corporate-mirror.mdx#mirrors-registries"
+
+[[row]]
+item = "ocx-insecure-registries"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_INSECURE_REGISTRIES"
+
+[[row]]
+item = "ocx-insecure-registries"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/corporate-mirror.mdx#mirrors-value"
+
+[[row]]
+item = "ocx-allow-yanked"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_ALLOW_YANKED"
+
+[[row]]
+item = "ocx-allow-yanked"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/choose-versions.mdx#versions-yanked"
+
+[[row]]
+item = "ocx-patch-snapshot"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_PATCH_SNAPSHOT"
+
+[[row]]
+item = "ocx-patch-snapshot"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/maintain-patches.mdx#patches-maintainer-freeze"
+
+[[row]]
+item = "ocx-mirrors"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_MIRRORS"
+
+[[row]]
+item = "ocx-mirrors"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/corporate-mirror.mdx#mirrors-env"
+
+[[row]]
+item = "ocx-no-modify-path"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_MODIFY_PATH"
+
+[[row]]
+item = "ocx-no-modify-path"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "getting-started/install-ocx.mdx#script-options"
+
+[[row]]
+item = "ocx-managed-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_MANAGED_CONFIG"
+
+[[row]]
+item = "ocx-managed-config"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/managed-configuration.md#managed-position"
+
+[[row]]
+item = "ocx-no-config-refresh"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_CONFIG_REFRESH"
+
+[[row]]
+item = "ocx-no-config-refresh"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/managed-configuration.md#managed-refresh"
+
+[[row]]
+item = "ocx-records-dir"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_RECORDS_DIR"
+
+[[row]]
+item = "ocx-records-dir"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/execution-records.md#execution-records-enable"
+
+[[row]]
+item = "ocx-records-name"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_RECORDS_NAME"
+
+[[row]]
+item = "ocx-records-name"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/execution-records.md#execution-records-naming"
+
+[[row]]
+item = "ocx-lazy-mode"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_LAZY_MODE"
+
+[[row]]
+item = "ocx-lazy-mode"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/deferred-packages.mdx#deferred-tools-ladder"
+
+[[row]]
+item = "ocx-lazy-report"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_LAZY_REPORT"
+
+[[row]]
+item = "ocx-lazy-report"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/deferred-packages.mdx#deferred-tools-report"
+
+[[row]]
+item = "ocx-toolchain-activate"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_TOOLCHAIN_ACTIVATE"
+
+[[row]]
+item = "ocx-toolchain-activate"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#activate"
+
+[[row]]
+item = "ocx-toolchain-pinned"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_TOOLCHAIN_PINNED"
+
+[[row]]
+item = "ocx-toolchain-pinned"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/toolchain-activation.md#pinned"
+
+[[row]]
+item = "ocx-toolchain_dir"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_TOOLCHAIN_DIR"
+
+[[row]]
+item = "ocx-toolchain_dir"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/project-toolchain.mdx#project-toolchain_dir"
+
+[[row]]
+item = "ocx-no-verify"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_VERIFY"
+
+[[row]]
+item = "ocx-no-verify"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/verify-installs.mdx#supply-chain-auto-verify"
+
+[[row]]
+item = "ocx-consent-paths"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_CONSENT_PATHS"
+
+[[row]]
+item = "ocx-consent-paths"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-consent.mdx#consent-tiers"
+
+[[row]]
+item = "ocx-consent-namespaces"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_CONSENT_NAMESPACES"
+
+[[row]]
+item = "ocx-consent-namespaces"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-consent.mdx#consent-tiers"
+
+[[row]]
+item = "ocx-no-completion"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_COMPLETION"
+
+[[row]]
+item = "ocx-no-completion"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-integration.mdx"
+
+[[row]]
+item = "ocx-no-hook"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_HOOK"
+
+[[row]]
+item = "ocx-no-hook"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-integration.mdx"
+
+[[row]]
+item = "ocx-jobs"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_JOBS"
+
+[[row]]
+item = "ocx-jobs"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "integration/github-actions.md#ci-jobs"
+
+[[row]]
+item = "ocx-no-update-check"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_NO_UPDATE_CHECK"
+
+[[row]]
+item = "ocx-no-update-check"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/update-ocx.mdx#update-ocx"
+
+[[row]]
+item = "ocx-update-check-interval"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_UPDATE_CHECK_INTERVAL"
+
+[[row]]
+item = "ocx-update-check-interval"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/update-ocx.mdx#update-ocx"
+
+[[row]]
+item = "ocx-self-update"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_SELF_UPDATE"
+
+[[row]]
+item = "ocx-self-update"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/update-ocx.mdx#update-ocx"
+
+[[row]]
+item = "ocx-toolchain-update"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_TOOLCHAIN_UPDATE"
+
+[[row]]
+item = "ocx-toolchain-update"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "guides/update-ocx.mdx#update-ocx"
+
+[[row]]
+item = "ocx-extra-ca-certs"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_EXTRA_CA_CERTS"
+
+[[row]]
+item = "ocx-extra-ca-certs"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "integration/proxy-and-ca.md#ca-env"
+
+[[row]]
+item = "ocx-sigstore-trusted-root"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_SIGSTORE_TRUSTED_ROOT"
+
+[[row]]
+item = "ocx-sigstore-trusted-root"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/signing.mdx#trust-root"
+
+[[row]]
+item = "ocx-identity-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_IDENTITY_TOKEN"
+
+[[row]]
+item = "ocx-identity-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/sign-a-release.md#ci-credentials"
+
+[[row]]
+item = "ocx-key-password"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_KEY_PASSWORD"
+
+[[row]]
+item = "ocx-key-password"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/sign-a-release.md#ci-credentials"
+
+[[row]]
+item = "ocx-signing-key"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_SIGNING_KEY"
+
+[[row]]
+item = "ocx-signing-key"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/sign-a-release.md#ci-credentials"
+
+[[row]]
+item = "ocx-announce-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_ANNOUNCE_TOKEN"
+
+[[row]]
+item = "ocx-announce-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/announce-from-ci.md#announcing-postures"
+
+[[row]]
+item = "ocx-announce-git-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_ANNOUNCE_GIT_TOKEN"
+
+[[row]]
+item = "ocx-announce-git-token"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/announce-from-ci.md#announcing-transport"
+
+[[row]]
+item = "ocx-announce-git-username"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::OCX_ANNOUNCE_GIT_USERNAME"
+
+[[row]]
+item = "ocx-announce-git-username"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "publishing/announce-from-ci.md#announcing-transport"
+
+[[row]]
+item = "ocx-env-state"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::__OCX_ENV_STATE"
+
+[[row]]
+item = "ocx-env-state"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "explanation/shell-integration.mdx#activation-state-carrier"
+
+[[row]]
+item = "ocx-env-pwd"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "crates/ocx_env/src/vars.rs::__OCX_ENV_PWD"
+
+[[row]]
+item = "ocx-env-pwd"
+page = "docs/reference/environment.md"
+action = "moved"
+home = "troubleshooting/shell.mdx#repair"

@@ -1,0 +1,97 @@
+{
+ "anchors": [
+  "contributing-bazel",
+  "contributing-bazel-acceptance",
+  "contributing-bazel-first-build",
+  "contributing-bazel-grafana",
+  "contributing-bazel-warm-cache"
+ ],
+ "commands": [
+  "ocx exec"
+ ],
+ "flags": [
+  "--allow",
+  "--announce",
+  "--bazelrc",
+  "--disk",
+  "--doc",
+  "--expunge",
+  "--force",
+  "--host",
+  "--ignore-submodules",
+  "--jobs",
+  "--junit-xml",
+  "--linkopt",
+  "--local",
+  "--nobuild",
+  "--nocache",
+  "--output",
+  "--remote",
+  "--repo",
+  "--short",
+  "--test",
+  "--version"
+ ],
+ "env": [
+  "OCX_ACCEPTANCE_UNSERIALISED"
+ ],
+ "config_keys": [],
+ "exit_codes": [
+  "0",
+  "1",
+  "8"
+ ],
+ "slugs": [],
+ "links": [
+  "../getting-started.md#project-toolchain",
+  "https://bazel.build/",
+  "https://bazel.build/remote/bep",
+  "https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions",
+  "https://github.com/asciinema/agg",
+  "https://github.com/bazelbuild/bazelisk",
+  "https://github.com/bazelbuild/rules_rust",
+  "https://github.com/mozilla/sccache",
+  "https://grafana.com/",
+  "https://taskfile.dev/"
+ ],
+ "fences": [
+  "sh:4baf67fa: $ ocx exec bazel -- bazel --version",
+  "sh:58b1286b: $ CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@",
+  "sh:a2112691: $ ocx exec bazel -- bazel info --announce_rc 2>&1 | grep -v ",
+  "sh:b453913c: $ ocx exec bazel -- bazel build --nobuild //...",
+  "sh:e11fb33f: # ~/.bazelrc -- host-wide, outside every checkout by constru",
+  "sh:e462be56: # ~/.bazelrc, appended to the block above",
+  "text:0a90de1e: Analyzing: 287 targets (0 packages loaded, 0 targets configu",
+  "text:32c6b95a: # first build, empty disk cache",
+  "text:399b467e: INFO: Reading 'startup' options from <repo>/.bazelrc: --host",
+  "text:ec063152: build --remote_header=authorization=Basic <base64>"
+ ],
+ "facts": [
+  "The Rust workspace builds through cargo and through a parallel Bazel graph that checks the cargo build. [L6]",
+  "Eight gates run in two lanes: seven on every change, and the acceptance suite on the deep lane only. [L6]",
+  "rust:clippy:check and rust:doc:ratchet compare diagnostics to a per-file baseline instead of failing on warnings. [L8]",
+  "Nobody types bazel directly; task is the one command, and bazel is a pinned tool in ocx.lock. [L10]",
+  "Host state such as the output root, RAM envelope and libstdc++ prerequisite belongs in ~/.bazelrc, never a per-checkout file. [L14]",
+  "Cargo.bazel.lock.json is gitignored on purpose, because a committed copy records the generating machine's output base. [L29]",
+  "task bazel:bootstrap notices a missing lockfile and repins it before any gate that needs the live graph. [L31]",
+  "The repin runs CARGO_BAZEL_REPIN=1 with bazel fetch on the crates repo, and the task checks the file exists afterward. [L34]",
+  "A cargo config in a parent of the splice temp directory makes the repin refuse with exit code 8. [L43]",
+  "The drift gate refuses to report on fewer than 58 targets across 20 packages. [L71]",
+  "A target outside the sandbox must carry the cache-excluding tag its kind needs: external for tests, no-remote-cache for builds. [L73]",
+  "42 extra targets are GIF renders tagged manual, so wildcard builds skip them while bazel query still names them. [L75]",
+  "task recordings:gifs is the one consumer of the GIF targets, and it runs their render proof every time. [L79]",
+  "Four tasks write a Build Event Protocol stream into a 0700 temp directory that is removed on exit. [L87]",
+  "bazel:test:accept runs one sh_test per acceptance module, 171 today, and replaces the direct pytest call in task verify. [L91]",
+  "Run twice on an unchanged tree, the acceptance lane reports Executed 0 out of n tests because results are cached. [L93]",
+  "The running compose stack is not an action input, so a stack that is up with different content is not detected. [L101]",
+  "On one crate, a warm disk cache cut a rebuild after bazel clean from about 29.6 seconds to 1.9 seconds. [L113]",
+  "The committed rc points builds at a remote cache, and reading it needs a credential line in the user's own ~/.bazelrc. [L127]",
+  "The remote_header value must be quoted, since an unquoted space makes Bazel read the payload as a target. [L134]",
+  "Without the header the server answers 401, and builds run on the disk cache alone. [L144]",
+  "CI binds the read credential on non-main triggers and presents only the write credential on main, one header per source. [L146]",
+  "A Grafana dashboard titled Bazel build has four panels, and all four currently read zero. [L169]",
+  "No CI run has yet exercised the BEP-to-OTLP script, so the span-based panels have nothing to show. [L171]",
+  "Locally the OTLP push is a silent no-op unless an OTLP endpoint is configured on the machine. [L173]"
+ ],
+ "lines": 188
+}

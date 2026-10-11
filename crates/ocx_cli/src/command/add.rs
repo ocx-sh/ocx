@@ -20,6 +20,8 @@ use crate::options;
 pub struct Add {
     /// Named group to add the bindings to. Defaults to the implicit
     /// `[tools]` table when omitted.
+    ///
+    /// The name must be non-empty and contain only alphanumeric characters, `-`, or `_`.
     #[arg(long = "group", short = 'g', value_name = "GROUP")]
     pub group: Option<String>,
 
@@ -31,6 +33,10 @@ pub struct Add {
 
     /// Tool identifiers to add, each optionally prefixed with `NAME=`
     /// (e.g. `ocx.sh/cmake:3.28`, `glab=ocx.sh/gitlab/cli`).
+    ///
+    /// A bare identifier without a tag defaults to `:latest`, and the written `ocx.toml` entry
+    /// is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`). `NAME` must be non-empty and
+    /// contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
     #[arg(required = true, num_args = 1.., value_name = "[NAME=]IDENTIFIER")]
     pub identifiers: Vec<String>,
 }

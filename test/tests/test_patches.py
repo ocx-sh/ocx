@@ -132,7 +132,7 @@ def _make_companion(
 
     Always published `platform="any"`: a binary-free, env-only companion is
     the canonical `any`-published package (adr_platform_model_unification.md
-    D1's `Any`-offer rule) — it survives `ocx patch sync`'s default 5-platform
+    D1's `Any`-offer rule) — it survives `ocx patch sync`'s default 6-platform
     fan-out regardless of which concrete platform(s) a consumer actually runs
     on. A companion pinned to the current host platform instead fails closed
     the moment any `required` rule referencing it (especially a `--global`
@@ -4574,9 +4574,9 @@ def test_patch_test_optional_tier_with_path_prefixed_registry_composes(
 # ---------------------------------------------------------------------------
 # `ocx patch test` — the published contract, one test per documented line
 #
-# Sources: website/src/docs/user-guide/patches.md "Test locally without
+# Sources: website/src/content/docs/guides/patches.mdx "Test locally without
 # publishing" + the bootstrap tip, and the `patch test` exit-code table in
-# website/src/docs/reference/command-line.md.
+# website/src/content/docs/reference/command-line/patch.md.
 #
 # Every assertion names the ONE exit code the contract names. A `!= 0` band
 # cannot tell "the binary rejected my input" from "the flag was never

@@ -15,7 +15,7 @@ pub struct LazyMode {
     /// When omitted, read from `ocx.toml` (the package entry, then the group,
     /// then the top-level `lazy-mode` key), then `OCX_LAZY_MODE`, else `never`;
     /// the flag overrides all of them. Resolution order in full:
-    /// https://ocx.sh/docs/reference/command-line#arg-lazy-mode
+    /// https://ocx.sh/docs/explanation/deferred-packages/#deferred-tools-ladder
     #[clap(long = "lazy-mode", value_enum, value_name = "MODE")]
     lazy_mode: Option<lazy::LazyMode>,
 }

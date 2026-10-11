@@ -28,7 +28,7 @@ Always explore neighborhood around requested topic:
 | A CLI pattern | How modern CLIs handle it (mise, proto, pixi, uv), UX trends |
 | OCI/registry topics | Container ecosystem trends, OCI artifacts spec evolution, sigstore |
 | CI/CD patterns | GitHub Actions marketplace trends, Dagger, Earthly, cost optimization |
-| Web/docs tooling | Static site generators, documentation-as-code trends, Astro vs VitePress |
+| Web/docs tooling | Static site generators, documentation-as-code trends, Astro/Starlight alternatives |
 | DevOps tooling | Platform engineering trends, developer experience tools |
 | Testing patterns | Property-based testing, snapshot testing, contract testing trends |
 

@@ -1,0 +1,11 @@
+[[row]]
+item = "--certificate-chain"
+page = "docs/in-depth/self-hosted-sigstore.md"
+action = "deleted"
+reason = "obsolete"
+
+[[row]]
+item = "--certificate-chain"
+page = "docs/in-depth/signing.md"
+action = "deleted"
+reason = "obsolete"

@@ -13,7 +13,7 @@ pub struct Pinned {
     /// When neither flag is given, the value is read from `ocx.toml` (the
     /// `pinned` key), then `OCX_TOOLCHAIN_PINNED`, else links are followed;
     /// either flag overrides all of them. Resolution order in full:
-    /// https://ocx.sh/docs/reference/command-line#arg-pinned
+    /// https://ocx.sh/docs/explanation/toolchain-activation/#pinned
     #[clap(long = "pinned", overrides_with = "no_pinned")]
     pinned: bool,
 
@@ -24,7 +24,7 @@ pub struct Pinned {
     /// it to override an `ocx.toml` or `OCX_TOOLCHAIN_PINNED` that asked for
     /// digest paths.
     ///
-    /// See https://ocx.sh/docs/reference/command-line#arg-pinned for the full
+    /// See https://ocx.sh/docs/explanation/toolchain-activation/#pinned for the full
     /// resolution order.
     #[clap(long = "no-pinned", overrides_with = "pinned")]
     no_pinned: bool,

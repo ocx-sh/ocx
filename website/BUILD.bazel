@@ -1,57 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# The VitePress site as one coarse target (C-023). The BZL-JS-01/BZL-JS-03
+# The Astro Starlight site as one coarse target (C-023). The BZL-JS-01/BZL-JS-03
 # exemption, the tag decision, why the output is a `.tar`, and the one-label
 # patch that closes the `test/doc_scripts` gap are all in `site.bzl`'s module
 # docstring; this file is the wiring.
 #
 # Declaring this BUILD file makes `website/` a package, so `//:` labels can no
-# longer reach into it. Measured before and after on 9.2.0:
-# `bazel build --nobuild //...` went 277 -> 279 targets, exit 0 both times.
-# Nothing broke, because the root `exports_files` names only `Cargo.lock` and
-# no label anywhere spells `//:website/…`. That is not the free outcome — the
-# equivalent change under `test/` invalidated 63 labels across eight files and
-# took `//...` down — it is only what this particular boundary happened to cut.
+# longer reach into it. No label anywhere spells `//:website/…`, so nothing broke.
 
 load("//website:site.bzl", "site_target")
 
-# Everything vitepress reads, as one glob.
+# Everything astro reads, as one glob.
 #
-# The four exclusions are the ones that would otherwise feed this rule its own
-# or another tool's output: `.vitepress/dist` is where vitepress writes when
-# `task website:build` runs the non-Bazel path, `.vitepress/cache` is vite's
-# transform cache, and the two `node_modules` entries are bun's install tree
-# (`website/node_modules` is also in `.bazelignore`, `src/node_modules` is not).
-# An input set containing a previous output re-keys the action on every run,
-# which reads exactly like a rule with an undeclared input and is not one.
+# `redirects.d/**` is read at config time by `plugins/redirects.mjs`
+# (`loadRedirects` -> `readdirSync`); without it astro.config.mjs throws in the
+# sandbox. `old-urls.txt` and `lighthouse.budgets.mjs` are read only by the
+# node tests and `scripts/lighthouse.mjs`, never by `astro build`, so they stay out.
+#
+# The exclusions keep this rule from consuming its own or another tool's output:
+# `dist` is where `task website:build` writes, `.astro` is astro's generated
+# types and content cache, and `node_modules` is pnpm's install tree
+# (`website/node_modules` is also in `.bazelignore`). An input set containing a
+# previous output re-keys the action on every run, which reads exactly like a
+# rule with an undeclared input and is not one.
 #
 # `src/**` deliberately includes the GENERATED, gitignored subtrees —
-# `src/_scripts/**` above all, which is a hard prerequisite (`site.bzl` records
-# the measured ENOENT), plus `src/public/casts`, `src/public/data`,
-# `src/public/schemas` and `src/docs/reference/dependencies.md`. They are files
-# the site embeds, so they belong in the key; a fresh clone has none of them
-# and the runner refuses by name rather than letting vitepress abort five
-# stages in.
+# `src/_scripts/**` above all, which is a hard prerequisite (`site.bzl` refuses
+# by name without it), plus `src/public/casts`, `src/public/data`,
+# `src/public/schemas` and `src/content/docs/reference/dependencies.md`. They
+# are files the site embeds, so they belong in the key.
 #
 # `allow_empty = False` is the floor — a glob that matched nothing would
-# otherwise declare a rule whose inputs are `package.json` alone, and
+# otherwise declare a rule whose inputs are the config files alone, and
 # `bazel build //website:site` would report success over a site nobody built.
 _SITE_SRCS = glob(
     [
-        ".vitepress/**",
+        "plugins/**",
+        "redirects.d/**",
         "src/**",
     ],
     allow_empty = False,
     exclude = [
-        ".vitepress/cache/**",
-        ".vitepress/dist/**",
         "node_modules/**",
         "src/node_modules/**",
     ],
 ) + [
-    "bun.lock",
+    "astro.config.mjs",
     "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.json",
+    "//:CHANGELOG.md",
 ]
 
 site_target(
@@ -88,7 +88,6 @@ site_target(
 exports_files(
     [
         "recordings.taskfile.yml",
-        "src/docs/reference/command-line.md",
         "src/public/schemas/metadata/v1.json",
     ],
     visibility = ["//test:__pkg__"],
@@ -114,4 +113,15 @@ filegroup(
         exclude = ["**/__pycache__/**"],
     ),
     visibility = ["//test:__pkg__"],
+)
+
+# The docs pages, for the generator test that checks every help-text URL lands
+# on a page and anchor (`//crates/ocx_schema:docs_generator`).
+filegroup(
+    name = "docs_content",
+    srcs = glob(
+        ["src/content/docs/**"],
+        allow_empty = False,
+    ),
+    visibility = ["//crates/ocx_schema:__pkg__"],
 )

@@ -66,7 +66,7 @@ pub struct PackagePush {
     #[clap(flatten)]
     keep_tag: options::KeepTag,
 
-    /// Append a UTC build-metadata segment to the published tag.
+    /// Append a UTC build-metadata segment to the published tag, which must be `X.Y.Z` (variant or pre-release allowed) with no build metadata yet.
     #[arg(long_help = "\
         Append a UTC build-metadata segment to the published tag.\n\n\
         `datetime` appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. \
@@ -147,7 +147,7 @@ pub struct PackagePush {
     #[clap(long = "tags-file", value_name = "PATH")]
     tags_file: Option<std::path::PathBuf>,
 
-    /// After the push, attest this CycloneDX SBOM against the pushed manifest.
+    /// After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not undo the push, is recorded in the report and sets the exit code
     #[arg(long_help = "\
         After the push, attest this CycloneDX SBOM against the pushed manifest.\n\n\
         Sugar for `ocx package attest --type cyclonedx` on the digest this push just wrote. The \
@@ -159,7 +159,7 @@ pub struct PackagePush {
     #[clap(long = "sbom", value_name = "PATH")]
     sbom: Option<std::path::PathBuf>,
 
-    /// Sign each platform manifest this push writes, inline.
+    /// Sign each platform manifest this push writes, inline. A failure does not undo the push, is recorded in the report and sets the exit code
     #[arg(long_help = "\
         Sign each platform manifest this push writes, inline.\n\n\
         Opt-in: a push without it signs nothing. The signature covers the platform manifest, whose \
@@ -249,6 +249,16 @@ pub struct PackagePush {
         Digest references enable layer reuse: a base layer pushed once can be referenced by digest \
         from many packages without re-uploading. Zero layers is valid (produces a config-only OCI \
         artifact) when `--metadata` is supplied.\n\n\
+        The resolved `strip` and `prefix` travel in the layer descriptor's annotations \
+        (`sh.ocx.layer.strip-components`, `sh.ocx.layer.prefix`), never in `metadata.json`; each \
+        falls back independently at read time to the package-wide `strip_components`, then to 0 or \
+        the package root. `from` is push-only and never reaches the manifest. A registry may \
+        decline a mount, and most do unless the credential has pull scope on the source: a file \
+        layer is then simply uploaded, but a digest layer has no local bytes, so a declined mount \
+        fails the push unless the blob already exists in the target repository.\n\n\
+        Layers are a flat merge, not an overlay stack: OCI whiteout entries pass through as \
+        ordinary files. Keep `prefix` shallow for packages that install on Windows (`MAX_PATH`); it \
+        cannot contain a comma. Malformed layout syntax is a usage error (exit 64).\n\n\
         Examples: ocx package push repo:2.0.0 ./libs.tar.gz:strip=1,prefix=share ocx package push \
         repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst ocx package push app:1.0.0 \
         ./layer.tar.gz:from=base-images/layer")]

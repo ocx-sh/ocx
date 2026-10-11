@@ -1,0 +1,3 @@
+/docs/missing/
+/docs/installation/#nope
+/docs/getting-started/#gone

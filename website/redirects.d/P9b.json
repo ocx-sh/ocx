@@ -1,0 +1,195 @@
+{
+  "/docs/reference/command-line/": {
+    "fragments": {
+      "add-binding-names": "/docs/user-guide/#project-add-names",
+      "exit-codes": "/docs/reference/exit-codes/",
+      "json-documents": "/docs/reference/machine-interface/#machine-interface-roots",
+      "package-create-libc-check": "/docs/authoring/building-pushing/#create-libc-check",
+      "package-create-receipt": "/docs/authoring/building-pushing/#create-receipt",
+      "package-prune-deleting": "/docs/user-guide/snapshot-tracks/#snapshot-tracks-teardown",
+      "package-prune-locating": "/docs/user-guide/snapshot-tracks/#snapshot-tracks-teardown",
+      "package-prune-registry-support": "/docs/user-guide/snapshot-tracks/#snapshot-tracks-registries",
+      "package-prune-safeguard": "/docs/user-guide/snapshot-tracks/#snapshot-tracks-refusals",
+      "package-prune-selecting": "/docs/user-guide/snapshot-tracks/#snapshot-tracks-teardown",
+      "package-push-annotations": "/docs/authoring/building-pushing/#source-annotation",
+      "package-push-layout": "/docs/authoring/building-pushing/#layer-layout",
+      "package-verify-attestations": "/docs/user-guide/attestations/#attestations-verification",
+      "package-verify-identity": "/docs/user-guide/#supply-chain-trust-policy",
+      "pull-dry-run": "/docs/in-depth/project/#pull-dry-run",
+      "pull-render": "/docs/in-depth/project/#pull-render",
+      "pull-render-skipped": "/docs/in-depth/project/#pull-render-skipped",
+      "select-entry-point-collision": "/docs/explanation/entry-points/#collisions",
+      "self-setup-session-path": "/docs/installation/#session-path",
+      "self-setup-session-path-removal": "/docs/installation/#session-path-removal",
+      "update-report": "/docs/user-guide/#project-update-report",
+      "upgrade-report": "/docs/user-guide/#project-upgrade-report"
+    }
+  },
+  "/docs/reference/configuration/": {
+    "fragments": {
+      "env-overrides": "/docs/reference/environment/",
+      "errors": "/docs/reference/exit-codes/",
+      "file-locations-explicit": "/docs/in-depth/configuration/#explicit",
+      "future": "/docs/reference/configuration/",
+      "future-clean": "/docs/reference/configuration/",
+      "future-project": "/docs/reference/configuration/",
+      "future-registries-fields": "/docs/reference/configuration/",
+      "keys-extra_ca_certs-managed": "/docs/integration/proxy-and-ca/#ca-fleet",
+      "keys-extra_ca_certs-precedence": "/docs/integration/proxy-and-ca/#ca-precedence",
+      "keys-extra_ca_certs-publish": "/docs/integration/proxy-and-ca/#ca-publish",
+      "keys-extra_ca_certs-refusals": "/docs/integration/proxy-and-ca/#ca-refusals",
+      "keys-extra_ca_certs-system-lock": "/docs/integration/proxy-and-ca/#ca-system-lock",
+      "keys-managed-one-hop": "/docs/explanation/managed-configuration/#managed-one-hop",
+      "keys-managed-precedence": "/docs/explanation/managed-configuration/#managed-position",
+      "keys-managed-system-lock": "/docs/explanation/managed-configuration/#managed-locks",
+      "keys-managed-trust-root": "/docs/user-guide/#managed-config-trust",
+      "keys-mirrors-auth": "/docs/user-guide/#mirrors",
+      "keys-mirrors-diagnostics": "/docs/user-guide/#mirrors",
+      "keys-mirrors-interactions": "/docs/user-guide/#mirrors",
+      "keys-mirrors-merge": "/docs/user-guide/#mirrors",
+      "keys-mirrors-value": "/docs/user-guide/#mirrors-value",
+      "keys-patches-no-patches": "/docs/user-guide/patches/#patches-config",
+      "keys-patches-scopes": "/docs/user-guide/patches/#patches-config",
+      "keys-records-scopes": "/docs/reference/execution-records/#execution-records-configuration",
+      "keys-registries-index-file": "/docs/in-depth/indices/#servable-consuming",
+      "keys-toolchain_dir-expansion": "/docs/user-guide/#project-toolchain_dir",
+      "keys-toolchain_dir-managed": "/docs/user-guide/#project-toolchain_dir",
+      "keys-toolchain_dir-refusals": "/docs/user-guide/#project-toolchain_dir",
+      "keys-trust-merge": "/docs/in-depth/signing/#identity-matching-tiers",
+      "keys-trust-no-match": "/docs/in-depth/signing/#identity-matching-no-match",
+      "keys-trust-regex": "/docs/in-depth/signing/#identity-matching-regex",
+      "keys-trust-scope": "/docs/user-guide/#supply-chain-trust-policy-scope",
+      "keys-trust-scope-set": "/docs/user-guide/#supply-chain-trust-policy-scope",
+      "keys-trust-signers": "/docs/user-guide/#supply-chain-trust-policy-signers",
+      "keys-trust-signers-publish": "/docs/user-guide/#supply-chain-trust-policy-signers",
+      "keys-trust-sigstore-ladder": "/docs/in-depth/self-hosted-sigstore/#trusted-root-fields",
+      "keys-trust-sigstore-publish": "/docs/in-depth/self-hosted-sigstore/#trusted-root-fields",
+      "keys-trust-sigstore-system-lock": "/docs/in-depth/self-hosted-sigstore/#trusted-root-fields",
+      "keys-trust-specificity": "/docs/in-depth/signing/#identity-matching-specificity",
+      "keys-trust-system-lock": "/docs/in-depth/signing/#identity-matching-lock",
+      "precedence": "/docs/in-depth/configuration/#precedence",
+      "precedence-kill-switch": "/docs/in-depth/configuration/#kill-switch",
+      "precedence-merge": "/docs/in-depth/configuration/#merge-rules",
+      "project-config": "/docs/user-guide/#project",
+      "project-config-activate": "/docs/explanation/toolchain-activation/#activate",
+      "project-config-activate-ladder": "/docs/explanation/toolchain-activation/#ladders",
+      "project-config-env": "/docs/user-guide/#project-env",
+      "project-config-groups": "/docs/user-guide/#project",
+      "project-config-names": "/docs/user-guide/#project-names",
+      "project-config-package": "/docs/user-guide/#project-package",
+      "project-config-pinned": "/docs/explanation/toolchain-activation/#pinned",
+      "project-config-pinned-ladder": "/docs/explanation/toolchain-activation/#ladders",
+      "project-config-toolchain-lazy": "/docs/in-depth/lazy-loading/#deferred-tools-ladder",
+      "schemas": "/docs/reference/machine-interface/#machine-interface-schemas"
+    }
+  },
+  "/docs/reference/env-composition/": {
+    "fragments": {
+      "visibility-surfaces-companions": "/docs/explanation/patches/#patches-how-part-of-target"
+    }
+  },
+  "/docs/reference/environment/": {
+    "fragments": {
+      "external-ca-certificates": "/docs/integration/proxy-and-ca/#ca-baseline",
+      "external-ci": "/docs/integration/unattended-ci/#ci-variables",
+      "external-ci-commit-sha": "/docs/integration/unattended-ci/#ci-variables",
+      "external-ci-integration": "/docs/integration/unattended-ci/#ci-variables",
+      "external-ci-pipeline-created-at": "/docs/integration/unattended-ci/#ci-variables",
+      "external-ci-project-url": "/docs/integration/unattended-ci/#ci-variables",
+      "external-coexisting-tools": "/docs/in-depth/shell-integration/#coexistence",
+      "external-docker-config": "/docs/user-guide/#authentication-docker-credentials",
+      "external-git-ca": "/docs/integration/proxy-and-ca/#ca-keys",
+      "external-github-actions": "/docs/integration/unattended-ci/#ci-variables",
+      "external-github-env": "/docs/integration/github-actions/#ci-github-actions",
+      "external-github-oidc": "/docs/in-depth/signing/#ci",
+      "external-github-path": "/docs/integration/github-actions/#ci-github-actions",
+      "external-github-repository": "/docs/integration/unattended-ci/#ci-variables",
+      "external-github-run-identity": "/docs/integration/unattended-ci/#ci-variables",
+      "external-github-server-url": "/docs/integration/unattended-ci/#ci-variables",
+      "external-github-sha": "/docs/integration/unattended-ci/#ci-variables",
+      "external-gitlab-ci": "/docs/integration/unattended-ci/#ci-variables",
+      "external-gitlab-job": "/docs/integration/unattended-ci/#ci-variables",
+      "external-oidc-tokens": "/docs/in-depth/signing/#ci",
+      "external-proxies": "/docs/integration/proxy-and-ca/#proxy",
+      "external-source-date-epoch": "/docs/integration/unattended-ci/#ci-variables",
+      "ocx-applied": "/docs/in-depth/shell-integration/#activation-state-carrier",
+      "ocx-home-setup": "/docs/in-depth/shell-integration/#activation-files",
+      "ocx-mirror-pipeline": "/docs/reference/environment/",
+      "ocx-toolchain_dir-expansion": "/docs/user-guide/#project-toolchain_dir",
+      "ocx-toolchain_dir-refusals": "/docs/user-guide/#project-toolchain_dir",
+      "script-env-access": "/docs/reference/script-host-api/#ocx-env",
+      "shell-activation-files": "/docs/in-depth/shell-integration/#activation-files"
+    }
+  },
+  "/docs/reference/execution-records/": {
+    "fragments": {
+      "execution-records-consumer": "/docs/explanation/execution-records/#consumer",
+      "execution-records-purl": "/docs/explanation/records-and-sbom/#purl",
+      "execution-records-sbom-chain": "/docs/explanation/records-and-sbom/#sbom-chain"
+    }
+  },
+  "/docs/reference/machine-interface/": {
+    "fragments": {
+      "machine-interface-exit-codes": "/docs/reference/exit-codes/"
+    }
+  },
+  "/docs/reference/metadata/": {
+    "fragments": {
+      "dependencies": "/docs/reference/metadata/dependencies/#dependencies",
+      "dependencies-authoring-vs-published": "/docs/authoring/dependencies/#pinning",
+      "dependencies-entry": "/docs/reference/metadata/dependencies/#dependencies-entry",
+      "dependencies-manifest-pins": "/docs/in-depth/dependencies/#manifest-pins",
+      "dependencies-no-version-ranges": "/docs/in-depth/dependencies/#scope",
+      "dependencies-ordering": "/docs/reference/metadata/dependencies/#dependencies-ordering",
+      "dependencies-registry": "/docs/authoring/dependencies/#pinning",
+      "dependencies-visibility": "/docs/reference/metadata/dependencies/#dependencies-visibility",
+      "entry-points": "/docs/reference/metadata/entry-points/#entry-points",
+      "entry-points-args": "/docs/publishing/entry-points/#dispatch",
+      "entry-points-disk-layout": "/docs/explanation/entry-points/#declaring",
+      "entry-points-example": "/docs/reference/metadata/entry-points/#entry-points-wire-shape",
+      "entry-points-uniqueness": "/docs/reference/metadata/entry-points/#entry-points-uniqueness",
+      "entry-points-wire-shape": "/docs/reference/metadata/entry-points/#entry-points-wire-shape",
+      "env": "/docs/reference/metadata/env/#env",
+      "env-constant": "/docs/reference/metadata/env/#env-constant",
+      "env-entry-visibility": "/docs/reference/metadata/env/#env-entry-visibility",
+      "env-interpolation": "/docs/reference/metadata/env/#env-interpolation",
+      "env-interpolation-escape": "/docs/reference/metadata/env/#env-interpolation-escape",
+      "env-interpolation-render": "/docs/reference/metadata/env/#env-interpolation-render",
+      "env-interpolation-self": "/docs/reference/metadata/env/#env-interpolation-self",
+      "env-interpolation-self-env": "/docs/reference/metadata/env/#env-interpolation-self-env",
+      "env-interpolation-unrecognised": "/docs/reference/metadata/env/#env-interpolation-unrecognised",
+      "env-list": "/docs/reference/metadata/env/#env-list",
+      "env-list-separator": "/docs/reference/metadata/env/#env-list-separator",
+      "env-path": "/docs/reference/metadata/env/#env-path",
+      "executables": "/docs/reference/metadata/entry-points/#executables",
+      "executables-claim": "/docs/authoring/entry-points/#binaries",
+      "executables-none-vs-empty": "/docs/reference/metadata/entry-points/#executables-none-vs-empty",
+      "executables-scope": "/docs/reference/metadata/entry-points/#executables-scope",
+      "executables-vs-entry-points": "/docs/authoring/entry-points/#binaries",
+      "executables-writing": "/docs/reference/metadata/entry-points/#executables-writing",
+      "integrations": "/docs/reference/metadata/integrations/#integrations",
+      "integrations-caps": "/docs/reference/metadata/integrations/#integrations-caps",
+      "integrations-declarers": "/docs/explanation/integrations/#declarers",
+      "integrations-interpolation": "/docs/reference/metadata/integrations/#integrations-interpolation",
+      "integrations-namespace": "/docs/reference/metadata/integrations/#integrations-namespace",
+      "integrations-no-merge": "/docs/explanation/integrations/#no-merge",
+      "integrations-schema-version": "/docs/explanation/integrations/#schema-version",
+      "json-schema-editors": "/docs/reference/machine-interface/#machine-interface-schemas",
+      "json-schema-local": "/docs/reference/machine-interface/#machine-interface-schemas",
+      "json-schema-validation": "/docs/reference/machine-interface/#machine-interface-schemas",
+      "metadata": "/docs/reference/metadata/#format",
+      "schema": "/docs/reference/metadata/#format-top-level"
+    }
+  },
+  "/docs/reference/platforms/": {
+    "fragments": {
+      "shared-digests": "/docs/in-depth/storage/#shared-digests"
+    }
+  },
+  "/docs/reference/script-host-api/": {
+    "fragments": {
+      "cross-type-wall": "/docs/authoring/testing/#scripted-tests-ocx-api",
+      "overview": "/docs/authoring/testing/#scripted-tests"
+    }
+  }
+}

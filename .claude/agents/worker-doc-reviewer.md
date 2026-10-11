@@ -15,22 +15,20 @@ Read-only review agent. Detects doc drift. Input: changed source files. Output: 
 
 Cross-reference every changed file against table. If source change match, verify doc accurate + complete.
 
-| Source change pattern | Documentation file | Section to check |
+| Source change pattern | Documentation file (under `website/src/content/docs/`) | Section to check |
 |---|---|---|
-| `crates/ocx_cli/src/command/*.rs` (new file) | `reference/command-line.md` | New command section + summary |
-| `crates/ocx_cli/src/command/*.rs` (new/changed flag) | `reference/command-line.md` | Flag table for that command |
-| `crates/ocx_cli/src/command/*.rs` (changed default) | `reference/command-line.md` | Flag description + default |
-| New `OCX_*` env var anywhere | `reference/environment.md` | New env var section |
-| Changed env var behavior/default | `reference/environment.md` | Env var description |
-| `crates/ocx_schema/**` (new field) | `reference/metadata.md` | Schema field entry |
-| `crates/ocx_package_manager/src/**` (changed logic) | `user-guide.md` | Package lifecycle sections |
-| `crates/ocx_oci/src/platform*` (new platform) | `installation.md`, `user-guide.md` | Platform tables |
-| `crates/ocx_oci/src/client*` (auth change) | `reference/environment.md`, `user-guide.md` | Auth sections |
-| JSON output format changes | `reference/command-line.md` | Output format descriptions |
-| `crates/ocx_store/src/**` | `user-guide.md` | Three-store architecture section |
-| New user-facing feature | `getting-started.md` | If it changes the core workflow |
-| Breaking change | `changelog.md` | Breaking changes section |
-| New CI integration pattern | `user-guide.md` | CI integration section |
+| `crates/ocx_cli/src/command/*.rs` (new file, new/changed flag or default) | `reference/command-line/**` (generated; never hand-edited) | Clap help is the source: `task website:reference:check` is green, the page is regenerated, the flag/default reads right |
+| New or changed `OCX_*` env var anywhere | `reference/environment.md` (generated from `ocx_env` doc blocks) | `ocx_env` declaration documented, page regenerated |
+| `crates/ocx_config/**` (new/changed setting) | `reference/configuration.md` (generated), `reference/project-file.md` | Schema description is the source |
+| `crates/ocx_schema/**` (new field) | `reference/metadata/` | Schema field entry |
+| JSON output format changes | `reference/machine-interface.md`, `reference/exit-codes.md` | Report/error-document description |
+| `crates/ocx_package_manager/src/**` (changed logic) | `guides/`, `explanation/` | Pages that walk the changed lifecycle step |
+| `crates/ocx_oci/src/platform*` (new platform) | `reference/platforms.md`, `getting-started/install-ocx.mdx` | Platform tables |
+| `crates/ocx_oci/src/client*` (auth change) | `reference/environment.md`, `integration/` | Auth sections |
+| `crates/ocx_store/src/**` | `explanation/storage.mdx` | Three-store architecture section |
+| New user-facing feature | `getting-started/` | If it changes the core workflow |
+| Breaking change | commit subject (`!`) | `CHANGELOG.md` is generated from it; never edited |
+| New CI integration pattern | `integration/` | CI integration page |
 
 ## Review Checklist
 

@@ -1,0 +1,78 @@
+---
+title: "Run a command with its dependencies"
+description: "Run a tool together with the tools it depends on, and inspect the dependency tree."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import Terminal from '../../../components/Terminal.astro'
+
+Use this page to run a tool together with the tools it depends on, and to inspect the dependency tree.
+
+## Pull and run \{#dependencies\}
+
+A publisher can declare that a package needs other packages to work. A web app needs a JavaScript runtime. A build tool needs a compiler. The publisher pins each dependency to an exact [OCI digest][in-depth-storage-packages]. OCX handles dependencies for you.
+
+Pull the package, and OCX [resolves the closure transitively][in-depth-dependencies-resolution]:
+
+\<\<\< @/_scripts/user-guide/deps-pull.sh\{sh\}
+
+Say `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`. All three packages land in the [package store][in-depth-storage-packages]. Only `acme/webapp:2.0` is the explicit install. The dependencies are stored but do not show up as top-level installs.
+
+To run the package with its dependency environments configured, use [`ocx package exec`][cmd-package-exec]:
+
+\<\<\< @/_scripts/user-guide/deps-exec.sh\{sh\}
+
+[`ocx package exec`][cmd-package-exec] first [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order. Then it launches the command. [`ocx package env`][cmd-package-env] exports the same composed environment for use in your own shell.
+
+:::caution[install + select does not set up dependency environments]
+[`ocx package install --select`][cmd-package-install] creates a [current symlink][in-depth-storage-symlinks] that points at the package root, with the package's files under its `content/` subdirectory. If you or another tool invokes a binary through that symlink directly, the dependency environments are **not** configured. Only the package's own files are reachable. For packages with dependencies, use [`ocx package exec`][cmd-package-exec]. Or export the full environment first with [`ocx package env`][cmd-package-env] or [`ocx env`][cmd-env-root].
+:::
+
+## Run several packages together \{#run-several-packages\}
+
+Name more than one package before `--` to run a command with all their environments composed. A dependency that two roots share is emitted once, as [composition order][in-depth-environments-composition-order] describes:
+
+\<\<\< @/_scripts/getting-started/exec-multi.sh\{sh\}
+
+This puts Node.js and Bun on `PATH` for the one `bun --version` command. [`ocx package env`][cmd-package-env] takes the same list when you need the variables in your own shell.
+
+## Inspecting the dependency tree
+
+[`ocx package deps`][cmd-deps] shows the declared relationships. The default tree view annotates [non-public dependencies][in-depth-environments-visibility], so you can see which deps cross the [interface surface][in-depth-environments-two-surfaces]:
+
+<Terminal src="/casts/user-guide/deps.cast" title="Inspecting the dependency tree" collapsed />
+
+`--flat` shows the resolved evaluation order, which is the exact sequence OCX uses when it composes environments. This is the primary debugging tool when environment variables are not what you expect:
+
+<Terminal src="/casts/user-guide/deps-flat.cast" title="Resolved dependency order" collapsed />
+
+`--why` traces the path from a root package to a transitive dependency:
+
+<Terminal src="/casts/user-guide/deps-why.cast" title="Tracing why a dependency is pulled in" collapsed />
+
+## Conflict warnings
+
+Two dependencies may set the same scalar variable, for example both set `JAVA_HOME` to different paths. OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics: the package later in topological order wins, silently. Inspect the order with [`ocx package deps --flat`][cmd-deps] and decide whether the conflict is real.
+
+Project toolchains behave the same way. Suppose you add a package with dependencies and also declare one of those dependencies as a top-level binding in `ocx.toml`. Both contribute environment variables. Either remove the redundant binding, because the transitive dependency provides it, or accept that the top-level entry's value wins the conflict.
+
+:::tip[Learn more]
+[Dependencies In Depth][in-depth-dependencies] covers the transitive resolution algorithm and the scope philosophy: no version ranges and no auto-update.
+[Environments In Depth][in-depth-environments] covers composition order, the visibility model (sealed, private, public, interface), the `--self` flag and last-writer-wins.
+:::
+
+[cmd-package-install]: ../reference/command-line/package-consuming.md#package-install
+[cmd-package-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
+[cmd-deps]: ../reference/command-line/package-consuming.md#deps
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[in-depth-storage-packages]: ../explanation/storage.mdx#packages
+[in-depth-storage-symlinks]: ../explanation/storage.mdx#symlinks
+[in-depth-dependencies]: ../explanation/dependencies.mdx
+[in-depth-dependencies-resolution]: ../explanation/dependencies.mdx#resolution
+[in-depth-environments]: ../explanation/environments.mdx
+[in-depth-environments-two-surfaces]: ../explanation/environments.mdx#two-surfaces
+[in-depth-environments-visibility]: ../explanation/environments.mdx#visibility-views
+[in-depth-environments-composition-order]: ../explanation/environments.mdx#composition-order
+[in-depth-environments-last-wins]: ../explanation/environments.mdx#last-wins

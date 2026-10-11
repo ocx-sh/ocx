@@ -138,8 +138,8 @@ generic to detect and must be caught in review.
 - `quality-rust.md` — Comment Quality / two-register model (`///` contract vs `//`
   rationale); the register split this rule applies to CLI help.
 - `subsystem-cli.md` / `subsystem-cli-commands.md` — CLI architecture, command taxonomy,
-  and the canonical per-command docs at `website/src/docs/reference/command-line.md`
-  (where depth lives).
+  and the per-command docs at `website/src/content/docs/reference/command-line/`
+  (generated from this help by `task website:reference:generate`; where depth lives).
 - `docs-style.md` — how the documentation website narrative is written (the target for
   detail trimmed out of help).
 - `quality-core.md` — universal anti-pattern severity tiers.

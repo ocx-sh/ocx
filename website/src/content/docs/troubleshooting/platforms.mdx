@@ -1,0 +1,150 @@
+---
+title: "Fix Linux, macOS and Windows problems"
+description: "Fix the install and launch failures that depend on the host platform: libc selection on Linux, code signing on macOS and executable resolution on Windows."
+---
+{/* doc_type: troubleshooting */}
+
+import Tooltip from '@ocx-sh/theme/components/Tooltip.astro'
+
+## Error: no glibc binary installs on Alpine, even with gcompat \{#linux-gcompat\}
+
+This issue occurs when the host's dynamic linker identifies itself as musl, as it does on [Alpine Linux][alpine] with [gcompat][gcompat] installed. The linker is still the musl loader (`/lib/ld-musl-x86_64.so.1`) and its `--version` output reads `musl libc`. OCX detects `libc.musl` and selects the `libc.musl` manifest entry.
+
+OCX selects index entries by identity, not by capability. It reports what the loader identifies itself as, not what it can emulate. Forcing a glibc binary onto a musl host would work most of the time, but gcompat implements only a subset of glibc's ABI. A binary that calls an uncovered function fails at runtime with a symbol-lookup error, which is harder to diagnose than a clean install failure. The rule "ld.so tells the truth about what it is" means every install is either correct or fails with a clear feature mismatch error.
+
+**To use the glibc binary anyway**, pass `--platform` with an explicit `+libc.glibc` feature tag:
+
+```sh
+ocx package install acme/mytool:1.0.0 --platform linux/amd64+libc.glibc
+```
+
+This selects the `libc.glibc` manifest entry. It is a real override, not a bypass. The binary runs only if your gcompat covers the glibc symbols it calls. Treat it as an escape hatch for cases where you know the binary works, such as cross-fetching to bundle elsewhere.
+
+**The recommended fix** is for the publisher to ship a fully static build next to the glibc and musl builds. A static binary carries no `os.features` declaration and matches every Linux host. See [libc Differentiation: Static binaries][authoring-libc-static] in the multi-platform publishing guide.
+
+## Warning: libc detection finds nothing, or finds another environment's libc \{#linux-non-fhs\}
+
+This issue occurs when OCX cannot read a loader from a present system binary. It also occurs when the binary runs in a different namespace than the one that was probed. OCX detects the libc of the host it runs on, at install time.
+
+**Non-FHS hosts.** OCX does not look for the dynamic loader at fixed [Filesystem Hierarchy Standard][fhs] paths. It reads the loader path out of a present system binary instead. The [`PT_INTERP`][pt-interp] field of every dynamically linked ELF names the exact loader the kernel will use. In a [Gentoo Prefix][gentoo-prefix], under Homebrew-on-Linux or in a custom sysroot, the probe binaries point to the prefix loader and detection works.
+
+**NixOS depends on [nix-ld][nix-ld].** With nix-ld active, an FHS shim sits at the canonical loader path (`/lib/ld-linux-x86-64.so.2`) and detection works normally. Without it, the standard probe binaries (`/usr/bin/env`, `/bin/sh`, `/bin/ls`) are statically linked and carry no `PT_INTERP`. The scan finds nothing and OCX logs a debug note when `/nix` is present.
+
+Whenever detection finds nothing, OCX matches only entries with no `os.features` (the static and universal builds). It never hard-fails, and you can always force a variant with `--platform`.
+
+**Containers and distrobox.** Detection does not follow a binary into another namespace. This is a deliberate, documented limitation. The run environment may provide a different libc if you install on one host and run the binary elsewhere. Examples are a [distrobox][distrobox] or toolbox guest, a bind-mounted container, or a copied `~/.ocx` on another machine.
+
+The normal flow never hits this, because [`ocx package exec`][cmd-package-exec] and [`ocx exec`][cmd-run] launch the binary on the same host and kernel that detection ran against.
+
+Install inside the environment you intend to run in, or pin the variant with `--platform linux/amd64+libc.glibc`. Detection at exec time in the target namespace is tracked for a future design pass.
+
+## Error: macOS kills an extracted binary with Killed: 9 \{#macos-codesign\}
+
+This issue occurs when a binary carries no valid <Tooltip term="code signature">A cryptographic seal embedded in the binary's `__LINKEDIT` segment. macOS checks it before allowing execution. An ad-hoc signature, created with `codesign --sign -`, is a local integrity check that needs no Apple Developer certificate.</Tooltip>. On Apple Silicon the kernel terminates unsigned binaries immediately with `Killed: 9`.
+
+On Intel, <Tooltip term="Gatekeeper">A macOS subsystem that checks downloaded applications for valid signatures and notarization. Since Sequoia 15.1 the bypass for unsigned apps is removed.</Tooltip> blocks them when a <Tooltip term="quarantine flag">The `com.apple.quarantine` extended attribute. Browsers and other download tools set it on files fetched from the internet.</Tooltip> is present.
+
+A publisher who never signed the binaries before packaging ships unsigned files. Signatures that existed before packaging survive the tar round-trip, because they are part of the binary content and not extended attributes.
+
+OCX repairs this automatically. After extracting a package it walks the content directory recursively and detects <Tooltip term="Mach-O binaries">The native executable format on macOS and iOS. OCX identifies them by the first four bytes of each file, which hold a known magic number such as `0xFEEDFACF` for 64-bit or `0xCAFEBABE` for universal.</Tooltip>. Each one that lacks a valid signature gets an ad-hoc signature.
+
+Binaries that already verify are left as they are, and quarantine flags are stripped. No configuration is required.
+
+[Homebrew][homebrew] solves the same problem with the same technique, per-file ad-hoc signing without bundle sealing (see [`codesign_patched_binary`][homebrew-codesign]). OCX signs after extraction rather than after patching, but the `codesign` invocation is equivalent. Publishers can sign before packaging, and OCX then leaves those signatures intact. It is not required.
+
+<details>
+<summary>What ocx runs under the hood</summary>
+
+Quarantine removal runs first, on the entire content directory:
+
+```sh
+xattr -dr com.apple.quarantine <content_path>
+```
+
+Then, for each Mach-O binary whose existing signature fails `codesign --verify --strict` (recursive walk, symlinks not followed):
+
+```sh
+codesign --sign - --force --preserve-metadata=entitlements <binary>
+```
+
+A binary whose signature already verifies is left untouched, so a sealed `.app` bundle keeps its bundle signature.
+
+- Only `entitlements` are preserved from the original signature.
+- `flags` would carry the hardened-runtime bit, whose library validation rejects ad-hoc signed libraries.
+- `requirements` holds the original certificate's Team ID constraint, which an ad-hoc signature cannot satisfy.
+- Preserving either causes dyld "different Team IDs" errors when loading third-party frameworks.
+- Hardlinked files (same inode) are signed only once.
+
+</details>
+
+**Disable the automatic signing** by setting [`OCX_NO_CODESIGN`][env-no-codesign] to a truthy value:
+
+```sh
+export OCX_NO_CODESIGN=1
+```
+
+**Sign manually** when a binary still fails to launch after installation:
+
+```sh
+codesign --sign - --force --preserve-metadata=entitlements /path/to/binary
+```
+
+**Remove the quarantine flag** from a whole directory:
+
+```sh
+xattr -dr com.apple.quarantine /path/to/content
+```
+
+<details>
+<summary>Can I disable macOS code signing enforcement entirely?</summary>
+
+macOS enforces code signatures through <Tooltip term="AMFI">Apple Mobile File Integrity, a kernel-level module that validates code signatures independently of Gatekeeper. Disabling it takes Recovery Mode, turning off SIP and setting `amfi_get_out_of_my_way=1`.</Tooltip>. Gatekeeper is a separate layer.
+
+The macOS [Developer Mode][developer-mode] setting (since Ventura 13) relaxes restrictions for development tools like Xcode and Instruments. It does **not** exempt unsigned binaries, and `Killed: 9` still occurs on Apple Silicon with Developer Mode enabled.
+
+Ad-hoc signing through OCX is the simplest solution. It needs no certificates and no system changes.
+
+</details>
+
+## Error: Windows cannot launch a packaged .bat or .cmd binary \{#windows-exec-resolution\}
+
+This issue occurs when `PATHEXT` is missing from the environment and a packaged binary ships as a `.bat` or `.cmd` script. A bare name that resolves nowhere fails with `"bun" does not resolve in the composed environment; searched: [...]`, exit 65, slug `command_not_found`.
+
+Windows does not treat scripts the way Unix does. On Unix, a file with a `#!/bin/sh` shebang and the execute bit launches directly. On Windows, the kernel's [CreateProcessW][createprocessw] API only searches for `.exe` files. It ignores `.bat`, `.cmd` and other script types.
+
+This applies to the packaged third-party binary a command resolves to. It does not apply to OCX's own entry-point launchers. Those are native `<name>.exe` shims, and `.EXE` is always in the default `PATHEXT`, so a launcher resolves by bare name with no configuration.
+
+Package metadata often exposes binaries as scripts (`.bat` or `.cmd` on Windows). When [`ocx package exec`][cmd-package-exec] runs one, it must find the script through the <Tooltip term="PATHEXT">`PATHEXT` lists the file extensions Windows appends to a bare command name, for example `.COM;.EXE;.BAT;.CMD`. Typing `bun` makes the shell try `bun.COM`, `bun.EXE` and `bun.BAT` in turn on every `PATH` entry.</Tooltip> variable, as a Windows shell would. OCX does this with the [which][which-crate] crate: it searches `PATH` with `PATHEXT`-aware extension matching before it spawns the child. A command that contains a path separator and fails to resolve logs `Could not resolve "bun" via PATH, falling back to OS lookup.` and falls back to the OS lookup. A bare name has no such fallback.
+
+In containers, CI runners and custom shells with a minimal environment, `PATHEXT` may be absent. Without it, `ocx package exec` cannot resolve a packaged `.bat` or `.cmd` binary by bare name. Set `PATHEXT` to resolve it. The default Windows value is `.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC`.
+
+```powershell
+$env:PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
+```
+
+In a POSIX shell that runs OCX on Windows (Git Bash, for example), export the same value:
+
+```sh
+export PATHEXT='.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
+```
+
+[alpine]: https://alpinelinux.org/
+[gcompat]: https://gitlab.alpinelinux.org/alpine/gcompat
+[nix-ld]: https://github.com/nix-community/nix-ld
+[gentoo-prefix]: https://wiki.gentoo.org/wiki/Project:Prefix
+[distrobox]: https://distrobox.it/
+[fhs]: https://refspecs.linuxfoundation.org/fhs.shtml
+[pt-interp]: https://refspecs.linuxfoundation.org/elf/elf.pdf
+
+[authoring-libc-static]: ../publishing/libc-variants.md#libc-static
+
+[cmd-package-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-run]: ../reference/command-line/commands.md#exec
+
+[createprocessw]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+[which-crate]: https://crates.io/crates/which
+[homebrew]: https://brew.sh/
+[homebrew-codesign]: https://github.com/Homebrew/brew/blob/master/Library/Homebrew/extend/os/mac/keg.rb
+[developer-mode]: https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device
+
+[env-no-codesign]: ../reference/environment.md#ocx-no-codesign

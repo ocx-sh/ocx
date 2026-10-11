@@ -1,0 +1,216 @@
+---
+title: "Dependencies"
+description: "Why OCX pins every dependency to an exact manifest digest, how the create and push steps enforce it, and how transitive dependencies resolve, compose and stay alive."
+---
+{/* doc_type: explanation */}
+
+import Tooltip from '@ocx-sh/theme/components/Tooltip.astro'
+
+This page explains why the dependency surface of an OCX package is so small, how transitive resolution works, and where the related design lives. The related design covers visibility, environment composition, and garbage collection.
+
+A binary rarely runs in isolation. A web application needs a JavaScript runtime. A build tool needs a compiler. A Maven build needs both Java and Maven on `PATH`.
+
+Most package managers solve this with version-range resolvers and project-level lockfiles. That is useful when source compilation produces unique builds. It is heavyweight when the upstream is already a content-addressed binary in an OCI registry.
+
+OCX takes a deliberately narrow approach. Every dependency is pinned by the publisher to an exact <Tooltip term="OCI digest">A SHA-256 fingerprint that identifies a specific build of a package. The publisher records the exact digest they tested against, not a version range and not a floating tag. The dependency graph is therefore fully determined by the package metadata alone.</Tooltip>.
+
+There are no version ranges, no resolution algorithm, and no auto-updates. The dependency graph is a flat list of digests baked into each package's metadata.
+
+The user-facing surface lives in the [Dependencies section of the user guide][user-deps]. It covers auto-fetch, `ocx package exec`, and `ocx package deps`.
+
+## Authoring vs Published \{#dependencies-authoring-vs-published\}
+
+The `metadata.json` you author and the one OCX publishes are not always the same bytes. In the authoring sidecar, a dependency identifier needs only an explicit registry, for example `ocx.sh/java:21`. The digest is optional.
+
+[`ocx package create --platform`][cmd-package-create] resolves a tag-only identifier against the selected index. It rewrites the sidecar in place and pins the resolved manifest digest directly on the identifier. With `--platform any` the same rule applies. An `any` package can only depend on packages that themselves offer an `any` manifest, and the winning manifest's digest is pinned bare on the identifier.
+
+The published form is what the registry stores and what `ocx package install` reads. Every dependency identifier carries a manifest digest, and nothing else changes between the two shapes. The published form is a strict subset of the authoring form, so an already-published `metadata.json` parses as authoring metadata unchanged.
+
+The rewritten sidecar, not the one you hand-wrote, is what you commit alongside the archive. [`ocx package push`][cmd-package-push] reads it, verifies that every dependency is pinned, and refuses to publish anything still tag-only (exit 65).
+
+## Manifest Pins, Not Index Pins \{#manifest-pins\}
+
+A dependency's digest is not free to identify anything with the right bytes. It must reference a platform [OCI manifest][oci-image-manifest], never an [OCI Image Index][oci-image-index]. Pinning a dependency's index digest looks appealing at first. A single identifier could then resolve to whichever platform an installing host needs, the same way an ordinary package reference does at install time.
+
+That reasoning breaks the moment the dependency's publisher pushes again. [Cascade publishing][in-depth-versioning-cascades] rewrites a tag's index on every platform push. The previous index digest becomes untagged, and the registry's garbage collector reclaims it on its next sweep.
+
+A dependency pinned to that untagged index digest starts returning 404 for good. This happens the first time its publisher adds a platform or re-releases an existing one. The child platform manifests have no such problem. Every successor index still references them, so they survive indefinitely.
+
+`push` enforces the rule at publish time. It resolves each dependency's pin against its registry and rejects the push (exit 65) if the resolved digest is an image index rather than a manifest. The error names the offending dependency.
+
+:::note[The same rule governs the project lock]
+[`ocx.lock`][in-depth-project-lock] applies the identical rule to project toolchains. It records each binding's **per-platform leaf manifest digest**, deliberately never the index digest. See [Lock format][in-depth-project-lock-format]. Package dependencies follow the same rule, for the same reason. The index digest is a moving target across a publisher's release history, and the leaf manifest digest is not.
+:::
+
+## Create Resolves, Push Gates \{#create-push-split\}
+
+Enforcing the manifest-pin rule by hand-editing digests does not scale, so OCX splits the publishing pipeline into two responsibilities.
+
+[`ocx package create --platform`][cmd-package-create] is the compiler. The publisher writes each dependency tag-only in the `metadata.json` sidecar. `create` resolves it against the selected index into a manifest pin and rewrites the sidecar in canonical form.
+
+[`ocx package push`][cmd-package-push] is a pure gate. It makes no resolution decisions. It verifies only that every declared dependency already carries a manifest pin covering the single platform the invocation publishes. It refuses to publish otherwise.
+
+The split keeps the published guarantee cheap to check. `push` never decides *which* manifest a dependency should resolve to. It confirms that a pin already exists and that it actually resolves, in its registry, to a manifest rather than an index.
+
+Resolution happens once, at `create` time. It needs index access, `--offline`, `--remote` and `--frozen` routing, and disambiguation between candidate manifests. The publisher can inspect and commit the result before it ever reaches a registry.
+
+A package built with `--platform any` performs no platform-specific resolution of its own. It can only depend on dependencies that themselves offer an `any` build. A dependency with no `any` manifest blocks `create` outright and the error names the offending dependency. See [Multi-Platform Packages][authoring-multi-platform] for the publisher workflow. See [Platforms][reference-platforms] for the compatibility rule `create` evaluates each candidate manifest against.
+
+A pin is a snapshot of the publisher's platform coverage at the moment `create` ran, not a live query. Suppose a dependency's own publisher later adds an `any` build where none existed before. Packages that depend on it do not retroactively gain it, and re-running `create` and `push` picks it up.
+
+This mirrors [the project lock's pin-preservation guarantee][in-depth-project-lock-pin-preservation]. Neither layer silently advances a pin nobody asked to re-resolve.
+
+## Registry Requirement \{#dependencies-registry\}
+
+Every dependency identifier must include an explicit registry. Write `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`, not `java:21@sha256:a1b2c3d4e5f6...`. Default registry resolution is not applied, because the consumer may have a different default registry than the publisher. Identifiers without an explicit registry are rejected at deserialization.
+
+## Resolution \{#resolution\}
+
+When you pull or install a package that declares dependencies, OCX fetches every required package transitively. That includes dependencies of dependencies, and so on. It stores them in the [package store][in-depth-storage-packages]. The process is fully automatic and requires no extra flags:
+
+```shell
+ocx package pull acme/webapp:2.0
+```
+
+Suppose `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`. All three packages then end up in the package store. Only `acme/webapp:2.0` is the package you explicitly requested. The dependencies are implementation details, fetched and stored but not surfaced as top-level installs.
+
+Each declared dependency is identified by digest, so the publisher's recorded graph is the complete truth. Two builds of `acme/webapp:2.0` that pin different `nodejs` digests resolve to *different* dependency closures, even if the surface tag (`nodejs/node:24`) is the same.
+
+:::note[Resolution is publisher-provided, not solved]
+[Nix derivations][nix] take the same approach. Every input is pinned by hash, and the store is content-addressed. There are no version ranges, because the exact input is determined at build time. 
+
+[Go modules][go-modules] use Minimum Version Selection with a `go.sum` integrity file. That is deterministic, but it still has a resolution algorithm. [Homebrew][homebrew] uses floating name-only dependencies with no pinning at all.
+
+OCX sits closest to Nix in philosophy, with exact pins and no resolution. It has neither the functional language nor the build system. The dependency declaration is a flat list of digests in a JSON file.
+:::
+
+## Composition \{#composition\}
+
+To actually *run* a package with its dependency environments configured, use [`ocx package exec`][cmd-exec]. To export the composed environment into a shell, use [`ocx env`][cmd-env-root].
+
+[`ocx package exec`][cmd-exec] composes the environments of all dependencies in <Tooltip term="topological order">Dependencies are applied before their dependents, in the order the metadata declares them. A dependency's own dependencies come before it. If A depends on B, and B depends on C, the order is C → B → A.</Tooltip> before launching the command. Dependencies come first, then the package you requested.
+
+Scalar variables (like `JAVA_HOME`) follow last-writer-wins. Accumulator variables (like `PATH`) merge naturally, and each dependency's `bin/` directory is prepended in order.
+
+The full algorithm is documented in [Environments][in-depth-environments] under [Composition Order][env-composition] and [Last-Wins Scalar Semantics][env-last-wins]. It covers the transitive-closure walk, the edge filter, scalar vs. accumulator semantics, and conflict reporting. There is one canonical implementation, and the design lives there.
+
+## Visibility \{#visibility\}
+
+Every package owns two environment surfaces. The **interface surface** is what consumers see by default. The **private surface** is what the package's own launchers see at runtime. A package that wraps a compiler might need `CC` and `LD_LIBRARY_PATH` internally, so those belong on the private surface. A shared Java runtime that every consumer needs goes on the interface surface.
+
+Each dependency declares a `visibility` value (`sealed`, `private`, `public` or `interface`) controlling which surface it reaches. When dependencies form chains, visibility propagates inductively along edges. Diamond resolution applies the most-open value per axis.
+
+:::note[Compare with Nix and Guix]
+Functional package managers call the same idea **propagated dependencies**. In [Nix][nix], [`propagatedBuildInputs`][nix-propagated] is the propagated counterpart to `buildInputs`. In [Guix][guix], [`propagated-inputs`][guix-propagated] are installed to profiles alongside the package they belong to. OCX's `public` and `interface` visibilities have the same shape. The `private` value is the equivalent of plain `buildInputs` / `inputs`, and `sealed` contributes nothing to either side.
+:::
+
+The complete model is documented in [Environments][in-depth-environments]. It covers the per-axis truth table, the edge filter, propagation rules, and worked examples. See [Two Surfaces][env-two-surfaces], [Visibility Views][env-visibility], and [Edge Filter][env-edge-filter]. The `--self` flag selects which surface [`ocx package exec`][cmd-exec] emits. The [Visibility Views section][env-visibility] holds the full truth table.
+
+## Garbage Collection \{#gc\}
+
+Dependencies are protected from garbage collection as long as any package that depends on them is still referenced. When you uninstall a package, its dependencies do not disappear immediately. They remain in the package store until no other installed package depends on them. [`ocx clean`][cmd-clean] removes only packages that have no references at all: no install symlinks and no dependent packages.
+
+The mechanism is forward-only. OCX records each dependency as a forward-ref inside the dependent package's `refs/deps/` directory, pointing at the dependency's `content/`. Nothing is written into the dependency's own `refs/symlinks/`. The dependency is protected by the *liveness of its dependents*, not by a back-reference inside itself.
+
+The full reachability walk lives in [Storage → Garbage Collection][in-depth-storage-gc]. It shows how `refs/symlinks/`, `refs/deps/`, `refs/layers/`, and `refs/blobs/` compose into one BFS sweep.
+
+## Scope \{#scope\}
+
+OCX dependencies are deliberately simple. They solve a specific problem without introducing the complexity of a full-featured dependency resolver.
+
+### No version ranges \{#dependencies-no-version-ranges\}
+
+A dependency is pinned to an exact digest. There is no "give me any Java >= 21" logic. The publisher chose a specific build, tested against it, and recorded it. 
+
+In the published form, the digest is the complete truth and there is nothing to resolve. The tag portion of the identifier is purely informational. It records what the publisher pinned against and enables future update tooling, but it is never used for resolution. You never write the digest by hand, because `create` computes the pin for you.
+
+This is a deliberate design choice. Version ranges introduce a resolution algorithm, typically [SAT-solving][sat-solving] or [Minimum Version Selection][go-mvs]. That algorithm produces different results depending on what is available in the index at resolution time. Two machines with different index states can resolve the same dependency specification to different binaries. This directly contradicts the OCX reproducibility guarantee: the same metadata should always produce the same result.
+
+<details>
+<summary>Why not Minimum Version Selection?</summary>
+
+[Go modules][go-modules] and [Bazel's Bzlmod][bazel-bzlmod] use Minimum Version Selection (MVS). The highest minimum version requested by any dependent wins. MVS is deterministic and polynomial-time, but it still requires an index to enumerate the available versions.
+
+OCX dependencies work offline with no index at all, because the digest is the pin. Future tooling will help publishers discover when a pinned dependency has an updated build. That keeps the update decision explicit.
+
+</details>
+
+### Automatic security patches \{#dependencies-security-patches\}
+
+OCX does not automatically substitute a different build of a dependency. When a dependency receives a security fix, the publisher must release a new version of their package with the updated digest. Substituting a build automatically would break the reproducibility guarantee. This is a deliberate tradeoff of reproducibility over convenience.
+
+The tradeoff matches the [Nix][nix] model, where a security patch means rebuilding every affected derivation. The difference is that OCX has no build system. The publisher re-pins the digest and pushes a new tag. Future tooling will help publishers detect when a pinned dependency has an updated build.
+
+### Shared dependencies \{#dependencies-shared\}
+
+Several installed packages can depend on the same package at the same digest. The dependency is then stored once in the [package store][in-depth-storage-packages] through content-addressed deduplication. Each dependent records a forward-ref, so the shared dependency is not garbage collected until all dependents are removed.
+
+Two packages can also depend on the same package at *different* digests. Both versions are then installed as separate packages. If both would contribute to the same environment, composition fails, because a single environment cannot expose two versions of one package and `PATH` resolves only one. This applies through `ocx package env`, `ocx env`, `ocx package exec`, and `ocx exec`.
+
+The error names the conflicting repository and the versions involved. Two tags that resolve to the *same* digest are the same version and never conflict.
+
+Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order. Use [`ocx package deps --why`][cmd-deps] to trace the conflicting paths. The `deps` command reports the conflict as a non-fatal warning, so the tree stays inspectable.
+
+### Not a project-level lockfile \{#scope-lockfile\}
+
+Dependencies live in package metadata. They describe what a *single package* needs, not what a *project* needs. The [project toolchain][in-depth-project] is the separate concept that carries a project-level file with lock semantics.
+
+The dependency surface is a strict subset of what a general-purpose package manager exposes. OCX deliberately leaves resolution and lockfile composition to the publisher and to higher-level tooling. The runtime guarantee is that *whatever the publisher pinned is what the consumer gets*.
+
+## See Also
+
+- [Dependencies section in the user guide][user-deps]: pull, exec, deps, conflict warnings
+- [Environments][in-depth-environments]: composition algorithm, visibility model, last-wins semantics
+- [Storage → Garbage Collection][in-depth-storage-gc]: forward-ref reachability walk
+- [Entry Points][in-depth-entry-points]: generated launchers that embed the private surface
+- [Declaring dependencies][authoring-dependencies]: the publisher workflow, write tag-only and `create` resolves
+- [Building and pushing][authoring-building-pushing]: the `create` and `push` split, gate errors, exit codes
+- [Multi-Platform Packages][authoring-multi-platform]: building and pushing per platform, dependencies on multi-platform builds
+- [Dependencies reference][reference-dependencies]: sidecar field shapes, manifest-pin rule
+
+
+[nix]: https://nixos.org/
+[nix-propagated]: https://ryantm.github.io/nixpkgs/stdenv/stdenv/
+[guix]: https://guix.gnu.org/
+[guix-propagated]: https://guix.gnu.org/manual/en/html_node/package-Reference.html
+[go-modules]: https://go.dev/ref/mod
+[go-mvs]: https://research.swtch.com/vgo-mvs
+[bazel-bzlmod]: https://bazel.build/external/module
+[sat-solving]: https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
+[homebrew]: https://brew.sh/
+[oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[oci-image-manifest]: https://github.com/opencontainers/image-spec/blob/main/manifest.md#image-manifest
+
+
+[cmd-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-env-root]: ../reference/command-line/commands.md#env-root
+[cmd-clean]: ../reference/command-line/commands.md#clean
+[cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
+[cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
+[cmd-deps]: ../reference/command-line/package-consuming.md#deps
+
+
+[reference-dependencies]: ../reference/metadata/dependencies.md#dependencies
+[reference-platforms]: ../reference/platforms.md
+
+
+[authoring-dependencies]: ../publishing/declare-dependencies.md
+[authoring-building-pushing]: ../publishing/build-and-push.mdx
+[authoring-multi-platform]: ../publishing/multi-platform.mdx
+
+
+[user-deps]: ../guides/run-with-dependencies.mdx#dependencies
+[in-depth-environments]: ./environments.mdx
+[in-depth-entry-points]: ./entry-points.md
+[in-depth-storage-packages]: ./storage.mdx#packages
+[in-depth-storage-gc]: ./storage.mdx#gc
+[in-depth-versioning-cascades]: ./versioning.mdx#cascades
+[in-depth-project]: ./project-toolchain.md
+[in-depth-project-lock]: ./project-toolchain.md#lock
+[in-depth-project-lock-format]: ./project-toolchain.md#lock-format
+[in-depth-project-lock-pin-preservation]: ./project-toolchain.md#pin-preservation
+[env-composition]: ./environments.mdx#composition-order
+[env-last-wins]: ./environments.mdx#last-wins
+[env-two-surfaces]: ./environments.mdx#two-surfaces
+[env-visibility]: ./environments.mdx#visibility-views
+[env-edge-filter]: ./environments.mdx#edge-filter

@@ -1,0 +1,98 @@
+{
+ "anchors": [
+  "attestations",
+  "attestations-attach",
+  "attestations-attach-signed",
+  "attestations-attach-unsigned",
+  "attestations-read",
+  "attestations-types",
+  "attestations-verification"
+ ],
+ "commands": [
+  "ocx package attest",
+  "ocx package push",
+  "ocx package sbom",
+  "ocx package verify"
+ ],
+ "flags": [
+  "--attestation",
+  "--certificate-identity",
+  "--certificate-oidc-issuer",
+  "--format",
+  "--no-verify",
+  "--no-x",
+  "--output",
+  "--predicate",
+  "--registry-referrers-mode",
+  "--sbom",
+  "--summary",
+  "--type",
+  "--verify",
+  "--x"
+ ],
+ "env": [],
+ "config_keys": [
+  "trust.policy"
+ ],
+ "exit_codes": [
+  "64"
+ ],
+ "slugs": [],
+ "links": [
+  "#attestations-attach",
+  "#attestations-read",
+  "#attestations-types",
+  "../in-depth/signing.md",
+  "../reference/command-line.md#package-attest",
+  "../reference/command-line.md#package-push",
+  "../reference/command-line.md#package-sbom",
+  "../reference/command-line.md#package-sign",
+  "../reference/command-line.md#package-verify-attestations",
+  "../user-guide.md#supply-chain-auto-verify",
+  "/casts/user-guide/attestations-unsigned.cast",
+  "/casts/user-guide/attestations.cast",
+  "https://github.com/in-toto/attestation",
+  "https://github.com/secure-systems-lab/dsse",
+  "https://github.com/sigstore/cosign",
+  "https://github.com/sigstore/cosign/blob/main/doc/cosign_attach_sbom.md",
+  "https://github.com/sigstore/fulcio",
+  "https://github.com/sigstore/rekor",
+  "https://openvex.dev/spec",
+  "https://oras.land/docs/commands/oras_attach/"
+ ],
+ "fences": [
+  "shell:1717f90f: ocx package sbom -p linux/amd64 --type cyclonedx --output sb",
+  "shell:59031403: ocx package attest -p linux/amd64 --predicate sbom.json --ty",
+  "shell:d2efed59: cyclonedx-cli ... > sbom.json"
+ ],
+ "facts": [
+  "A signature says who published a package but not what is inside it, so a signed binary can still ship a vulnerable library. [L7]",
+  "An attestation is a structured statement such as an SBOM, provenance or scan result, bound to the manifest digest the signature covers. [L9]",
+  "ocx package attest publishes attestations through the same keyless pipeline as signing, and sbom reads them back. [L9]",
+  "SBOMs must travel with the package even where no signing identity exists, such as a laptop, a local script or an unwired CI job. [L13]",
+  "Attach has two shapes, and OCX picks one from what it sees in the environment rather than from a flag. [L15]",
+  "attest and push --sbom sign when a signing identity is visible, otherwise they attach the document raw and say so. [L18]",
+  "push --sbom attaches the SBOM in the same operation as the push, as sugar for attest --type cyclonedx on that digest. [L23]",
+  "push --sbom is CycloneDX only, so SPDX, multiple predicate types or other digests need the attest command directly. [L30]",
+  "With a signing identity, attest wraps the predicate in a DSSE envelope naming the target digest, signs it keylessly and pushes it as a referrer. [L36]",
+  "Without a signing identity the SBOM document is pushed as the referrer payload with its own media type and no envelope or log entry. [L44]",
+  "An identity that is visible but fails to acquire is a hard error, never a silent fallback to the unsigned form. [L48]",
+  "SLSA provenance is refused without a signing identity, exit 64 unsigned_type_unsupported, before any network call. [L50]",
+  "A consumer who configured a policy must never receive an unsigned document presented as verified. [L60]",
+  "sbom resolves one of two modes per invocation, Demand or Permissive, and states which one it used. [L62]",
+  "Demand mode lists only documents that passed the full signature pipeline and refuses unsigned attachments outright. [L64]",
+  "Permissive mode runs no cryptography, and every document it returns is reported verified false with no signer identity. [L65]",
+  "With no flags and no matching policy the read runs in Permissive mode; a matching policy or identity flags selects Demand. [L69]",
+  "--verify with no identity source is a usage error, exit 64, rather than a silent fall back to permissive. [L78]",
+  "Verified entries carry identity, issuer and signed-at fields, while unverified entries omit them instead of emitting empty values. [L84]",
+  "More than one matching candidate is refused, and the error names every colliding digest and predicate type. [L92]",
+  "verify --attestation runs the same cryptography as Demand mode and answers only pass or fail, never returning content. [L97]",
+  "Predicate aliases mirror cosign, for example cyclonedx and spdxjson, while slsaprovenance is refused in favour of slsaprovenance1. [L104]",
+  "Any other --type value is taken as an absolute predicate-type URI and stored byte-exact, with a 15 MiB predicate size bound. [L114]",
+  "Unsigned attach covers only the three SBOM media types, and every other predicate type is refused with exit 64. [L117]",
+  "Demand mode never returns an unverified result for a signed candidate, so a failing registry, Rekor proof or identity check fails the read. [L122]",
+  "Permissive mode is a floor the reader chooses explicitly, and it never upgrades a document to look checked. [L124]",
+  "Verification proves authenticity as of signing, not currency, and offers no rollback protection against an older signed attestation. [L126]"
+ ],
+ "lines": 155
+}
