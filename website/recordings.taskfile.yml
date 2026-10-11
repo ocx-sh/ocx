@@ -5,7 +5,6 @@ version: '3'
 vars:
   BIN_DIR: "{{.ROOT_DIR}}/test/bin"
   OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
-  SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
   CASTS_DIR: "{{.ROOT_DIR}}/website/src/public/casts"
   GIFS_DIR: "{{.ROOT_DIR}}/out/recordings"
   FONTS_DIR: "{{.ROOT_DIR}}/.fonts"
@@ -14,12 +13,14 @@ vars:
 tasks:
   ensure-binary:
     internal: true
+    # `rust:build` is the one producer of `test/bin/ocx` (Bazel, with the
+    # `__testing` seams); a second cargo build here wrote a seam-less release
+    # binary over it. It pins `SKIP_BUILD` off, so CI -- where the site job has
+    # no prebuilt binary -- builds it too. A nested `task`, not `task: :rust:build`:
+    # this file is included at two depths and a leading `:` resolves one
+    # namespace up from `website:recordings:`.
     cmds:
-      - cargo build --release -p ocx
-      - mkdir -p {{.BIN_DIR}}
-      - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
-    status:
-      - '{{eq .SKIP_BUILD "true"}}'
+      - task -d '{{.ROOT_DIR}}' rust:build
 
   ensure-font:
     desc: Download CaskaydiaCove Nerd Font if not present
@@ -42,8 +43,6 @@ tasks:
       - '{{.OCX_BINARY}}'
     cmds:
       - task: ensure-binary
-        vars:
-          SKIP_BUILD: "{{.SKIP_BUILD}}"
       - uv run pytest recordings/ {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
@@ -61,8 +60,6 @@ tasks:
       - '{{.OCX_BINARY}}'
     cmds:
       - task: ensure-binary
-        vars:
-          SKIP_BUILD: "{{.SKIP_BUILD}}"
       - uv run pytest recordings/ -n auto {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"

@@ -459,8 +459,5 @@ failed assert on a missing prerequisite over `pytest.skip`.
 Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
 
 **Never run `task website:build` while an acceptance suite is running.** Its
-`website:recordings:ensure-binary` step rebuilds `-p ocx` in *release* — without
-`--features ocx/__testing` — and copies the result over `test/bin/ocx`. A suite
-that survives the swap runs its remaining rows against a binary with no test
-seams and reports a meaningless green. The only thing that reliably prevents it
-is the `Text file busy` you get from overwriting a binary that is executing.
+`website:recordings:ensure-binary` step runs `rust:build`, which republishes
+`test/bin/ocx` under the running suite; wait for the suite to end.
