@@ -255,7 +255,9 @@ pub(super) fn extract(archive: &Path, output: &Path, strip_components: usize, de
         let mut entry = zip.by_index(i).map_err(Error::Zip)?;
         // No enclosed name means absolute or escaping: refuse the archive, never skip the entry.
         let Some(enclosed_name) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
-            return Err(Error::EntryEscape(PathBuf::from(entry.name())));
+            return Err(Error::EntryEscape(PathBuf::from(
+                String::from_utf8_lossy(entry.name_raw()).into_owned(),
+            )));
         };
 
         let stripped: PathBuf = enclosed_name.iter().skip(strip_components).collect();

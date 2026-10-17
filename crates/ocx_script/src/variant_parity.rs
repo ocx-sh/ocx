@@ -46,11 +46,12 @@ fn eval_check(body: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("parse failed: {e}"))?;
     let globals = parity_globals();
-    let module = Module::new();
-    let mut eval = Evaluator::new(&module);
-    eval.eval_module(ast, &globals)
-        .map_err(|e| format!("eval failed: {e}"))?;
-    Ok(())
+    Module::with_temp_heap(|module| {
+        let mut eval = Evaluator::new(&module);
+        eval.eval_module(ast, &globals)
+            .map_err(|e| format!("eval failed: {e}"))?;
+        Ok(())
+    })
 }
 
 #[test]

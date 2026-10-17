@@ -61,20 +61,18 @@ pub(super) fn evaluate(
     let _scope = host::scoped(state);
 
     let globals = build_globals();
-    let module = Module::new();
-
-    let outcome = {
+    let outcome = Module::with_temp_heap(|module| {
         let mut eval = Evaluator::new(&module);
         eval.set_max_callstack_size(limits.max_callstack_size)
             .map_err(|e| ScriptError::HostSetup(e.to_string()))?;
 
-        match eval.eval_module(ast, &globals) {
+        Ok(match eval.eval_module(ast, &globals) {
             Ok(_) => ScriptOutcome {
                 kind: ScriptOutcomeKind::Passed,
             },
             Err(e) => ScriptOutcome { kind: classify(&e) },
-        }
-    };
+        })
+    })?;
 
     // Before the scope drops, or the report loses the last `ocx.run` result.
     host::stash_last_run(host::with(|s| s.last_run.clone()));

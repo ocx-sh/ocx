@@ -44,10 +44,10 @@ __testing = [
 # Pure-Rust git via `gix` — no libgit2 / native dep. Note: `gix` is an
 # unconditional dep of vergen-gix; the features list below controls which
 # VERGEN_* vars are emitted, not whether `gix` compiles.
-# Pinned exactly (`=9.1.0`) because this is a build-dep with ~31 transitive
-# gix-family crates: a floating `^9.1` would let `cargo update` silently
+# Pinned exactly (`=10.0.1`) because this is a build-dep with ~31 transitive
+# gix-family crates: a floating `^10` would let `cargo update` silently
 # bump all of them without review.
-vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
+vergen-gix = { version = "=10.0.1", default-features = false, features = ["build", "cargo", "rustc"] }
 
 [dependencies]
 ocx_announce.workspace = true

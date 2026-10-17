@@ -93,7 +93,7 @@ async fn repack_wheel_with_budget(
         if entry.is_dir() {
             continue;
         }
-        let raw_name = entry.name().to_string();
+        let raw_name = String::from_utf8_lossy(entry.name_raw()).into_owned();
         let enclosed = entry
             .enclosed_name()
             .ok_or_else(|| RepackError::UnsafeEntryPath(raw_name.clone()))?;

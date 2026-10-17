@@ -62,7 +62,7 @@ impl AllocFrozenValue for OsValue {
 }
 
 impl<'v> AllocValue<'v> for OsValue {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -106,20 +106,22 @@ mod tests {
 
     #[test]
     fn equals_same_variant_is_true() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let a = heap.alloc(OsValue(OperatingSystem::Linux));
-        let b = heap.alloc(OsValue(OperatingSystem::Linux));
-        assert!(a.equals(b).unwrap());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let a = heap.alloc(OsValue(OperatingSystem::Linux));
+            let b = heap.alloc(OsValue(OperatingSystem::Linux));
+            assert!(a.equals(b).unwrap());
+        });
     }
 
     #[test]
     fn equals_different_variant_is_false() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let a = heap.alloc(OsValue(OperatingSystem::Linux));
-        let b = heap.alloc(OsValue(OperatingSystem::Darwin));
-        assert!(!a.equals(b).unwrap());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let a = heap.alloc(OsValue(OperatingSystem::Linux));
+            let b = heap.alloc(OsValue(OperatingSystem::Darwin));
+            assert!(!a.equals(b).unwrap());
+        });
     }
 
     #[test]
@@ -127,10 +129,11 @@ mod tests {
         // The cross-type wall: `ocx.os.Linux == ocx.arch.Amd64` is `false`,
         // not an error. Same predicate applies vs strings (covered by the
         // acceptance suite).
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let os = heap.alloc(OsValue(OperatingSystem::Linux));
-        let arch = heap.alloc(ArchValue(Architecture::Amd64));
-        assert!(!os.equals(arch).unwrap());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let os = heap.alloc(OsValue(OperatingSystem::Linux));
+            let arch = heap.alloc(ArchValue(Architecture::Amd64));
+            assert!(!os.equals(arch).unwrap());
+        });
     }
 }

@@ -129,12 +129,12 @@
           "description": "One JSON report of the named root, exit 0.",
           "type": "object",
           "properties": {
-            "root": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "report"
+            },
+            "root": {
+              "type": "string"
             }
           },
           "required": [
@@ -146,12 +146,12 @@
           "description": "One JSON report of the named root, then a non-zero exit: the command reports what it did before failing.",
           "type": "object",
           "properties": {
-            "root": {
-              "type": "string"
-            },
             "type": {
               "type": "string",
               "const": "report_then_fail"
+            },
+            "root": {
+              "type": "string"
             }
           },
           "required": [
@@ -429,15 +429,15 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "choice"
+            },
             "choices": {
               "type": "array",
               "items": {
                 "$ref": "#/$defs/Choice"
               }
-            },
-            "type": {
-              "type": "string",
-              "const": "choice"
             }
           },
           "required": [

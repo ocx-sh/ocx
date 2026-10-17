@@ -14,7 +14,7 @@
 
 use std::env;
 
-use vergen_gix::{BuildBuilder, CargoBuilder, Emitter, GixBuilder, RustcBuilder};
+use vergen_gix::{Build, Cargo, Emitter, Gix, Rustc};
 
 /// Provenance a `__testing` build bakes instead of git and CI state; every value stays
 /// detectable, or the release provenance check cannot refuse a test build posing as a release.
@@ -43,9 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `build_timestamp` only in CI: it changes every run and would force a relink per local build.
     let in_ci = std::env::var_os("CI").is_some();
     println!("cargo:rerun-if-env-changed=CI");
-    let build = BuildBuilder::default().build_timestamp(in_ci).build()?;
-    let cargo = CargoBuilder::default().target_triple(true).debug(true).build()?;
-    let rustc = RustcBuilder::default().semver(true).build()?;
+    let build = Build::builder().build_timestamp(in_ci).build();
+    let cargo = Cargo::builder().target_triple(true).debug(true).build();
+    let rustc = Rustc::builder().semver(true).build();
 
     let mut emitter = Emitter::default();
     emitter
@@ -53,23 +53,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_instructions(&cargo)?
         .add_instructions(&rustc)?;
 
-    // Non-fatal: a tarball build without `.git/` warns and continues.
-    match GixBuilder::default()
+    // Non-fatal: a tarball build without `.git/` leaves the `VERGEN_GIT_*` variables unset
+    // (vergen only fails on error under `fail_on_error`).
+    let gix = Gix::builder()
         .sha(false) // long SHA — short variant derived in build_info.rs
-        .describe(true, true, None) // dirty marker + tags
+        .describe(true, true, None) // tags + dirty marker
         // Tracked-only: the release job writes an untracked `dist-manifest.json` first, which
         // would mark every published binary dirty.
         .dirty(false)
         .commit_timestamp(true)
-        .build()
-    {
-        Ok(gix) => {
-            emitter.add_instructions(&gix)?;
-        }
-        Err(error) => {
-            println!("cargo:warning=vergen-gix metadata unavailable (no .git/?): {error}");
-        }
-    }
+        .build();
+    emitter.add_instructions(&gix)?;
 
     emitter.emit()?;
 
@@ -93,11 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Toolchain metadata, the placeholder table and the `__OCX_BUILD_VERSION` pass-through (it feeds
-/// `app::version()`, so never a placeholder); a `GixBuilder` or `CI`/`GITHUB_*` read here would
+/// `app::version()`, so never a placeholder); a `Gix` or `CI`/`GITHUB_*` read here would
 /// bake checkout or CI state and re-run this script per commit.
 fn emit_testing_provenance() -> Result<(), Box<dyn std::error::Error>> {
-    let cargo = CargoBuilder::default().target_triple(true).debug(true).build()?;
-    let rustc = RustcBuilder::default().semver(true).build()?;
+    let cargo = Cargo::builder().target_triple(true).debug(true).build();
+    let rustc = Rustc::builder().semver(true).build();
     Emitter::default()
         .add_instructions(&cargo)?
         .add_instructions(&rustc)?

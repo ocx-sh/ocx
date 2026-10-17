@@ -63,7 +63,7 @@ impl fmt::Display for PlatformValue {
 
 #[starlark_value(type = PlatformValue::TYPE)]
 impl<'v> StarlarkValue<'v> for PlatformValue {
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
             "is_any" => Some(Value::new_bool(self.is_any)),
             "os" => Some(match self.os {
@@ -85,7 +85,7 @@ impl<'v> StarlarkValue<'v> for PlatformValue {
 
 impl<'v> AllocValue<'v> for PlatformValue {
     // `alloc_simple` is sound only while the value holds no `Value` pointers; add one and it needs `Trace`.
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -126,36 +126,38 @@ mod tests {
 
     #[test]
     fn get_attr_returns_typed_values_for_specific() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let platform = Platform::Specific {
-            os: OperatingSystem::Linux,
-            arch: Architecture::Amd64,
-            variant: None,
-            os_features: Vec::new(),
-        };
-        let value = heap.alloc(PlatformValue::from_platform(&platform));
-        let is_any = value.get_attr("is_any", heap).unwrap().unwrap();
-        assert_eq!(is_any.unpack_bool(), Some(false));
-        let os_attr = value.get_attr("os", heap).unwrap().unwrap();
-        let os_inner = os_attr.downcast_ref::<OsValue>().expect("p.os is OsValue");
-        assert_eq!(os_inner.0, OperatingSystem::Linux);
-        let arch_attr = value.get_attr("arch", heap).unwrap().unwrap();
-        let arch_inner = arch_attr.downcast_ref::<ArchValue>().expect("p.arch is ArchValue");
-        assert_eq!(arch_inner.0, Architecture::Amd64);
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let platform = Platform::Specific {
+                os: OperatingSystem::Linux,
+                arch: Architecture::Amd64,
+                variant: None,
+                os_features: Vec::new(),
+            };
+            let value = heap.alloc(PlatformValue::from_platform(&platform));
+            let is_any = value.get_attr("is_any", heap).unwrap().unwrap();
+            assert_eq!(is_any.unpack_bool(), Some(false));
+            let os_attr = value.get_attr("os", heap).unwrap().unwrap();
+            let os_inner = os_attr.downcast_ref::<OsValue>().expect("p.os is OsValue");
+            assert_eq!(os_inner.0, OperatingSystem::Linux);
+            let arch_attr = value.get_attr("arch", heap).unwrap().unwrap();
+            let arch_inner = arch_attr.downcast_ref::<ArchValue>().expect("p.arch is ArchValue");
+            assert_eq!(arch_inner.0, Architecture::Amd64);
+        });
     }
 
     #[test]
     fn get_attr_returns_none_for_any_variant() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let value = heap.alloc(PlatformValue::from_platform(&Platform::Any));
-        let is_any = value.get_attr("is_any", heap).unwrap().unwrap();
-        assert_eq!(is_any.unpack_bool(), Some(true));
-        let os_attr = value.get_attr("os", heap).unwrap().unwrap();
-        assert!(os_attr.is_none());
-        let arch_attr = value.get_attr("arch", heap).unwrap().unwrap();
-        assert!(arch_attr.is_none());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let value = heap.alloc(PlatformValue::from_platform(&Platform::Any));
+            let is_any = value.get_attr("is_any", heap).unwrap().unwrap();
+            assert_eq!(is_any.unpack_bool(), Some(true));
+            let os_attr = value.get_attr("os", heap).unwrap().unwrap();
+            assert!(os_attr.is_none());
+            let arch_attr = value.get_attr("arch", heap).unwrap().unwrap();
+            assert!(arch_attr.is_none());
+        });
     }
 
     #[test]

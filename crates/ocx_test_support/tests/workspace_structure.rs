@@ -1954,7 +1954,7 @@ fn hand_classification_impls(file: &Path, parsed: &syn::File) -> Vec<Reach> {
             if is_cfg_test(&block.attrs) {
                 return;
             }
-            if let Some((_, path, _)) = &block.trait_
+            if let Some((path, _)) = &block.trait_
                 && let Some(last) = path.segments.last()
                 && let Some(name) = self.classification_trait(&last.ident.to_string())
             {
@@ -3943,7 +3943,7 @@ impl DeclaredTypes {
                 if is_cfg_test(&block.attrs) {
                     return;
                 }
-                if let Some((_, path, _)) = &block.trait_
+                if let Some((path, _)) = &block.trait_
                     && path.segments.last().is_some_and(|segment| segment.ident == "Error")
                 {
                     self.0.implementing.insert(type_name(&block.self_ty));
