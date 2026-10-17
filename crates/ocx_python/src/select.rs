@@ -8,7 +8,9 @@ use std::str::FromStr;
 
 use uv_distribution_filename::{BuildTag, WheelFilename};
 use uv_pep508::{MarkerEnvironment as UvMarkerEnvironment, MarkerEnvironmentBuilder, MarkerTree};
-use uv_platform_tags::{AbiTag, Arch, Os, Platform as UvPlatform, TagCompatibility, TagPriority, Tags};
+use uv_platform_tags::{
+    AbiTag, Arch, CPythonAbiVariants, Os, Platform as UvPlatform, TagCompatibility, TagPriority, Tags, TagsOptions,
+};
 
 use crate::lock::{LockedPackage, LockedWheel, Pylock};
 use crate::platform::{
@@ -126,14 +128,17 @@ fn build_target_tags(target: &PythonTarget) -> Result<Tags, SelectError> {
         Implementation::CPython => "cpython",
     };
     Tags::from_env(
-        &platform,
+        platform,
         version,
         implementation_name,
         // CPython's implementation version tracks its Python version.
         version,
-        // Only consulted for a `manylinux` OS; harmless for musl/macOS/Windows.
-        true,
-        is_free_threaded(target),
+        TagsOptions {
+            // Only consulted for a `manylinux` OS; harmless for musl/macOS/Windows.
+            manylinux_compatible: true,
+            gil_disabled: is_free_threaded(target),
+            ..TagsOptions::default()
+        },
     )
     .map_err(|error| model_error("platform tag set", error))
 }
@@ -223,8 +228,8 @@ fn validate_abi_consistency(
             continue;
         };
         for abi in parsed.abi_tags() {
-            if let AbiTag::CPython { gil_disabled, .. } = abi
-                && *gil_disabled != free_threaded
+            if let AbiTag::CPython { variant, .. } = abi
+                && variant.contains(CPythonAbiVariants::Freethreading) != free_threaded
             {
                 return Err(SelectError::AbiMismatch {
                     filename: wheel.filename.clone(),

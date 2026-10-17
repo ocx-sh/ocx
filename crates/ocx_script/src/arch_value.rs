@@ -61,7 +61,7 @@ impl AllocFrozenValue for ArchValue {
 }
 
 impl<'v> AllocValue<'v> for ArchValue {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -97,19 +97,21 @@ mod tests {
 
     #[test]
     fn equals_same_variant_is_true() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let a = heap.alloc(ArchValue(Architecture::Amd64));
-        let b = heap.alloc(ArchValue(Architecture::Amd64));
-        assert!(a.equals(b).unwrap());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let a = heap.alloc(ArchValue(Architecture::Amd64));
+            let b = heap.alloc(ArchValue(Architecture::Amd64));
+            assert!(a.equals(b).unwrap());
+        });
     }
 
     #[test]
     fn equals_different_variant_is_false() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let a = heap.alloc(ArchValue(Architecture::Amd64));
-        let b = heap.alloc(ArchValue(Architecture::Arm64));
-        assert!(!a.equals(b).unwrap());
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let a = heap.alloc(ArchValue(Architecture::Amd64));
+            let b = heap.alloc(ArchValue(Architecture::Arm64));
+            assert!(!a.equals(b).unwrap());
+        });
     }
 }

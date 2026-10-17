@@ -40,7 +40,7 @@ impl RunResult {
     }
 
     /// Allocates this result as a typed Starlark value.
-    pub(super) fn alloc<'v>(&self, heap: &'v starlark::values::Heap) -> starlark::values::Value<'v> {
+    pub(super) fn alloc<'v>(&self, heap: starlark::values::Heap<'v>) -> starlark::values::Value<'v> {
         heap.alloc(RunResultValue {
             exit_code: self.exit_code,
             stdout: self.stdout.clone(),
@@ -83,7 +83,7 @@ impl fmt::Display for RunResultValue {
 
 #[starlark_value(type = RunResultValue::TYPE)]
 impl<'v> StarlarkValue<'v> for RunResultValue {
-    fn get_attr(&self, attribute: &str, heap: &'v Heap) -> Option<Value<'v>> {
+    fn get_attr(&self, attribute: &str, heap: Heap<'v>) -> Option<Value<'v>> {
         match attribute {
             "exit_code" => Some(heap.alloc(self.exit_code)),
             "stdout" => Some(heap.alloc(self.stdout.as_str())),
@@ -103,7 +103,7 @@ impl<'v> StarlarkValue<'v> for RunResultValue {
 }
 
 impl<'v> AllocValue<'v> for RunResultValue {
-    fn alloc_value(self, heap: &'v Heap) -> Value<'v> {
+    fn alloc_value(self, heap: Heap<'v>) -> Value<'v> {
         heap.alloc_simple(self)
     }
 }
@@ -158,42 +158,45 @@ mod tests {
 
     #[test]
     fn alloc_exposes_all_five_attributes() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let r = RunResult::new(7, "out\n".into(), "warn\n".into(), 123, true);
-        let value = r.alloc(heap);
-        let exit_code = value.get_attr("exit_code", heap).unwrap().unwrap();
-        assert_eq!(exit_code.unpack_i32(), Some(7));
-        let stdout = value.get_attr("stdout", heap).unwrap().unwrap();
-        assert_eq!(stdout.unpack_str(), Some("out\n"));
-        let stderr = value.get_attr("stderr", heap).unwrap().unwrap();
-        assert_eq!(stderr.unpack_str(), Some("warn\n"));
-        let duration = value.get_attr("duration_ms", heap).unwrap().unwrap();
-        assert_eq!(duration.unpack_i32().map(i64::from), Some(123));
-        let truncated = value.get_attr("truncated", heap).unwrap().unwrap();
-        assert_eq!(truncated.unpack_bool(), Some(true));
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let r = RunResult::new(7, "out\n".into(), "warn\n".into(), 123, true);
+            let value = r.alloc(heap);
+            let exit_code = value.get_attr("exit_code", heap).unwrap().unwrap();
+            assert_eq!(exit_code.unpack_i32(), Some(7));
+            let stdout = value.get_attr("stdout", heap).unwrap().unwrap();
+            assert_eq!(stdout.unpack_str(), Some("out\n"));
+            let stderr = value.get_attr("stderr", heap).unwrap().unwrap();
+            assert_eq!(stderr.unpack_str(), Some("warn\n"));
+            let duration = value.get_attr("duration_ms", heap).unwrap().unwrap();
+            assert_eq!(duration.unpack_i32().map(i64::from), Some(123));
+            let truncated = value.get_attr("truncated", heap).unwrap().unwrap();
+            assert_eq!(truncated.unpack_bool(), Some(true));
+        });
     }
 
     #[test]
     fn alloc_type_tag_is_run_result() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let r = RunResult::new(0, String::new(), String::new(), 0, false);
-        let value = r.alloc(heap);
-        assert_eq!(value.get_type(), RunResultValue::TYPE);
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let r = RunResult::new(0, String::new(), String::new(), 0, false);
+            let value = r.alloc(heap);
+            assert_eq!(value.get_type(), RunResultValue::TYPE);
+        });
     }
 
     #[test]
     fn unknown_attribute_returns_none() {
-        let module = starlark::environment::Module::new();
-        let heap = module.heap();
-        let r = RunResult::new(0, String::new(), String::new(), 0, false);
-        let value = r.alloc(heap);
-        // `Value::get_attr` returns `Result<Option<Value>>`; an unknown
-        // attribute on a typed value with `get_attr -> None` surfaces as
-        // `Ok(None)` (no Starlark `AttributeError` raised here — the engine
-        // decides whether to raise based on the call site).
-        let outcome = value.get_attr("nonexistent", heap).unwrap();
-        assert!(outcome.is_none(), "unknown attribute must be None, got {outcome:?}");
+        starlark::environment::Module::with_temp_heap(|module| {
+            let heap = module.heap();
+            let r = RunResult::new(0, String::new(), String::new(), 0, false);
+            let value = r.alloc(heap);
+            // `Value::get_attr` returns `Result<Option<Value>>`; an unknown
+            // attribute on a typed value with `get_attr -> None` surfaces as
+            // `Ok(None)` (no Starlark `AttributeError` raised here — the engine
+            // decides whether to raise based on the call site).
+            let outcome = value.get_attr("nonexistent", heap).unwrap();
+            assert!(outcome.is_none(), "unknown attribute must be None, got {outcome:?}");
+        });
     }
 }

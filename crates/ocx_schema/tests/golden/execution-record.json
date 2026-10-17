@@ -246,6 +246,10 @@
           "description": "`ocx exec` — a project toolchain.",
           "type": "object",
           "properties": {
+            "tier": {
+              "type": "string",
+              "const": "project"
+            },
             "cleanEnv": {
               "description": "Whether the child env was built clean rather than inherited.",
               "type": "boolean"
@@ -264,24 +268,24 @@
               "items": {
                 "type": "string"
               }
-            },
-            "tier": {
-              "type": "string",
-              "const": "project"
             }
           },
           "required": [
+            "tier",
             "cleanEnv",
             "projectRoot",
             "lock",
-            "groups",
-            "tier"
+            "groups"
           ]
         },
         {
           "description": "`ocx package exec` — identifiers named on the command line.",
           "type": "object",
           "properties": {
+            "tier": {
+              "type": "string",
+              "const": "package"
+            },
             "cleanEnv": {
               "description": "Whether the child env was built clean rather than inherited.",
               "type": "boolean"
@@ -292,16 +296,12 @@
               "items": {
                 "type": "string"
               }
-            },
-            "tier": {
-              "type": "string",
-              "const": "package"
             }
           },
           "required": [
+            "tier",
             "cleanEnv",
-            "requested",
-            "tier"
+            "requested"
           ]
         },
         {

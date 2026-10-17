@@ -1467,6 +1467,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "patch"
+            },
             "rule": {
               "type": "string",
               "description": "The descriptor rule glob that admitted the companion for the base."
@@ -1474,10 +1478,6 @@
             "companion": {
               "type": "string",
               "description": "The identifier of the companion that produced the entry."
-            },
-            "type": {
-              "type": "string",
-              "const": "patch"
             }
           },
           "required": [
@@ -2234,13 +2234,13 @@
         {
           "type": "object",
           "properties": {
-            "digest": {
-              "$ref": "#/$defs/Digest",
-              "description": "The bare manifest the tag resolves to."
-            },
             "type": {
               "type": "string",
               "const": "not_an_index"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "The bare manifest the tag resolves to."
             }
           },
           "required": [
@@ -2349,6 +2349,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "stale"
+            },
             "tag": {
               "$ref": "#/$defs/AliasTag",
               "description": "The alias tag."
@@ -2360,10 +2364,6 @@
             "live": {
               "$ref": "#/$defs/Digest",
               "description": "The digest the alias points at today."
-            },
-            "type": {
-              "type": "string",
-              "const": "stale"
             }
           },
           "required": [
@@ -2377,13 +2377,13 @@
         {
           "type": "object",
           "properties": {
-            "tag": {
-              "$ref": "#/$defs/AliasTag",
-              "description": "The alias tag."
-            },
             "type": {
               "type": "string",
               "const": "not_committed"
+            },
+            "tag": {
+              "$ref": "#/$defs/AliasTag",
+              "description": "The alias tag."
             }
           },
           "required": [
@@ -2418,6 +2418,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "child_manifest_missing"
+            },
             "tag": {
               "$ref": "#/$defs/AliasTag",
               "description": "The alias tag."
@@ -2425,10 +2429,6 @@
             "digest": {
               "$ref": "#/$defs/Digest",
               "description": "The missing child manifest."
-            },
-            "type": {
-              "type": "string",
-              "const": "child_manifest_missing"
             }
           },
           "required": [
@@ -2441,6 +2441,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "child_digest_unaddressable"
+            },
             "tag": {
               "$ref": "#/$defs/AliasTag",
               "description": "The alias tag."
@@ -2448,10 +2452,6 @@
             "digest_text": {
               "type": "string",
               "description": "The child digest exactly as the index writes it; no `Digest`, since this build cannot parse it."
-            },
-            "type": {
-              "type": "string",
-              "const": "child_digest_unaddressable"
             }
           },
           "required": [
@@ -2464,13 +2464,13 @@
         {
           "type": "object",
           "properties": {
-            "tag": {
-              "$ref": "#/$defs/AliasTag",
-              "description": "The alias tag."
-            },
             "type": {
               "type": "string",
               "const": "would_empty_index"
+            },
+            "tag": {
+              "$ref": "#/$defs/AliasTag",
+              "description": "The alias tag."
             }
           },
           "required": [
@@ -2623,6 +2623,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "written"
+            },
             "digest": {
               "$ref": "#/$defs/Digest",
               "description": "The digest of the index written."
@@ -2637,10 +2641,6 @@
                 "type": "string"
               },
               "description": "The dead child digests dropped from the planned index before it went on the\nwire, each backing nothing but orphan slots; absent when empty, as on every\nordinary write."
-            },
-            "type": {
-              "type": "string",
-              "const": "written"
             }
           },
           "required": [
@@ -2653,13 +2653,13 @@
         {
           "type": "object",
           "properties": {
-            "reason": {
-              "$ref": "#/$defs/Unrepairable",
-              "description": "Why the alias was refused."
-            },
             "type": {
               "type": "string",
               "const": "refused"
+            },
+            "reason": {
+              "$ref": "#/$defs/Unrepairable",
+              "description": "Why the alias was refused."
             }
           },
           "required": [
@@ -2671,6 +2671,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "raced"
+            },
             "expected": {
               "description": "The digest the plan expected; absent when the plan expected no alias.",
               "$ref": "#/$defs/Digest"
@@ -2678,10 +2682,6 @@
             "live": {
               "description": "The digest the alias holds now; absent when the alias is gone.",
               "$ref": "#/$defs/Digest"
-            },
-            "type": {
-              "type": "string",
-              "const": "raced"
             }
           },
           "required": [
@@ -2692,13 +2692,13 @@
         {
           "type": "object",
           "properties": {
-            "message": {
-              "type": "string",
-              "description": "The rendered cause."
-            },
             "type": {
               "type": "string",
               "const": "failed"
+            },
+            "message": {
+              "type": "string",
+              "description": "The rendered cause."
             }
           },
           "required": [
@@ -3474,16 +3474,16 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "tags"
+            },
             "tags": {
               "type": "array",
               "items": {
                 "type": "string"
               },
               "description": "The named tags."
-            },
-            "type": {
-              "type": "string",
-              "const": "tags"
             }
           },
           "required": [
@@ -3495,6 +3495,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "prerelease"
+            },
             "prerelease": {
               "$ref": "#/$defs/PackageVersion",
               "description": "A pre-release without a build, e.g. `0.5.0-canary`."
@@ -3504,10 +3508,6 @@
               "format": "uint32",
               "minimum": 1,
               "description": "Keep the newest this many builds and the rolling tag; at least 1.\nAbsent when every build is selected."
-            },
-            "type": {
-              "type": "string",
-              "const": "prerelease"
             }
           },
           "required": [
@@ -5020,13 +5020,13 @@
         {
           "type": "object",
           "properties": {
-            "detail": {
-              "type": "string",
-              "description": "The probe error."
-            },
             "type": {
               "type": "string",
               "const": "registry_probe_failed"
+            },
+            "detail": {
+              "type": "string",
+              "description": "The probe error."
             }
           },
           "required": [
@@ -5051,13 +5051,13 @@
         {
           "type": "object",
           "properties": {
-            "version": {
-              "type": "string",
-              "description": "The installed version string."
-            },
             "type": {
               "type": "string",
               "const": "unparseable_current"
+            },
+            "version": {
+              "type": "string",
+              "description": "The installed version string."
             }
           },
           "required": [
@@ -5124,13 +5124,13 @@
         {
           "type": "object",
           "properties": {
-            "detail": {
-              "type": "string",
-              "description": "The underlying error."
-            },
             "type": {
               "type": "string",
               "const": "spawn_failed"
+            },
+            "detail": {
+              "type": "string",
+              "description": "The underlying error."
             }
           },
           "required": [
@@ -5142,14 +5142,14 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "exited"
+            },
             "exit_code": {
               "type": "integer",
               "format": "int32",
               "description": "The setup's exit code."
-            },
-            "type": {
-              "type": "string",
-              "const": "exited"
             }
           },
           "required": [
@@ -5161,14 +5161,14 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "signalled"
+            },
             "signal": {
               "type": "integer",
               "format": "int32",
               "description": "The signal number."
-            },
-            "type": {
-              "type": "string",
-              "const": "signalled"
             }
           },
           "required": [
@@ -5518,13 +5518,13 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string",
-              "description": "The exact string the variable held."
-            },
             "type": {
               "type": "string",
               "const": "value"
+            },
+            "value": {
+              "type": "string",
+              "description": "The exact string the variable held."
             }
           },
           "required": [
@@ -5708,6 +5708,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "no_stamp_no_grant"
+            },
             "derived_sources": {
               "type": "array",
               "uniqueItems": true,
@@ -5729,10 +5733,6 @@
                 "type": "string"
               },
               "description": "The `namespaces` patterns the derived sources were matched against."
-            },
-            "type": {
-              "type": "string",
-              "const": "no_stamp_no_grant"
             }
           },
           "required": [
@@ -5746,6 +5746,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "source_set_drift"
+            },
             "new_sources": {
               "type": "array",
               "uniqueItems": true,
@@ -5753,10 +5757,6 @@
                 "type": "string"
               },
               "description": "Sources present in the lock and absent from the stamp."
-            },
-            "type": {
-              "type": "string",
-              "const": "source_set_drift"
             }
           },
           "required": [
@@ -5768,6 +5768,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "uncorroborated_namespace"
+            },
             "claimed_sources": {
               "type": "array",
               "uniqueItems": true,
@@ -5783,10 +5787,6 @@
                 "type": "string"
               },
               "description": "The source set derived from the store's recorded pull origins;\nabsent when no complete record exists."
-            },
-            "type": {
-              "type": "string",
-              "const": "uncorroborated_namespace"
             }
           },
           "required": [
@@ -5798,6 +5798,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "hook_disabled"
+            },
             "rung": {
               "type": "string",
               "description": "The deciding rung, rendered (`--no-hook`, `OCX_NO_HOOK`, `[shell] hook`, …)."
@@ -5805,10 +5809,6 @@
             "tier": {
               "type": "string",
               "description": "The config tier that set it; present only when rung 4 decided."
-            },
-            "type": {
-              "type": "string",
-              "const": "hook_disabled"
             }
           },
           "required": [
@@ -5834,13 +5834,13 @@
         {
           "type": "object",
           "properties": {
-            "scope": {
-              "$ref": "#/$defs/ScopeId",
-              "description": "The scope whose payload was dropped."
-            },
             "type": {
               "type": "string",
               "const": "ledger_over_cap"
+            },
+            "scope": {
+              "$ref": "#/$defs/ScopeId",
+              "description": "The scope whose payload was dropped."
             }
           },
           "required": [
@@ -5852,13 +5852,13 @@
         {
           "type": "object",
           "properties": {
-            "first_prompt": {
-              "type": "boolean",
-              "description": "`true` for the ordinary first-prompt absence."
-            },
             "type": {
               "type": "string",
               "const": "ledger_unreadable"
+            },
+            "first_prompt": {
+              "type": "boolean",
+              "description": "`true` for the ordinary first-prompt absence."
             }
           },
           "required": [
@@ -5912,6 +5912,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "symlinked_candidate_skipped"
+            },
             "candidate": {
               "type": "string",
               "description": "The symlinked candidate that was skipped."
@@ -5919,10 +5923,6 @@
             "ancestor": {
               "type": "string",
               "description": "The ancestor project activated in its place."
-            },
-            "type": {
-              "type": "string",
-              "const": "symlinked_candidate_skipped"
             }
           },
           "required": [
@@ -5935,13 +5935,13 @@
         {
           "type": "object",
           "properties": {
-            "entry": {
-              "type": "string",
-              "description": "The granting entry."
-            },
             "type": {
               "type": "string",
               "const": "active_via_paths_grant"
+            },
+            "entry": {
+              "type": "string",
+              "description": "The granting entry."
             }
           },
           "required": [
@@ -5953,13 +5953,13 @@
         {
           "type": "object",
           "properties": {
-            "detail": {
-              "type": "string",
-              "description": "The resolution failure, rendered for a human."
-            },
             "type": {
               "type": "string",
               "const": "project_unresolved"
+            },
+            "detail": {
+              "type": "string",
+              "description": "The resolution failure, rendered for a human."
             }
           },
           "required": [
@@ -5971,6 +5971,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "paths_near_miss"
+            },
             "entry": {
               "type": "string",
               "description": "The entry that nearly matched."
@@ -5978,10 +5982,6 @@
             "canonical": {
               "type": "string",
               "description": "The canonical project directory it was compared against."
-            },
-            "type": {
-              "type": "string",
-              "const": "paths_near_miss"
             }
           },
           "required": [
@@ -5994,6 +5994,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "paths_defect"
+            },
             "entry": {
               "type": "string",
               "description": "The malformed entry."
@@ -6001,10 +6005,6 @@
             "defect": {
               "type": "string",
               "description": "What is wrong with the entry, rendered for a human."
-            },
-            "type": {
-              "type": "string",
-              "const": "paths_defect"
             }
           },
           "required": [
@@ -6017,6 +6017,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "toolchain_manifest_unparsed"
+            },
             "manifest": {
               "type": "string",
               "description": "The `ocx.toml` that would not parse — `$OCX_HOME/ocx.toml` for the\nglobal tier, the project's own otherwise."
@@ -6024,10 +6028,6 @@
             "detail": {
               "type": "string",
               "description": "The parse failure, rendered for a human."
-            },
-            "type": {
-              "type": "string",
-              "const": "toolchain_manifest_unparsed"
             }
           },
           "required": [

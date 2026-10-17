@@ -9,8 +9,10 @@ ignore = [
   "RUSTSEC-2024-0436",
   # REMOVE when 'cargo tree -i fxhash' is empty after a starlark family bump — fxhash unmaintained (transitive via starlark_map), RUSTSEC-2025-0057 informational-only.
   "RUSTSEC-2025-0057",
-  # REMOVE when 'cargo tree -i proc-macro-error2' is empty — proc-macro-error2 unmaintained (transitive via oci-client → oci-spec → getset), RUSTSEC-2026-0173 informational-only, no safe upgrade available.
-  "RUSTSEC-2026-0173",
+  # REMOVE when 'cargo tree --target all -i atomic-polyfill' is empty — atomic-polyfill unmaintained (transitive via starlark -> pagable -> postcard -> heapless 0.7), RUSTSEC-2023-0089 informational-only, no safe upgrade.
+  "RUSTSEC-2023-0089",
+  # REMOVE when 'cargo tree -i unsafe-libyaml' is empty — unsafe-libyaml unmaintained (transitive via serde_yaml_ng), RUSTSEC-2024-0449 informational-only, no safe upgrade.
+  "RUSTSEC-2024-0449",
   # REMOVE when 'cargo tree -e normal -i rsa' is empty — rsa (Marvin timing
   # sidechannel, RUSTSEC-2023-0071) is pulled transitively via
   # sigstore -> openidconnect for OIDC JWT (RS256) public-key verification.
