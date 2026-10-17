@@ -158,7 +158,7 @@ async fn uninstall_symlinks(
             .map_err(|error| PackageErrorKind::Internal(error.into()))?;
         path
     } else {
-        // Debug, not warn: `ocx remove` hits this for every `ocx add` binding, which never creates a candidate.
+        // Debug, not warn: uninstalling an already-uninstalled tag is the normal idempotent case.
         log::debug!(
             "Package '{}' has no installed candidate at '{}' — nothing to uninstall.",
             package,

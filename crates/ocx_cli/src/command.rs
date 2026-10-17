@@ -351,7 +351,7 @@ pub enum Command {
         Each argument is a bare binding name (`cmake`), a name with a tag (`kitware/cmake:3.28`) \
         or a fully-qualified identifier (`ocx.sh/kitware/cmake:3.28`). An identifier is reduced \
         to its repository basename and matched against the `ocx.toml` map key. The tag and \
-        registry only locate the entry and the installed package. A binding added under \
+        registry only locate the entry. A binding added under \
         an explicit name (`ocx add glab=...`) is matched only by that name.\n\n\
         Fails with exit 79 when an argument matches no binding; the removals are staged together, \
         so `ocx.toml` is left unchanged.\n\n\
@@ -360,7 +360,8 @@ pub enum Command {
         Drops each binding from `ocx.lock` as well. Then it re-renders the project toolchain into \
         `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The removed tools leave the `links/<group>/<entry>` tree and the `shells/default/bin` \
         launchers reached through the `active` link. That directory carries its own `.gitignore`, \
-        so `git status` stays clean.")]
+        so `git status` stays clean.\n\n\
+        Only the reference is removed; `ocx clean` deletes a package nothing else references.")]
     #[command(visible_alias = "rm")]
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.

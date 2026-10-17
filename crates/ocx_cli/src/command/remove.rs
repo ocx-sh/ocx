@@ -2,8 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx remove <identifier>...` — drop one or more bindings from
-//! `ocx.toml`, rewrite `ocx.lock` for the affected groups, and uninstall
-//! the tools.
+//! `ocx.toml` and rewrite `ocx.lock` for the affected groups.
 
 use std::process::ExitCode;
 
@@ -18,9 +17,9 @@ use crate::app::project_context::{load_project_for_mutate, record_activation_con
 /// Each argument reduces to a binding name (`ocx.sh/cmake:3.28` matches
 /// `cmake`; an explicitly named binding only by its name), searched in
 /// `[tools]` and every group, or only in `--group <name>`. Matches are removed,
-/// `ocx.lock` keeps every survivor's pin exactly, and their packages are
-/// uninstalled. Any argument matching nothing fails the whole command with
-/// `ocx.toml` untouched. Exits 65 when `ocx.toml` drifted from `ocx.lock`
+/// `ocx.lock` keeps every survivor's pin exactly. Any argument matching
+/// nothing fails the whole command with `ocx.toml` untouched. Exits 65 when
+/// `ocx.toml` drifted from `ocx.lock`
 /// (run `ocx lock`), 78 when a survivor's legacy entry can no longer be
 /// migrated exactly (run `ocx update`).
 #[derive(Parser, Clone)]
@@ -43,7 +42,6 @@ impl Remove {
         let guard = load_project_for_mutate(&context).await?;
 
         let mut remove_keys: Vec<String> = Vec::with_capacity(self.identifiers.len());
-        let mut install_identifiers: Vec<ocx_oci::PackageRef> = Vec::new();
 
         for raw in &self.identifiers {
             let binding_key = if raw.contains('/') {
@@ -57,25 +55,6 @@ impl Remove {
                     .unwrap_or_else(|| raw.clone())
             };
 
-            let install_identifier = match self.group.as_deref() {
-                Some("default") => guard.config().tools.get(&binding_key).cloned(),
-                Some(g) => guard
-                    .config()
-                    .groups
-                    .get(g)
-                    .and_then(|grp| grp.tools.get(&binding_key))
-                    .cloned(),
-                None => guard
-                    .config()
-                    .tools
-                    .get(&binding_key)
-                    .or_else(|| guard.config().groups.values().find_map(|g| g.tools.get(&binding_key)))
-                    .cloned(),
-            };
-
-            if let Some(id) = install_identifier {
-                install_identifiers.push(id);
-            }
             remove_keys.push(binding_key);
         }
 
@@ -133,24 +112,6 @@ impl Remove {
 
         // Stamped after the commit, or consent records the source set being replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
-
-        // Best-effort: a lock-only workflow never installed them, and the commit is not rolled back.
-        if !install_identifiers.is_empty() {
-            let _ = context
-                .manager()
-                .uninstall_all(&install_identifiers, false, false)
-                .await;
-
-            // Keyed tag-less like `resolve_global_current_env`, or a `package select`-anchored `current`
-            // outlives its binding.
-            if context.global() {
-                let current_keys: Vec<_> = install_identifiers
-                    .iter()
-                    .map(|ident| ident.without_specifiers())
-                    .collect();
-                let _ = context.manager().deselect_all(&current_keys).await;
-            }
-        }
 
         let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);

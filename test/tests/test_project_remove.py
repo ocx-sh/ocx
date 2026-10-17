@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.assertions import assert_not_exists, assert_symlink_exists
+from src.assertions import assert_symlink_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
@@ -106,13 +106,12 @@ def _setup_project_with_tool(
 
 
 @pytest.mark.smoke
-def test_remove_drops_binding_and_uninstalls(
+def test_remove_drops_binding_keeps_install_symlinks(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx remove <name>`` removes the binding from ``ocx.toml``, rewrites
-    ``ocx.lock``, and uninstalls the package (candidate symlink absent).
-
-    Spec: Unit 7 §3 bullet 1.
+    """``ocx remove <name>`` removes the binding from ``ocx.toml`` and
+    ``ocx.lock`` and leaves the ``package install`` candidate symlink alone
+    (ocx-sh/ocx#622).
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_rem_drop"
@@ -135,7 +134,7 @@ def test_remove_drops_binding_and_uninstalls(
         f"lock entry for {repo!r} must be removed from ocx.lock; got:\n{lock_text}"
     )
 
-    assert_not_exists(candidate)
+    assert_symlink_exists(candidate)
 
 
 def test_remove_rejects_unknown_binding(
@@ -348,7 +347,7 @@ def test_remove_multiple_bindings_in_one_call(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx remove A B`` drops both bindings from ``ocx.toml`` + ``ocx.lock``
-    and uninstalls both (candidate symlinks absent)."""
+    and leaves both ``package install`` candidate symlinks alone."""
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_multi_a"
     repo_b = f"t_{short}_multi_b"
@@ -391,7 +390,7 @@ def test_remove_multiple_bindings_in_one_call(
     for repo in (repo_a, repo_b):
         assert repo not in toml_content, f"{repo!r} must be gone from ocx.toml; got:\n{toml_content}"
         assert repo not in lock_text, f"{repo!r} must be gone from ocx.lock; got:\n{lock_text}"
-        assert_not_exists(_candidate_path(ocx, repo, "1.0.0"))
+        assert_symlink_exists(_candidate_path(ocx, repo, "1.0.0"))
 
 
 def test_remove_fails_fast_when_one_absent(
@@ -414,3 +413,25 @@ def test_remove_fails_fast_when_one_absent(
         "ocx.toml must be unchanged when a batch remove hits a missing binding"
     )
     assert_symlink_exists(candidate)
+
+
+def test_remove_keeps_selected_current(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx remove`` leaves the ``current`` symlink of a ``package install
+    --select`` in place (ocx-sh/ocx#622)."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_rem_sel"
+    project_dir, candidate = _setup_project_with_tool(ocx, tmp_path, repo, "1.0.0")
+    select_r = _run_cmd(
+        ocx, project_dir, "package", "install", "--select", f"{ocx.registry}/{repo}:1.0.0"
+    )
+    assert select_r.returncode == EXIT_SUCCESS, f"install --select failed: {select_r.stderr}"
+    current = candidate.parent.parent / "current"
+    target = current.resolve()
+
+    result = _run_cmd(ocx, project_dir, "remove", repo)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx remove failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert_symlink_exists(candidate)
+    assert_symlink_exists(current)
+    assert current.resolve() == target, "ocx remove must not repoint `current`"

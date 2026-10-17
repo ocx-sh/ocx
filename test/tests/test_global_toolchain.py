@@ -26,12 +26,17 @@ isolation is by PATH precedence via ``ocx run``, not by subshell PATH strip.
 
 from __future__ import annotations
 
+import json
 import re as _re_gt
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner
+from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
+from src.runner import registry_dir
 from src.shell_eval import run_after_sourcing
 
 # ---------------------------------------------------------------------------
@@ -126,11 +131,8 @@ def test_global_add_install_select_then_fresh_shell_sees_tool(
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
     )
 
-    # `add --global` installs AND auto-sets the `current` selection in the
-    # global tier (signed handshake §1: "global IS the project toolchain — the
-    # only difference is the load site"). No manual `ocx package select` —
-    # `resolve_global_current_env` reads exactly the `current` symlink that
-    # `add --global` just created.
+    # No `ocx package select`: `ocx --global env` resolves the lock-pinned
+    # digest, not a `current` symlink.
 
     # Get the activation export lines via `ocx --global env --shell=sh`.
     env_result = _run_cmd(ocx, tmp_path, "--global", "env", "--shell=sh")
@@ -641,7 +643,7 @@ def test_clean_keeps_global_lock_pinned_package(
     make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=[bin_name])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
-    # Step 1: add to global toolchain — installs + writes lock + selects current.
+    # Step 1: add to global toolchain — pulls the package and writes the lock.
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
@@ -891,14 +893,11 @@ def test_global_partial_mutator_fail_closed_message_not_project_only(
 def test_global_remove_emits_no_warning_for_ordinary_binding(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`ocx --global remove` must not WARN about an absent candidate/current
-    symlink.
+    """`ocx --global remove` of a binding that `add` created must be quiet.
 
-    `add` materialises through ``pull_all`` and deliberately creates neither a
-    candidate nor a ``current`` symlink (ADR D5 amended 2026-05-19), so
-    ``remove``'s best-effort teardown finds both absent for EVERY ordinary
-    binding. Warning there fires on the happy path and tells the user nothing
-    (ocx-sh/ocx#274) — the absence is debug-level.
+    `add` materialises through ``pull_all`` and creates neither a candidate nor
+    a ``current`` symlink, so nothing about their absence is worth a warning
+    (ocx-sh/ocx#274).
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
@@ -917,4 +916,122 @@ def test_global_remove_emits_no_warning_for_ordinary_binding(
     assert "warning:" not in remove.stderr, (
         "removing an ordinary global binding must be quiet — the absent "
         f"candidate/current symlinks are the normal state; stderr:\n{remove.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Toolchain commands leave package-install symlinks alone (ocx-sh/ocx#622)
+# ---------------------------------------------------------------------------
+
+
+def _install_select(ocx: OcxRunner, cwd: Path, fq: str) -> Path:
+    """``ocx package install --select`` and return the reported package path."""
+    result = _run_cmd(ocx, cwd, "--format", "json", "package", "install", "--select", fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"package install --select must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    packages = json.loads(result.stdout)["packages"]
+    assert len(packages) == 1, f"one identifier in, one entry out: {packages}"
+    path = Path(next(iter(packages.values()))["path"]).resolve()
+    assert path.is_dir(), f"installed package path must exist: {path}"
+    return path
+
+
+def _install_links(ocx: OcxRunner, repo: str, tag: str) -> dict[str, Path]:
+    base = Path(ocx.ocx_home) / "symlinks" / registry_dir(ocx.registry) / repo
+    return {"candidate": base / "candidates" / tag, "current": base / "current"}
+
+
+def _assert_links_unchanged(links: dict[str, Path], before: dict[str, Path], step: str) -> None:
+    for name, link in links.items():
+        assert_symlink_exists(link)
+        assert link.resolve() == before[name], (
+            f"{step} must leave the `{name}` symlink of `package install --select` "
+            f"alone; was {before[name]}, now {link.resolve()}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("argv", "extra_env"),
+    [
+        pytest.param(("--global", "remove", "{fq}"), None, id="remove"),
+        pytest.param(("--global", "lock"), None, id="lock"),
+        pytest.param(("--global", "update"), None, id="update"),
+        pytest.param(("--global", "exec", "--", "gtool"), None, id="exec"),
+        pytest.param(("--global", "env", "--shell=sh"), None, id="env"),
+        pytest.param(("clean",), {"OCX_NO_PROJECT": "1"}, id="clean"),
+    ],
+)
+def test_toolchain_command_leaves_package_install_symlinks(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    argv: tuple[str, ...],
+    extra_env: dict[str, str] | None,
+) -> None:
+    """No toolchain command creates, moves or deletes the ``candidates/<tag>``
+    or ``current`` symlink that ``ocx package install --select`` wrote: those
+    belong to the package-install domain, the toolchain only to ``ocx.lock``.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+
+    package_path = _install_select(ocx, cwd, fq)
+    links = _install_links(ocx, unique_repo, "1.0.0")
+    before = {name: link.resolve() for name, link in links.items()}
+
+    add = _run_cmd(ocx, cwd, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, (
+        f"--global add must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
+    )
+    _assert_links_unchanged(links, before, "--global add")
+
+    args = [a.format(fq=fq) for a in argv]
+    result = _run_cmd(ocx, cwd, *args, extra_env=extra_env)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"`ocx {' '.join(args)}` must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    _assert_links_unchanged(links, before, f"`ocx {' '.join(args)}`")
+    assert package_path.is_dir(), f"package must stay installed: {package_path}"
+
+
+def test_global_remove_leaves_user_selection_to_package_uninstall(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """After ``ocx --global remove``, the ``package install --select`` links
+    still root the package against ``ocx clean``; ``package uninstall
+    --deselect`` releases it and the next clean collects it.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
+    fq = f"{ocx.registry}/{unique_repo}:1.0.0"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    no_project = {"OCX_NO_PROJECT": "1"}
+
+    # The issue's order: bind first, then install and select.
+    add = _run_cmd(ocx, cwd, "--global", "add", fq)
+    assert add.returncode == EXIT_SUCCESS, f"--global add failed:\n{add.stderr}"
+    package_path = _install_select(ocx, cwd, fq)
+    links = _install_links(ocx, unique_repo, "1.0.0")
+    before = {name: link.resolve() for name, link in links.items()}
+
+    remove = _run_cmd(ocx, cwd, "--global", "remove", unique_repo)
+    assert remove.returncode == EXIT_SUCCESS, f"--global remove failed:\n{remove.stderr}"
+    clean = _run_cmd(ocx, cwd, "clean", extra_env=no_project)
+    assert clean.returncode == EXIT_SUCCESS, f"clean failed:\n{clean.stderr}"
+    _assert_links_unchanged(links, before, "--global remove + clean")
+    assert package_path.is_dir(), f"selected package must survive clean: {package_path}"
+
+    uninstall = _run_cmd(ocx, cwd, "package", "uninstall", "--deselect", fq)
+    assert uninstall.returncode == EXIT_SUCCESS, f"uninstall failed:\n{uninstall.stderr}"
+    clean = _run_cmd(ocx, cwd, "clean", extra_env=no_project)
+    assert clean.returncode == EXIT_SUCCESS, f"clean failed:\n{clean.stderr}"
+    for link in links.values():
+        assert_not_exists(link)
+    assert not package_path.exists(), (
+        f"clean must collect the package once nothing roots it: {package_path}"
     )
