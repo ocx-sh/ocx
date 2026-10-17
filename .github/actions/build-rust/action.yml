@@ -26,7 +26,7 @@ runs:
   using: composite
   steps:
     - name: Install Rust Toolchain
-      uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         toolchain: stable
         targets: ${{ inputs.target }}
@@ -39,7 +39,7 @@ runs:
         TARGET: ${{ inputs.target }}
       run: rustup target add "$TARGET"
     - name: Rust Cache
-      uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         save-if: ${{ github.ref == 'refs/heads/main' }}
     # Compile cache in front of the shared Garage store; the calling job sets
@@ -51,13 +51,13 @@ runs:
     # developer machines for every dependency crate.
     - name: sccache
       if: ${{ env.SCCACHE_ENABLED == 'true' }}
-      uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
     - name: Install Zig
       if: ${{ inputs.use_zigbuild == 'true' }}
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
     - name: Install cargo-zigbuild
       if: ${{ inputs.use_zigbuild == 'true' }}
-      uses: taiki-e/install-action@58e862542551f667fa44c8a2a4a1d64ad477c96a # v2.75.17
+      uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
       with:
         tool: cargo-zigbuild
     - name: Build (cargo)
@@ -88,7 +88,7 @@ runs:
         [[ "$TARGET" == *windows* ]] && ext=".exe"
         cp "target/${TARGET}/release/ocx${ext}" "ocx-${TARGET}${SUFFIX}${ext}"
     - name: Upload ocx Binary
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ocx-${{ inputs.target }}${{ inputs.artifact_suffix }}
         path: ocx-${{ inputs.target }}${{ inputs.artifact_suffix }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}

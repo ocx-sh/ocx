@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
@@ -48,7 +48,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # For the `.claude` step below, not for actionlint: `arch-principles.md`
           # declares an `external/**/*.rs` path scope and the rule-glob test
@@ -128,11 +128,11 @@ jobs:
       OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           matcher: true
           # Defer warning-denial to [workspace.lints.rust]. The action's default
@@ -141,14 +141,14 @@ jobs:
           # turning its upstream lints into hard build errors.
           rustflags: ""
       - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: sccache
         if: ${{ env.SCCACHE_ENABLED == 'true' }}
-        uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       # `Install nextest` stood here and is gone with the lane swap below: the
       # unit run, its floor and the doctests are all `bazel test //crates/...`
       # now. Nothing left in this job invokes nextest, and an install for a tool
@@ -188,7 +188,7 @@ jobs:
       # blocking, because a sweep that reds is a statement about the tree, not
       # a backlog number. uv is its one tool, and this job had none.
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       # test_contract_baseline.py walks HEAD's ancestry to its newest vX.Y.Z
       # tag; the depth-1 checkout has neither, and its tag floor reds without
       # them. Release tags only, plus the history that reaches them. `main`
@@ -416,7 +416,7 @@ jobs:
         run: task website:reference:check
         continue-on-error: true
       - name: Upload Binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ocx-binary
           path: test/bin/ocx
@@ -493,7 +493,7 @@ jobs:
       # job's verdict comes from the step above, never from these two.
       - name: Publish Unit Test Results
         if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
         with:
           files: target/bazel/junit.xml
           check_name: "Unit Test Results"
@@ -605,7 +605,7 @@ jobs:
       OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
       - name: Start acceptance registry
@@ -622,16 +622,16 @@ jobs:
           done
           echo "::error::Registry did not become reachable"; exit 1
       - name: Download Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ocx-binary
           path: test/bin
       - name: Prepare Binaries
         run: chmod +x test/bin/ocx
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
       # Not Sigstore setup, although it exists for the cosign matrix: `-m smoke`
       # deselects that matrix but still collects its modules, and
       # `tests/fixtures/cosign_matrix.py` resolves the pinned cosign binary at
@@ -652,7 +652,7 @@ jobs:
         run: task test:smoke
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
         with:
           files: test/results/junit-smoke.xml
           check_name: "Smoke Acceptance Results"
