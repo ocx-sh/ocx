@@ -21,3 +21,6 @@ src/content/docs/reference/dependencies.md
 
 # Lighthouse CI output (scripts/lighthouse.mjs).
 /.lighthouseci
+
+# Mirror of the root CHANGELOG.md, written by astro.config.mjs so the changelog page can include it.
+src/_changelog.md
