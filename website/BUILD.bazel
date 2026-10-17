@@ -43,6 +43,7 @@ _SITE_SRCS = glob(
     allow_empty = False,
     exclude = [
         "node_modules/**",
+        "src/_changelog.md",
         "src/node_modules/**",
     ],
 ) + [

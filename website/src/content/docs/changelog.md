@@ -3,4 +3,4 @@ title: "Changelog"
 ---
 <!-- doc_type: changelog -->
 
-<!--@include: ../../../../CHANGELOG.md{3,}-->
+<!--@include: ../../_changelog.md{3,}-->
