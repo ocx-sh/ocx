@@ -454,11 +454,10 @@ pub enum Package {
     Exec(super::exec::Exec),
     /// Remove an installed candidate for one or more packages.
     ///
-    /// Removes the candidate symlink and its back-reference. Object-store content stays unless
-    /// `--purge` is given and no other references remain.
+    /// Removes the candidate symlink and its back-reference. Only the reference goes; `ocx clean`,
+    /// or `--purge` right away, deletes a package nothing else references, a lock pin included.
     ///
-    /// The `current` symlink stays unless `--deselect` is given. Use `ocx clean` to remove every
-    /// unreferenced object at once.
+    /// The `current` symlink stays unless `--deselect` is given.
     Uninstall(super::uninstall::Uninstall),
     /// Resolve installed packages and print their package-root (or, with
     /// `--candidate`/`--current`, install-symlink) paths.

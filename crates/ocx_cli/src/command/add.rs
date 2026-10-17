@@ -10,7 +10,8 @@ use ocx_project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resol
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
-    ensure_global_project_initialized, load_project_for_mutate, materialize_lock, record_activation_consent,
+    ensure_global_project_initialized, load_project_for_mutate, materialize_lock, purge_unpinned,
+    record_activation_consent,
 };
 use crate::conventions;
 use crate::options;
@@ -27,6 +28,9 @@ pub struct Add {
 
     #[clap(flatten)]
     pub pull: options::Pull,
+
+    #[clap(flatten)]
+    pub purge: options::Purge,
 
     #[clap(flatten)]
     pub platform: options::PlatformOption,
@@ -136,14 +140,15 @@ impl Add {
         }
 
         let touched = plan.touched.clone();
-        let new_lock = match guard.previous_lock().cloned() {
+        let previous = guard.previous_lock().cloned();
+        let new_lock = match &previous {
             Some(prev) => {
                 // Freshness anchors on the pre-mutation snapshot: the new bindings change the candidate's
                 // hash, so anchoring on it would fail every clean add.
                 resolve_lock_touched(
                     staged.config(), // candidate (post-mutation)
                     guard.config(),  // pre-mutation snapshot — freshness anchor
-                    &prev,
+                    prev,
                     context.default_index(),
                     &touched,
                     ResolveLockOptions::default(),
@@ -181,6 +186,10 @@ impl Add {
 
         // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
+
+        if self.purge.enabled() {
+            purge_unpinned(&context, previous.as_ref(), &new_lock).await;
+        }
 
         // After the commit: a failed download leaves the binding declared.
         materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;

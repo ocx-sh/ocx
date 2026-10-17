@@ -1211,3 +1211,31 @@ def test_update_check_unaffected_by_pull_flags(
     )
     # --check must not materialize anything even when --pull is present.
     assert_not_exists(candidate_v1)
+
+
+def test_update_purge_deletes_the_superseded_digest(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx update --purge`` deletes the digest the lock no longer pins and keeps
+    the one it moved to; plain ``ocx update`` leaves the old one for ``ocx clean``."""
+    repo = f"t_{uuid4().hex[:8]}_upd_purge"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    added = _run_add(ocx, project, f"{ocx.registry}/{repo}:latest")
+    assert added.returncode == EXIT_SUCCESS, f"ocx add failed:\n{added.stderr}"
+
+    root = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry) / "sha256"
+
+    def present(leaves: list[str]) -> list[Path]:
+        return [root / h[:2] / h[2:32] for h in leaves if (root / h[:2] / h[2:32]).is_dir()]
+
+    old = present(_leaves_for(_read_lock_text(project), repo))
+    assert old, "ocx add must pull the host leaf into the package store"
+
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True, index=False)
+    result = _run_update(ocx, project, "--purge")
+    assert result.returncode == EXIT_SUCCESS, f"ocx update --purge failed:\n{result.stderr}"
+    new = present(_leaves_for(_read_lock_text(project), repo))
+    assert new and new != old, "ocx update must move the lock and pull the new digest"
+    for package_dir in old:
+        assert_not_exists(package_dir)

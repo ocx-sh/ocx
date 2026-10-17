@@ -302,6 +302,17 @@ pub async fn record_activation_consent_over(
     }
 }
 
+/// After a commit, deletes each package `previous` pinned and `next` does not, when nothing
+/// else references it. A failure warns; the committed lock stands.
+pub async fn purge_unpinned(context: &crate::app::Context, previous: Option<&ProjectLock>, next: &ProjectLock) {
+    let Some(previous) = previous else { return };
+    crate::conventions::report_purge(
+        context,
+        context.manager().purge_unpinned(previous, next).await,
+        "could not delete the packages this command unlinked",
+    );
+}
+
 /// Pulls every binding in `lock` for `platform` into the object store; a no-op unless `eager`.
 ///
 /// Each binding carries its `config` tag while `lock` binds to `config`, and none once stale.

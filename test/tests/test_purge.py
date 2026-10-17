@@ -355,3 +355,17 @@ def test_purge_preserves_shared_layer_inodes(
     assert "shared-layer-binary" in content_bytes, (
         f"Package B's file content corrupted after purging A: {content_bytes!r}"
     )
+
+
+def test_purge_keeps_a_package_a_lock_pins(ocx: OcxRunner, published_package: PackageInfo):
+    """``package uninstall --purge`` removes the candidate but keeps a package
+    the global ``ocx.lock`` pins: a lock pin is a reference like any other."""
+    pkg = published_package
+    added = ocx.run("--global", "add", pkg.fq, format=None, check=False)
+    assert added.returncode == 0, f"--global add failed:\n{added.stderr}"
+    result = ocx.json("package", "install", pkg.short)["packages"]
+    content = Path(result[pkg.short]["path"]).resolve()
+    assert_dir_exists(content)
+
+    ocx.plain("package", "uninstall", "--purge", pkg.short)
+    assert_dir_exists(content)

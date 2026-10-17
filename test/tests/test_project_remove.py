@@ -435,3 +435,59 @@ def test_remove_keeps_selected_current(ocx: OcxRunner, tmp_path: Path) -> None:
     assert_symlink_exists(candidate)
     assert_symlink_exists(current)
     assert current.resolve() == target, "ocx remove must not repoint `current`"
+
+
+def _package_dirs(ocx: OcxRunner, leaves: list[str]) -> list[Path]:
+    """The package-store directories of ``leaves`` that exist on this host."""
+    root = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry) / "sha256"
+    return [root / h[:2] / h[2:32] for h in leaves if (root / h[:2] / h[2:32]).is_dir()]
+
+
+@pytest.mark.parametrize(
+    ("flags", "deleted"),
+    [
+        pytest.param((), False, id="default"),
+        pytest.param(("--purge",), True, id="purge"),
+        pytest.param(("--purge", "--no-purge"), False, id="no-purge-last"),
+    ],
+)
+def test_remove_purge_deletes_only_on_request(
+    ocx: OcxRunner, tmp_path: Path, flags: tuple[str, ...], deleted: bool
+) -> None:
+    """``ocx remove`` only drops the reference; ``--purge`` also deletes the
+    package nothing else references, and ``--no-purge`` last turns it back off.
+    """
+    repo = f"t_{uuid4().hex[:8]}_rem_purge"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, f'[tools]\n{repo} = "{ocx.registry}/{repo}:1.0.0"\n')
+    lock = _run_cmd(ocx, project_dir, "lock")
+    assert lock.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock.stderr}"
+    dirs = _package_dirs(ocx, _leaves_for_remove((project_dir / "ocx.lock").read_text(), repo))
+    assert dirs, "ocx lock must pull the host leaf into the package store"
+
+    result = _run_cmd(ocx, project_dir, "remove", *flags, repo)
+    assert result.returncode == EXIT_SUCCESS, f"ocx remove failed: {result.stderr}"
+    for package_dir in dirs:
+        assert package_dir.exists() != deleted, (
+            f"`ocx remove {' '.join(flags)}` must {'delete' if deleted else 'keep'} {package_dir}"
+        )
+
+
+def test_remove_purge_keeps_a_package_install_holds(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx remove --purge`` keeps a package ``package install --select`` holds:
+    the install symlinks are a reference of their own."""
+    repo = f"t_{uuid4().hex[:8]}_rem_purge_held"
+    project_dir, candidate = _setup_project_with_tool(ocx, tmp_path, repo, "1.0.0")
+    select = _run_cmd(ocx, project_dir, "package", "select", f"{ocx.registry}/{repo}:1.0.0")
+    assert select.returncode == EXIT_SUCCESS, f"package select failed: {select.stderr}"
+    dirs = _package_dirs(ocx, _leaves_for_remove((project_dir / "ocx.lock").read_text(), repo))
+    assert dirs, "the installed host leaf must be in the package store"
+
+    result = _run_cmd(ocx, project_dir, "remove", "--purge", repo)
+    assert result.returncode == EXIT_SUCCESS, f"ocx remove --purge failed: {result.stderr}"
+    assert_symlink_exists(candidate)
+    assert_symlink_exists(candidate.parent.parent / "current")
+    for package_dir in dirs:
+        assert package_dir.is_dir(), f"a package install holds {package_dir}; --purge must keep it"

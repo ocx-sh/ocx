@@ -361,7 +361,8 @@ pub enum Command {
         `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The removed tools leave the `links/<group>/<entry>` tree and the `shells/default/bin` \
         launchers reached through the `active` link. That directory carries its own `.gitignore`, \
         so `git status` stays clean.\n\n\
-        Only the reference is removed; `ocx clean` deletes a package nothing else references.")]
+        Only the reference is removed; `ocx clean`, or `--purge` right away, deletes a package \
+        nothing else references.")]
     #[command(visible_alias = "rm")]
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.

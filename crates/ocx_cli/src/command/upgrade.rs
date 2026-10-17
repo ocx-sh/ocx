@@ -13,10 +13,13 @@ use ocx_project::{
 
 use crate::api::data::update::UpdateReport;
 use crate::api::data::upgrade::{BeyondMajor, SkippedBinding, TagUpgrade, UpgradeReport, VerboseUpgradeReport};
-use crate::app::project_context::{load_project_for_mutate, materialize_lock, record_activation_consent};
+use crate::app::project_context::{
+    load_project_for_mutate, materialize_lock, purge_unpinned, record_activation_consent,
+};
 use crate::command::index_common::policy_blocked;
 use crate::command::update::{concrete_versions, missing_lock, print_verdict, select_touched};
 use crate::conventions;
+use crate::options;
 
 /// Arguments for `ocx upgrade`; its help text lives on `Command::Upgrade`.
 #[derive(Parser, Clone)]
@@ -59,6 +62,9 @@ pub struct Upgrade {
     /// it appears in (narrow with `-g`). An unknown name exits 64.
     #[arg(num_args = 0..)]
     pub names: Vec<String>,
+
+    #[clap(flatten)]
+    pub purge: options::Purge,
 }
 
 impl Upgrade {
@@ -228,6 +234,10 @@ impl Upgrade {
 
         // After the commit, so the stamp records the new source set.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
+
+        if self.purge.enabled() {
+            purge_unpinned(&context, Some(&previous), &new_lock).await;
+        }
 
         // After the commit, so a failure here never rolls back the lock.
         materialize_lock(&context, &new_lock, &config, true, platform).await?;

@@ -946,6 +946,64 @@
             "help": "Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit"
           },
           {
+            "id": "purge",
+            "long": "purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Also delete each package this command unlinks, when nothing else references it"
+          },
+          {
+            "id": "no_purge",
+            "long": "no-purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave unlinked packages on disk for `ocx clean`. The default"
+          },
+          {
             "id": "platform",
             "long": "platform",
             "short": "p",
@@ -2330,6 +2388,64 @@
             "help": "Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit"
           },
           {
+            "id": "purge",
+            "long": "purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Also delete each package this command unlinks, when nothing else references it"
+          },
+          {
+            "id": "no_purge",
+            "long": "no-purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave unlinked packages on disk for `ocx clean`. The default"
+          },
+          {
             "id": "platform",
             "long": "platform",
             "short": "p",
@@ -2751,6 +2867,64 @@
             "help": "Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit"
           },
           {
+            "id": "purge",
+            "long": "purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Also delete each package this command unlinks, when nothing else references it"
+          },
+          {
+            "id": "no_purge",
+            "long": "no-purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave unlinked packages on disk for `ocx clean`. The default"
+          },
+          {
             "id": "platform",
             "long": "platform",
             "short": "p",
@@ -2992,6 +3166,64 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Binding names to upgrade; leave every other binding as declared"
+          },
+          {
+            "id": "purge",
+            "long": "purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Also delete each package this command unlinks, when nothing else references it"
+          },
+          {
+            "id": "no_purge",
+            "long": "no-purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave unlinked packages on disk for `ocx clean`. The default"
           }
         ],
         "groups": [],
@@ -10311,13 +10543,44 @@
                 ],
                 "requires": [],
                 "conflicts": [],
-                "overrides": [],
+                "overrides": [
+                  "no_purge"
+                ],
                 "require_equals": false,
                 "allow_hyphen_values": false,
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Delete the object from the store when no references remain after uninstall"
+                "help": "Also delete each package this command unlinks, when nothing else references it"
+              },
+              {
+                "id": "no_purge",
+                "long": "no-purge",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "purge"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Leave unlinked packages on disk for `ocx clean`. The default"
               },
               {
                 "id": "packages",
@@ -11375,6 +11638,64 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Target a specific group. Use `default` to target the implicit `[tools]` table, or a named group (e.g. `ci`) to target `[group.ci]`. Without this flag, all groups are searched; if the binding appears in more than one group an error is returned"
+          },
+          {
+            "id": "purge",
+            "long": "purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Also delete each package this command unlinks, when nothing else references it"
+          },
+          {
+            "id": "no_purge",
+            "long": "no-purge",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "purge"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave unlinked packages on disk for `ocx clean`. The default"
           }
         ],
         "groups": [],

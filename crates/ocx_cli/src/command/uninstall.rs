@@ -8,21 +8,19 @@ use clap::Parser;
 
 /// Remove the installed candidate for one or more packages.
 ///
-/// Removes the candidate symlink and its back-reference.  The object-store
-/// content is left on disk unless `--purge` is given, in which case the
-/// object directory is deleted when no other references remain.
+/// Removes the candidate symlink and its back-reference. Only the reference
+/// goes; `ocx clean`, or `--purge` right away, deletes a package nothing else
+/// references.
 ///
 /// To remove the current-version symlink as well, pass `-d`/`--deselect`.
-/// To clean up all unreferenced objects at once use `ocx clean`.
 #[derive(Parser)]
 pub struct Uninstall {
     /// Also remove the current symlink (equivalent to also running `ocx package deselect`).
     #[clap(short = 'd', long = "deselect")]
     deselect: bool,
 
-    /// Delete the object from the store when no references remain after uninstall.
-    #[clap(long = "purge")]
-    purge: bool,
+    #[clap(flatten)]
+    purge: options::Purge,
 
     /// Package identifiers to uninstall.
     #[arg(required = true, num_args = 1.., value_name = "PACKAGE")]
@@ -35,7 +33,7 @@ impl Uninstall {
 
         let results = context
             .manager()
-            .uninstall_all(&identifiers, self.deselect, self.purge)
+            .uninstall_all(&identifiers, self.deselect, self.purge.enabled())
             .await?;
 
         let mut entries = Vec::new();

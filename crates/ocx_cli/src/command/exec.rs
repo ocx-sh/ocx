@@ -6,7 +6,6 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_config::env;
 use ocx_package::launch::LaunchIdentities;
-use ocx_package_manager::RootSet;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
@@ -216,26 +215,11 @@ impl Exec {
         let pinned: Vec<_> = install_infos.iter().map(|info| info.identifier().clone()).collect();
 
         // The exit code stays the child's whatever happens below: a failed removal is not the tool's status.
-        match manager.purge_unrooted(&pinned).await {
-            // Log records, never `ui().status`: a status line bypasses `--log-level`, and the terminal is the child's.
-            Ok(purged) => {
-                match purged.root_set {
-                    // The designed outcome: it keeps `--rm` from deleting an install under its own symlink.
-                    RootSet::Determinate => {
-                        for identifier in &purged.retained {
-                            log::info!("kept {identifier}: still held by something else");
-                        }
-                    }
-                    // Nothing was tested: naming identifiers would claim each is held, which this run never checked.
-                    RootSet::Indeterminate => context.ui().warn(
-                        "retained every package: a project lock could not be read this run, so nothing was removed",
-                    ),
-                }
-            }
-            Err(error) => context
-                .ui()
-                .warn(format!("could not remove the packages this run composed: {error}")),
-        }
+        crate::conventions::report_purge(
+            &context,
+            manager.purge_unrooted(&pinned).await,
+            "could not remove the packages this run composed",
+        );
 
         Ok(exit_code)
     }
