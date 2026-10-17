@@ -10,14 +10,14 @@
     "lighthouse": "node scripts/lighthouse.mjs"
   },
   "dependencies": {
-    "@astrojs/markdown-remark": "7.3.2",
-    "@astrojs/starlight": "0.42.4",
+    "@astrojs/markdown-remark": "7.3.3",
+    "@astrojs/starlight": "0.42.6",
     "@ocx-sh/theme": "github:ocx-sh/website#0443625f4b0a0e6a1bf393fc2205bb438d439302&path:/packages/theme",
-    "astro": "7.3.5"
+    "astro": "7.4.0"
   },
   "devDependencies": {
     "@lhci/cli": "0.15.1",
-    "lighthouse": "12.6.1",
-    "playwright-core": "^1.63.0"
+    "lighthouse": "13.5.0",
+    "playwright-core": "^1.64.1"
   }
 }
