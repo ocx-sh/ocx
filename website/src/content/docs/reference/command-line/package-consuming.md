@@ -344,9 +344,9 @@ ocx package select [OPTIONS] <PACKAGE>...
 
 Remove an installed candidate for one or more packages.
 
-Removes the candidate symlink and its back-reference. Object-store content stays unless `--purge` is given and no other references remain.
+Removes the candidate symlink and its back-reference. Only the reference goes; `ocx clean`, or `--purge` right away, deletes a package nothing else references, a lock pin included.
 
-The `current` symlink stays unless `--deselect` is given. Use `ocx clean` to remove every unreferenced object at once.
+The `current` symlink stays unless `--deselect` is given.
 
 ```text
 ocx package uninstall [OPTIONS] <PACKAGE>...
@@ -355,7 +355,8 @@ ocx package uninstall [OPTIONS] <PACKAGE>...
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--deselect`, `-d` |  | Also remove the current symlink (equivalent to also running `ocx package deselect`) |
-| `--purge` |  | Delete the object from the store when no references remain after uninstall |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 
 ## `ocx package verify` {#package-verify}
 

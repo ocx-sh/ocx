@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::{error::PackageError, error::PackageErrorKind};
 
-use super::garbage_collection::GarbageCollector;
-use super::resolve::SitePatchRoots;
+use super::purge::{UnrootedPaths, purge_unrooted_paths};
 
 use super::super::PackageManager;
 
@@ -26,42 +26,10 @@ struct SymlinkRemoval {
 }
 
 impl PackageManager {
-    /// Removes the candidate symlink for `package` and optionally the current
-    /// symlink (`deselect`) and the backing object directory (`purge`).
+    /// Uninstalls multiple packages, optionally purging what nothing else holds.
     ///
-    /// Returns `Some(UninstallResult)` when the candidate symlink existed and
-    /// was removed, or `None` when no candidate was present (no-op).
-    pub async fn uninstall(
-        &self,
-        package: &ocx_oci::PackageRef,
-        deselect: bool,
-        purge: bool,
-    ) -> Result<Option<UninstallResult>, PackageErrorKind> {
-        let result = uninstall_symlinks(self.file_structure(), package, deselect).await?;
-        let Some((candidate, pkg_root)) = result else {
-            return Ok(None);
-        };
-
-        let mut purged = None;
-        if purge && let Some(ref obj_dir) = pkg_root {
-            let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default())
-                .await
-                .map_err(PackageErrorKind::Internal)?;
-            let removed = gc
-                .purge(std::slice::from_ref(obj_dir))
-                .await
-                .map_err(PackageErrorKind::Internal)?;
-            if removed.iter().any(|p| p == obj_dir) {
-                purged = Some(obj_dir.clone());
-            }
-        }
-
-        Ok(Some(UninstallResult { candidate, purged }))
-    }
-
-    /// Uninstalls multiple packages, optionally purging unreferenced objects.
-    ///
-    /// Builds the [`GarbageCollector`] graph once for the batch, since each build walks the whole object store.
+    /// The purge keeps a package any root holds, a project lock pin included, by `clean`'s
+    /// reachability roots; an unreadable lock keeps every package.
     pub async fn uninstall_all(
         &self,
         packages: &[ocx_oci::PackageRef],
@@ -95,28 +63,24 @@ impl PackageManager {
             Vec::new()
         };
 
-        let purged_set: std::collections::HashSet<PathBuf> = if !purge_seeds.is_empty() {
-            let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default())
-                .await
-                .map_err(|e| {
-                    crate::error::Error::UninstallFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        PackageErrorKind::Internal(e),
-                    )])
-                })?;
-            gc.purge(&purge_seeds)
-                .await
-                .map_err(|e| {
-                    crate::error::Error::UninstallFailed(vec![PackageError::new(
-                        packages[0].clone(),
-                        PackageErrorKind::Internal(e),
-                    )])
-                })?
-                .into_iter()
-                .collect()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let mut purged_set: HashSet<PathBuf> = HashSet::new();
+        if !purge_seeds.is_empty() {
+            let outcome = purge_unrooted_paths(self, &purge_seeds).await.map_err(|e| {
+                crate::error::Error::UninstallFailed(vec![PackageError::new(
+                    packages[0].clone(),
+                    PackageErrorKind::Internal(e),
+                )])
+            })?;
+            match outcome {
+                Some(UnrootedPaths { held, .. }) => purged_set.extend(
+                    purge_seeds
+                        .into_iter()
+                        .zip(held)
+                        .filter_map(|(seed, held)| (!held).then_some(seed)),
+                ),
+                None => log::warn!("kept every package: a project lock could not be read, so nothing was purged"),
+            }
+        }
 
         let results = removals
             .into_iter()

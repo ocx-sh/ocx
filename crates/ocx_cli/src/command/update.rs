@@ -12,7 +12,9 @@ use ocx_project::{
 
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
 use crate::app::CliRefusal;
-use crate::app::project_context::{load_project_for_mutate, materialize_lock, record_activation_consent};
+use crate::app::project_context::{
+    load_project_for_mutate, materialize_lock, purge_unpinned, record_activation_consent,
+};
 use crate::conventions;
 use crate::options;
 
@@ -38,6 +40,9 @@ pub struct Update {
 
     #[clap(flatten)]
     pub pull: options::Pull,
+
+    #[clap(flatten)]
+    pub purge: options::Purge,
 
     #[clap(flatten)]
     pub platform: options::PlatformOption,
@@ -153,6 +158,10 @@ impl Update {
 
         // After the commit, so the stamp records the new source set.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
+
+        if self.purge.enabled() {
+            purge_unpinned(&context, previous.as_ref(), &new_lock).await;
+        }
 
         // After the commit, so a failure here never rolls back the lock.
         materialize_lock(&context, &new_lock, &config, eager, platform).await?;

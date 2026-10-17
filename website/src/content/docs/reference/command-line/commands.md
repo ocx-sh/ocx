@@ -61,8 +61,10 @@ ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 | --- | --- | --- |
 | `--group`, `-g` | `GROUP` | Named group to add the bindings to. Defaults to the implicit `[tools]` table when omitted |
 | `--no-pull` |  | Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 
 ## `ocx clean` {#clean}
 
@@ -252,8 +254,10 @@ ocx lock [OPTIONS]
 | --- | --- | --- |
 | `--check` |  | Verify `ocx.lock` is current relative to `ocx.toml` and exit |
 | `--no-pull` |  | Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 
 ## `ocx login` {#login}
 
@@ -338,7 +342,7 @@ Drops each binding from `ocx.lock` as well. Then it re-renders the project toolc
 
 The removed tools leave the `links/<group>/<entry>` tree and the `shells/default/bin` launchers reached through the `active` link. That directory carries its own `.gitignore`, so `git status` stays clean.
 
-Only the reference is removed; `ocx clean` deletes a package nothing else references.
+Only the reference is removed; `ocx clean`, or `--purge` right away, deletes a package nothing else references.
 
 - Alias: `rm`
 
@@ -349,6 +353,8 @@ ocx remove [OPTIONS] <IDENTIFIER>...
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--group`, `-g` | `NAME` | Target a specific group. Use `default` to target the implicit `[tools]` table, or a named group (e.g. `ci`) to target `[group.ci]`. Without this flag, all groups are searched; if the binding appears in more than one group an error is returned |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 
 ## `ocx status` {#status}
 
@@ -407,8 +413,10 @@ ocx update [OPTIONS] [NAMES]...
 | `--check` |  | Verify the candidate lock would match the predecessor and exit; exits 65 when a pin would change |
 | `--group`, `-g` | `GROUPS` | Advance every binding in the named group(s); freeze the rest |
 | `--no-pull` |  | Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 | `--verbose`, `-v` |  | List the bindings that did not move as well as the ones that did |
 
 ## `ocx upgrade` {#upgrade}
@@ -442,6 +450,8 @@ ocx upgrade [OPTIONS] [NAMES]...
 | `--check` |  | Report the tags that would move and exit without writing |
 | `--group`, `-g` | `GROUPS` | Upgrade every binding in the named group(s); leave the rest |
 | `--major` |  | Allow a tag to move to a newer major version |
+| `--no-purge` |  | Leave unlinked packages on disk for `ocx clean`. The default |
+| `--purge` |  | Also delete each package this command unlinks, when nothing else references it |
 | `--verbose`, `-v` |  | List the bindings that were left alone as well as the ones that moved |
 
 ## `ocx version` {#version}

@@ -419,6 +419,31 @@ pub const fn not_eval_safe_advisory(is_json: bool, stdout_is_terminal: bool) -> 
     Some("default output is not eval-safe; use --shell=bash to activate")
 }
 
+/// Reports a purge on stderr: what a root kept, or why nothing was tested. Never fails the command.
+pub fn report_purge(
+    context: &crate::app::Context,
+    result: ocx_package_manager::Result<ocx_package_manager::PurgeUnrooted>,
+    failure: &str,
+) {
+    use ocx_package_manager::RootSet;
+    match result {
+        // Log records, never `ui().status`: a status line bypasses `--log-level`, and under
+        // `package exec --rm` the terminal is the child's.
+        Ok(purged) => match purged.root_set {
+            RootSet::Determinate => {
+                for identifier in &purged.retained {
+                    log::info!("kept {identifier}: still held by something else");
+                }
+            }
+            // Nothing was tested: naming identifiers would claim each is held, which this run never checked.
+            RootSet::Indeterminate => context
+                .ui()
+                .warn("retained every package: a project lock could not be read this run, so nothing was removed"),
+        },
+        Err(error) => context.ui().warn(format!("{failure}: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -9,7 +9,8 @@ use ocx_project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
-    ProjectContextError, load_project_for_mutate, load_project_with_lock, materialize_lock, record_activation_consent,
+    ProjectContextError, load_project_for_mutate, load_project_with_lock, materialize_lock, purge_unpinned,
+    record_activation_consent,
 };
 use crate::conventions;
 use crate::options;
@@ -36,6 +37,9 @@ pub struct Lock {
     pub pull: options::Pull,
 
     #[clap(flatten)]
+    pub purge: options::Purge,
+
+    #[clap(flatten)]
     pub platform: options::PlatformOption,
 }
 
@@ -51,13 +55,14 @@ impl Lock {
         // Lock-only: the candidate config is byte-identical, so `commit` skips the manifest write.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
-        let new_lock = match guard.previous_lock().cloned() {
+        let previous = guard.previous_lock().cloned();
+        let new_lock = match &previous {
             // Clean: carry every pin forward; advancing a moved tag here would silently do `ocx update`'s job.
             Some(prev) if prev.is_current(staged.config()) => {
                 resolve_lock_touched(
                     staged.config(), // candidate
                     staged.config(), // pre-mutation snapshot (lock-only: identical to candidate)
-                    &prev,
+                    prev,
                     context.default_index(),
                     &[], // empty touched ⇒ resolve nothing; carry every pin forward
                     ResolveLockOptions::default(),
@@ -106,6 +111,10 @@ impl Lock {
 
         // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
+
+        if self.purge.enabled() {
+            purge_unpinned(&context, previous.as_ref(), &new_lock).await;
+        }
 
         // After the commit: a failed download leaves the lock committed.
         materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;

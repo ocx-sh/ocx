@@ -11,6 +11,8 @@ Use this page to remove a package you no longer need and to reclaim the disk spa
 
 [`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary when no [other reference][in-depth-storage-gc] remains.
 
+Toolchain commands only drop references too. [`ocx remove`][cmd-remove], [`ocx update`][cmd-update] and the other commands that rewrite `ocx.lock` take the same `--purge` for the packages they unpin.
+
 ## Sweep the store \{#cleanup-sweep\}
 
 [`ocx clean`][cmd-clean] sweeps the whole store in one pass. It removes every package that has no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package. Layers and blobs that become unreachable go with them.
@@ -63,6 +65,8 @@ Each swept stamp is reported as a `consent` entry, and `--dry-run` names the sta
 [cmd-add]: ../reference/command-line/commands.md#add
 [cmd-lock]: ../reference/command-line/commands.md#lock
 [cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-remove]: ../reference/command-line/commands.md#remove
+[cmd-update]: ../reference/command-line/commands.md#update
 [in-depth-storage-packages]: ../explanation/storage.mdx#packages
 [in-depth-storage-gc]: ../explanation/storage.mdx#gc
 [in-depth-dependencies-gc]: ../explanation/dependencies.mdx#gc

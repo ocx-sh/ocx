@@ -79,6 +79,10 @@ pub struct AddArgs {
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
     /// pull` or the first `ocx exec` / direnv hit
     pub no_pull: bool,
+    /// Also delete each package this command unlinks, when nothing else references it
+    pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Tool identifiers to add, each optionally prefixed with `NAME=` (e.g. `ocx.sh/cmake:3.28`,
@@ -92,6 +96,8 @@ impl AddArgs {
         argv.flag("group", &self.group, Presence::Optional, &[]);
         argv.switch("pull", self.pull);
         argv.switch("no-pull", self.no_pull);
+        argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.positional("identifiers", &self.identifiers, Presence::Required, Hyphen::Refuse);
     }
@@ -545,6 +551,10 @@ pub struct LockArgs {
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
     /// pull` or the first `ocx exec` / direnv hit
     pub no_pull: bool,
+    /// Also delete each package this command unlinks, when nothing else references it
+    pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
 }
@@ -555,6 +565,8 @@ impl LockArgs {
         argv.switch("check", self.check);
         argv.switch("pull", self.pull);
         argv.switch("no-pull", self.no_pull);
+        argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
     }
 }
@@ -1638,8 +1650,10 @@ impl PackageTestArgs {
 pub struct PackageUninstallArgs {
     /// Also remove the current symlink (equivalent to also running `ocx package deselect`)
     pub deselect: bool,
-    /// Delete the object from the store when no references remain after uninstall
+    /// Also delete each package this command unlinks, when nothing else references it
     pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
     /// Package identifiers to uninstall
     pub packages: Vec<String>,
 }
@@ -1649,6 +1663,7 @@ impl PackageUninstallArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.switch("deselect", self.deselect);
         argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
         argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
     }
 }
@@ -1890,6 +1905,10 @@ pub struct RemoveArgs {
     /// group (e.g. `ci`) to target `\[group.ci\]`. Without this flag, all groups are searched; if
     /// the binding appears in more than one group an error is returned
     pub group: Option<String>,
+    /// Also delete each package this command unlinks, when nothing else references it
+    pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
 }
 
 impl RemoveArgs {
@@ -1897,6 +1916,8 @@ impl RemoveArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.positional("identifiers", &self.identifiers, Presence::Required, Hyphen::Refuse);
         argv.flag("group", &self.group, Presence::Optional, &[]);
+        argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
     }
 }
 
@@ -2114,6 +2135,10 @@ pub struct UpdateArgs {
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
     /// pull` or the first `ocx exec` / direnv hit
     pub no_pull: bool,
+    /// Also delete each package this command unlinks, when nothing else references it
+    pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Advance every binding in the named group(s); freeze the rest
@@ -2129,6 +2154,8 @@ impl UpdateArgs {
         argv.switch("verbose", self.verbose);
         argv.switch("pull", self.pull);
         argv.switch("no-pull", self.no_pull);
+        argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
@@ -2148,6 +2175,10 @@ pub struct UpgradeArgs {
     pub groups: Vec<String>,
     /// Binding names to upgrade; leave every other binding as declared
     pub names: Vec<String>,
+    /// Also delete each package this command unlinks, when nothing else references it
+    pub purge: bool,
+    /// Leave unlinked packages on disk for `ocx clean`. The default
+    pub no_purge: bool,
 }
 
 impl UpgradeArgs {
@@ -2158,6 +2189,8 @@ impl UpgradeArgs {
         argv.switch("verbose", self.verbose);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
+        argv.switch("purge", self.purge);
+        argv.switch("no-purge", self.no_purge);
     }
 }
 

@@ -37,7 +37,6 @@
   "crates/ocx_package_manager/src/tasks/render_toolchain.rs::rustdoc::redundant_explicit_links": 1,
   "crates/ocx_package_manager/src/tasks/resolve.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_package_manager/src/tasks/resolve.rs::rustdoc::private_intra_doc_links": 1,
-  "crates/ocx_package_manager/src/tasks/uninstall.rs::rustdoc::private_intra_doc_links": 1,
   "crates/ocx_package_manager/src/tasks/update_check.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_project/src/project_lock.rs::rustdoc::private_intra_doc_links": 1,
   "crates/ocx_schema/src/reports.rs::rustdoc::private_intra_doc_links": 1,

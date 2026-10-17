@@ -10,7 +10,8 @@ use clap::Parser;
 use ocx_project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{load_project_for_mutate, record_activation_consent};
+use crate::app::project_context::{load_project_for_mutate, purge_unpinned, record_activation_consent};
+use crate::options;
 
 /// Remove one or more package bindings from `ocx.toml`.
 ///
@@ -35,6 +36,9 @@ pub struct Remove {
     /// binding appears in more than one group an error is returned.
     #[arg(long = "group", short = 'g', value_name = "NAME")]
     pub group: Option<String>,
+
+    #[clap(flatten)]
+    pub purge: options::Purge,
 }
 
 impl Remove {
@@ -69,12 +73,13 @@ impl Remove {
         })?;
 
         // Empty touched set: survivors keep their pins verbatim, and drift fails 65/78 instead of re-resolving.
-        let new_lock = match guard.previous_lock().cloned() {
+        let previous = guard.previous_lock().cloned();
+        let new_lock = match &previous {
             Some(prev) => {
                 resolve_lock_touched(
                     staged.config(), // candidate — removed binding already absent
                     guard.config(),  // pre-mutation snapshot — freshness anchor
-                    &prev,
+                    prev,
                     context.default_index(),
                     &[], // EMPTY touched set — resolve nothing
                     ResolveLockOptions::default(),
@@ -112,6 +117,10 @@ impl Remove {
 
         // Stamped after the commit, or consent records the source set being replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
+
+        if self.purge.enabled() {
+            purge_unpinned(&context, previous.as_ref(), &new_lock).await;
+        }
 
         let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
