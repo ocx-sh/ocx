@@ -76,7 +76,7 @@ Both bindings coexist. `ocx exec gh`, `ocx exec glab`, `ocx remove glab` and the
 
 `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`. An invalid name exits 64.
 
-[`ocx remove`][cmd-remove] (alias `rm`) drops bindings from `ocx.toml`, rewrites `ocx.lock` and uninstalls their packages. An argument is a bare name (`cmake`), a name with a tag (`kitware/cmake:3.28`) or a fully qualified identifier. The identifier forms are reduced to the repository basename and matched against the TOML key. A binding added as `glab=…` is therefore removed with `ocx remove glab` and not by its identifier.
+[`ocx remove`][cmd-remove] (alias `rm`) drops bindings from `ocx.toml` and rewrites `ocx.lock`. Only the reference is removed; `ocx clean` deletes a package nothing else references. An argument is a bare name (`cmake`), a name with a tag (`kitware/cmake:3.28`) or a fully qualified identifier. The identifier forms are reduced to the repository basename and matched against the TOML key. A binding added as `glab=…` is therefore removed with `ocx remove glab` and not by its identifier.
 
 An argument that matches no binding exits 79. Removals are staged together, so `ocx.toml` is left unchanged in that case.
 
