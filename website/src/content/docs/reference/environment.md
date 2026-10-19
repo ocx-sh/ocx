@@ -86,6 +86,9 @@ Authentication type for one registry.
 `<REGISTRY>` is the registry name with every non-alphanumeric character replaced by `_`, case
 kept, so `docker.io` reads `OCX_AUTH_docker_io_TYPE`.
 
+Any `OCX_AUTH_*` value set for a registry means ocx never invokes a Docker credential helper
+for it; `anonymous` opts a registry out of helper lookup entirely.
+
 - Visibility: public
 - Value: `choice: anonymous, basic, token, bearer`
 - See: [Authenticate](../guides/authenticate.mdx)
@@ -796,6 +799,17 @@ always bypasses it.
 ## Internal {#internal}
 
 Variables OCX writes and reads for its own plumbing. Do not set them by hand unless an entry says so.
+
+## `__OCX_CREDENTIAL_HELPER` {#ocx-credential-helper}
+
+Set by ocx on every credential helper it starts; an ocx running under it never downloads.
+
+A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that
+ocx would install the package the outer ocx is still pulling and wait on its lock. Under the
+marker ocx behaves as if `--offline` were given.
+
+- Visibility: plumbing
+- Value: `bool`
 
 ## `__OCX_ENV_PWD` {#ocx-env-pwd}
 

@@ -108,6 +108,7 @@ impl ErrorDetail {
             Self::ConfigParse => Some(ExitCode::ConfigError),
             Self::CredentialHelperFailed => Some(ExitCode::AuthError),
             Self::CredentialHelperInvalidJson => Some(ExitCode::DataError),
+            Self::CredentialHelperNotInstalled => Some(ExitCode::PolicyBlocked),
             Self::CredentialHelperNotOnPath => Some(ExitCode::ConfigError),
             Self::CredentialHelperTimeout => Some(ExitCode::TempFail),
             Self::CredentialHelperUnsafePath => Some(ExitCode::ConfigError),

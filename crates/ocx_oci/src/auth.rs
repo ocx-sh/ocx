@@ -17,43 +17,51 @@ pub use store::{Credential, CredentialStore, DockerCredentialStore, StoreOptions
 /// The result of an auth lookup, which can fail no other way.
 pub type Result<T> = std::result::Result<T, AuthError>;
 
+/// Looks up the Docker-config credential for a canonicalized registry; blocking, so it runs off the runtime.
+type DockerLookup = std::sync::Arc<dyn Fn(&str) -> Result<Option<crate::native::Auth>> + Send + Sync>;
+
+/// Credential resolution with one lookup per registry per process, whatever its outcome.
+///
+/// A credential helper can be slow or fail, and every request for a registry would pay for it again;
+/// the outcome, a failure included, is the registry's answer for the rest of the run.
 #[derive(Clone)]
 pub struct Auth {
-    cache: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::native::Auth>>>,
+    lookups: ocx_util::singleflight::Group<String, crate::native::Auth>,
+    docker: DockerLookup,
 }
 
 impl Auth {
     pub fn new() -> Self {
+        Self::with_docker_lookup(std::sync::Arc::new(|registry: &str| get_docker_auth(registry)))
+    }
+
+    fn with_docker_lookup(docker: DockerLookup) -> Self {
         Auth {
-            cache: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            // Waiters outlive at most one helper budget, so this bound only guards a lost leader.
+            lookups: ocx_util::singleflight::Group::new(1024, std::time::Duration::from_secs(120)),
+            docker,
         }
-    }
-
-    pub async fn get(&self, registry: impl AsRef<str>) -> Result<crate::native::Auth> {
-        let registry = registry.as_ref();
-        if let Some(auth) = self.get_cached_auth(registry).await {
-            return Ok(auth);
-        }
-        let auth = self.get_impl(registry).await?;
-        self.set_cached_auth(registry, auth.clone()).await;
-        Ok(auth)
-    }
-
-    async fn get_impl(&self, registry: impl AsRef<str>) -> Result<crate::native::Auth> {
-        let registry = registry.as_ref();
-        if let Some(auth) = get_env_auth(registry)? {
-            return Ok(auth);
-        }
-        if let Some(auth) = get_docker_auth(registry)? {
-            return Ok(auth);
-        }
-        Ok(crate::native::Auth::Anonymous)
     }
 
     /// Retrieves authentication for the specified registry, falling back to anonymous if retrieval fails.
     pub async fn get_or_fallback(&self, registry: impl AsRef<str>) -> crate::native::Auth {
+        use ocx_util::singleflight::Acquisition;
+
         let registry = registry.as_ref();
-        match self.get(registry).await {
+        match self.lookups.try_acquire(registry.to_owned()).await {
+            Ok(Acquisition::Resolved(auth)) => auth,
+            Ok(Acquisition::Leader(handle)) => {
+                let auth = self.lookup_or_anonymous(registry).await;
+                handle.complete(auth.clone());
+                auth
+            }
+            // The leader vanished or the group is full: ask directly rather than fail the request.
+            Err(_) => self.lookup_or_anonymous(registry).await,
+        }
+    }
+
+    async fn lookup_or_anonymous(&self, registry: &str) -> crate::native::Auth {
+        match self.lookup(registry).await {
             Ok(auth) => auth,
             Err(error) => {
                 log::warn!(
@@ -66,16 +74,19 @@ impl Auth {
         }
     }
 
-    async fn get_cached_auth(&self, registry: impl AsRef<str>) -> Option<crate::native::Auth> {
-        let registry = registry.as_ref();
-        let cache = self.cache.read().await;
-        cache.get(registry).cloned()
-    }
-
-    async fn set_cached_auth(&self, registry: impl AsRef<str>, auth: crate::native::Auth) {
-        let registry = registry.as_ref().to_string();
-        let mut cache = self.cache.write().await;
-        cache.insert(registry, auth);
+    async fn lookup(&self, registry: &str) -> Result<crate::native::Auth> {
+        if let Some(auth) = get_env_auth(registry)? {
+            return Ok(auth);
+        }
+        let docker = self.docker.clone();
+        let canonical = registry.to_owned();
+        let found = tokio::task::spawn_blocking(move || docker(&canonical))
+            .await
+            .unwrap_or_else(|error| {
+                log::warn!("Docker credential lookup for registry '{registry}' aborted: {error}");
+                Ok(None)
+            })?;
+        Ok(found.unwrap_or(crate::native::Auth::Anonymous))
     }
 }
 
@@ -102,13 +113,14 @@ fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Au
         Err(DockerError::NoCredentialConfigured)
         | Err(DockerError::ConfigNotFound)
         | Err(DockerError::ConfigReadError)
-        | Err(DockerError::NotFound)
-        | Err(DockerError::HelperFailure {
-            helper: _,
-            stdout: _,
-            stderr: _,
-        }) => {
+        | Err(DockerError::NotFound) => {
             log::debug!("No native Docker credentials found for registry '{}'", registry);
+            None
+        }
+        // stdout can carry the secret; only the helper's own complaint is shown.
+        Err(DockerError::HelperFailure { helper, stderr, .. }) => {
+            let reason = stderr.lines().next().unwrap_or_default();
+            log::warn!("credential helper '{helper}' failed for registry '{registry}': {reason}");
             None
         }
         Err(error) => {
@@ -162,6 +174,63 @@ fn get_env_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Auth>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An `Auth` whose Docker lookup counts its calls and answers `outcome`.
+    fn counting_auth(outcome: fn() -> Result<Option<crate::native::Auth>>) -> (Auth, std::sync::Arc<AtomicUsize>) {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let auth = Auth::with_docker_lookup(std::sync::Arc::new(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            outcome()
+        }));
+        (auth, calls)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_gets_ask_the_helper_once() {
+        let _env = ocx_env::overrides::lock();
+        let (auth, calls) = counting_auth(|| Ok(Some(crate::native::Auth::Bearer("t".into()))));
+        let results = futures::future::join_all((0..8).map(|_| auth.get_or_fallback("reg.example"))).await;
+        assert!(
+            results
+                .iter()
+                .all(|a| matches!(a, crate::native::Auth::Bearer(t) if t == "t"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_is_not_retried() {
+        let _env = ocx_env::overrides::lock();
+        let (auth, calls) = counting_auth(|| {
+            Err(AuthError::DockerCredentialRetrieval(
+                docker_credential::CredentialRetrievalError::HelperCommunicationError,
+            ))
+        });
+        for _ in 0..3 {
+            assert!(matches!(
+                auth.get_or_fallback("reg.example").await,
+                crate::native::Auth::Anonymous
+            ));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ocx_auth_override_never_asks_the_helper() {
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_reg_example_TYPE", "anonymous");
+        let (auth, calls) = counting_auth(|| Ok(Some(crate::native::Auth::Bearer("t".into()))));
+        assert!(matches!(
+            auth.get_or_fallback("reg.example").await,
+            crate::native::Auth::Anonymous
+        ));
+        env.set_raw("OCX_AUTH_other_example_TOKEN", "tok");
+        assert!(matches!(auth.get_or_fallback("other.example").await, crate::native::Auth::Bearer(t) if t == "tok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn test_get_docker_auth_no_credentials() {

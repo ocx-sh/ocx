@@ -69,6 +69,7 @@ config_io	IoError	Reading a config file failed
 config_parse	ConfigError	A config file does not parse
 credential_helper_failed	AuthError	The credential helper failed to supply credentials
 credential_helper_invalid_json	DataError	The credential helper answered with invalid JSON
+credential_helper_not_installed	PolicyBlocked	The credential helper is not installed, and an ocx started by a credential helper never downloads
 credential_helper_not_on_path	ConfigError	The configured credential helper is not on PATH
 credential_helper_timeout	TempFail	The credential helper did not answer in time
 credential_helper_unsafe_path	ConfigError	The credential helper resolves to an unsafe path

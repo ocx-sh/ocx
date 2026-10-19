@@ -64,7 +64,15 @@ If a Docker configuration is found, OCX uses the stored credentials. The configu
 docker login "<registry>"
 ```
 
-Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `credsStore`, then `auths[REGISTRY]`. Any `OCX_AUTH_*` variable for the registry wins over all of them.
+Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `auths[REGISTRY]`, then `credsStore`. Any `OCX_AUTH_*` variable for the registry wins over all of them, and then OCX runs no credential helper for that registry.
+
+### Credential helper installed with OCX \{#authentication-helper-from-ocx\}
+
+A credential helper such as the [Amazon ECR credential helper][ecr-helper] can itself be an OCX package. Add it to the [project or global toolchain][guide-project-toolchain] and put the toolchain's launcher directory on `PATH`. OCX then finds the helper there like any other `docker-credential-*` program.
+
+- OCX asks a helper for a registry's credentials at most once per run, before it starts installing anything from that registry.
+- The first install of the helper cannot use the helper. Pull it with `OCX_AUTH_*` variables, or from a registry that allows anonymous access. Until the helper is installed, OCX skips it, warns that it is not installed, and carries on without those credentials.
+- To keep a registry away from the helper altogether, set `OCX_AUTH_<REGISTRY>_TYPE=anonymous`, or give it a `TOKEN`.
 
 :::tip[Learn more]
 [Environment variable reference][env-ref]: every `OCX_AUTH_*` variant and the complete normalization rules.
@@ -96,5 +104,7 @@ Remove credentials with [`ocx logout`][cmd-logout]. Logout exits 0 when the regi
 [env-auth-token]: ../reference/environment.md#ocx-auth-registry-token
 [env-docker-config]: ../reference/environment.md#external-docker-config
 [env-ref]: ../reference/environment.md
+[ecr-helper]: https://github.com/awslabs/amazon-ecr-credential-helper
+[guide-project-toolchain]: ./project-toolchain.mdx
 [in-depth-storage-stores]: ../explanation/storage.mdx#stores
 [in-depth-configuration]: ../explanation/configuration.mdx

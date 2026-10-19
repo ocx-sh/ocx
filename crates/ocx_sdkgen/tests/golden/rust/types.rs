@@ -2648,6 +2648,9 @@ pub enum ErrorDetail {
     CredentialHelperFailed,
     /// The credential helper answered with invalid JSON
     CredentialHelperInvalidJson,
+    /// The credential helper is not installed, and an ocx started by a credential helper never
+    /// downloads
+    CredentialHelperNotInstalled,
     /// The configured credential helper is not on PATH
     CredentialHelperNotOnPath,
     /// The credential helper did not answer in time
@@ -3621,6 +3624,7 @@ impl ErrorDetail {
             Self::ConfigParse => "config_parse",
             Self::CredentialHelperFailed => "credential_helper_failed",
             Self::CredentialHelperInvalidJson => "credential_helper_invalid_json",
+            Self::CredentialHelperNotInstalled => "credential_helper_not_installed",
             Self::CredentialHelperNotOnPath => "credential_helper_not_on_path",
             Self::CredentialHelperTimeout => "credential_helper_timeout",
             Self::CredentialHelperUnsafePath => "credential_helper_unsafe_path",
@@ -4144,6 +4148,7 @@ impl ErrorDetail {
             "config_parse" => Self::ConfigParse,
             "credential_helper_failed" => Self::CredentialHelperFailed,
             "credential_helper_invalid_json" => Self::CredentialHelperInvalidJson,
+            "credential_helper_not_installed" => Self::CredentialHelperNotInstalled,
             "credential_helper_not_on_path" => Self::CredentialHelperNotOnPath,
             "credential_helper_timeout" => Self::CredentialHelperTimeout,
             "credential_helper_unsafe_path" => Self::CredentialHelperUnsafePath,

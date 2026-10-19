@@ -152,6 +152,8 @@ impl ContextOptions {
         ] {
             *flag |= var.bool_or(false)?;
         }
+        // A credential helper's ocx must not reach the registry it is resolving credentials for.
+        self.offline |= ocx_env::__OCX_CREDENTIAL_HELPER.bool_or(false)?;
         Ok(())
     }
 
@@ -235,6 +237,21 @@ mod tests {
         let from_env = parsed(&["ocx"]);
         assert!(from_env.offline && from_env.remote && from_env.global && from_env.quiet);
         assert!(!from_env.frozen);
+    }
+
+    /// An ocx started by a credential helper never reaches a registry, whatever else is set.
+    #[test]
+    fn the_credential_helper_marker_forces_offline() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("no variable is set");
+        assert!(!options.offline);
+
+        env.set(&ocx_env::__OCX_CREDENTIAL_HELPER, "1");
+        let mut options = ContextOptions::try_parse_from(["ocx", "--remote"]).expect("args parse");
+        options.apply_env().expect("the marker is a boolean");
+        assert!(options.offline);
     }
 
     /// A refusing variable's unparsable value is an error naming the key, not a silent off.

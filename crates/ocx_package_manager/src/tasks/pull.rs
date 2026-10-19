@@ -98,10 +98,18 @@ impl PackageManager {
         // The batch's only trace in non-TTY log output.
         tracing::info!(parent: &outer, count, "pulling");
 
+        let mut unresolved = prefetch_credentials(self, packages, &platform).await;
+
         let shared_groups = SetupGroups::new();
         let semaphore = concurrency.semaphore();
         let mut tasks = JoinSet::new();
-        for package in packages {
+        for (slot, package) in packages.iter().enumerate() {
+            // The prefetch already met this root's failure; dialling it again would only repeat it.
+            if let Some(kind) = unresolved[slot].take() {
+                let package = package.clone();
+                tasks.spawn(async move { (package, Err(kind)) });
+                continue;
+            }
             let mgr = self.clone();
             let package = package.clone();
             let platform = platform.clone();
@@ -127,6 +135,70 @@ impl PackageManager {
         }
         Ok(infos)
     }
+}
+
+/// Resolves the credentials of every registry the closures of the uninstalled `packages` touch.
+///
+/// Runs before any setup task takes a staging lock: a credential helper that is itself an ocx
+/// trampoline would otherwise start while a lock is held and wait on it (#623). Best effort except
+/// for a root that does not resolve, whose error is returned in its slot: the pull would hit the
+/// same one, and a refused handshake must not be dialled twice. A closure that cannot be walked
+/// resurfaces, with its proper error, from the pull that follows.
+async fn prefetch_credentials(
+    mgr: &PackageManager,
+    packages: &[ocx_oci::PackageRef],
+    platform: &ocx_oci::Platform,
+) -> Vec<Option<PackageErrorKind>> {
+    if mgr.is_offline() {
+        return packages.iter().map(|_| None).collect();
+    }
+    let walks = packages
+        .iter()
+        .map(|package| async move { walk_uninstalled_closure(mgr, package, platform).await.err() });
+    futures::future::join_all(walks).await
+}
+
+/// # Errors
+///
+/// Only the root's own resolution failure; the closure walk after it is logged and dropped.
+async fn walk_uninstalled_closure(
+    mgr: &PackageManager,
+    package: &ocx_oci::PackageRef,
+    platform: &ocx_oci::Platform,
+) -> Result<(), PackageErrorKind> {
+    // A digest-pinned root answers from the store without resolving, which would reach the network.
+    if let Ok(pinned) = ocx_oci::PinnedPackageRef::try_from(package.clone())
+        && is_installed(mgr, &pinned).await
+    {
+        return Ok(());
+    }
+    let resolved = mgr.resolve(package, platform.clone()).await?;
+    if is_installed(mgr, &resolved.pinned).await {
+        return Ok(());
+    }
+    if let Err(error) = walk_closure(mgr, &resolved, platform).await {
+        log::debug!("Credential prefetch for '{package}' stopped early: {error}");
+    }
+    Ok(())
+}
+
+async fn walk_closure(
+    mgr: &PackageManager,
+    resolved: &super::resolve::ResolvedChain,
+    platform: &ocx_oci::Platform,
+) -> Result<(), PackageErrorKind> {
+    let (fs, index) = (mgr.file_structure(), mgr.index());
+    let metadata = super::common::load_config_metadata(index, &resolved.pinned, &resolved.final_manifest).await?;
+    let config_digest = super::common::config_blob_digest(&resolved.final_manifest)?;
+    super::common::walk_closure_nodes(fs, index, false, &resolved.pinned, &metadata, config_digest, platform).await?;
+    Ok(())
+}
+
+/// A probe failure reads as "not installed": the pull itself will meet and report it.
+async fn is_installed(mgr: &PackageManager, pinned: &ocx_oci::PinnedPackageRef) -> bool {
+    matches!(mgr.find_plain(pinned).await, Ok(Some(_)))
+        && ocx_package::install_status::check_install_status(&mgr.file_structure().packages.install_status(pinned))
+            .await
 }
 
 fn setup_with_tracker<'a>(

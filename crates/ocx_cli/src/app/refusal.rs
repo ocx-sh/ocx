@@ -92,6 +92,15 @@ pub enum CliRefusal {
     )]
     FrozenRefused(String),
 
+    /// A credential helper's ocx was asked to run a helper that is not installed.
+    #[error("{0}")]
+    #[exit(
+        PolicyBlocked,
+        slug = "credential_helper_not_installed",
+        summary = "The credential helper is not installed, and an ocx started by a credential helper never downloads"
+    )]
+    CredentialHelperNotInstalled(String),
+
     /// `ocx package create` extracted an archive to nothing.
     #[error("{0}")]
     #[exit(
