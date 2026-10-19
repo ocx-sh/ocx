@@ -574,6 +574,11 @@
           "exit_code": 65
         },
         {
+          "value": "credential_helper_not_installed",
+          "description": "The credential helper is not installed, and an ocx started by a credential helper never downloads",
+          "exit_code": 81
+        },
+        {
           "value": "credential_helper_not_on_path",
           "description": "The configured credential helper is not on PATH",
           "exit_code": 78

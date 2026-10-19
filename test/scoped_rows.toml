@@ -37,6 +37,7 @@ ocx_oci = [
     "tests/test_proxy_registry.py",
     "tests/test_oci_registry_mirror.py",
     "tests/test_login.py",
+    "tests/test_credential_helper_reentry.py",
     "tests/test_tag_*.py",
     "tests/test_registry_startup_retry.py",
     "tests/test_resolution_chain_refs.py",
@@ -120,6 +121,7 @@ ocx_project = [
 ]
 # `env`, `exec`, `run`, `update`, `select`, `status`, `inspect`, `offline`, patches, records, entrypoints
 ocx_package_manager = [
+    "tests/test_credential_helper_reentry.py",
     "tests/test_env*.py",
     "tests/test_exec*.py",
     "tests/test_patch*.py",

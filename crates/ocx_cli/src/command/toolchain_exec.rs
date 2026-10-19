@@ -11,7 +11,7 @@ use clap::Parser;
 use ocx_config::env;
 use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::env::entry::Entry;
-use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_package_manager::composer::{ComposeOmission, ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{PackageBinding, RecordInputs, Scope};
 use ocx_project::{
@@ -19,6 +19,7 @@ use ocx_project::{
     select_tool_set,
 };
 
+use crate::app::CliRefusal;
 use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, ListSeparatorError, reconcile_list_separators};
@@ -156,13 +157,22 @@ impl ToolchainExec {
                 ),
             })
             .collect();
+        // Deliberate deviation from `ocx env` = `ocx exec`: under the credential-helper marker nothing
+        // installs, or the install waits on the pull that is waiting on this helper (#623).
+        let from_credential_helper = ocx_env::__OCX_CREDENTIAL_HELPER.bool_or(false)?;
+        let materialization = if from_credential_helper {
+            Materialization::LocalOnly
+        } else {
+            Materialization::Install
+        };
         let composed = manager
-            .compose_roots(&requests, &host, Materialization::Install, context.concurrency())
+            .compose_roots(&requests, &host, materialization, context.concurrency())
             .await?;
         for advisory in &composed.advisories {
             context.ui().warn(advisory.to_string());
         }
         let install_infos = composed.roots;
+        let omitted = composed.omitted;
         // Tools materialized on the spot: half of the execution record's drift signal.
         let auto_installed = composed.pulled;
         // Bound once: drives the parent resolve and is forwarded, so a launcher's re-entry honours the same opt-out.
@@ -223,7 +233,7 @@ impl ToolchainExec {
         // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
-        let bindings = project_bindings(&resolved, &install_infos);
+        let bindings = project_bindings(&resolved, &omitted, &install_infos);
 
         let (command, _) = self
             .argv
@@ -233,7 +243,14 @@ impl ToolchainExec {
         // Resolved once for record and launch, or the audit trail can name a different binary.
         // Only this lookup copy of `PATH` excludes the trampoline dirs; the child's keeps them for sibling re-entry.
         let excluded = trampoline_lookup_exclusions(context.file_structure(), &toolchain_home);
-        let executable = process_env.resolve_command_excluding(command, &excluded)?;
+        let executable = process_env
+            .resolve_command_excluding(command, &excluded)
+            .map_err(|error| match omitted.is_empty() {
+                true => anyhow::Error::from(error),
+                false => anyhow::Error::from(CliRefusal::CredentialHelperNotInstalled(format!(
+                    "credential helper `{command}` is not installed; install it with `ocx pull` using other credentials (`OCX_AUTH_*`)"
+                ))),
+            })?;
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -268,13 +285,16 @@ impl ToolchainExec {
 
 /// Pair each root package with the `ocx.toml` binding it was selected under.
 ///
-/// Zipped by index: under `Materialization::Install` `compose_roots` yields one root per request, in order.
+/// Zipped by index once the `omitted` requests are set aside: `compose_roots` yields one root per
+/// surviving request, in order.
 fn project_bindings(
     resolved: &[ocx_project::ResolvedTool],
+    omitted: &[ComposeOmission],
     install_infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
 ) -> Vec<PackageBinding> {
     resolved
         .iter()
+        .filter(|tool| !omitted.iter().any(|omission| omission.identifier == tool.identifier))
         .zip(install_infos)
         .filter_map(|(tool, info)| match &tool.origin {
             Origin::Group(group) => Some(PackageBinding {

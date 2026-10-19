@@ -109,6 +109,11 @@ impl Context {
         };
 
         if !in_seam {
+            // Process-global, set once: every helper this process spawns carries the re-entry marker.
+            docker_credential::set_helper_env(vec![(
+                ocx_env::__OCX_CREDENTIAL_HELPER.declaration().name.to_owned(),
+                "1".to_owned(),
+            )]);
             crate::tracing_init::LogSettings::default()
                 .with_console_level(options.log_level)
                 .with_stderr_color(color_config.stderr)

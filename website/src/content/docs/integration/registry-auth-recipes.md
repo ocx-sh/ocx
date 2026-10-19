@@ -80,6 +80,8 @@ On a runner that stays up, the [Amazon ECR credential helper][ecr-helper] mints 
 { "credHelpers": { "123456789012.dkr.ecr.eu-west-1.amazonaws.com": "ecr-login" } }
 ```
 
+The helper can be an ocx package too; see [Credential helper installed with OCX][auth-helper-from-ocx].
+
 ## Storing credentials on a runner {#auth-store}
 
 [`ocx login`][cmd-login] writes to the same `~/.docker/config.json` as `docker login`. It prefers a credential helper or a keychain. A runner has neither, so the command refuses with exit 78 unless you pass `--allow-insecure-store`. That flag stores the credential as plaintext base64 in the config file.
@@ -112,6 +114,7 @@ A refused credential exits 80 (`AuthError`). [`ocx login`][cmd-login] checks the
 
 <!-- guides -->
 [guide-authenticate]: ../guides/authenticate.mdx
+[auth-helper-from-ocx]: ../guides/authenticate.mdx#authentication-helper-from-ocx
 [guide-mirror-auth]: ../guides/corporate-mirror.mdx#mirrors-auth
 
 <!-- pages -->

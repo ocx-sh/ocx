@@ -613,6 +613,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 
 | Slug | Meaning |
 | --- | --- |
+| `credential_helper_not_installed` | The credential helper is not installed, and an ocx started by a credential helper never downloads |
 | `frozen_refused` | The verb discovers new digests, which frozen mode forbids |
 | `index_resolution_blocked` | A local policy refused resolving through the index |
 | `offline_attest_refused` | Attaching was refused because offline mode is on |

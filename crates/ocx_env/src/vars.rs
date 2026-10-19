@@ -473,6 +473,9 @@ crate::env_vars! {
     ///
     /// `<REGISTRY>` is the registry name with every non-alphanumeric character replaced by `_`, case
     /// kept, so `docker.io` reads `OCX_AUTH_docker_io_TYPE`.
+    ///
+    /// Any `OCX_AUTH_*` value set for a registry means ocx never invokes a Docker credential helper
+    /// for it; `anonymous` opts a registry out of helper lookup entirely.
     pub OCX_AUTH_TYPE = "OCX_AUTH_{REGISTRY}_TYPE": Choice["anonymous", "basic", "token", "bearer"], Public;
     /// User name for one registry; `<REGISTRY>` is the registry slug.
     ///
@@ -499,6 +502,12 @@ crate::env_vars! {
     /// Holds the pid, `$pwd`, the direnv/mise yield sentinels and the two consent-grant variables,
     /// space-joined; never set it by hand.
     pub __OCX_ENV_PWD: String, Plumbing;
+    /// Set by ocx on every credential helper it starts; an ocx running under it never downloads.
+    ///
+    /// A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that
+    /// ocx would install the package the outer ocx is still pulling and wait on its lock. Under the
+    /// marker ocx behaves as if `--offline` were given.
+    pub __OCX_CREDENTIAL_HELPER: Bool, Plumbing;
 
     // ── Test seams ──
 
