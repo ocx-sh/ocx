@@ -4,9 +4,10 @@
 //! `ocx patch sync`: host-level site-patch-tier refresh (`adr_infrastructure_patches.md § The site tier`).
 
 use crate::{
-    error::PackageErrorKind, tasks::patch_discovery::PatchDescriptorScope, tasks::patch_discovery::PatchDiscoveryMode,
-    tasks::patch_discovery::PatchDiscoveryState, tasks::patch_discovery::PatchTagMap,
+    concurrency::Concurrency, error::PackageErrorKind, tasks::patch_discovery::PatchDescriptorScope,
+    tasks::patch_discovery::PatchDiscoveryState, tasks::patch_discovery::PatchTagMap, tasks::patch_discovery::SyncPass,
     tasks::patch_discovery::global_descriptor_id, tasks::patch_discovery::patch_descriptor_id,
+    tasks::patch_discovery::sync_discover_all,
 };
 
 use super::super::PackageManager;
@@ -300,51 +301,48 @@ impl PackageManager {
             }
         }
 
-        for (platform, bases) in &bases_per_platform {
-            // `GlobalOnly`: a synthetic base would expand into a package-specific source outside the known set.
-            if bases.is_empty() {
-                match self
-                    .discover_and_install_patches_with_mode(
-                        &global_id,
-                        platform,
-                        PatchDiscoveryMode::Sync,
-                        PatchDescriptorScope::GlobalOnly,
-                    )
-                    .await
-                {
-                    Ok(count) => companions_installed += count,
-                    Err(err) => {
-                        if is_fatal_sync_error(&err) {
-                            return Err(err.into());
-                        }
-                        log::warn!("patch sync: global descriptor check failed: {err}; continuing");
-                    }
-                }
-            } else {
+        let passes: Vec<SyncPass> = bases_per_platform
+            .iter()
+            .flat_map(|(platform, bases)| {
+                let pass = |base: &ocx_oci::PackageRef, scope| SyncPass {
+                    base: base.clone(),
+                    platform: (*platform).clone(),
+                    scope,
+                };
+                // `GlobalOnly`: a synthetic base would expand into a package-specific source outside the known set.
                 // `Both`, not `PackageSpecificOnly`, or a required global companion is absent for later offline execs.
-                for base_id in bases {
-                    match self
-                        .discover_and_install_patches_with_mode(
-                            base_id,
-                            platform,
-                            PatchDiscoveryMode::Sync,
-                            PatchDescriptorScope::Both,
-                        )
-                        .await
-                    {
-                        Ok(count) => companions_installed += count,
-                        Err(err) => {
-                            if is_fatal_sync_error(&err) {
-                                return Err(err.into());
-                            }
-                            log::warn!(
-                                "patch sync: descriptor check for '{}' failed: {err}; continuing",
-                                base_id
-                            );
-                        }
-                    }
+                if bases.is_empty() {
+                    vec![pass(&global_id, PatchDescriptorScope::GlobalOnly)]
+                } else {
+                    bases
+                        .iter()
+                        .map(|base| pass(base, PatchDescriptorScope::Both))
+                        .collect()
+                }
+            })
+            .collect();
+
+        let results = sync_discover_all(self, &passes, Concurrency::cores()).await?;
+        let mut fatal: Option<PackageErrorKind> = None;
+        for (pass, result) in passes.iter().zip(results) {
+            match result {
+                Ok(count) => companions_installed += count,
+                Err(err) if is_fatal_sync_error(&err) => {
+                    fatal.get_or_insert(err);
+                }
+                Err(err) if pass.scope == PatchDescriptorScope::GlobalOnly => {
+                    log::warn!("patch sync: global descriptor check failed: {err}; continuing");
+                }
+                Err(err) => {
+                    log::warn!(
+                        "patch sync: descriptor check for '{}' failed: {err}; continuing",
+                        pass.base
+                    );
                 }
             }
+        }
+        if let Some(err) = fatal {
+            return Err(err.into());
         }
 
         let mut descriptors_updated: usize = 0;
@@ -368,6 +366,7 @@ impl PackageManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::patch_discovery::PatchDiscoveryMode;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -814,6 +813,67 @@ mod tests {
         assert_eq!(
             report.descriptors_updated, 0,
             "an unchanged upstream digest must not be counted as a descriptor advance"
+        );
+    }
+
+    /// A sync fetches each distinct descriptor once, however many tags, repositories and
+    /// platforms name it: the global root and one per repository, not one per base and platform.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_fetches_each_distinct_descriptor_once_across_bases_and_platforms() {
+        let tmp = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let fs = ocx_store::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
+
+        // Two tags of one repository and a second repository: three bases, two package descriptors.
+        let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
+        for (repository, tag) in [("cmake", "3.28"), ("cmake", "3.29"), ("ninja", "1.12")] {
+            let candidate =
+                symlink_store.candidate(&ocx_oci::PackageRef::new_registry(repository, "ocx.sh").clone_with_tag(tag));
+            tokio::fs::create_dir_all(candidate.parent().unwrap()).await.unwrap();
+            tokio::fs::write(&candidate, b"").await.unwrap();
+        }
+
+        // Only the global root is published; the package descriptors are 404s.
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) =
+            build_descriptor_artifact(serde_json::json!([{ "match": "*", "packages": [] }]));
+        use ocx_oci::Client;
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+        let stub_data = StubTransportData::new();
+        {
+            let mut inner = stub_data.write();
+            inner.manifests.insert(
+                global_descriptor_id(&patch_config).to_string(),
+                (manifest_bytes, manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes);
+        }
+        let stub_client = Client::with_transport(Box::new(StubTransport::new(stub_data.clone())));
+        let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = ocx_index::Index::from_chained(local_index, vec![], ocx_index::ChainMode::Offline);
+        let manager =
+            PackageManager::new(fs, index, Some(stub_client), "localhost:5000").with_patches(Some(patch_config));
+
+        let platforms: Vec<ocx_oci::Platform> = ["linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"]
+            .iter()
+            .map(|platform| platform.parse().unwrap())
+            .collect();
+        let report = manager
+            .sync_patches(&platforms)
+            .await
+            .expect("sync_patches must return Ok");
+        assert_eq!(report.bases_checked, 4, "three bases plus the global root");
+
+        let manifest_fetches = stub_data
+            .read()
+            .calls
+            .iter()
+            .filter(|call| *call == "pull_manifest_raw")
+            .count();
+        assert_eq!(
+            manifest_fetches, 3,
+            "one fetch each for the global root, cmake and ninja; not one per base and platform"
         );
     }
 

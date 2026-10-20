@@ -18,6 +18,7 @@ use ocx_oci::{self, PackageRef, tag::InternalTag};
 use ocx_package::install_info::InstallInfo;
 
 use ocx_util::fs::LockedJsonFile;
+use ocx_util::singleflight;
 
 use super::super::{PackageManager, error::PackageError, error::PackageErrorKind};
 use super::install::finalize_indexed_errors;
@@ -29,6 +30,12 @@ use crate::{concurrency, concurrency::Concurrency};
 /// Maximum companions across all descriptor sources for one base install; the per-descriptor limits
 /// alone allow `256 × 64 × 2 = 32 768` from a compromised registry.
 pub const MAX_TOTAL_COMPANIONS: usize = 256;
+
+/// Distinct `(companion, platform)` installs one sync shares; past it each install runs uncoordinated.
+const MAX_SHARED_COMPANION_INSTALLS: usize = 8192;
+
+/// How long a sync pass waits on another pass installing the same companion.
+const SHARED_COMPANION_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 
 // ── Three-state discovery state ───────────────────────────────────────────────
 
@@ -213,6 +220,7 @@ impl PackageManager {
                     mode,
                     PatchDescriptorScope::Both,
                     revalidated.as_deref(),
+                    None,
                 )
                 .await;
                 (index, result)
@@ -264,14 +272,14 @@ impl PackageManager {
         }
 
         if mode != PatchDiscoveryMode::Revalidate || reads_snapshot(self, mode) {
-            return discover_from(self, base_id, platform, mode, scope, None).await;
+            return discover_from(self, base_id, platform, mode, scope, None, None).await;
         }
         let ids = descriptor_ids(patches, base_id, scope);
         let (revalidated, errors) = revalidate_descriptors(self, patches, &ids, Concurrency::cores()).await;
         if let Some((_, error)) = errors.into_iter().next() {
             return Err(error);
         }
-        let installed = discover_from(self, base_id, platform, mode, scope, Some(&revalidated)).await?;
+        let installed = discover_from(self, base_id, platform, mode, scope, Some(&revalidated), None).await?;
         commit_descriptor_advances(&revalidated.pending)
             .await
             .map_err(PackageErrorKind::Internal)?;
@@ -445,7 +453,158 @@ fn descriptor_ids(patches: &ResolvedPatchConfig, base_id: &PackageRef, scope: Pa
     }
 }
 
-/// Descriptor sources a Revalidate pass re-checked once, read by every base it covers.
+/// One `ocx patch sync` discovery: `base` on `platform`, consulting `scope`.
+pub(super) struct SyncPass {
+    pub(super) base: PackageRef,
+    pub(super) platform: ocx_oci::Platform,
+    pub(super) scope: PatchDescriptorScope,
+}
+
+/// `ocx patch sync`'s discovery: each distinct descriptor re-fetched once, then every pass
+/// concurrently, each companion installed once per platform. Results are in `passes` order.
+///
+/// Descriptor advances commit only when no pass failed a required companion, keeping the last-known-good digest.
+///
+/// # Errors
+///
+/// A failed write of a descriptor advance.
+pub(super) async fn sync_discover_all(
+    manager: &PackageManager,
+    passes: &[SyncPass],
+    concurrency: Concurrency,
+) -> crate::Result<Vec<Result<usize, PackageErrorKind>>> {
+    let Some(patches) = manager.patches() else {
+        return Ok(passes.iter().map(|_| Ok(0)).collect());
+    };
+    let mut seen: HashSet<PackageRef> = HashSet::new();
+    let ids: Vec<PackageRef> = passes
+        .iter()
+        .flat_map(|pass| descriptor_ids(patches, &pass.base, pass.scope))
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    let synced = Arc::new(sync_descriptors(manager, &ids, concurrency).await);
+    let installs = CompanionInstalls::new(MAX_SHARED_COMPANION_INSTALLS, SHARED_COMPANION_INSTALL_TIMEOUT);
+
+    let semaphore = concurrency.semaphore();
+    let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
+    for (index, pass) in passes.iter().enumerate() {
+        let manager = manager.clone();
+        let (base, platform, scope) = (pass.base.clone(), pass.platform.clone(), pass.scope);
+        let synced = synced.clone();
+        let installs = installs.clone();
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            // Named, not `_`: the permit must span the whole discovery call.
+            let _permit = concurrency::acquire_permit(&semaphore).await;
+            let mode = PatchDiscoveryMode::Sync;
+            let result = discover_from(&manager, &base, &platform, mode, scope, Some(&synced), Some(&installs)).await;
+            (index, result)
+        });
+    }
+    let mut results: Vec<(usize, Result<usize, PackageErrorKind>)> = Vec::with_capacity(passes.len());
+    while let Some(join_result) = tasks.join_next().await {
+        match join_result {
+            Ok(outcome) => results.push(outcome),
+            Err(panic) => {
+                tasks.abort_all();
+                std::panic::resume_unwind(panic.into_panic());
+            }
+        }
+    }
+    results.sort_by_key(|(index, _)| *index);
+
+    let required_failed = results
+        .iter()
+        .any(|(_, result)| matches!(result, Err(PackageErrorKind::RequiredCompanionFailed { .. })));
+    if !required_failed {
+        commit_descriptor_advances(&synced.pending).await?;
+    }
+    Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
+/// Re-fetches each of `ids` regardless of its recorded state, concurrently under `concurrency`.
+///
+/// A failed source is left out, so every pass naming it re-fetches and reports it itself.
+async fn sync_descriptors(
+    manager: &PackageManager,
+    ids: &[PackageRef],
+    concurrency: Concurrency,
+) -> RevalidatedDescriptors {
+    let semaphore = concurrency.semaphore();
+    let outcomes = futures::future::join_all(ids.iter().map(|id| {
+        let semaphore = semaphore.clone();
+        async move {
+            let _permit = concurrency::acquire_permit(&semaphore).await;
+            let mut pending = Vec::new();
+            let result = sync_descriptor(manager, id, &mut pending).await;
+            (result, pending)
+        }
+    }))
+    .await;
+
+    let mut synced = RevalidatedDescriptors::default();
+    for (id, (result, pending)) in ids.iter().zip(outcomes) {
+        match result {
+            Ok(descriptor) => {
+                synced.descriptors.insert(id.clone(), descriptor);
+                synced.pending.extend(pending);
+            }
+            // ponytail: each pass naming it retries; memoize the failure if an outage makes sync slow.
+            Err(error) => log::debug!("patch sync: '{id}' failed once, left to each base: {error}"),
+        }
+    }
+    synced
+}
+
+/// Sync's re-fetch of one source regardless of state.
+///
+/// Deferred for a recorded descriptor, so a required-companion failure preserves its digest.
+async fn sync_descriptor(
+    manager: &PackageManager,
+    descriptor_id: &PackageRef,
+    pending: &mut Vec<PendingDescriptorCommit>,
+) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
+    let tags_path = manager.file_structure().patch_descriptor_path(descriptor_id);
+    let state = PatchTagMap::read(&tags_path)
+        .await
+        .map_err(PackageErrorKind::Internal)?;
+    let commit = match state {
+        PatchDiscoveryState::LookedHasDescriptor { .. } => DescriptorCommit::Deferred,
+        _ => DescriptorCommit::Eager,
+    };
+    log::debug!("patch discovery (sync): re-fetching '{descriptor_id}' (recorded: {state:?})");
+    fetch_or_record_absent(manager, descriptor_id, &tags_path, commit, pending).await
+}
+
+/// One `install_companion` per `(companion, platform)` across a sync, however many bases name it.
+type CompanionInstalls = singleflight::Group<(PackageRef, ocx_oci::Platform), InstallInfo>;
+
+/// [`PackageManager::install_companion`], shared through `installs` when given.
+async fn install_companion_once(
+    manager: &PackageManager,
+    companion_id: &PackageRef,
+    platform: &ocx_oci::Platform,
+    mode: PatchDiscoveryMode,
+    installs: Option<&CompanionInstalls>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    let handle = match installs {
+        None => None,
+        Some(installs) => match installs.try_acquire((companion_id.clone(), platform.clone())).await {
+            Ok(singleflight::Acquisition::Resolved(installed)) => return Ok(installed),
+            Ok(singleflight::Acquisition::Leader(handle)) => Some(handle),
+            // A failed or abandoned leader shares nothing: install here and keep this call's own error.
+            Err(_) => None,
+        },
+    };
+    let result = manager.install_companion(companion_id, platform.clone(), mode).await;
+    // On failure the dropped handle tells waiters "abandoned", so each retries with its own error.
+    if let (Some(handle), Ok(installed)) = (handle, &result) {
+        handle.complete(installed.clone());
+    }
+    result
+}
+
+/// Descriptor sources a Revalidate or Sync pass checked once, read by every base it covers.
 #[derive(Default)]
 struct RevalidatedDescriptors {
     /// Every re-checked source; a non-fatal re-check failure holds its recorded state, so no base refetches it.
@@ -604,7 +763,8 @@ async fn load_recorded_descriptor(
 
 /// Discovers `base_id`'s descriptors and installs their companions; returns how many installed.
 ///
-/// A source in `revalidated` is taken as re-checked; any other is read by `mode`.
+/// A source in `revalidated` is taken as re-checked; any other is read by `mode`. Companion
+/// installs are shared through `installs` when given.
 async fn discover_from(
     manager: &PackageManager,
     base_id: &PackageRef,
@@ -612,6 +772,7 @@ async fn discover_from(
     mode: PatchDiscoveryMode,
     scope: PatchDescriptorScope,
     revalidated: Option<&RevalidatedDescriptors>,
+    installs: Option<&CompanionInstalls>,
 ) -> Result<usize, PackageErrorKind> {
     let Some(patches) = manager.patches() else {
         return Ok(0);
@@ -638,19 +799,13 @@ async fn discover_from(
             descriptors.extend(descriptor.clone());
             continue;
         }
-        let tags_path = file_structure.patch_descriptor_path(&descriptor_id);
-        let state = PatchTagMap::read(&tags_path)
-            .await
-            .map_err(PackageErrorKind::Internal)?;
         let descriptor = if mode == PatchDiscoveryMode::Sync {
-            // Deferred for a recorded descriptor, so a required-companion failure preserves its digest.
-            let commit = match state {
-                PatchDiscoveryState::LookedHasDescriptor { .. } => DescriptorCommit::Deferred,
-                _ => DescriptorCommit::Eager,
-            };
-            log::debug!("patch discovery (sync): re-fetching '{descriptor_id}' (recorded: {state:?})");
-            fetch_or_record_absent(manager, &descriptor_id, &tags_path, commit, &mut pending_tag_writes).await?
+            sync_descriptor(manager, &descriptor_id, &mut pending_tag_writes).await?
         } else {
+            let tags_path = file_structure.patch_descriptor_path(&descriptor_id);
+            let state = PatchTagMap::read(&tags_path)
+                .await
+                .map_err(PackageErrorKind::Internal)?;
             load_recorded_descriptor(manager, &descriptor_id, &tags_path, state, &mut pending_tag_writes).await?
         };
         descriptors.extend(descriptor);
@@ -727,7 +882,7 @@ async fn discover_from(
                     continue;
                 }
             }
-            match manager.install_companion(&companion_id, platform.clone(), mode).await {
+            match install_companion_once(manager, &companion_id, platform, mode, installs).await {
                 Ok(_) => {
                     installed_count += 1;
                     log::debug!("patch discovery: companion '{}' installed", companion_id);
@@ -1863,6 +2018,57 @@ mod tests {
             probe_count(&data),
             3,
             "global, cmake and ninja once each; six would be one probe per base and source"
+        );
+    }
+
+    /// A companion one sync pass installed answers every later pass on that platform; without
+    /// the shared group the same call installs afresh, which fails against an empty registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shared_companion_install_answers_later_passes() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = make_stub_manager(tmp.path(), &data, false);
+        let companion = PackageRef::parse("patches.corp.com/ca-certs:latest").expect("valid identifier");
+        let platform = ocx_oci::Platform::any();
+
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            companion.clone_with_digest(ocx_oci::Algorithm::Sha256.hash(b"ca-certs")),
+        )
+        .expect("pinned identifier must build");
+        let package_dir = manager.file_structure().packages.path(&pinned);
+        let metadata = serde_json::from_value(serde_json::json!({ "type": "bundle", "version": 1 })).unwrap();
+        let installed = InstallInfo::new(
+            pinned,
+            metadata,
+            ocx_package::resolved_package::ResolvedPackage::new(),
+            ocx_store::file_structure::PackageDir { dir: package_dir },
+        );
+        let installs = CompanionInstalls::new(8, std::time::Duration::from_secs(5));
+        let Ok(singleflight::Acquisition::Leader(handle)) =
+            installs.try_acquire((companion.clone(), platform.clone())).await
+        else {
+            panic!("the first pass leads the install");
+        };
+        handle.complete(installed);
+
+        let shared = install_companion_once(
+            &manager,
+            &companion,
+            &platform,
+            PatchDiscoveryMode::Sync,
+            Some(&installs),
+        )
+        .await
+        .expect("a later pass reuses the first pass's install");
+        assert_eq!(
+            shared.dir().dir,
+            manager.file_structure().packages.path(shared.identifier())
+        );
+
+        let unshared = install_companion_once(&manager, &companion, &platform, PatchDiscoveryMode::Sync, None).await;
+        assert!(
+            matches!(unshared, Err(PackageErrorKind::NotFound)),
+            "nothing publishes the companion; got: {unshared:?}"
         );
     }
 
