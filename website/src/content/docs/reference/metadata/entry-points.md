@@ -70,9 +70,11 @@ See [Declaring executables][authoring-binaries] for why the claim is unverified 
 
 ### Interface Surface, Own Package Only {#executables-scope}
 
-A name is eligible only if it is reachable through a `${installPath}`- or `${self.installPath}`-rooted [`path`](./env.md#env-path) variable with [interface visibility](./env.md#env-entry-visibility).
+A name is eligible only if it is reachable through a `${installPath}`- or `${self.installPath}`-rooted [`path`](./env.md#env-path) variable named `PATH` with [interface visibility](./env.md#env-entry-visibility).
 
 - Private, `libexec`-style directories are never candidates.
+- Only the `PATH` variable is scanned (`Path` also counts for a Windows target). `LD_LIBRARY_PATH` and every other path variable never contribute a name.
+- Shared libraries in a scanned directory are never claimed: ELF shared objects and Mach-O files that are not executables are skipped even when their exec bit is set. Scripts and unrecognized files are claimed.
 - The claim is own-package only and never transitive: a package never lists a dependency's executables. What is reachable through a dependency chain is reported by [`ocx env`][cmd-env-root] and [`ocx package env`][cmd-package-env] in their `binaries` array, attributed per admitted package.
 - A [render modifier](./env.md#env-interpolation-render) on the `PATH` value takes it out of scan scope, so the segment is silently excluded from the auto-filled claim. On Linux and `any` the [libc lint][cmd-package-create-libc-check] of `ocx package create` refuses such a value at publish time. On darwin and Windows nothing diagnoses it.
 
