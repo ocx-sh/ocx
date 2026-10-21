@@ -7,18 +7,19 @@
 # reachable from a check (plan C-029), so every property below is established
 # against a scratch `$RUNNER_TEMP` and a fake credential this script invents.
 #
-# Seven properties, each shown **both** red and green, because a green whose red
+# Six properties, each shown **both** red and green, because a green whose red
 # was never reachable is indistinguishable from a check that never ran
 # (quality-core.md § Unchecked Green):
 #
-#   1. a non-empty write credential writes the rc and the helper, owner-only
+#   1. a non-empty write credential writes the golden rc and the helper,
+#      owner-only
 #   2. an empty credential writes nothing at all
 #   3. the cleanup step removes both, and is green when there was nothing to
 #      remove — the state a job that failed before the write leaves behind
 #   4. the credential reaches no command line, so `set -x` cannot log it
 #   5. nothing already at those paths is ever written through
-#   6. the read credential is a quoted `--remote_header` and no helper at all
-#   7. a second credential source is refused, and the refusal is not the leak
+#   6. a credential already configured in an rc Bazel reads is refused, and the
+#      refusal is not the leak
 #
 # The step bodies are read out of `action.yml` with a YAML parser rather than
 # copied here, so this script cannot drift into proving something the action no
@@ -41,11 +42,11 @@ SECRET_VALUE='b2N4LWNpOnMzY3IzdC1wNHNzdzByZA=='
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Every run below is hermetic in the two places `write_rc.py`'s DX-81 guard
-# reads: the rc chain is `$GITHUB_WORKSPACE/.bazelrc`, `$HOME/.bazelrc` and
+# Every run below is hermetic in the two places `write_rc.py`'s existing-credential
+# guard reads: the rc chain is `$GITHUB_WORKSPACE/.bazelrc`, `$HOME/.bazelrc` and
 # whatever they import. Without these, a developer whose own `~/.bazelrc` carries
 # the read credential — the spelling `.bazelrc` documents for a workstation —
-# would red properties 1 through 6 on a tree with nothing wrong with it, and the
+# would red properties 1 through 5 on a tree with nothing wrong with it, and the
 # script would be measuring their machine rather than the action. The empty
 # workspace also keeps this repository's own `.bazelrc` out of the walk.
 #
@@ -115,18 +116,19 @@ run_write() {
     GITHUB_ACTION_PATH="$1" RUNNER_TEMP="$2" WRITE_AUTH="$SECRET" bash -c "$3"
 }
 
-# 0 when the pair is present with the contracted modes and the rc names exactly
-# the helper that was written. The rc is compared for **equality** with the one
-# line it must hold, never searched for a substring: a comment saying
-# `--credential_helper` is absent contains the needle just as well as the flag
-# does.
+# 0 when the pair is present with the contracted modes and the rc is, byte for
+# byte, the golden text built from this directory. `cmp`, never `$(cat)`: command
+# substitution drops trailing newlines, and a substring search passes on a third
+# line, a comment header or a missing final newline. The here-string supplies the
+# one trailing newline.
 assert_shape() {
     local rc="$1/bazel-cache.rc" helper="$1/bazel-cache-helper"
     [ -f "$rc" ] || return 1
     [ -f "$helper" ] || return 1
     [ "$(stat -c %a "$rc")" = "600" ] || return 1
     [ "$(stat -c %a "$helper")" = "700" ] || return 1
-    [ "$(cat "$rc")" = "build --credential_helper=bazel-cache.ocx.sh=$helper" ] || return 1
+    cmp -s "$rc" - <<<"build --credential_helper=bazel-cache.ocx.sh=$helper
+build --remote_upload_local_results=true" || return 1
 }
 
 # 0 when the directory is untouched. Non-existence, not emptiness — and over the
@@ -144,7 +146,7 @@ scratch() {
 }
 
 # ---------------------------------------------------------------------------
-printf '\n[1] a non-empty credential writes the rc and the helper, owner-only\n'
+printf '\n[1] a non-empty credential writes the golden rc and the helper, owner-only\n'
 # ---------------------------------------------------------------------------
 temp="$(scratch t1)"
 run_write "$SUBJECT" "$temp" "$WRITE_BODY" >/dev/null
@@ -180,6 +182,31 @@ if assert_shape "$temp"; then
 fi
 red "the shape assertion refused it"
 
+# The golden compare must refuse a rc that lacks the upload grant, and one that
+# carries anything beyond the two contracted lines.
+mutant="$(scratch m1b)"
+mutate '"build --remote_upload_local_results=true\n"' '""' \
+    <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t1rb)"
+run_write "$mutant" "$temp" "$WRITE_BODY" >/dev/null
+red "rc without the upload grant: $(tr '\n' '|' <"$temp/bazel-cache.rc")"
+if assert_shape "$temp"; then
+    fail "the grant-less mutant passed the shape assertion — it cannot discriminate"
+fi
+red "the shape assertion refused it"
+
+mutant="$(scratch m1c)"
+mutate '"build --remote_upload_local_results=true\n"' \
+    '"build --remote_upload_local_results=true\n"
+        "# MUTANT\n"' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t1rc)"
+run_write "$mutant" "$temp" "$WRITE_BODY" >/dev/null
+red "rc with a third line: $(tr '\n' '|' <"$temp/bazel-cache.rc")"
+if assert_shape "$temp"; then
+    fail "the extra-line mutant passed the shape assertion — it cannot discriminate"
+fi
+red "the shape assertion refused it"
+
 # ---------------------------------------------------------------------------
 printf '\n[2] an empty credential writes nothing at all\n'
 # ---------------------------------------------------------------------------
@@ -194,7 +221,7 @@ mutant="$(scratch m2)"
 mutate '
         return
 ' '
-        auth = "authorization=Basic "  # MUTANT
+        write_auth = "authorization=Basic cGxhY2Vob2xkZXI="  # MUTANT
 ' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
 temp="$(scratch t2r)"
 GITHUB_ACTION_PATH="$mutant" RUNNER_TEMP="$temp" WRITE_AUTH="" bash -c "$WRITE_BODY" >/dev/null
@@ -293,10 +320,11 @@ if not steps:
 interpolating = [s["name"] for s in steps if "${{" in s["run"]]
 if interpolating:
     raise SystemExit(f"run bodies carrying an expression: {interpolating}")
-for variable, expression in (("WRITE_AUTH", "write-auth"), ("READ_AUTH", "read-auth")):
-    bindings = [s.get("env", {}).get(variable) for s in steps]
-    if "${{ inputs.%s }}" % expression not in bindings:
-        raise SystemExit(f"no step binds {variable} through env: {bindings}")
+bindings = [s.get("env", {}).get("WRITE_AUTH") for s in steps]
+if "${{ inputs.write-auth }}" not in bindings:
+    raise SystemExit(f"no step binds WRITE_AUTH through env: {bindings}")
+if "read-auth" in document["inputs"]:
+    raise SystemExit("action.yml still declares the retired read-auth input")
 if "post" in document["runs"] or "post-if" in document["runs"]:
     raise SystemExit("composite runs declare no post hook; the caller supplies if: always()")
 ' "$ACTION_YML" || fail "action.yml does not bind the credential through env:"
@@ -339,105 +367,19 @@ if [ ! -s "$WORK/victim-red" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-printf '\n[6] the read credential is a quoted --remote_header and no helper at all\n'
+printf '\n[6] a credential already configured in an rc Bazel reads is refused\n'
 # ---------------------------------------------------------------------------
-# A read credential is a value Bazel *sends*, so BZL-CACHE-04's executed-helper
-# hazard does not reach it and no helper is written. What does reach it is the
-# rc tokenizer: measured on the pinned 9.2.0, an unquoted
-# `build --remote_header=authorization=Basic <b64>` is split on whitespace and
-# `<b64>` arrives as a positional argument (`ERROR: unknown key(s)`, exit 2).
-# The emitted line is therefore checked with a **tokenizer**, not a substring —
-# a `grep` for the credential passes on exactly the broken form this forbids.
-run_read() {
-    GITHUB_ACTION_PATH="$1" RUNNER_TEMP="$2" READ_AUTH="$3" bash -c "$WRITE_BODY"
-}
+# Bazel `add`s an `Authorization` header per configured source rather than
+# replacing it and sends every one of them on the same request — measured
+# against a local sink, one cache `PUT` carried three. Which one an origin honours
+# is that origin's business, so the action refuses to become a second source.
+# `$HOME` and `$GITHUB_WORKSPACE` are the scratch pair exported at the top of this
+# script, so each case builds exactly the rc chain it is about.
 
-# 0 when the rc holds one `--remote_header` whose value survives tokenization
-# whole, at mode 600, with no helper beside it.
-assert_read_shape() {
-    local rc="$1/bazel-cache.rc"
-    [ -f "$rc" ] || return 1
-    [ ! -e "$1/bazel-cache-helper" ] || return 1
-    [ "$(stat -c %a "$rc")" = "600" ] || return 1
-    EXPECTED="$SECRET" python3 -c '
-import os, shlex, sys
-
-tokens = shlex.split(open(sys.argv[1], encoding="utf-8").read())
-if tokens != ["build", "--remote_header=" + os.environ["EXPECTED"]]:
-    raise SystemExit(f"rc tokenizes to {tokens!r}")
-' "$rc"
-}
-
-temp="$(scratch t6)"
-run_read "$SUBJECT" "$temp" "$SECRET" >/dev/null
-assert_read_shape "$temp" || fail "a read-only credential did not produce the contracted rc"
-green "stat -c %a bazel-cache.rc -> $(stat -c %a "$temp/bazel-cache.rc")"
-green "rc holds exactly: $(cat "$temp/bazel-cache.rc")"
-green "no bazel-cache-helper written: $(ls -A "$temp" | tr '\n' ' ')"
-
-# Red (a): the unquoted spelling. It contains the credential and reads fine, and
-# Bazel splits it into a flag plus a stray argument.
-mutant="$(scratch m6)"
-mutate 'f"build --remote_header={shlex.quote(auth)}\n"' \
-    'f"build --remote_header={auth}\n"  # MUTANT' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
-temp="$(scratch t6r)"
-run_read "$mutant" "$temp" "$SECRET" >/dev/null
-red "the unquoted rc holds: $(cat "$temp/bazel-cache.rc")"
-grep -qF "$SECRET_VALUE" "$temp/bazel-cache.rc" ||
-    fail "the unquoted mutant did not even contain the credential — nothing is being measured"
-red "a substring check for the credential PASSES on it, which is why this uses a tokenizer"
-if assert_read_shape "$temp"; then
-    fail "the unquoted mutant passed the tokenizer assertion — it cannot discriminate"
-fi
-red "the tokenizer assertion refused it"
-
-# Red (b): a value Bazel's rc tokenizer would re-decode. It unescapes a
-# backslash inside single quotes where POSIX does not, so `shlex.quote` is not
-# sufficient on its own and such a value is refused rather than mangled.
-temp="$(scratch t6b)"
-if run_read "$SUBJECT" "$temp" 'authorization=Basic a\b==' >/dev/null 2>&1; then
-    fail "a backslash-bearing credential was accepted — it would reach Bazel altered"
-fi
-assert_nothing_written "$temp" || fail "the refused credential still left a file behind"
-red "a backslash-bearing read credential exits non-zero and writes nothing"
-
-# Red (c): the shape check is the write half's, reached through the read half.
-temp="$(scratch t6c)"
-if run_read "$SUBJECT" "$temp" 'not-a-header-value' >/dev/null 2>&1; then
-    fail "a credential with no \`=\` was accepted"
-fi
-red "a read credential that is not \`<header>=<value>\` exits non-zero"
-
-# Red (d): the same `set -x` detector as [4], on the read binding. `env:`-borne
-# is never a traced word; the interpolated spelling is.
-temp="$(scratch t6d)"
-traced="$(GITHUB_ACTION_PATH="$SUBJECT" RUNNER_TEMP="$temp" READ_AUTH="$SECRET" \
-    bash -x -c "$WRITE_BODY" 2>&1)"
-grep -q 'umask 077' <<<"$traced" || fail "the trace does not show the step running at all"
-if grep -qF "$SECRET_VALUE" <<<"$traced"; then
-    fail "the read credential appears in the trace of the compliant step"
-fi
-green "$(wc -l <<<"$traced" | tr -d ' ') traced lines, none containing the read credential"
-
-# ---------------------------------------------------------------------------
-printf '\n[7] a second credential source is refused, and the refusal is not the leak\n'
-# ---------------------------------------------------------------------------
-# DX-81. Bazel `add`s an `Authorization` header per configured source rather
-# than replacing it, and sends every one of them on the same request — measured
-# against a local sink with both routes live, one cache `PUT` carried three.
-# Which one an origin honours is that origin's business, and a design that needs
-# to know is the defect, so the action refuses to become the second source.
-#
-# Two ways the second one arrives and each gets its own red: the caller passing
-# both inputs, and an rc file Bazel already reads. `$HOME` and
-# `$GITHUB_WORKSPACE` are the scratch pair exported at the top of this script,
-# so each case builds exactly the rc chain it is about.
-
-# `$1`=action dir, `$2`=$RUNNER_TEMP, `$3`=READ_AUTH, `$4`=WRITE_AUTH. stderr
-# folded into stdout, because the refusal is a `sys.exit` message.
+# `$1`=action dir, `$2`=$RUNNER_TEMP, `$3`=WRITE_AUTH. stderr folded into stdout,
+# because the refusal is a `sys.exit` message.
 run_guarded() {
-    GITHUB_ACTION_PATH="$1" RUNNER_TEMP="$2" READ_AUTH="$3" WRITE_AUTH="$4" \
-        bash -c "$WRITE_BODY" 2>&1
+    GITHUB_ACTION_PATH="$1" RUNNER_TEMP="$2" WRITE_AUTH="$3" bash -c "$WRITE_BODY" 2>&1
 }
 
 # 0 when the step refused for the contracted reason and left no trace of the
@@ -452,40 +394,19 @@ assert_refused() {
     assert_nothing_written "$2"
 }
 
-# Green: one source and a clean chain still writes. Without this the reds below
-# would be satisfied by an action that refuses everything.
-temp="$(scratch t7)"
-run_guarded "$SUBJECT" "$temp" "$SECRET" "" >/dev/null
-[ -f "$temp/bazel-cache.rc" ] || fail "a single source with a clean rc chain wrote nothing"
-green "one source, empty rc chain -> $(ls -A "$temp" | tr '\n' ' ')"
+# Green: a clean chain still writes. Without this the reds below would be
+# satisfied by an action that refuses everything.
+temp="$(scratch t6)"
+run_guarded "$SUBJECT" "$temp" "$SECRET" >/dev/null
+assert_shape "$temp" || fail "a clean rc chain did not produce the contracted pair"
+green "empty rc chain -> $(ls -A "$temp" | tr '\n' ' ')"
 
-# Red (a): both inputs. The `main` push presents the write credential alone,
-# every other trigger the read credential alone — never the two together.
-temp="$(scratch t7a)"
-if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET" "$SECRET")"; then
-    fail "both credentials at once were accepted — the lane would send two headers"
-fi
-assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
-red "both inputs -> exit non-zero, nothing written: $(head -c 96 <<<"$output")…"
-
-# And the proof that it is *this* guard refusing: with it removed the two-source
-# state is reachable, and the one rc file then holds both a header and a helper.
-mutant="$(scratch m7a)"
-mutate '    if read_auth and write_auth:' '    if False:  # MUTANT' \
-    <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
-temp="$(scratch t7ar)"
-run_guarded "$mutant" "$temp" "$SECRET" "$SECRET" >/dev/null
-grep -q -- '--remote_header=' "$temp/bazel-cache.rc" &&
-    grep -q -- '--credential_helper=' "$temp/bazel-cache.rc" ||
-    fail "the guard-less mutant did not produce the two-source rc — nothing is being measured"
-red "without the guard one rc file carries $(wc -l <"$temp/bazel-cache.rc" | tr -d ' ') credential lines"
-
-# Red (b): the source Bazel already reads. `.bazelrc` documents `~/.bazelrc` as
+# Red (a): the source Bazel already reads. `.bazelrc` documents `~/.bazelrc` as
 # where a developer's read credential lives, and a runner that acquired one
 # would make every request carry two headers with nothing failing.
-temp="$(scratch t7b)"
+temp="$(scratch t6a)"
 printf "build --remote_header='%s'\n" "$SECRET" >"$HOME/.bazelrc"
-if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET" "")"; then
+if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET")"; then
     fail "a credential was written beside an existing \$HOME/.bazelrc header"
 fi
 assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
@@ -493,15 +414,15 @@ grep -qF "$HOME/.bazelrc:1" <<<"$output" ||
     fail "the refusal does not name the file and line it found: $output"
 red "an existing \$HOME/.bazelrc header -> refused, naming $HOME/.bazelrc:1 and not its value"
 
-# Red (c): the same source one `import` away. This repository's `.bazelrc` ends
+# Red (b): the same source one `import` away. This repository's `.bazelrc` ends
 # in `try-import %workspace%/.bazelrc.user`, which is gitignored — so a guard
 # reading only the files it was handed is green over the one rc file a developer
 # is most likely to put a credential in.
 rm -f "$HOME/.bazelrc"
 printf 'try-import %%workspace%%/.bazelrc.user\n' >"$GITHUB_WORKSPACE/.bazelrc"
 printf "build --remote_header='%s'\n" "$SECRET" >"$GITHUB_WORKSPACE/.bazelrc.user"
-temp="$(scratch t7c)"
-if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET" "")"; then
+temp="$(scratch t6b)"
+if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET")"; then
     fail "a credential reached only through an \`import\` was not seen"
 fi
 assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
@@ -510,13 +431,13 @@ grep -qF "$GITHUB_WORKSPACE/.bazelrc.user:1" <<<"$output" ||
 red "a header behind \`try-import\` -> refused, naming .bazelrc.user:1"
 
 # And the same red state, to show the chain reader is what found it: with the
-# second guard removed the credential is written beside the header that was
-# already there.
-mutant="$(scratch m7c)"
+# guard removed the credential is written beside the header that was already
+# there.
+mutant="$(scratch m6b)"
 mutate '    configured = other_credential_sources()' '    configured = []  # MUTANT' \
     <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
-temp="$(scratch t7cr)"
-run_guarded "$mutant" "$temp" "$SECRET" "" >/dev/null
+temp="$(scratch t6br)"
+run_guarded "$mutant" "$temp" "$SECRET" >/dev/null
 [ -f "$temp/bazel-cache.rc" ] ||
     fail "the chain-blind mutant wrote nothing — the red is not measuring the chain reader"
 red "without the chain reader the rc lands beside the imported header"
@@ -526,8 +447,8 @@ red "without the chain reader the rc lands beside the imported header"
 # source. A guard reporting it would red every tree carrying the documentation.
 printf "# build --remote_header='%s'\n" "$SECRET" >"$GITHUB_WORKSPACE/.bazelrc"
 rm -f "$GITHUB_WORKSPACE/.bazelrc.user"
-temp="$(scratch t7d)"
-run_guarded "$SUBJECT" "$temp" "$SECRET" "" >/dev/null
+temp="$(scratch t6c)"
+run_guarded "$SUBJECT" "$temp" "$SECRET" >/dev/null
 [ -f "$temp/bazel-cache.rc" ] || fail "a commented-out rc header was read as a live source"
 green "a commented-out header is not a source; the rc was written"
 rm -f "$GITHUB_WORKSPACE/.bazelrc"
