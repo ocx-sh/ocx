@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import subprocess
 import tarfile
 from argparse import Namespace
 from pathlib import Path
@@ -142,3 +144,41 @@ def test_a_workspace_reading_skip_is_not_run_even_with_cargo_on_path(
     bundle = make_bundle(tmp_path, [{"label": "//a:a", "skips": ["deps_direction"], "exact": 0}])
     assert run(tmp_path, bundle, source_root=tmp_path) is None
     assert "not run (reads the workspace)" in capsys.readouterr().out
+
+
+def _bazel_argv(monkeypatch: pytest.MonkeyPatch, runner_temp: Path | None) -> list[str]:
+    """The argv `bazel()` hands to `subprocess.run`, with `$RUNNER_TEMP` set or removed."""
+    if runner_temp is None:
+        monkeypatch.delenv("RUNNER_TEMP", raising=False)
+    else:
+        monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    seen: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tb.subprocess, "run", fake_run)
+    tb.bazel("build", "//a:a")
+    assert len(seen) == 1
+    return seen[0]
+
+
+def test_the_cache_rc_is_the_first_startup_option_when_the_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "bazel-cache.rc").write_text("build --remote_header='x=y'\n", encoding="utf-8")
+    argv = _bazel_argv(monkeypatch, tmp_path)
+    assert argv == [*tb.BAZEL, f"--bazelrc={tmp_path}/bazel-cache.rc", "build", "//a:a"]
+
+
+@pytest.mark.parametrize("state", ["no RUNNER_TEMP", "no rc file"])
+def test_no_cache_rc_flag_without_the_file(state: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `--bazelrc` naming a missing file is a hard bazel error (fork PRs, developer shells).
+    argv = _bazel_argv(monkeypatch, None if state == "no RUNNER_TEMP" else tmp_path)
+    assert argv == [*tb.BAZEL, "build", "//a:a"]
+
+
+def test_every_bazel_call_goes_through_the_seam() -> None:
+    # `BAZEL` appears in its definition and inside `bazel()` only; a second use is a call that skips the rc.
+    assert len(re.findall(r"\bBAZEL\b", Path(tb.__file__).read_text(encoding="utf-8"))) == 2

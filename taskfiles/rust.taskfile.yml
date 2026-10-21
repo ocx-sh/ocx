@@ -203,9 +203,6 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-clippy-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/clippy-bep.json'
-      # `bazel:test:unit`'s CACHE_RC, and why it is derived from the file.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode
@@ -257,8 +254,6 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-rustdoc-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/rustdoc-bep.json'
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode

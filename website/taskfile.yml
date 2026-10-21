@@ -123,7 +123,7 @@ tasks:
     dir: '{{.TASKFILE_DIR}}'
     cmds:
       - task: scripts:publish
-      - ocx exec bazel -- bazel build //website:site
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build //website:site
       - rm -rf dist
       - mkdir -p dist
       - tar -xf {{.ROOT_DIR}}/bazel-bin/website/site.tar -C dist

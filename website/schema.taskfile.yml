@@ -21,11 +21,6 @@ tasks:
     # analysis. The repository root, because `ocx exec` resolves `bazel` from
     # the nearest `ocx.toml`.
     dir: '{{.ROOT_DIR}}'
-    vars:
-      # The CI cache credential, derived exactly as `test:.build-binaries`
-      # derives it: a startup option, present only when the file exists.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - ocx exec bazel -- bazel {{.CACHE_RC}} build {{.SCHEMA_TARGET}}
       # Output paths from `cquery --output=files`, never a spelled `bazel-bin/`

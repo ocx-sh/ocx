@@ -172,12 +172,6 @@ tasks:
     # The repository root, not `test/`: `ocx exec` resolves `bazel` from the
     # nearest `ocx.toml`, and `test/ocx.toml` binds no `bazel`.
     dir: '{{toSlash .ROOT_DIR}}'
-    vars:
-      # The CI cache credential, derived exactly as `bazel:test:unit` derives
-      # it (`taskfiles/bazel.taskfile.yml` says why the file's existence and
-      # not a lane decides): a startup option, so it precedes the command word.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       # The very outputs the Bazel acceptance targets run (`test/bazel.bzl`),
       # so the pytest entry points and `bazel:test:accept` test one binary.
@@ -557,7 +551,7 @@ tasks:
         # `ocx exec bazel --`, like every other bazel call in this repository:
         # a plain shell has no `bazel` on PATH, and a hand-run query is not an
         # exception to that (CLAUDE.md § Bazel, DX-42).
-        ocx exec bazel -- bazel query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
+        ocx exec bazel -- bazel {{.CACHE_RC}} query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
         python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
         import json
         import pathlib

@@ -4,6 +4,23 @@ version: '3'
 
 vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
+  # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string: the CI cache
+  # credential `.github/actions/bazel-cache-rc` writes. It is a startup option,
+  # so every `ocx exec bazel -- bazel` call passes it first (held by
+  # `.claude/tests/test_workflows.py`); a call without it reads the shared cache
+  # anonymously, a 401, and compiles cold, green.
+  #
+  # Derived from the file existing, never from a lane naming it: `--bazelrc` on
+  # a missing path is a hard error (9.2.0: exit 2), a fork PR gets no secrets so
+  # the action writes nothing, and a developer shell has no `$RUNNER_TEMP`. The
+  # last two read the cache anonymously, the documented fallback.
+  #
+  # `printf '%s' "<value>"`, never `printf -- '--bazelrc=%s'`: go-task's shell
+  # (mvdan/sh) takes `--` as the format and silently drops the credential.
+  # ponytail: unquoted at the call site; `$RUNNER_TEMP` has no space on a GitHub
+  # runner. A path with one needs the flag built inside the `cmd:` body.
+  CACHE_RC:
+    sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
 
 includes:
   bazel: ./taskfiles/bazel.taskfile.yml
