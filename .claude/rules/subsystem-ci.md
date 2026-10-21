@@ -133,6 +133,17 @@ Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (pr
 - Embedded shellcheck severity floor = `--severity=warning` (`SHELLCHECK_OPTS` in the task), matching `shell:shellcheck`. Info/style findings are not gated.
 - The cargo-dist-generated `release.yml` is excluded via `.github/actionlint.yaml` (`paths:` ignore-all) — never hand-edited, drift policed by `verify-release-ci.yml`.
 
+## Bazel remote cache
+
+Decision: [`adr_bazel_build_adoption.md`](../artifacts/adr_bazel_build_adoption.md) § Cache staging rulings 5, 5a, 5b (amended 2026-10-22, [#638](https://github.com/ocx-sh/ocx/issues/638)).
+
+- **Every lane that holds the secret `BAZEL_CACHE_WRITE_AUTH` writes** — same-repo PRs, merge queue, `main`, dispatch, schedule. A fork PR gets no secrets: it holds none, writes no rc file, and builds with `--disk_cache` only.
+- **`.github/actions/bazel-cache-rc` has one mode.** With `write-auth` it writes `$RUNNER_TEMP/bazel-cache.rc` (0600: `--credential_helper` to the 0700 helper, plus `--remote_upload_local_results=true`); empty input writes no file. Callers pass `write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}` unconditionally — no event predicate. Cleanup stays under `if: always()`.
+- **The upload grant lives in that rc, never on a step.** `--bazelrc` loads after `.bazelrc`, whose `=false` stays the default. Root `taskfile.yml` holds the one `CACHE_RC` var and every `ocx exec bazel -- bazel` line passes it.
+- **No CI read credential** (`BAZEL_CACHE_READ_AUTH` and `read-auth` are retired). Reads are still 401 without a credential, so the developer-side read credential (`~/.bazelrc`, `task bazel:doctor`) stays.
+- **A reusable workflow that holds a cache step takes the secret by name** (`verify-deep.yml` `workflow_call.secrets`; `release-readiness.yml` passes it), never `secrets: inherit`. `.claude/tests/test_workflows.py` holds all of this.
+- **Deviation from the vendored lore rule (plan_pr637_round2 D5).** `.claude/rules/bazel-quality/caching.md` BZL-CACHE-02 still states the old writer rule ("Keep write access to the Action Cache strictly narrower than read access — never symmetric, and never held by a developer machine's default configuration"), and BZL-CACHE-01 still keeps every same-repo PR lane read-only. ocx deliberately deviates from both until I1's `grim update` pulls the lore release carrying the amended BZL-CACHE-02. Never edit the vendored file here: `grim:check` reds.
+
 ## Test telemetry
 
 Every unit and acceptance run — in CI and on a developer machine — pushes its JUnit report to `https://otel.ocx.sh` as OTLP traces, so Grafana can name the tests that accumulate the most wall clock. One converter, `junit2otlp` 0.1.2, on both routes: the composite action `.github/actions/test-telemetry` in CI, the `telemetry:push` task locally.
