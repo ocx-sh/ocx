@@ -2318,3 +2318,22 @@ def test_cache_rc_is_defined_once_in_the_root_taskfile() -> None:
     assert len(defined) == 1 and defined[0].startswith("taskfile.yml:"), (
         f"`CACHE_RC:` must be defined exactly once, in the root taskfile.yml; found: {defined}"
     )
+
+
+def test_bazel_test_accept_never_uploads_verdicts_whatever_rc_a_lane_passes() -> None:
+    """`adr_test_speed_tiers.md` D6: acceptance verdicts stay on the local disk.
+
+    A command-line flag outranks the CI rc's `--remote_upload_local_results=true`, so this holds on any lane.
+    """
+    tasks = yaml.safe_load((ROOT / "taskfiles" / "bazel.taskfile.yml").read_text(encoding="utf-8"))["tasks"]
+    bodies = [c.get("cmd", "") for c in tasks["test:accept"]["cmds"] if isinstance(c, dict)]
+    invocations = [
+        line
+        for body in bodies
+        for line in body.splitlines()
+        if not line.lstrip().startswith("#") and "bazel {{.CACHE_RC}} test " in line
+    ]
+    assert len(invocations) == 1, f"expected one `bazel test` line in `bazel:test:accept`, found {invocations}"
+    assert re.search(r"bazel \{\{\.CACHE_RC\}\} test\b.* --remote_upload_local_results=false\b", invocations[0]), (
+        f"`bazel:test:accept` must pass `--remote_upload_local_results=false` after `test`: {invocations[0].strip()}"
+    )

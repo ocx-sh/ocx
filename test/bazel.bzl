@@ -221,11 +221,10 @@ stale green to announce:
   reader, `test_schema_generation.py`, was ported to Rust — C-020).
 
 **None of these results reaches another machine**, which bounds every gap
-above to the host that produced it: `.bazelrc` carries
-`--remote_upload_local_results=false`, and the acceptance job holds the shared
-cache's *read* credential and no write credential on any trigger. A wrong entry
-here is one developer's or one runner's, and a `NOCACHE=1` (which adds
-`--nocache_test_results`) clears it.
+above to the host that produced it: no CI lane runs these targets, and
+`bazel:test:accept` passes `--remote_upload_local_results=false` on its own
+command line, which outranks any rc file. A wrong entry here is one
+developer's, and a `NOCACHE=1` (which adds `--nocache_test_results`) clears it.
 
 What is **not** a gap any more: the binary under test. It is a Bazel output,
 `//crates/ocx_cli:ocx`, in every target's `data`, so the targets key on the
