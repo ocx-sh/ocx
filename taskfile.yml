@@ -13,6 +13,7 @@ includes:
   rust: ./taskfiles/rust.taskfile.yml
   shell: ./taskfiles/shell.taskfile.yml
   ci: ./taskfiles/ci.taskfile.yml
+  cross: ./taskfiles/cross.taskfile.yml
   coverage: ./taskfiles/coverage.taskfile.yml
   duplo: ./taskfiles/duplo.taskfile.yml
   release: ./taskfiles/release.taskfile.yml

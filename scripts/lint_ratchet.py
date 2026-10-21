@@ -95,7 +95,7 @@ UNCODED = "<uncoded>"
 #: one reads `N warnings emitted` / `1 warning emitted`. (cargo's "generated N
 #: warnings" line never reaches a rustc-native file.)
 RUSTC_SUMMARY = re.compile(r"^\d+ warnings? emitted$")
-#: `rust_clippy_aspect`'s opt-out tags (rules_rust 0.74 `clippy.bzl`
+#: `rust_clippy_aspect`'s opt-out tags (rules_rs's bundled hermeticbuild rules_rust 0.74 fork, `clippy.bzl`
 #: `get_clippy_ready_crate_info`), compared after `-` → `_` and lower-casing.
 CLIPPY_OPT_OUT = frozenset({"no_clippy", "no_lint", "nolint", "noclippy"})
 #: The rule kinds that provide `CrateInfo` / `TestCrateInfo`, which is exactly

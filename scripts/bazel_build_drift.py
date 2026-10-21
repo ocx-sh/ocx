@@ -13,7 +13,7 @@ readings WP-13 left for WP-15 to own — a `bazel query --output=build` and a
 unchanged. Nothing here re-spells the comparison.
 
 **Why `bazel query --output=build` and never the BUILD file's text.** WP-12's
-BUILD files get their third-party edges from crate_universe's
+BUILD files get their third-party edges from rules_rs's
 `all_crate_deps()` / `aliases()`, so the literal file text does not contain a
 dep list at all: `crates/ocx_util/BUILD.bazel` says `deps = all_crate_deps(normal
 = True)` and nothing else. A text parse would read every package as having zero
@@ -27,7 +27,7 @@ quietly wrong:
 
 * A Cargo **rename** hides the package name. `crates/ocx_util/Cargo.toml` says
   `pki-types = { package = "rustls-pki-types" }`, and the Bazel label is
-  `@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1`. The resolve graph
+  `@crates//:rustls-pki-types-1.15.1`. The resolve graph
   reports the real name and the rename separately, so the two halves meet on
   the name that is actually in both. Four such renames exist here
   (`rustls-pki-types` three times, `sha2 -> sha2_oid` once).
@@ -57,9 +57,9 @@ is exactly the package's own is dropped, so a real edge to a sibling crate is
 never swallowed.
 
 **The label map is the thing that makes a version bump loud.** A resolved
-third-party label is `@crates//<name>-<version>:<name>-<version>` and the
+third-party label is `@crates//:<name>-<version>` and the
 version is not separable from the name by inspection: `toml` resolves to
-`@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0`, where a `rsplit("-", 1)`
+`@crates//:toml-1.1.4+spec-1.1.0`, where a `rsplit("-", 1)`
 answers `toml-1.1.4+spec`. So no version stripping happens anywhere in this
 file — every label is declared in `scripts/bazel_label_map.toml` or it is its
 own exit 1 (C-010). `--update` regenerates that table from the same two
@@ -167,7 +167,7 @@ UPDATE_UNDERIVABLE_MSG = (
 #   3. Labels are plain double-quoted strings containing no escape.
 #
 # A `select()`'s KEYS are string literals too (`"//conditions:default"`,
-# `"@rules_rust//rust/platform:..."`). Neither matches the two dep-label
+# `"@rules_rs//rs/platforms/config:..."`). Neither matches the two dep-label
 # prefixes, which is why extracting every string on the line is safe here and
 # would not be if the prefixes were widened.
 # ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ def read_cargo_metadata(document: dict) -> tuple[dict[str, set[str]], dict[str, 
 
     Read off `resolve.nodes`, not off `packages[].dependencies`: the resolve
     graph is feature-resolved and rename-resolved, and it is the same lock
-    crate_universe generated the `@crates//` labels from.
+    rules_rs generated the `@crates//` labels from.
     """
     by_id = {package["id"]: package for package in document["packages"]}
     nodes = {node["id"]: node for node in document["resolve"]["nodes"]}
@@ -569,7 +569,7 @@ MAP_PREAMBLE = """\
 #
 # Two derivations, both mechanical:
 #
-#   `@crates//<name>-<version>:<name>-<version>` -> the workspace-resolved
+#   `@crates//:<name>-<version>` -> the workspace-resolved
 #       package whose `<name>-<version>` is exactly that stem. Never a
 #       `rsplit("-", 1)`: `toml` resolves to `toml-1.1.4+spec-1.1.0`, whose
 #       version contains a `-`, so the split answers `toml-1.1.4+spec`. The
@@ -585,7 +585,7 @@ MAP_PREAMBLE = """\
 #
 # The Cargo-rename trap the plan recorded does NOT appear here. This workspace
 # renames `rustls-pki-types` to `pki-types` and `sha2` to `sha2_oid`, and
-# neither spelling occurs in any label: crate_universe keys on the package
+# neither spelling occurs in any label: rules_rs keys on the package
 # name. `sha2` is in this table twice, at 0.10.9 and 0.11.0, which is the case
 # a single `@crates//:sha2` alias could not have expressed.
 
@@ -605,11 +605,11 @@ def derive_label_map(
     findings: list[Finding] = []
     for label in sorted({label for labels in read.deps.values() for label in labels}):
         if label.startswith("@crates//"):
-            stem = label[len("@crates//") :].split(":", 1)[0]
+            stem = label.split(":", 1)[1]
             if stem in by_stem:
                 derived[label] = by_stem[stem]
             elif label in existing:
-                # Kept, not dropped: a hand-added row for a label crate_universe
+                # Kept, not dropped: a hand-added row for a label rules_rs
                 # spells some other way must survive a regeneration.
                 derived[label] = existing[label]
             else:
@@ -657,13 +657,13 @@ def run_update(*, bazel_bin: str, query_output: Path | None, metadata_path: Path
 #: version so the fixture exercises the stem a `rsplit("-", 1)` would maul,
 #: and `sha2` appears at two versions so the many-labels-one-name shape is in
 #: the GREEN half rather than only asserted about in a comment.
-TOKIO = "@crates//tokio-1.53.1:tokio-1.53.1"
-SERDE = "@crates//serde-1.0.229:serde-1.0.229"
-TOML = "@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0"
-ASYNC_TRAIT = "@crates//async-trait-0.1.91:async-trait-0.1.91"
-SHA2_OLD = "@crates//sha2-0.10.9:sha2-0.10.9"
-SHA2_NEW = "@crates//sha2-0.11.0:sha2-0.11.0"
-PKI_TYPES = "@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1"
+TOKIO = "@crates//:tokio-1.53.1"
+SERDE = "@crates//:serde-1.0.229"
+TOML = "@crates//:toml-1.1.4+spec-1.1.0"
+ASYNC_TRAIT = "@crates//:async-trait-0.1.91"
+SHA2_OLD = "@crates//:sha2-0.10.9"
+SHA2_NEW = "@crates//:sha2-0.11.0"
+PKI_TYPES = "@crates//:rustls-pki-types-1.15.1"
 OCX_CLI_LABEL = "//crates/ocx_cli:ocx_cli"
 
 FIXTURE_MAP = {
@@ -935,7 +935,7 @@ def prove_readers(text: str, metadata: dict) -> int:
     # A `select()` on a deps line yields its labels and none of its keys.
     selected = (
         '# /abs/path/crates/ocx_shim/BUILD.bazel:9:13\nrust_library(\n  name = "ocx_shim",\n'
-        '  deps = [] + select({"@rules_rust//rust/platform:x86_64-pc-windows-msvc": '
+        '  deps = [] + select({"@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": '
         f'["{TOKIO}"], "//conditions:default": []}}),\n)\n'
     )
     picked = read_build_output(selected).deps["crates/ocx_shim"]
@@ -970,7 +970,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
     )
     print(
         f"C-010 GREEN: {DRIFT_PACKAGE_FLOOR} packages / {DRIFT_TARGET_FLOOR} targets agree, "
-        "first-party and @crates//<name>-<version> edges both compared"
+        "first-party and @crates//:<name>-<version> edges both compared"
     )
     checks += 1
 
@@ -1059,7 +1059,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
     #     Spelled as a VERSION bump, the way a row actually goes missing: the
     #     version is in both halves of the label, so every `cargo update` that
     #     moves a pin retires a row.
-    bumped = "@crates//tokio-1.54.0:tokio-1.54.0"
+    bumped = "@crates//:tokio-1.54.0"
     mutated = text.replace(TOKIO, bumped)
     expect(bumped in read_build_output(mutated).deps[victim], "the version bump did not land")
     expect(bumped not in FIXTURE_MAP, "the bumped label must have no row")
@@ -1289,7 +1289,7 @@ def prove_map_reader(scratch: Path) -> int:
     """The label map's own reader floor, on real files under `.tmp/`."""
     checks = 0
     path = scratch / "bazel_label_map.toml"
-    good = '[label]\n"@crates//tokio-1.53.1:tokio-1.53.1" = "tokio"\n'
+    good = '[label]\n"@crates//:tokio-1.53.1" = "tokio"\n'
     path.write_text(good, encoding="utf-8")
     mapping, finding = read_label_map(path)
     expect(finding is None and mapping == {TOKIO: "tokio"}, f"a good map must read cleanly, got {mapping}")

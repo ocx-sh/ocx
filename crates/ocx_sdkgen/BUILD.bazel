@@ -16,7 +16,6 @@ rust_library(
     # The SDK runtime, copied verbatim into every generated SDK by `include_str!`.
     compile_data = glob(["templates/**"]),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True),
@@ -34,7 +33,6 @@ rust_binary(
     aliases = aliases(),
     compile_data = ["//crates/ocx_schema:golden"],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     stamp = 0,
     version = "0.6.2",
@@ -45,16 +43,12 @@ rust_binary(
 # so both the input documents and that golden are data.
 rust_test(
     name = "ocx_sdkgen_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     crate = ":ocx_sdkgen",
     data = glob(
         ["tests/golden/**"],
         allow_empty = True,
     ) + ["//crates/ocx_schema:golden"],
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     deps = all_crate_deps(normal_dev = True),
 )
@@ -66,12 +60,7 @@ rust_test(
     srcs = [
         "tests/contract_lint.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     data = [
         "tests/fixtures/contract_lint_red.json",
         "tests/fixtures/contract_lint_red_cli.json",
@@ -80,10 +69,6 @@ rust_test(
         "//crates/ocx_schema:golden",
     ],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -101,21 +86,12 @@ rust_test(
     srcs = [
         "tests/compat_gate.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     data = glob(["tests/compat_corpus/**"]) + [
         "//crates/ocx_schema:contract",
         "//crates/ocx_schema:golden",
     ],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -135,19 +111,10 @@ rust_test(
         ["tests/golden/rust/**/*.rs"],
         allow_empty = True,
     ),
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     crate_root = "tests/conformance.rs",
     data = ["//crates/ocx_schema:contract"],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -167,22 +134,13 @@ rust_test(
         ["tests/golden/rust/**/*.rs"],
         allow_empty = True,
     ),
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     crate_root = "tests/sdk_rust.rs",
     data = [
         "tests/fixtures/fake_ocx.sh",
         "//crates/ocx_cli:ocx",
     ],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {
         "CARGO_MANIFEST_DIR": "crates/ocx_sdkgen",
         "SDK_TEST_OCX_BINARY": "$(rootpath //crates/ocx_cli:ocx)",

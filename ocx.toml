@@ -13,5 +13,6 @@ uv = "ocx.sh/astral-sh/uv:0"
 python = "ocx.sh/astral-sh/python-build-standalone:3.14"
 node = "ocx.sh/nodejs/node:24"
 pnpm = "ocx.sh/pnpm/pnpm:11"
+zot = "ocx.sh/project-zot/zot:2.1.21"
 
 [group]

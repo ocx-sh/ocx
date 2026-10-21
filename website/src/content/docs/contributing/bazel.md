@@ -28,7 +28,7 @@ Nobody types `bazel` directly. [`task`][task-runner] is the one command anyone r
 
 ## First build {#contributing-bazel-first-build}
 
-Before your first Bazel build, run `/init-bazel-config`, or `task bazel:doctor` for the checks alone. `.bazelrc` and `MODULE.bazel` are committed and already correct. A first build gets host state wrong, and no gate here can see it. That state is the output root, the RAM envelope, the `libstdc++` link prerequisite and the remote-cache reader credential. It belongs in `~/.bazelrc`, never `.bazelrc.user`.
+Before your first Bazel build, run `/init-bazel-config`, or `task bazel:doctor` for the checks alone. `.bazelrc` and `MODULE.bazel` are committed and already correct. A first build gets host state wrong, and no gate here can see it. That state is the output root, the RAM envelope and the remote-cache reader credential. It belongs in `~/.bazelrc`, never `.bazelrc.user`.
 
 All eight live in `taskfiles/bazel.taskfile.yml` as `task` targets: `bazel:pin:check`, `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard`, `bazel:lint`, `bazel:mod:check`, `bazel:test:unit`, and `bazel:test:accept`. `task verify` runs all of them. On CI the first seven are `verify-basic.yml`'s and `bazel:test:accept` is `verify-deep.yml`'s. None needs a `bazel` invocation typed by hand.
 
@@ -43,30 +43,13 @@ $ ocx exec bazel -- bazel --version
 bazel 9.2.0
 ```
 
-**The one thing a fresh clone does need once.** `Cargo.bazel.lock.json` is the lockfile that `crate_universe` from [rules_rust][rules-rust] reads to resolve third-party crates. It is gitignored on purpose. Three `[patch.crates-io]` entries point at path-dependency submodules, which makes `crate_universe` record the *generating machine's* output base into the file.
+**Third-party crates need no setup step.** [rules_rs][rules-rs] resolves them straight from `Cargo.lock`, so a fresh clone builds without a generated lockfile, a repin or a bootstrap task. The three forks under `external/` are picked up from the `[patch.crates-io]` paths as they are.
 
-A committed copy therefore fails to read back on any other tree, including the one that generated it, after a `bazel clean --expunge`. On a fresh clone every `bazel query` dies with `Unable to read lockfile` until it is regenerated once.
+**The C and C++ toolchain is hermetic.** The `llvm` module ([hermetic-llvm][hermetic-llvm]) supplies the compiler, linker and sysroots, so the build reads no host `gcc`, `libstdc++` or system linker.
 
-Every gate that needs a live graph calls `task bazel:bootstrap` first. It notices the missing file and repins:
+**One Linux host builds every platform.** `task cross:targets` lists the supported triples and `task cross:build TARGET=<triple>` cross-builds `ocx` for one of them into `target/cross/<triple>/`. The Windows targets use `gnullvm`. Cross builds pass `-c opt`, because an unoptimised Windows binary overflows its 1 MiB main-thread stack at startup. On CI this is how macOS and Windows get their binaries: they are built once on Linux, and the native runners only download and execute them.
 
-```sh
-$ CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates
-```
-
-Measured in this checkout: 12 seconds. The exit code of the repin is not proof it ran. `bazel fetch --repo=@crates` exits 0 in about two seconds as a no-op once `@crates` is already in the repo contents cache. It splices nothing and writes no lockfile. `task bazel:bootstrap` checks that the file actually exists afterward rather than trusting the exit code.
-
-**A build also writes three files you should not commit.** `crate_universe` splices each `[patch.crates-io]` path submodule. It leaves a generated `BUILD.bazel` behind in `external/rust-oci-client`, `external/docker_credential` and `external/sigstore-rs`. They belong to the generator, not to this repository. CI regenerates them on every run.
-
-So `task bazel:bootstrap` adds `BUILD.bazel` to each submodule's `$GIT_DIR/modules/<path>/info/exclude` instead. That is the one ignore file a superproject may write without editing a fork's tree. It is per worktree, which is why the task writes it rather than a setup step you run once.
-
-After a build, `git status --short --ignore-submodules=none` is clean. If it is not, run `task bazel:bootstrap`.
-
-Two failure modes are worth knowing before they surprise you:
-
-- **A `~/.cargo/config.toml` above the splice temp directory.** If one sits in a parent of wherever `crate_universe` splices its workspace, the repin refuses with exit code 8 and `A Cargo config file was found in a parent directory`. Point the splice temp outside `$HOME`: `CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice`.
-- **A missing `libstdc++.so` development symlink** hits Fedora-family distributions, which ship `libstdc++.so.6` but not the unversioned `libstdc++.so` symlink that the `process_wrapper` link step of `rules_rust` needs. The `libstdc++-devel` package provides that symlink, and the `gcc-c++` group pulls the package in transitively if you already have it. Without it every Rust link action fails inside the sandbox. The fix is either `sudo dnf install libstdc++-devel` or a manual symlink farm referenced from `~/.bazelrc`. The farm needs **both** `--linkopt=-L<dir>` and `--host_linkopt=-L<dir>`, because the exec-config tool build, which runs the build scripts of `crate_universe` for the host, does not read plain `--linkopt`.
-
-**Host state lives in `~/.bazelrc`, never a per-checkout file.** This machine carries four fixed worktrees of this repository plus disposable agent checkouts under `.agents/worktrees/`. Nothing host-specific should need setting up once per checkout. Examples are the linker workaround above, the JVM heap cap, the local `--jobs` cap and the cache reader credential below.
+**Host state lives in `~/.bazelrc`, never a per-checkout file.** This machine carries four fixed worktrees of this repository plus disposable agent checkouts under `.agents/worktrees/`. Nothing host-specific should need setting up once per checkout. Examples are the JVM heap cap, the local `--jobs` cap and the cache reader credential below.
 
 `bazel` already reads `~/.bazelrc` on its own, with no `import` line needed on either side. It reads the file after the workspace's committed `.bazelrc` and before any `--bazelrc=` flag:
 
@@ -74,8 +57,6 @@ Two failure modes are worth knowing before they surprise you:
 # ~/.bazelrc -- host-wide, outside every checkout by construction, read from every worktree
 startup --host_jvm_args=-Xmx2g
 build --jobs=12
-build --linkopt=-L/home/you/.cache/ocx/libdir
-build --host_linkopt=-L/home/you/.cache/ocx/libdir
 ```
 
 `.bazelrc.user` is still gitignored, and `.bazelrc` still `try-import`s it as its last line. The file is a comment-only stub for a genuine per-checkout experiment, such as one flag you want on this worktree and nowhere else. It is never for anything that describes the machine.
@@ -231,7 +212,7 @@ INFO: Reading 'startup' options from ~/.bazelrc: --output_user_root=~/.cache/ocx
 INFO: Reading rc options for 'info' from <repo>/.bazelrc:
   Inherited 'build' options: --jobs=12 --disk_cache=~/.cache/ocx/bazel-disk --remote_cache=https://bazel-cache.ocx.sh/v1 ...
 INFO: Reading rc options for 'info' from ~/.bazelrc:
-  Inherited 'build' options: --jobs=12 --linkopt=-L~/.cache/ocx/libdir --host_linkopt=-L~/.cache/ocx/libdir --remote_header=authorization=Basic <redacted>
+  Inherited 'build' options: --jobs=12 --remote_header=authorization=Basic <redacted>
 ```
 
 The workspace `.bazelrc` is read first. `~/.bazelrc` is read after it, so a host-wide value can override a workspace one where the two conflict.
@@ -255,7 +236,8 @@ Locally the push is a deliberate silent no-op unless an OTLP endpoint is configu
 <!-- external -->
 [bazel]: https://bazel.build/
 [bazelisk]: https://github.com/bazelbuild/bazelisk
-[rules-rust]: https://github.com/bazelbuild/rules_rust
+[rules-rs]: https://github.com/hermeticbuild/rules_rs
+[hermetic-llvm]: https://github.com/hermeticbuild/hermetic-llvm
 [sccache]: https://github.com/mozilla/sccache
 [grafana]: https://grafana.com/
 [bazel-bep]: https://bazel.build/remote/bep

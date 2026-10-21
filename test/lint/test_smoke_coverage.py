@@ -57,7 +57,7 @@ def _subcommand_type_is_hidden(module: str, type_name: str) -> bool:
     `Launcher` is the case: `command.rs` carries only `#[command(subcommand)]`,
     the hiding attribute sits on `pub enum Launcher` in `command/launcher.rs`.
     """
-    source = (COMMAND_MODULES / f"{module}.rs").read_text()
+    source = (COMMAND_MODULES / f"{module}.rs").read_text(encoding="utf-8")
     attrs: list[str] = []
     for line in source.splitlines():
         stripped = line.strip()
@@ -76,7 +76,7 @@ def visible_verbs() -> set[str]:
     Excluded: `hide = true` (on the variant or on the group type it wraps),
     `Deprecated*` variants and the `external_subcommand` catch-all.
     """
-    source = COMMAND_RS.read_text()
+    source = COMMAND_RS.read_text(encoding="utf-8")
     body = re.search(r"^pub enum Command \{\n(.*?)^\}", source, re.DOTALL | re.MULTILINE)
     assert body, f"pub enum Command not found in {COMMAND_RS}"
     verbs: set[str] = set()
@@ -262,7 +262,7 @@ def _reachable_invocations(fn: ast.AST, helpers: dict[str, ast.AST]) -> tuple[tu
 def smoke_tests() -> list[SmokeTest]:
     found: list[SmokeTest] = []
     for path in sorted(TESTS_DIR.glob("test_*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         helpers = {
             n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
@@ -355,7 +355,7 @@ def test_deep_workflow_is_opt_in_and_runs_in_the_merge_queue() -> None:
     """
     import yaml  # a suite dependency (test/pyproject.toml); nothing above needs it
 
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "verify-deep.yml").read_text())
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "verify-deep.yml").read_text(encoding="utf-8"))
     # PyYAML reads the bare `on` key as the YAML 1.1 boolean `True`.
     triggers = workflow.get("on", workflow.get(True))
     assert isinstance(triggers, dict), f"verify-deep.yml has no `on:` mapping: {triggers!r}"

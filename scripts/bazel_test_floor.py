@@ -16,7 +16,7 @@ leaves the gating lane entirely.
 
 **What it reads, and why it is not `test.xml`.** The ADR's design was a
 `rust_test` wired to `$XML_OUTPUT_FILE`, giving Bazel a real per-case JUnit
-report. Measured on this tree at bazel 9.2.0, rules_rust 0.68 — no `rust_test`
+report. Measured on this tree at bazel 9.2.0, rules_rs (bundled hermeticbuild rules_rust 0.74 fork) — no `rust_test`
 in `crates/*/BUILD.bazel` carries that wiring, so Bazel writes its **synthesised**
 `test.xml`, which is the ADR's own falsifier:
 

@@ -210,7 +210,6 @@ tasks:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - task: :bazel:bootstrap
       - cmd: |
           status=0
           ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/... --output_groups=clippy_output \
@@ -264,7 +263,6 @@ tasks:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - task: :bazel:bootstrap
       - cmd: |
           status=0
           ocx exec bazel -- bazel {{.CACHE_RC}} build {{.BAZEL_ARGS | default ""}} //crates/... --output_groups=rustdoc_diagnostics \

@@ -94,8 +94,11 @@ DEEP_JOBS = frozenset(
     {
         "index-conformance-drift",
         "build",
-        "cross-compile",
-        "acceptance-tests",
+        "cross",
+        "unit-native",
+        "acceptance",
+        "acceptance-merge",
+        "acceptance-native",
         "test-results",
         "satellite-verify",
         "satellite-contract",
@@ -107,7 +110,7 @@ MERGE_QUEUE_SAFE_CANCEL = (
     "${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}"
 )
 # Exact, not "contains the schedule clause": any wider `if:` can keep that
-# clause and still admit no dispatch, which leaves the 3-OS matrix unreachable.
+# clause and still admit no dispatch, which leaves the cross-build unreachable.
 DEEP_BUILD_IF = "github.event_name != 'schedule' || inputs.full"
 
 
@@ -437,7 +440,7 @@ def test_no_claude_document_claims_a_job_its_workflow_lacks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D5: basic runs on Linux only; deep's `build` matrix owns the three OSes
+# D5: basic runs on Linux only; deep's native jobs own macOS and Windows
 # ---------------------------------------------------------------------------
 
 
@@ -459,35 +462,121 @@ def test_basic_runs_on_linux_only() -> None:
     )
 
 
-def test_deep_build_matrix_covers_the_three_oses() -> None:
-    """The matrix, and everything between a dispatch and it: the `if:` that
-    admits one, the `runs-on` that reads the matrix, and no `exclude` carving
-    an OS back out."""
+def _runner_labels(job: dict) -> list[str]:
+    """The runner labels a job can land on, the matrix expanded.
+
+    Only `${{ matrix.job.os }}` is expanded; any other expression is returned
+    as written, which reads as non-Linux — a shape this file cannot resolve is
+    one it must not wave through.
+    """
+    runs_on = str(job.get("runs-on", ""))
+    if runs_on == "${{ matrix.job.os }}":
+        return [str(entry["os"]) for entry in job["strategy"]["matrix"]["job"]]
+    return [runs_on]
+
+
+# What a download-and-execute job must not do: build. `cargo` and `bazel` as
+# words (so `cargo-nextest` and `bazelisk` read too), and the three setup
+# spellings a Rust toolchain arrives through.
+_BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolchain|setup-rust|build-rust|bazel-cache-rc")
+NATIVE_DEEP_JOBS = frozenset({"unit-native", "acceptance-native"})
+
+
+def test_deep_build_job_is_the_one_linux_compile() -> None:
+    """The `build` job's `if:` admits a dispatch, it runs on Linux, and the
+    Linux unit run is skipped on a push to `main`, where `verify-basic.yml`'s
+    `smoke` job already ran the identical `bazel:test:unit`."""
     build = _load(VERIFY_DEEP)["jobs"]["build"]
     assert build.get("if") == DEEP_BUILD_IF, (
         f"verify-deep.yml `build.if` is `{build.get('if')}`, expected `{DEEP_BUILD_IF}` — any "
         f"other shape can keep the schedule clause and still admit no dispatch, which leaves "
-        f"a branch with zero Windows/macOS coverage (basic has none, D5, and no pull request "
-        f"fires this workflow)"
+        f"a branch with no cross-build and so no Windows/macOS coverage at all (basic has "
+        f"none, D5, and no pull request fires this workflow)"
     )
-    assert build.get("runs-on") == "${{ matrix.job.os }}", (
-        f"verify-deep.yml `build.runs-on` is `{build.get('runs-on')}`, not "
-        f"`${{{{ matrix.job.os }}}}` — the matrix below decides nothing unless the job runs on "
-        f"its `os`"
+    assert build.get("runs-on") == "ubuntu-latest", (
+        f"verify-deep.yml `build.runs-on` is `{build.get('runs-on')}` — every binary in this "
+        f"workflow is compiled on one Linux host"
     )
-    matrix = build["strategy"]["matrix"]
-    assert "exclude" not in matrix, (
-        f"verify-deep.yml `build` matrix has `exclude: {matrix['exclude']}` — an excluded OS "
-        f"is one the `job` list below still names and nothing runs"
+    [unit] = [step for step in build["steps"] if str(step.get("run", "")).strip() == "task bazel:test:unit"]
+    assert unit.get("if") == "github.event_name != 'push'", (
+        f"verify-deep.yml `build` unit step has `if: {unit.get('if')}` — on a push to `main` "
+        f"`verify-basic.yml` runs the same `bazel:test:unit` on the same tree, so the step must "
+        f"be skipped there and run on every other trigger"
     )
-    runners = [str(entry.get("os", "")) for entry in matrix["job"]]
-    missing = [
-        family for family in OS_FAMILIES if not any(os.startswith(f"{family}-") for os in runners)
-    ]
-    assert not missing, (
-        f"verify-deep.yml `build` matrix runs on {runners}, no {missing} entry — basic has no "
-        f"such leg (D5), so this is the only gate that compiles and runs the `cfg` arms for "
-        f"that OS on a pull request"
+
+
+def test_deep_cross_matrix_is_every_supported_target() -> None:
+    """One `cross` leg per `task cross:targets` triple: a missing leg is a
+    platform whose binary the run never builds, and nothing else would red."""
+    vars_ = _load(ROOT / "taskfiles" / "cross.taskfile.yml")["vars"]
+    targets = vars_["TARGETS"].split()
+    assert len(targets) >= 8, f"read {targets} from cross.taskfile.yml TARGETS"
+    matrix = _load(VERIFY_DEEP)["jobs"]["cross"]["strategy"]["matrix"]
+    assert sorted(matrix["target"]) == sorted(targets), (
+        f"verify-deep.yml `cross` matrix is {sorted(matrix['target'])}, "
+        f"`task cross:targets` is {sorted(targets)}"
+    )
+
+
+def test_deep_non_linux_jobs_only_download_and_execute() -> None:
+    """Every non-ubuntu job of verify-deep contains no build tooling.
+
+    All compilation happens on the Linux `build` and `cross` jobs; a macOS or Windows
+    runner that grows a `cargo`, `bazel` or Rust-toolchain step is paying
+    10x-minute rates for a second compile and reintroducing the toolchain
+    drift the cross-build removed.
+    """
+    jobs = _load(VERIFY_DEEP)["jobs"]
+    native = {
+        name: job
+        for name, job in jobs.items()
+        if any(not label.startswith("ubuntu-") for label in _runner_labels(job))
+    }
+    # The floor, before the negative below: a reader that found no native job
+    # sweeps clean and says nothing.
+    assert set(native) == NATIVE_DEEP_JOBS, (
+        f"verify-deep.yml non-Linux jobs are {sorted(native)}, expected exactly "
+        f"{sorted(NATIVE_DEEP_JOBS)}"
+    )
+    for name, job in native.items():
+        labels = _runner_labels(job)
+        missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
+        assert not missing, f"verify-deep.yml `{name}` runs on {labels}, no {missing} entry"
+        assert "exclude" not in job["strategy"]["matrix"], f"verify-deep.yml `{name}` matrix has an `exclude`"
+        offending = [
+            step.get("name", step.get("uses", step.get("run")))
+            for step in job["steps"]
+            if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
+        ]
+        assert not offending, (
+            f"verify-deep.yml `{name}` runs on a non-Linux runner and has build steps {offending} — "
+            f"non-Linux jobs download what `cross` cross-compiled and execute it, nothing more"
+        )
+
+
+def test_deep_linux_acceptance_is_four_shards_feeding_a_merge_job() -> None:
+    """Sharding is only a coverage claim if the floor is judged over the merge."""
+    jobs = _load(VERIFY_DEEP)["jobs"]
+    acceptance, merge = jobs["acceptance"], jobs["acceptance-merge"]
+    assert acceptance["runs-on"] == "ubuntu-latest"
+    assert acceptance["strategy"]["matrix"]["shard"] == [1, 2, 3, 4], (
+        f"verify-deep.yml `acceptance` shards are {acceptance['strategy']['matrix'].get('shard')}, "
+        f"expected [1, 2, 3, 4]"
+    )
+    runs = [str(step.get("run", "")) for step in acceptance["steps"]]
+    assert "task test:accept:native SHARD=${{ matrix.shard }}/4" in runs, (
+        f"verify-deep.yml `acceptance` never runs its shard: {runs}"
+    )
+    needs = merge["needs"]
+    assert (needs if isinstance(needs, list) else [needs]) == ["acceptance"], (
+        f"verify-deep.yml `acceptance-merge` needs {needs}, expected `acceptance`"
+    )
+    assert "!cancelled()" in str(merge.get("if", "")), (
+        "verify-deep.yml `acceptance-merge` has no `!cancelled()` — a red shard would skip the merge "
+        "and the floor would never be judged over what did run"
+    )
+    assert any(str(step.get("run", "")).startswith("task test:accept:floor ") for step in merge["steps"]), (
+        "verify-deep.yml `acceptance-merge` never runs `task test:accept:floor`"
     )
 
 
@@ -660,18 +749,19 @@ _BUILD_TEST_ELSEWHERE = {
     "rust:license:deps": ("verify-licenses.yml", "task rust:license:deps"),
     "rust:license:notice:check": ("verify-licenses.yml", "task rust:license:notice:check"),
     # The deep workflow runs the acceptance suite. It once spelled this
-    # `task test`, the SERIAL pytest entry point (21:41 for 3819 tests on an
-    # idle four-core runner), then `task test:parallel`, and now the Bazel
-    # lane: 171 `sh_test` targets with their results cached, run concurrently
-    # behind the runner's host locks. `verify-basic.yml` is
+    # `task test`, the SERIAL pytest entry point, then the Bazel lane (171
+    # cached `sh_test` targets), and is now four pytest shards over the
+    # cross-built binaries (`task test:accept:native`, floored by a merge job).
+    # The local gate still runs the Bazel lane. `verify-basic.yml` is
     # deliberately not the home for it — that workflow is the fast PR gate and
     # the acceptance suite is the deep one's long half.
-    "bazel:test:accept": ("verify-deep.yml", "task bazel:test:accept"),
+    "bazel:test:accept": ("verify-deep.yml", "task test:accept:native"),
     # The testcases the Bazel `rust_test` targets skip. The deep workflow's
-    # macOS and Windows legs run the whole workspace under nextest, these
-    # included — which is where the uncovered ocx_util `pub` and the spawn
-    # outside launch that added this step to `task verify` went red.
-    "rust:test:bazel-skipped": ("verify-deep.yml", "cargo nextest run --workspace"),
+    # macOS and Windows legs run the cross-built unit-test bundle, which is
+    # expected to carry these (the old legs ran the whole workspace under
+    # nextest) — where the uncovered ocx_util `pub` and the spawn outside
+    # launch that added this step to `task verify` went red.
+    "rust:test:bazel-skipped": ("verify-deep.yml", "task cross:test:run"),
 }
 
 
@@ -3406,13 +3496,14 @@ def test_oci_publish_bare_download_is_the_scanned_set() -> None:
     )
 
 
-def test_cross_compile_scans_its_release_build() -> None:
-    """AM-2: the one release build (no `__testing`) on every `main` push scans green on real bytes."""
-    steps = _run_steps(_load(VERIFY_DEEP)["jobs"]["cross-compile"])
-    scans = [index for index, run in steps if f"{PROVENANCE_CHECK} --scan" in run]
-    builds = [index for index, run in steps if "cargo xwin build --release" in run]
-    assert scans, "verify-deep.yml `cross-compile` has no `release_provenance_check.py --scan` step"
-    assert builds and min(scans) > min(builds), f"--scan at step {scans}, build at step {builds}"
+def test_deep_does_not_scan_the_bazel_built_binaries() -> None:
+    """The Bazel-built `ocx` carries `__testing` placeholder provenance by design, so a
+    provenance `--scan` of it reds; the scan lives in `scan-binaries.yml` over release bytes."""
+    text = VERIFY_DEEP.read_text(encoding="utf-8")
+    assert f"{PROVENANCE_CHECK} --scan" not in text, (
+        "verify-deep.yml scans its binaries, which are the `_TESTING_PROVENANCE` Bazel build — "
+        "that scan can only red; release and deploy-dev scan the real release bytes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3472,6 +3563,25 @@ def test_deploy_docs_checks_the_built_site_before_uploading_it() -> None:
         assert command in runs, f"build job never runs `{command}`"
     assert runs.index("task website:build") < runs.index("task website:check") < uploads[0]
     assert runs.index("task test:doc-scripts:drift") < uploads[0]
+
+
+def test_verify_deep_grants_no_write_at_the_top_and_keeps_test_bin_executable() -> None:
+    """write scopes live on the publishing job only; every test-bin download is `chmod -R`'d."""
+    document = _load(VERIFY_DEEP)
+    top = document.get("permissions") or {}
+    assert "write" not in top.values(), f"verify-deep.yml grants write at the top: {top!r}"
+    assert document["jobs"]["test-results"]["permissions"].get("checks") == "write"
+    for name, job in document["jobs"].items():
+        steps = job.get("steps") or []
+        if any(
+            str(s.get("uses", "")).startswith("actions/download-artifact@")
+            and "test-bin-" in str(s.get("with", {}).get("name", ""))
+            for s in steps
+        ):
+            runs = "\n".join(str(s.get("run", "")) for s in steps)
+            assert "chmod -R +x test/bin" in runs or job["runs-on"] == "windows-latest", (
+                f"verify-deep.yml job {name!r} downloads test-bin but never `chmod -R +x test/bin`"
+            )
 
 
 def test_deploy_docs_grants_nothing_at_the_top_and_triggers_on_main_and_dispatch() -> None:

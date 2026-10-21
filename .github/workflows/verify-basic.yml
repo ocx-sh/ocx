@@ -157,14 +157,14 @@ jobs:
         id: fmt
         run: task rust:format:check
         continue-on-error: true
-      # `Clippy` stood here and moved below `Install lld`: it is a Bazel build
-      # now (`task rust:clippy:check`, one cached aspect pass that is both the
-      # `-D warnings` gate and the backlog ratchet), so it needs the cache
-      # credential and lld the Bazel gates need.
+      # `Clippy` stood here and moved below the cache credential: it is a Bazel
+      # build now (`task rust:clippy:check`, one cached aspect pass that is both
+      # the `-D warnings` gate and the backlog ratchet), so it needs the cache
+      # credential the Bazel gates need.
       #
       # The crate-split structural gates `task verify` runs
       # (plan_crate_split_workspace.md C-011, C-070), in its order: clippy and
-      # the doc ratchet run after `Install lld` and the Bazel graph gates
+      # the doc ratchet run after the Bazel graph gates
       # (`Clippy` / `Doc ratchet` below), before the build, then the unit run.
       # The floor and the skip ceiling used to bracket that run as two cargo
       # steps; both now come off the Bazel run's own build event stream in one
@@ -250,21 +250,6 @@ jobs:
       # and a pin nothing checks makes the gates below read the wrong binary's
       # graph. No test asserts its presence.
       #
-      # `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard` and
-      # `bazel:mod:check` each depend on `bazel:bootstrap` in the taskfile:
-      # `Cargo.bazel.lock.json` is gitignored (DX-23, it records the generating
-      # machine's output base), so a runner arrives without it and every
-      # `bazel query` would die with `Unable to read lockfile`. The bootstrap
-      # repins once (measured 18 s) and then asserts the lockfile exists,
-      # because the repin command itself exits 0 as a no-op once `@crates` is
-      # in the repo contents cache. `Bazel graph loads` is the first of the
-      # four to reach `@crates` — every `crates/*/BUILD.bazel` does
-      # `load("@crates//:defs.bzl", …)` at loading phase — so it is the step a
-      # missing bootstrap reds first, measured at exit 201.
-      # `bazel:lint` does not depend on it, and that is measured rather than
-      # assumed: with the lockfile moved aside `bazel run //:buildifier.check`
-      # still exits 0, while `bazel mod deps` exits 2 on a failed extension.
-      #
       # `bazel:lint` is the only one of these that executes a build action, and
       # the action it executes is the buildifier launcher — no compile, no Rust
       # toolchain, no `@crates`. Their `--remote_cache` and
@@ -328,23 +313,6 @@ jobs:
         with:
           read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
           write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
-      # Ahead of every Bazel command in this job, because the C++ toolchain is
-      # autoconfigured on first use and the choice is made there, once, for the
-      # life of the output base. `rules_cc`'s `unix_cc_configure.bzl` probes
-      # `lld` then `gold` and bakes the winner into the toolchain as a forced
-      # `-fuse-ld=`; the runner image carries `ld.gold` and no unversioned
-      # `ld.lld`, so every rustc link action on this lane took gold and printed
-      # `warning: the gold linker is deprecated and has known bugs with Rust`.
-      # That is rustc's own warning about miscompiles, not cosmetic noise, and
-      # there is no flag that unpicks the choice: `--linkopt=-fuse-ld=bfd` would
-      # leave `supports_start_end_lib` on, and GNU ld has no `--start-lib`
-      # (checked on 2.45). Installing the linker Bazel already prefers is the
-      # only lever. `verify-deep.yml`'s Linux leg carries the same step for the
-      # same reason, and it must: the two lanes share one remote cache, and a
-      # toolchain difference between them is a different action key for every
-      # compile.
-      - name: Install lld
-        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Bazel pin authority
         run: task bazel:pin:check
       # Per-target analysis timings to otel.ocx.sh (C-019, S-013) are pushed
@@ -380,7 +348,7 @@ jobs:
         run: task bazel:mod:check
       # Clippy over //crates/... as `.bazelrc`'s aspect, ratcheted against
       # clippy-warn-baseline.json off this run's build event stream. After
-      # `Install lld` and the cache credential for the reason the gates above
+      # the cache credential for the reason the gates above
       # are, and before `Build` so the dependency compiles it shares with the
       # binary are warm. A lint: `continue-on-error`, reported by the final
       # gate step.
@@ -403,8 +371,8 @@ jobs:
       # and the `__OCX_TESTING_SELF_IMAGE` seam the self-setup / self-update tests use
       # to redirect `ocx.sh/ocx/cli` at the fixture registry — copied to
       # `test/bin/ocx`. Directly after the doc ratchet, not up beside Suite
-      # census, because it needs `ocx exec bazel`, the cache credential and
-      # lld, as the ratchets and the gates above do; uploaded before the unit
+      # census, because it needs `ocx exec bazel` and the cache credential,
+      # as the ratchets and the gates above do; uploaded before the unit
       # tests because an artifact uploaded early is one a later failure cannot
       # take away.
       - name: Build
@@ -603,24 +571,14 @@ jobs:
     env:
       # Test telemetry, same guard as the `smoke` job above.
       OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+      # The suite reads its registries from native zot processes (below), not
+      # from the compose file: no Docker on the path of the PR gate.
+      OCX_TEST_NATIVE_SERVICES: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - name: Start acceptance registry
-        shell: bash
-        run: |
-          # Same bring-up as the full acceptance job: zot (OCI 1.1 Referrers
-          # API) on 5000 plus the registry:2 sibling, from the compose file.
-          docker compose -f test/docker-compose.yml up -d registry mirror-registry
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:5000/v2/ > /dev/null 2>&1; then
-              echo "Registry is ready"; exit 0
-            fi
-            sleep 0.5
-          done
-          echo "::error::Registry did not become reachable"; exit 1
       - name: Download Binary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -644,12 +602,20 @@ jobs:
           # Default-off for the reason the workflow-lint job states: a restored
           # object store is runner-executable content.
           cache: false
+      # zot comes from the project toolchain `Setup OCX` just materialized (OCI
+      # 1.1 Referrers API on 5000, plus the target and prod ports); the
+      # registry:2 mirror fixture is not started, and no smoke test needs it.
+      - name: Start native registries
+        run: task test:services:native:start
       - name: Run Smoke Tier
         # The JUnit report is not asked for here any more: the task writes
         # `test/results/junit-smoke.xml` on every run, local ones included, so
         # one flag in one place (test/taskfile.yml `SMOKE_JUNIT_XML`) feeds
         # both the check below and the timings a developer's run pushes.
         run: task test:smoke
+      - name: Stop native registries
+        if: ${{ always() }}
+        run: task test:services:native:stop
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0

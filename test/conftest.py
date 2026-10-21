@@ -59,7 +59,7 @@ def pytest_configure(config: pytest.Config) -> None:
     reach the terminal `task verify` runs in -- no tcsetpgrp() steal, no
     SIGTTIN. The controller keeps it, so Ctrl-C still works.
     """
-    if hasattr(config, "workerinput"):
+    if hasattr(config, "workerinput") and hasattr(os, "setsid"):  # no sessions on Windows
         with contextlib.suppress(OSError):
             os.setsid()
 
@@ -94,7 +94,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     registry = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(registry)
 
-    from src.helpers import compose_up, registry_is_reachable
+    from src.helpers import compose_up, native_services, registry_is_reachable
 
     secondaries = (
         ("mirror-registry", os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)),
@@ -103,6 +103,8 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     for service, address in secondaries:
         if registry_is_reachable(address):
             continue
+        if native_services() and service == "mirror-registry":
+            continue  # registry:2 has no native build; its fixtures skip
         # A warm primary makes `start_registry` a no-op, so a sibling service
         # that was never created stays absent — the retry alone would just
         # burn its budget against a container that does not exist. Issue the

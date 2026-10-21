@@ -63,6 +63,15 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
+def native_services() -> bool:
+    """True when the services are native zot processes (``OCX_TEST_NATIVE_SERVICES=1``).
+
+    Under it nothing may reach for docker: a service that is down is a hard
+    failure naming ``task test:services:native:start``, never a compose up.
+    """
+    return os.environ.get("OCX_TEST_NATIVE_SERVICES") == "1"
+
+
 def compose_up() -> None:
     """Bring the whole docker-compose stack up.
 
@@ -71,6 +80,11 @@ def compose_up() -> None:
     A caller that needs a specific service must issue this itself rather than
     assume the primary's start created everything.
     """
+    if native_services():
+        raise RuntimeError(
+            "OCX_TEST_NATIVE_SERVICES=1 and a service is unreachable; "
+            "run `task test:services:native:start` (compose is never used here)"
+        )
     subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
         check=True,
@@ -144,6 +158,11 @@ def start_registry(registry: str) -> None:
     if registry_is_reachable(registry) and registry_accepts_writes(registry):
         return
 
+    if native_services():
+        raise RuntimeError(
+            f"OCX_TEST_NATIVE_SERVICES=1 and registry at {registry} is not up and writable; "
+            "run `task test:services:native:start`"
+        )
     if registry_is_reachable(registry):
         print(
             f"registry at {registry} is reachable but refuses writes (storage full?) — recreating it",
@@ -175,12 +194,26 @@ _WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
 _COMPOSE_LOCK = Path.home() / ".cache" / "ocx-compose.lock"
 
 
-def _compose(*args: str) -> subprocess.CompletedProcess[str]:
+def _compose(*args: str, profile: bool = True) -> subprocess.CompletedProcess[str]:
+    selector = ["--profile", "sigstore"] if profile else []
     return subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", *args],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), *selector, *args],
         capture_output=True,
         text=True, check=False,
     )
+
+
+def _profile_services() -> list[str] | None:
+    """The services the `sigstore` profile adds, or None when compose cannot say.
+
+    A bare `--profile sigstore up -d` also starts the profile-less registries,
+    whose ports native zot already holds.
+    """
+    with_profile = _compose("config", "--services")
+    without = _compose("config", "--services", profile=False)
+    if with_profile.returncode != 0 or without.returncode != 0:
+        return None
+    return sorted(set(with_profile.stdout.split()) - set(without.stdout.split()))
 
 
 def _stack_is_already_running() -> bool:
@@ -191,11 +224,11 @@ def _stack_is_already_running() -> bool:
     containers sharing the project name are ignored — this asks whether ours
     are up, not whether the daemon is idle.
     """
-    declared = _compose("config", "--services")
+    declared = _profile_services()
     running = _compose("ps", "--services", "--filter", "status=running")
-    if declared.returncode != 0 or running.returncode != 0:
+    if declared is None or running.returncode != 0:
         return False  # cannot prove it is up, so fall through to `up -d`
-    return set(declared.stdout.split()) <= set(running.stdout.split())
+    return set(declared) <= set(running.stdout.split())
 
 
 def start_sigstore_stack(timeout: float = 300.0) -> None:
@@ -243,7 +276,7 @@ def _bring_up_serialized() -> None:
         import fcntl
     except ImportError:  # Windows: no flock, and no shared stack to contend for
         if not _stack_is_already_running():
-            _require_up(_compose("up", "-d"))
+            _require_up(_compose("up", "-d", *(_profile_services() or [])))
         return
 
     _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +284,7 @@ def _bring_up_serialized() -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
         try:
             if not _stack_is_already_running():
-                _require_up(_compose("up", "-d"))
+                _require_up(_compose("up", "-d", *(_profile_services() or [])))
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 

@@ -16,19 +16,9 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     version = "0.6.2",
-    deps = all_crate_deps(normal = True) + [
-        "//crates/ocx_cli",
-        "//crates/ocx_config",
-        "//crates/ocx_env",
-        "//crates/ocx_exit",
-        "//crates/ocx_oci",
-        "//crates/ocx_package",
-        "//crates/ocx_package_manager",
-        "//crates/ocx_project",
-    ],
+    deps = all_crate_deps(normal = True),
 )
 
 # The checked-in schema documents, `cli.json` among them, for targets that read
@@ -126,10 +116,7 @@ genrule(
 
 rust_test(
     name = "ocx_schema_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
     # environment (`std::env::set_var`) inside the test body. nextest runs one
     # process per testcase, so that is safe there; libtest runs them as threads
@@ -145,7 +132,6 @@ rust_test(
     ) + [
         "//crates/ocx_cli:api_data",
     ],
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     deps = all_crate_deps(normal_dev = True),
 )
@@ -156,12 +142,7 @@ rust_test(
         "tests/borrowed_vocabulary_matches_spec.rs",
         "tests/spec_vocabulary/mod.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
     # environment (`std::env::set_var`) inside the test body. nextest runs one
     # process per testcase, so that is safe there; libtest runs them as threads
@@ -184,10 +165,6 @@ rust_test(
         exclude = ["tests/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -195,12 +172,6 @@ rust_test(
         normal_dev = True,
     ) + [
         ":ocx_schema",
-        "//crates/ocx_cli",
-        "//crates/ocx_config",
-        "//crates/ocx_oci",
-        "//crates/ocx_package",
-        "//crates/ocx_package_manager",
-        "//crates/ocx_project",
     ],
 )
 
@@ -209,12 +180,7 @@ rust_test(
     srcs = [
         "tests/golden_schemas.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
     # environment (`std::env::set_var`) inside the test body. nextest runs one
     # process per testcase, so that is safe there; libtest runs them as threads
@@ -237,10 +203,6 @@ rust_test(
         exclude = ["tests/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -248,12 +210,6 @@ rust_test(
         normal_dev = True,
     ) + [
         ":ocx_schema",
-        "//crates/ocx_cli",
-        "//crates/ocx_config",
-        "//crates/ocx_oci",
-        "//crates/ocx_package",
-        "//crates/ocx_package_manager",
-        "//crates/ocx_project",
     ],
 )
 
@@ -262,12 +218,7 @@ rust_test(
     srcs = [
         "tests/docs.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
     # environment (`std::env::set_var`) inside the test body. nextest runs one
     # process per testcase, so that is safe there; libtest runs them as threads
@@ -290,10 +241,6 @@ rust_test(
         exclude = ["tests/*.rs"],
     ) + ["//website:docs_content"],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     version = "0.6.2",
     deps = all_crate_deps(
@@ -301,13 +248,6 @@ rust_test(
         normal_dev = True,
     ) + [
         ":ocx_schema",
-        "//crates/ocx_cli",
-        "//crates/ocx_config",
-        "//crates/ocx_exit",
-        "//crates/ocx_oci",
-        "//crates/ocx_package",
-        "//crates/ocx_package_manager",
-        "//crates/ocx_project",
     ],
 )
 
@@ -316,12 +256,7 @@ rust_test(
     srcs = [
         "tests/schema_outputs.rs",
     ],
-    aliases = aliases(
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
     # environment (`std::env::set_var`) inside the test body. nextest runs one
     # process per testcase, so that is safe there; libtest runs them as threads
@@ -344,10 +279,6 @@ rust_test(
         exclude = ["tests/*.rs"],
     ) + [":ocx_schema_bin"],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
     # `CARGO_BIN_EXE_ocx_schema` is what cargo sets for an integration test of
     # a package with a `[[bin]]`; the two binary contracts at the end of
     # `tests/schema_outputs.rs` read it through `env!`. A `rootpath` is relative
@@ -362,13 +293,6 @@ rust_test(
         normal_dev = True,
     ) + [
         ":ocx_schema",
-        "//crates/ocx_cli",
-        "//crates/ocx_config",
-        "//crates/ocx_env",
-        "//crates/ocx_oci",
-        "//crates/ocx_package",
-        "//crates/ocx_package_manager",
-        "//crates/ocx_project",
     ],
 )
 

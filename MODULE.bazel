@@ -17,7 +17,9 @@ module(
 
 # Every dependency carries an explicit version. A `bazel_dep` without one
 # resolves to whatever the registry serves that day.
-bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "rules_rs", version = "0.1.3")
+bazel_dep(name = "llvm", version = "0.8.25")
+bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
 bazel_dep(name = "rules_ocx", version = "0.5.0")
@@ -31,32 +33,82 @@ bazel_dep(name = "rules_ocx", version = "0.5.0")
 # must agree. Omitting this call is not an error — rules_rust's own non-dev
 # registration backs it up and the build succeeds with nothing here naming a
 # version, while `DEFAULT_RUST_VERSION` moves under every ruleset bump.
-rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(
+toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
+toolchains.toolchain(
     edition = "2024",
-    versions = ["1.95.0"],
+    version = "1.95.0",
 )
-use_repo(rust, "rust_toolchains")
+use_repo(toolchains, "default_rust_toolchains")
 
-register_toolchains("@rust_toolchains//:all")
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
+rules_rust.patch(
+    patches = ["//patches:rules_rust_keep_doctest_stdout.patch"],
+)
+use_repo(rules_rust, "rules_rust")
 
-# ---------------------------------------------------------------------------
-# Third-party crates
-# ---------------------------------------------------------------------------
+register_toolchains(
+    "@default_rust_toolchains//...",
+    "@llvm//toolchain:all",
+)
 
-# `lockfile =` is explicit and mandatory (BZL-RUST-01). Without it
-# `determine_repin()` returns True unconditionally: every build re-splices the
-# whole graph, forever, and no freshness check is possible at all. Note
-# `cargo_lockfile` is Cargo's own `Cargo.lock` and does not satisfy that.
-#
-# Repin with `CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates`. Never
-# `bazel sync` — deleted at Bazel 9.0.0, whatever the ruleset's docs print.
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+# A `frameworks` tag REPLACES the llvm module's default sysroot set, so the
+# defaults (CoreFoundation .. SystemConfiguration) are restated; the dependency
+# graph additionally links AppKit, IOKit and OpenDirectory on macOS.
+osx = use_extension("@llvm//extensions:osx.bzl", "osx")
+osx.frameworks(
+    names = [
+        "AppKit",
+        "ATS",
+        "ApplicationServices",
+        "ColorSync",
+        "CoreGraphics",
+        "CoreServices",
+        "CoreText",
+        "HIServices",
+        "ImageIO",
+        "PrintCore",
+        "QD",
+        "SpeechSynthesis",
+        "CFNetwork",
+        "CFOpenDirectory",
+        "CollectionViewCore",
+        "CoreFoundation",
+        "FontServices",
+        "Foundation",
+        "IOKit",
+        "Kernel",
+        "OSLog",
+        "OpenDirectory",
+        "Security",
+        "SystemConfiguration",
+        "UIFoundation",
+    ],
+)
+
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//:Cargo.lock",
-    lockfile = "//:Cargo.bazel.lock.json",
-    manifests = ["//:Cargo.toml"],
+    cargo_lock = "//:Cargo.lock",
+    cargo_toml = "//:Cargo.toml",
+    generate_lint_config = True,
+    platform_triples = [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-gnullvm",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnullvm",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+    ],
+)
+crate.annotation(
+    crate = "aws-lc-sys",
+    gen_build_script = "on",
+)
+crate.annotation(
+    crate = "zstd-sys",
+    gen_build_script = "on",
 )
 use_repo(crate, "crates")
 

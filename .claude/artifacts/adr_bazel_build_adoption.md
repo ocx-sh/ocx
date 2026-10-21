@@ -1,5 +1,7 @@
 # ADR: Adopt Bazel 9 under Taskfile to cache test execution per crate
 
+> **Superseded in part by [`adr_bazel_rules_rs_migration.md`](./adr_bazel_rules_rs_migration.md):** rules_rust 0.74 with crate_universe is replaced by rules_rs and the hermetic `@llvm` toolchain; everything else here (gates, lanes, cache, acceptance targets) stands.
+
 ## Metadata
 
 **Status:** Accepted (2026-09-21, meta-orchestrator under the owner's /goal; owner may revert) — the four-stage **scope** is owner-ratified (dossier G3 + the

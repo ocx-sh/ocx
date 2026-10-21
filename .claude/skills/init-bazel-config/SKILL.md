@@ -1,6 +1,6 @@
 ---
 name: init-bazel-config
-description: Use when Bazel has never been built on this machine, or when a build fails for a reason the workspace cannot explain — no such target '//:ZGV2…', a link error about libstdc++, every action missing the remote cache, the output root under /tmp. Checks the same host preconditions `task bazel:doctor` does, then asks for the one thing a check cannot supply (the dev-read cache password, the maintainer opt-in) and writes the answer to ~/.bazelrc.
+description: Use when Bazel has never been built on this machine, or when a build fails for a reason the workspace cannot explain — no such target '//:ZGV2…', every action missing the remote cache, the output root under /tmp. Checks the same host preconditions `task bazel:doctor` does, then asks for the one thing a check cannot supply (the dev-read cache password, the maintainer opt-in) and writes the answer to ~/.bazelrc.
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[--check-only]"
@@ -16,7 +16,7 @@ triggers:
 
 `.bazelrc` and `MODULE.bazel` are committed, so every checkout arrives with the
 workspace half of a working build already correct. The other half lives on the
-host — output root, RAM envelope, the C++ link prerequisite, the remote cache
+host — output root, RAM envelope, the remote cache
 reader credential — is committed nowhere, and is what a first build gets wrong.
 No gate in this repository can see it.
 
@@ -77,32 +77,11 @@ in that file outside them survives, and a second run is a no-op.
 `userrc-host-state` means `.bazelrc.user` carries host state: move those lines
 into `~/.bazelrc` yourself and say which ones you moved.
 
-## Step 3 — the C++ link prerequisite (`cxx-missing`)
-
-`gcc -print-file-name=libstdc++.so` must print a path that **exists**. gcc echoes
-the bare name back when it cannot find the file, so a non-empty answer proves
-nothing. Without it, rules_rust's `process_wrapper` fails to link.
-
-The doctor prints the distro command. On Fedora it is `sudo dnf install gcc-c++`
-— **not** `libstdc++-devel`, which does not ship `libstdc++.so` (measured, F43,
-and it is the obvious wrong answer). Debian and Ubuntu: `sudo apt install g++`.
-
-No root? Offer the symlink farm instead — it is green as `cxx-farm` (WARN), not
-a workaround the doctor pretends is a toolchain:
-
-```sh
-mkdir -p ~/.cache/ocx/libdir
-ln -sf "$(gcc -print-file-name=libstdc++.so.6)" ~/.cache/ocx/libdir/libstdc++.so
-```
-
-then two lines into `~/.bazelrc`, `build --linkopt=-L$HOME/.cache/ocx/libdir` and
-the same with `--host_linkopt`. Say that they retire once gcc-c++ lands.
-
-## Step 4 — the cache reader credential (`cache-credential-*`)
+## Step 3 — the cache reader credential (`cache-credential-*`)
 
 Reads only. **Refuse to place a writer credential on a developer machine** — the
 write lane is CI's, and the org secret exists so no laptop needs one. If asked,
-say no and point at Step 6.
+say no and point at Step 5.
 
 `credential-unquoted` first, before anything else: the rc tokenizer splits on
 whitespace, so `--remote_header=authorization=Basic <b64>` makes Bazel read the
@@ -133,7 +112,7 @@ rather not put it there runs that heredoc themselves and you re-run Step 0.
 refused before the realm saw the request. Do not touch the credential; retry
 from another network.
 
-## Step 5 — caches (`disk-cache-*`, `output-root-*`)
+## Step 4 — caches (`disk-cache-*`, `output-root-*`)
 
 Nothing under `/tmp`: it is a tmpfs on this host and an hourly reaper walks it,
 so a cache there is RAM that vanishes mid-build. `--write-host-block` fixes the
@@ -144,7 +123,7 @@ means you are not running from the repository root.
 why the GC flags are off on this pin, and the doctor turns it into a `FAIL` by
 itself once the pin crosses 9.3.0. Do not "fix" it.
 
-## Step 6 — maintainer path (`maintainer-secrets`) — opt-in only
+## Step 5 — maintainer path (`maintainer-secrets`) — opt-in only
 
 Only when the doctor reports org admin on `ocx-sh`. Never automatic: rotating an
 org secret is a decision. `AskUserQuestion` — "Set the org cache secrets now?" /
@@ -158,20 +137,20 @@ printf '%s' "Basic $(printf '%s' 'dev-read:<pw>' | base64 -w0)" |
 and `BAZEL_CACHE_WRITE_AUTH` the same way with the writer identity. Never echo
 either value and never write either into a local file.
 
-## Step 7 — one warm-cache smoke
+## Step 6 — one warm-cache smoke
 
 ```
 ocx exec bazel -- bazel test //crates/ocx_exit:all
 ```
 
 Report the summary's cache line — `(cached) PASSED`, or the `remote cache hit`
-count. A run that builds everything from scratch after Step 4 went green means
+count. A run that builds everything from scratch after Step 3 went green means
 the credential reaches the realm but the actions do not key to it; say so rather
 than calling the setup done.
 
 ## Stop condition
 
-`task bazel:doctor --force` exits 0, and Step 7's summary is reported. Report
+`task bazel:doctor --force` exits 0, and Step 6's summary is reported. Report
 each check you changed and each `WARN` you deliberately left. Never edit a check
 to make it pass.
 

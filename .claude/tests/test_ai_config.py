@@ -1989,7 +1989,7 @@ class TestPlanStatusBlock:
 
 
 class TestVerifyDeepBuildMatrix:
-    """Structural invariant: `verify-deep.yml::build` matrix must keep an
+    """Structural invariant: `verify-deep.yml::unit-native` matrix must keep an
     enabled (non-commented-out) `macos-latest` entry on `main`.
 
     Background: ADR `adr_file_lock_unification.md` §CI Integration permits an
@@ -2002,14 +2002,14 @@ class TestVerifyDeepBuildMatrix:
     missing.
 
     This test reads `verify-deep.yml` as text and asserts a non-comment line
-    matching `os: macos-latest` appears in the `build` job's matrix block.
+    matching `os: macos-latest` appears in the `unit-native` job's matrix block.
     Pure structural — does not validate the rest of the matrix, just that the
     macOS leg is enabled when the branch lands.
     """
 
     _WORKFLOW = ROOT / ".github" / "workflows" / "verify-deep.yml"
 
-    def test_macos_latest_is_enabled_in_verify_deep_build(self) -> None:
+    def test_macos_latest_is_enabled_in_verify_deep_unit_native(self) -> None:
         assert self._WORKFLOW.exists(), (
             f"workflow missing: {self._WORKFLOW.relative_to(ROOT)}"
         )
@@ -2017,9 +2017,9 @@ class TestVerifyDeepBuildMatrix:
         # Locate the `build:` job block. It starts at `^  build:` (2-space
         # indent under `jobs:`) and ends at the next sibling-level job
         # (`^  \w[\w-]*:`) or EOF.
-        build_match = re.search(r"(?m)^  build:\n", text)
+        build_match = re.search(r"(?m)^  unit-native:\n", text)
         assert build_match is not None, (
-            "`build:` job not found in verify-deep.yml — workflow shape changed?"
+            "`unit-native:` job not found in verify-deep.yml — workflow shape changed?"
         )
         # Find the start of the next 2-space-indented job (sibling level).
         next_job = re.search(r"(?m)^  [A-Za-z_][A-Za-z0-9_-]*:\n", text[build_match.end():])
@@ -2034,7 +2034,7 @@ class TestVerifyDeepBuildMatrix:
                 return  # invariant holds
         # Fallthrough: macos entry missing or only present as a comment.
         raise AssertionError(
-            "`os: macos-latest` matrix entry missing from `verify-deep.yml::build` "
+            "`os: macos-latest` matrix entry missing from `verify-deep.yml::unit-native` "
             "(or only present as a commented-out line). Restore it before merging "
             "to `main` — see ADR adr_file_lock_unification.md §CI Integration "
             "'Final state diff (must land before main)'. The iteration tactic of "
@@ -2567,14 +2567,6 @@ class TestBazelGateProse:
     _NUMBER_WORDS = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
     _COUNT_PHRASE = re.compile(r"\b(three|four|five|six|seven|eight)\s+(?:\w+\s+)?gates\b", re.I)
 
-    #: Measured with `Cargo.bazel.lock.json` moved aside, not assumed:
-    #: `bazel:pin:check` (`bazel --version`) and `bazel:lint`
-    #: (`bazel run //:buildifier.check`) both still exit 0, while
-    #: `bazel:build:nobuild` exits 201 and `bazel mod deps` exits 2 —
-    #: every `crates/*/BUILD.bazel` does `load("@crates//:defs.bzl", …)` at
-    #: loading phase, so anything reaching the graph needs the lockfile.
-    _NO_BOOTSTRAP = frozenset({"bazel:pin:check", "bazel:lint"})
-
     @classmethod
     def _gates(cls) -> list[str]:
         """The `bazel:*` tasks the two `verify` phases dispatch directly."""
@@ -2631,45 +2623,22 @@ class TestBazelGateProse:
             f"({expected}): {self._gates()}"
         )
 
-    def test_every_graph_reaching_bazel_task_bootstraps(self) -> None:
-        """`Cargo.bazel.lock.json` is gitignored, so CI arrives without it.
+    #: Taskfiles that must not name the deleted `bazel:bootstrap` repin: rules_rs
+    #: resolves `@crates` from `Cargo.lock` at module-extension time, so no task
+    #: needs a pre-step before reaching the graph.
+    _BOOTSTRAP_SCANNED = ("taskfile.yml", "taskfiles/*.yml", "website/*.taskfile.yml")
 
-        `bazel:build:nobuild` and `bazel:test:scoped` each lost their
-        `- task: bootstrap` to one commit that never mentioned the removal.
-        Locally that is invisible — phase 1's `scripts:verify` reaches
-        `bazel:bootstrap` before phase 2 runs — and red on every clean CI run.
-        """
-        bodies = yaml.safe_load(self._BAZEL_TASKFILE.read_text(encoding="utf-8"))["tasks"]
-        invokes = re.compile(r"\bbazel\s+(?!--version\b)\w")
-        orphans: list[str] = []
-        for name, body in bodies.items():
-            full = f"bazel:{name}"
-            if full == "bazel:bootstrap" or full in self._NO_BOOTSTRAP:
-                continue
-            items = [*(body.get("cmds") or []), *([body["cmd"]] if "cmd" in body else [])]
-            shell = " ".join(item for item in items if isinstance(item, str)) + " ".join(
-                str(item.get("cmd", "")) for item in items if isinstance(item, dict)
-            )
-            if invokes.search(shell) and "bazel:bootstrap" not in (
-                TestSelfTestsRunOnAGate._reachable_from(full)
-            ):
-                orphans.append(full)
-        assert not orphans, (
-            f"{orphans} invoke `bazel` against the graph and never reach `bazel:bootstrap`. "
-            f"`Cargo.bazel.lock.json` is gitignored (DX-23), so `actions/checkout` never "
-            f"delivers it and every `crates/*/BUILD.bazel` loads `@crates//:defs.bzl` at "
-            f"loading phase — measured, the task exits 201 on `Unable to read lockfile`. "
-            f"Add `- task: bootstrap`, or add the task to `_NO_BOOTSTRAP` with the "
-            f"lockfile-absent exit code you measured"
-        )
-
-    def test_the_no_bootstrap_exemptions_still_exist(self) -> None:
-        """A stale exemption silently widens the test above into a no-op."""
-        bodies = yaml.safe_load(self._BAZEL_TASKFILE.read_text(encoding="utf-8"))["tasks"]
-        missing = sorted(name for name in self._NO_BOOTSTRAP if name.split(":", 1)[1] not in bodies)
-        assert not missing, (
-            f"{missing} are exempted from the bootstrap requirement and are not tasks of "
-            f"{self._BAZEL_TASKFILE.name} — the exemption list is stale"
+    def test_no_task_references_the_deleted_bootstrap(self) -> None:
+        files = [p for pattern in self._BOOTSTRAP_SCANNED for p in sorted(ROOT.glob(pattern))]
+        assert len(files) >= 5, f"the scan read {len(files)} taskfiles — the glob stopped matching"
+        offenders = [
+            str(p.relative_to(ROOT))
+            for p in files
+            if re.search(r"\bbazel:bootstrap\b|\btask:\s*bootstrap\b", p.read_text(encoding="utf-8"))
+        ]
+        assert not offenders, (
+            f"{offenders} reference `bazel:bootstrap`, which no longer exists — rules_rs "
+            f"reads Cargo.lock directly, so there is no repin step to run first"
         )
 
 

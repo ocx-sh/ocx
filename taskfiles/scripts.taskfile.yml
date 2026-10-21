@@ -40,11 +40,10 @@ tasks:
     # Through `ocx exec bazel prek --`: the tests that read the live graph need
     # a `bazel` on PATH, the commit-gate tests drive real git hooks through
     # `prek`, and `ocx exec` puts only the packages it names on PATH. The
-    # bootstrap gives the graph tests crate_universe's gitignored lockfile. They share one xdist group, so one worker queries the graph
+    # graph tests share one xdist group, so one worker queries the graph
     # while the rest run beside it.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - task: :bazel:bootstrap
       - ocx exec bazel prek -- uv run --project test pytest scripts/tests -q -n auto --dist loadgroup {{.CLI_ARGS}}
 
   dead-path-sweep:

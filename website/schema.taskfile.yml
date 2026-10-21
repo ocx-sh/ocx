@@ -27,12 +27,6 @@ tasks:
       CACHE_RC:
         sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
-      # A nested `task`, not `task: :bazel:bootstrap`: this file is included at
-      # two depths (root `schema:` and `website:schema:`), and go-task resolves
-      # a leading `:` one namespace up rather than at the root — from
-      # `website:schema:` it names `website:bazel:bootstrap`, which does not
-      # exist (measured on go-task 3.53.1).
-      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
       - ocx exec bazel -- bazel {{.CACHE_RC}} build {{.SCHEMA_TARGET}}
       # Output paths from `cquery --output=files`, never a spelled `bazel-bin/`
       # path (that symlink follows whichever configuration built last). The

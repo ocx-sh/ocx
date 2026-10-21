@@ -41,13 +41,11 @@ jobs:
           # object store stays uncached, as there.
           cache: false
       # The build reaches schema generation, a Bazel build: the read credential
-      # (this workflow never writes the cache) and lld, as in verify-basic.yml.
+      # (this workflow never writes the cache), as in verify-basic.yml.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      - name: Install lld
-        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Build the site
         run: task website:build
       # Links, old URLs and the built-site tests, before anything uploads.

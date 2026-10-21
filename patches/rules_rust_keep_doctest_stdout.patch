@@ -1,0 +1,13 @@
+--- rust/private/rustdoc_test.bzl
++++ rust/private/rustdoc_test.bzl
+@@ -89,10 +89,6 @@
+     action.process_wrapper_flags.add("--stderr-file", stderr_file)
+     action.process_wrapper_flags.add("--captured-exit-code-file", exit_code_file)
+ 
+-    # The stdout is cached, and libtest lists tests in completion order with
+-    # wall-clock durations, so a passing run would write different bytes each
+-    # time. A failing run keeps it for the failure details.
+-    action.process_wrapper_flags.add("--discard-stdout-on-success", "true")
+ 
+     ctx.actions.run(
+         mnemonic = "RustdocTest",

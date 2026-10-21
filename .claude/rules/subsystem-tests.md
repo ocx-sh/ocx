@@ -46,6 +46,10 @@ route), and OCX is referrers-only with no tag-schema fallback (#106). The single
 the permanent referrers-unsupported negative fixture. `test_referrers_smoke.py` proves
 the round-trip. Referrers push/list helpers live in `src/registry.py`.
 
+**Native services (`OCX_TEST_NATIVE_SERVICES=1`).** The macOS and Windows CI runners have no Docker, so the registries run as native `zot` processes from the project toolchain: `task test:services:native:start` (`test/src/native_registries.py`) binds the registry, target and prod ports, `…:stop` deletes the stores. With the variable set, `conftest.py` and `src/helpers.py` never call compose — a service that is down is a hard failure naming the start task — and the `registry:2` mirror is not started, so `mirror_registry` / `legacy_registry` tests skip. Native CI scope today: the smoke tier (`task test:smoke`) on macOS and Windows; full-suite parity there is a follow-up. Linux CI also uses native zot, for the sharded run below.
+
+**Sharding and the merged floor.** `scripts/accept_shard.py` splits `test/tests/test_*.py` (sorted by stem, shard `i/n` takes `modules[i-1::n]`); `task bazel:test:accept SHARD=i/n` and `task test:accept:native SHARD=i/n` both use it, so a module lands in the same shard on either path. A shard is a subset, so floors are never evaluated per shard: each writes its own JUnit file under `target/accept/junit/`, and `task test:accept:floor JUNIT_DIR=<dir>` (`scripts/accept_floor.py`, plus `conformance_floor.py`) applies `SUITE_FLOOR`, the ceilings and the conformance floor over the merged directory. An empty directory is red, as is a shard index past the module count.
+
 ## OcxRunner API
 
 ```python

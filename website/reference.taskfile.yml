@@ -16,8 +16,6 @@ tasks:
     # `ocx.toml`. No `sources:`: Bazel is the cache.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # A nested `task`, not `task: :bazel:bootstrap` (see schema.taskfile.yml).
-      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
       - ocx exec bazel -- bazel build {{.DOCS_TARGET}}
       - cmd: |
           set -eu
@@ -33,7 +31,6 @@ tasks:
     desc: Fail when a generated reference page differs from what the sources render
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
       - ocx exec bazel -- bazel build {{.GENERATOR_TARGET}}
       - cmd: |
           set -eu

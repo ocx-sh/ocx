@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:bd270bf97ef97cad7fe2b6063f250abfac6dfe29a512c5cbb07eae70f7c7d354"
+declaration_hash = "sha256:779bd9ade2f416b492e4de3b405552a43a7d8775b3d48bbc25549ce8be2bec14"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-11T00:30:42Z"
+generated_at = "2026-10-20T21:30:40Z"
 
 [[tool]]
 name = "actionlint"
@@ -184,3 +184,16 @@ repository = "ocx.sh/astral-sh/uv"
 "linux/arm64+libc.glibc" = "sha256:6032218a742e03a5d2b91690e716bf44d2fa369259cc0564ae27bb166a1347d9"
 "windows/amd64" = "sha256:75ee3facb7f4a5ed382d6cc0736ec622190b3f8891abf1432a7d7fd6d4361eaf"
 "windows/arm64" = "sha256:b143f13fb9bdb58eaeaaa71ca2c6d3ed4b6190b6aebd0100a914606c2378cb16"
+
+[[tool]]
+name = "zot"
+group = "default"
+repository = "ocx.sh/project-zot/zot"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:af8435fae824ef08bc812e25d27775c022b53e66acecd29ccfdd7837965db717"
+"darwin/arm64" = "sha256:5a5e183734909119949498851f4e9374889fc56f679a11acf98b74c3a2d68c74"
+"linux/amd64+libc.glibc" = "sha256:799d8323f4988a3b92eb73710592d6676fc3cbd7a53a327110636ce31a279863"
+"linux/arm64+libc.glibc" = "sha256:db47881c85243120e19b9a863c6bed82a6b4e593bfb2ef65bf524bac123a42de"
+"windows/amd64" = "sha256:3e765d65aff26b48219bf707d95bc870c75223fddc3f39a639f71cb1abbdff90"
+"windows/arm64" = "sha256:73493ecb40e3dc7cf368686a14bf545f804dd2cd540247248548e69c92738684"

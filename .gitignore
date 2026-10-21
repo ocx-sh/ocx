@@ -146,6 +146,3 @@ test/manual/announce-e2e/results/*
 # value Bazel EXECUTES is remote code execution on `git clone` + `bazel query`.
 .bazelrc.user
 
-# crate_universe's splicing lock records this machine's output base, so it is
-# a local artifact, never a lock. Bootstrap with CARGO_BAZEL_REPIN=true.
-/Cargo.bazel.lock.json

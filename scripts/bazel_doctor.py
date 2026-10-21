@@ -10,7 +10,7 @@
 
 `.bazelrc` and `MODULE.bazel` are committed, so a checkout arrives with the
 workspace half of a working build already correct. Everything that is *not*
-committed — the output root, the RAM envelope, the C++ link prerequisite, the
+committed — the output root, the RAM envelope, the
 cache reader credential — lives on the host, is invisible to every gate in this
 repository, and is what a new machine actually gets wrong. This reads that half.
 
@@ -503,99 +503,6 @@ def check_host_rc(home_rc: str | None, user_rc: str | None) -> list[Check]:
                 )
             )
     return checks
-
-
-# ---------------------------------------------------------------------------
-# Check 3 — the C++ link prerequisite
-# ---------------------------------------------------------------------------
-
-#: Measured on Fedora 43: `libstdc++-devel` does NOT ship `libstdc++.so`; the
-#: linker script lives in `gcc-c++`. Installing the -devel package is the
-#: obvious wrong answer and leaves the build failing identically.
-DISTRO_FIX = {
-    "fedora": "sudo dnf install gcc-c++   (NOT libstdc++-devel — measured on F43, it does not ship libstdc++.so)",
-    "rhel": "sudo dnf install gcc-c++",
-    "debian": "sudo apt install g++",
-    "ubuntu": "sudo apt install g++",
-    "arch": "sudo pacman -S gcc",
-    "alpine": "sudo apk add g++",
-}
-
-
-def distro_ids(os_release: str | None) -> list[str]:
-    """`ID` then each `ID_LIKE` word, in that order."""
-    if not os_release:
-        return []
-    ids: list[str] = []
-    for line in os_release.splitlines():
-        key, _, value = line.partition("=")
-        value = value.strip().strip('"')
-        if key == "ID" and value:
-            ids.append(value)
-        elif key == "ID_LIKE" and value:
-            ids.extend(value.split())
-    return ids
-
-
-def distro_command(os_release: str | None) -> str:
-    for identifier in distro_ids(os_release):
-        if identifier in DISTRO_FIX:
-            return DISTRO_FIX[identifier]
-    return "install your distribution's C++ compiler package (it ships libstdc++.so)"
-
-
-def check_cxx(
-    printed: str | None,
-    exists: bool,
-    farm_dir: str | None,
-    farm_has_lib: bool,
-    os_release: str | None,
-) -> list[Check]:
-    """`gcc -print-file-name=libstdc++.so` must resolve to a real file.
-
-    gcc echoes the *bare name* back when it cannot find the file, so "resolved"
-    means an absolute path that exists — a truthy string is the wrong test and
-    passes on exactly the broken host this check is for. rules_rust's
-    `process_wrapper` links C++ and fails without it.
-
-    The root-free fallback is a symlink farm plus `-L<dir>`, and it is accepted
-    as green: it makes the link work, which is the property. It is reported as
-    the fallback so the line does not read as a working toolchain.
-    """
-    if printed and printed.startswith("/") and exists:
-        return [
-            Check(
-                "cxx",
-                "libstdc++.so resolves for the linker",
-                OK,
-                f"gcc -print-file-name=libstdc++.so -> {printed}",
-            )
-        ]
-    if farm_dir and farm_has_lib:
-        return [
-            Check(
-                "cxx-farm",
-                "libstdc++.so resolves for the linker",
-                WARN,
-                f"gcc cannot find libstdc++.so (it echoed {printed!r}); the root-free symlink "
-                f"farm at {farm_dir} is covering it via --linkopt=-L",
-                f"to retire the farm and its two ~/.bazelrc lines: {distro_command(os_release)}",
-            )
-        ]
-    return [
-        Check(
-            "cxx-missing",
-            "libstdc++.so resolves for the linker",
-            FAIL,
-            f"gcc -print-file-name=libstdc++.so echoed {printed!r} rather than a path that "
-            "exists — rules_rust's process_wrapper cannot link",
-            f"{distro_command(os_release)}\n"
-            "        or, without root, a symlink farm written to ~/.bazelrc:\n"
-            "          mkdir -p ~/.cache/ocx/libdir && ln -sf \"$(gcc -print-file-name=libstdc++.so.6)\" ~/.cache/ocx/libdir/libstdc++.so\n"
-            "          build --linkopt=-L$HOME/.cache/ocx/libdir\n"
-            "          build --host_linkopt=-L$HOME/.cache/ocx/libdir",
-        )
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1154,27 +1061,6 @@ def gather(home: Path, repo: Path) -> list[Check]:
     )
     checks += check_host_rc(home_rc, user_rc)
 
-    _, printed = run(["gcc", "-print-file-name=libstdc++.so"])
-    printed = printed.strip()
-    home_lines = rc_lines(home_rc or "")
-    farm = next(
-        (
-            token.split("-L", 1)[1]
-            for line in home_lines
-            for token in line.tokens
-            if token.startswith(("--linkopt=-L", "--host_linkopt=-L"))
-        ),
-        None,
-    )
-    farm = os.path.expandvars(os.path.expanduser(farm)) if farm else None
-    checks += check_cxx(
-        printed,
-        bool(printed) and printed.startswith("/") and os.path.exists(printed),
-        farm,
-        bool(farm) and os.path.exists(os.path.join(farm, "libstdc++.so")),
-        read(Path("/etc/os-release")),
-    )
-
     base_url = os.environ.get(CACHE_URL_ENV, DEFAULT_CACHE_URL)
     checks += check_credential(home_rc, base_url)
 
@@ -1504,25 +1390,6 @@ def prove_pure_checks() -> int:
         "bazelisk on PATH did not red",
     )
 
-    fedora = 'ID=fedora\nVERSION_ID=43\n'
-    expect("gcc-c++" in distro_command(fedora), "the Fedora command is wrong")
-    expect("libstdc++-devel" in distro_command(fedora), "the F43 -devel trap is not stated")
-    expect("apt install g++" in distro_command('ID=ubuntu\nID_LIKE=debian\n'), "debian wrong")
-    expect("install your" in distro_command("ID=haiku\n"), "an unknown distro must stay generic")
-    expect(not codes(check_cxx("/usr/lib64/libstdc++.so", True, None, False, fedora), FAIL), "green")
-    expect(
-        codes(check_cxx("libstdc++.so", False, None, False, fedora), FAIL) == ["cxx-missing"],
-        "gcc echoing the bare name back did not red",
-    )
-    expect(
-        codes(check_cxx("libstdc++.so", False, "/home/x/libdir", True, fedora), FAIL) == [],
-        "the symlink farm fallback did not count as covered",
-    )
-    expect(
-        codes(check_cxx("libstdc++.so", False, "/home/x/libdir", True, fedora), WARN) == ["cxx-farm"],
-        "the farm fallback must warn, not pass silently",
-    )
-
     home = "/home/x/.cache/ocx"
     expect(version_tuple("bazel 9.2.0") == (9, 2, 0), "the version did not parse")
     expect(version_tuple(None) == (), "an absent version must be empty, not zero")
@@ -1571,7 +1438,7 @@ def prove_pure_checks() -> int:
     expect(codes(check_fonts(None, None), WARN) == ["fonts-unknown"], "unresolvable fc-list")
     expect(codes(check_fonts("/usr/sbin/fc-list", []), WARN) == ["fonts-absent"], "no families")
     expect(not codes(check_fonts("/usr/sbin/fc-list", ["Adwaita Mono"]), WARN), "families green")
-    print("  pure checks: toolchain, C++, caches, maintainer and fonts each shown red and green")
+    print("  pure checks: toolchain, caches, maintainer and fonts each shown red and green")
     return 29
 
 

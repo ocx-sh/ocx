@@ -56,7 +56,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Env composition / visibility / entrypoints | [subsystem-package-manager.md](./rules/subsystem-package-manager.md), [subsystem-package.md](./rules/subsystem-package.md), website `reference/env-composition.md` |
 | Starlark host API (`ocx package test --script`, typed values) | [subsystem-script.md](./rules/subsystem-script.md), [subsystem-tests.md](./rules/subsystem-tests.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
-| A Bazel build that never worked on this host (toolchain pin, `~/.bazelrc`, libstdc++, cache credential) | skill `init-bazel-config`, `task bazel:doctor` — [bazel-quality.md](./rules/bazel-quality.md) is the ruleset, this is the machine |
+| A Bazel build that never worked on this host (toolchain pin, `~/.bazelrc`, cache credential) | skill `init-bazel-config`, `task bazel:doctor` — [bazel-quality.md](./rules/bazel-quality.md) is the ruleset, this is the machine |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
 | Bazel builds (`BUILD`/`MODULE.bazel`/Starlark) | [bazel-quality.md](./rules/bazel-quality.md) (shareable), skills `bazel-adopt`, `bazel-diagnose` |
 | Writing a flag into `.bazelrc`, a workflow or an rc file | [bazel-quality.md](./rules/bazel-quality.md) § BZL-FLAG-11 — prove it on the pinned binary's **two** help surfaces first; empty output is not a pass |

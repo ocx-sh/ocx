@@ -36,6 +36,14 @@
       "semanticCommitScope": "deps"
     },
     {
+      "description": "rules_rs and llvm move together (adr_bazel_rules_rs_migration.md) — one PR",
+      "matchManagers": ["bazel-module"],
+      "matchPackageNames": ["rules_rs", "llvm"],
+      "groupName": "rules_rs and llvm",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
       "description": "Website npm deps — group, chore(deps) prefix",
       "matchManagers": ["npm"],
       "groupName": "npm-deps",

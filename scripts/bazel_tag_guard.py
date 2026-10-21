@@ -398,9 +398,8 @@ it is here rather than in a commit message.
 
 TAG_QUERY_MSG = (
     "bazel tag guard: `bazel query 'kind(rule, {universe})' --output=streamed_jsonproto` "
-    "exited {rc} — nothing was read, so every clause is vacuous. If this is a fresh "
-    "checkout or a linked worktree, crate_universe's `Cargo.bazel.lock.json` is gitignored "
-    "and absent; the reader floor below is what actually fails the run. stderr: {detail}"
+    "exited {rc} — nothing was read, so every clause is vacuous; the reader floor "
+    "below is what actually fails the run. stderr: {detail}"
 )
 TAG_PARSE_MSG = (
     "bazel tag guard: line {line} of the query output is not JSON ({error}) — the reader "
@@ -2143,8 +2142,7 @@ def capture_live(bazel: str, scratch: Path) -> tuple[Path, list[dict]]:
         rc == 0,
         f"`bazel query 'kind(rule, {universe})'` exited {rc}. This gate's subject is the live "
         "graph, so a self-test that greened without reading it would be the vacuous green "
-        "this plan exists to prevent. On a fresh checkout or a linked worktree the cause is "
-        "crate_universe's gitignored Cargo.bazel.lock.json — repin, or copy it in. stderr: "
+        "this plan exists to prevent. stderr: "
         + " | ".join(stderr.strip().splitlines()[-4:]),
     )
     path = scratch / "live_capture.json"
