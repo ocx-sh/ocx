@@ -174,7 +174,7 @@ tasks:
       # Then the mode, before anything writes a secret into it.
       - task: bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - ocx exec bazel -- bazel build --nobuild --build_event_json_file={{.BEP}} //...
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build --nobuild --build_event_json_file={{.BEP}} //...
       # The `chmod 600` rides the emptiness post-condition because it is the
       # same post-condition: the stream exists and it is ours alone. Bazel
       # creates it at the umask (0644 here, measured), which the 0700 directory
@@ -257,7 +257,7 @@ tasks:
       release-gate chain below.
 
     dir: '{{.ROOT_DIR}}'
-    cmd: ocx exec bazel -- bazel run //:buildifier.check
+    cmd: ocx exec bazel -- bazel {{.CACHE_RC}} run //:buildifier.check
 
   mod:check:
     desc: The module lockfile is fresh — `bazel mod deps` refusing to update `MODULE.bazel.lock`
@@ -271,7 +271,7 @@ tasks:
 
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - ocx exec bazel -- bazel mod deps --lockfile_mode=error
+      - ocx exec bazel -- bazel {{.CACHE_RC}} mod deps --lockfile_mode=error
 
   test:unit:
     desc: The workspace unit-test lane — `bazel test //crates/...`, floored per target off the build event stream
@@ -355,40 +355,6 @@ tasks:
       # to keep in step. It carries no secret — `bazel_test_floor.py` writes
       # test names, outcomes and panic text, never the client environment.
       JUNIT: '{{.ROOT_DIR}}/target/bazel/junit.xml'
-      # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string. That file
-      # is the cache credential `.github/actions/bazel-cache-rc` writes; without
-      # it every request to the shared cache is an anonymous 401 and this lane
-      # compiles cold, which is what it did until now.
-      #
-      # **Derived from the file existing, never from a lane naming it.** Three
-      # states must all be green and only one has the file: `--bazelrc` on a
-      # missing path is a HARD error (measured on the pinned 9.2.0: exit 2,
-      # `Unable to read .bazelrc file`, before anything runs), a fork PR is
-      # given no secrets so the action writes nothing, and a developer shell has
-      # no `$RUNNER_TEMP` at all. Both of those then read the cache anonymously
-      # over `--disk_cache`, which is the documented fallback — a lane that
-      # fails loudly on a fork is the defect, not the fallback.
-      #
-      # It is a *startup* option, so it goes before the command word. It does
-      # not replace the tracked `.bazelrc`: measured with `--announce_rc`, Bazel
-      # reads the home rc, then the workspace rc, then this one, so
-      # `--remote_upload_local_results=false` still holds on every lane.
-      #
-      # `printf '%s' "<value>"`, and the spelling is measured rather than
-      # stylistic. go-task runs `sh:` through its own shell (mvdan/sh), not
-      # bash, and that `printf` builtin does **not** honour `--` as
-      # end-of-options: `printf -- '--bazelrc=%s' "$X"` takes `--` as the
-      # *format* and emits exactly two dashes, so the lane ran
-      # `bazel -- test //crates/...` with the credential silently dropped. It
-      # is green — the flag is simply gone — which is why it was caught by
-      # reading `task --dry`'s rendered command line and not by a bash probe of
-      # the same expression, where `--` works.
-      #
-      # ponytail: no quoting around the expansion at the call site —
-      # `$RUNNER_TEMP` is `/home/runner/work/_temp` on every GitHub runner. A
-      # path with a space would need the flag built inside the `cmd:` body.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: bep:mode
@@ -442,8 +408,8 @@ tasks:
           python3 scripts/bazel_accept_proofs.py --check-s015 \
               --warm <unchanged-tree BEP> --mutated <binary-swap BEP> \
               --tags test/results/bazel-acceptance-tags.json \
-              --built-binary "$(ocx exec bazel -- bazel cquery --output=files //crates/ocx_cli:ocx)" \
-              --binary-under-test "$(ocx exec bazel -- bazel cquery --output=files //crates/ocx_cli:ocx)"
+              --built-binary "$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery --output=files //crates/ocx_cli:ocx)" \
+              --binary-under-test "$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery --output=files //crates/ocx_cli:ocx)"
 
       **`//test:all`, not `//test/...`, and that is a deviation with a measured
       reason.** `bazel test` over a target pattern builds the non-test targets
@@ -530,14 +496,6 @@ tasks:
       ACCEPT_JOBS_DEFAULT:
         sh: n=$(nproc 2>/dev/null || echo 8); if [ "$n" -gt 8 ]; then n=8; fi; printf '%s' "$n"
       ACCEPT_JOBS: '{{.ACCEPT_JOBS | default .ACCEPT_JOBS_DEFAULT}}'
-      # Identical in shape and reason to `test:unit`'s: `--bazelrc` on a missing
-      # path is a hard error, a fork PR is given no secrets so the action writes
-      # nothing, and a developer shell has no $RUNNER_TEMP — so the flag is
-      # derived from the file existing, never from a lane naming it. `printf
-      # '%s'` and not `printf -- '%s'`: mvdan/sh's builtin takes `--` as the
-      # format string (measured; it silently dropped the credential).
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       # The generated JSON schemas: several modules read one straight off
       # disk (`src/public/schemas/`, outside this graph), copied there from
@@ -689,7 +647,7 @@ tasks:
       - task: build:nobuild
       - task: lint
       - task: mod:check
-      - ocx exec bazel -- bazel test //... {{.CLI_ARGS}}
+      - ocx exec bazel -- bazel {{.CACHE_RC}} test //... {{.CLI_ARGS}}
 
   test:scoped:
     desc: The change-selected entry point — only the Bazel targets the changed paths reach
@@ -795,4 +753,4 @@ tasks:
           [ -n "$selected" ] || {
           echo 'bazel test:scoped: the change reaches no Bazel target - nothing to run (selection in {{.TARGETS}})' >&2;
           exit 0; };
-          ocx exec bazel -- bazel test $selected {{.CLI_ARGS}}
+          ocx exec bazel -- bazel {{.CACHE_RC}} test $selected {{.CLI_ARGS}}

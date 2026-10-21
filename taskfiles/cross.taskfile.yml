@@ -41,8 +41,8 @@ tasks:
           printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
           bin=ocx; case "$t" in *-windows-*) bin=ocx.exe;; esac
           flags="-c opt --platforms=@rules_rs//rs/platforms:$t"
-          ocx exec bazel -- bazel build $flags //crates/ocx_cli:ocx
-          src=$(ocx exec bazel -- bazel cquery $flags --output=files //crates/ocx_cli:ocx 2>/dev/null | tail -n1)
+          ocx exec bazel -- bazel {{.CACHE_RC}} build $flags //crates/ocx_cli:ocx
+          src=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery $flags --output=files //crates/ocx_cli:ocx 2>/dev/null | tail -n1)
           mkdir -p "target/cross/$t"
           cp -L --remove-destination "$src" "target/cross/$t/$bin"
           echo "$PWD/target/cross/$t/$bin"

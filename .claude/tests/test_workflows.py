@@ -717,7 +717,15 @@ def test_the_unit_lane_passes_the_cache_credential_only_when_it_exists(tmp_path:
     failing. **Without** it, the flag must be absent: `--bazelrc` naming a missing
     file is a hard error (9.2.0: exit 2, `Unable to read .bazelrc file`), and that is
     the fork-PR lane, which must read anonymously rather than fail.
+
+    The expression is the root `taskfile.yml`'s `CACHE_RC` var (the one definition every
+    task and include inherits); it is read from there as well as rendered, so a second
+    definition shadowing it cannot leave this test measuring the wrong one.
     """
+    expression = yaml.safe_load((ROOT / "taskfile.yml").read_text(encoding="utf-8"))["vars"]["CACHE_RC"]["sh"]
+    assert "printf '%s'" in expression and "printf --" not in expression, (
+        f"root taskfile.yml `CACHE_RC` is {expression!r}; go-task's shell takes `printf --` as the format"
+    )
     (tmp_path / "bazel-cache.rc").write_text("build --remote_header='x=y'\n", encoding="utf-8")
 
     with_credential = _rendered_unit_lane(tmp_path)
@@ -3600,3 +3608,59 @@ def test_the_retired_pages_deploy_workflows_are_gone() -> None:
         assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is back"
     jobs = _load(ROOT / ".github" / "workflows" / "release.yml")["jobs"]
     assert "custom-deploy-website-release" not in jobs
+
+
+# ---------------------------------------------------------------------------
+# One `CACHE_RC`, and every Bazel call a task makes carries it
+# ---------------------------------------------------------------------------
+
+#: `--bazelrc` is a startup option, so it must sit immediately after the second
+#: `bazel`. A call without it reads the shared cache anonymously (a 401) and
+#: compiles cold, green — the shape that left `cross:build` uncached.
+_TASK_BAZEL_CALL = re.compile(r"ocx exec bazel -- bazel(?:[ \t]+(\S+))?")
+#: Invocations found in the tracked taskfiles when this was written. A floor, not
+#: a census: a reader that stopped seeing taskfiles passes a negative silently.
+_TASK_BAZEL_CALL_FLOOR = 25
+
+
+def _tracked_taskfiles() -> list[Path]:
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", ":(glob)**/taskfile.yml", ":(glob)**/*.taskfile.yml"],
+        capture_output=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.split()
+    return [ROOT / name for name in listed]
+
+
+def test_every_task_bazel_call_passes_the_cache_rc_first() -> None:
+    seen = 0
+    missing: list[str] = []
+    for path in _tracked_taskfiles():
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            for call in _TASK_BAZEL_CALL.finditer(line):
+                seen += 1
+                if call.group(1) != "{{.CACHE_RC}}":
+                    missing.append(f"{path.relative_to(ROOT)}:{number}")
+    assert seen >= _TASK_BAZEL_CALL_FLOOR, (
+        f"found {seen} `ocx exec bazel -- bazel` calls in the taskfiles, floor {_TASK_BAZEL_CALL_FLOOR} — "
+        f"the reader stopped short, and a clean result over it proves nothing"
+    )
+    assert not missing, (
+        "these task calls to bazel do not pass `{{.CACHE_RC}}` as the first startup option, so on CI they "
+        "read the shared cache anonymously: " + ", ".join(missing)
+    )
+
+
+def test_cache_rc_is_defined_once_in_the_root_taskfile() -> None:
+    defined = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in _tracked_taskfiles()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if re.match(r"\s*CACHE_RC:", line)
+    ]
+    assert len(defined) == 1 and defined[0].startswith("taskfile.yml:"), (
+        f"`CACHE_RC:` must be defined exactly once, in the root taskfile.yml; found: {defined}"
+    )
