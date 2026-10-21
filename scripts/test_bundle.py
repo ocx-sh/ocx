@@ -53,8 +53,19 @@ LIBTEST_RESULT = re.compile(
 )
 
 
+def cache_rc():
+    """The CI cache credential as Bazel's first startup option, only when the file exists.
+
+    The rule of the root taskfile's `CACHE_RC`: `--bazelrc` on a missing path is a hard
+    Bazel error, and fork PRs and developer shells have no such file.
+    """
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    rc = Path(runner_temp, "bazel-cache.rc") if runner_temp else None
+    return [f"--bazelrc={rc}"] if rc and rc.is_file() else []
+
+
 def bazel(*args, capture=False):
-    cmd = [*BAZEL, *args]
+    cmd = [*BAZEL, *cache_rc(), *args]
     res = subprocess.run(
         cmd, cwd=ROOT, capture_output=capture, text=True, encoding="utf-8", check=False
     )
