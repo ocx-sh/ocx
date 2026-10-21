@@ -190,13 +190,9 @@ the space before the base64 payload splits the flag from an unquoted second word
 
 Without the header the `auth_basic` realm of the server answers 401 to every request. Your builds then run on `--disk_cache` alone, which is a slower first build and nothing worse.
 
-**CI carries the reader credential too, and never beside the writer.** The Linux build leg of `verify-deep.yml` binds `read-auth` to the org secret `BAZEL_CACHE_READ_AUTH` unconditionally. The `smoke` job of `verify-basic.yml` serves every trigger from one job. It therefore binds `read-auth` to the *negation* of the trusted-event gate that releases `write-auth`.
+**CI writes the cache from every lane that holds the secret.** Each Bazel job passes `write-auth` the secret `BAZEL_CACHE_WRITE_AUTH` on every trigger. The `.github/actions/bazel-cache-rc` action turns it into a CI-only rc under `$RUNNER_TEMP`. That rc names a credential helper for the cache host and grants the upload. The credential's user is in both realms, so one header reads and writes. A structural test in `.claude/tests/test_workflows.py` holds every Bazel lane to that step.
 
-The `main` push presents the write credential alone. Its user is in both realms, so it reads and writes with one header. Every other trigger presents the read credential alone.
-
-Bazel sends one `Authorization` header per configured source rather than the last one. Two bindings live at once would therefore leave the origin to choose between them. A structural test counts the sources per trigger and refuses any number but one.
-
-A fork PR still sees none of it. [GitHub Actions withholds a repository's secrets from a run triggered by a fork's `pull_request` event][github-actions-secrets-forks]. So that lane alone reads anonymously over `--disk_cache` and compiles cold, by design and not by omission.
+A fork PR still sees none of it. [GitHub Actions withholds a repository's secrets from a run triggered by a fork's `pull_request` event][github-actions-secrets-forks]. So that lane gets no rc and compiles cold over `--disk_cache`, by design and not by omission.
 
 Verify precedence once, from wherever `bazel` runs on this machine. `--announce_rc`
 echoes every rc line it read **including the header value**, so send it through a
