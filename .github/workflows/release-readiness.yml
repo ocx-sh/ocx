@@ -30,6 +30,8 @@ jobs:
   deep:
     name: Verify Deep
     uses: ./.github/workflows/verify-deep.yml
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
 
   shells:
     name: Shell Activation Deep

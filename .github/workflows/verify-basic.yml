@@ -89,9 +89,9 @@ jobs:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
     # Stated rather than inherited (plan_bazel_build_adoption.md C-016). This is
-    # the job the Bazel gates below run in, and the one earmarked to hold the
-    # cache write credential, so its grant must not widen silently with the
-    # workflow-level block above it.
+    # the job the Bazel gates below run in and it holds the cache write
+    # credential, so its grant must not widen silently with the workflow-level
+    # block above it.
     #
     # It is the workflow default written out, NOT a reduction to `contents:
     # read`: `EnricoMi/publish-unit-test-result-action` creates a check run and
@@ -252,67 +252,18 @@ jobs:
       #
       # `bazel:lint` is the only one of these that executes a build action, and
       # the action it executes is the buildifier launcher — no compile, no Rust
-      # toolchain, no `@crates`. Their `--remote_cache` and
-      # `--remote_upload_local_results=false` come from the committed
-      # `.bazelrc`, unconditionally — and none of them overrides the latter.
-      # Only `Unit tests (Bazel)` does, on the `main` push alone.
+      # toolchain, no `@crates`.
       #
-      # **One credential source per lane, and the two bindings below are one
-      # gate read twice.** Bazel `add`s an `Authorization` header per configured
-      # source and sends every one of them on the same request — measured
-      # against a local sink with both routes live, a cache `PUT` carried
-      # *three*. Which of them an origin honours is that origin's business, and
-      # a design that needs to know is the defect (DX-81). So the lanes are
-      # disjoint by construction rather than by the server's parsing:
-      #
-      # * the **`main` push presents the write credential alone**. The `ci` user
-      #   is in both realms, so the one helper reads and writes, and `read-auth`
-      #   is the empty string on exactly that lane;
-      # * **every other trigger presents the read credential alone** — a
-      #   same-repo pull request is the lane the cache exists for, and the merge
-      #   queue is not a push to `main`, so it reads too.
-      #
-      # `!(…)` rather than a second, independently-worded condition: it is
-      # ruling 5's expression negated, so the two bindings cannot drift into
-      # overlapping or into leaving a trigger with nothing. The truthy branch
-      # carries the secret in both, because GitHub's `a && b || c` yields `c`
-      # whenever `b` is falsy and `''` is falsy — a binding written
-      # `<trusted> && '' || secrets.READ` would hand the read secret to the
-      # `main` push, which is the state this gate exists to forbid.
-      #
-      # A **fork** PR is given no secrets, both bindings are then the empty
-      # string, the action writes nothing, and the lane reads anonymously over
-      # `--disk_cache` — silently, because a step that fails loudly on a fork is
-      # the defect. Until this step existed every request to the shared cache
-      # was an anonymous 401 and `Unit tests (Bazel)` compiled cold on every run.
-      #
-      # **Write is ADR ruling 5's expression and nothing looser**, so it is the
-      # empty string on every lane but the `main` push — BZL-CACHE-01's "absent
-      # from that lane's environment, not merely unused". With it empty
-      # `write_rc.py` emits no `--credential_helper` line at all, which is a
-      # stronger statement than an rc file holding an unused one. The gate lives
-      # here and never inside the composite action: under `workflow_call` the
-      # `github` context is the *caller's*, so a trigger test evaluated in a
-      # composite action answers about the wrong workflow (ruling 5a).
-      #
-      # The count is asserted per trigger in `.claude/tests/test_workflows.py`
-      # (`test_every_bazel_lane_carries_exactly_one_credential_source`), and
-      # `write_rc.py` refuses at runtime if a second source reaches the same
-      # invocation from an rc file this file cannot see.
-      #
-      # This job is now **the one write lane in the corpus**, which narrows what
-      # `_lanes_not_disabling_upload` covers here — it exempts a job holding the
-      # write credential — and `.claude/tests/test_workflows.py` carries the
-      # replacement: `--remote_upload_local_results=true` may be cited by no job
-      # that lacks the credential, must be gated on the same trusted event where
-      # it is cited, no second job may hold the credential, and a job holding it
-      # while citing no upload flag is itself a finding — that pairing is a live
-      # write credential on a runner uploading nothing, green at full cost.
+      # Every same-repo lane holding the secret reads and writes the shared
+      # cache. The rc file the step writes carries the credential helper and
+      # the upload grant, and each task passes it with `--bazelrc` only when it
+      # exists, so no step spells the grant. A fork PR gets no secrets: the
+      # action writes no rc and the lane runs uncached over `--disk_cache`,
+      # silently, because a step that fails loudly on a fork is the defect.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
-          read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
-          write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
       - name: Bazel pin authority
         run: task bazel:pin:check
       # Per-target analysis timings to otel.ocx.sh (C-019, S-013) are pushed
@@ -414,34 +365,12 @@ jobs:
       # and every arm skips silently. With both, a shell that cannot be reached
       # under Bazel's sandbox reds `assert_every_present_interpreter_ran` by
       # name instead of dropping out of the matrix (#349).
-      #
-      # **The upload grant, and the only step in the repository that carries
-      # it.** The tracked `.bazelrc` sets `--remote_upload_local_results=false`
-      # unconditionally, and that file stays as it is: a command-line build
-      # option outranks every rc file, so the override belongs here. Measured on
-      # the pinned 9.2.0 rather than taken from the manual — with the flag
-      # passed here the build event stream's *canonical* command line carries
-      # `--remote_upload_local_results=true` and no `=false`; without it,
-      # `=false`. The same run, done with `--disk_cache` pointed at a path no rc
-      # file names, created that path.
-      #
-      # It rides `{{.CLI_ARGS}}`, which `bazel:test:unit` appends after the
-      # command word, because `--remote_upload_local_results` is a *build*
-      # option. `--bazelrc` could not: that one is a **startup** option and must
-      # precede the command word, which is why the lane derives it from the
-      # credential file existing rather than taking it here.
-      #
-      # The expression is ruling 5's, the same one that releases the credential
-      # two steps up, so a pull request appends no argument at all — the
-      # credential and the grant are absent together or present together, and
-      # neither can arrive without the other.
       - name: Unit tests (Bazel)
         env:
           __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish,fish,pwsh
         run: >-
           task bazel:test:unit --
           --test_env=PATH --test_env=__OCX_TESTING_REQUIRE_LIVE_SHELLS
-          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && '--remote_upload_local_results=true' || '' }}
       # The two consumers the lane swap took away, restored onto the report the
       # step above now writes. Until this, `smoke` published unit results to
       # neither the pull request nor otel.ocx.sh — the swap deleted both steps
@@ -498,7 +427,7 @@ jobs:
       # consumes the output any more (the schema tests are outside the smoke
       # tier, and `verify-deep.yml`'s acceptance job ships its own). It is the
       # `//crates/ocx_schema:schemas` genrule, so it sits inside the credential
-      # window above and reads the shared cache like the gates do.
+      # window above and shares the cache like the gates do.
       - name: Generate Schema
         run: task schema:generate
       # `Publish Unit Test Results` and `Push unit test timings` stood here and
