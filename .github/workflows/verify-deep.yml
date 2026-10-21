@@ -36,6 +36,15 @@ on:
         description: Run the build, native-test and acceptance jobs, not just the drift check.
         type: boolean
         default: true
+    # actionlint reads a `workflow_call` secrets block as the whole `secrets`
+    # context, so the telemetry credential the jobs below read is declared
+    # beside the cache one; a caller that passes neither runs uncached and
+    # pushes no timings.
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      OTEL_OTLP_AUTH:
+        required: false
   # Every push to `main`: merges are rebase-only and there is no queue, so a PR
   # verified at its own head lands on a `main` that moved since, and this is
   # the one full run over the tree that actually landed (DX-16).
@@ -128,16 +137,14 @@ jobs:
           # $OCX_HOME/{blobs,layers,packages,tags} across runs, and a restored
           # object store is runner-executable content.
           cache: false
-      # The **read** credential: `write-auth` is not passed here in any
-      # spelling, so this job holds no write credential and the cache stays
-      # read-only on every trigger this workflow has. A fork PR sees no
-      # secrets, the binding is the empty string and Bazel reads anonymously.
-      # No `Install lld`: rules_rs links with the hermetic `@llvm` toolchain,
-      # so the runner needs no host linker.
+      # Reads and writes the shared cache; with no secret (a fork PR, or a
+      # `workflow_call` that passed none) the action writes no rc and Bazel
+      # runs uncached. No `Install lld`: rules_rs links with the hermetic
+      # `@llvm` toolchain, so the runner needs no host linker.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
       # Skipped on a push to `main`: `verify-basic.yml`'s `smoke` job runs the
       # identical `bazel:test:unit` on the same push, so a second run here is a
       # duplicate of the same Linux unit suite (and doctests) over the same
@@ -191,10 +198,10 @@ jobs:
           suite: unit
 
   # One parallel leg per triple. Serially in one job the eight `-c opt` builds
-  # took 2h+ cold; this lane reads the cache and never writes it (#638). A leg
-  # uploads only its own `ocx`, plus the unit bundle and acceptance binaries
-  # where its triple has a native leg. `needs:` names a whole matrix, so a
-  # consumer waits for the slowest leg, not only its own.
+  # took 2h+ cold; every leg shares the Bazel cache (#638). A leg uploads only
+  # its own `ocx`, plus the unit bundle and acceptance binaries where its
+  # triple has a native leg. `needs:` names a whole matrix, so a consumer waits
+  # for the slowest leg, not only its own.
   cross:
     name: Cross-build (${{ matrix.target }})
     if: github.event_name != 'schedule' || inputs.full
@@ -229,11 +236,11 @@ jobs:
         with:
           version: '0.6.2'
           cache: false
-      # Read credential only, as in `build`.
+      # Same cache step as `build`.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
       # NO release-provenance `--scan` here. The old cross-compile job ran it
       # over a real `--release` cargo build; this job has no such build, and
       # the Bazel-built `ocx` deliberately carries the `__testing` placeholder

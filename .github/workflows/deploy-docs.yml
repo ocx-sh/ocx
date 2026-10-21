@@ -40,12 +40,12 @@ jobs:
           # Toolchain from ocx.toml + ocx.lock, as in verify-basic.yml; the
           # object store stays uncached, as there.
           cache: false
-      # The build reaches schema generation, a Bazel build: the read credential
-      # (this workflow never writes the cache), as in verify-basic.yml.
+      # The build reaches schema generation, a Bazel build: it shares the cache
+      # like the verify lanes do.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
       - name: Build the site
         run: task website:build
       # Links, old URLs and the built-site tests, before anything uploads.
