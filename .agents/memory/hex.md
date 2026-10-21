@@ -117,6 +117,16 @@ research-axes:
 
 ## Memory
 
+- **Active plan (hex-plan high, 2026-10-22, plan-approved): `.claude/artifacts/plan_pr637_round2.md`** —
+  PR #637 round 2 (findings 1-17 of `.agents/batches/pr637-batch2.md`; issues #631-#636, #638). Phase 1 = cache
+  (P1) then a measured D-CROSS gate; then tiers (conventions adoption), test tooling, platform, cleanups, release
+  readiness. 15 pipelines + contract wave A0, 11 waves; satellites S1 (ocx-sh/conventions) and S2
+  (ocx-sh/grimoire-lore) released once at G7. Research: `research_pr637_round2.md`.
+  Next: `/hex-execute .claude/artifacts/plan_pr637_round2.md`.
+- **Note for the next `/hex-init`:** plans now carry two more satellites — `conventions` →
+  `/home/mherwig/dev/ocx-conventions` and `lore` → `/home/mherwig/dev/grimoire-lore`. Unlike the two in Pointers,
+  both checkouts sit on owner branches, so their WPs use a separate worktree under this repo's
+  `.agents/worktrees/sat-<repo>` from `origin/main` (plan D12), never commit in place.
 - **Active plan (hex-plan xhigh, 2026-10-11, plan-approved): `.claude/artifacts/plan_docs_next_level.md`** —
   from the ratified `docs-next-level` discussion; contract wave P0 + 18 pipelines / 7 waves, critical path
   P0 → P2 → P5 → P9 → P12 → P13b → P14. Theme pinned to npm `@ocx-sh/theme@0.1.1` (on website main); theme gaps
