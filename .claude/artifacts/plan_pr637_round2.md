@@ -7,11 +7,11 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-22
-- **Active phase:** 1 — caching (P1, with S1/S2 in parallel)
-- **Step:** /hex-execute → P1 steps (4 parallel step worktrees `hex/humble-meandering-fox--p1-{tasks,action,lanes,records}`)
+- **Active phase:** 1 — caching: P1 landed, awaiting G1 (S1/S2 with the meta-orchestrator)
+- **Step:** P1 landed, awaiting G1
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-22 (plan written on top of 975d07b01; spec review round 1 applied)
-- **Next:** /hex-execute .claude/artifacts/plan_pr637_round2.md
+- **Last update:** 2026-10-22 (after a569b8113: ci(bazel): the acceptance no-upload flag follows the target list)
+- **Next:** G1 (meta: push P1, verify-deep ×2, C-005, D-CROSS); then /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0
 
 ---
 
@@ -289,7 +289,7 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 
 | ID | Repo | Scope (C-/S-) | Expected files | Wave | Depends on | Marks | Status |
 |---|---|---|---|---|---|---|---|
-| P1 | ocx | Phase 1 cache: C-001–C-005, S-001, S-002 | `taskfile.yml` (vars), `taskfiles/{bazel,rust,cross}.taskfile.yml`, `test/taskfile.yml`, `website/{taskfile,reference.taskfile,schema.taskfile,recordings.taskfile}.yml`, `scripts/test_bundle.py`, `scripts/tests/test_test_bundle.py`, `.github/actions/bazel-cache-rc/**`, `.github/workflows/{verify-basic,verify-deep,deploy-docs}.yml`, `.claude/tests/test_workflows.py`, `.claude/artifacts/{adr_bazel_build_adoption,research_bazel_cache_trust_boundary}.md`, `.claude/rules/subsystem-ci.md` | 1 | — | review | pending |
+| P1 | ocx | Phase 1 cache: C-001–C-005, S-001, S-002 | `taskfile.yml` (vars), `taskfiles/{bazel,rust,cross}.taskfile.yml`, `test/taskfile.yml`, `website/{taskfile,reference.taskfile,schema.taskfile,recordings.taskfile}.yml`, `scripts/test_bundle.py`, `scripts/tests/test_test_bundle.py`, `.github/actions/bazel-cache-rc/**`, `.github/workflows/{verify-basic,verify-deep,deploy-docs}.yml`, `.claude/tests/test_workflows.py`, `.claude/artifacts/{adr_bazel_build_adoption,research_bazel_cache_trust_boundary}.md`, `.claude/rules/subsystem-ci.md` | 1 | — | review | merged |
 | S1 | conventions | C-010, C-011 | `copier.yml`, `src/**`, `template/**` (built), `.github/actions/setup/action.yml`, `scripts/baseline_check.py`, `scripts/adopt.sh`, `docs/contract.md`, `MANIFEST.toml`, `fleet.toml`, `drift/**`, tests | 1 | — | hard | pending |
 | S2 | lore | #634 item 1, BZL-CACHE-02 | `rules/bazel-quality/{rust,caching}.md`, `skills/bazel-adopt/references/branch-rust.md`, `publish.toml` | 1 | — | — | pending |
 | A0 | ocx | contract wave: C-012, C-019, stubs, contract tests for C-014/C-015/C-003(d) | `ocx.toml`, `ocx.lock`, template-owned files, `AGENTS.md` (adopt.sh append only), seeded stubs (`.github/workflows/{basic-repo,deep-repo}.yml`, `.gitleaks.toml`, `.github/renovate-local.json`), `.copier-answers.yml`, exit-1 stubs in `taskfiles/{ci,release}.taskfile.yml`, `.claude/tests/test_workflows.py` (new job-shape + `acceptance.yml` input pins), `.claude/tests/test_ai_config.py` (`TestVerifyDeepBuildMatrix` → `deep-repo.yml`, `TestSelfTestsRunOnAGate`), `test/lint/test_smoke_coverage.py` (c) | 2 | P1, G1, S1 pushed | — | pending |
@@ -558,3 +558,25 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
 ## Schedule log
 
 - 2026-10-22 — plan written (hex-plan high); spec review round 1: 4 block + 19 warn + 2 suggest, all applied.
+- 2026-10-22 — P1 executed as 4 parallel step branches (`p1-{tasks,action,lanes,records}`) + 2 residual commits, merged
+  onto `hex/humble-meandering-fox` at a569b8113. Verify: `selftest.sh` 0; `task claude:tests --force` 378 passed / 20
+  skipped; `task scripts:self-test -- -k test_bundle` 16 passed; `task ci:actionlint` 0. C-001 red (17 call sites incl.
+  `cross.taskfile.yml:44,45`) → green; C-003 red (`verify-basic.yml:smoke` with `write-auth` deleted →
+  `test_every_cache_step_passes_the_write_secret_and_nothing_else`) → green after restore.
+  Decisions taken in execution (question → research → decision):
+  - C-003(d) needs a caller to pass the secret → `release-readiness.yml` `deep` passes `BAZEL_CACHE_WRITE_AUTH` by
+    name (file outside P1's set; R2 rewrites it later). `verify-deep.yml` `workflow_call.secrets` declares it and
+    `OTEL_OTLP_AUTH` (actionlint reads a declared block as the whole `secrets` context).
+  - C-003(c) lane tokens vs. what the tasks run → 11 lanes found (floor 11): 4 write (`verify-basic:smoke`,
+    `verify-deep:build`, `verify-deep:cross`, `deploy-docs:build`); 7 named non-Bazel exclusions (`workflow-lint`,
+    `smoke-acceptance`, `unit-native`, `acceptance`, `acceptance-native`, `satellite-verify`, `satellite-contract`) —
+    `test:accept:native`, `satellite:` and `SKIP_BUILD` paths never reach Bazel, so they get no credential.
+  - Every writer uploads → would a lane upload acceptance verdicts (`adr_test_speed_tiers.md` D6)? No CI lane runs
+    `bazel:test:accept`; to keep D6 by construction it passes `--remote_upload_local_results=false` after its targets
+    (a command-line flag outranks the CI rc), pinned by `test_bazel_test_accept_never_uploads_verdicts_whatever_rc_a_lane_passes`.
+  - C-002 "exactly" → the rc carries the two lines and no comment header (D21 compares it byte-for-byte with S1's golden).
+  - Vendored lore: the old same-repo-PR read-only clause is BZL-CACHE-01 as well as 02 → S2 amends both (sent to the
+    meta-orchestrator); `subsystem-ci.md` § Bazel remote cache carries the D5 note naming both.
+  - Left stale, out of P1: `scripts/bazel_doctor.py:784` and `.claude/skills/init-bazel-config/SKILL.md:134` still set
+    the org secret `BAZEL_CACHE_READ_AUTH` (it may still serve `rules_ocx`); vendored `bazel-adopt` / `bazel-quality.md`
+    text follows I1's `grim update`.
