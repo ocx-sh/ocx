@@ -114,8 +114,9 @@ build --aspects=//:rustdoc_diagnostics.bzl%rustdoc_diagnostics_aspect
 # bazel-remote unit; that is a server flag and no Bazel binary carries it.
 build --remote_cache=https://bazel-cache.ocx.sh/v1
 
-# Writes are granted per-lane, never by this file. A contributor, a fork PR and
-# a non-main CI lane all read and none of them write.
+# Reads need a developer's own credential in ~/.bazelrc. Writes are granted by
+# the rc a CI lane holding BAZEL_CACHE_WRITE_AUTH passes, never by this file; a
+# contributor and a fork PR never write.
 build --remote_upload_local_results=false
 
 # The default is 60s PER OPERATION. A single slow box with no failover, serving

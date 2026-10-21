@@ -190,7 +190,7 @@ Set `dir:` on include block when all tasks should run relative to sub-taskfile's
 
 ## OCX-Specific Task Contracts
 
-- **Generation tasks** never fingerprint Rust source lists. A generator that is a Bazel target is a Bazel action: `schema:generate` builds the `//crates/ocx_schema:schemas` genrule (`ocx exec bazel -- bazel build`, `test:.build-binaries`' `CACHE_RC`), reads its outputs with `cquery --output=files`, refuses anything but the seven expected paths before writing one, and carries no `sources:` — Bazel is the cache. The recorder (`recordings:*`) gets `test/bin/ocx` from `rust:build` (nested `task -d <root>`, `SKIP_BUILD` pinned off) and fingerprints on `sources: [<binary>]`; it never runs cargo.
+- **Generation tasks** never fingerprint Rust source lists. A generator that is a Bazel target is a Bazel action: `schema:generate` builds the `//crates/ocx_schema:schemas` genrule (`ocx exec bazel -- bazel build`, the root `taskfile.yml`'s `CACHE_RC`), reads its outputs with `cquery --output=files`, refuses anything but the seven expected paths before writing one, and carries no `sources:` — Bazel is the cache. The recorder (`recordings:*`) gets `test/bin/ocx` from `rust:build` (nested `task -d <root>`, `SKIP_BUILD` pinned off) and fingerprints on `sources: [<binary>]`; it never runs cargo.
 
 ## Sources
 

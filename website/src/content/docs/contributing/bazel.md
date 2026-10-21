@@ -171,7 +171,7 @@ INFO: Build completed successfully, 336 total actions
 INFO: Elapsed time: 1.913s
 ```
 
-**The remote cache is a second layer above that, and the reader realm is live.** The committed `.bazelrc` points at it with `build --remote_cache=https://bazel-cache.ocx.sh/v1`, beside `build --remote_upload_local_results=false`. The file says of that line: "a contributor, a fork PR and a non-main CI lane all read and none of them write". Reading it needs a `--remote_header` credential line in your own `~/.bazelrc`, never a repo file. Ask a maintainer for a `dev-read` account:
+**The remote cache is a second layer above that, and the reader realm is live.** The committed `.bazelrc` points at it with `build --remote_cache=https://bazel-cache.ocx.sh/v1`, beside `build --remote_upload_local_results=false`. The file says of that line: "a contributor and a fork PR never write"; only CI lanes holding the write secret do, through an rc they pass on the command line. Reading it needs a `--remote_header` credential line in your own `~/.bazelrc`, never a repo file. Ask a maintainer for a `dev-read` account:
 
 ```sh
 # ~/.bazelrc, appended to the block above
