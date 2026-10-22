@@ -232,9 +232,6 @@ jobs:
     env:
       # Test telemetry, guarded on a value `if:` can read; empty on a fork PR, where the push is skipped.
       OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-      # The suite reads its registries from native zot processes (below), not
-      # from the compose file: no Docker on the path of the PR gate.
-      OCX_TEST_NATIVE_SERVICES: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,20 +260,15 @@ jobs:
           version: '0.6.2'
           # Default-off: a restored object store is runner-executable content.
           cache: false
-      # zot comes from the project toolchain `Setup OCX` just materialized (OCI
-      # 1.1 Referrers API on 5000, plus the target and prod ports); the
-      # registry:2 mirror fixture is not started, and no smoke test needs it.
-      - name: Start native registries
-        run: task test:services:native:start
+      # The smoke tier starts its own zot registries (OCI 1.1 Referrers API)
+      # from the project toolchain `Setup OCX` just materialized, on free
+      # ports; the registry:2 mirror is never started, and no smoke test needs it.
       - name: Run Smoke Tier
         # The task writes `test/results/junit-smoke.xml` on every run, local
         # ones included, so one flag in one place (test/taskfile.yml
         # `SMOKE_JUNIT_XML`) feeds both the report below and the timings a
         # developer's run pushes.
         run: task test:smoke
-      - name: Stop native registries
-        if: ${{ always() }}
-        run: task test:services:native:stop
       # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
