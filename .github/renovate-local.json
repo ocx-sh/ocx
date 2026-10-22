@@ -1,1 +1,10 @@
-{"$schema": "https://docs.renovatebot.com/renovate-schema.json", "description": ["Repo-local Renovate rules, merged after the ocx-sh/conventions preset. Ecosystem norms (npm, docker, actions, cargo, python) live in conventions; put only repo-specific rules here."]}
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": ["ocx-specific Renovate rules, merged after the ocx-sh/conventions preset."],
+  "npm": { "managerFilePatterns": ["/^website/"] },
+  "packageRules": [
+    { "description": "release.yml is cargo-dist-generated and floats by design", "matchManagers": ["github-actions"], "matchFileNames": [".github/workflows/release.yml"], "enabled": false },
+    { "description": "rules_rs and llvm move together (adr_bazel_rules_rs_migration.md)", "matchManagers": ["bazel-module"], "matchPackageNames": ["rules_rs", "llvm"], "groupName": "rules_rs and llvm" },
+    { "description": "Dockerfile base images: one group, ci(deps)", "matchManagers": ["dockerfile"], "groupName": "docker-base-images", "semanticCommitType": "ci", "semanticCommitScope": "deps" }
+  ]
+}
