@@ -550,7 +550,7 @@ tasks:
         raw='{{.BAZEL_TAGS_JSON}}.jsonproto'
         # `ocx exec bazel --`, like every other bazel call in this repository:
         # a plain shell has no `bazel` on PATH, and a hand-run query is not an
-        # exception to that (CLAUDE.md § Bazel, DX-42).
+        # exception to that (AGENTS.md § Bazel, DX-42).
         ocx exec bazel -- bazel {{.CACHE_RC}} query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
         python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
         import json

@@ -25,8 +25,9 @@ mechanical: this machine carries four fixed worktrees plus an agent worktree per
 task, `.bazelrc.user` is per-checkout and gitignored, so the credential and the
 output root would have to be re-created in every one of them — and a checkout
 that missed one fails in a way that looks like a cache outage. `~/.bazelrc` is
-read from all of them. The committed `.bazelrc` `try-import`s `.bazelrc.user`
-last, which stays the right place for a genuinely per-checkout experiment.
+read from all of them. The committed `.bazelrc` imports `bazel/baseline.bazelrc`
+at its top, and that file's last line is the one `try-import` of `.bazelrc.user`,
+which stays the right place for a genuinely per-checkout experiment.
 
 **Four traps this file exists because of, all measured on this host.**
 
