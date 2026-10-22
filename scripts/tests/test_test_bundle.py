@@ -146,12 +146,17 @@ def test_a_workspace_reading_skip_is_not_run_even_with_cargo_on_path(
     assert "not run (reads the workspace)" in capsys.readouterr().out
 
 
-def _bazel_argv(monkeypatch: pytest.MonkeyPatch, runner_temp: Path | None) -> list[str]:
-    """The argv `bazel()` hands to `subprocess.run`, with `$RUNNER_TEMP` set or removed."""
+def _bazel_argv(monkeypatch: pytest.MonkeyPatch, runner_temp: Path | None, root: Path | None = None) -> list[str]:
+    """The argv `bazel()` hands to `subprocess.run`, with `$RUNNER_TEMP` set or removed.
+
+    `root` stands in for the checkout, whose `.bazelrc.user` the cache rule reads; without one the
+    checkout is a path that holds no such file, so a developer's own `.bazelrc.user` changes nothing.
+    """
     if runner_temp is None:
         monkeypatch.delenv("RUNNER_TEMP", raising=False)
     else:
         monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    monkeypatch.setattr(tb, "ROOT", root if root is not None else Path("/nonexistent-checkout"))
     seen: list[list[str]] = []
 
     def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -177,6 +182,34 @@ def test_no_cache_rc_flag_without_the_file(state: str, tmp_path: Path, monkeypat
     # `--bazelrc` naming a missing file is a hard bazel error (fork PRs, developer shells).
     argv = _bazel_argv(monkeypatch, None if state == "no RUNNER_TEMP" else tmp_path)
     assert argv == [*tb.BAZEL, "build", "//a:a"]
+
+
+def _checkout_with_user_rc(tmp_path: Path, user_rc: str) -> Path:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / ".bazelrc.user").write_text(user_rc, encoding="utf-8")
+    return root
+
+
+def test_no_cache_rc_flag_when_bazelrc_user_already_imports_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The setup action's trusted mode `try-import`s the credential from `.bazelrc.user`; naming the
+    # same file with `--bazelrc` reads it twice. The root taskfile's `CACHE_RC` yields nothing here.
+    (tmp_path / "bazel-cache.rc").write_text("build --remote_header='x=y'\n", encoding="utf-8")
+    root = _checkout_with_user_rc(tmp_path, f"try-import {tmp_path}/bazel-cache.rc\n")
+    argv = _bazel_argv(monkeypatch, tmp_path, root)
+    assert argv == [*tb.BAZEL, "build", "//a:a"]
+
+
+def test_cache_rc_flag_stays_when_bazelrc_user_names_another_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A developer's own `.bazelrc.user` is the common case and must not switch the credential off.
+    (tmp_path / "bazel-cache.rc").write_text("build --remote_header='x=y'\n", encoding="utf-8")
+    root = _checkout_with_user_rc(tmp_path, "build --jobs=4\ntry-import /elsewhere/bazel-cache.rc\n")
+    argv = _bazel_argv(monkeypatch, tmp_path, root)
+    assert argv == [*tb.BAZEL, f"--bazelrc={tmp_path}/bazel-cache.rc", "build", "//a:a"]
 
 
 def test_every_bazel_call_goes_through_the_seam() -> None:

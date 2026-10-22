@@ -75,7 +75,7 @@ tasks:
       A convenience entry point, not a gate: nothing in `taskfile.yml`, in
       `.github/workflows/**` or in `scripts/scoped_gate.py` calls this task,
       and no rule prescribes it as *the* per-task gate any more (that used to
-      contradict CLAUDE.md's `verify:scoped` model — plan_test_speed_tiers.md
+      contradict AGENTS.md's `verify:scoped` model — plan_test_speed_tiers.md
       C-022 swept the wording). It stays as a Rust-only convenience for a
       manual review-fix loop when only Rust changed. Anything it runs that
       must also gate a

@@ -15,7 +15,7 @@ Claude Code have three rule-activation mechanisms. Each different purpose — co
 |---|---|---|---|
 | **Rule** (`.claude/rules/*.md`) | `paths:` glob — fire when edit match file | Standards/context need *while writing* file | `quality-rust.md` on `**/*.rs` |
 | **Skill** (`.claude/skills/<name>/SKILL.md`) | `description` match by LLM vs current task | Workflow + criteria for task topic | `deps` for "add a crate" |
-| **Catalog** (`.claude/rules.md`) | Read-on-demand during planning, point from CLAUDE.md | Discover what rules exist *before* file open | — |
+| **Catalog** (`.claude/rules.md`) | Read-on-demand during planning, point from AGENTS.md | Discover what rules exist *before* file open | — |
 
 Path-scoped rules no fire during plan/research/architecture — no file open. Skills need LLM already know skill exist. Catalog (`.claude/rules.md`) close gap: authoritative map browse during plan/research. Any `.claude/rules/` change must reflect in catalog same commit; structural tests enforce parity.
 
@@ -32,8 +32,8 @@ A vendored global cost same context as hand-written one, so count it. Lever over
 
 Two more always-load files reach Claude by different mechanism, *not* count here because no use path-scope frontmatter layer:
 
-- `.claude/rules.md` — catalog itself; `@`-import from `CLAUDE.md`
-- `CLAUDE.md` — project root instructions; load by Claude Code direct
+- `.claude/rules.md` — catalog itself; `@`-import from `AGENTS.md`
+- `AGENTS.md` — project root instructions, read by every agent harness (Claude Code reaches it through `CLAUDE.md`, which is the template's two lines: the baseline marker and `@AGENTS.md`)
 
 `meta-ai-config.md` path-scoped to `.claude/**` (not true global); load when AI config files edit.
 
@@ -41,11 +41,11 @@ If strict count drift from 4, `test_global_rule_count_matches` fail.
 
 ## Core Principle: Context Budget
 
-Every rule, skill description, CLAUDE.md line compete same context window. Bloat config = Claude ignore instructions.
+Every rule, skill description, AGENTS.md line compete same context window. Bloat config = Claude ignore instructions.
 
 | Artifact | Budget | Impact |
 |----------|--------|--------|
-| CLAUDE.md | <200 lines | Load every request — every line cost attention |
+| AGENTS.md | <200 lines | Load every request — every line cost attention |
 | Rules (global) | <200 lines each | Load every request — minimize globals |
 | Rules (scoped) | <200 lines each | Load only on path match — prefer scoping |
 | Skill descriptions | 2% of context window total | All descriptions load at session start |
@@ -59,7 +59,7 @@ Every rule, skill description, CLAUDE.md line compete same context window. Bloat
 Must Claude know it every session?
 ├─ Yes → Is it file/directory-specific?
 │  ├─ Yes → .claude/rules/ with paths: scoping
-│  └─ No → CLAUDE.md (only if removing it causes mistakes)
+│  └─ No → AGENTS.md (only if removing it causes mistakes)
 └─ No → Is it invoked manually or auto-triggered?
    ├─ Manual with side effects → Skill with disable-model-invocation: true
    ├─ Auto-triggered by context → Skill with good description
@@ -220,9 +220,9 @@ Project-local JSONL store for recurring technical patterns (oci-client quirks, c
 
 ## Anti-Patterns
 
-1. **Global rule >200 lines** — same problem as bloat CLAUDE.md
-2. **Rules match `src/**/*`** — too broad, effectively another CLAUDE.md
-3. **Duplicate content** across CLAUDE.md, rules, skills — single source of truth
+1. **Global rule >200 lines** — same problem as bloat AGENTS.md
+2. **Rules match `src/**/*`** — too broad, effectively another AGENTS.md
+3. **Duplicate content** across AGENTS.md, rules, skills — single source of truth
 4. **Verbose SKILL.md** without progressive disclosure — move reference material to support files
 5. **No `disable-model-invocation`** on action skills — Claude trigger unpredictable
 6. **Too many auto-trigger skills** — description budget fill up, skills excluded
@@ -240,7 +240,7 @@ When edit any `.claude/` artifact:
 - [ ] Frontmatter follow conventions for artifact type
 - [ ] Cross-refs point to existing files
 - [ ] New rules reference subsystem context rules where relevant
-- [ ] CLAUDE.md stay under 200 lines
+- [ ] AGENTS.md stay under 200 lines; `CLAUDE.md` stays the template's two lines
 - [ ] Global rules total manageable (current 4 — monitor growth; see `### Current Global Rules` above for strict definition)
 - [ ] AI config structural tests pass: `task claude:tests`
 
@@ -249,7 +249,7 @@ When edit any `.claude/` artifact:
 `.claude/tests/test_ai_config.py` = automated enforcement layer for checklist above. Tests live alongside config they validate (not in `test/`, which for OCX binary acceptance tests). `task claude:tests` runs three files — `test_ai_config.py`, `test_hooks.py` (the hook modules' pure logic: verify-mark polarities, the release full-mark guard, commit-message extraction) and `test_workflows.py` (`.github/workflows/*.yml` glob liveness + `verify-deep.yml`'s trigger shape) — as part of `task verify` (via `claude:verify`) and catch:
 
 - **Rule glob validity**: every `paths:` glob in scoped rules match at least one file on disk (dead glob detection)
-- **CLAUDE.md consistency**: line budget, stated principle count match headings, stated worktree count match table rows
+- **AGENTS.md consistency**: line budget, stated principle count match headings, stated worktree count match table rows; `CLAUDE.md` is exactly the baseline marker line plus `@AGENTS.md`
 - **Cross-reference accuracy**: workflow filenames in rules exist on disk, artifact paths in skills use correct directories
 - **Agent correctness**: tool/body consistency (no commands need tools not in frontmatter), completion protocol compliance
 - **Hook safety**: no `set -e` in PostToolUse hooks, conditional log trim
@@ -265,7 +265,7 @@ When edit any `.claude/` artifact:
 | New scoped rule added | Cover auto (glob match validation) |
 | New keyword trigger | Cover auto (overlap + noise detection) |
 | New agent with tool restrictions | Add test verify body no use commands outside `tools:` |
-| New convention in CLAUDE.md | Add test count/validate stated fact |
+| New convention in AGENTS.md | Add test count/validate stated fact |
 | New hook script | Add safety tests (no `set -e` for PostToolUse, exit code discipline) |
 | New cross-reference pattern | Add test resolve reference to real file |
 
@@ -296,7 +296,7 @@ PostToolUse hook (`post-tool-use-tracker.sh`) fire on every `Edit|Write` and out
 | New subsystem created | Add `subsystem-{name}.md` scoped rule |
 | Codebase pattern changed | Update affected subsystem rules |
 | New tool integrated | Add to relevant skills, `quality-core.md`, and `config_reminder` in hook |
-| Taskfile changed | Update CLAUDE.md, quality-core.md, relevant skill Task Runner sections |
+| Taskfile changed | Update AGENTS.md, quality-core.md, relevant skill Task Runner sections |
 | Website component added/changed | Update `subsystem-website.md`, `docs-style.md`, documentation skill |
 | CI workflow changed | Update `subsystem-ci.md` rule |
 | Claude Code new release | Run `/meta-maintain-config research "Claude Code features"` |

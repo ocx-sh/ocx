@@ -77,6 +77,21 @@ tasks:
       - prek install --allow-missing-config --hook-type pre-commit --hook-type commit-msg
       - install -m 0755 scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
 
+  # The three `[patch.crates-io]` forks under `external/`. The conventions template's checkout step
+  # fetches no submodules, and an empty `external/` breaks everything that resolves the patched
+  # graph: Bazel's `crate.from_cargo`, cargo-deny, cargo-about, cargo-cyclonedx. `cargo fmt` and
+  # hawkeye read none of it. The `ci:*` tier aliases that need the graph run this first.
+  #
+  # `status:` greps the `-` prefix, which `git submodule status` prints for an uninitialised
+  # submodule only. A `+` (checked out at another commit) is somebody's work in progress and is
+  # left alone, which is why this is not `git submodule status` compared against nothing.
+  submodules:
+    desc: Initialise the git submodules under external/ (idempotent; a no-op once none is uninitialised)
+    status:
+      - test -z "$(git submodule status --recursive | grep '^-')"
+    cmds:
+      - git submodule update --init --recursive
+
   # Fast-forward the current branch onto main.
   # Captures the current branch, switches to main, then `git merge --ff-only`.
   # Fails if the working tree is dirty or already on main.

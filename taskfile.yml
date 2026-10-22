@@ -216,7 +216,7 @@ tasks:
                    (test:rows:check), on every routed and scoped run (an
                    escalate reaches both through `verify`), then only the
                    routed checks: ruff for `test/lint/**`, claude:tests for `.claude/**`,
-                   `.agents/**` and CLAUDE.md, actionlint (+ test_workflows.py)
+                   `.agents/**`, AGENTS.md and CLAUDE.md, actionlint (+ test_workflows.py)
                    for `.github/**`, test:parallel over the touched
                    `test/tests/test_*.py`, scripts:self-test for `scripts/**`,
                    `task --list-all` (a parse) for any taskfile,
