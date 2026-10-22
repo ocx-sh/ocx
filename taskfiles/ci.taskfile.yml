@@ -92,7 +92,30 @@ tasks:
     cmds:
       - task: :git:submodules
       - task: :website:build
+      # ponytail: audits only the pages that met every budget on the 2026-10-22 full build (18 of the
+      # 88 measured; the rest miss performance 100, dom <= 800 or bytes <= 147 KiB). A page joins the
+      # list once it passes; drop the list for the whole tree when the docs backlog is empty.
       - task: :website:lighthouse
+        vars:
+          CLI_ARGS: >-
+            --page /
+            --page /404.html
+            --page /explanation/project-groups/
+            --page /explanation/records-and-sbom/
+            --page /explanation/records-launcher-frames/
+            --page /explanation/toolchain-render/
+            --page /getting-started/first-package/
+            --page /getting-started/first-project/
+            --page /guides/authenticate/
+            --page /guides/choose-versions/
+            --page /guides/clean-up/
+            --page /guides/configure-ocx/
+            --page /guides/find-packages/
+            --page /guides/lock-and-reproduce/
+            --page /guides/run-with-dependencies/
+            --page /integration/
+            --page /integration/bazel/
+            --page /integration/devcontainers-and-editors/
 
   deep:
     desc: 'Deep tier: suite rows check, contract-baseline repository tests and the full self-tests of the gate scripts'
