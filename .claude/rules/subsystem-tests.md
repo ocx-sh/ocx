@@ -213,8 +213,9 @@ Every Rust unit test must run in **under 1.000 s**. `task rust:test:duration`
 (`scripts/unit_test_duration_gate.py`) asserts it over the run log
 `rust:test:unit` tee'd to `target/nextest/run.log`, inside the same
 `rust:test:floor` → `rust:test:unit` → `rust:test:ceiling` bracket: the floor
-step deletes the log, so a duration read there can only be that run's. It runs
-on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
+step deletes the log, so a duration read there can only be that run's. No lane
+runs the live gate (its log left with the nextest bracket); its proof runs under
+`task scripts:self-test`.
 
 - **What a green claims, exactly.** *Every unit test that runs in the Linux
   unit suite is under 1 second.* Not "every unit test on every platform" —

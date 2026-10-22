@@ -415,9 +415,7 @@ _STALE_JOB_CLAIMS = frozenset(
         # `verify-basic.yml` `smoke` / `workflow-lint` jobs and `verify-deep.yml` `build` /
         # `satellite-verify` jobs: the template owns those two files now and the repo-owned jobs
         # moved to `basic-repo.yml` and `deep-repo.yml`. The records below are dated and quote what
-        # existed when they were written, so each is a deletion record in the sense above. The two
-        # rules at the end are live and name the new homes in no sentence yet; repointing them is
-        # a rule edit outside the workflow files, and each row goes the moment it is made.
+        # existed when they were written, so each is a deletion record in the sense above.
         ".claude/artifacts/adr_bazel_build_adoption.md: verify-basic.yml smoke",
         ".claude/artifacts/adr_test_speed_tiers.md: verify-basic.yml smoke",
         ".claude/artifacts/adr_toolchain_activation.md: verify-deep.yml build",
@@ -431,8 +429,6 @@ _STALE_JOB_CLAIMS = frozenset(
         ".claude/artifacts/research_test_tier_operability.md: verify-basic.yml smoke",
         ".claude/artifacts/review_adr_bazel_quality.md: verify-basic.yml smoke",
         ".claude/artifacts/review_adr_bazel_security.md: verify-basic.yml smoke",
-        ".claude/rules/subsystem-taskfiles.md: verify-basic.yml smoke",
-        ".claude/rules/subsystem-tests.md: verify-basic.yml smoke",
     }
 )
 
