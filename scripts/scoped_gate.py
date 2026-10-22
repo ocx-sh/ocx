@@ -2242,7 +2242,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         (proj / "trunk_file.txt").write_text("trunk\n", encoding="utf-8")
         _commit(proj, "trunk")
         if merging:
-            git(proj, "merge", "--no-ff", "--no-commit", "side")
+            git(proj, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "--no-commit", "side")
             if not (Path(git(proj, "rev-parse", "--absolute-git-dir").strip()) / "MERGE_HEAD").exists():
                 raise SystemExit("fixture: the paused merge left no MERGE_HEAD")
         return proj
@@ -2408,7 +2408,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         _commit(wp, name)
 
     def _merge_wp(repo: Path) -> str:
-        git(repo, "merge", "--no-ff", "--no-commit", "wp")
+        git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "--no-commit", "wp")
         return git(repo, "rev-parse", "MERGE_HEAD^{tree}").strip()
 
     def _record(repo: Path, junit: Path, since: float | None = None) -> tuple[int, list[str]]:

@@ -871,7 +871,9 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             # refused exactly the same.
             "a redirected push": (f"git push origin main > {log} 2>&1", True),
             "a fully qualified refspec": ("git push origin HEAD:refs/heads/main", True),
-            "a bare push on main": ("git push -u origin", True),
+            # `push.default=current` pins what a bare push means: without a developer's
+            # `push.autoSetupRemote`, git refuses it for want of an upstream before the hook runs.
+            "a bare push on main": ("git -c push.default=current push -u origin", True),
             "a branch merely spelled like main": ("git push origin main:feature/main-fix", False),
         }
         for name, (script, refused) in cases.items():
