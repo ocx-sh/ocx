@@ -92,6 +92,25 @@ tasks:
     cmds:
       - git submodule update --init --recursive
 
+  # The history the lint and deep tiers read. The conventions template's checkout is depth 1 with no
+  # tags and no `origin/main`; `test/lint/test_contract_baseline.py` walks HEAD back to the newest
+  # vX.Y.Z tag and `test_docs_quality_gate.py` diffs against `git merge-base origin/main HEAD`, so a
+  # tier that runs them from that checkout reds on a missing ref, not on a defect. Release tags and
+  # `main` only, plus the history that reaches them. `ci:lint` and `ci:deep` run this first.
+  history:
+    desc: Fetch the release tags, origin/main and the history behind them (idempotent; a no-op once all three are local)
+    status:
+      - test "$(git rev-parse --is-shallow-repository)" = false
+      - git rev-parse -q --verify refs/remotes/origin/main
+      - git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' HEAD
+    cmds:
+      - |
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch --no-tags --recurse-submodules=no --unshallow origin '+refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/origin/main'
+        else
+          git fetch --no-tags --recurse-submodules=no origin '+refs/tags/v*:refs/tags/v*' '+refs/heads/main:refs/remotes/origin/main'
+        fi
+
   # Fast-forward the current branch onto main.
   # Captures the current branch, switches to main, then `git merge --ff-only`.
   # Fails if the working tree is dirty or already on main.
