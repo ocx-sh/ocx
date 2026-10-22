@@ -372,3 +372,27 @@ def test_deep_workflow_is_opt_in_and_runs_in_the_merge_queue() -> None:
         f"verify-deep.yml `on` is {sorted(triggers)} — no `merge_group`, so nothing runs the "
         f"deep tier on the queued merge commit"
     )
+
+
+def test_ci_runs_the_smoke_tier_through_basic_repo() -> None:
+    """`basic-repo.yml`'s `smoke-acceptance` job runs `task test:smoke`.
+
+    The tier is the automatic pull-request gate only while a job runs it. The
+    basic tier's repo-owned jobs live in `basic-repo.yml`, called by the template's
+    `repo` job; a tier no job selects with `-m smoke` is a gate nothing opens.
+    """
+    import yaml  # a suite dependency (test/pyproject.toml); nothing above needs it
+
+    workflow = REPO_ROOT / ".github" / "workflows" / "basic-repo.yml"
+    assert workflow.exists(), f"{workflow.relative_to(REPO_ROOT)}: no such workflow, so CI runs no smoke tier"
+    jobs = yaml.safe_load(workflow.read_text(encoding="utf-8")).get("jobs") or {}
+    assert "smoke-acceptance" in jobs, f"basic-repo.yml has no job `smoke-acceptance`; its jobs are {sorted(jobs)}"
+    commands = [
+        line
+        for step in jobs["smoke-acceptance"].get("steps") or []
+        for line in str(step.get("run", "")).splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert any(re.search(r"\btask test:smoke(?![\w:-])", line) for line in commands), (
+        f"basic-repo.yml job `smoke-acceptance` runs no `task test:smoke`; its commands are {commands}"
+    )
