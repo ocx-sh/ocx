@@ -747,6 +747,61 @@ def test_the_unit_lane_passes_the_cache_credential_only_when_it_exists(tmp_path:
         )
 
 
+_USER_RC_SILENT = "build --jobs=4\n"
+_USER_RC_IMPORTS_THE_CACHE_RC = "try-import {rc}\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="go-task's shell runs an external `grep`")
+@pytest.mark.parametrize(
+    ("user_rc", "cache_rc_exists", "passes_the_flag"),
+    [
+        pytest.param(None, False, False, id="no-rc-file"),
+        pytest.param(_USER_RC_SILENT, True, True, id="rc-file-user-rc-silent"),
+        pytest.param(_USER_RC_IMPORTS_THE_CACHE_RC, True, False, id="user-rc-already-imports-it"),
+    ],
+)
+def test_the_cache_rc_is_read_once_whichever_way_it_arrives(
+    tmp_path: Path, user_rc: str | None, cache_rc_exists: bool, passes_the_flag: bool
+) -> None:
+    """`CACHE_RC` in its three states, through go-task's own shell, on the real expression.
+
+    The setup action's trusted mode writes `$RUNNER_TEMP/bazel-cache.rc` and imports it from
+    `.bazelrc.user`; a `--bazelrc=` for the same file would then load it twice and repeat its
+    `--remote_header`. So the flag is passed only when the file exists **and** `.bazelrc.user`
+    does not already name it. A `.bazelrc.user` that merely exists changes nothing: the check
+    is on its text. The expression is read from the root `taskfile.yml` and evaluated in a
+    scratch taskfile, so `{{.ROOT_DIR}}` is the scratch directory and a developer's own
+    `.bazelrc.user` is never read or written.
+    """
+    expression = yaml.safe_load((ROOT / "taskfile.yml").read_text(encoding="utf-8"))["vars"]["CACHE_RC"]["sh"]
+    rc = tmp_path / "bazel-cache.rc"
+    if cache_rc_exists:
+        rc.write_text("build --remote_header='x=y'\n", encoding="utf-8")
+    if user_rc is not None:
+        (tmp_path / ".bazelrc.user").write_text(user_rc.format(rc=rc), encoding="utf-8")
+    (tmp_path / "Taskfile.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "3",
+                "vars": {"CACHE_RC": {"sh": expression}},
+                "tasks": {"show": {"silent": True, "cmds": ['echo "[{{.CACHE_RC}}]"']}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    environment = {**os.environ, "RUNNER_TEMP": str(tmp_path)}
+    rendered = subprocess.run(
+        ["task", "show"], capture_output=True, encoding="utf-8", cwd=tmp_path, env=environment, check=False
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    expected = f"[--bazelrc={rc}]" if passes_the_flag else "[]"
+    assert rendered.stdout.strip() == expected, (
+        f"CACHE_RC rendered {rendered.stdout.strip()!r}, expected {expected!r}. Passing the flag with "
+        f"`.bazelrc.user` already importing the file loads the credential twice; dropping it with no "
+        f"import leaves every request an anonymous 401"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CI runs every step of `.verify:build-test` (B5R-4)
 # ---------------------------------------------------------------------------

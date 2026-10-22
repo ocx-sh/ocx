@@ -17,10 +17,17 @@ vars:
   #
   # `printf '%s' "<value>"`, never `printf -- '--bazelrc=%s'`: go-task's shell
   # (mvdan/sh) takes `--` as the format and silently drops the credential.
+  # Also empty when `.bazelrc.user` already names the file: the setup action's
+  # trusted mode imports it from there, and passing `--bazelrc=` for the same
+  # file reads it twice. The check is on the user rc's text, never on whether
+  # that file exists, so a developer's own `.bazelrc.user` changes nothing.
+  #
   # ponytail: unquoted at the call site; `$RUNNER_TEMP` has no space on a GitHub
   # runner. A path with one needs the flag built inside the `cmd:` body.
   CACHE_RC:
-    sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    sh: |-
+      rc="${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc"
+      test -f "$rc" && { test ! -f '{{.ROOT_DIR}}/.bazelrc.user' || ! grep -qF "$rc" '{{.ROOT_DIR}}/.bazelrc.user'; } && printf '%s' "--bazelrc=$rc" || true
 
 includes:
   bazel: ./taskfiles/bazel.taskfile.yml
