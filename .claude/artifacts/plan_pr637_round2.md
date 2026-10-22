@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-22
 - **Active phase:** 2 — tiers: W2–W4 (A0, A2 ∥ A3 ∥ A5, A4), scope stops at G2
-- **Step:** /hex-execute → W2 A0 contract wave (render from S1 `7d067fa`)
+- **Step:** /hex-execute → W3 (A2 ∥ A3 ∥ A5) from wave commit 16ccb2795
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
 - **Last update:** 2026-10-22 (after 42d7b3370: chore(hex): P1 landed on plan_pr637_round2, awaiting G1; G1 measurements recorded)
 - **Next:** /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0 (W2); before A4 builds the cross variant, re-dispatch verify-deep ×2 once the cache volume is freed and re-apply D13 to run 2 (§ Schedule log, G1)
@@ -292,7 +292,7 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 | P1 | ocx | Phase 1 cache: C-001–C-005, S-001, S-002 | `taskfile.yml` (vars), `taskfiles/{bazel,rust,cross}.taskfile.yml`, `test/taskfile.yml`, `website/{taskfile,reference.taskfile,schema.taskfile,recordings.taskfile}.yml`, `scripts/test_bundle.py`, `scripts/tests/test_test_bundle.py`, `.github/actions/bazel-cache-rc/**`, `.github/workflows/{verify-basic,verify-deep,deploy-docs}.yml`, `.claude/tests/test_workflows.py`, `.claude/artifacts/{adr_bazel_build_adoption,research_bazel_cache_trust_boundary}.md`, `.claude/rules/subsystem-ci.md` | 1 | — | review | merged |
 | S1 | conventions | C-010, C-011 | `copier.yml`, `src/**`, `template/**` (built), `.github/actions/setup/action.yml`, `scripts/baseline_check.py`, `scripts/adopt.sh`, `docs/contract.md`, `MANIFEST.toml`, `fleet.toml`, `drift/**`, tests | 1 | — | hard | pending |
 | S2 | lore | #634 item 1, BZL-CACHE-02 | `rules/bazel-quality/{rust,caching}.md`, `skills/bazel-adopt/references/branch-rust.md`, `publish.toml` | 1 | — | — | pending |
-| A0 | ocx | contract wave: C-012, C-019, stubs, contract tests for C-014/C-015/C-003(d) | `ocx.toml`, `ocx.lock`, template-owned files, `AGENTS.md` (adopt.sh append only), seeded stubs (`.github/workflows/{basic-repo,deep-repo}.yml`, `.gitleaks.toml`, `.github/renovate-local.json`), `.copier-answers.yml`, exit-1 stubs in `taskfiles/{ci,release}.taskfile.yml`, `.claude/tests/test_workflows.py` (new job-shape + `acceptance.yml` input pins), `.claude/tests/test_ai_config.py` (`TestVerifyDeepBuildMatrix` → `deep-repo.yml`, `TestSelfTestsRunOnAGate`), `test/lint/test_smoke_coverage.py` (c) | 2 | P1, G1, S1 pushed | — | pending |
+| A0 | ocx | contract wave: C-012, C-019, stubs, contract tests for C-014/C-015/C-003(d) | `ocx.toml`, `ocx.lock`, template-owned files, `AGENTS.md` (adopt.sh append only), seeded stubs (`.github/workflows/{basic-repo,deep-repo}.yml`, `.gitleaks.toml`, `.github/renovate-local.json`), `.copier-answers.yml`, exit-1 stubs in `taskfiles/{ci,release}.taskfile.yml`, `.claude/tests/test_workflows.py` (new job-shape + `acceptance.yml` input pins), `.claude/tests/test_ai_config.py` (`TestVerifyDeepBuildMatrix` → `deep-repo.yml`, `TestSelfTestsRunOnAGate`), `test/lint/test_smoke_coverage.py` (c) | 2 | P1, G1, S1 pushed | — | merged |
 | A2 | ocx | C-018, grim | `AGENTS.md`, `CLAUDE.md`, `.claude/tests/test_ai_config.py`, `.claude/hooks/**`, `.claude/taskfile.yml`, `scripts/{commit_gate,scoped_gate,dead_path_sweep,bazel_accept_proofs}.py` (+ tests), `test/lint/test_deprecated_spellings.py`, `grimoire.{toml,lock}`, grim outputs, `.claude/rules.md` | 3 | A0 | — | pending |
 | A3 | ocx | C-013, C-016, C-017, D18 | root `taskfile.yml`, `taskfiles/{ci,release,scripts}.taskfile.yml`, `.claude/tests/test_hooks.py`, `.github/renovate-local.json`, `.gitleaks.toml`, `.bazelrc`, `test/taskfile.yml`, `test/pyproject.toml`, `test/lint/test_contract_baseline.py`, `.claude/rules/{workflow-release,subsystem-taskfiles}.md` | 3 | A0 | — | pending |
 | A5 | ocx | C-020 | `website/taskfile.yml` | 3 | A0 | — | pending |
@@ -625,3 +625,44 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     (740 s of 792 s on `x86_64-unknown-linux-gnu`); after the owner frees the cache volume, re-dispatch verify-deep
     twice and re-apply D13 to the second run before A4. B stands unless the slowest warm cross job then drops to 3:00 or less.
   - #638 stays open until a run shows remote hits above zero on a cross job.
+- 2026-10-22 — **A0 contract wave landed** (wave commit 16ccb2795; render from S1 `7d067fa`). Commits e8a9e84da
+  (C-019 pins), 829c8c1fa (C-012 render), 3f4936fe1 (task stubs), 32ffcc35a (contract tests). Verify: `ocx lock
+  --check` 0; all 15 pre-existing lock rows byte-identical (go-task→task), 6 new group rows; `task baseline:check`
+  fails on exactly 2 lines — C-006 `shell-essentials` (A2), C-014 `ci:docs` never mentions Lighthouse (A3 + A5); a
+  planted `cliff.toml` edit showed the drift check red, then green. `task claude:tests --force`: 60 failed / 356
+  passed — every red owned: A2 5 (CLAUDE.md→AGENTS.md readers), A3 3 (`TestReleasePrepareGuard`), A4 52
+  (`test_workflows.py` + the two `test_ai_config.py` contracts). `task test:lint:structure`: 3 red — A2
+  (`test_deprecated_spellings` reads AGENTS.md), A4 ×2 (smoke coverage). Contract tests shown green on a scratch
+  copy of the target shape; 40 single mutations each reddened the named test.
+  Decisions (question → research → decision):
+  - Python pin → the plain `3.14.7` tag rolled to a newer build and no longer matches the lock → the build-qualified
+    `3.14.7_20260814` (the baseline's exact-version pattern accepts the suffix).
+  - Role groups → template jobs install `default,<role>` and `ocx exec -g` composes only the named group → every
+    tool stays in `[tools]`; `lint` = prek, gitleaks, grim, uv, actionlint (`workflows:lint` runs actionlint under
+    `-g lint`); `release` = git-cliff; `test`/`build`/`docs` declared empty. `ponytail:` every CI job pulls the full
+    default set; split per role if setup time shows up in the numbers.
+  - D13 switch → "re-checkable" needs one place to flip → reusable `cross.yml` exists in both variants; `deep-repo.yml`
+    always calls it; `basic-repo.yml` calls it iff `CROSS_VARIANT == "A"` in `test_workflows.py`. Flipping D13 = that
+    constant + one call job.
+  - C-003(d) as written is unsatisfiable: template `verify-deep.yml` declares no `workflow_call.secrets`, and passing
+    an undeclared secret is an actionlint error → restated: a caller passes each secret the callee declares required,
+    plus `BAZEL_CACHE_WRITE_AUTH` wherever declared; no `secrets: inherit` (cargo-dist `release.yml` exempt).
+  - S1 fit-check items, owner per item: (1) zizmor 9 findings → A4 fixes; `notify-discord.yml`'s
+    `dangerous-triggers` takes an inline ignore with its reason (`workflow_run` is its purpose; it checks out no code).
+    (2) `notify-discord.yml` `workflow_run.workflows` → A4 renames to the template names and a test ties every listed
+    name to a workflow's `name:`. (3) write-capable `claude.yml` → kept, A4 moves it to repo-owned `claude-write.yml`
+    (v1.0.252, `contents: write`) on the triggers the template's read-only workflow does not take: issue labelled
+    `claude`, issue opened with `@claude`, and a comment phrase without `@claude` (`/claude-write`), so the two never
+    both answer; on `@claude` comments the template's read-only responder answers. Owner-visible. (4) template
+    pre-commit stage (staged gitleaks) → accepted (template-owned file); `hooks:pre-commit` stays undefined (ocx keeps
+    no repo pre-commit work); A3 adds `hooks:repo-commit-msg` = `commit_gate.py --check-message` and makes `git:hooks`
+    run `task hooks:install` beside the pre-push copy. (5) CLAUDE.md readers → A2 (C-018). (6) rc loader → one per
+    lane, picked by who imported the rc: the conventions setup action's `.bazelrc.user` try-import in template jobs,
+    `CACHE_RC`'s `--bazelrc=` in repo-owned jobs (ocx's `bazel-cache-rc` action); `CACHE_RC` is empty whenever
+    `.bazelrc.user` already names the rc, and `.bazelrc` try-imports `.bazelrc.user` once (A3); exactly-once shown with
+    `--announce_rc` after A3. (7) `release-readiness.yml` → A4 passes no secret to template verify-deep (uncached until
+    R2 replaces that call) and grants the nested jobs' permissions; conventions-side change reported.
+  - File sets amended: A3 += `taskfiles/git.taskfile.yml`, `.claude/tests/test_workflows.py` (loader case only),
+    `.claude/rules/meta-ai-config.md` and `website/src/content/docs/contributing/bazel.md` (old `release:prepare`
+    prose); A4 += `.github/workflows/{claude-write,notify-discord,release-readiness}.yml`; A2 may touch
+    `.claude/tests/test_hooks.py` only for AGENTS.md readers (A3 owns `TestReleasePrepareGuard`).
