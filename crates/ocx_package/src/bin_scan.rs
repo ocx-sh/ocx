@@ -14,7 +14,7 @@ use crate::metadata::binary::{Binaries, BinaryError, BinaryName};
 use crate::metadata::env::modifier::Modifier;
 use crate::metadata::template::classify_install_path_rooted_dir;
 use ocx_oci::{OperatingSystem, Platform};
-use ocx_util::fs::path::join_under_root;
+use ocx_util::fs::path::{RelativePath, join_under_root};
 use ocx_util::fs::{DirWalker, WalkDecision};
 
 /// Windows extension allowlist the scan strips from a filename stem; frozen, never
@@ -56,16 +56,7 @@ async fn collect_candidates(
     let wildcard_dirs = wildcard_target_dirs(content_root, strip).await?;
 
     let mut candidates: BTreeMap<BinaryName, Candidate> = BTreeMap::new();
-    for var in &bundle.env {
-        if !var.visibility.has_interface() {
-            continue;
-        }
-        let Modifier::Path(path_var) = &var.modifier else {
-            continue;
-        };
-        let Some(rel) = classify_install_path_rooted_dir(&path_var.value) else {
-            continue;
-        };
+    for rel in scan_scope(metadata) {
         for wildcard_dir in &wildcard_dirs {
             let Ok(scan_dir) = join_under_root(wildcard_dir, rel.as_path()) else {
                 continue;
@@ -74,6 +65,23 @@ async fn collect_candidates(
         }
     }
     Ok(candidates)
+}
+
+/// The `${installPath}`-relative directories `metadata`'s interface-visible `Path` vars name;
+/// empty when the package names nothing to scan.
+fn scan_scope(metadata: &AuthoringMetadata) -> Vec<RelativePath> {
+    let AuthoringMetadata::Bundle(bundle) = metadata;
+    let mut scope = Vec::new();
+    for var in &bundle.env {
+        if !var.visibility.has_interface() {
+            continue;
+        }
+        let Modifier::Path(path_var) = &var.modifier else {
+            continue;
+        };
+        scope.extend(classify_install_path_rooted_dir(&path_var.value));
+    }
+    scope
 }
 
 /// Every existing directory `strip` levels below `content_root`, the ones
@@ -275,7 +283,7 @@ pub enum ScanMode {
 ///
 /// A Verify disagreement, a case-fold collision in a scanned set
 /// ([`BinScanError::Binary`]), a walk I/O failure, or
-/// [`BinScanError::UnsupportedHostScan`] when a required scan cannot run on this host.
+/// [`BinScanError::UnsupportedHostScan`] when a required scan over a non-empty scope cannot run on this host.
 pub async fn resolve_binaries(
     content_root: &Path,
     metadata: AuthoringMetadata,
@@ -297,10 +305,13 @@ async fn resolve_binaries_on_host(
 
     match (mode, declared) {
         (ScanMode::Off, _) => Ok(metadata),
-        // Refuse, never degrade: Auto would publish a silently absent `binaries`.
-        (ScanMode::Verify, _) | (ScanMode::Auto, None) if !host_can_scan => Err(BinScanError::UnsupportedHostScan {
-            platform: platform.clone(),
-        }),
+        // Refuse, never degrade: Auto would publish a silently absent `binaries`. An empty scope
+        // scans nothing on any host, so only a non-empty one makes the host's blind spot matter.
+        (ScanMode::Verify, _) | (ScanMode::Auto, None) if !host_can_scan && !scan_scope(&metadata).is_empty() => {
+            Err(BinScanError::UnsupportedHostScan {
+                platform: platform.clone(),
+            })
+        }
         (_, None) => {
             let scanned = scan_interface_binaries(content_root, &metadata, platform).await?;
             let binaries = Binaries::try_from(scanned)?;
@@ -1056,6 +1067,51 @@ mod tests {
             "the declared claim must pass through verbatim: {:?}",
             resolved.binaries()
         );
+    }
+
+    /// Metadata whose scan scope is empty: a constant, and a `Path` var that is
+    /// private, so nothing names a directory to scan.
+    fn empty_scope_metadata() -> AuthoringMetadata {
+        serde_json::from_str(
+            r#"{"type":"bundle","version":1,"env":[
+                {"key":"MARKER","type":"constant","value":"v","visibility":"interface"},
+                {"key":"PATH","type":"path","value":"${installPath}/bin","required":false,"visibility":"private"}]}"#,
+        )
+        .expect("fixture metadata parses")
+    }
+
+    /// An env-only package names no directory to scan, so an unscannable host
+    /// has nothing to refuse: the scan would find nothing on any host.
+    #[tokio::test]
+    async fn resolve_binaries_auto_proceeds_on_an_empty_scope_when_the_host_cannot_scan() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_binaries_on_host(
+            dir.path(),
+            empty_scope_metadata(),
+            &linux_platform(),
+            ScanMode::Auto,
+            false,
+        )
+        .await
+        .expect("an empty scan scope must not refuse on an unscannable host");
+        assert_eq!(
+            resolved.binaries().map(|binaries| binaries.iter().count()),
+            Some(0),
+            "an empty scope fills the claim with the empty list: {:?}",
+            resolved.binaries()
+        );
+    }
+
+    /// `--bin-scan` over an empty scope verifies nothing, so it proceeds too.
+    #[tokio::test]
+    async fn resolve_binaries_verify_proceeds_on_an_empty_scope_when_the_host_cannot_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = empty_scope_metadata().with_binaries(Binaries::try_from(BTreeSet::new()).unwrap());
+
+        resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Verify, false)
+            .await
+            .expect("an empty scan scope must not refuse a Verify on an unscannable host");
     }
 
     /// The other control: `--no-bin-scan` never scans, so it stays a way
