@@ -93,7 +93,7 @@ tasks:
       - task: :git:submodules
       - task: :website:build
       # ponytail: audits only the pages that met every budget on the 2026-10-22 full build (18 of the
-      # 88 measured; the rest miss performance 100, dom <= 800 or bytes <= 147 KiB). A page joins the
+      # 89 measured; the rest miss performance 100, dom <= 800 or bytes <= 147 KiB). A page joins the
       # list once it passes; drop the list for the whole tree when the docs backlog is empty.
       - task: :website:lighthouse
         vars:

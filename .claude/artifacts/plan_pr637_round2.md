@@ -691,7 +691,7 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     Rust toolchain: runner rustup 1.29.1 installs the pinned 1.95.0 itself. Chrome: `CHROME_PATH` → `CHROME_BIN`
     (runner image) → Playwright. Live shells: `basic-repo.yml` `unit-live-shells` keeps the nu/elvish/fish arms the
     template `test` job would skip.
-  - Full-site Lighthouse (never a CI gate before) → 18 of 88 measured pages pass; the rest miss performance 100,
+  - Full-site Lighthouse (never a CI gate before) → 18 of 89 measured pages (of 149) pass; the rest miss performance 100,
     dom ≤ 800 or bytes ≤ 147 KiB, and a whole-tree run takes over an hour with retries → `ci:docs` audits the 18
     passing pages (exit 0), each page joins once it passes; whole tree stays local. Docs backlog, owner-visible.
   - Capability changes, owner-visible: JUnit becomes annotations + job summary (repo jobs hold `contents: read` only);
