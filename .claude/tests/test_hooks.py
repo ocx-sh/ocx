@@ -275,7 +275,7 @@ def _task_cmds(taskfile: Path, name: str) -> list[str]:
 
 
 class TestReleasePrepareGuard:
-    """`task release:prepare` is the conventions template's, with ocx's four hooks (C-017).
+    """`task release:prepare` is the conventions template's, with ocx's four hooks.
 
     The template task is flattened in from `taskfiles/baseline.taskfile.yml`: it
     calls `release:gate` first, then `release:bump-files`, git-cliff,
@@ -378,7 +378,7 @@ class TestReleasePrepareGuard:
 
 class TestCommitMsgGateCallSite:
     """The conventions template's `commit-msg` hook reaches `scripts/commit_gate.py` through
-    ocx's `hooks:repo-commit-msg` task (S1 fit check, item 4).
+    ocx's `hooks:repo-commit-msg` task.
 
     The template's own subject regex refuses the `Checkpoint` and `release:` subjects this
     repository commits, and it prefers the repo task only when one exists, without a word
