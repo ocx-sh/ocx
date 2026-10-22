@@ -82,8 +82,8 @@ tasks:
       merge is wired into `.verify:build-test` or a workflow job in its own
       right — never left to this list, which no CI run and no commit hook
       evaluates. `check:windows-cfg` below is reachable only from here; the
-      MSVC property it checks is gated natively by verify-deep.yml's
-      `Build & Unit Test (Windows)` job.
+      Windows unit tests run natively in deep-repo.yml's `Unit Test (Windows)`
+      leg, on the gnullvm bundle cross.yml builds from Linux.
 
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
@@ -144,14 +144,14 @@ tasks:
 
       So the workspace's own `cfg(windows)` code is covered elsewhere, and is
       covered — the claim that nothing sees it is wrong:
-        * `Build & Unit Test (Windows)` in verify-deep.yml runs
-          `cargo nextest run --workspace` on windows-latest for every
-          non-draft pull request, the merge queue and every push to main,
-          which compiles the lib and every test target natively. It is the
-          gate that has actually caught these breaks (basic has no Windows
-          leg, D5).
-        * `check:windows` below is its local mirror, through cargo-xwin in
-          Docker, and now carries `--all-targets` for the same reason.
+        * `Unit Test (Windows)` in deep-repo.yml (called by verify-deep.yml:
+          nightly, dispatch, the `run-deep` label) runs the
+          `x86_64-pc-windows-gnullvm` unit-test bundle that cross.yml
+          cross-compiles from Linux, so the lib and every test target compile
+          for Windows and then run natively. A pull request gets it only with
+          the label (basic has no Windows leg).
+        * `check:windows` below is the local MSVC check, through cargo-xwin in
+          Docker, and carries `--all-targets` for the same reason.
       Both inherit `-D warnings` from `[workspace.lints.rust]`, so neither
       needs a RUSTFLAGS of its own.
     sources: *rust-sources
@@ -380,7 +380,7 @@ tasks:
       - install:nextest
     # `real_binary::` is the generated SDK's run against the Bazel-built `ocx`,
     # whose path only that Bazel target compiles in; under cargo it fails by
-    # design, so it is filtered here as in verify-deep.yml's cargo legs.
+    # design, so it is filtered here.
     # `set -o pipefail` so nextest's own exit status survives the `tee`; the
     # tee is what lets `test:ceiling` read the Summary line of the run that
     # just happened rather than of some earlier one (same shape as
@@ -607,11 +607,10 @@ tasks:
       `cfg(windows)` code — `check:windows-cfg` cannot reach it on the host
       (see there) — and
       it covers the aarch64 arm that no CI leg on a pull request does. Not in
-      `verify`: it needs Docker and a ~250 MiB SDK download, and every
-      non-draft pull request already runs verify-deep.yml's `Build & Unit
-      Test (Windows)`, which compiles the same code natively. Run it before
-      marking a PR ready with anything under a `cfg(windows)` or
-      `cfg(not(unix))` branch and save a CI round-trip.
+      `verify`: it needs Docker and a ~250 MiB SDK download, and deep-repo.yml's
+      `Unit Test (Windows)` leg already runs the same code's tests, cross-built
+      for gnullvm. Run it before marking a PR ready with anything under a
+      `cfg(windows)` or `cfg(not(unix))` branch and save a CI round-trip.
 
       Not a `verify-basic.yml` leg either, and a plain host `cargo check
       --target` is not a cheaper substitute for one: `ocx_oci` pulls
@@ -636,9 +635,9 @@ tasks:
     summary: |
       Runs `cargo xwin build --release` for x86_64-pc-windows-msvc and
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
-      Mirrors the CI cross-compile (verify-deep.yml) byte-for-byte modulo
-      the Docker-from-host scaffolding. Produces
-      target/xwin/<triple>/release/ocx.exe. Shares caches
+      Not the CI cross-build: cross.yml runs Bazel's gnullvm one
+      (`task cross:build`), and the release ships the cargo-dist MSVC zips.
+      Produces target/xwin/<triple>/release/ocx.exe. Shares caches
       with check:windows under .cache/xwin/.
     cmds:
       - task: xwin-build-x86:exec
@@ -699,7 +698,8 @@ tasks:
       `bazel:test:unit` is the only unit-test run in `task verify`, and its
       `rust_test` targets `--skip` testcases that walk `crates/*/src` of
       crates they do not depend on or need a process of their own. Without this
-      step those ran on verify-deep's macOS and Windows legs alone.
+      step those ran nowhere: the macOS and Windows legs only execute the
+      Linux-built bundle (adr_bazel_rules_rs_migration.md, Consequences).
 
       scripts/bazel_skipped_tests.py derives the list from the `--skip=` args
       of every crates/*/BUILD.bazel and maps each to its cargo package and test
@@ -857,13 +857,12 @@ tasks:
       platform" — `platforms: [linux]`, the guard `test:floor` and
       `test:ceiling` already carry because cfg-gated tests make the counts
       platform-dependent. The gap is real and named rather than papered over:
-      `verify-deep.yml`'s `Build & Unit Test` matrix runs **raw**
-      `cargo nextest run --workspace --target=… --profile ci --locked` on
-      Linux, macOS and Windows, not through `task`, so this gate never judges
-      the macOS or Windows legs; `build-windows-shims.yml` runs three crates
-      the same way. Extending the gate there would be worse than the gap: deep
-      is moving to manual dispatch, so a copy of this step living on it would
-      be a green nobody can tell from one that never ran.
+      deep-repo.yml's `Unit Test` legs run the cross-built bundle on macOS and
+      Windows through `task cross:test:run`, so this gate never judges them;
+      `build-windows-shims.yml` runs three crates through raw
+      `cargo nextest`. Extending the gate there would be worse than the gap:
+      deep runs nightly and on dispatch, not on every change, so a copy of this
+      step living on it would be a green nobody can tell from one that never ran.
 
       A unit test is a function call with its dependencies faked; one that
       takes a second is waiting on something real — a lock timeout, a retry
