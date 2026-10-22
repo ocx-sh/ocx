@@ -7,11 +7,11 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-22
-- **Active phase:** 1 — caching: P1 landed, awaiting G1 (S1/S2 with the meta-orchestrator)
-- **Step:** P1 landed, awaiting G1
+- **Active phase:** 1 — caching: G1 done (S1/S2 with the meta-orchestrator)
+- **Step:** G1 done: D13=B (provisional: the cache server refused every upload, so run 2 was cold); next W2 A0
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-22 (after a569b8113: ci(bazel): the acceptance no-upload flag follows the target list)
-- **Next:** G1 (meta: push P1, verify-deep ×2, C-005, D-CROSS); then /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0
+- **Last update:** 2026-10-22 (after 42d7b3370: chore(hex): P1 landed on plan_pr637_round2, awaiting G1; G1 measurements recorded)
+- **Next:** /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0 (W2); before A4 builds the cross variant, re-dispatch verify-deep ×2 once the cache volume is freed and re-apply D13 to run 2 (§ Schedule log, G1)
 
 ---
 
@@ -580,3 +580,48 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
   - Left stale, out of P1: `scripts/bazel_doctor.py:784` and `.claude/skills/init-bazel-config/SKILL.md:134` still set
     the org secret `BAZEL_CACHE_READ_AUTH` (it may still serve `rules_ocx`); vendored `bazel-adopt` / `bazel-quality.md`
     text follows I1's `grim update`.
+- 2026-10-22 — **G1 executed (C-005, D13).** Runs on `42d7b3370`: verify-deep
+  [run 1](https://github.com/ocx-sh/ocx/actions/runs/39693735688) (first after P1) and
+  [run 2](https://github.com/ocx-sh/ocx/actions/runs/39697641072) (repeat), the push's
+  [basic run](https://github.com/ocx-sh/ocx/actions/runs/39693729788). Pre-P1 baseline on `4c6cfa68a`: verify-deep
+  [39533123731](https://github.com/ocx-sh/ocx/actions/runs/39533123731), basic
+  [39533129113](https://github.com/ocx-sh/ocx/actions/runs/39533129113). Wall = `startedAt`→`completedAt` per job.
+  Executed = `processwrapper-sandbox` actions of the job's first Bazel invocation (`INFO: N processes`; the later
+  invocations are local action-cache re-runs). Ratio = remote hits ÷ (hits + executed).
+
+  | Job | pre-P1 | run 1 | run 2 | executed | remote hits (run 2) | ratio | upload HTTP 500, run 1 / run 2 |
+  |---|---|---|---|---|---|---|---|
+  | Cross aarch64-apple-darwin | 22:45 | 28:39 | 20:08 | 1630 | 0 | 0% | 12843 / 12848 |
+  | Cross aarch64-pc-windows-gnullvm | 18:53 | 19:22 | 18:23 | 3243 | 0 | 0% | 20314 / 20321 |
+  | Cross aarch64-unknown-linux-gnu | 16:42 | 13:06 | 14:05 | 1754 | 0 | 0% | 14442 / 14442 |
+  | Cross aarch64-unknown-linux-musl | 17:21 | 18:03 | 17:08 | 3084 | 0 | 0% | 20368 / 20369 |
+  | Cross x86_64-apple-darwin | 12:24 | 13:11 | 13:31 | 1521 | 0 | 0% | 11810 / 11810 |
+  | Cross x86_64-pc-windows-gnullvm | 22:57 | 30:05 | 31:15 | 3730 | 0 | 0% | 22879 / 22904 |
+  | Cross x86_64-unknown-linux-gnu | 15:53 | 17:26 | 13:12 | 1645 | 0 | 0% | 14029 / 14032 |
+  | Cross x86_64-unknown-linux-musl | 13:12 | 17:49 | 13:10 | 2975 | 0 | 0% | 19932 / 19931 |
+  | Build (Linux unit tests, schema; also builds the acceptance binaries) | 10:09 | 11:39 | 17:33 | 2266 | 0 | 0% | 18539 / 18123 |
+  | Smoke (Linux), basic run | 18:45 | 14:24 | n/a (one run) | 2126 | 0 | 0% | 26346 |
+  | Satellite Verify / Contract | 1:37 / 8:42 | 1:40 / 4:08 | 3:44 / 4:09 | no Bazel | n/a | n/a | n/a |
+
+  Whole deep run, created→last job: 28:19 pre-P1, 36:03 run 1, 36:45 run 2.
+  - **Zero remote hits in every Bazel job of every run**; executed counts are identical across pre-P1, run 1 and
+    run 2, so run 2 on the same SHA was a cold build. Acceptance shards and the macOS/Windows unit and smoke legs run
+    no Bazel (they download the Build job's binaries), so "unit" and "acceptance build" are the one Build row.
+  - **Auth is fixed.** Pre-P1 every cross job logged 1–3 HTTP 401 (rc written, never passed to the cross task calls:
+    C-001). Run 1 and run 2: 0 × 401, 0 × 403 on every Bazel lane; each wrote its rc (`Cache mode: write`, rc mode 600,
+    helper 700).
+  - **Writes are attempted, authenticated, and refused by the server.** Every upload gets HTTP 500 "no space left on
+    device" from `bazel-cache.ocx.sh` (its CAS volume is full): 155156 responses in run 1, 154780 in run 2 across the
+    nine Bazel jobs. Main push `56155691e` (2026-10-20 16:17, [basic](https://github.com/ocx-sh/ocx/actions/runs/39456163806)
+    Smoke (Linux)) already showed 768 such responses beside 583 remote hits of 1479 non-internal actions, so the volume
+    was full before P1 and still served old entries. P1's rc, upload grant and lane policy are exercised; nothing persists.
+  - **A refusing cache costs time.** Build job Bazel elapsed 564 s pre-P1, 651 s run 1, 940 s run 2 (177 upload
+    timeouts under `--remote_timeout=30s` in run 2); job wall 10:09 → 11:39 → 17:33.
+  - D26: the analysis-only Bazel calls in Smoke (Linux) took 0.5–1.9 s each, one server start per job; the `ponytail:`
+    ceiling holds, nothing to fix.
+  - **D13 = B.** Slowest warm cross job 31:15 (`x86_64-pc-windows-gnullvm`), fastest 13:10 (`x86_64-unknown-linux-musl`);
+    all eight exceed 3:00, so cross lives only in `deep-repo.yml` and basic builds Linux only (A4 builds variant B).
+    **Provisional:** run 2 was cold, so 31:15 is a cold number. The Bazel build is ~93% of a cross job's wall
+    (740 s of 792 s on `x86_64-unknown-linux-gnu`); after the owner frees the cache volume, re-dispatch verify-deep
+    twice and re-apply D13 to the second run before A4. B stands unless the slowest warm cross job then drops to 3:00 or less.
+  - #638 stays open until a run shows remote hits above zero on a cross job.
