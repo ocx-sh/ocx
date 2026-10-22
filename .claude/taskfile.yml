@@ -77,7 +77,11 @@ tasks:
     # after it are the same kind: the published hex bundle links `../DESIGN.md`
     # (not shipped), `hex-execute/overlays.md` (deleted) and two anchors its
     # own vendored hex-core does not carry yet. Drop all four when `grim update`
-    # brings a hex release whose skills link-check clean.
+    # brings a hex release whose skills link-check clean. The fifth is the
+    # published rust-cargo rule's link to `.agents/research/rust-ecosystem.md`,
+    # a file in the lore repository that resolves nowhere here (the repo used to
+    # carry a local plain-text edit; `grim:check` forbids that, so the link is
+    # excluded instead). Drop it when lore fixes the link.
     dir: '{{.TASKFILE_DIR}}'
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
@@ -92,6 +96,7 @@ tasks:
         --exclude 'hex-execute/overlays\.md#review-axis$'
         --exclude 'hex-core/references/worktree\.md#pipeline-worktree-mechanics$'
         --exclude 'hex-core/references/loop\.md#review-calls$'
+        --exclude '\.claude/\.agents/research/rust-ecosystem\.md$'
         --format json --output {{.REPORTS_DIR}}/lint-links.json
         ../AGENTS.md .
     sources: *claude-sources
