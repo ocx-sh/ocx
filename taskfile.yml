@@ -17,10 +17,17 @@ vars:
   #
   # `printf '%s' "<value>"`, never `printf -- '--bazelrc=%s'`: go-task's shell
   # (mvdan/sh) takes `--` as the format and silently drops the credential.
+  # Also empty when `.bazelrc.user` already names the file: the setup action's
+  # trusted mode imports it from there, and passing `--bazelrc=` for the same
+  # file reads it twice. The check is on the user rc's text, never on whether
+  # that file exists, so a developer's own `.bazelrc.user` changes nothing.
+  #
   # ponytail: unquoted at the call site; `$RUNNER_TEMP` has no space on a GitHub
   # runner. A path with one needs the flag built inside the `cmd:` body.
   CACHE_RC:
-    sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    sh: |-
+      rc="${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc"
+      test -f "$rc" && { test ! -f '{{.ROOT_DIR}}/.bazelrc.user' || ! grep -qF "$rc" '{{.ROOT_DIR}}/.bazelrc.user'; } && printf '%s' "--bazelrc=$rc" || true
 
 includes:
   bazel: ./taskfiles/bazel.taskfile.yml
@@ -83,6 +90,16 @@ tasks:
         cmd: git commit --allow-empty -m "Checkpoint"
       - cmd: git add .
       - cmd: git commit --amend --no-edit --allow-empty
+
+  # The commit-msg gate. The template's `hooks:commit-msg` delegates here when this task exists, instead of its
+  # own subject regex, which refuses the `Checkpoint` and `release:` subjects this repository commits.
+  # CLI_ARGS is the message file prek appends, already shell-quoted by Task: quoting it again breaks a path
+  # with a space. `hooks:pre-commit` stays undefined on purpose: lint and format live behind the verify mark.
+  hooks:repo-commit-msg:
+    desc: 'The commit-msg gate: conventional subject, the Checkpoint and release: carve-outs, a fresh verify mark'
+    silent: true
+    cmds:
+      - python3 scripts/commit_gate.py --check-message {{.CLI_ARGS}}
 
   check:
     # `--locked` makes a hand-merged Cargo.lock fail here, at the next run,

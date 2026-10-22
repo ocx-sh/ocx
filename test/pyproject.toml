@@ -52,6 +52,12 @@ markers = [
     # `task test:rows:check` reds a command file no marker, [verbs] entry or
     # [security] glob names. Only a module-level `pytestmark` binding counts.
     "command(*keys): the crates/ocx_cli/src/command/ files whose edit selects this module in `task verify:scoped` (see test/scoped_rows.toml)",
+    # The deep lint tier (`task test:lint:deep`, run by `task ci:deep`): lint
+    # tests that read repository history (release tags, the committed contract
+    # baseline), which a checkout without tags answers wrongly. `task
+    # test:lint:structure` deselects them with `-m "not deep"`; each tier keeps
+    # its own collected floor, so neither can shrink unseen.
+    "deep: lint-tier test that reads repository history (release tags); selected by `task test:lint:deep`, deselected by `task test:lint:structure`",
 ]
 
 # Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by

@@ -1,10 +1,63 @@
 [extend]
 useDefault = true
 
-# Allowlist false positives by path or regex here, never by .gitleaksignore fingerprints.
-# gitleaks rejects an allowlist with no check, so the placeholder regex below matches nothing real;
-# replace it with your first real entry.
-[allowlist]
-description = "Repo-local allowlist for gitleaks false positives"
-regexes = ['''^ocx-baseline-allowlist-placeholder$''']
-paths = []
+# Every entry below names a rule and the paths it covers, never a value: `task secrets` scans the whole
+# history, so a path stays listed after the file is deleted, and a value in this file would be a copy of
+# what it excuses. Each entry was read finding by finding; none is a live credential.
+
+[[allowlists]]
+description = "Unit-test fixtures: placeholder session keys and a sentinel CI token that tests assert never leaks"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^crates/ocx_cli/src/api/data/shell_state\.rs$''',
+  '''^crates/ocx_cli/src/command/shell_state\.rs$''',
+  '''^crates/ocx_cli/src/command/self_group/activate\.rs$''',
+  '''^crates/ocx_lib/src/activation\.rs$''',
+  '''^crates/ocx_shell/src/ci\.rs$''',
+]
+
+[[allowlists]]
+description = "Golden provenance fixture: blob digests in a localhost registry reference"
+targetRules = ["generic-api-key"]
+paths = ['''^test/tests/fixtures/golden/provenance\.json$''']
+
+[[allowlists]]
+description = "bazel-cache-rc self-test: the fake credential its own header comment declares"
+targetRules = ["generic-api-key"]
+paths = ['''^\.github/actions/bazel-cache-rc/selftest\.sh$''']
+
+[[allowlists]]
+description = "Research note on the local Sigstore stack: a container image reference and a placeholder client secret"
+targetRules = ["generic-api-key", "curl-auth-user"]
+paths = ['''^\.claude/artifacts/research_sigstore_selfhost_stack\.md$''']
+
+[[allowlists]]
+description = "Local Sigstore test stack keys and the golden cosign key: committed on purpose, test/sigstore/README.md says so"
+targetRules = ["private-key"]
+paths = [
+  '''^test/sigstore/keys/''',
+  '''^test/tests/fixtures/golden/keys/cosign\.key$''',
+]
+
+[[allowlists]]
+description = "Logging test: a PEM header around a body its comment says is deliberately not a key"
+targetRules = ["private-key"]
+paths = ['''^test/tests/test_logging\.py$''']
+
+[[allowlists]]
+description = "Forge driver tests: sentinel token values, lowercase words joined by dashes rather than random characters"
+targetRules = ["gitlab-pat"]
+paths = [
+  '''^crates/ocx_announce/src/forge/gitlab\.rs$''',
+  '''^crates/ocx_lib/src/forge/gitlab\.rs$''',
+]
+
+[[allowlists]]
+description = "Transcript fixtures in the vendored retro skill tests: a Stripe-shaped string with a 12-character body, too short for a real key"
+targetRules = ["stripe-access-token"]
+paths = ['''^\.(agents|claude|opencode)/skills/hex-retro/scripts/retro\.py$''']
+
+[[allowlists]]
+description = "Hook test: a JWT whose payload decodes to a sub claim of 'user'"
+targetRules = ["jwt", "generic-api-key"]
+paths = ['''^\.claude/tests/test_hooks\.py$''']

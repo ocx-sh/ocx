@@ -3,7 +3,7 @@
 version: '3'
 
 tasks:
-  # Install the two hooks that gate work here, into git's own hooks directory.
+  # Install the hooks that gate work here, into git's own hooks directory.
   # Called by `default` and `verify` because those are the two things everyone
   # working here runs; there is no `task setup` to put it in.
   #
@@ -20,18 +20,24 @@ tasks:
   #   repository tracks its images in LFS, and losing those hooks checks out
   #   pointer files and pushes pointers with no objects.
   #
-  #   `prek install` reads `.pre-commit-config.yaml` and writes the `commit-msg`
-  #   shim. Never `--force`: that deletes a `<hook>.legacy` file, and the whole
-  #   reason prek can share a hooks directory is that it chains one.
+  #   `hooks:install` is the conventions template's: the prek shims for the
+  #   `pre-commit` (staged gitleaks) and `commit-msg` stages declared in the
+  #   template-owned `.pre-commit-config.yaml`. `commit-msg` reaches
+  #   `scripts/commit_gate.py` through the repo-owned `hooks:repo-commit-msg`
+  #   task in the root taskfile.yml. Never `--force`: that deletes a
+  #   `<hook>.legacy` file, and the whole reason prek can share a hooks
+  #   directory is that it chains one.
   #
-  #   `--allow-missing-config` is load-bearing, not tidiness. The hooks
-  #   directory is shared and the path absolute, so the shim also runs in a
+  #   The `prek install` that follows re-writes both shims with
+  #   `--allow-missing-config`, which is load-bearing, not tidiness. The hooks
+  #   directory is shared and the path absolute, so a shim also runs in a
   #   worktree parked on a branch that predates this config — and prek exits 1
   #   with "No `prek.toml` or `.pre-commit-config.yaml` found" there, blocking
-  #   every commit on it (measured). The flag restores exactly what the
-  #   relative `.githooks` gave for free: a tree without the gate files runs no
-  #   gate instead of erroring. The push gate is unaffected either way, being a
-  #   copy in the hooks directory rather than anything read out of the tree.
+  #   every commit on it (measured). The template's own shim lacks the flag; the
+  #   flag restores exactly what the relative `.githooks` gave for free: a tree
+  #   without the gate files runs no gate instead of erroring. The push gate is
+  #   unaffected either way, being a copy in the hooks directory rather than
+  #   anything read out of the tree.
   #
   #   `scripts/pre-push.sh` is copied over LFS's generated `pre-push`, because
   #   it does that delegation itself and the gate has to run before it. It is a
@@ -53,7 +59,7 @@ tasks:
   # Public, not `internal:`: with no `task setup` in this repository, this is
   # the one command that arms a fresh clone, so it belongs in `task --list`.
   hooks:
-    desc: Install the commit and push hooks into git's hooks directory (idempotent)
+    desc: Install the pre-commit, commit-msg and pre-push hooks into git's hooks directory (idempotent)
     vars:
       HOOKS:
         sh: git rev-parse --path-format=absolute --git-common-dir
@@ -61,12 +67,14 @@ tasks:
       # The token, not merely `prek`: a shim armed without it reads as armed
       # while blocking every commit on a branch that lacks the config.
       - grep -q skip-on-missing-config {{.HOOKS}}/hooks/commit-msg
+      - grep -q skip-on-missing-config {{.HOOKS}}/hooks/pre-commit
       - grep -q 'git lfs' {{.HOOKS}}/hooks/post-checkout
       - cmp -s scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
     cmds:
       - git config --local --unset-all core.hooksPath || true
       - git lfs install --local --force
-      - prek install --allow-missing-config
+      - task: :hooks:install
+      - prek install --allow-missing-config --hook-type pre-commit --hook-type commit-msg
       - install -m 0755 scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
 
   # Fast-forward the current branch onto main.
