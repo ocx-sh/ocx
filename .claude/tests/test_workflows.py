@@ -5,22 +5,19 @@ Two shapes the crate split can break without any workflow going red:
 - a `paths:` / `paths-ignore:` entry whose last file moved. The workflow then
   never fires, and a workflow that never fires is a green nobody can tell
   from a pass. Every entry must match at least one tracked file.
-- `verify-deep.yml`'s trigger shape, which is what makes it a manual gate:
-  NO `pull_request` trigger and no job guarding on a `github.event.pull_request`
-  context (a deep run is ≈113 runner-minutes against basic's ≈18, so it is
-  opt-in per branch), `workflow_dispatch` — now the only way a human runs it —
-  and `push` to `main` (the one full run over the tree a rebase-only merge
-  actually landed, DX-16).
-- the merge-queue shape of BOTH tiers — `merge_group` and a
-  `cancel-in-progress` that leaves queue runs alone — since either workflow's
-  checks can be marked required.
+- the deep tier's trigger shape, which is what makes it opt-in: the conventions
+  template's `verify-deep.yml` runs nightly, by `workflow_dispatch`, from the
+  readiness gate (`workflow_call`) and on a pull request only once it carries the
+  `run-deep` label. A push to `main` runs the basic tier alone.
+- the merge-queue shape of the basic tier — `merge_group` and a `cancel-in-progress`
+  that cancels pull-request runs only, so a queue run is never a cancelled check.
 - the shell zoo's checkout and its task graph, which are one contract: that
   job omits `submodules:` on purpose, so a task it runs must not reach
   `:website:schema:default` and through it a cargo build of a workspace whose
   `external/` patch sources are not on disk.
-- the tier partition (D5): `verify-basic.yml` is what a pull request pays
-  for, so it runs on Linux only, and the Windows and macOS unit legs are
-  `verify-deep.yml`'s `build` matrix. A leg re-added to basic is a cost every
+- the tier partition (D5): `verify-basic.yml` and `basic-repo.yml` are what a pull
+  request pays for, so they run on Linux only, and the Windows and macOS unit legs
+  are `deep-repo.yml`'s `unit-native` matrix. A leg re-added to basic is a cost every
   push pays twice; a leg dropped from deep's matrix is a `cfg(windows)` /
   `cfg(target_os = "macos")` arm nothing compiles anywhere.
 
@@ -56,6 +53,7 @@ Run:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -72,49 +70,22 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 VERIFY_DEEP = ROOT / ".github" / "workflows" / "verify-deep.yml"
 VERIFY_BASIC = ROOT / ".github" / "workflows" / "verify-basic.yml"
-# The merge-queue shape belongs to both tiers, not to deep alone.
-TIERS = (VERIFY_BASIC, VERIFY_DEEP)
 # Runner-label prefixes: `ubuntu-latest`, `macos-14`, `windows-2025` all
 # belong to their family, so a version pin never reads as a lost OS.
 OS_FAMILIES = ("ubuntu", "macos", "windows")
 
-# No deep job may condition on a pull request any more: the workflow does not
-# fire on one, so such a guard is either dead text or evidence the trigger came
-# back. The whole `github.event.pull_request` context is the needle, so the
-# former draft guard and any other shape of it read the same.
-PULL_REQUEST_CONTEXT = "github.event.pull_request"
-# Both checks below this point are negative — "`pull_request` is not among the
-# triggers", "no job's `if:` names that context" — and a negative over a
-# collection passes identically when the collection is empty, mis-keyed, or
-# read by a loader that returned nothing. The reader self-test that used to
-# floor this file went with the draft-guard parser it proved, so these two sets
-# are the floor instead: each check asserts what it *saw* before asserting what
-# it did not. They are exact rather than a count, so the failure names the
-# drift. Adding a trigger or a job to the deep tier reds one of them, which is
-# the review it deserves.
-DEEP_TRIGGERS = frozenset({"workflow_dispatch", "workflow_call", "push", "merge_group", "schedule"})
-DEEP_JOBS = frozenset(
-    {
-        "index-conformance-drift",
-        "build",
-        "cross",
-        "unit-native",
-        "acceptance",
-        "acceptance-merge",
-        "acceptance-native",
-        "test-results",
-        "satellite-verify",
-        "satellite-contract",
-    }
-)
-# A cancelled merge-queue run counts as a failed check and drops the entry
-# from the queue, so queue runs are never cancelled; `main` keeps its carve-out.
-MERGE_QUEUE_SAFE_CANCEL = (
-    "${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}"
-)
-# Exact, not "contains the schedule clause": any wider `if:` can keep that
-# clause and still admit no dispatch, which leaves the cross-build unreachable.
-DEEP_BUILD_IF = "github.event_name != 'schedule' || inputs.full"
+# The label a pull request carries to start the deep tier. The template's `pull_request` trigger is
+# `labeled` only, so a push to a labelled pull request does not re-run it.
+RUN_DEEP_LABEL = "run-deep"
+# Both checks that read deep's triggers and jobs are over a collection, and a check over a collection
+# passes identically when the collection is empty, mis-keyed or read by a loader that returned nothing.
+# These sets are the floor: exact rather than a count, so the failure names the drift.
+DEEP_TRIGGERS = frozenset({"workflow_dispatch", "workflow_call", "schedule", "pull_request"})
+DEEP_JOBS = frozenset({"deep", "repo", "nightly-red"})
+# The template's expression cancels a pull-request run and nothing else. A queue run has the event
+# `merge_group` and a push to `main` the event `push`, so neither is ever cancelled — a cancelled
+# merge-queue run is a failed check and drops the entry from the queue.
+CANCEL_ONLY_PULL_REQUESTS = "${{ github.event_name == 'pull_request' }}"
 
 
 def _load(workflow: Path) -> dict:
@@ -184,111 +155,98 @@ def test_path_filters_match_tracked_files(workflow: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C-016: verify-deep.yml is a manual gate that survives the merge queue
+# C-016: the deep tier is opt-in, and the basic tier survives the merge queue
 # ---------------------------------------------------------------------------
 
 
-def test_deep_does_not_run_on_pull_requests() -> None:
+def test_deep_runs_on_a_pull_request_only_when_it_is_labelled() -> None:
     """The deep tier is opt-in, not per-PR.
 
-    A deep run is ≈113 runner-minutes against `verify-basic.yml`'s ≈18, most of
-    it Windows and macOS minutes, and every pull request paid it on every push.
-    Re-adding the trigger is a real decision about cost and about what the
-    basic tier is for — so it reds here rather than arriving in a diff nobody
-    reads. The coverage this gives up is named in subsystem-ci.md.
+    A deep run is the cross-builds plus macOS and Windows minutes, and every pull
+    request used to pay it on every push. The template's one pull-request trigger is
+    `labeled`, and the `run-deep` guard on its jobs (the next test) is what keeps any
+    other label from starting it. Adding `synchronize` or `opened` is a real decision
+    about cost and about what the basic tier is for, so it reds here rather than
+    arriving in a diff nobody reads. The coverage this gives up is named in
+    subsystem-ci.md.
     """
     on = _on(VERIFY_DEEP)
-    assert "pull_request" not in on, (
-        f"verify-deep.yml `on` has {sorted(on)}, including `pull_request` — the deep tier "
-        f"is opt-in per branch (`gh workflow run verify-deep.yml --ref <branch>`), and a "
-        f"pull request pays for the basic tier only. If this is deliberate, this assertion "
-        f"and subsystem-ci.md's 'Verification tiers' table change together"
+    assert on.get("pull_request") == {"types": ["labeled"]}, (
+        f"verify-deep.yml `on.pull_request` is {on.get('pull_request')!r}, expected only "
+        f"`types: [labeled]` — any other type runs the deep tier on every push to every pull request"
     )
-    # The floor: the assertion above is a negative, and an `on:` block this
-    # reader got back empty or under a key it does not know would satisfy it
-    # while proving nothing.
+    # The floor: the assertion above is a negative on every other trigger, and an `on:` block
+    # this reader got back empty or under a key it does not know would satisfy it while proving
+    # nothing.
     assert set(on) == DEEP_TRIGGERS, (
         f"verify-deep.yml `on` is {sorted(on)}, expected exactly {sorted(DEEP_TRIGGERS)} — "
-        f"a trigger gained or lost changes when the deep tier runs, and the `pull_request` "
-        f"assertion above is only evidence if this reader saw the real `on:` block"
+        f"a trigger gained or lost changes when the deep tier runs"
     )
 
 
 def test_deep_is_dispatched_by_hand() -> None:
-    """`workflow_dispatch` is now the load-bearing trigger: with `pull_request`
-    gone it is the only way a branch gets Windows, macOS or full-acceptance
-    coverage before it lands. Lose it and the deep tier runs nowhere but on
-    `main`, after the merge."""
+    """`workflow_dispatch` is how a human runs the deep tier on a branch whose pull
+    request is not open yet. Lose it and the tier runs nightly and on a label only."""
     on = _on(VERIFY_DEEP)
     assert "workflow_dispatch" in on, (
-        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_dispatch` — the deep tier "
-        f"no longer runs per pull request, so this is the only way a human runs it on a "
-        f"branch; without it nothing deep happens until the merge lands on `main`"
+        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_dispatch` — the one way to "
+        f"run the deep tier on a branch before a pull request carries the label"
     )
 
 
-def test_deep_runs_on_every_push_to_main() -> None:
-    """Merges are rebase-only and there is no queue (DX-16): a PR verified at
-    its own head lands on a `main` that moved since, so the push is the one
-    full run over the tree that actually landed."""
+def test_deep_runs_nightly_and_for_the_readiness_gate() -> None:
+    """A push to `main` runs the basic tier alone, so the nightly schedule is the
+    only automatic full run, and `workflow_call` is how the release readiness gate runs
+    the same jobs on a ref it is about to release."""
     on = _on(VERIFY_DEEP)
-    assert "push" in on, (
-        f"verify-deep.yml `on` has {sorted(on)} and no `push` — nothing full-suite runs on "
-        f"`main` after a rebase-only merge (DX-16)"
+    assert "schedule" in on, f"verify-deep.yml `on` has {sorted(on)} and no `schedule` — nothing deep runs unattended"
+    assert "workflow_call" in on, (
+        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_call` — release-readiness.yml cannot call it"
     )
-    branches = (on["push"] or {}).get("branches") or []
-    assert "main" in branches, f"verify-deep.yml `on.push.branches` is {branches}, missing `main`"
 
 
-@pytest.mark.parametrize("workflow", TIERS, ids=lambda workflow: workflow.name)
-def test_each_tier_triggers_in_the_merge_queue(workflow: Path) -> None:
-    """Both tiers, because either one can be marked required: a required check
-    that never runs on the queued merge commit blocks the queue forever, and
-    basic's `merge_group: {}` exists for exactly that."""
-    on = _on(workflow)
+def test_basic_triggers_in_the_merge_queue() -> None:
+    """A required check that never runs on the queued merge commit blocks the queue forever,
+    and `basic-gate` is the one required check."""
+    on = _on(VERIFY_BASIC)
     assert "merge_group" in on, (
-        f"{workflow.name} `on` has {sorted(on)} and no `merge_group` — a required check that "
+        f"verify-basic.yml `on` has {sorted(on)} and no `merge_group` — a required check that "
         f"never runs on the queued merge commit blocks the queue forever"
     )
 
 
-def test_no_deep_job_guards_on_a_pull_request() -> None:
-    """The other half of the trigger removal, and the half a diff hides.
+def test_every_deep_job_starts_only_on_the_label_or_the_schedule() -> None:
+    """The other half of the trigger shape, and the half a diff hides.
 
-    Every job used to carry `github.event_name != 'pull_request' ||
-    github.event.pull_request.draft == false`. With no `pull_request` trigger
-    that term is always true — dead text that reads like a live gate, and the
-    shape someone restoring the trigger would find already in place. The needle
-    is the whole `github.event.pull_request` context rather than that one
-    expression, so a rewritten guard reds too.
+    A pull request event reaches every job of the workflow, so a job with no guard runs
+    for *any* label a maintainer adds. Each job either names the `run-deep` label or is
+    the scheduled `nightly-red` reporter.
     """
     jobs = _load(VERIFY_DEEP)["jobs"]
-    # The floor, before the negative below: a job set this reader got back
-    # empty — or six jobs it read past because the loader returned them under
-    # some other shape — sweeps clean and says nothing.
+    # The floor, before the negative below: a job set this reader got back empty — or one it
+    # read past because the loader returned it under some other shape — sweeps clean and says
+    # nothing.
     assert set(jobs) == DEEP_JOBS, (
         f"verify-deep.yml jobs are {sorted(jobs)}, expected exactly {sorted(DEEP_JOBS)} — a "
-        f"job added here must be checked for a pull-request guard by the assertion below, "
-        f"and one removed means this sweep now reads less than it claims to"
+        f"job added here must be checked for a label guard by the assertion below"
     )
-    guarded = {
-        name: job["if"] for name, job in jobs.items() if PULL_REQUEST_CONTEXT in str(job.get("if", ""))
+    unguarded = {
+        name: job.get("if")
+        for name, job in jobs.items()
+        if RUN_DEEP_LABEL not in str(job.get("if", "")) and "'schedule'" not in str(job.get("if", ""))
     }
-    assert not guarded, (
-        f"verify-deep.yml jobs whose `if:` reads `{PULL_REQUEST_CONTEXT}`: {guarded}. The "
-        f"workflow has no `pull_request` trigger, so that context is never populated: the "
-        f"term is dead text if the trigger is still gone, and a re-added trigger belongs "
-        f"in `test_deep_does_not_run_on_pull_requests` above, not here"
+    assert not unguarded, (
+        f"verify-deep.yml jobs whose `if:` names neither the `{RUN_DEEP_LABEL}` label nor the "
+        f"schedule: {unguarded}. A pull request `labeled` event with any other label would run them"
     )
 
 
-@pytest.mark.parametrize("workflow", TIERS, ids=lambda workflow: workflow.name)
-def test_each_tier_cancel_in_progress_spares_the_merge_queue(workflow: Path) -> None:
-    value = _load(workflow)["concurrency"]["cancel-in-progress"]
-    assert value == MERGE_QUEUE_SAFE_CANCEL, (
-        f"{workflow.name} `concurrency.cancel-in-progress` is `{value}`, expected "
-        f"`{MERGE_QUEUE_SAFE_CANCEL}` — a cancelled merge-queue run is a failed check and "
-        f"drops the entry from the queue"
+def test_basic_cancel_in_progress_cancels_pull_requests_only() -> None:
+    value = _load(VERIFY_BASIC)["concurrency"]["cancel-in-progress"]
+    assert value == CANCEL_ONLY_PULL_REQUESTS, (
+        f"verify-basic.yml `concurrency.cancel-in-progress` is `{value}`, expected "
+        f"`{CANCEL_ONLY_PULL_REQUESTS}` — a cancelled merge-queue run is a failed check and "
+        f"drops the entry from the queue, and a cancelled run on `main` leaves a merge unverified"
     )
 
 
@@ -310,11 +268,89 @@ def _disarmed(job: dict, step: dict) -> list[str]:
     return reasons
 
 
+# ---------------------------------------------------------------------------
+# What a `task <name>` step runs
+# ---------------------------------------------------------------------------
+#
+# The template's jobs run `task ci:lint`, `task ci:test`, `task ci:build`, `task ci:docs` and
+# `task ci:deep`; the tasks each tier holds are listed in `taskfiles/ci.taskfile.yml`. A test
+# that asks "does CI run X" therefore reads the task graph, not the workflow text.
+
+
+@functools.cache
+def _task_table() -> dict[str, tuple[dict, str]]:
+    """Every task of the root taskfile and its includes, `{qualified name: (body, namespace)}`.
+
+    A task of an included taskfile is qualified by the include's key, so `:rust:build` and
+    `rust:build` are one entry. Hidden tasks (`.ensure-cargo-tool`) are in it. An include that
+    does not exist raises: a reader that silently skipped it would read a smaller graph.
+    """
+    table: dict[str, tuple[dict, str]] = {}
+
+    def read(path: Path, namespace: str) -> None:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name, body in (document.get("tasks") or {}).items():
+            table[f"{namespace}{name}"] = (body if isinstance(body, dict) else {}, namespace)
+        for key, include in (document.get("includes") or {}).items():
+            target = include if isinstance(include, str) else include["taskfile"]
+            read((path.parent / target).resolve(), f"{namespace}{key}:")
+
+    read(ROOT / "taskfile.yml", "")
+    return table
+
+
+@functools.cache
+def _task_reach(name: str) -> frozenset[str]:
+    """Every task `task <name>` can run: itself, its `deps:` and the `task:` entries of its `cmds:`.
+
+    Transitive, and an over-approximation: a `task:` entry guarded by `if:` or `platforms:`
+    counts as reached. That is the right side to err on for a reader that names a task the
+    tier lists, and the wrong one for "this ran on this runner" — which no static read proves.
+    """
+    table = _task_table()
+    seen: set[str] = set()
+    stack = [name]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        body, namespace = table.get(current, ({}, ""))
+        for key in ("deps", "cmds"):
+            for entry in body.get(key) or []:
+                if isinstance(entry, dict) and "task" in entry:
+                    target = str(entry["task"])
+                    stack.append(target[1:] if target.startswith(":") else f"{namespace}{target}")
+    return frozenset(seen)
+
+
+def _step_reaches(step: dict, task: str) -> bool:
+    """Whether the step's `run:` is `task <alias-or-task>` and `<task>` is among what that reaches."""
+    found = re.match(r"task ([\w:.-]+)(?![\w:-])", str(step.get("run", "")).strip())
+    return bool(found) and task in _task_reach(found.group(1))
+
+
+@pytest.mark.parametrize(
+    ("alias", "task", "reached"),
+    [
+        pytest.param("ci:lint", "claude:tests", True, id="lint-reaches-the-claude-tests"),
+        pytest.param("ci:lint", "bazel:build:drift", True, id="lint-reaches-a-bazel-gate"),
+        pytest.param("ci:build", "rust:build", True, id="build-reaches-the-build"),
+        pytest.param("ci:build", "claude:tests", False, id="build-does-not-reach-the-claude-tests"),
+        pytest.param("ci:docs", "bazel:test:unit", False, id="docs-does-not-reach-the-unit-tests"),
+    ],
+)
+def test_the_task_reader_reaches_through_an_alias_and_stops_at_its_edge(alias: str, task: str, reached: bool) -> None:
+    """The reader's own red and green: a graph read as empty reaches nothing, one read as
+    everything reaches everything, and each answers the sweeps below the same way."""
+    assert (task in _task_reach(alias)) is reached, f"`task {alias}` reaches {sorted(_task_reach(alias))}"
+
+
 def test_the_claude_structural_tests_run_in_ci() -> None:
-    """This file included. No workflow invoked `task claude:tests`, so every
-    shape asserted here — the D5 partition below among them — held on a
-    developer's machine and nowhere else: a leg deleted from deep's matrix
-    was green in CI.
+    """This file included. `claude:tests` is a member of `ci:lint`, which the template's
+    `lint` job runs — and a workflow that ran neither would leave every shape asserted here,
+    the D5 partition below among them, true on a developer's machine and nowhere else: a leg
+    deleted from deep's matrix was green in CI.
 
     Presence is half of it: a step whose failure is tolerated or skipped is
     the same green as no step. One carrier must run unconditionally and be
@@ -325,14 +361,15 @@ def test_the_claude_structural_tests_run_in_ci() -> None:
         for workflow in WORKFLOWS
         for name, job in (_load(workflow).get("jobs") or {}).items()
         for step in (job.get("steps") or [])
-        if "task claude:tests" in str(step.get("run", ""))
+        if _step_reaches(step, "claude:tests")
     ]
     assert carriers, (
-        "no workflow step runs `task claude:tests` — the structural tests of `.claude/` "
-        "are then a gate nothing in CI executes, and this assertion is the one that says so"
+        "no workflow step runs `task claude:tests` or a `ci:*` alias that reaches it — the "
+        "structural tests of `.claude/` are then a gate nothing in CI executes, and this "
+        "assertion is the one that says so"
     )
     assert any(not reasons for _, _, reasons in carriers), (
-        f"every workflow step running `task claude:tests` is disarmed: "
+        f"every workflow step reaching `task claude:tests` is disarmed: "
         f"{[(workflow, job, reasons) for workflow, job, reasons in carriers]} — a tolerated or "
         f"skipped failure is the same green as no step at all, so one carrier must be "
         f"unconditional and able to fail its job"
@@ -372,7 +409,31 @@ _JOB_CLAIM = re.compile(r"`([a-z0-9-]+\.yml)`(?:'s)?\s+`([A-Za-z0-9_-]+)`\s+(?:j
 # lacks is that document's correct content, and this needle cannot tell a
 # deletion record from an assertion of coverage.
 _STALE_JOB_CLAIMS = frozenset(
-    {".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke-windows"}
+    {
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke-windows",
+        # The adoption of the conventions template (plan_pr637_round2.md) retired the repo-written
+        # `verify-basic.yml` `smoke` / `workflow-lint` jobs and `verify-deep.yml` `build` /
+        # `satellite-verify` jobs: the template owns those two files now and the repo-owned jobs
+        # moved to `basic-repo.yml` and `deep-repo.yml`. The records below are dated and quote what
+        # existed when they were written, so each is a deletion record in the sense above. The two
+        # rules at the end are live and name the new homes in no sentence yet; repointing them is
+        # a rule edit outside the workflow files, and each row goes the moment it is made.
+        ".claude/artifacts/adr_bazel_build_adoption.md: verify-basic.yml smoke",
+        ".claude/artifacts/adr_test_speed_tiers.md: verify-basic.yml smoke",
+        ".claude/artifacts/adr_toolchain_activation.md: verify-deep.yml build",
+        ".claude/artifacts/issue_drafts_crate_split_satellites.md: verify-deep.yml satellite-verify",
+        ".claude/artifacts/migration_plan_bazel.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_bazel_build_adoption.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml workflow-lint",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-deep.yml build",
+        ".claude/artifacts/plan_test_speed_tiers.md: verify-basic.yml smoke",
+        ".claude/artifacts/research_test_tier_operability.md: verify-basic.yml smoke",
+        ".claude/artifacts/review_adr_bazel_quality.md: verify-basic.yml smoke",
+        ".claude/artifacts/review_adr_bazel_security.md: verify-basic.yml smoke",
+        ".claude/rules/subsystem-taskfiles.md: verify-basic.yml smoke",
+        ".claude/rules/subsystem-tests.md: verify-basic.yml smoke",
+    }
 )
 
 
@@ -447,22 +508,58 @@ def test_no_claude_document_claims_a_job_its_workflow_lacks() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[str, str]]:
+    """`(jobs read, {<workflow>:<job>: runner label})` for every job of `workflow` not on a literal `ubuntu-*`.
+
+    A job that calls a repo workflow is followed into it with its `with:` as the callee's
+    `inputs`, so `runs-on: ${{ inputs.os }}` is read as the label the caller passed. Any other
+    expression is returned as written, which reads as non-Linux — a shape this file cannot resolve
+    is one it must not wave through.
+    """
+    read = 0
+    off: dict[str, str] = {}
+    for name, job in (_load(workflow).get("jobs") or {}).items():
+        if callee := _local_callee(job):
+            count, found = _off_linux(WORKFLOW_DIR / callee, job.get("with") or {})
+            read, off = read + count, off | found
+            continue
+        read += 1
+        label = re.sub(
+            r"\$\{\{\s*inputs\.([\w-]+)\s*\}\}",
+            lambda match: str((inputs or {}).get(match.group(1), match.group(0))),
+            str(job.get("runs-on", "")),
+        )
+        if not label.startswith("ubuntu-"):
+            off[f"{workflow.name}:{name}"] = label
+    return read, off
+
+
 def test_basic_runs_on_linux_only() -> None:
     """Strict on purpose: a list or a `${{ matrix.* }}` expression cannot be
-    read as Linux here, so only a literal `ubuntu-*` label passes."""
-    jobs = _load(VERIFY_BASIC)["jobs"]
-    assert jobs, "verify-basic.yml has no jobs"
-    off_linux = {
-        name: job.get("runs-on")
-        for name, job in jobs.items()
-        if not str(job.get("runs-on", "")).startswith("ubuntu-")
-    }
-    assert not off_linux, (
-        f"verify-basic.yml jobs not on a literal `ubuntu-*` runner: {off_linux}. Basic is the "
-        f"tier a pull request pays for (D5); Windows and macOS unit coverage is "
-        f"verify-deep.yml's `build` matrix, so a leg here runs the same suite twice on every "
-        f"push to `main`"
+    read as Linux here, so only a literal `ubuntu-*` label passes. The basic tier is the
+    template's `verify-basic.yml` and, through its `repo` job, `basic-repo.yml` and the
+    reusable workflows that calls."""
+    read, off = _off_linux(VERIFY_BASIC)
+    assert read >= 10, f"read {read} basic-tier jobs, expected at least 10 — a caller was not followed"
+    assert not off, (
+        f"basic-tier jobs not on a literal `ubuntu-*` runner: {off}. Basic is the tier a pull request "
+        f"pays for (D5); Windows and macOS unit coverage is deep-repo.yml's `unit-native`, so a leg here "
+        f"runs the same suite twice on every push"
     )
+
+
+def test_the_linux_reader_reds_an_off_linux_job_and_resolves_an_input(tmp_path: Path) -> None:
+    """The reader's red and green: a Windows job is reported, and `${{ inputs.os }}` is the label
+    the caller passed, so the same workflow is Linux for one caller and not for another."""
+    workflow = tmp_path / "w.yml"
+    workflow.write_text(
+        "on: {workflow_call: {}}\njobs:\n  a: {runs-on: windows-latest}\n  b: {runs-on: '${{ inputs.os }}'}\n",
+        encoding="utf-8",
+    )
+    read, off = _off_linux(workflow, {"os": "macos-latest"})
+    assert (read, set(off)) == (2, {"w.yml:a", "w.yml:b"}), off
+    read, off = _off_linux(workflow, {"os": "ubuntu-24.04"})
+    assert (read, set(off)) == (2, {"w.yml:a"}), off
 
 
 def _runner_labels(job: dict) -> list[str]:
@@ -485,26 +582,19 @@ _BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolc
 NATIVE_DEEP_JOBS = frozenset({"unit-native", "acceptance-native"})
 
 
-def test_deep_build_job_is_the_one_linux_compile() -> None:
-    """The `build` job's `if:` admits a dispatch, it runs on Linux, and the
-    Linux unit run is skipped on a push to `main`, where `verify-basic.yml`'s
-    `smoke` job already ran the identical `bazel:test:unit`."""
-    build = _load(VERIFY_DEEP)["jobs"]["build"]
-    assert build.get("if") == DEEP_BUILD_IF, (
-        f"verify-deep.yml `build.if` is `{build.get('if')}`, expected `{DEEP_BUILD_IF}` — any "
-        f"other shape can keep the schedule clause and still admit no dispatch, which leaves "
-        f"a branch with no cross-build and so no Windows/macOS coverage at all (basic has "
-        f"none, D5, and no pull request fires this workflow)"
+def test_the_cross_workflow_is_the_one_linux_compile() -> None:
+    """Every binary the deep tier tests is compiled on one Linux host, in `cross.yml`.
+
+    The macOS and Windows legs download what that workflow built (the next test holds them to
+    it), so a second compile site is a second toolchain to drift.
+    """
+    cross = _load(CROSS)["jobs"]["cross"]
+    assert cross.get("runs-on") == "ubuntu-latest", (
+        f"cross.yml `cross.runs-on` is `{cross.get('runs-on')}` — every binary in the deep tier is "
+        f"compiled on one Linux host"
     )
-    assert build.get("runs-on") == "ubuntu-latest", (
-        f"verify-deep.yml `build.runs-on` is `{build.get('runs-on')}` — every binary in this "
-        f"workflow is compiled on one Linux host"
-    )
-    [unit] = [step for step in build["steps"] if str(step.get("run", "")).strip() == "task bazel:test:unit"]
-    assert unit.get("if") == "github.event_name != 'push'", (
-        f"verify-deep.yml `build` unit step has `if: {unit.get('if')}` — on a push to `main` "
-        f"`verify-basic.yml` runs the same `bazel:test:unit` on the same tree, so the step must "
-        f"be skipped there and run on every other trigger"
+    assert any(str(step.get("run", "")).strip().startswith("task cross:build") for step in cross["steps"]), (
+        "cross.yml `cross` never runs `task cross:build`"
     )
 
 
@@ -514,22 +604,23 @@ def test_deep_cross_matrix_is_every_supported_target() -> None:
     vars_ = _load(ROOT / "taskfiles" / "cross.taskfile.yml")["vars"]
     targets = vars_["TARGETS"].split()
     assert len(targets) >= 8, f"read {targets} from cross.taskfile.yml TARGETS"
-    matrix = _load(VERIFY_DEEP)["jobs"]["cross"]["strategy"]["matrix"]
+    matrix = _load(CROSS)["jobs"]["cross"]["strategy"]["matrix"]
     assert sorted(matrix["target"]) == sorted(targets), (
-        f"verify-deep.yml `cross` matrix is {sorted(matrix['target'])}, "
+        f"cross.yml `cross` matrix is {sorted(matrix['target'])}, "
         f"`task cross:targets` is {sorted(targets)}"
     )
 
 
 def test_deep_non_linux_jobs_only_download_and_execute() -> None:
-    """Every non-ubuntu job of verify-deep contains no build tooling.
+    """Every non-ubuntu job of deep-repo.yml contains no build tooling.
 
-    All compilation happens on the Linux `build` and `cross` jobs; a macOS or Windows
-    runner that grows a `cargo`, `bazel` or Rust-toolchain step is paying
-    10x-minute rates for a second compile and reintroducing the toolchain
-    drift the cross-build removed.
+    All compilation happens in `cross.yml`; a macOS or Windows runner that grows a
+    `cargo`, `bazel` or Rust-toolchain step is paying 10x-minute rates for a second compile and
+    reintroducing the toolchain drift the cross-build removed. A job that calls a reusable
+    workflow has no runner of its own and is read in that workflow (the shell activation matrix
+    is `shell-activation-deep.yml`'s, and installs what it tests).
     """
-    jobs = _load(VERIFY_DEEP)["jobs"]
+    jobs = {name: job for name, job in _repo_jobs(DEEP_REPO).items() if "uses" not in job}
     native = {
         name: job
         for name, job in jobs.items()
@@ -538,48 +629,45 @@ def test_deep_non_linux_jobs_only_download_and_execute() -> None:
     # The floor, before the negative below: a reader that found no native job
     # sweeps clean and says nothing.
     assert set(native) == NATIVE_DEEP_JOBS, (
-        f"verify-deep.yml non-Linux jobs are {sorted(native)}, expected exactly "
+        f"deep-repo.yml non-Linux jobs are {sorted(native)}, expected exactly "
         f"{sorted(NATIVE_DEEP_JOBS)}"
     )
     for name, job in native.items():
         labels = _runner_labels(job)
         missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
-        assert not missing, f"verify-deep.yml `{name}` runs on {labels}, no {missing} entry"
-        assert "exclude" not in job["strategy"]["matrix"], f"verify-deep.yml `{name}` matrix has an `exclude`"
+        assert not missing, f"deep-repo.yml `{name}` runs on {labels}, no {missing} entry"
+        assert "exclude" not in job["strategy"]["matrix"], f"deep-repo.yml `{name}` matrix has an `exclude`"
         offending = [
             step.get("name", step.get("uses", step.get("run")))
             for step in job["steps"]
             if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
         ]
         assert not offending, (
-            f"verify-deep.yml `{name}` runs on a non-Linux runner and has build steps {offending} — "
+            f"deep-repo.yml `{name}` runs on a non-Linux runner and has build steps {offending} — "
             f"non-Linux jobs download what `cross` cross-compiled and execute it, nothing more"
         )
 
 
-def test_deep_linux_acceptance_is_four_shards_feeding_a_merge_job() -> None:
+def test_linux_acceptance_is_four_shards_feeding_a_merge_job() -> None:
     """Sharding is only a coverage claim if the floor is judged over the merge."""
-    jobs = _load(VERIFY_DEEP)["jobs"]
-    acceptance, merge = jobs["acceptance"], jobs["acceptance-merge"]
-    assert acceptance["runs-on"] == "ubuntu-latest"
-    assert acceptance["strategy"]["matrix"]["shard"] == [1, 2, 3, 4], (
-        f"verify-deep.yml `acceptance` shards are {acceptance['strategy']['matrix'].get('shard')}, "
-        f"expected [1, 2, 3, 4]"
+    inputs = _workflow_call(ACCEPTANCE)["inputs"]
+    assert inputs["shard-count"]["default"] == 4, f"acceptance.yml `shard-count` defaults to {inputs['shard-count']}"
+    passed = (_repo_job(BASIC_REPO, "acceptance").get("with") or {}).get("shard-count", 4)
+    assert passed == 4, f"basic-repo.yml `acceptance` passes shard-count={passed!r}, expected the default 4"
+    jobs = _repo_jobs(ACCEPTANCE)
+    shard, merge = jobs["shard"], jobs["merge"]
+    assert shard["runs-on"] == "${{ inputs.os }}", f"acceptance.yml `shard.runs-on` is {shard['runs-on']!r}"
+    runs = [str(step.get("run", "")) for step in shard["steps"]]
+    assert 'task test:accept:native SHARD="$SHARD/$SHARD_COUNT"' in runs, (
+        f"acceptance.yml `shard` never runs its shard: {runs}"
     )
-    runs = [str(step.get("run", "")) for step in acceptance["steps"]]
-    assert "task test:accept:native SHARD=${{ matrix.shard }}/4" in runs, (
-        f"verify-deep.yml `acceptance` never runs its shard: {runs}"
-    )
-    needs = merge["needs"]
-    assert (needs if isinstance(needs, list) else [needs]) == ["acceptance"], (
-        f"verify-deep.yml `acceptance-merge` needs {needs}, expected `acceptance`"
-    )
+    assert _needs(merge) == ["shard"], f"acceptance.yml `merge` needs {_needs(merge)}, expected `shard`"
     assert "!cancelled()" in str(merge.get("if", "")), (
-        "verify-deep.yml `acceptance-merge` has no `!cancelled()` — a red shard would skip the merge "
+        "acceptance.yml `merge` has no `!cancelled()` — a red shard would skip the merge "
         "and the floor would never be judged over what did run"
     )
     assert any(str(step.get("run", "")).startswith("task test:accept:floor ") for step in merge["steps"]), (
-        "verify-deep.yml `acceptance-merge` never runs `task test:accept:floor`"
+        "acceptance.yml `merge` never runs `task test:accept:floor`"
     )
 
 
@@ -640,6 +728,10 @@ def test_the_unit_lane_runs_its_floor_parser_and_that_parser_s_self_test() -> No
 
 
 _DURATION_PROOF = "uv run --project test pytest scripts/tests/test_unit_test_duration_gate.py -q"
+#: The proof also runs inside `task scripts:self-test`, whose recipe is `pytest scripts/tests` — the
+#: directory holding that module (asserted below, so a moved module cannot leave this standing).
+_DURATION_PROOF_MODULE = ROOT / "scripts" / "tests" / "test_unit_test_duration_gate.py"
+_SELF_TEST_RUN = "task scripts:self-test"
 
 
 def test_the_duration_budget_is_proved_where_it_runs() -> None:
@@ -659,21 +751,28 @@ def test_the_duration_budget_is_proved_where_it_runs() -> None:
     the second assertion is what keeps this test honest: the self-test must run
     somewhere. Re-adding the budget without its fixtures reds the loop; deleting
     the fixtures reds the floor.
+
+    The proof runs as the explicit command or as a member of `task scripts:self-test`
+    (`basic-repo.yml`'s `scripts-tests` and the template's `ci:deep`), which collects the whole
+    of `scripts/tests`.
     """
+    assert _DURATION_PROOF_MODULE.is_file(), f"{_DURATION_PROOF_MODULE.relative_to(ROOT)} is gone"
     proved: list[str] = []
     for name, document in _documents():
         for job_name, job in (document.get("jobs") or {}).items():
             runs = {str(step.get("run", "")).strip() for step in (job.get("steps") or [])}
-            if _DURATION_PROOF in runs:
+            proves = _DURATION_PROOF in runs or _SELF_TEST_RUN in runs
+            if proves:
                 proved.append(f"{name}:{job_name}")
             if "task rust:test:duration" not in runs:
                 continue
-            assert _DURATION_PROOF in runs, (
+            assert proves, (
                 f"{name}:{job_name} runs `task rust:test:duration` and never "
-                f"`{_DURATION_PROOF}` — the budget parser is then proved nowhere the budget runs"
+                f"`{_DURATION_PROOF}` or `{_SELF_TEST_RUN}` — the budget parser is then proved "
+                f"nowhere the budget runs"
             )
     assert proved, (
-        f"no workflow runs `{_DURATION_PROOF}` — the budget parser's "
+        f"no workflow runs `{_DURATION_PROOF}` or `{_SELF_TEST_RUN}` — the budget parser's "
         "red/red/green fixtures then run nowhere, and the loop above is vacuous"
     )
 
@@ -806,28 +905,17 @@ def test_the_cache_rc_is_read_once_whichever_way_it_arrives(
 # CI runs every step of `.verify:build-test` (B5R-4)
 # ---------------------------------------------------------------------------
 
-#: Phase steps a workflow other than `verify-basic.yml` runs, and the spelling
-#: that file uses. Every row is asserted live below: an exemption whose target
-#: is gone forbids nothing while reading as coverage, so a task dropped from
-#: the phase, or a workflow that stopped running one, reds here.
+#: Phase steps no `ci:*` alias reaches, and the workflow that runs each under the spelling given.
+#: Every row is asserted live below: an exemption whose target is gone forbids nothing while
+#: reading as coverage, so a task dropped from the phase, or a workflow that stopped running one,
+#: reds here.
 _BUILD_TEST_ELSEWHERE = {
     "rust:license:check": ("verify-licenses.yml", "task rust:license:check"),
     "rust:license:deps": ("verify-licenses.yml", "task rust:license:deps"),
     "rust:license:notice:check": ("verify-licenses.yml", "task rust:license:notice:check"),
-    # The deep workflow runs the acceptance suite. It once spelled this
-    # `task test`, the SERIAL pytest entry point, then the Bazel lane (171
-    # cached `sh_test` targets), and is now four pytest shards over the
-    # cross-built binaries (`task test:accept:native`, floored by a merge job).
-    # The local gate still runs the Bazel lane. `verify-basic.yml` is
-    # deliberately not the home for it — that workflow is the fast PR gate and
-    # the acceptance suite is the deep one's long half.
-    "bazel:test:accept": ("verify-deep.yml", "task test:accept:native"),
-    # The testcases the Bazel `rust_test` targets skip. The deep workflow's
-    # macOS and Windows legs run the cross-built unit-test bundle, which is
-    # expected to carry these (the old legs ran the whole workspace under
-    # nextest) — where the uncovered ocx_util `pub` and the spawn outside
-    # launch that added this step to `task verify` went red.
-    "rust:test:bazel-skipped": ("verify-deep.yml", "task cross:test:run"),
+    # The acceptance suite is `acceptance.yml`'s: four pytest shards over the rebuilt binaries
+    # (`task test:accept:native`), floored by a merge job. The local gate still runs the Bazel lane.
+    "bazel:test:accept": ("acceptance.yml", "task test:accept:native"),
 }
 
 
@@ -850,11 +938,12 @@ def _runs(workflow: str, command: str) -> bool:
     """Whether any job of `workflow` runs `command` in a way that can fail it.
 
     Matched on the step's own `run:`, prefix-anchored so a task is not found
-    inside a longer task's name. A step tolerated by `continue-on-error` is
+    inside a longer task's name, or on a `task ci:<tier>` step whose tier reaches the task
+    (`_step_reaches`). A step tolerated by `continue-on-error` is
     not coverage — that green cannot be told from no step at all — unless it
     carries an `id` a later step of the same job reads, which is section 3 of
-    subsystem-ci.md's deliberate shape: `verify-basic.yml`'s lint steps never
-    block the test results and the job's last step exits 1 on their outcomes.
+    subsystem-ci.md's deliberate shape: a lint step never blocks the test results
+    and the job's last step exits 1 on their outcomes.
 
     `if:` is deliberately not weighed here. A trigger or platform condition
     is scheduling, not disarming, and which events fire which workflow is
@@ -866,7 +955,8 @@ def _runs(workflow: str, command: str) -> bool:
             continue
         steps = job.get("steps") or []
         for index, step in enumerate(steps):
-            if not re.match(rf"{re.escape(command)}(?![\w:-])", str(step.get("run", "")).strip()):
+            literal = re.match(rf"{re.escape(command)}(?![\w:-])", str(step.get("run", "")).strip())
+            if not (literal or _step_reaches(step, command.removeprefix("task "))):
                 continue
             if step.get("continue-on-error", False) is False:
                 return True
@@ -882,14 +972,13 @@ def _runs(workflow: str, command: str) -> bool:
 def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
     """A step of the full local gate that no workflow runs is a gate CI skips.
 
-    `verify-basic.yml` re-lists `.verify:build-test`'s steps by hand, and the
-    since-deleted `rust:test:doc` (the doctests now run as `rust_doc_test`
-    targets inside `bazel:test:unit`) was added to the phase and not to the
-    file: it appeared in none of the workflows, in no spelling, so CI ran zero
-    doctests while every local `task verify` ran them. That is DX-5/C-008's
-    pattern — a gate outside the full gate is a gate nobody runs — and a
-    hand-kept second list is how it recurs, so the two are held together here
-    instead.
+    The template's `lint`, `test`, `build` and `docs` jobs run `task ci:lint`, `ci:test`,
+    `ci:build` and `ci:docs`, so a phase step is covered when `verify-basic.yml` runs a tier
+    that reaches it. The since-deleted `rust:test:doc` was added to the phase and not to the
+    workflow: it appeared in none of them, in no spelling, so CI ran zero doctests while every
+    local `task verify` ran them. That is DX-5/C-008's pattern — a gate outside the full gate is
+    a gate nobody runs — and a hand-kept second list is how it recurs, so the two are held
+    together here instead.
     """
     if task in _BUILD_TEST_ELSEWHERE:
         workflow, command = _BUILD_TEST_ELSEWHERE[task]
@@ -900,9 +989,9 @@ def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
         )
         return
     assert _runs("verify-basic.yml", f"task {task}"), (
-        f"`.verify:build-test` runs `{task}` and verify-basic.yml does not — CI would skip it "
-        f"entirely. Add the step, or add a `_BUILD_TEST_ELSEWHERE` row naming the workflow that "
-        f"runs it (the row is asserted live)"
+        f"`.verify:build-test` runs `{task}` and verify-basic.yml reaches it through no `ci:*` tier "
+        f"— CI would skip it entirely. Add it to a tier in taskfiles/ci.taskfile.yml, or add a "
+        f"`_BUILD_TEST_ELSEWHERE` row naming the workflow that runs it (the row is asserted live)"
     )
 
 
@@ -1155,14 +1244,14 @@ BAZEL_LANE_FLOOR = 11
 #: Detected lanes that get no cache credential (least privilege), with the reason each
 #: reaches no Bazel. A row whose job is no longer a detected lane is a finding.
 LANE_EXCLUSIONS = {
-    "verify-basic.yml:workflow-lint": "actionlint and the .claude pytest suite; no Bazel call",
-    "verify-basic.yml:smoke-acceptance": "pytest on the ocx-binary artifact; CI sets SKIP_BUILD, "
+    "basic-repo.yml:smoke-acceptance": "pytest on the ocx-binary artifact; CI sets SKIP_BUILD, "
     "so test:.build-binaries is skipped",
-    "verify-deep.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
-    "verify-deep.yml:acceptance": "test:accept:native runs pytest on the prebuilt test-bin artifact",
-    "verify-deep.yml:acceptance-native": "macOS/Windows runner, SKIP_BUILD, prebuilt test-bin",
-    "verify-deep.yml:satellite-verify": "cargo builds of ocx-mirror; no Bazel",
-    "verify-deep.yml:satellite-contract": "cargo builds plus pytest; no Bazel",
+    "acceptance.yml:shard": "test:accept:native runs pytest on the binaries the `binary` job built; "
+    "the cache credential stays in that job",
+    "deep-repo.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
+    "deep-repo.yml:acceptance-native": "macOS/Windows runner, SKIP_BUILD, prebuilt test-bin",
+    "deep-repo.yml:satellite-verify": "cargo builds of ocx-mirror; no Bazel",
+    "deep-repo.yml:satellite-contract": "cargo builds plus pytest; no Bazel",
 }
 
 _WRITE_SECRET_REF = re.compile(r"secrets\.BAZEL_CACHE_WRITE\w*")
@@ -1183,9 +1272,16 @@ _SPACED_CONFIG = re.compile(r"--config\s+(\S+)")
 #: One rc stanza: `build:ci --remote_cache=…`. `common` and `build` both reach a
 #: `bazel test`, so all three command words are read.
 _RC_STANZA = re.compile(r"(?m)^[ \t]*(build|common|test)(?::([\w.-]+))?[ \t]+(.*)$")
-#: Where the write secret may be named: as a cache step's credential input, or passed
-#: through by name to a reusable workflow.
-_WRITE_SECRET_SPOTS = frozenset({("with", "write-auth"), ("secrets", WRITE_SECRET)})
+#: Where the write secret may be named: as a cache step's credential input (the repo action's
+#: `write-auth`, the template setup action's `cache-write-auth`), or passed through by name to a
+#: reusable workflow.
+_WRITE_SECRET_SPOTS = frozenset(
+    {("with", "write-auth"), ("with", "cache-write-auth"), ("secrets", WRITE_SECRET)}
+)
+#: The conventions template's setup action. Its `trusted` cache mode presents the write credential
+#: on every event that carries it, which is `write-auth` under another name; it owns the credential's
+#: lifetime itself, since a composite action has no `post:` hook and the template's jobs add no cleanup.
+TEMPLATE_SETUP = "ocx-sh/conventions/.github/actions/setup"
 
 
 # ---------------------------------------------------------------------------
@@ -1328,8 +1424,23 @@ def _rc_writes(step: dict) -> bool:
     return _is_rc_step(step) and not _truthy_input(step, "cleanup")
 
 
+def _is_template_cache_step(step: dict) -> bool:
+    """The template setup action in the mode that writes the cache rc. The same action called with only
+    `report:` (the telemetry push) or in another mode writes nothing and is no cache step."""
+    return (
+        str(step.get("uses", "")).startswith(f"{TEMPLATE_SETUP}@")
+        and str((step.get("with") or {}).get("bazel-cache", "")) == "trusted"
+    )
+
+
 def _cache_writer_auth(step: dict) -> str | None:
-    """The credential a step hands the `bazel-cache-rc` action, `None` when it writes no rc."""
+    """The credential a step hands a cache-rc writer, `None` when it writes no rc.
+
+    The writer is `bazel-cache-rc` (`write-auth`) or the template setup action in `trusted` mode
+    (`cache-write-auth`).
+    """
+    if _is_template_cache_step(step):
+        return str((step.get("with") or {}).get("cache-write-auth", ""))
     return str((step.get("with") or {}).get("write-auth", "")) if _rc_writes(step) else None
 
 
@@ -1439,7 +1550,11 @@ def _upload_flag_findings(documents: list[tuple[str, dict]]) -> list[str]:
 def _lanes_without_cache_step(
     documents: list[tuple[str, dict]], excluded: Iterable[str] = ()
 ) -> list[str]:
-    """C-003(c): every Bazel lane writes the cache before its first lane step and cleans up after."""
+    """C-003(c): every Bazel lane writes the cache before its first lane step and cleans up after.
+
+    The cleanup half is the caller's duty for `bazel-cache-rc` only; the template's setup action
+    in `trusted` mode has no cleanup to add (see `TEMPLATE_SETUP`).
+    """
     findings = []
     for where, (job, lane) in _lane_jobs(documents).items():
         if where in excluded:
@@ -1448,7 +1563,7 @@ def _lanes_without_cache_step(
         writers = [i for i, step in enumerate(steps) if _cache_writer_auth(step) is not None]
         if not writers or writers[0] > lane[0]:
             findings.append(f"{where}: no cache write step before its first lane step ({lane[0]})")
-        elif gap := _cleanup_gap(steps):
+        elif _is_rc_step(steps[writers[0]]) and (gap := _cleanup_gap(steps)):
             findings.append(f"{where}: {gap}")
     return findings
 
@@ -1721,6 +1836,13 @@ def _corpus(
     return [("lane.yml", yaml.safe_load(lane)), ("caller.yml", yaml.safe_load(caller or _caller()))]
 
 
+def _template_write(auth: str = WRITE_AUTH, mode: str = "trusted") -> str:
+    return (
+        f"      - uses: {TEMPLATE_SETUP}@7d067fa0a28f195bb5833be434449dea12113551 # v0\n"
+        f"        with:\n          bazel-cache: {mode}\n          cache-write-auth: {auth}\n"
+    )
+
+
 _SWEEPS = {
     "write-credential": _write_credential_findings,
     "no-upload-flag": _upload_flag_findings,
@@ -1810,6 +1932,24 @@ def test_every_sweep_reds_its_violating_corpus(sweep: str, corpus: list[tuple[st
     compliant one would leave the sweep correctly finding nothing."""
     assert corpus != _corpus(), f"the `{sweep}` violating corpus mutates nothing"
     assert _SWEEPS[sweep](corpus), f"`{sweep}` found nothing in a corpus built to violate it"
+
+
+@pytest.mark.parametrize(
+    ("steps", "sweep", "findings"),
+    [
+        pytest.param((_template_write(), _run()), "lane-cache-step", False, id="trusted-step-before-the-lane-needs-no-cleanup"),
+        pytest.param((_template_write(), _run()), "write-credential", False, id="trusted-step-passing-the-secret-by-name"),
+        pytest.param((_template_write(auth=_EVENT_GATE), _run()), "write-credential", True, id="trusted-step-with-an-event-predicate"),
+        pytest.param((_run(), _template_write()), "lane-cache-step", True, id="trusted-step-after-the-lane"),
+        pytest.param((_template_write(mode="read"), _run()), "lane-cache-step", True, id="read-mode-writes-no-rc"),
+        pytest.param((_write(), _run()), "lane-cache-step", True, id="the-repo-action-still-owes-its-cleanup"),
+    ],
+)
+def test_the_template_setup_step_is_a_cache_writer_in_trusted_mode_only(
+    steps: tuple[str, ...], sweep: str, findings: bool
+) -> None:
+    """Red and green for the template's `bazel-cache: trusted` step as a cache writer."""
+    assert bool(_SWEEPS[sweep](_corpus(*steps))) is findings
 
 
 def test_a_named_exclusion_skips_its_lane() -> None:
@@ -2398,23 +2538,26 @@ def test_deploy_docs_checks_the_built_site_before_uploading_it() -> None:
     assert runs.index("task test:doc-scripts:drift") < uploads[0]
 
 
-def test_verify_deep_grants_no_write_at_the_top_and_keeps_test_bin_executable() -> None:
-    """write scopes live on the publishing job only; every test-bin download is `chmod -R`'d."""
-    document = _load(VERIFY_DEEP)
-    top = document.get("permissions") or {}
-    assert "write" not in top.values(), f"verify-deep.yml grants write at the top: {top!r}"
-    assert document["jobs"]["test-results"]["permissions"].get("checks") == "write"
-    for name, job in document["jobs"].items():
-        steps = job.get("steps") or []
-        if any(
-            str(s.get("uses", "")).startswith("actions/download-artifact@")
-            and "test-bin-" in str(s.get("with", {}).get("name", ""))
-            for s in steps
-        ):
+def test_acceptance_binaries_downloaded_for_a_test_run_are_made_executable() -> None:
+    """An artifact round trip drops every executable bit: each job that downloads into
+    `test/bin` on a runner that has them runs `chmod -R +x test/bin`, or a missing one reds
+    deep in the suite instead of at the step that lost it."""
+    checked = []
+    for workflow in (DEEP_REPO, ACCEPTANCE):
+        for name, job in _repo_jobs(workflow).items():
+            steps = job.get("steps") or []
+            if not any(
+                str(s.get("uses", "")).startswith("actions/download-artifact@")
+                and (s.get("with") or {}).get("path") == "test/bin"
+                for s in steps
+            ):
+                continue
+            checked.append(f"{workflow.name}:{name}")
             runs = "\n".join(str(s.get("run", "")) for s in steps)
-            assert "chmod -R +x test/bin" in runs or job["runs-on"] == "windows-latest", (
-                f"verify-deep.yml job {name!r} downloads test-bin but never `chmod -R +x test/bin`"
+            assert "chmod -R +x test/bin" in runs, (
+                f"{workflow.name} job {name!r} downloads into test/bin but never `chmod -R +x test/bin`"
             )
+    assert len(checked) >= 2, f"read {checked}; the readers found fewer test-bin downloads than the two the tiers have"
 
 
 def test_deploy_docs_grants_nothing_at_the_top_and_triggers_on_main_and_dispatch() -> None:
@@ -2805,4 +2948,146 @@ def test_the_acceptance_workflow_merges_shards_on_the_input_shard_count() -> Non
     assert sources and all(source and "inputs.shard-count" in source for source in sources), (
         f"{ACCEPTANCE.name}: the floor step in `{merge}` takes EXPECT_SHARDS from {sources}, "
         f"expected `inputs.shard-count`, never a literal"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The workflows around the tiers: Discord, the readiness gate, the write-capable responder
+# ---------------------------------------------------------------------------
+
+NOTIFY_DISCORD = WORKFLOW_DIR / "notify-discord.yml"
+CLAUDE_TEMPLATE = WORKFLOW_DIR / "claude.yml"
+CLAUDE_WRITE = WORKFLOW_DIR / "claude-write.yml"
+RELEASE_READINESS = WORKFLOW_DIR / "release-readiness.yml"
+_LEVELS = {"none": 0, "read": 1, "write": 2}
+#: `(caller job, scope)` pairs where a caller grants less than its callee asks and the file cannot be
+#: fixed here: `release.yml` is generated by cargo-dist, whose `custom-docker-publish` grant comes from
+#: `dist-workspace.toml`, while `docker-publish.yml`'s `build` job asks for `artifact-metadata: write`
+#: (added with the attest-build-provenance v4 bump). The next release run fails at startup on it until
+#: `dist-workspace.toml` grants the scope and `release.yml` is regenerated. Asserted live below, so
+#: the row goes the moment the grant exists.
+KNOWN_UNGRANTED = frozenset({("release.yml:custom-docker-publish", "artifact-metadata")})
+
+
+def test_every_workflow_the_discord_notifier_watches_is_some_workflows_name() -> None:
+    """`workflow_run.workflows` matches the `name:` of the workflow that ran, exactly. A name
+    that no file carries is a notification that never fires, with no error anywhere — which is
+    how `Basic Verification` and `Verify Deep` outlived the rename to `verify-basic` and
+    `verify-deep`."""
+    names = {str(_load(workflow).get("name")) for workflow in WORKFLOWS}
+    watched = _on(NOTIFY_DISCORD)["workflow_run"]["workflows"]
+    # The floor: an empty list is a notifier that watches nothing, and sweeps clean.
+    assert {"verify-basic", "verify-deep"} <= set(watched), f"notify-discord.yml watches {watched}"
+    missing = sorted(set(watched) - names)
+    assert not missing, (
+        f"notify-discord.yml watches {missing}, which no workflow's `name:` is; the names are {sorted(names)}"
+    )
+
+
+def _scope_levels(document: dict, job: dict) -> dict[str, int]:
+    """The permission each scope of a job is granted: its own `permissions:`, else the workflow's.
+
+    `read-all` / `write-all` are the scope `*`.
+    """
+    granted = job.get("permissions", document.get("permissions") or {})
+    if isinstance(granted, str):
+        return {"*": _LEVELS[granted.split("-")[0]]}
+    return {scope: _LEVELS[level] for scope, level in (granted or {}).items()}
+
+
+def _callers_granting_too_little(documents: list[tuple[str, dict]]) -> list[tuple[str, str, str]]:
+    """`(caller job, scope, message)` where a job calling a repo workflow grants less than a job of that workflow asks for.
+
+    GitHub checks this when the run starts, statically — a job an `if:` would skip counts — and
+    a violation fails the whole run, not the one job. Each edge is checked against the callee's
+    own jobs; a callee job that itself calls a workflow is bounded by its own grant, checked at
+    that edge.
+    """
+    by_name = dict(documents)
+    findings = []
+    for where, document, job in _jobs(documents):
+        callee = _local_callee(job)
+        if callee is None or callee not in by_name:
+            continue
+        grant = _scope_levels(document, job)
+        for name, called in (by_name[callee].get("jobs") or {}).items():
+            for scope, level in _scope_levels(by_name[callee], called or {}).items():
+                if level > max(grant.get(scope, 0), grant.get("*", 0)):
+                    findings.append((where, scope, f"{where} grants {scope} level {grant.get(scope, 0)} to {callee}, whose job `{name}` asks {level}"))
+    return findings
+
+
+def _permission_edge(grant: dict, asks: dict) -> list[tuple[str, dict]]:
+    callee = {"on": {"workflow_call": {}}, "jobs": {"j": {"permissions": asks, "runs-on": "ubuntu-latest"}}}
+    caller = {"jobs": {"c": {"uses": "./.github/workflows/callee.yml", "permissions": grant}}}
+    return [("caller.yml", caller), ("callee.yml", callee)]
+
+
+@pytest.mark.parametrize(
+    ("grant", "asks", "findings"),
+    [
+        pytest.param({"contents": "read"}, {"contents": "read"}, False, id="equal"),
+        pytest.param({"contents": "read", "issues": "write"}, {"issues": "write"}, False, id="the-union-is-granted"),
+        pytest.param({"contents": "read"}, {"issues": "write"}, True, id="a-scope-the-caller-lacks"),
+        pytest.param({"issues": "read"}, {"issues": "write"}, True, id="a-lower-level"),
+        pytest.param({}, {"contents": "read"}, True, id="nothing-granted"),
+    ],
+)
+def test_the_permission_edge_reader_reds_a_caller_that_grants_too_little(
+    grant: dict, asks: dict, findings: bool
+) -> None:
+    assert bool(_callers_granting_too_little(_permission_edge(grant, asks))) is findings
+
+
+def test_every_caller_grants_the_union_of_what_the_workflow_it_calls_asks_for() -> None:
+    """The release readiness gate calls `verify-deep.yml`, whose `nightly-red` job asks
+    `issues: write` (on a schedule it never has here — the check counts it anyway), so its caller
+    job grants that and `contents: read`."""
+    documents = _documents()
+    assert ("release-readiness.yml", "verify-deep.yml") in _call_edges(documents), (
+        "release-readiness.yml no longer calls verify-deep.yml — the edge this test exists for is gone"
+    )
+    found = _callers_granting_too_little(documents)
+    findings = [message for where, scope, message in found if (where, scope) not in KNOWN_UNGRANTED]
+    assert not findings, (
+        f"{findings}. A called workflow's jobs may not ask for more than the job that calls it grants; "
+        f"the run fails at startup, before any job, and no job's `if:` helps"
+    )
+    fixed = sorted(KNOWN_UNGRANTED - {(where, scope) for where, scope, _ in found})
+    assert not fixed, f"listed grants that are no longer short: {fixed} — remove them from `KNOWN_UNGRANTED`"
+
+
+def test_release_readiness_calls_the_template_deep_tier_and_rolls_it_into_a_verdict() -> None:
+    jobs = _load(RELEASE_READINESS)["jobs"]
+    assert jobs["deep"].get("uses") == "./.github/workflows/verify-deep.yml", jobs["deep"].get("uses")
+    assert "secrets" not in jobs["deep"], (
+        "release-readiness.yml passes secrets to verify-deep.yml, which declares none under "
+        "`workflow_call` — GitHub rejects a secret the callee does not declare"
+    )
+    assert _needs(jobs["gate"]) == ["deep"], f"the verdict job needs {_needs(jobs['gate'])}"
+
+
+def test_claude_write_answers_only_what_the_template_responder_does_not() -> None:
+    """The template's `claude.yml` is read-only (`contents: read`) and answers every `@claude`
+    comment and every pull request. `claude-write.yml` keeps the old write-capable responder, so it
+    must not answer the same event twice: its comment trigger is a different phrase that excludes
+    `@claude`, and its `issues` events are ones the template does not subscribe to."""
+    template_on = _on(CLAUDE_TEMPLATE)
+    template_ifs = " ".join(str(job.get("if", "")) for job in _load(CLAUDE_TEMPLATE)["jobs"].values())
+    write = _load(CLAUDE_WRITE)
+    condition = str(write["jobs"]["claude"]["if"])
+    assert "issues" not in template_on, "the template responder now takes `issues` events; claude-write.yml overlaps it"
+    assert "'@claude'" in template_ifs, "the template responder no longer keys on `@claude`; re-derive the disjointness"
+    assert "'/claude-write'" in condition and "!contains(github.event.comment.body, '@claude')" in condition, (
+        "claude-write.yml answers a comment that holds `@claude`, which the template responder answers too"
+    )
+    permissions = write["jobs"]["claude"]["permissions"]
+    assert permissions["contents"] == "write", f"claude-write.yml permissions are {permissions}"
+    assert all(
+        "write" not in str(job.get("permissions", {}).get("contents", ""))
+        for job in _load(CLAUDE_TEMPLATE)["jobs"].values()
+    ), "the template responder gained `contents: write`; the two are no longer the read and the write responder"
+    checkout = next(s for s in write["jobs"]["claude"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False, (
+        "claude-write.yml's checkout keeps its token; the action replaces it before pushing, so keep none"
     )
