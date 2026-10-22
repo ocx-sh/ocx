@@ -399,7 +399,7 @@ ignored = 2
 [[target]]
 label = "//crates/ocx_util:ocx_util_test"
 crate = "ocx_util"
-cases = 285
+cases = 290
 
 # ---------------------------------------------------------------------------
 # C-008's suite-level exclusion set: what `cargo nextest list` reports and no

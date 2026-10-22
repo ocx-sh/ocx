@@ -7,6 +7,7 @@ mod drop_file;
 mod empty_or_absent;
 mod file_lock;
 mod locked_file;
+mod long_path;
 pub mod path;
 mod same_dir;
 mod same_filesystem;
@@ -124,14 +125,14 @@ where
 ///
 /// An already-present `target` is not success: a mutable destination may hold stale content.
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, |tmp| tmp.persist(target).map(|_| ()))
+    persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Existing))
 }
 
 /// [`persist_temp_file`], except an existing `target` is left alone and reported as `AlreadyExists`. Blocking.
 ///
 /// For a destination whose file identity matters: a replacing racer orphans what hardlinks the winner's file.
 pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, |tmp| tmp.persist_noclobber(target).map(|_| ()))
+    persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Never))
 }
 
 /// Outcome of a no-clobber publish attempt — see [`persist_temp_file_noclobber`].
@@ -159,8 +160,8 @@ fn attempt_noclobber(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
 ) -> Result<PersistOutcome, tempfile::PersistError> {
-    match tmp.persist_noclobber(target) {
-        Ok(_) => Ok(PersistOutcome::Published),
+    match persist_at(tmp, target, Replace::Never) {
+        Ok(()) => Ok(PersistOutcome::Published),
         Err(persist_err) if persist_err.error.kind() == std::io::ErrorKind::AlreadyExists => {
             if published_at(target, &persist_err.file) {
                 // Our link landed and only the NFS reply was lost; no `keep()`, or a `.tmp*` is stranded.
@@ -191,6 +192,35 @@ fn published_at(target: &std::path::Path, tmp: &tempfile::NamedTempFile) -> bool
 #[cfg(not(unix))]
 fn published_at(_target: &std::path::Path, _tmp: &tempfile::NamedTempFile) -> bool {
     false
+}
+
+/// Whether a publish may replace what already sits at the target.
+#[derive(Clone, Copy)]
+enum Replace {
+    Existing,
+    Never,
+}
+
+/// One publish attempt of `tmp` at `target`, by the Windows `\\?\` route when either path is 260 units or more.
+///
+/// Every publish goes through here: `tempfile` passes its paths to `MoveFileExW` unprefixed, so a long
+/// one fails with `ERROR_PATH_NOT_FOUND`.
+fn persist_at(
+    tmp: tempfile::NamedTempFile,
+    target: &std::path::Path,
+    replace: Replace,
+) -> Result<(), tempfile::PersistError> {
+    #[cfg(windows)]
+    {
+        if let Some(paths) = long_path::api_pair(tmp.path(), target) {
+            return long_path::persist(tmp, paths, replace);
+        }
+    }
+    match replace {
+        Replace::Existing => tmp.persist(target),
+        Replace::Never => tmp.persist_noclobber(target),
+    }
+    .map(|_| ())
 }
 
 /// The shared publish loop with the Windows retry schedule, generic so a caller can get its temp file back.
@@ -433,6 +463,22 @@ mod tests {
             PersistOutcome::Published => panic!("an occupied target must never be replaced"),
         }
         assert_eq!(std::fs::read(&target).unwrap(), b"first-record");
+    }
+
+    /// Windows: a failure under a long path stays a plain `NotFound` and the verbatim prefix,
+    /// which is the helper's own spelling, never reaches the error a caller reports.
+    #[cfg(windows)]
+    #[test]
+    fn persist_temp_file_into_a_missing_long_directory_fails_without_the_verbatim_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = directory_of_at_least(root.path(), 260);
+        let target = parent.join("missing").join("out.json");
+        let tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+
+        let err = persist_temp_file(tmp, &target).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "unexpected: {err}");
+        assert!(!err.to_string().contains(r"\\?\"), "the prefix leaked: {err}");
     }
 
     /// Baseline (all platforms): a populated directory tree lands at an absent
