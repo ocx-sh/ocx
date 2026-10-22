@@ -32,11 +32,13 @@ tasks:
   lint:
     desc: 'Lint tier: format, shell, claude, test-lint and bazel gates, licenses, suite census, dead-path sweep, clippy, doc ratchet'
     # Submodules first: the template's checkout fetches none, and every Bazel gate below plus cargo-deny and
-    # cargo-about resolve the graph the forks under `external/` patch. Then phase 1 of `task verify` (parallel,
+    # cargo-about resolve the graph the forks under `external/` patch. History second: the lint tier's
+    # git readers need the release tags and `origin/main`, which that checkout lacks too. Then phase 1 of `task verify` (parallel,
     # builds nothing), then phase 2's lint members in its order: the Bazel gates after `bazel:build:nobuild`,
     # which proves the graph loads, and the two Bazel aspect passes last.
     cmds:
       - task: :git:submodules
+      - task: :git:history
       - task: .lint:phase1
       - task: :bazel:build:nobuild
       - task: :bazel:build:drift
@@ -119,9 +121,11 @@ tasks:
 
   deep:
     desc: 'Deep tier: suite rows check, contract-baseline repository tests and the full self-tests of the gate scripts'
-    # The self-tests that read the live Bazel graph need the submodules.
+    # The self-tests that read the live Bazel graph need the submodules; the deep lint tier reads the
+    # release tags, which the template's depth-1 checkout does not carry.
     cmds:
       - task: :git:submodules
+      - task: :git:history
       - task: :test:rows:check
       - task: :test:lint:deep
       - task: :scripts:self-test
