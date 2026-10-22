@@ -2,8 +2,11 @@ name: Shell Activation (Deep)
 
 # Cross-platform `ocx self setup` + `ocx self activate` coverage for the platforms
 # the per-PR `shell-activation.yml` (Linux shell-zoo) cannot reach: macOS and
-# Windows. Runs on demand and weekly, NOT per-PR, because macOS/Windows runner
-# minutes are far more expensive than Linux (see subsystem-ci.md "Cost Factors").
+# Windows. Reusable only: `deep-repo.yml` calls it, so it runs with the deep tier
+# (nightly, on dispatch, on the `run-deep` label) and in the release readiness gate,
+# NOT per-PR, because macOS/Windows runner minutes are far more expensive than Linux
+# (see subsystem-ci.md "Cost Factors"). It has no trigger of its own: a cron here
+# would run the matrix a second time beside the deep tier's nightly.
 #
 # - macOS: reuses the self-contained `test/tests/test_shell_activation.py` matrix
 #   AND the per-prompt reconciler matrix `test/tests/test_shell_reconcile.py`
@@ -15,7 +18,7 @@ name: Shell Activation (Deep)
 #   now also drives one non-interactive apply/revert reconcile cycle (S-045).
 #
 # cmd/batch PATH idempotency is covered separately by the `live_batch_*` unit test
-# on the windows-latest `nextest --workspace` leg of `verify-deep.yml`.
+# on the windows-latest unit leg of `deep-repo.yml`.
 #
 # STATED RESIDUAL — the Windows leg proves activation-time and reconcile-time
 # behaviour, NOT prompt *firing*. A real interactive ConPTY session under Windows
@@ -24,29 +27,10 @@ name: Shell Activation (Deep)
 # uncovered, and is named here rather than implied to be covered.
 
 on:
-  workflow_dispatch:
-  schedule:
-    # Weekly, Monday 06:00 UTC — catches platform drift without per-PR cost.
-    - cron: "0 6 * * 1"
-  # Reusable: composed into the pre-release `release-readiness.yml` gate so a
-  # single dispatch reports one GO/NO-GO across all platforms.
   workflow_call:
 
 permissions:
   contents: read
-
-# Literal group name (not the subsystem-ci.md §6 `${{ github.workflow }}-...`
-# convention): this workflow is ALSO reused via `workflow_call` from
-# `release-readiness.yml`, where `github.workflow` resolves to the CALLER's name
-# ("Release Readiness"). With the convention, the composed child would compute the
-# SAME group as the parent's own concurrency, and since `cancel-in-progress` is
-# false on main the parent would hold the group while waiting on the child —
-# a self-deadlock that GitHub resolves by failing the called workflow. A literal
-# prefix keeps standalone dispatch/cron de-duplication without colliding with any
-# caller.
-concurrency:
-  group: shell-activation-deep-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   macos:

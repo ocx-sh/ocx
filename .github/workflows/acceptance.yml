@@ -1,0 +1,320 @@
+name: Acceptance
+
+# The full acceptance suite, sharded, with one merge job that judges the suite floor and the skip and
+# xfail ceilings over every shard's report together (a floor is a property of the whole suite, never of
+# one shard). Reusable: `basic-repo.yml` runs it on every pull request; the release readiness gate calls
+# it once per platform on the release bytes.
+#
+# Jobs: `plan` (shard list and binary source) -> `binary` (builds, only for `binary: build`) -> `shard`
+# (pytest against the prebuilt binaries, no Bazel and no cache credential) -> `merge` (floor and ceilings).
+# The cache write credential lives in `binary` alone, so it never shares a runner with the tests.
+#
+# Linux runner labels only: the steps start Docker services and need systemd. macOS and Windows legs
+# need the POSIX-tool provisioning `deep-repo.yml`'s `acceptance-native` does and belong to the readiness
+# workflow.
+#
+# Artifact names carry `inputs.os`, so one run can call this workflow once per runner label and no more.
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner label the shards run on, a Linux label such as `ubuntu-latest`.
+        type: string
+        required: true
+      shard-count:
+        description: Number of shards the suite is split into.
+        type: number
+        default: 4
+      binary:
+        description: >-
+          Where the binaries under test come from: `build` rebuilds //crates/ocx_cli:ocx (Linux only), or
+          `artifact:<name>` downloads the artifact `<name>` into test/bin.
+        type: string
+        required: true
+      limits-dir:
+        description: Directory holding SUITE_FLOOR and the skip and xfail ceilings the merge job judges the suite against.
+        type: string
+        default: test
+      release-binary:
+        description: The binary under test is a release build. Sets OCX_TEST_RELEASE_BINARY for the shards.
+        type: boolean
+        default: false
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      OTEL_OTLP_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan (${{ inputs.os }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      build: ${{ steps.plan.outputs.build }}
+      artifact: ${{ steps.plan.outputs.artifact }}
+    steps:
+      - name: Plan the shards and the binary source
+        id: plan
+        env:
+          BINARY: ${{ inputs.binary }}
+          OS: ${{ inputs.os }}
+          SHARD_COUNT: ${{ inputs.shard-count }}
+        run: |
+          set -euo pipefail
+          case "$SHARD_COUNT" in
+            ''|0|*[!0-9]*) echo "::error::shard-count must be a positive integer, got '$SHARD_COUNT'"; exit 1 ;;
+          esac
+          case "$BINARY" in
+            build) build=true; artifact="acceptance-binaries-$OS" ;;
+            artifact:?*) build=false; artifact="${BINARY#artifact:}" ;;
+            *) echo "::error::binary must be 'build' or 'artifact:<name>', got '$BINARY'"; exit 1 ;;
+          esac
+          {
+            echo "shards=[$(seq -s, 1 "$SHARD_COUNT")]"
+            echo "build=$build"
+            echo "artifact=$artifact"
+          } >> "$GITHUB_OUTPUT"
+
+  # Builds the binaries once for every shard. The only job here that holds the cache credential.
+  binary:
+    name: Build binaries
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: a restored object store is runner-executable content.
+          cache: false
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      # `ocx`, `ocx-shim` and `schema/ocx_schema` land in test/bin: the layout `cross:test:bin` stages too.
+      - name: Build
+        run: task rust:build
+      # The metadata schema `tests/test_schema.py` reads; it is generated, not tracked.
+      - name: Generate Schema
+        run: task schema:generate
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
+      - name: Upload binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.plan.outputs.artifact }}
+          path: test/bin/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload schema
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.plan.outputs.artifact }}-schema
+          path: website/src/public/schemas/metadata/v1.json
+          if-no-files-found: error
+          retention-days: 1
+
+  shard:
+    name: Acceptance (${{ inputs.os }}, shard ${{ matrix.shard }}/${{ inputs.shard-count }})
+    needs: [plan, binary]
+    # `binary` is skipped for `binary: artifact:<name>`; anything else but success stops the shards.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.binary.result) }}
+    runs-on: ${{ inputs.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    env:
+      # zot runs as native processes from the project toolchain (5000/5003/5004);
+      # only the registry:2 mirror and the Sigstore stack need Docker.
+      OCX_TEST_NATIVE_SERVICES: "1"
+      # Empty when the binary is not a release build; the suite reads it by truthiness.
+      OCX_TEST_RELEASE_BINARY: ${{ inputs.release-binary && '1' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      # Puts `zot` (and the rest of the project toolchain) on PATH.
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: a restored object store is runner-executable content.
+          cache: false
+      - name: Download acceptance binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.plan.outputs.artifact }}
+          path: test/bin
+      - name: Download Schema
+        if: needs.plan.outputs.build == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.plan.outputs.artifact }}-schema
+          path: website/src/public/schemas/metadata
+      - name: Prepare Binaries
+        shell: bash
+        run: |
+          # An artifact round trip drops every executable bit, nested ones
+          # (`schema/ocx_schema`) included; a missing one must red here, not as
+          # a confusing failure deep in the suite.
+          chmod -R +x test/bin
+          for bin in test/bin/ocx test/bin/ocx-shim test/bin/schema/ocx_schema; do
+            [ -x "$bin" ] || { echo "::error::$bin is missing or not executable"; exit 1; }
+          done
+      - name: Start native registries
+        run: task test:services:native:start
+      - name: Start mirror registry
+        shell: bash
+        run: |
+          # distribution's registry:2 is the negative fixture for the Referrers
+          # API (legacy_registry, #106) and the mirror tests' upstream; it has no
+          # native build, so it stays in Docker on 5001.
+          docker compose -f test/docker-compose.yml up -d mirror-registry
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:5001/v2/ > /dev/null 2>&1; then
+              echo "Mirror registry is ready"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::Mirror registry did not become reachable"
+          exit 1
+      - name: Start Sigstore stack
+        shell: bash
+        run: |
+          # The signing acceptance tests run against a real Fulcio + Rekor +
+          # TesseraCT + dex stack, not a fake, so the `sigstore` profile is a
+          # hard prerequisite: `tests/fixtures/sigstore_stack.py` raises rather
+          # than skipping, because a skip here is indistinguishable from a pass
+          # and these are the tests carrying the supply-chain contract.
+          #
+          # The services are NAMED: a bare `--profile sigstore up` also starts
+          # the compose `registry`, `target-registry` and `prod-registry`, which
+          # would take ports 5000/5003/5004 from the native zot processes.
+          start=$SECONDS
+          docker compose -f test/docker-compose.yml --profile sigstore up -d \
+            dex sigstore-ct fulcio sigstore-mysql trillian-log-server trillian-log-signer rekor
+          # Four of the seven images are distroless, so compose healthchecks
+          # cannot run inside them; wait-for-stack.py polls from the host and is
+          # the same gate the fixtures use and the self-hosting docs hand out.
+          python3 test/sigstore/wait-for-stack.py --timeout 300
+          echo "sigstore stack ready in $((SECONDS - start))s"
+      # The readiness gate prints which service is down and names the log
+      # command, but nobody can run that command on a finished runner — without
+      # this step a bring-up failure costs a whole second run to diagnose.
+      - name: Sigstore stack logs (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          docker compose -f test/docker-compose.yml --profile sigstore ps
+          for service in rekor trillian-log-server trillian-log-signer sigstore-mysql fulcio sigstore-ct dex; do
+            echo "::group::$service"
+            docker compose -f test/docker-compose.yml --profile sigstore logs --tail=80 "$service" || true
+            echo "::endgroup::"
+          done
+      - name: Run Acceptance Tests
+        shell: bash
+        # `ubuntu-latest` ships systemd, so its `environment.d` generator is
+        # present and a skip in `test_session_path.py` would mean the binary
+        # moved — not that the host lacks it. The `environment.d` prepend has
+        # open upstream reports of not landing for PATH (systemd/systemd#40430),
+        # so this is the one leg where "skipped" and "passed" must not read the
+        # same. Fails closed: any value but empty or `0` arms the gate.
+        env:
+          __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
+          SHARD: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shard-count }}
+        run: task test:accept:native SHARD="$SHARD/$SHARD_COUNT"
+      - name: Stop native registries
+        if: ${{ always() }}
+        run: task test:services:native:stop
+      - name: Stop Docker services
+        if: ${{ always() }}
+        shell: bash
+        # `--profile sigstore` is load-bearing: a bare `down` leaves
+        # profile-gated services running.
+        run: docker compose -f test/docker-compose.yml --profile sigstore down 2>/dev/null || true
+      - name: Upload shard JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: accept-junit-${{ inputs.os }}-shard-${{ matrix.shard }}
+          path: target/accept/junit/*.xml
+          retention-days: 1
+
+  # The floor and the skip/xfail ceilings are properties of the whole suite, so
+  # they are judged over every shard's report together, never per shard.
+  merge:
+    name: Acceptance (${{ inputs.os }}, merged)
+    needs: shard
+    # Skipped with the shards: a failed `plan` or `binary` job already reds the run, and a merge with no
+    # reports to read would only add a second, misleading failure.
+    if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Download shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: accept-junit-${{ inputs.os }}-shard-*
+          path: accept-junit
+          merge-multiple: true
+      # Absolute paths: the task runs with `dir: ./test`, so a relative one would
+      # resolve under test/ while the reports sit at the repository root.
+      - name: Suite floor and ceilings
+        env:
+          SHARD_COUNT: ${{ inputs.shard-count }}
+          LIMITS_DIR: ${{ inputs.limits-dir }}
+        run: task test:accept:floor JUNIT_DIR="$GITHUB_WORKSPACE/accept-junit" EXPECT_SHARDS="$SHARD_COUNT" LIMITS_DIR="$GITHUB_WORKSPACE/$LIMITS_DIR"
+      # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
+      - name: Publish acceptance results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: accept-junit/*.xml
+          require_tests: false
+          annotate_only: true
+      - name: Push acceptance test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 15
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: accept-junit/*.xml
+          suite: acceptance

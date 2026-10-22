@@ -66,6 +66,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
+          persist-credentials: false
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
@@ -116,6 +117,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
+          persist-credentials: false
           # The drift check below walks `git log` per path.
           fetch-depth: 0
       - name: Setup OCX
@@ -206,8 +208,10 @@ jobs:
       #      re-cuts the blob from the uploaded artifact above.
       # See adr_shim_hermetic_zigbuild.md §"gate redesign".
       - name: Validate committed shim blob (provenance model)
+        env:
+          COMMITTED: ${{ steps.paths.outputs.committed }}
         run: |
-          committed='${{ steps.paths.outputs.committed }}'
+          committed="$COMMITTED"
           arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
           # 1. valid PE (MZ magic)
           if [ "$(head -c2 "$committed")" != "MZ" ]; then
@@ -324,6 +328,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
+          persist-credentials: false
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       # The ocx this puts on PATH never reaches the tests below: their fixture

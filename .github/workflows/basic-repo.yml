@@ -1,21 +1,295 @@
-# Seeded once by ocx-sh/conventions; this file belongs to the repo from here on.
-# verify-basic calls it as its `repo` job: put the repo-owned jobs that gate a pull request here.
-# A called workflow sees only the secrets it declares, so keep every secret the `repo_workflows` answer
-# lists declared under `on.workflow_call.secrets`.
-name: basic-repo
+name: Basic (repo)
+
+# The repo-owned jobs of the basic tier, called by the conventions template's `repo` job in
+# `verify-basic.yml`. The template owns lint, test, build and docs (`task ci:lint`, `ci:test`, `ci:build`,
+# `ci:docs`); this file holds what those four cannot: the acceptance binary and suites, the commit check
+# and the script self-tests.
+#
+# Everything here runs under the permissions the template's caller grants, `contents: read`; a job asking
+# for more fails the whole run at startup. Test results therefore publish as annotations and a job
+# summary, never as a check run or a pull request comment.
+#
+# Cross-builds sit in `deep-repo.yml` (variant B of plan_pr637_round2.md D13). Flipping to variant A is
+# the `CROSS_VARIANT` constant in `.claude/tests/test_workflows.py` plus one job here that calls
+# `cross.yml`.
 
 on:
   workflow_call:
     secrets:
       BAZEL_CACHE_WRITE_AUTH:
         required: false
+      OTEL_OTLP_AUTH:
+        required: false
 
 permissions: {}
 
 jobs:
-  repo:
+  conventional-commits:
+    name: Conventional Commits
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - run: echo "no repo-owned basic jobs yet"
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check conventional commits
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
+        with:
+          command: check
+          args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  # The scripts under `scripts/` are the gates themselves, and their tests ran only on a developer's
+  # machine until they had a job. The job always runs, so its required check is never left unknown by a
+  # skip; a step inside it decides whether `scripts/**` or its toolchain changed (plan_pr637_round2.md D19).
+  scripts-tests:
+    name: Script self-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff against the pull request's base needs the base commit.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Did the scripts change
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Only a pull request has a base to diff against; every other event runs the tests.
+          if [ "$EVENT" != pull_request ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          touched="$(git diff --name-only "$BASE_SHA" HEAD -- scripts taskfiles/scripts.taskfile.yml test/pyproject.toml test/uv.lock ocx.toml ocx.lock .github/workflows/basic-repo.yml)"
+          if [ -n "$touched" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The script self-tests were skipped: nothing under scripts/ or its toolchain changed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Setup OCX
+        if: steps.changed.outputs.changed == 'true'
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: a restored object store is runner-executable content.
+          cache: false
+      - name: Run the script self-tests
+        if: steps.changed.outputs.changed == 'true'
+        run: task scripts:self-test
+
+  # The acceptance binary, built where a later job needs it: `smoke-acceptance` downloads `ocx-binary`.
+  # `task rust:build` is a `bazel build` of `//crates/ocx_cli:ocx` — the binary the Bazel acceptance
+  # targets run, carrying the `__testing` provenance and the `__OCX_TESTING_SELF_IMAGE` seam the
+  # self-setup / self-update tests use to redirect `ocx.sh/ocx/cli` at the fixture registry — copied to
+  # `test/bin/ocx`. The template's `build` job (`ci:build`) builds the same graph and shares the cache.
+  binaries:
+    name: Acceptance binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: a restored object store is runner-executable content.
+          cache: false
+      # Reads and writes the shared cache; with no secret (a fork PR) the action writes no rc and Bazel
+      # runs uncached.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      - name: Build
+        run: task rust:build
+      # C-015's caller half, which a composite action cannot carry itself: it has no `post:` hook, so the
+      # deletion is an obligation on this file. `always()` and not `success()` — a cancelled or failed job
+      # is exactly the one that would otherwise leave the credential on the runner.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
+      - name: Upload Binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ocx-binary
+          path: test/bin/ocx
+          compression-level: 0
+          retention-days: 1
+
+  # The unit run with every hook shell reachable. The template's `test` job runs `ci:test` with no
+  # interpreter on PATH beyond the runner's, so the nine-shell parity matrix skips its elvish, nushell and
+  # fish arms there; an arm that never runs is a green indistinguishable from an absent test (#349). This
+  # job puts the three on PATH from the ocx registry, sets the guard that turns a missing arm into a red
+  # and forwards both into Bazel's sandbox, where `--test_env=PATH` re-executes the tests against that
+  # PATH. It is also the only leg where the emitted statements meet those shells' real parsers.
+  unit-live-shells:
+    name: Unit tests (live shells)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # `project: ''` is the action's documented opt-out from project auto-load. This leg wants the
+          # binary and nothing else; the step below pulls three shells with `ocx --remote`, which needs
+          # no project toolchain.
+          project: ''
+          cache: false
+      - name: Put the elvish, nushell and fish parity arms on PATH
+        run: |
+          set -euo pipefail
+          # Namespaced, not the flat `nushell`/`elvish`: index.ocx.sh is
+          # authoritative for every name in the `ocx.sh` registry, and only
+          # `nushell/nushell`, `elvish/elvish` and `fish-shell/fish` are announced
+          # there -- the flat spellings resolve to nothing and the pull exits 1.
+          eval "$(ocx --remote package env nushell/nushell elvish/elvish fish-shell/fish --shell=bash)"
+          for interpreter in nu elvish fish; do
+            # Assigned first, so `set -e` sees the lookup's exit status: a
+            # failed `command -v` inside an argument would otherwise append
+            # `dirname ""` = `.` to the PATH and read as success.
+            resolved="$(command -v "$interpreter")"
+            dirname "$resolved" >> "$GITHUB_PATH"
+          done
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      - name: Unit tests (Bazel)
+        env:
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish,fish,pwsh
+        run: >-
+          task bazel:test:unit --
+          --test_env=PATH --test_env=__OCX_TESTING_REQUIRE_LIVE_SHELLS
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
+
+  # The full suite on Linux, with the Sigstore stack, on a binary rebuilt from the warm cache (D20).
+  acceptance:
+    name: Acceptance (Linux)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      os: ubuntu-latest
+      binary: build
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+
+  smoke-acceptance:
+    name: Smoke Acceptance
+    # The per-verb smoke tier (`task test:smoke`, plan_crate_split_workspace.md
+    # C-012 – C-015): one marked happy path per visible top-level verb, run in
+    # parallel against the acceptance registry only, inside a 90 s wall-clock
+    # budget. The same setup as the full acceptance suite minus everything the
+    # Sigstore stack needs — no `--profile sigstore`, no readiness gate, no stack
+    # logs — because `test/lint/test_smoke_coverage.py` asserts that no marked
+    # test takes the `sigstore_stack` / `identity_token` fixtures. The schema
+    # artifacts are not downloaded either: the schema tests are outside the
+    # selection and no module reads the schema at import — and `task
+    # test:smoke` builds only the binaries (`test:.build-binaries`), never
+    # `//crates/ocx_schema:schemas`, so this job carries no Bazel setup of
+    # its own.
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # The 90 s budget in `task test:smoke` is measured after pytest returns,
+    # so a hung smoke test never trips it; this is what stops one. 10 min
+    # leaves room for the registry bring-up, the artifact download and
+    # `setup-ocx` ahead of the tier itself.
+    timeout-minutes: 10
+    env:
+      # Test telemetry, guarded on a value `if:` can read; empty on a fork PR, where the push is skipped.
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+      # The suite reads its registries from native zot processes (below), not
+      # from the compose file: no Docker on the path of the PR gate.
+      OCX_TEST_NATIVE_SERVICES: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Download Binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ocx-binary
+          path: test/bin
+      - name: Prepare Binaries
+        run: chmod +x test/bin/ocx
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      # Not Sigstore setup, although it exists for the cosign matrix: `-m smoke`
+      # deselects that matrix but still collects its modules, and
+      # `tests/fixtures/cosign_matrix.py` resolves the pinned cosign binary at
+      # import — without the project toolchain materialized, collection errors
+      # and the whole selection fails to run.
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: a restored object store is runner-executable content.
+          cache: false
+      # zot comes from the project toolchain `Setup OCX` just materialized (OCI
+      # 1.1 Referrers API on 5000, plus the target and prod ports); the
+      # registry:2 mirror fixture is not started, and no smoke test needs it.
+      - name: Start native registries
+        run: task test:services:native:start
+      - name: Run Smoke Tier
+        # The task writes `test/results/junit-smoke.xml` on every run, local
+        # ones included, so one flag in one place (test/taskfile.yml
+        # `SMOKE_JUNIT_XML`) feeds both the report below and the timings a
+        # developer's run pushes.
+        run: task test:smoke
+      - name: Stop native registries
+        if: ${{ always() }}
+        run: task test:services:native:stop
+      # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
+      - name: Publish Smoke Results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: test/results/junit-smoke.xml
+          require_tests: false
+          annotate_only: true
+      - name: Push smoke test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: test/results/junit-smoke.xml
+          suite: smoke
