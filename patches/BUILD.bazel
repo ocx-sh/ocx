@@ -1,1 +1,0 @@
-exports_files(["rules_rust_keep_doctest_stdout.patch"])
