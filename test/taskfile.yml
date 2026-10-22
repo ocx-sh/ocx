@@ -404,6 +404,33 @@ tasks:
       - python3 {{toSlash .ROOT_DIR}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}
       - python3 {{toSlash .ROOT_DIR}}/scripts/conformance_floor.py --junit {{.JUNIT_DIR}}
 
+  windows-local:
+    desc: >-
+      Run the acceptance suite (MODE=accept) or the Rust unit-test bundle
+      (MODE=unit) on the Windows host from WSL: `task -x test:windows-local
+      MODE=accept -- -k patch`
+    summary: |
+      `scripts/windows_local.sh`: cross-builds the gnullvm `ocx.exe` (`cross:test:bin`;
+      the unit bundle for MODE=unit) unless `EXE=<path>` names one, stages the git working
+      tree (`git ls-files -co --exclude-standard`, minus `external/` and `.agents/`) into
+      `%USERPROFILE%\ocx-wintest\<checkout-name>\` on C:, starts native zot there from
+      `ocx.lock` on dedicated ports (15000, 15003, 15004; WSL's own compose registries on
+      5000..5004 are reachable from Windows, so the default ports could reach the wrong
+      stack), runs `test:accept:native` through `cmd.exe` and stops the registries.
+      `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the shard's JUnit report comes back to
+      `target/windows-local/junit/`. After `--`: pytest arguments (accept) or one
+      substring filtering the bundle's testcases (unit).
+
+      The exit status is the child's, but only under `task -x`: without it task reports
+      201 for any failed command. 69 means this is not WSL with a Windows cmd.exe, 2 a
+      shard request the selector refuses, 64 a malformed call.
+    cmds:
+      - >-
+        bash {{toSlash .ROOT_DIR}}/scripts/windows_local.sh --mode '{{.MODE}}'
+        {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}}
+        {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}
+        {{if .EXE}}--exe '{{.EXE}}'{{end}} -- {{.CLI_ARGS}}
+
   smoke:
     desc: >-
       The smoke tier: one marked happy path per visible top-level verb
