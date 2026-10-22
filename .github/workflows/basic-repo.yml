@@ -1,0 +1,21 @@
+# Seeded once by ocx-sh/conventions; this file belongs to the repo from here on.
+# verify-basic calls it as its `repo` job: put the repo-owned jobs that gate a pull request here.
+# A called workflow sees only the secrets it declares, so keep every secret the `repo_workflows` answer
+# lists declared under `on.workflow_call.secrets`.
+name: basic-repo
+
+on:
+  workflow_call:
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  repo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "no repo-owned basic jobs yet"

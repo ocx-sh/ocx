@@ -1,734 +1,90 @@
-name: Verify Deep
-
-# The deep tier of the two-tier gate (subsystem-ci.md "Verification tiers"):
-# Linux unit tests and schema in `build`, one parallel `cross` leg per target,
-# the macOS and Windows unit and smoke legs that only download and execute, the
-# sharded full acceptance suite with the Sigstore stack, `satellite-verify` and
-# `satellite-contract`. Runs on demand, on `main`, in the merge queue and
-# weekly — NOT per pull request, because a deep run costs several times the
-# basic tier's ≈18 runner-minutes (subsystem-ci.md "Cost Factors"), and every
-# PR paid it on every push. `verify-basic.yml` is the whole automatic PR gate
-# now; the deep tier is opt-in per branch:
-#
-#     gh workflow run verify-deep.yml --ref <branch>
-#
-# STATED RESIDUAL — no pull request runs the `cfg(windows)` /
-# `cfg(target_os = "macos")` unit tests or the full acceptance suite unless
-# someone dispatches this workflow. The push to `main` below is where that
-# coverage lands automatically, which is after the merge, not before it.
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+name: verify-deep
 
 on:
-  # The manual invocation, and with the `pull_request` trigger gone the only
-  # way a branch gets deep coverage before it lands.
-  workflow_dispatch:
-    inputs:
-      # Both satellite jobs check ocx-mirror out at this ref: the branch a
-      # same-series mirror fix lives on, before it merges.
-      mirror_ref:
-        description: ocx-mirror branch, tag or SHA for the satellite jobs (empty = its default branch).
-        type: string
-        default: ''
-  # Reusable: composed into the pre-release `release-readiness.yml` gate so a
-  # single dispatch reports one GO/NO-GO across all platforms.
-  workflow_call:
-    inputs:
-      full:
-        description: Run the build, native-test and acceptance jobs, not just the drift check.
-        type: boolean
-        default: true
-    # actionlint reads a `workflow_call` secrets block as the whole `secrets`
-    # context, so the telemetry credential the jobs below read is declared
-    # beside the cache one; a caller that passes neither runs uncached and
-    # pushes no timings.
-    secrets:
-      BAZEL_CACHE_WRITE_AUTH:
-        required: false
-      OTEL_OTLP_AUTH:
-        required: false
-  # Every push to `main`: merges are rebase-only and there is no queue, so a PR
-  # verified at its own head lands on a `main` that moved since, and this is
-  # the one full run over the tree that actually landed (DX-16).
-  # `verify-basic.yml` runs its smoke tier on the same push.
-  # remove push: [main] once merge_group is live (D6)
-  push:
-    branches: [main]
-  # The merge queue, so a deep check the owner later marks required can still
-  # run on the queued merge commit.
-  merge_group: {}
-  # Weekly, for `index-conformance-drift` only — it is the one check here that
-  # can go stale without anyone touching this repository. The build and
-  # acceptance jobs stay off the cron: a cron'd cross-build plus sharded
-  # acceptance is real money for a signal the push to `main` already produces.
   schedule:
-    - cron: '0 6 * * 1'
+    # Nightly minute is stable per repository: sha256(repo_name)[:4] % 60, computed at render time.
+    - cron: "11 3 * * *"
+  workflow_dispatch:
+  workflow_call:
+  # Lets a PR that adds this workflow run its own deep tier (dispatch needs the file on the default branch).
+  pull_request:
+    types: [labeled]
 
-permissions:
-  contents: read
-
-# Literal group name (not the subsystem-ci.md §6 `${{ github.workflow }}-...`
-# convention), for the reason spelled out in `shell-activation-deep.yml`: this
-# workflow is also reused from `release-readiness.yml`, where `github.workflow`
-# resolves to the CALLER's name and the convention would make parent and child
-# contend for one group.
-concurrency:
-  group: verify-deep-${{ github.ref }}
-  # A cancelled merge-queue run is a failed check to the queue, which then
-  # drops the entry — so queue refs are never cancelled; `main` keeps its
-  # carve-out. `.claude/tests/test_workflows.py` asserts this expression.
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}
+permissions: {}
 
 jobs:
-  index-conformance-drift:
-    name: Index Conformance Drift
-    # Unconditional: this is the job the weekly cron exists for.
-    runs-on: ubuntu-latest
-    # Reads a public repository through `gh api`; nothing here writes.
+  deep:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-deep'
+    name: deep (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Compare vendored fixtures against ocx-sh/indexbot@main
+      - uses: ocx-sh/conventions/.github/actions/setup@7d067fa0a28f195bb5833be434449dea12113551 # v0
+        with:
+          groups: default,test,build
+          bazel-cache: trusted
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      - run: task ci:deep
+      - name: Push JUnit telemetry
+        if: always()
+        uses: ocx-sh/conventions/.github/actions/setup@7d067fa0a28f195bb5833be434449dea12113551 # v0
+        with:
+          report: target/reports/junit/*.xml
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      - name: Upload JUnit reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-${{ matrix.os }}
+          path: target/reports/junit
+          if-no-files-found: ignore
+
+  # Repo-owned deep jobs: .github/workflows/deep-repo.yml is seeded once and belongs to the repo from then on.
+  repo:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-deep'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/deep-repo.yml
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+
+  # One issue labelled nightly-red: opened/updated on a red scheduled run, closed on the next green one.
+  nightly-red:
+    if: always() && github.event_name == 'schedule'
+    needs: [deep, repo]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close the nightly-red issue
         env:
-          # `gh api` against the public ocx-sh/indexbot; read-only, no elevation.
           GH_TOKEN: ${{ github.token }}
-        run: task test:index-conformance-drift
-
-  # Linux unit tests and the schema. Every binary the run executes is built on
-  # Linux, here and in `cross` below, through Bazel's hermetic toolchain; the
-  # macOS and Windows jobs only download and run. No cargo, bazel or Rust
-  # toolchain exists on a non-Linux runner.
-  build:
-    name: Build (Linux unit tests, schema)
-    # Under `workflow_call` the `github` context is the CALLER's, so
-    # `github.event_name` alone would skip this job for a caller that ever
-    # gains a `schedule:` trigger — a GO verdict over no build at all.
-    # `inputs.full` is null on our own dispatch/cron and true (its default) on
-    # every call, so the expensive legs are tied to the call, not the trigger.
-    if: github.event_name != 'schedule' || inputs.full
-    runs-on: ubuntu-latest
-    env:
-      # Test telemetry (subsystem-ci.md § Test telemetry). Lifted into the job
-      # env because `secrets` is not a context a composite action's `if:` can
-      # read; the push step guards on `env.OTEL_OTLP_AUTH != ''` so a fork PR —
-      # which sees no secrets — skips the push instead of failing it.
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
-          persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      # `ocx` on PATH is a prerequisite, not a convenience: every task in
-      # `taskfiles/bazel.taskfile.yml` and `taskfiles/cross.taskfile.yml` shells
-      # out through `ocx exec bazel --`, resolved from this repository's own
-      # `ocx.toml` (the 9.2.0 pin `bazel:pin:check` asserts).
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
-        with:
-          version: '0.6.2'
-          # Default-off: the action would otherwise restore
-          # $OCX_HOME/{blobs,layers,packages,tags} across runs, and a restored
-          # object store is runner-executable content.
-          cache: false
-      # Reads and writes the shared cache; with no secret (a fork PR, or a
-      # `workflow_call` that passed none) the action writes no rc and Bazel
-      # runs uncached. No `Install lld`: rules_rs links with the hermetic
-      # `@llvm` toolchain, so the runner needs no host linker.
-      - name: Bazel cache credential
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
-      # Skipped on a push to `main`: `verify-basic.yml`'s `smoke` job runs the
-      # identical `bazel:test:unit` on the same push, so a second run here is a
-      # duplicate of the same Linux unit suite (and doctests) over the same
-      # tree. Every other trigger — dispatch, call, merge queue — has no such
-      # sibling and still runs it.
-      - name: Unit tests (Bazel)
-        if: github.event_name != 'push'
-        run: task bazel:test:unit
-      # The `//crates/ocx_schema:schemas` genrule, so it runs before the
-      # credential goes. The full acceptance suite reads the generated metadata
-      # schema, and it runs on prebuilt binaries with no Bazel of its own.
-      - name: Generate Schema
-        run: task schema:generate
-      # C-015's caller half. `always()` rather than `success()`: a cancelled or
-      # failed job must leave no credential on the runner either, and a
-      # composite action has no `post:` hook.
-      - name: Remove the Bazel cache credential
-        if: always()
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          cleanup: 'true'
-      - name: Upload Schema
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ocx-schema
-          path: website/src/public/schemas/metadata/v1.json
-          retention-days: 1
-      # `task bazel:test:unit` writes a per-case report at
-      # `target/bazel/junit.xml` off the same `test.log` files its floor reads
-      # (Bazel's own `test.xml` carries one `testcase` per *target*). `junit.xml`
-      # in every leg so the `test-results` job's `artifacts/**/junit.xml` glob
-      # needs no second spelling. Absent on a push to `main`, where the unit
-      # step above is skipped.
-      - name: Upload Test Results
-        if: ${{ !cancelled() && github.event_name != 'push' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deep-unit-Linux
-          path: target/bazel/junit.xml
-      # Per-test timings to otel.ocx.sh. `!cancelled()` rather than `success()`:
-      # a failing suite still writes the report. Tolerated twice over — the
-      # action turns its own failures into warnings, and this guards the case
-      # where the runner kills it.
-      - name: Push unit test timings
-        if: ${{ !cancelled() && github.event_name != 'push' && env.OTEL_OTLP_AUTH != '' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: ./.github/actions/test-telemetry
-        with:
-          junit: target/bazel/junit.xml
-          suite: unit
-
-  # One parallel leg per triple. Serially in one job the eight `-c opt` builds
-  # took 2h+ cold; every leg shares the Bazel cache (#638). A leg uploads only
-  # its own `ocx`, plus the unit bundle and acceptance binaries where its
-  # triple has a native leg. `needs:` names a whole matrix, so a consumer waits
-  # for the slowest leg, not only its own.
-  cross:
-    name: Cross-build (${{ matrix.target }})
-    if: github.event_name != 'schedule' || inputs.full
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Equal to `task cross:targets`; `.claude/tests/test_workflows.py` holds it there.
-        target:
-          - aarch64-apple-darwin
-          - aarch64-pc-windows-gnullvm
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - x86_64-apple-darwin
-          - x86_64-pc-windows-gnullvm
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-        include:
-          - { target: aarch64-apple-darwin, bundle: true, test-bin: true }
-          - { target: x86_64-pc-windows-gnullvm, bundle: true, test-bin: true }
-          - { target: x86_64-unknown-linux-gnu, test-bin: true }
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
-          persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
-        with:
-          version: '0.6.2'
-          cache: false
-      # Same cache step as `build`.
-      - name: Bazel cache credential
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
-      # NO release-provenance `--scan` here. The old cross-compile job ran it
-      # over a real `--release` cargo build; this job has no such build, and
-      # the Bazel-built `ocx` deliberately carries the `__testing` placeholder
-      # provenance (`crates/ocx_cli/BUILD.bazel` `_TESTING_PROVENANCE`), so a
-      # scan of these bytes would red by design. A second, release-profile
-      # compile just to scan it is the cost this restructure removes. The scan
-      # still runs over the real release bytes in `scan-binaries.yml`
-      # (called by `release.yml` and `deploy-dev.yml`) before anything ships.
-      - name: Cross-build ocx
-        run: task cross:build TARGET="${{ matrix.target }}"
-      - name: Bundle unit tests
-        if: matrix.bundle
-        run: task cross:test:bundle TARGET="${{ matrix.target }}"
-      - name: Stage acceptance binaries
-        if: matrix.test-bin
-        run: task cross:test:bin TARGET="${{ matrix.target }}"
-      - name: Remove the Bazel cache credential
-        if: always()
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          cleanup: 'true'
-      # `ocx*` is `ocx` or `ocx.exe`; `test-bin/` and the bundle do not match.
-      - name: Upload ocx
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ocx-${{ matrix.target }}
-          path: target/cross/${{ matrix.target }}/ocx*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-      - name: Upload unit-test bundle
-        if: matrix.bundle
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: unit-tests-${{ matrix.target }}
-          path: target/cross/${{ matrix.target }}/unit-tests.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-      - name: Upload acceptance binaries
-        if: matrix.test-bin
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-bin-${{ matrix.target }}
-          path: target/cross/${{ matrix.target }}/test-bin/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-
-  # macOS and Windows unit tests: download the test executables `cross`
-  # cross-compiled and run them. Nothing is compiled or installed here beyond
-  # the task runner and a Python for the runner script.
-  unit-native:
-    name: Unit Test (${{ matrix.job.name }})
-    needs: cross
-    runs-on: ${{ matrix.job.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        job:
-          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm }
-    env:
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-    steps:
-      # The taskfile includes every sub-taskfile, so a sparse checkout would
-      # fail to load; a plain checkout of the tree is a few seconds and needs
-      # no submodules.
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-      - name: Download unit-test bundle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: unit-tests-${{ matrix.job.target }}
-          path: bundle
-      # `cross:test:run` reds on a failing test and on an under-run.
-      - name: Run unit tests
-        shell: bash
-        env:
-          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper
-          # (ocx#524); both interpreters ship on the image, so a skip is a red.
-          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'pwsh,powershell' || '' }}
-        run: task cross:test:run BUNDLE="bundle/unit-tests.tar.gz" SOURCE_ROOT="$GITHUB_WORKSPACE"
-      - name: Upload Test Results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deep-unit-${{ matrix.job.name }}
-          path: target/cross/unit-junit.xml
-      - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: ./.github/actions/test-telemetry
-        with:
-          junit: target/cross/unit-junit.xml
-          suite: unit
-
-  # The full acceptance suite on Linux, sharded four ways over the prebuilt
-  # `test-bin-x86_64-unknown-linux-gnu`; `acceptance-merge` judges the floor and
-  # ceilings over the merged reports. No Bazel on this runner: the suite is
-  # plain pytest against the binaries `cross` staged.
-  acceptance:
-    name: Acceptance (Linux, shard ${{ matrix.shard }}/4)
-    needs: [build, cross]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    env:
-      # zot runs as native processes from the project toolchain (5000/5003/5004);
-      # only the registry:2 mirror and the Sigstore stack need Docker.
-      OCX_TEST_NATIVE_SERVICES: "1"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
-          persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      # Puts `zot` (and the rest of the project toolchain) on PATH.
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
-        with:
-          version: '0.6.2'
-          # Default-off: a restored object store is runner-executable content.
-          cache: false
-      - name: Download acceptance binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: test-bin-x86_64-unknown-linux-gnu
-          path: test/bin
-      - name: Download Schema
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ocx-schema
-          path: website/src/public/schemas/metadata
-      - name: Prepare Binaries
-        shell: bash
+          REPO: ${{ github.repository }}
+          RESULT: ${{ needs.deep.result }}
+          REPO_RESULT: ${{ needs.repo.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # An artifact round trip drops every executable bit, nested ones
-          # (`schema/ocx_schema`) included; a missing one must red here, not as
-          # a confusing failure deep in the suite.
-          chmod -R +x test/bin
-          for bin in test/bin/ocx test/bin/ocx-shim test/bin/schema/ocx_schema; do
-            [ -x "$bin" ] || { echo "::error::$bin is missing or not executable"; exit 1; }
-          done
-      - name: Start native registries
-        run: task test:services:native:start
-      - name: Start mirror registry
-        shell: bash
-        run: |
-          # distribution's registry:2 is the negative fixture for the Referrers
-          # API (legacy_registry, #106) and the mirror tests' upstream; it has no
-          # native build, so it stays in Docker on 5001.
-          docker compose -f test/docker-compose.yml up -d mirror-registry
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:5001/v2/ > /dev/null 2>&1; then
-              echo "Mirror registry is ready"
-              exit 0
+          set -euo pipefail
+          # A red repo-owned job reddens the night; a cancelled one leaves the issue as it is.
+          [ "$REPO_RESULT" = success ] || [ "$RESULT" = failure ] || RESULT=$REPO_RESULT
+          num=$(gh issue list --repo "$REPO" --label nightly-red --state open --json number --jq '.[0].number // empty')
+          if [ "$RESULT" = success ]; then
+            [ -z "$num" ] || gh issue close "$num" --repo "$REPO" --comment "Nightly green again: $RUN_URL"
+          elif [ "$RESULT" = failure ]; then
+            if [ -n "$num" ]; then
+              gh issue comment "$num" --repo "$REPO" --body "Still red: $RUN_URL"
+            else
+              gh label create nightly-red --repo "$REPO" --color B60205 --description "verify-deep failed on schedule" 2>/dev/null || true
+              gh issue create --repo "$REPO" --label nightly-red --title "verify-deep: nightly red" --body "The scheduled verify-deep run failed: $RUN_URL"
             fi
-            sleep 0.5
-          done
-          echo "::error::Mirror registry did not become reachable"
-          exit 1
-      - name: Start Sigstore stack
-        shell: bash
-        run: |
-          # The signing acceptance tests run against a real Fulcio + Rekor +
-          # TesseraCT + dex stack, not a fake, so the `sigstore` profile is a
-          # hard prerequisite: `tests/fixtures/sigstore_stack.py` raises rather
-          # than skipping, because a skip here is indistinguishable from a pass
-          # and these are the tests carrying the supply-chain contract.
-          #
-          # The services are NAMED: a bare `--profile sigstore up` also starts
-          # the compose `registry`, `target-registry` and `prod-registry`, which
-          # would take ports 5000/5003/5004 from the native zot processes.
-          start=$SECONDS
-          docker compose -f test/docker-compose.yml --profile sigstore up -d \
-            dex sigstore-ct fulcio sigstore-mysql trillian-log-server trillian-log-signer rekor
-          # Four of the seven images are distroless, so compose healthchecks
-          # cannot run inside them; wait-for-stack.py polls from the host and is
-          # the same gate the fixtures use and the self-hosting docs hand out.
-          python3 test/sigstore/wait-for-stack.py --timeout 300
-          echo "sigstore stack ready in $((SECONDS - start))s"
-      # The readiness gate prints which service is down and names the log
-      # command, but nobody can run that command on a finished runner — without
-      # this step a bring-up failure costs a whole second run to diagnose.
-      - name: Sigstore stack logs (on failure)
-        if: failure()
-        shell: bash
-        run: |
-          docker compose -f test/docker-compose.yml --profile sigstore ps
-          for service in rekor trillian-log-server trillian-log-signer sigstore-mysql fulcio sigstore-ct dex; do
-            echo "::group::$service"
-            docker compose -f test/docker-compose.yml --profile sigstore logs --tail=80 "$service" || true
-            echo "::endgroup::"
-          done
-      - name: Run Acceptance Tests
-        shell: bash
-        # `ubuntu-latest` ships systemd, so its `environment.d` generator is
-        # present and a skip in `test_session_path.py` would mean the binary
-        # moved — not that the host lacks it. The `environment.d` prepend has
-        # open upstream reports of not landing for PATH (systemd/systemd#40430),
-        # so this is the one leg where "skipped" and "passed" must not read the
-        # same. Fails closed: any value but empty or `0` arms the gate.
-        env:
-          __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
-        run: task test:accept:native SHARD=${{ matrix.shard }}/4
-      - name: Stop native registries
-        if: ${{ always() }}
-        run: task test:services:native:stop
-      - name: Stop Docker services
-        if: ${{ always() }}
-        shell: bash
-        # `--profile sigstore` is load-bearing: a bare `down` leaves
-        # profile-gated services running.
-        run: docker compose -f test/docker-compose.yml --profile sigstore down 2>/dev/null || true
-      - name: Upload shard JUnit
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: accept-junit-shard-${{ matrix.shard }}
-          path: target/accept/junit/*.xml
-          retention-days: 1
-
-  # The floor and the skip/xfail ceilings are properties of the whole suite, so
-  # they are judged over the four shards' reports together, never per shard.
-  acceptance-merge:
-    name: Acceptance (Linux, merged)
-    needs: acceptance
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) }}
-    runs-on: ubuntu-latest
-    env:
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Download shard reports
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: accept-junit-shard-*
-          path: accept-junit
-          merge-multiple: true
-      # Absolute: the task runs with `dir: ./test`, so a relative path would
-      # resolve under test/ while the reports sit at the repository root.
-      - name: Suite floor and ceilings
-        run: task test:accept:floor JUNIT_DIR="${{ github.workspace }}/accept-junit" EXPECT_SHARDS=4
-      - name: Upload Test Results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deep-acceptance-Linux
-          path: accept-junit/*.xml
-      - name: Push acceptance test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
-        continue-on-error: true
-        timeout-minutes: 15
-        uses: ./.github/actions/test-telemetry
-        with:
-          junit: accept-junit/*.xml
-          suite: acceptance
-
-  # Smoke subset on macOS and Windows against native zot, on the binaries
-  # `cross` cross-compiled. Full native-suite parity is a follow-up.
-  acceptance-native:
-    name: Smoke (${{ matrix.job.name }})
-    needs: cross
-    runs-on: ${{ matrix.job.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        job:
-          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
-          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm }
-    env:
-      OCX_TEST_NATIVE_SERVICES: "1"
-      # The binaries come from the `cross` job; the task must not build.
-      SKIP_BUILD: "true"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
-          persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      # Puts `zot` (and the rest of the project toolchain) on PATH.
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
-        with:
-          version: '0.6.2'
-          cache: false
-      - name: Download acceptance binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: test-bin-${{ matrix.job.target }}
-          path: test/bin
-      # An artifact round trip drops the executable bit; Windows has none.
-      - name: Prepare Binaries
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          # An artifact round trip drops every executable bit, nested ones
-          # (`schema/ocx_schema`) included; a missing one must red here, not as
-          # a confusing failure deep in the suite.
-          chmod -R +x test/bin
-          for bin in test/bin/ocx test/bin/ocx-shim test/bin/schema/ocx_schema; do
-            [ -x "$bin" ] || { echo "::error::$bin is missing or not executable"; exit 1; }
-          done
-      # `test/taskfile.yml` shells out to `python3`, `date`, `tr`, `dirname` and
-      # `basename`. A Windows runner has none of them on the PATH task's shell
-      # sees: Git's `usr\bin` carries the coreutils, and setup-python provides
-      # only `python`, so `python3.exe` is a copy of it in the same directory
-      # (a copy elsewhere would lose the DLLs it loads beside itself).
-      - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-      - name: Provide POSIX tools and python3 (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          echo 'C:\Program Files\Git\usr\bin' >> "$GITHUB_PATH"
-          py_dir="$(dirname "$(command -v python)")"
-          [ -e "$py_dir/python3.exe" ] || cp "$py_dir/python.exe" "$py_dir/python3.exe"
-      - name: Start native registries
-        run: task test:services:native:start
-      - name: Run Smoke Tier
-        run: task test:smoke
-      - name: Stop native registries
-        if: ${{ always() }}
-        run: task test:services:native:stop
-      - name: Upload Test Results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deep-smoke-${{ matrix.job.name }}
-          path: test/results/junit-smoke.xml
-
-  test-results:
-    name: Publish Deep Test Results
-    needs: [build, unit-native, acceptance-merge, acceptance-native]
-    runs-on: ubuntu-latest
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) }}
-    # The one job that publishes a check run and a PR comment; every other job
-    # inherits the read-only workflow grant.
-    permissions:
-      contents: read
-      checks: write
-      pull-requests: write
-    steps:
-      - name: Download Artifacts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: deep-*
-          path: artifacts
-      - name: Publish Test Results
-        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
-        with:
-          files: "artifacts/**/*.xml"
-          check_name: "Deep Test Results"
-
-  satellite-verify:
-    name: Satellite Verify (ocx-mirror)
-    # The schedule clause matches `build`: the weekly cron is the drift check
-    # only, and a mirror build is real money for a signal the push to `main`
-    # already produces.
-    if: github.event_name != 'schedule' || inputs.full
-    # NON-BLOCKING until ocx-sh/ocx-mirror re-points at the split crates
-    # (plan_crate_split_workspace.md DEC-4). The flip is deleting the
-    # `continue-on-error` line below and nothing else; the ocx-mirror
-    # follow-up PR that WP-39 specifies carries it. While the line is set
-    # this job must NEVER be made a required check: the job's own check run
-    # still concludes `failure` (only the workflow run and `needs.*.result`
-    # read `success`), so a required check on it would block every merge
-    # until the mirror re-points — and if GitHub ever read the job as green,
-    # it would gate nothing. Either way, required + continue-on-error is a
-    # gate that cannot do its job. Job-level rather than step-level so the
-    # job shows red in the run view when the task fails.
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    # Reads two public repositories; nothing here writes.
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: ocx
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: ocx
-          submodules: true
-          persist-credentials: false
-      # `actions/checkout` refuses a `path:` outside the workspace, so the
-      # satellite is a sibling under it rather than the task's `../ocx-mirror`
-      # default, and `OCX_MIRROR_DIR` names it. Its submodule is not fetched:
-      # `task satellite:verify` overlays this checkout over the mirror's
-      # `external/ocx` (rsync --delete), so the pinned pointer's tree would
-      # only be cloned to be deleted.
-      - name: Checkout ocx-mirror
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ocx-sh/ocx-mirror
-          path: ocx-mirror
-          # Empty off `workflow_dispatch`: the default branch.
-          ref: ${{ inputs.mirror_ref }}
-          persist-credentials: false
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          # The toolchain file and the cached workspace live under `ocx/`, not
-          # at the workspace root.
-          rust-src-dir: ocx
-          matcher: true
-          # Same reason as verify-basic.yml: denial lives in
-          # [workspace.lints.rust] so the path-vendored forks stay capped.
-          rustflags: ""
-          # The mirror builds into the persistent target dir the task keeps
-          # under `.tmp/satellite-verify/`; cache it (on failure too — the job
-          # is expected red until the mirror re-points, and a cache that only
-          # saves on green would never warm).
-          cache-workspaces: "ocx -> .tmp/satellite-verify/cargo-target"
-          cache-on-failure: true
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Build ocx-mirror against this tree and check the satellite linking rule
-        env:
-          OCX_MIRROR_DIR: ${{ github.workspace }}/ocx-mirror
-        run: task satellite:verify --force
-
-  satellite-contract:
-    name: Satellite Contract (ocx-mirror)
-    if: github.event_name != 'schedule' || inputs.full
-    runs-on: ubuntu-latest
-    # Reads two public repositories; nothing here writes.
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: ocx
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: ocx
-          submodules: true
-          persist-credentials: false
-      - name: Checkout ocx-mirror
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ocx-sh/ocx-mirror
-          path: ocx-mirror
-          ref: ${{ inputs.mirror_ref }}
-          persist-credentials: false
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-        with:
-          rust-src-dir: ocx
-          matcher: true
-          rustflags: ""
-          # The candidate `ocx` and the mirror share this target dir.
-          cache-workspaces: "ocx -> .tmp/satellite-verify/cargo-target"
-          cache-on-failure: true
-      - name: Setup Task
-        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: Run ocx-mirror's acceptance suite against the candidate ocx
-        env:
-          OCX_MIRROR_DIR: ${{ github.workspace }}/ocx-mirror
-        run: task satellite:contract --force
+          fi

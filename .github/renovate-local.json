@@ -1,0 +1,1 @@
+{"$schema": "https://docs.renovatebot.com/renovate-schema.json", "description": ["Repo-local Renovate rules, merged after the ocx-sh/conventions preset. Ecosystem norms (npm, docker, actions, cargo, python) live in conventions; put only repo-specific rules here."]}

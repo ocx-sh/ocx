@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+# Allowlist false positives by path or regex here, never by .gitleaksignore fingerprints.
+# gitleaks rejects an allowlist with no check, so the placeholder regex below matches nothing real;
+# replace it with your first real entry.
+[allowlist]
+description = "Repo-local allowlist for gitleaks false positives"
+regexes = ['''^ocx-baseline-allowlist-placeholder$''']
+paths = []
