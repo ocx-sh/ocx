@@ -21,10 +21,10 @@
 set -euo pipefail
 
 TRIPLE=x86_64-pc-windows-gnullvm
-# Dedicated ports: WSL forwards its own localhost:5000..5004 (the compose stack) to
-# Windows, so the default ports would reach that stack, never the zot started here.
-# native_registries.py refuses a busy port instead of sharing it.
-PORT_REGISTRY=15000 PORT_MIRROR=15001 PORT_TARGET=15003 PORT_PROD=15004
+# The suite starts its own zot registries on free ports. The registry:2 mirror is Docker
+# only, and WSL forwards its own localhost:5001 to Windows, so the default port would
+# reach WSL's compose stack; a dedicated one is reachable by nothing.
+PORT_MIRROR=15001
 GIT_USR_BIN='C:\Program Files\Git\usr\bin'
 
 die() {
@@ -171,9 +171,7 @@ fi
     # A host-global commit.gpgsign would break the fixtures' commits.
     printf '%s\r\n' 'set "GIT_CONFIG_COUNT=2"' 'set "GIT_CONFIG_KEY_0=commit.gpgsign"' 'set "GIT_CONFIG_VALUE_0=false"' \
         'set "GIT_CONFIG_KEY_1=tag.gpgsign"' 'set "GIT_CONFIG_VALUE_1=false"'
-    printf '%s\r\n' 'set "SKIP_BUILD=true"' 'set "OCX_TEST_NATIVE_SERVICES=1"'
-    printf '%s\r\n' "set \"OCX_TEST_REGISTRY_PORT=$PORT_REGISTRY\"" "set \"OCX_TEST_MIRROR_PORT=$PORT_MIRROR\"" \
-        "set \"OCX_TEST_TARGET_PORT=$PORT_TARGET\"" "set \"OCX_TEST_PROD_PORT=$PORT_PROD\""
+    printf '%s\r\n' 'set "SKIP_BUILD=true"' "set \"OCX_TEST_MIRROR_PORT=$PORT_MIRROR\""
     printf '%s\r\n' "set \"TEST_BASETEMP=$own_win\\p-$NAME\"" "set \"TEST_TMPDIR=$own_win\\t-$NAME\""
 } >"$own_wsl/$NAME-env.cmd"
 
@@ -187,26 +185,13 @@ if [ ! -f "$own_wsl/py/Scripts/python3.exe" ]; then
     cp -f "$own_wsl/py/Scripts/python.exe" "$own_wsl/py/Scripts/python3.exe"
 fi
 
-# 5. The run. zot comes from ocx.lock through the staged ocx.exe; the registries are
-# started before the suite and stopped after it, whatever the suite did.
-stopped=1
-stop_registries() {
-    [ "$stopped" -eq 0 ] || return 0
-    stopped=1
-    win "task -x test:services:native:stop" || true
-}
-trap 'stop_registries; rm -f "$list" "$have"' EXIT
+# 5. The run. zot comes from ocx.lock through the staged ocx.exe; pytest starts it itself.
 rc=0
 if [ "$mode" = accept ]; then
-    stopped=0
-    win "test\\bin\\ocx.exe exec zot -- task -x test:services:native:start" || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        shard_vars=''
-        [ -z "$shard_count" ] || shard_vars="$shard_vars SHARD_COUNT=$shard_count"
-        [ -z "$shard_index" ] || shard_vars="$shard_vars SHARD_INDEX=$shard_index"
-        win "task -x test:accept:native$shard_vars -- $args" || rc=$?
-    fi
-    stop_registries
+    shard_vars=''
+    [ -z "$shard_count" ] || shard_vars="$shard_vars SHARD_COUNT=$shard_count"
+    [ -z "$shard_index" ] || shard_vars="$shard_vars SHARD_INDEX=$shard_index"
+    win "test\\bin\\ocx.exe exec zot -- task -x test:accept:native$shard_vars -- $args" || rc=$?
     # The reports leave with the run: F2's limits are counted off them.
     mkdir -p "$ROOT/target/windows-local/junit"
     if [ -d "$stage_wsl/target/accept/junit" ]; then

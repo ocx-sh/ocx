@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -7,10 +8,10 @@ import stat
 import subprocess
 import sys
 import tarfile
-import time
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -50,7 +51,7 @@ class _Unset:
 _UNSET = _Unset()
 
 # ---------------------------------------------------------------------------
-# Docker-compose helpers
+# Docker-compose helpers (the registry:2 mirror and the Sigstore profile)
 # ---------------------------------------------------------------------------
 
 
@@ -63,126 +64,18 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
-def native_services() -> bool:
-    """True when the services are native zot processes (``OCX_TEST_NATIVE_SERVICES=1``).
+def compose_up_service(service: str) -> None:
+    """``docker compose up -d <service>`` under the host-wide compose lock.
 
-    Under it nothing may reach for docker: a service that is down is a hard
-    failure naming ``task test:services:native:start``, never a compose up.
+    Two sessions creating one container at once race, and one loses outright; the
+    lock is held across the call so the second finds the container already there.
     """
-    return os.environ.get("OCX_TEST_NATIVE_SERVICES") == "1"
-
-
-def compose_up() -> None:
-    """Bring the whole docker-compose stack up.
-
-    ``start_registry`` short-circuits on a warm primary, so a *sibling*
-    service that was never created stays absent for the rest of the session.
-    A caller that needs a specific service must issue this itself rather than
-    assume the primary's start created everything.
-    """
-    if native_services():
-        raise RuntimeError(
-            "OCX_TEST_NATIVE_SERVICES=1 and a service is unreachable; "
-            "run `task test:services:native:start` (compose is never used here)"
+    with _compose_lock():
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", service],
+            check=True,
+            capture_output=True,
         )
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
-        check=True,
-        capture_output=True,
-    )
-
-
-def registry_accepts_writes(registry: str) -> bool:
-    """Return True if the registry can still start a blob upload.
-
-    `GET /v2/` answers 200 from a registry whose storage is full, and the
-    primary one stores to a 2 GB tmpfs that fills up over a day of runs. The
-    suite then pushes into 500s and reds in the thousands with no test naming
-    the cause. This asks the question the suite actually depends on.
-    """
-    request = urllib.request.Request(
-        f"http://{registry}/v2/ocx-write-probe/blobs/uploads/", method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            location = response.headers.get("Location")
-            accepted = response.status in (201, 202)
-    except urllib.error.HTTPError as refusal:
-        return refusal.code in (401, 403, 405)  # answering, just not to us
-    except (urllib.error.URLError, OSError):
-        return False
-    if location:  # do not leave the probe upload behind
-        target = location if location.startswith("http") else f"http://{registry}{location}"
-        try:
-            urllib.request.urlopen(urllib.request.Request(target, method="DELETE"), timeout=5)
-        except (urllib.error.URLError, OSError):
-            pass
-    return accepted
-
-
-def _recycle_registry(registry: str) -> None:
-    """Recreate the primary registry container, discarding its tmpfs.
-
-    A restart is not enough on some daemons -- the volume is recreated with
-    the container, not with the process. Serialized on the same host-wide lock
-    compose bring-up uses, because a sibling worktree shares this container.
-
-    The caller decided on a probe taken WITHOUT that lock, so each step re-asks
-    under it: a sibling may have recycled already. A write-accepting registry is
-    left alone, and after its own `up -d` this holds the lock until the registry
-    accepts writes (30 s): `up -d` returns before it listens, and the next sibling
-    would read "starting" as "full" (`lint/test_registry_recycle.py`).
-    """
-    import fcntl  # POSIX-only, imported where used like the bring-up lock below
-
-    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with _COMPOSE_LOCK.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        registry_accepts_writes(registry) or subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "rm", "-sf", "registry"],
-            capture_output=True, check=False,
-        )
-        registry_accepts_writes(registry) or subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "registry"],
-            capture_output=True, check=False,
-        ) and any(registry_accepts_writes(registry) or time.sleep(0.5) for _ in range(60))
-
-
-def start_registry(registry: str) -> None:
-    """Start the registry via docker-compose if it is not already running.
-
-    Reachable is not enough: a registry whose storage is full answers every
-    read and fails every write, so it is recycled rather than handed to the
-    suite.
-    """
-    if registry_is_reachable(registry) and registry_accepts_writes(registry):
-        return
-
-    if native_services():
-        raise RuntimeError(
-            f"OCX_TEST_NATIVE_SERVICES=1 and registry at {registry} is not up and writable; "
-            "run `task test:services:native:start`"
-        )
-    if registry_is_reachable(registry):
-        print(
-            f"registry at {registry} is reachable but refuses writes (storage full?) — recreating it",
-            file=sys.stderr,
-        )
-        _recycle_registry(registry)
-    else:
-        compose_up()
-
-    # Wait for the registry to answer and to accept a write (up to 30 s).
-    for _ in range(60):
-        if registry_is_reachable(registry) and registry_accepts_writes(registry):
-            return
-        time.sleep(0.5)
-
-    raise RuntimeError(
-        f"Registry at {registry} did not become writable — reachable="
-        f"{registry_is_reachable(registry)}. Check `docker logs` for "
-        f"'no space left on device': its store is a 2 GB tmpfs."
-    )
 
 
 SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
@@ -192,6 +85,22 @@ _WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
 #: Host-wide lock serializing compose bring-up across concurrent sessions.
 #: Outside any worktree: two worktrees are exactly the case it exists for.
 _COMPOSE_LOCK = Path.home() / ".cache" / "ocx-compose.lock"
+
+
+@contextlib.contextmanager
+def _compose_lock() -> Iterator[None]:
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock, and no shared stack to contend for
+        yield
+        return
+    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(_COMPOSE_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _compose(*args: str, profile: bool = True) -> subprocess.CompletedProcess[str]:
@@ -206,8 +115,8 @@ def _compose(*args: str, profile: bool = True) -> subprocess.CompletedProcess[st
 def _profile_services() -> list[str] | None:
     """The services the `sigstore` profile adds, or None when compose cannot say.
 
-    A bare `--profile sigstore up -d` also starts the profile-less registries,
-    whose ports native zot already holds.
+    A bare `--profile sigstore up -d` also starts the profile-less
+    `mirror-registry`, which a session that never asked for it must not create.
     """
     with_profile = _compose("config", "--services")
     without = _compose("config", "--services", profile=False)
@@ -272,21 +181,9 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
 
 def _bring_up_serialized() -> None:
     """Check-then-``up`` under an exclusive host lock, so the two are atomic."""
-    try:
-        import fcntl
-    except ImportError:  # Windows: no flock, and no shared stack to contend for
+    with _compose_lock():
         if not _stack_is_already_running():
             _require_up(_compose("up", "-d", *(_profile_services() or [])))
-        return
-
-    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(_COMPOSE_LOCK, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
-        try:
-            if not _stack_is_already_running():
-                _require_up(_compose("up", "-d", *(_profile_services() or [])))
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _require_up(result: subprocess.CompletedProcess[str]) -> None:

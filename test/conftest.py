@@ -1,10 +1,12 @@
 """Shared fixtures and hooks for all test suites (tests/ and recordings/)."""
+
 from __future__ import annotations
 
 import contextlib
 import dataclasses
 import importlib.util
 import os
+import shutil
 import stat
 import sys
 import textwrap
@@ -16,21 +18,20 @@ from pathlib import Path
 import pytest
 
 from src import forward_proxy as forward_proxy_mod
-from src.helpers import PROJECT_ROOT, start_registry
+from src import zot
+from src.helpers import PROJECT_ROOT, compose_up_service, registry_is_reachable
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
 # Session hooks
 # ---------------------------------------------------------------------------
 
-# Default addresses for the two registry:2 services, derived from the same
-# port knobs `docker-compose.yml` binds with. A machine that already runs
-# something on 5000 (another checkout, an unrelated project) exports
-# OCX_TEST_REGISTRY_PORT once and compose, the taskfile and these defaults all
-# move together. An explicit REGISTRY / MIRROR_REGISTRY still wins over both.
-_DEFAULT_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_REGISTRY_PORT', '5000')}"
+# The registry:2 mirror (compose service `mirror-registry`) keeps a fixed port:
+# OCX_TEST_MIRROR_PORT moves it, as it moves `docker-compose.yml`. The zot
+# registries have no default: their ports exist only after `pytest_configure`.
 _DEFAULT_MIRROR_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_MIRROR_PORT', '5001')}"
-_DEFAULT_TARGET_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_TARGET_PORT', '5003')}"
+_ZOT = pytest.StashKey[zot.Stack]()
+_TEST_ROOT = Path(__file__).resolve().parent
 
 
 def _wait_for_reachable(
@@ -54,73 +55,61 @@ def _wait_for_reachable(
     return False
 
 
+def _wants_zot(config: pytest.Config) -> bool:
+    """Whether this process starts the session's zot registries.
+
+    Not the xdist workers (they read the controller's ports from the
+    environment), not a run that executes no test (`--collect-only`, `--help`),
+    not a run that opted out, and not the lint tier, which may reach no registry.
+    """
+    if hasattr(config, "workerinput") or os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        return False
+    if (
+        config.getoption("collectonly")
+        or config.getoption("help")
+        or config.getoption("version")
+    ):
+        return False
+    invoked_from = Path(config.invocation_params.dir)
+    targets = [
+        (invoked_from / str(arg).split("::")[0]).resolve() for arg in config.args
+    ]
+    # A string compare on the first segment, not a joined path: the tag guard reads
+    # a `test/<dir>` join as an input every acceptance module would have to declare.
+    in_lint = [
+        _TEST_ROOT in t.parents and t.relative_to(_TEST_ROOT).parts[0] == "lint"
+        for t in targets
+    ]
+    return not (targets and all(in_lint))
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Each xdist worker gets its own session, so nothing a test spawns can
     reach the terminal `task verify` runs in -- no tcsetpgrp() steal, no
     SIGTTIN. The controller keeps it, so Ctrl-C still works.
+
+    The controller starts the session's zot registries here, before xdist spawns
+    a worker, and exports their ports: workers inherit the environment and never
+    start one (`src/zot.py`).
     """
-    if hasattr(config, "workerinput") and hasattr(os, "setsid"):  # no sessions on Windows
+    if hasattr(config, "workerinput") and hasattr(
+        os, "setsid"
+    ):  # no sessions on Windows
         with contextlib.suppress(OSError):
             os.setsid()
-
-
-def pytest_sessionstart(session: pytest.Session) -> None:
-    """Start the registry (and secondary registries) once before xdist workers spawn.
-
-    Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): the Windows
-    native-shim acceptance suite (``tests/test_windows_shim.py``) builds a
-    fake ``pkg_root`` on disk and never touches a registry — and the
-    ``registry:2`` Docker Compose fixture does not start on ``windows-latest``
-    (system_design §8). Selecting only that module on a runner without Docker
-    sets this flag so ``pytest_sessionstart`` does not hard-fail trying to
-    ``docker compose up`` a registry no collected test needs.
-
-    The mirror registry (``localhost:5001``) and the promotion target
-    (``localhost:5003``) are started under the same opt-out guard. Both are
-    declared in the same docker-compose.yml as the primary registry, but
-    ``start_registry`` returns early when the primary is already warm, so it
-    cannot be relied on to have created them: each secondary is brought up
-    here in its own right, then given a bounded retry for the beat its port
-    takes to bind. A secondary that is still unreachable after both is a
-    hard failure — Docker is available, so an absent service is a broken
-    environment, and skipping instead would empty whole suites (every test
-    in ``test_package_copy.py`` depends on ``target-registry``) while the
-    run still exits 0.
-    """
-    if os.environ.get("PYTEST_XDIST_WORKER") is not None:
+    if not _wants_zot(config):
         return
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
-        return
-    registry = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
-    start_registry(registry)
+    try:
+        stack = zot.start()
+    except zot.ZotError as error:
+        raise pytest.UsageError(str(error)) from None
+    config.stash[_ZOT] = stack
+    os.environ.update(stack.env())
 
-    from src.helpers import compose_up, native_services, registry_is_reachable
 
-    secondaries = (
-        ("mirror-registry", os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)),
-        ("target-registry", os.environ.get("TARGET_REGISTRY", _DEFAULT_TARGET_REGISTRY)),
-    )
-    for service, address in secondaries:
-        if registry_is_reachable(address):
-            continue
-        if native_services() and service == "mirror-registry":
-            continue  # registry:2 has no native build; its fixtures skip
-        # A warm primary makes `start_registry` a no-op, so a sibling service
-        # that was never created stays absent — the retry alone would just
-        # burn its budget against a container that does not exist. Issue the
-        # compose up here rather than assuming the primary's start did it.
-        compose_up()
-        if _wait_for_reachable(lambda address=address: registry_is_reachable(address)):
-            continue
-        # Hard failure, not a skip. Docker is available (the opt-out above did
-        # not fire), so an absent service is a broken environment, not a
-        # legitimately reduced one — and a skip here silently empties whole
-        # suites while the run still exits 0.
-        raise RuntimeError(
-            f"{service} at {address} did not become reachable after "
-            f"`docker compose up -d` and a bounded retry; the suites that "
-            f"need it would otherwise skip and the run would still pass"
-        )
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if (stack := config.stash.get(_ZOT, None)) is not None:
+        stack.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -128,67 +117,67 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _zot_address(instance: str) -> str:
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip(f"OCX_TESTS_NO_REGISTRY=1: {instance} registry not started")
+    port = os.environ.get(f"OCX_TEST_{instance.upper()}_PORT")
+    assert port, (
+        f"no zot `{instance}` port in the environment: test/conftest.py::pytest_configure did not start one"
+    )
+    return f"localhost:{port}"
+
+
+def _mirror_address(address: str, fixture: str) -> str:
+    """The compose ``mirror-registry`` (registry:2), started on first use.
+
+    Skips only when there is no ``docker`` CLI to start it with. A CLI whose
+    daemon is down, or a service that never answers, is a broken environment and
+    fails: a skip there would empty whole suites while the run still exits 0.
+    """
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: registry:2 fixture not started")
+    if registry_is_reachable(address):
+        return address
+    if shutil.which("docker") is None:
+        pytest.skip(
+            f"{fixture}: no registry:2 at {address} and no `docker` to start the compose 'mirror-registry'"
+        )
+    compose_up_service("mirror-registry")
+    if not _wait_for_reachable(lambda: registry_is_reachable(address)):
+        raise RuntimeError(
+            f"mirror-registry at {address} did not become reachable after "
+            f"`docker compose up -d mirror-registry` and a bounded retry"
+        )
+    return address
+
+
 @pytest.fixture(scope="session")
 def registry() -> str:
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
-        pytest.skip("OCX_TESTS_NO_REGISTRY=1: registry not started")
-
-    addr = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
-    start_registry(addr)
-    return addr
+    return _zot_address("registry")
 
 
 @pytest.fixture(scope="session")
 def mirror_registry() -> str:
-    """Session-scoped mirror registry (localhost:5001, the second registry:2).
-
-    Parallel to the ``registry`` fixture but targets the mirror service.
-    Returns the registry address on success or skips the test if the mirror
-    registry is not reachable (single-registry environment, no Docker, or
-    Windows runner that sets ``OCX_TESTS_NO_REGISTRY=1``).
+    """Session-scoped mirror registry (localhost:5001, the registry:2 service).
 
     Tests in ``test_oci_registry_mirror.py`` declare this as a fixture
-    dependency so they are automatically skipped when the mirror is absent.
+    dependency; it is the only thing that starts the compose service.
     """
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
-        pytest.skip("OCX_TESTS_NO_REGISTRY=1: mirror registry not started")
-
-    addr = os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
-
-    from src.helpers import registry_is_reachable
-    if not registry_is_reachable(addr):
-        pytest.skip(
-            f"mirror registry at {addr} is not reachable; "
-            "test_oci_registry_mirror.py requires the docker-compose 'mirror-registry' service"
-        )
-    return addr
+    return _mirror_address(
+        os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY), "mirror_registry"
+    )
 
 
 @pytest.fixture(scope="session")
 def target_registry() -> str:
-    """Session-scoped promotion target (the second zot, localhost:5003).
+    """Session-scoped promotion target (the session's second zot).
 
     A cross-registry ``ocx package copy`` needs a target that implements the OCI
-    1.1 Referrers API, so it cannot be ``mirror_registry`` — that one is
+    1.1 Referrers API, so it cannot be ``mirror_registry`` -- that one is
     registry:2 and deliberately has none. Consumed by
     ``tests/test_package_copy.py``.
-
-    Skips when the service is unreachable, on the same terms as
-    ``mirror_registry``: a single-registry environment, no Docker, or a Windows
-    runner that sets ``OCX_TESTS_NO_REGISTRY=1``.
     """
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
-        pytest.skip("OCX_TESTS_NO_REGISTRY=1: target registry not started")
-
-    addr = os.environ.get("TARGET_REGISTRY", _DEFAULT_TARGET_REGISTRY)
-
-    from src.helpers import registry_is_reachable
-    if not registry_is_reachable(addr):
-        pytest.skip(
-            f"target registry at {addr} is not reachable; "
-            "test_package_copy.py requires the docker-compose 'target-registry' service"
-        )
-    return addr
+    return _zot_address("target")
 
 
 @pytest.fixture(scope="session")
@@ -197,30 +186,13 @@ def legacy_registry() -> str:
 
     A real OCI Distribution v2 registry that does NOT implement the OCI 1.1
     Referrers API: ``GET /v2/<name>/referrers/<digest>`` returns 404. Consumed
-    by ``test_referrers_capability.py`` (#106) to assert the clean
-    fallback-index path against a genuine v2 registry, and
-    by ``test_referrers_smoke.py`` to prove the harness carries a real
-    referrers-unsupported registry.
-
-    Backed by the SAME docker-compose ``mirror-registry`` service as
-    ``mirror_registry`` — the compose file keeps exactly one ``registry:2``
-    instance, which serves both the mirror-test and referrers-negative roles.
-    Skips (like ``mirror_registry``) when the service is unreachable: a
-    single-registry environment, no Docker, or a Windows runner that sets
-    ``OCX_TESTS_NO_REGISTRY=1``.
+    by ``test_referrers_capability.py`` to assert the clean fallback-index path
+    against a genuine v2 registry, and by ``test_referrers_smoke.py``. Backed by
+    the SAME compose ``mirror-registry`` service as ``mirror_registry``.
     """
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
-        pytest.skip("OCX_TESTS_NO_REGISTRY=1: legacy (registry:2) fixture not started")
-
-    addr = os.environ.get("LEGACY_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
-
-    from src.helpers import registry_is_reachable
-    if not registry_is_reachable(addr):
-        pytest.skip(
-            f"legacy registry:2 fixture at {addr} is not reachable; "
-            "test_referrers_capability.py requires the docker-compose 'mirror-registry' service"
-        )
-    return addr
+    return _mirror_address(
+        os.environ.get("LEGACY_REGISTRY", _DEFAULT_MIRROR_REGISTRY), "legacy_registry"
+    )
 
 
 @pytest.fixture(scope="session")
@@ -228,12 +200,12 @@ def ocx_binary() -> Path:
     """The `ocx` under test.
 
     Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): the runner that
-    sets it — ``build-windows-shims.yml``'s ``acceptance-windows`` job — builds
+    sets it -- ``build-windows-shims.yml``'s ``acceptance-windows`` job -- builds
     only ``ocx_shim`` and starts no registry, so an ``ocx`` is neither present
     nor useful there (every test reaching this fixture also depends on
     ``registry``, which skips under the same flag). Both halves are *observed*
     before the skip: the flag is set and the binary is genuinely absent. On any
-    runner that does build one, a missing binary stays a hard failure — a
+    runner that does build one, a missing binary stays a hard failure -- a
     silent skip of the whole acceptance suite is the false green this guard
     must not create.
     """

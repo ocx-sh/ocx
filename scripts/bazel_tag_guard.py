@@ -335,7 +335,6 @@ SUITE_INPUTS_REQUIRED_FILES = frozenset(
         "//test:ocx.toml",
         "//test:pyproject.toml",
         "//test:uv.lock",
-        "//test:zot-config.json",
     }
 )
 """Named files the group must carry — each one read by (nearly) every module,
@@ -497,25 +496,6 @@ TAG_UNCACHED_UNREAD_MSG = (
 )
 TAG_CARRIES_SOME = "carries {present}, none of which excludes it from a cache"
 TAG_CARRIES_NONE = "carries no cache-excluding tag at all"
-TAG_SLOT_UNDECLARED_MSG = (
-    "bazel tag guard: {label} names the xdist group(s) {groups}, and its target's "
-    "`OCX_ACCEPTANCE_SLOTS` is {declared!r}. Every acceptance target is its own pytest process, "
-    "and runs from sibling checkouts on one stack overlap, so a group — shared with another "
-    "module or not — is serialised only by the runner's per-group host lock; xdist would have "
-    "put it on one worker. Set test/BUILD.bazel `module_slots` for this module to {groups}"
-)
-TAG_SLOT_UNRESOLVED_MSG = (
-    "bazel tag guard: {label} spells an xdist group this derivation cannot resolve to a string "
-    "literal ({spelling}). Whether another module shares it — and so whether its target needs a "
-    "slot lock — is then unknowable. Use a literal, or a subscript of a module-level dict of "
-    "literals (test_doc_scripts.py's SHARED_SLOT_GROUPS)"
-)
-TAG_SLOT_FOREIGN_MSG = (
-    "bazel tag guard: {path} spells `xdist_group` ({spelling}) outside a `tests/test_*.py` "
-    "module. The slot derivation reads each module's own source only, so a group applied from a "
-    "helper, a conftest or an `add_marker` hook reaches no target's `OCX_ACCEPTANCE_SLOTS` and "
-    "its members run unserialised. Move the mark into the modules it applies to"
-)
 TAG_HAND_READ_MSG = (
     "bazel tag guard: {label} does not declare {missing}, which it reads where no AST can see "
     "(`HAND_DECLARED_READS` / `IMPLIED_READS` say how). Its result is CACHED, so a change to "
@@ -523,10 +503,9 @@ TAG_HAND_READ_MSG = (
 )
 TAG_SERIALISED_MSG = (
     "bazel tag guard: {label} is an acceptance target and carries `{tag}`, which runs it with "
-    "nothing else. The acceptance targets run concurrently behind the runner's host locks "
+    "nothing else. The acceptance targets run concurrently, each on registries of its own "
     "(test/bazel.bzl § Concurrency, ADR AM-9), so one `{tag}` target puts the suite back on a "
-    "single lane. A module that must not overlap another names an xdist group instead "
-    "(`module_slots` in test/BUILD.bazel)"
+    "single lane. Make the module's shared state per-session instead"
 )
 TAG_HAND_READ_UNREVIEWED_MSG = (
     "bazel tag guard: {label} (or a helper it imports) {hints} — a read the AST derivation "
@@ -537,11 +516,6 @@ TAG_HAND_READ_UNREVIEWED_MSG = (
 TAG_HAND_READ_UNKNOWN_MSG = (
     "bazel tag guard: `HAND_DECLARED_READS` names {name}, which is no acceptance target in this "
     "universe — delete the entry, or it rots into a requirement nothing is held to"
-)
-TAG_SLOT_READER_MSG = (
-    "bazel tag guard: the xdist-group derivation found {found} as group(s), and {known!r} is "
-    "not among them — the reader stopped matching, and an empty requirement is satisfied by "
-    "every target"
 )
 TAG_UNIVERSE_MSG = (
     "bazel tag guard read {queried}, but stage {stage!r} declares {declared} — a verdict "
@@ -569,8 +543,7 @@ class RuleRecord:
     moves."""
 
     env: tuple[tuple[str, str], ...] = ()
-    """The rule's `env` attribute, sorted `(name, value)` pairs — where an
-    acceptance target carries `OCX_ACCEPTANCE_SLOTS` (`slot_findings`)."""
+    """The rule's `env` attribute, sorted `(name, value)` pairs."""
 
 
 # ---------------------------------------------------------------------------
@@ -1407,145 +1380,6 @@ IMPLIED_READS: dict[str, frozenset[str]] = {
 """`{input: what reading it also reads}` — for every module, not one: whoever
 declares the key must declare the values. The same residual as above."""
 
-SLOTS_ENV = "OCX_ACCEPTANCE_SLOTS"
-"""The env name `test/bazel.bzl` `_SLOTS_ENV` sets from `module_slots`."""
-
-KNOWN_GROUP = "patch_global_slot"
-"""The reader floor for `slot_findings`: a group `tests/test_patches.py` names
-today (`lint/test_patch_global_slot.py` pins its members). A derivation that no
-longer finds it has stopped reading, not found a clean tree. It was a
-cross-module group until each patch test got a patch registry path of its own;
-the floor only needs a group that is certainly there, not a shared one."""
-
-
-def _stray_group_spellings(tree: ast.Module, calls: set[int]) -> list[str]:
-    """Every `xdist_group` a reader of CALLS would miss: the name or attribute
-    outside a call's `func` (`g = pytest.mark.xdist_group`), and the string
-    `"xdist_group"` (`add_marker("xdist_group")`, `getattr(mark, ...)`). Over-reds
-    on purpose — a docstring that merely mentions the mark contains more than
-    the bare word and is not matched."""
-    stray: list[str] = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Attribute) and node.attr == "xdist_group") or (
-            isinstance(node, ast.Name) and node.id == "xdist_group"
-        ):
-            if id(node) not in calls:
-                stray.append(ast.unparse(node))
-        elif isinstance(node, ast.Constant) and node.value == "xdist_group":
-            stray.append(ast.unparse(node))
-    return stray
-
-
-def foreign_group_spellings(helpers: dict[str, str]) -> dict[str, list[str]]:
-    """`{helper path: every xdist_group spelling}` over the non-module files an
-    acceptance module can load (`read_helper_sources`): any spelling there is a
-    group no target's slot list can carry."""
-    found: dict[str, list[str]] = {}
-    for path, text in sorted(helpers.items()):
-        spellings = list(_group_spellings(text))
-        if spellings:
-            found[path] = spellings
-    return found
-
-
-@functools.cache
-def _group_spellings(text: str) -> tuple[str, ...]:
-    tree = _parse(text)
-    return tuple(
-        [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call) and _call_name(node.func) == "xdist_group"]
-        + _stray_group_spellings(tree, set())
-    )
-
-
-def xdist_groups(source: str) -> tuple[set[str], list[str]]:
-    groups, unresolved = _xdist_groups(source)
-    return set(groups), list(unresolved)
-
-
-@functools.cache
-def _xdist_groups(source: str) -> tuple[frozenset[str], tuple[str, ...]]:
-    """`(group names, unresolvable spellings)` one module's source names.
-
-    A name is resolved when the `xdist_group(...)` argument is a string literal,
-    or a subscript of a module-level dict whose values are all string literals
-    (then every value counts — over-requiring a lock is safe, under-requiring
-    is not). Anything else is returned as unresolved and reds, and so is any
-    spelling of the mark that is not a call (`_stray_group_spellings`).
-    """
-    tree = _parse(source)
-    dicts: dict[str, set[str]] = {}
-    for node in tree.body:
-        value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
-        if not isinstance(value, ast.Dict) or not all(
-            isinstance(v, ast.Constant) and isinstance(v.value, str) for v in value.values
-        ):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for target in targets:
-            if isinstance(target, ast.Name):
-                dicts[target.id] = {v.value for v in value.values}  # type: ignore[union-attr]
-    groups: set[str] = set()
-    unresolved: list[str] = []
-    calls: set[int] = set()
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and _call_name(node.func) == "xdist_group"):
-            continue
-        calls.add(id(node.func))
-        arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "name"), None)
-        match arg:
-            case ast.Constant(value=str(name)):
-                groups.add(name)
-            case ast.Subscript(value=ast.Name(id=name)) if name in dicts:
-                groups |= dicts[name]
-            case _:
-                unresolved.append(ast.unparse(node))
-    return frozenset(groups), tuple(unresolved + _stray_group_spellings(tree, calls))
-
-
-def slot_findings(
-    *,
-    acceptance: set[str],
-    env_of: dict[str, dict[str, str]],
-    sources: dict[str, str],
-    helpers: dict[str, str] | None = None,
-) -> list[Finding]:
-    """Each acceptance target declares exactly the xdist groups its module names
-    (`test/bazel.bzl` § Concurrency), and no group is spelled anywhere this
-    derivation does not read. `helpers=None` reads the live helper tree."""
-    findings: list[Finding] = []
-    if helpers is None:
-        helpers = read_helper_sources()
-    for path, spellings in foreign_group_spellings(helpers).items():
-        findings.append(Finding("tag-slot-foreign", TAG_SLOT_FOREIGN_MSG.format(path=path, spelling=spellings)))
-    derived = {name: xdist_groups(text) for name, text in sources.items()}
-    members: dict[str, set[str]] = {}
-    for name, (groups, _) in derived.items():
-        for group in groups:
-            members.setdefault(group, set()).add(name)
-    if KNOWN_GROUP not in members:
-        findings.append(Finding("tag-slot-reader", TAG_SLOT_READER_MSG.format(found=sorted(members), known=KNOWN_GROUP)))
-    for label in sorted(acceptance):
-        name = label[len(ACCEPTANCE_PACKAGE):] + MODULE_SHAPED_PATTERN_SUFFIX
-        groups, unresolved = derived.get(name, (set(), []))
-        for spelling in unresolved:
-            findings.append(
-                Finding("tag-slot-unresolved", TAG_SLOT_UNRESOLVED_MSG.format(label=label, spelling=spelling))
-            )
-        # Every group, not only a shared one: a group one module names is
-        # serial inside one pytest process, and two runs of that module from
-        # sibling checkouts are two processes.
-        required = sorted(groups)
-        declared = env_of.get(label, {}).get(SLOTS_ENV, "")
-        if sorted(declared.split()) != required:
-            findings.append(
-                Finding(
-                    "tag-slot-undeclared",
-                    TAG_SLOT_UNDECLARED_MSG.format(label=label, groups=required, declared=declared),
-                )
-            )
-    return findings
-
-
 def invisible_read_hints(text: str, moved_out: set[str] | frozenset[str]) -> list[str]:
     return list(_invisible_read_hints(text, frozenset(moved_out)))
 
@@ -1749,13 +1583,6 @@ def check_tags(
             sweep_findings(acceptance=acceptance, sweeps=sweeps, patterns=patterns)
         )
         findings.extend(suite_inputs_findings(records=records, closure=closure))
-        findings.extend(
-            slot_findings(
-                acceptance=acceptance,
-                env_of={record.label: dict(record.env) for record in records},
-                sources=sources,
-            )
-        )
         findings.extend(
             hand_read_findings(
                 acceptance=acceptance,
@@ -3185,109 +3012,6 @@ def prove_uncached(scratch: Path, live: list[dict]) -> int:
     expect("test_absent.py" in unknown.message, "the unknown finding does not name the entry")
     print(f"C-019 list RED : {unknown.message}")
     checks += 1
-    return checks
-
-
-def prove_slots(scratch: Path, live: list[dict]) -> int:
-    """The xdist-group slot locks, derived from source and read off `env`."""
-    checks = 0
-    path = scratch / "mode9.json"
-    sources = read_acceptance_sources()
-
-    def slot_codes(findings: list[Finding]) -> list[str]:
-        return [c for c in codes(findings) if c.startswith("tag-slot")]
-
-    green = _judge(path, live, sources=sources)
-    expect(slot_codes(green) == [], f"the live tree must be silent, got {slot_codes(green)}")
-    print(f"slots GREEN: every target declares exactly the xdist groups its module names ({KNOWN_GROUP} among them)")
-    checks += 1
-
-    # A member loses its lock: the case the whole clause exists for.
-    member = ACCEPTANCE_PACKAGE + "test_patches"
-    expect(KNOWN_GROUP in xdist_groups(sources["test_patches.py"])[0], "test_patches is no member")
-    findings = _judge(path, _mutate(live, member, env={}), sources=sources)
-    expect(SLOTS_ENV not in dict(_landed(path, member).env), "the env drop did not land")
-    dropped = _only(findings, "tag-slot-undeclared")
-    expect(member in dropped.message and KNOWN_GROUP in dropped.message, "names neither")
-    print(f"slots RED  : {dropped.message}")
-    checks += 1
-
-    # A lock nobody needs: it would serialise an unrelated module behind the group.
-    bystander = ACCEPTANCE_PACKAGE + "test_install"
-    findings = _judge(path, _mutate(live, bystander, env={SLOTS_ENV: KNOWN_GROUP}), sources=sources)
-    expect(dict(_landed(path, bystander).env).get(SLOTS_ENV) == KNOWN_GROUP, "the add did not land")
-    extra = _only(findings, "tag-slot-undeclared")
-    expect(bystander in extra.message, "the finding does not name the bystander")
-    print(f"slots RED  : {extra.message}")
-    checks += 1
-
-    # A group spelled through a name the derivation cannot resolve.
-    planted = dict(sources)
-    planted["test_install.py"] += '\nGROUP = "patch_global_slot"\npytestmark = pytest.mark.xdist_group(GROUP)\n'
-    findings = _judge(path, live, sources=planted)
-    unresolved = _only(findings, "tag-slot-unresolved")
-    expect("xdist_group(GROUP)" in unresolved.message, "the unresolved spelling is not named")
-    print(f"slots RED  : {unresolved.message}")
-    checks += 1
-
-    # A group only ONE module names still needs its lock: two runs of that
-    # module from sibling checkouts are two processes on one stack.
-    solo = dict(sources)
-    solo["test_install.py"] += '\npytestmark = pytest.mark.xdist_group("solo_slot")\n'
-    findings = _judge(path, live, sources=solo)
-    undeclared = _only(findings, "tag-slot-undeclared")
-    expect(bystander in undeclared.message and "solo_slot" in undeclared.message, "the solo group is not named")
-    print(f"slots RED  : {undeclared.message}")
-    findings = _judge(path, _mutate(live, bystander, env={SLOTS_ENV: "solo_slot"}), sources=solo)
-    expect(dict(_landed(path, bystander).env).get(SLOTS_ENV) == "solo_slot", "the solo env did not land")
-    expect(slot_codes(findings) == [], f"a declared solo group must green, got {slot_codes(findings)}")
-    print("slots GREEN: the same one-module group, declared, is silent")
-    checks += 2
-
-    # A group spelled where the derivation does not read: helpers and
-    # conftests (`read_helper_sources`), and a non-call spelling in a module.
-    _dump(path, live)
-    records, _ = read_rules(path.read_text(encoding="utf-8"))
-    acceptance = {r.label for r in records if r.label.startswith(ACCEPTANCE_PACKAGE) and is_test_rule(r.rule_class)}
-    env_of = {r.label: dict(r.env) for r in records}
-    helpers = read_helper_sources()
-    expect(len(helpers) > 10 and "test/tests/conftest.py" in helpers, f"the helper reader read {len(helpers)} file(s)")
-    live_slots = slot_findings(acceptance=acceptance, env_of=env_of, sources=sources, helpers=helpers)
-    expect(live_slots == [], f"the live helpers must be silent, got {codes(live_slots)}")
-    print(f"slots GREEN: {len(helpers)} helper/conftest file(s) read, none spells xdist_group")
-    checks += 1
-    for case, planted_text in {
-        "a conftest hook": 'def pytest_collection_modifyitems(items):\n    for i in items:\n        i.add_marker(pytest.mark.xdist_group("patch_global_slot"))\n',
-        "an alias": "SLOT = pytest.mark.xdist_group\n",
-        "a string mark name": 'def hook(item):\n    item.add_marker("xdist_group")\n',
-    }.items():
-        planted = dict(helpers)
-        planted["test/tests/conftest.py"] += "\n" + planted_text
-        foreign = _only(
-            slot_findings(acceptance=acceptance, env_of=env_of, sources=sources, helpers=planted), "tag-slot-foreign"
-        )
-        expect("test/tests/conftest.py" in foreign.message, f"{case}: the helper is not named")
-        print(f"slots RED  : {case}: {foreign.message}")
-        checks += 1
-    alias = dict(sources)
-    alias["test_install.py"] += "\nG = pytest.mark.xdist_group\npytestmark = G(\"patch_global_slot\")\n"
-    stray = _only(_judge(path, live, sources=alias), "tag-slot-unresolved")
-    expect("pytest.mark.xdist_group" in stray.message, "the module alias is not named")
-    print(f"slots RED  : {stray.message}")
-    checks += 1
-
-    # Pure: dict values resolve; both members of a shared group red; the reader floor.
-    expect(xdist_groups('D = {"a": "g1", "b": "g2"}\nm = pytest.mark.xdist_group(D[k])\n') == ({"g1", "g2"}, []), "dict values")
-    alone = slot_findings(acceptance={"//test:test_a"}, env_of={}, sources={"test_a.py": 'pytest.mark.xdist_group("solo")\n'}, helpers={})
-    expect(codes(alone) == ["tag-slot-reader", "tag-slot-undeclared"], f"got {codes(alone)}")
-    pair_sources = {name: f'pytest.mark.xdist_group("{KNOWN_GROUP}")\n' for name in ("test_a.py", "test_b.py")}
-    pair = slot_findings(acceptance={"//test:test_a", "//test:test_b"}, env_of={}, sources=pair_sources, helpers={})
-    expect(
-        [f.code for f in pair] == ["tag-slot-undeclared"] * 2 and all("patch_global_slot" in f.message for f in pair),
-        f"both members of a shared group must red, got {[f.code for f in pair]}",
-    )
-    print("slots GREEN/RED: a one-module group needs its lock too, a shared one needs it on both members, and the reader floor reds a derivation that lost the known group")
-    checks += 3
     return checks
 
 

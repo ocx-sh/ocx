@@ -19,9 +19,9 @@ vars:
   SCHEMA_BIN_DIR: "{{.BIN_DIR}}/schema"
   OCX_SCHEMA_BINARY: "{{.SCHEMA_BIN_DIR}}/ocx_schema{{exeExt}}"
   SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
-  # Host port the `registry` service in docker-compose.yml binds to. Same knob
-  # compose and test/conftest.py read, so exporting it once moves all three off
-  # a port another project already holds. Default 5000 keeps CI unchanged.
+  # The registry the bench harness dials (`bench:setup` waits on it). The suite no
+  # longer starts one on a fixed port: every pytest session runs its own zot
+  # (`test/src/zot.py`).
   REGISTRY_PORT:
     sh: printf '%s' "${OCX_TEST_REGISTRY_PORT:-5000}"
   # Where pytest puts its per-test arenas. Every installing test materializes a
@@ -94,35 +94,6 @@ vars:
   # reds the tier instead of quietly stretching it. A literal, deliberately:
   # a budget read from the environment could be raised by the run it gates.
   SMOKE_BUDGET_SECONDS: 90
-  # The one acceptance-suite lock on this host, and the reason it is a file
-  # rather than a convention: the four fixed worktrees and every agent worktree
-  # drive the SAME docker-compose stack on the same ports, so two suites at
-  # once push into one registry and read each other's state. It was a sentence
-  # in a session prompt until now, which is to say it was enforced by whoever
-  # remembered it.
-  #
-  # This step takes it EXCLUSIVE; `test/bazel.bzl`'s runner computes the same
-  # path and takes it SHARED, so bazel acceptance targets overlap each other
-  # and never an xdist run here (`test/bazel.bzl` § Concurrency).
-  #
-  # NOT under the repository, deliberately. `{{toSlash .TASKFILE_DIR}}/../.agents/…`
-  # resolves to a different file in each checkout and in every agent worktree,
-  # which is to say it would serialise nothing between exactly the trees that
-  # share the registry. The key is `REGISTRY_PORT` because the port identifies
-  # the contended stack: a checkout that moved its registry off 5000 is not a
-  # competitor and must not queue behind one that did not.
-  ACCEPTANCE_LOCK:
-    sh: >-
-      dir="$HOME/.cache/ocx"; mkdir -p "$dir";
-      printf '%s/acceptance-suite-%s.lock' "$dir" "${OCX_TEST_REGISTRY_PORT:-5000}"
-  # Held by the pytest step below for its whole run, and passed through by
-  # every bazel target before it takes the suite lock shared: flock(2) is not
-  # fair, so without it this step could wait out an unbroken chain of
-  # overlapping shared holders (`test/bazel.bzl` § Concurrency).
-  ACCEPTANCE_TURNSTILE:
-    sh: >-
-      dir="$HOME/.cache/ocx"; mkdir -p "$dir";
-      printf '%s/acceptance-turnstile-%s.lock' "$dir" "${OCX_TEST_REGISTRY_PORT:-5000}"
 
 # Applies to every task in this file, so no pytest leg can miss it.
 env:
@@ -215,33 +186,11 @@ tasks:
       - task: .suite-floor
       # `set -o pipefail` so pytest's own exit status survives the `tee`; the
       # tee is what lets `.suite-ceilings` read the summary line of the run
-      # that just happened rather than of some earlier one.
-      #
-      # `flock <file> <command>` and never the fd form. Measured: go-task runs
-      # a `cmds:` entry under mvdan/sh, whose `exec 9>file` opens the fd inside
-      # the interpreter and does NOT pass it to a child process — so `flock 9`
-      # exits 1 without ever waiting, and the step fails before pytest starts.
-      # `-o` closes the lock's fd in pytest, so a process the run leaves behind
-      # cannot go on holding it and block every bazel target after it.
-      # The `tee` stays outside the lock on purpose: it is not contended, and
-      # `set -o pipefail` in this shell is what keeps pytest's status from
-      # being replaced by the tee's.
-      #
-      # `flock -n … true` first, only to say out loud that this run is queued
-      # behind another one. A suite that sits silent for twenty minutes is
-      # indistinguishable from a hung one, and that is exactly the diagnosis
-      # subsystem-tests.md's "Observing a Running Suite" exists to make.
+      # that just happened rather than of some earlier one. Each run starts its
+      # own zot registries (`test/conftest.py`), so no host lock is taken.
       - >-
-        if command -v flock >/dev/null 2>&1; then
-          flock -n '{{.ACCEPTANCE_LOCK}}' true ||
-            echo "acceptance: another suite holds {{.ACCEPTANCE_LOCK}} — waiting for it" >&2;
-          LOCKED="flock -o {{.ACCEPTANCE_TURNSTILE}} flock -o {{.ACCEPTANCE_LOCK}}";
-        else
-          echo "acceptance: no flock(1) on this host — running unserialised, {{.ACCEPTANCE_LOCK}} untaken" >&2;
-          LOCKED="";
-        fi;
         set -o pipefail;
-        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" $LOCKED uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
         {{.CLI_ARGS | default "-v"}}
         2>&1 | tee {{.TEST_RUN_LOG}}
       - task: .suite-ceilings
@@ -271,13 +220,6 @@ tasks:
       # With `PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH"` on the pytest line itself —
       # go-task lets no task `env:` override a variable the OS already set.
       OCX_SCHEMA_BINARY: "{{.OCX_SCHEMA_BINARY}}"
-      # Mirror tests that call subprocess.run with {**os.environ, ...} need
-      # OCX_INSECURE_REGISTRIES to reach the plain-HTTP test registry.
-      # MirrorRunner sets it per-process; this env propagates it to tests that
-      # use subprocess directly (test_mirror_os_features.py). The port follows
-      # OCX_TEST_REGISTRY_PORT so it cannot drift from what compose bound; CI
-      # inherits the REGISTRY env var if set.
-      OCX_INSECURE_REGISTRIES: "localhost:{{.REGISTRY_PORT}}"
 
   # The acceptance suite never shrinks or goes quiet (C-069). Both checks are
   # `cmds:` entries, never `preconditions:` — `task --force` skips
@@ -342,28 +284,15 @@ tasks:
     # scripts/tests/test_conformance_floor.py is the checker's red/green proof.
     cmd: python3 {{toSlash .TASKFILE_DIR}}/../scripts/conformance_floor.py --junit {{.JUNIT_XML}}
 
-  services:native:start:
-    desc: >-
-      Start zot natively (registry, target, prod ports) from the project
-      toolchain, for hosts without Docker. Run the suite after it with
-      OCX_TEST_NATIVE_SERVICES=1 exported; the registry:2 mirror is not started.
-    dir: '{{toSlash .TASKFILE_DIR}}'
-    cmd: uv run python src/native_registries.py start
-
-  services:native:stop:
-    desc: Stop the native zot registries and delete their stores.
-    dir: '{{toSlash .TASKFILE_DIR}}'
-    cmd: uv run python src/native_registries.py stop
-
   accept:native:
     desc: >-
       Acceptance suite (or one shard) against the prebuilt test/bin/ binaries, no
       Bazel call: `task test:accept:native SHARD_COUNT=40 SHARD_INDEX=3`. One JUnit
       file per run under target/accept/junit/.
     summary: |
-      For CI runners that only download the binaries (SKIP_BUILD semantics) and
-      for the native-services path (`OCX_TEST_NATIVE_SERVICES=1`, see
-      `services:native:start`). Modules come from `scripts/accept_shard.py`, the
+      For CI runners that only download the binaries (SKIP_BUILD semantics), where
+      pytest starts its own zot (`zot` on PATH) and the registry:2 mirror
+      fixtures skip without a `docker` CLI. Modules come from `scripts/accept_shard.py`, the
       selector `bazel:test:accept SHARD_COUNT= SHARD_INDEX=` uses, so both paths
       run the same slice (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one
       variable without the other is refused). With neither, pytest selects as it
@@ -413,10 +342,8 @@ tasks:
       `scripts/windows_local.sh`: cross-builds the gnullvm `ocx.exe` (`cross:test:bin`;
       the unit bundle for MODE=unit) unless `EXE=<path>` names one, stages the git working
       tree (`git ls-files -co --exclude-standard`, minus `external/` and `.agents/`) into
-      `%USERPROFILE%\ocx-wintest\<checkout-name>\` on C:, starts native zot there from
-      `ocx.lock` on dedicated ports (15000, 15003, 15004; WSL's own compose registries on
-      5000..5004 are reachable from Windows, so the default ports could reach the wrong
-      stack), runs `test:accept:native` through `cmd.exe` and stops the registries.
+      `%USERPROFILE%\ocx-wintest\<checkout-name>\` on C:, and runs `test:accept:native`
+      through `cmd.exe` under `ocx exec zot`; pytest starts its own zot registries there.
       `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the shard's JUnit report comes back to
       `target/windows-local/junit/`. After `--`: pytest arguments (accept) or one
       substring filtering the bundle's testcases (unit).

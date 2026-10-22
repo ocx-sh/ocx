@@ -119,21 +119,18 @@ Each target names these inputs:
 
 Edit a file in one module's `module_data` and only that module re-runs. Change Rust code so the binary's bytes change and every target re-runs.
 
-The targets run concurrently against one compose stack, the same way the xdist workers of `task test:parallel` do. The runner supplies what xdist would otherwise provide:
+The targets run concurrently, and each one starts its own `zot` registries on free ports, so two targets share no registry state. The toolchain's `@tools//:zot` is a `data` input of every target. The runner supplies what xdist would otherwise provide:
 
-- one stack bring-up under a host lock
+- the `zot` launcher as an absolute path, in `OCX_TEST_ZOT`
 - a pytest temp directory per target
-- a host lock per `xdist_group` a module names, declared as `module_slots` in `test/BUILD.bazel`
 
-`task bazel:tag:guard` fails when that map and the source disagree.
+Only the `registry:2` mirror and the Sigstore stack stay in Docker, and a test starts them on first use.
 
-Every target also holds the host suite lock shared. The pytest step of `task test:parallel` holds it exclusively, so that step and a bazel run queue behind each other. Once that step is queued, no new target starts. The step holds a second host lock, a turnstile, while it waits. Every target has to pass through the turnstile before it takes the suite lock.
-
-A target that has to wait for any of these locks prints `acceptance sh_test: <module> is waiting for <lock>` to stderr first. A queued run therefore shows what it is waiting for instead of looking hung. Two bazel runs from sibling checkouts on the same stack do overlap, the way two xdist workers would.
+A target that has to wait for the lock on its temp directory prints `acceptance sh_test: <module> is waiting for <lock>` to stderr first. Only two runs of the same target, such as `--runs_per_test`, share that directory.
 
 The stale-run eviction and binary rebuild before the pytest step of `task test:parallel` take no lock, and neither does `task test:smoke`. Do not start either in a checkout whose bazel run is still going. The eviction stops every process running that checkout's `test/bin/ocx`.
 
-A host without `flock(1)` refuses to run the targets unless you pass `--test_env=OCX_ACCEPTANCE_UNSERIALISED=1`. That flag runs them with no locks, so pair it with `ACCEPT_JOBS=1`. `--local_test_jobs` stays on the command line of the task and in no rc file. An rc-file line applies per command rather than per target pattern. It would also throttle the 35 Rust test targets.
+A host without `flock(1)` refuses to run the targets unless you pass `--test_env=OCX_ACCEPTANCE_UNSERIALISED=1`. That flag runs them with no temp directory lock, so pair it with `ACCEPT_JOBS=1`. `--local_test_jobs` stays on the command line of the task and in no rc file. An rc-file line applies per command rather than per target pattern. It would also throttle the 35 Rust test targets.
 
 Pass `NOCACHE=1` to add `--nocache_test_results` when you want the run regardless of what the cache says. It is deliberately not `--force`. This repository tells everyone to type `task verify --force`. Binding the escape hatch to it would have made every full gate re-run every target.
 

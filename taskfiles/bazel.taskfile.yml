@@ -422,14 +422,11 @@ tasks:
       package's filegroups.
 
       **The targets run concurrently, `--local_test_jobs=$ACCEPT_JOBS` on the
-      command line, never in an rc file** (ADR ruling 12). They share one
-      compose stack the way `task test:parallel`'s xdist workers do, and the
-      runner supplies what xdist gave that separate processes lack — one stack
-      bring-up, a basetemp per target, a host lock per xdist group, and the
-      host suite lock taken SHARED so `task test:parallel`'s pytest step
-      (which takes it exclusive) never overlaps the run; a sibling checkout's
-      bazel run does overlap it, at xdist parity (`test/bazel.bzl` §
-      Concurrency, which also names what precedes that pytest step unlocked).
+      command line, never in an rc file** (ADR ruling 12). Each target starts its
+      own zot registries on free ports, so none shares registry state with
+      another target, a sibling checkout's run or a `task test:parallel`
+      session; the runner supplies the zot launcher and a basetemp per target
+      (`test/bazel.bzl` § Concurrency).
       The flag bounds how many pytest sessions run at once. The default is
       `min(8, nproc)` — 8 measured on the 32-core development host, fewer on
       CI's 4-core runner or any smaller machine — and `ACCEPT_JOBS=<n>`
