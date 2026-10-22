@@ -8,10 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-22
 - **Active phase:** 2 — tiers: W2–W4 (A0, A2 ∥ A3 ∥ A5, A4), scope stops at G2
-- **Step:** /hex-execute → W3 (A2 ∥ A3 ∥ A5) from wave commit 16ccb2795
+- **Step:** W2–W4 landed, awaiting G2
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-22 (after 42d7b3370: chore(hex): P1 landed on plan_pr637_round2, awaiting G1; G1 measurements recorded)
-- **Next:** /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0 (W2); before A4 builds the cross variant, re-dispatch verify-deep ×2 once the cache volume is freed and re-apply D13 to run 2 (§ Schedule log, G1)
+- **Last update:** 2026-10-22 (after c83909c69: ci(website): the docs tier audits the pages that already meet every Lighthouse budget)
+- **Next:** G2 (meta gate): push #637, dispatch verify-deep with the `run-deep` label path, then resume /hex-execute after G2 (§ Schedule log, W3–W4)
 
 ---
 
@@ -293,10 +293,11 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 | S1 | conventions | C-010, C-011 | `copier.yml`, `src/**`, `template/**` (built), `.github/actions/setup/action.yml`, `scripts/baseline_check.py`, `scripts/adopt.sh`, `docs/contract.md`, `MANIFEST.toml`, `fleet.toml`, `drift/**`, tests | 1 | — | hard | pending |
 | S2 | lore | #634 item 1, BZL-CACHE-02 | `rules/bazel-quality/{rust,caching}.md`, `skills/bazel-adopt/references/branch-rust.md`, `publish.toml` | 1 | — | — | pending |
 | A0 | ocx | contract wave: C-012, C-019, stubs, contract tests for C-014/C-015/C-003(d) | `ocx.toml`, `ocx.lock`, template-owned files, `AGENTS.md` (adopt.sh append only), seeded stubs (`.github/workflows/{basic-repo,deep-repo}.yml`, `.gitleaks.toml`, `.github/renovate-local.json`), `.copier-answers.yml`, exit-1 stubs in `taskfiles/{ci,release}.taskfile.yml`, `.claude/tests/test_workflows.py` (new job-shape + `acceptance.yml` input pins), `.claude/tests/test_ai_config.py` (`TestVerifyDeepBuildMatrix` → `deep-repo.yml`, `TestSelfTestsRunOnAGate`), `test/lint/test_smoke_coverage.py` (c) | 2 | P1, G1, S1 pushed | — | merged |
-| A2 | ocx | C-018, grim | `AGENTS.md`, `CLAUDE.md`, `.claude/tests/test_ai_config.py`, `.claude/hooks/**`, `.claude/taskfile.yml`, `scripts/{commit_gate,scoped_gate,dead_path_sweep,bazel_accept_proofs}.py` (+ tests), `test/lint/test_deprecated_spellings.py`, `grimoire.{toml,lock}`, grim outputs, `.claude/rules.md` | 3 | A0 | — | pending |
-| A3 | ocx | C-013, C-016, C-017, D18 | root `taskfile.yml`, `taskfiles/{ci,release,scripts}.taskfile.yml`, `.claude/tests/test_hooks.py`, `.github/renovate-local.json`, `.gitleaks.toml`, `.bazelrc`, `test/taskfile.yml`, `test/pyproject.toml`, `test/lint/test_contract_baseline.py`, `.claude/rules/{workflow-release,subsystem-taskfiles}.md` | 3 | A0 | — | pending |
-| A5 | ocx | C-020 | `website/taskfile.yml` | 3 | A0 | — | pending |
-| A4 | ocx | C-014, C-015, D-CROSS, D19, D20 | `.github/workflows/{basic-repo,deep-repo,acceptance,cross}.yml`, hand-written workflows (zizmor fixes; `shell-activation-deep.yml` cron → `workflow_call`), `.claude/tests/test_workflows.py`, `.claude/tests/test_ai_config.py`, `test/lint/test_smoke_coverage.py`, `.claude/rules/subsystem-ci.md` | 4 | A2, A3, A5 | review | pending |
+| A2 | ocx | C-018, grim | `AGENTS.md`, `CLAUDE.md`, `.claude/tests/test_ai_config.py`, `.claude/hooks/**`, `.claude/taskfile.yml`, `scripts/{commit_gate,scoped_gate,dead_path_sweep,bazel_accept_proofs}.py` (+ tests), `test/lint/test_deprecated_spellings.py`, `grimoire.{toml,lock}`, grim outputs, `.claude/rules.md` | 3 | A0 | — | merged |
+| A3 | ocx | C-013, C-016, C-017, D18 | root `taskfile.yml`, `taskfiles/{ci,release,scripts}.taskfile.yml`, `.claude/tests/test_hooks.py`, `.github/renovate-local.json`, `.gitleaks.toml`, `.bazelrc`, `test/taskfile.yml`, `test/pyproject.toml`, `test/lint/test_contract_baseline.py`, `.claude/rules/{workflow-release,subsystem-taskfiles}.md` | 3 | A0 | — | merged |
+| A5 | ocx | C-020 | `website/taskfile.yml` | 3 | A0 | — | merged |
+| A4 | ocx | C-014, C-015, D-CROSS, D19, D20 | `.github/workflows/{basic-repo,deep-repo,acceptance,cross}.yml`, hand-written workflows (zizmor fixes; `shell-activation-deep.yml` cron → `workflow_call`), `.claude/tests/test_workflows.py`, `.claude/tests/test_ai_config.py`, `test/lint/test_smoke_coverage.py`, `.claude/rules/subsystem-ci.md` | 4 | A2, A3, A5 | review | merged |
+| A6 | ocx | template-job prerequisites for C-013/C-020 (W4 residue, opened by the orchestrator) | `taskfiles/{ci,git}.taskfile.yml`, `website/scripts/lighthouse.mjs`, `scripts/{test_bundle,bazel_doctor}.py` (+ tests), rule prose | 4 | A3, A5 | — | merged |
 | T1 | ocx | C-030, C-031, S-005 | `scripts/accept_shard.py`, `scripts/accept_floor.py`, `scripts/windows_local.sh`, `scripts/tests/test_accept_{shard,floor}.py`, `test/taskfile.yml`, `taskfiles/bazel.taskfile.yml`, `.github/workflows/acceptance.yml`, `.claude/tests/test_workflows.py`, `adr_test_speed_tiers.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles}.md` | 5 | G2 | — | pending |
 | T2 | ocx | C-032, S-006 | `test/conftest.py`, `test/src/native_registries.py` → `test/src/zot.py` (new), `test/zot-config.json`, `docker-compose.yml`, `test/bazel.bzl`, `test/BUILD.bazel`, `scripts/bazel_accept_proofs.py`, `test/taskfile.yml`, `.github/workflows/{acceptance,basic-repo,deep-repo}.yml`, hard-port readers (`test/tests/fixtures/golden/generate.py`, `test_bench_smoke.py`, `attestations.py`, `test_shell_reconcile.py`), `.claude/rules/subsystem-tests.md` | 6 | T1 | hard | pending |
 | F1 | ocx | C-040, C-041, S-009, S-010 | `crates/ocx_util/src/fs.rs`, `crates/ocx_package/src/bin_scan.rs`, `crates/ocx_cli/src/command/package.rs` (help), `crates/TEST_TARGET_MAP.toml`, `test/tests/test_patch_smoke.py`, `adr_declared_binaries_metadata.md` | 7 | G3 | — | pending |
@@ -666,3 +667,38 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     `.claude/rules/meta-ai-config.md` and `website/src/content/docs/contributing/bazel.md` (old `release:prepare`
     prose); A4 += `.github/workflows/{claude-write,notify-discord,release-readiness}.yml`; A2 may touch
     `.claude/tests/test_hooks.py` only for AGENTS.md readers (A3 owns `TestReleasePrepareGuard`).
+- 2026-10-22 — **W3–W4 landed, awaiting G2** (feature tip c83909c69). Merges: A2 973b234a1, A3 7e00109d5, A5
+  431b37690, A4 cb3a9b203, A6 3ccbcd79b (W4 residue: template-job prerequisites). Contract drift: one additive test
+  (A3's `CACHE_RC` loader case); no A0 contract test edited. Verify on the tip: `task claude:tests --force` 453
+  passed / 0 failed; `task test:lint:structure` 457 passed; `task baseline:check` OK; `task ci:actionlint` and
+  `task workflows:lint` (actionlint + zizmor 1.30.1) exit 0, zizmor no findings, one inline ignore
+  (`notify-discord.yml` dangerous-triggers, reasoned); A4 step-list equality for every moved macOS/Windows job (no
+  command changed, a planted edit reds it); step-disposition table (127 rows, 7 dropped with reasons) in b44e9ac79's
+  body. Item 6 proof (`bazel info --announce_rc`, pinned binary): local `.bazelrc.user` read 1×; template lane (rc via
+  `.bazelrc.user`) 1× with `CACHE_RC` empty; repo lane (`--bazelrc=`) 1× with `CACHE_RC` set; both loaders at once
+  read it 2× — Bazel accepts a double load silently, so the one-loader rule is the only guard.
+  Decisions (question → research → decision):
+  - grim lock → `grim add`/`grim lock` re-resolve every `:latest` (20 digests would move, against D5) → lock built as
+    the `grim add` output with each existing digest restored; `grim install` accepts it, `grim:check` 0. Committing the
+    lock render dropped two local edits to vendored files (`rust-quality/cli-contract.md` EXIT-09, the
+    `crates-of-record.md` research pointer): vendored files follow the lock; upstream to lore if still wanted.
+  - `.agents/skills/` un-ignored → grim's codex client writes there and the template's `grim:check` reads git status.
+  - `.bazelrc` imports the baseline at the top (template seed shape) → `.bazelrc.user` is no longer the last rc line, so
+    a flag later in `.bazelrc` beats the user rc; no later line sets the credential helper or upload flag. Conventions
+    fix: move the `.bazelrc.user` try-import out of `bazel/baseline.bazelrc` into the seed's last line.
+  - Template jobs check out no submodules and `Cargo.toml` patches `external/*` → `git:submodules` (status-skipped when
+    initialised) runs first in every `ci:*` alias; conventions fix: `submodules: recursive` on template checkouts.
+    Rust toolchain: runner rustup 1.29.1 installs the pinned 1.95.0 itself. Chrome: `CHROME_PATH` → `CHROME_BIN`
+    (runner image) → Playwright. Live shells: `basic-repo.yml` `unit-live-shells` keeps the nu/elvish/fish arms the
+    template `test` job would skip.
+  - Full-site Lighthouse (never a CI gate before) → 18 of 88 measured pages pass; the rest miss performance 100,
+    dom ≤ 800 or bytes ≤ 147 KiB, and a whole-tree run takes over an hour with retries → `ci:docs` audits the 18
+    passing pages (exit 0), each page joins once it passes; whole tree stays local. Docs backlog, owner-visible.
+  - Capability changes, owner-visible: JUnit becomes annotations + job summary (repo jobs hold `contents: read` only);
+    deep runs nightly, on dispatch, on the `run-deep` label and from readiness — no push-to-main or merge queue
+    (C-015, D15, D17); Linux acceptance moved to every PR; Claude split into the template's read-only `@claude`
+    responder and repo-owned `claude-write.yml` (label `claude`, issue opened with `@claude`, `/claude-write`).
+  - Reusable nesting: release-readiness → verify-deep → deep-repo → acceptance/cross = 4, limit 10 (GitHub docs).
+  - Found, not in scope: cargo-dist `release.yml` `custom-docker-publish` grants no `artifact-metadata` that
+    `docker-publish.yml` requests (startup failure on the next tag; fix in `dist-workspace.toml` + regenerate); listed
+    as a known gap in the permission test.
