@@ -11,27 +11,29 @@ tasks:
     status:
       - cargo set-version --version
 
-  # Guard: the website embeds CHANGELOG.md via an `<!--@include:-->` directive, so
-  # the file is rendered as page Markdown. A raw `<tag>` from a commit subject (e.g.
-  # "ocx-<name>") is emitted as an HTML element and swallows the text after it.
-  # cliff.toml HTML-escapes angle brackets; this fails loudly if that escaping
-  # ever regresses.
+  # Guard: the website embeds CHANGELOG.md, so the file is rendered as page Markdown. A raw
+  # `<tag>` from a commit subject (e.g. "ocx-<name>") is emitted as an HTML element and
+  # swallows the text after it. The template cliff.toml HTML-escapes angle brackets; this
+  # fails loudly if that escaping ever regresses. FILE defaults to CHANGELOG.md; a scratch
+  # `git-cliff --unreleased` output can be checked the same way.
   changelog:validate:
     internal: true
+    vars:
+      FILE: '{{.FILE | default "CHANGELOG.md"}}'
     cmds:
       - |
-        if grep -nE '<[A-Za-z/]' CHANGELOG.md; then
-          echo "ERROR: CHANGELOG.md contains raw HTML tags (lines above)." >&2
+        if grep -nE '<[A-Za-z/]' '{{.FILE}}'; then
+          echo "ERROR: {{.FILE}} contains raw HTML tags (lines above)." >&2
           echo "git-cliff escaping regressed; the website build will fail." >&2
           exit 1
         fi
-      # Same @include, second failure mode: a repo-root-relative doc link resolves
-      # against the changelog page and dies as a dead link. cliff.toml rewrites
-      # these to absolute ocx.sh URLs; this fails loudly if that rewrite regresses.
+      # Same embed, second failure mode: a repo-root-relative doc link resolves against the
+      # changelog page and dies as a dead link. The template cliff.toml renders a commit's
+      # subject only and carries no link rewrite, so a subject must not cite a doc path.
       - |
-        if grep -nE 'website/src/(content/)?docs/' CHANGELOG.md; then
-          echo "ERROR: CHANGELOG.md contains repo-root-relative doc links (lines above)." >&2
-          echo "git-cliff link rewriting regressed; the website build will fail." >&2
+        if grep -nE 'website/src/(content/)?docs/' '{{.FILE}}'; then
+          echo "ERROR: {{.FILE}} contains repo-root-relative doc paths (lines above)." >&2
+          echo "A commit subject cites a website doc path; reword it without the path (the subject is the changelog line)." >&2
           exit 1
         fi
 
@@ -203,32 +205,38 @@ tasks:
       - task: sdkgen:check
       - task: sdkgen:package
 
-  # Hooks the conventions baseline's `release:prepare` calls when they exist.
-  # Each is a stub until the release flow is wired onto the template task.
+  # The hooks the conventions baseline's `release:prepare` calls (`task release:prepare BUMP=...`, flattened
+  # from taskfiles/baseline.taskfile.yml): gate -> bump-files -> git-cliff -> validate -> verify. It never
+  # tags or pushes; `release:tag` is the step that does (workflow-release.md).
   gate:
     desc: 'Release gate: a fresh full verify mark (commit_gate.py --require-full-mark) and the release provenance proof'
+    dir: '{{.ROOT_DIR}}'
     cmds:
-      - |
-        echo "release:gate: not implemented yet" >&2
-        exit 1
+      # The predicate the commit gate applies to a `release:` subject, run from the same module so the two
+      # cannot drift. `task verify:mark` writes a scoped mark and does not satisfy it; `task verify` does.
+      - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
+      # Before any file is touched: a release whose build would carry test provenance stops here, not
+      # after the version bump.
+      - task: provenance:proof
 
   bump-files:
-    desc: 'Set the release version in the workspace manifests (cargo set-version)'
+    desc: 'Set the release version in the workspace manifests (cargo set-version); VERSION=x.y.z'
+    deps:
+      - install:cargo-edit
+    requires:
+      vars: [VERSION]
     cmds:
-      - |
-        echo "release:bump-files: not implemented yet" >&2
-        exit 1
+      - cargo set-version "{{.VERSION | trimPrefix "v"}}"
 
   validate:
     desc: 'Validate what the release rewrote (changelog:validate)'
     cmds:
-      - |
-        echo "release:validate: not implemented yet" >&2
-        exit 1
+      - task: changelog:validate
 
   verify:
     desc: 'The release verification gate: task verify NOCACHE=1'
     cmds:
-      - |
-        echo "release:verify: not implemented yet" >&2
-        exit 1
+      # A fresh process, not `task: :verify`: NOCACHE reaches `bazel:test:accept` as a CLI var (CLI vars are
+      # global; a `vars:` on a task call is not), and a release re-executes every acceptance module
+      # instead of trusting cached verdicts.
+      - '{{.TASK_EXE}} verify NOCACHE=1'

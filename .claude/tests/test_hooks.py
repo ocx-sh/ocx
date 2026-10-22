@@ -254,51 +254,104 @@ class TestPreToolUseValidator:
 
 
 # ---------------------------------------------------------------------------
-# The gate call sites. The gate itself is `scripts/commit_gate.py`, run by
-# git through the hooks `task git:hooks` installs, and shown red and green by
-# its own tests (`scripts/tests/test_commit_gate.py`).
+# The gate call sites. The gate itself is `scripts/commit_gate.py`, run by git
+# through the hooks `task git:hooks` installs, and shown red and green by its
+# own tests (`scripts/tests/test_commit_gate.py`).
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_TASKFILE = REPO_ROOT / "taskfiles" / "release.taskfile.yml"
 
 
-class TestReleasePrepareGuard:
-    """`task release:prepare` runs the commit gate predicate first (C-021).
+def _task_cmds(taskfile: Path, name: str) -> list[str]:
+    """A task's `cmds:`, each rendered as the text task would run (`task: x` for a call)."""
+    import yaml
 
-    The predicate itself is shown red and green by
-    `scripts/tests/test_commit_gate.py`; what this catches is the *call site*
-    drifting away from it — a `prepare` that touches a file before asking for
-    the full mark, or one that stopped asking at all.
+    cmds = yaml.safe_load(taskfile.read_text(encoding="utf-8"))["tasks"][name]["cmds"]
+    return [
+        cmd if isinstance(cmd, str) else cmd["cmd"] if "cmd" in cmd else f"task: {cmd['task']}"
+        for cmd in cmds
+    ]
+
+
+class TestReleasePrepareGuard:
+    """`task release:prepare` is the conventions template's, with ocx's four hooks (C-017).
+
+    The template task is flattened in from `taskfiles/baseline.taskfile.yml`: it
+    calls `release:gate` first, then `release:bump-files`, git-cliff,
+    `release:validate` and `release:verify` when the repository defines them.
+    The predicates are shown red and green by `scripts/tests/test_commit_gate.py`;
+    what this catches is the *call sites* drifting: a hook ocx stopped defining
+    (the template then skips it without a word), a gate that no longer asks for
+    the full mark or runs the provenance proof, a verify that trusts cached verdicts.
     """
 
-    def test_release_prepare_runs_this_guard_first(self) -> None:
-        prepare = RELEASE_TASKFILE.read_text(encoding="utf-8").split("\n  prepare:\n", 1)[1]
-        cmds = prepare.split("    cmds:\n", 1)[1]
-        first = next(line for line in cmds.splitlines() if line.strip().startswith("- "))
-        assert "commit_gate.py --require-full-mark" in first
+    HOOKS = ("gate", "bump-files", "validate", "verify")
 
     @staticmethod
-    def _prepare_cmds() -> list[str]:
-        """`release:prepare`'s `cmds:`, each rendered as the text task would run or call."""
+    def _dry_prepare() -> list[str]:
+        """`task --dry release:prepare` as rendered lines, in run order."""
+        if shutil.which("task") is None:
+            pytest.skip("`task` is not on PATH (shutil.which returned None)")
+        result = subprocess.run(
+            ["task", "--dry", "release:prepare", "VERSION=9.9.9"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return (result.stdout + result.stderr).splitlines()
+
+    def test_ocx_defines_no_prepare_of_its_own(self) -> None:
         import yaml
 
         tasks = yaml.safe_load(RELEASE_TASKFILE.read_text(encoding="utf-8"))["tasks"]
-        return [cmd if isinstance(cmd, str) else f"task: {cmd.get('task')}" for cmd in tasks["prepare"]["cmds"]]
+        assert "prepare" not in tasks, "release:prepare is the template's; ocx adds hooks, not a second prepare"
+        missing = [hook for hook in self.HOOKS if hook not in tasks]
+        assert not missing, f"the template skips a hook the repository does not define: {missing}"
 
-    def test_release_prepare_runs_the_provenance_proof_before_any_edit(self) -> None:
+    def test_release_prepare_runs_the_gate_before_any_edit(self) -> None:
+        """The rendered run order: gate, then the version bump, then git-cliff's CHANGELOG
+        rewrite, then validate, then verify. Rendering applies the template's own `if:`
+        conditions, so a hook that is not defined is absent from it."""
+        lines = self._dry_prepare()
+
+        def at(needle: str) -> int:
+            hits = [i for i, line in enumerate(lines) if needle in line]
+            assert hits, f"`{needle}` is not in the rendered release:prepare run:\n" + "\n".join(lines)
+            return hits[0]
+
+        order = [
+            at("task release:gate"),
+            at("task release:bump-files"),
+            at("git-cliff --tag"),
+            at("task release:validate"),
+            at("task release:verify"),
+        ]
+        assert order == sorted(order), f"release:prepare runs its steps out of order: {order}"
+
+    def test_the_template_fallback_verify_is_not_taken(self) -> None:
+        """`release:verify` replaces the template's own `verify`; both would run the suite twice."""
+        taken = [line for line in self._dry_prepare() if line.startswith("task: [release:run] task verify")]
+        assert not taken, taken
+
+    def test_release_gate_asks_for_the_full_mark_first(self) -> None:
+        cmds = _task_cmds(RELEASE_TASKFILE, "gate")
+        assert "commit_gate.py --require-full-mark" in cmds[0], cmds
+
+    def test_release_gate_runs_the_provenance_proof(self) -> None:
         """C-006 / S-019: the real-bytes proof (release build green, `__testing` build red)
-        runs before `cargo set-version` touches a file."""
-        cmds = self._prepare_cmds()
-        proof = [i for i, cmd in enumerate(cmds) if cmd == "task: provenance:proof"]
-        bump = [i for i, cmd in enumerate(cmds) if cmd.startswith("cargo set-version")]
-        assert proof, f"release:prepare never runs `provenance:proof`: {cmds}"
-        assert bump and proof[0] < bump[0], f"provenance:proof at {proof}, the version bump at {bump}"
+        runs inside the gate, which the template runs before `release:bump-files`."""
+        assert "task: provenance:proof" in _task_cmds(RELEASE_TASKFILE, "gate")
 
-    def test_release_prepare_verifies_with_no_cached_verdicts(self) -> None:
+    def test_release_verify_runs_with_no_cached_verdicts(self) -> None:
         """C-006 / P-7: a release re-executes every acceptance module (`NOCACHE=1`)."""
-        verifies = [cmd for cmd in self._prepare_cmds() if cmd.strip().startswith("task verify")]
-        assert verifies == ["task verify NOCACHE=1"], verifies
+        assert _task_cmds(RELEASE_TASKFILE, "verify") == ["{{.TASK_EXE}} verify NOCACHE=1"]
+
+    def test_release_bump_files_sets_the_version_the_template_passes(self) -> None:
+        cmds = _task_cmds(RELEASE_TASKFILE, "bump-files")
+        assert cmds == ['cargo set-version "{{.VERSION | trimPrefix "v"}}"'], cmds
 
     @pytest.mark.parametrize(("cli_vars", "expect_nocache"), [([], False), (["NOCACHE=1"], True)])
     def test_nocache_reaches_the_acceptance_bazel_test(self, cli_vars: list[str], expect_nocache: bool) -> None:
