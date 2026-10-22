@@ -24,7 +24,7 @@ pytestmark = pytest.mark.command("patch_test")
 
 
 @pytest.mark.smoke
-def test_patch_test_composes(
+def test_patch_test_composes_a_companion_onto_a_base(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
     """`ocx patch test --descriptor <file> --registry <tier> <base>` dry-runs the
@@ -56,7 +56,6 @@ def test_patch_test_composes(
         # An env-only companion is the canonical `any`-published package, and
         # `patch test` fans a descriptor out over the concrete platform matrix.
         platform="any",
-        no_bin_scan=True,  # `any` cannot be scanned for executables on a Windows host
     )
 
     descriptor = tmp_path / "smoke_descriptor.json"
