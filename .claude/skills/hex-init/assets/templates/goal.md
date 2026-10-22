@@ -105,8 +105,8 @@ with an unclear cause — runs this protocol:
 
 - Entry point: Run the /hex-<mode> skill on <target>.
 - Refinement rounds: <N> — counts outer cycles: each review ⇄ execute
-  pass is one, and so is every failed repair or retry cycle — a local
-  verify failure, an execute or finalize retry, a post-finalize CI fix ⇄
+  pass is one, and so is every failed repair or retry cycle — a red
+  gate's fix pass, an execute or finalize retry, a post-finalize CI fix ⇄
   re-finalize pass. Inner review-fix rounds do not count, and their limit
   is untouched.
   Past `<N>`, the DONE block reports every remaining criterion `not met`

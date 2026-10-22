@@ -1,0 +1,173 @@
+# The inventory, the type enum and the IA plan
+
+Read this when running steps 7, 11 or 12. It holds the nine type values, how to
+seed a type from nav config, the nav shape per generator, and the plan output.
+
+Contents: [The type enum](#the-type-enum) ·
+[Seeding the type from nav](#seeding-the-type-from-nav) ·
+[Never seed the tier from nav](#never-seed-the-tier-from-nav) ·
+[The inventory table](#the-inventory-table) ·
+[The declaration carrier](#the-declaration-carrier) ·
+[Nav shape per generator](#nav-shape-per-generator) ·
+[The plan output](#the-plan-output) · [Migration cost](#migration-cost)
+
+## The type enum
+
+Nine values, closed. Each exists because a rule cannot be expressed without it.
+
+| Value | What the page is |
+|---|---|
+| `tutorial` | teaches through an example project, single non-branching path |
+| `how-to` | one goal, stated before the first `##` |
+| `reference` | lookup material, addressable from any tier |
+| `explanation` | why something works the way it does |
+| `troubleshooting` | an error catalogue keyed by the symptom |
+| `runbook` | an ordered operational procedure |
+| `landing` | an entry point that routes, and reaches an action fast |
+| `readme` | the repository root page |
+| `changelog` | dated release entries |
+
+`contributing` is deliberately not a value. A contributing page is a task page
+and takes `doc_type: how-to`. Adding a value that buys no rule adds a lookup to
+every rule row.
+
+`doc_tier` is required only on pages typed `tutorial`, `how-to` or `landing`.
+Forcing a tier onto a reference entry or a changelog puts a value where the
+concept means nothing.
+
+## Seeding the type from nav
+
+Where a generator nav config exists, its top-level group labels seed the type
+better than any path heuristic. Measured at 94.3% correct over 122 pages, against
+68.1% for a path classifier over the same corpus.
+
+| Nav label | Seeded type |
+|---|---|
+| Home | `landing` |
+| How-To, Guide, Recipes, Getting Started, Contributing | `how-to` |
+| Reference, API reference, Schema | `reference` |
+| Explanation, Concepts | `explanation` |
+| Changelog | `changelog` |
+
+Mixed groups such as `Ops` seed nothing and need a content read. So does any
+page outside the nav config.
+
+Run the seeding with the check the rule set ships.
+
+```sh
+python3 checks/doc_declaration.py --seed --root docs
+```
+
+The seed is a migration aid. The runtime check reads page content only, never a
+path and never a nav position, so a reorganisation cannot change a page's type.
+
+## Never seed the tier from nav
+
+Measured and rejected. Zero of nine sites could yield all three tier values from
+their nav config. Only three carried any tier-shaped label at all, and none
+separated everyday from integration.
+
+Deriving tier from nav needs a per-project label-to-tier mapping table. That is
+the same per-project table path-based typing was rejected for, and it fails the
+same way on a reorganisation. Assign the tier from the task list instead.
+
+## The inventory table
+
+One row per page in the published documentation tree. Exclude `.agents`, build
+output and vendored trees.
+
+| Path | Prose words | Type | Type source | Tier | Serves |
+|---|---|---|---|---|---|
+| docs/index.md | 254 | landing | nav label | first-steps | T07 |
+| docs/guide/quickstart.md | 443 | how-to | nav label | first-steps | T07, T11 |
+| docs/reference/api.md | 12 | reference | content read | none | T02 |
+| docs/in-depth/ci.md | 601 | explanation | content read | none | unmapped |
+
+Prose words come from `checks/strip_prose.py`, not from a raw word count. A raw
+count reads code fences, tables and link targets as prose and inflates a
+reference page into an adequate one.
+
+## The declaration carrier
+
+A comment line, within the first 12 lines, and never above existing front
+matter. One opener per markup family.
+
+| Markup | Opener |
+|---|---|
+| Markdown | `<!-- doc_type: how-to -->` |
+| MDX | `{/* doc_type: how-to */}` |
+| reStructuredText | `.. doc_type: how-to` |
+| MyST | `% doc_type: how-to` |
+
+Never YAML front matter. On mdBook a front matter block renders as a horizontal
+rule plus a real heading. That fake heading enters the search index with its own
+anchor. On MDX an HTML comment is a hard build error, and a Docusaurus site
+needs `markdown.format: detect` before the MDX opener works.
+
+Never place the comment above front matter that already exists. Reading "first
+line" literally destroys the front matter the page had.
+
+## Nav shape per generator
+
+The plan names the file it changes, because the generators diverge.
+
+| Generator | Nav lives in | Watch for |
+|---|---|---|
+| MkDocs Material | `mkdocs.yml`, `nav:` | needs a permissive YAML loader for `!ENV` and `!!python/name:` tags |
+| VitePress | `.vitepress/config.*` sidebar | the config is JavaScript or TypeScript, so parse it as text, not as YAML |
+| mdBook | `SUMMARY.md` | skip its own `# Summary` heading line, and note that a flat list has no grouping at all |
+| Docusaurus | `sidebars.js` or `sidebars.ts` | autogenerated sidebars take their order from `sidebar_position` in each page |
+| Starlight | `astro.config.*` sidebar entry | groups are objects with a `label` and `items` |
+| Sphinx | `toctree` directives inside pages | the tree is distributed across pages, so there is no single nav file to read |
+
+Confirm the planned depth and grouping with the shipped check.
+
+```sh
+python3 checks/nav_depth.py --root .
+```
+
+## The plan output
+
+The IA plan is one section of the discovery artifact. It names, for each action
+in the coverage table, the page that action produces and where it sits.
+
+```yaml
+ia_plan:
+  groups:
+    - label: "Getting started"
+      tier: first-steps
+      pages:
+        - path: docs/installation.md
+          doc_type: how-to
+          doc_tier: first-steps
+          action: keep
+          serves: [T07]
+    - label: "Guides"
+      tier: everyday
+      pages:
+        - path: docs/guide/pin-versions.md
+          doc_type: how-to
+          doc_tier: everyday
+          action: write
+          serves: [T11]
+  deletes:
+    - path: docs/api/text.md
+      unmapped: true
+      stub: true
+      exempt: false
+```
+
+Two structural obligations. The first-steps group and the everyday group are
+different top-level groups. Every `write` action traces to at least one task id,
+because a page that serves no need is the thing this procedure exists to stop.
+
+## Migration cost
+
+Price the retrofit before proposing it. Measured on a 248-page corpus, seeding
+the declaration cost 325 to 358 added lines across 248 files in one commit.
+About 115 pages seeded from nav labels, about 54 more from a path heuristic
+needing review, and about 79 needed a content read.
+
+Sequence it as two changes. Seed every page in one commit, then flip the check
+from a warning to an error. Flipping first leaves the tree red for as long as the
+retrofit takes.

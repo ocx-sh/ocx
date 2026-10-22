@@ -3,201 +3,77 @@
 A topic file of the hex swarm protocol; the spine is
 [`protocol.md`](protocol.md).
 
-## Worktree work-package mechanics
+## Pipeline worktree mechanics
 
-Every plan integrates through **one feature branch**; each **work package
-(WP)** runs on its own ephemeral branch in its own worktree:
+Every run integrates through **one feature branch**; each **pipeline** runs
+on its own branch in its own worktree:
 
-- **One feature branch per plan** — the integration target for every WP.
-  Resolve it once, at execution start: the non-trunk branch already
-  checked out, else create `hex/<plan-slug>` from the trunk. Its tip at
-  that moment is the **frozen base** every wave-1 WP branches from — never
-  a moving baseline.
-- **One ephemeral branch + worktree per WP** — branch
-  `hex/<plan-slug>--<wp-slug>` (hyphenated, not `hex/<plan-slug>/<wp-slug>`:
-  git refs are paths, so the feature branch `hex/<plan-slug>` cannot also be
-  a ref *directory* holding a `<wp-slug>` child — a branch cannot be both a
-  ref and a ref-directory), worktree `.agents/worktrees/<wp-slug>/`
-  (the default; a deviation location is documented in project context
-  (cached in `hex.md › Pointers`) — it describes repo layout, not hex
-  behavior, so any bundle that spawns worktrees reads the same source). A
-  launching WP bases on the **current feature-branch tip** — by serialized
-  integration it already holds every merged dependency; wave-1 WPs base on
-  the frozen initial tip. Basing on a
-  dependency WP's tip instead is the never-taken pipelining option:
-  dependency-ready launch requires every dep `merged` (already on the
-  feature branch), so that clause would only apply to an *unmerged*
-  dependency — documented, unused.
-- Concurrently-running WPs **must own disjoint file sets** — never two WPs
-  on the same file.
-- **Merge back onto the feature branch, serialized, in a valid topological
-  order** — one WP at a time, never a batch: each merge changes the base
-  under the next.
-  **The merge gate is a scoped check** —
-  after each WP merge onto the feature branch, run the
-  [scoped check](verify.md#scoped-check). The project's **full** documented
-  verification runs on **three policy triggers** and **two override paths**:
-  - **(i)** the merge of a **decomposing-coordinator-owned WP**, which pays
-    a full post-merge verification rather than a scoped check — the `join`
-    trigger, and the one place a merge's gate is decided by *who owns the
-    WP* rather than by a counter. **This narrows `adr_0010` `C-901`'s firing
-    condition**: the trigger keys on the decomposing kind, not on
-    "coordinator" alone, because a pipeline coordinator performs no join and
-    the trigger would otherwise fire on every work package that got one.
-    `C-901`'s other triggers, the scoped/full distinction and `C-904`'s
-    bisection walk are unchanged.
-  - **(ii)** a [checkpoint](verify.md#checkpoints).
-  - **(iii)** the **final gate** — the plan's terminal verification —
-    **mandatory, un-lowerable, and reached by every run that completes**.
-  - **(iv)** a `Verify: full` cell or a `Verify-default: full` Status line.
-  - **(v)** a **degrade** to full in **the merge gate's own run** of the
-    [scoped check](verify.md#scoped-check) (no discoverable assembly gate, no
-    runner-addressable WP tests) or of the selective-test convention
-    (shallow-clone pre-flight, or a selective command that failed). A
-    degrade at either in-worktree site binds that run only and never this
-    gate.
-
-  **The merge-triggered ones appear in the schedule log's `<trigger>`
-  vocabulary**
-  ([Parallel-by-default decomposition](decompose.md#parallel-by-default-decomposition)),
-  (ii) contributing three of its own; **the final gate is not a merge and
-  produces no log entry**, so it appears in that vocabulary not at all — nor
-  does a [Review-Fix Loop](loop.md#the-review-fix-loop) exit-gate run, `full` cell
-  or not, for the same reason: it fires in the WP's own worktree before the
-  merge, not at one.
-  Nothing else changes about merging: serialization, topological order, the
-  frozen base, merge-time file-set re-validation and `(Repo, path)`
-  disjointness are untouched. **The rationale the old rule carried is
-  preserved, not deleted** — cross-file interactions surface only post-merge,
-  which is precisely why (ii) exists and why its cadence is bounded rather
-  than left to the end of the run. **The Implement-phase verification is not
-  this gate**: the [Review-Fix Loop](loop.md#the-review-fix-loop)'s phase 3 runs the
-  same [scoped check](verify.md#scoped-check) in the WP's own worktree, at every tier,
-  and its compile-only carve-out for a leaf under a **decomposing**
-  coordinator is unchanged.
-  **Sub-WP merges are not merge-gate sites at all** — a coordinator's dotted
-  sub-WPs merge into the coordinator's own **shared worktree**, never onto the
-  feature branch, so they run neither a scoped check nor a counter increment,
-  and they produce no log entry; the coordinator's own in-worktree join check
-  ([`workers/coordinator.md`](workers/coordinator.md), unchanged) stays the
-  coordinator's business.
-  **The parent WP's merge onto the feature branch is the one gate site the
-  subtree produces**, and trigger (i) makes it a full post-merge verification,
-  since the in-worktree join proves nothing about the feature branch it has
-  not yet merged into.
-- **Merge-time file-set re-validation** — before merging a WP, run
-  `git diff --name-only <base>..<wp-branch>` (`<base>` is that WP's
-  recorded base — the feature-branch tip it launched from, the frozen
-  initial tip for wave-1 WPs, never the trunk) and require every listed
-  file to sit inside the
-  WP's declared file set. Anything outside → do not merge; reconcile
+- **One feature branch per plan** — the integration target for every
+  pipeline. Resolve it once, at execution start: the non-trunk branch
+  already checked out, else create `hex/<plan-slug>` from the trunk. The
+  contract wave commits onto it; its tip then is the **frozen base** every
+  pipeline branches from — never a moving baseline.
+- **One branch + worktree per pipeline** — branch
+  `hex/<plan-slug>--<pipeline-slug>` (hyphenated, not
+  `hex/<plan-slug>/<pipeline-slug>`: git refs are paths, so the feature
+  branch `hex/<plan-slug>` cannot also be a ref *directory*), worktree
+  `.agents/worktrees/<pipeline-slug>/` (the default; a deviation location is
+  documented in project context (cached in `hex.md › Pointers`) — it
+  describes repo layout, not hex behavior). All pipelines start together
+  from the frozen base. The pipeline's steps share its worktree and commit on
+  its branch, serially.
+- Concurrently-running pipelines **must own disjoint file sets** — never two
+  pipelines on the same file.
+- **Hub and generated files** (lockfiles, baselines, goldens; `/hex-init`
+  lists them in project context) are **never committed by a pipeline**. They
+  are regenerated **once, at integration, minimally** — no dependency
+  upgrade — as one commit on the feature branch.
+- **Job budget** — parallel builds share one build's budget: **live
+  pipelines × jobs per pipeline ≤ the project's single-build jobs** (its
+  `jobs` setting). The orchestrator sets each pipeline's share at launch and
+  the step brief names it. RAM stays at about one build; shared caches do not
+  fix serialization and are not relied on.
+- **Merge back onto the feature branch, serialized** — one pipeline at a
+  time, as each lands, never a batch: each merge changes the base under the
+  next. Merges use `--no-verify` and run **no gate and no check**
+  ([commits and hooks](verify.md#commits-and-hooks)); the integration gate
+  runs once, after the last merge and the hub-file regeneration
+  ([the two gates](verify.md#the-two-gates)).
+- **Merge-time file-set re-validation** — before merging a pipeline, run
+  `git diff --name-only <base>..<pipeline-branch>` (`<base>` is the frozen
+  base, never the trunk) and require every listed file to sit inside the
+  pipeline's declared file set. Anything outside → do not merge; reconcile
   first: justify the extra files in the plan's table, or re-scope the
-  WP.
-- **Merge conflict / post-merge failure playbook** — on a merge conflict
-  or a failed post-merge verification, the orchestrator judges the
-  collision semantically (a real design conflict versus a textual
-  overlap), applies at most **one** fix pass on the feature branch, and
-  re-verifies. Never loop past the one pass, never force-push, never rebase a
-  published ephemeral branch. What a still-failing state implicates depends on
-  which check failed:
-  - **A scoped-check failure implicates exactly the merge that just ran.**
-    Mark the WP `failed` in the plan's table — the long-standing behaviour,
-    unchanged.
-  - **A failure detected at a full documented verification gets the window
-    variant**, because a scoped merge gate leaves it implicating **any** merge
-    since the last full verification. Still failing after the one fix pass,
-    the orchestrator **bisects the window** — *when there is a window to
-    bisect*. The window is the ordered list of merges since the last full
-    verification, and **every one of them recorded its post-merge
-    feature-branch SHA in the plan's `## Schedule log`**
-    ([Parallel-by-default decomposition](decompose.md#parallel-by-default-decomposition)),
-    so the bisection needs no new bookkeeping and no `git bisect` invocation:
-    check out an already-recorded intermediate SHA, run the same full
-    verification, and halve. **Cost is bounded at `⌈log₂ M⌉` extra full
-    runs — two, at `M = 3`.** With a known-good base and a known-bad tip, `M`
-    merges leave `M − 1` unknown SHAs to probe, so three candidates take two
-    probes in the worst case and one in the best. The culprit WP is named and
-    marked `failed`; the cascade rule below then governs what happens next,
-    and the escalation it carries names
-    **the culprit, not the window**.
-  - **Two cases have no window and therefore no bisection**, and both route to
-    the ordinary root-cause path the
-    [Review-Fix Loop](loop.md#the-review-fix-loop) already owns, rather than claiming
-    a localization this playbook cannot deliver: **(i)** an **empty window** —
-    the failing verification is the final gate and the last full verification
-    already covered the last merge, so nothing merged since; **(ii)** a
-    **post-review-fix failure**, where the change under suspicion is an edit
-    made on the feature branch rather than a merge, so it has no WP to
-    attribute and no recorded SHA to probe.
-  - **A third case has a window but does not localize**: a non-deterministic
-    or order-dependent failure that does not reproduce at an intermediate SHA.
-    That one is reported as *"failure did not bisect"* over the window, which
-    is itself the diagnosis. **No WP is marked `failed` on a non-bisecting
-    failure** — naming the last-merged one would be a guess the four-status
-    column then presents as fact.
-  - **A `failed` WP does not stop the run.** It is marked `failed` as before,
-    and **the run continues while any WP is eligible**, escalating **at the
-    end** rather than immediately; the state summary that escalation carries
-    becomes the
-    [stranded-WP report](decompose.md#parallel-by-default-decomposition).
-- **Delete the ephemeral branch and remove the worktree after its WP
-  merges.** The feature branch is what survives; landing it on the trunk
-  is the human's step (their PR or merge flow) — hex never pushes, except
-  `/hex-finalize`'s force-push of the one feature branch it was invoked
-  on, consented by that invocation and approved at its gate — see
-  [`finalize.md`](finalize.md#scope). **Teardown is the *top*
-  orchestrator's — never a worker's and never a coordinator's, by `trap` or
-  otherwise**, and it sweeps and **reports rather than deletes**
-  on ambiguity — the checklist is
-  [`resources.md` § 8](resources.md#8-teardown)'s and is not restated here.
-- **The plan table's Status column is the WP-level state of record**
+  pipeline.
+- **Merge conflict playbook** — on a merge conflict the orchestrator judges
+  the collision semantically (a real design conflict versus a textual
+  overlap) and applies at most **one** fix pass on the feature branch. Never
+  loop past the one pass, never force-push, never rebase a published
+  pipeline branch. A failing integration gate follows
+  [the two gates](verify.md#the-two-gates), not this playbook.
+- **Delete the pipeline branch and remove its worktree after it merges.**
+  **Removing a worktree removes its build outputs** — target directories and
+  caches live inside it — so none outlives its pipeline. The feature branch
+  is what survives; landing it on the trunk is the human's step (their PR or
+  merge flow) — hex never pushes, except `/hex-finalize`'s force-push of the
+  one feature branch it was invoked on, consented by that invocation and
+  approved at its gate — see [`finalize.md`](finalize.md#scope).
+  **Teardown is the *top* orchestrator's — never a worker's, by `trap` or
+  otherwise**, and it sweeps and **reports rather than deletes** on
+  ambiguity — the checklist is [`resources.md` § Worktree cleanup](resources.md#worktree-cleanup)'s
+  and is not restated here.
+- **The plan table's Status column is the pipeline-level state of record**
   (`pending | active | merged | failed`): execution sets `active` when a
-  WP's worktree is created, `merged` after its merge, `failed` per the
-  playbook. Branches and worktrees are only its evidence — resume reads
-  the column, not the refs.
-- **Sub-WP rows (dotted IDs)** — a coordinator splits its WP into dotted
-  sub-WPs (`WP3.1`, `WP3.2`, …) that are **ordinary table rows** — same
-  columns, same four statuses. **Only leaf rows are branch- and
-  worktree-eligible**; a parent with children is never itself branched. The
-  default for sub-WPs is the parent WP's **single shared worktree, with no
-  sub-branches**; a hyphenated leaf branch `hex/<plan>--<wp>--<sub>` (never a
-  slash path) is created **only for a declared true-isolation need**. A
-  sub-WP's `Depends-on` inherits the parent's when absent (override for a
-  tighter edge). IDs are never renumbered — next sibling = next integer,
-  append-only — and there is **no schema-version marker**: the presence of
-  dotted IDs is the signal.
-- **Parent Status is a computed rollup, never written directly** —
-  recomputed on every child write: **failed** if any child failed;
-  **merged** iff every child is merged *and* the parent's join check passes;
-  **active** once any child has started (is active or merged); else
-  **pending**. Genuine join work (more than the sum of the children) is an
-  **ordinary sibling sub-WP row** that depends on the other children — no
-  fifth status, no `.join` suffix. A parent with zero children (every old
-  plan) rolls up to its own literal status — the rule is vacuous, old plans
-  unchanged.
+  pipeline's worktree is created, `merged` after its merge, `failed` when the
+  orchestrator defers the pipeline as residue after escalation. Branches and
+  worktrees are only its evidence — resume reads the column, not the refs.
+  **A `failed` pipeline does not stop the run**; the run continues and
+  escalates at the end.
 
-**Presence checks, not a version field.** The plan's four newer fields — the
-`Verify` column, the `Verify-default:` Status line, the `Reviewed:` Status
-line, and the `## Schedule log` section — follow the dotted-ID rule above and
-the `Repo` column rule below: **no schema-version marker**, the presence of
-the field is the signal. Every reader branches on presence, never on a
-compared version number — absent `Verify` cell or column ⇒ the plan's
-`Verify-default:`, else `scoped`; absent `Verify-default:` ⇒ `scoped`; absent
-`Reviewed:` ⇒ never reviewed ⇒ a full-branch review; absent schedule log ⇒ a
-run that predates it. None of the four is an error, and **a plan without them
-is a permanently valid shape, not a migration backlog**: a markdown table has
-no storage or index cost, so nothing ever forces a cleanup pass. The day a
-plan-format change is *not* additive — a column renamed or removed, or the
-table restructured — is when a real version marker plus a migration step
-earns its keep.
-
-The plan's `- Effective-tier:` Status line follows the same
-presence-not-version rule, but with a value space (`derived`) and a hard
-refusal on anything else, including a present-but-empty value ([the
-effective tier](decompose.md#the-effective-tier)). Presence-plus-refusal is a version
-marker under another name and this file does not pretend otherwise; what
-the rule above genuinely preserves is that **absence is never a version
-comparison** — it is legacy, permanently, with no migration and no prompt.
+**Presence checks, not a version field.** Optional plan fields — the
+`Reviewed:` Status line and the `Repo` column — are read by presence: absent
+`Reviewed:` ⇒ never reviewed ⇒ a full-branch review. None is an error, and a
+plan without them is a permanently valid shape, not a migration backlog.
 
 Ignore `.agents/worktrees/` specifically (transient checkouts); never
 ignore `.agents/` wholesale — `.agents/memory/hex.md` is shared
@@ -210,12 +86,12 @@ repos named by the lead's `Federation:` pointers
 clause below is inert and single-repo behaviour is byte-identical.
 
 - **`Repo` column (C-302)** — the plan table's second column names the repo
-  each WP runs in: a Federation key, or `.` (the empty-cell default) for the
-  lead. `Expected Files` are **repo-relative to that repo**, because
-  merge-time re-validation runs `git -C <repo> diff --name-only`. Sub-WPs
-  inherit the parent's `Repo` and never name a different repo than the parent
-  (only leaf rows are worktree-eligible, so a cross-repo split is at WP
-  grain). No schema-version marker — the column's presence is the signal.
+  each pipeline runs in: a Federation key, or `.` (the empty-cell default)
+  for the lead. `Expected Files` are **repo-relative to that repo**, because
+  merge-time re-validation runs `git -C <repo> diff --name-only`. A pipeline
+  lives in one worktree, so it runs in one repo; a cross-repo split is at
+  pipeline grain. No schema-version marker — the column's presence is the
+  signal.
 - **Pre-flight access invariant (C-303)** — no cross-repo mutation (branch,
   worktree, commit, back-pointer) occurs until, for **every** Federation key
   the plan uses, six halting clauses pass. It is a **barrier over all keys,
@@ -262,49 +138,45 @@ clause below is inert and single-repo behaviour is byte-identical.
 - **Satellite worktree mechanics (C-305)** —
   `git -C <path> branch hex/<plan-slug> <base>` (the frozen base SHA from the
   plan's `Repos:` ledger, C-317/C-324 — never a branch name), then
-  `git -C <path> worktree add .agents/worktrees/<wp-slug> hex/<plan-slug>--<wp-slug>`.
+  `git -C <path> worktree add .agents/worktrees/<pipeline-slug> hex/<plan-slug>--<pipeline-slug>`.
   The worktree lives under the **satellite's** own `.agents/worktrees/` — the
   owning repo records the checkout and already gitignores that path. Removal
   and branch delete after merge, as today. hex never fetches.
-- **Merge serialization spans repos (C-306)** — **one global topological
-  order over all WP rows regardless of repo, one merge in flight at a time.**
-  *Correctness* needs only two things: per-repo serialization (unchanged —
-  each merge moves the base under the next) and `Depends on` ordering wherever
-  an edge crosses the boundary (the DAG already enforces it); two WPs in
-  different repos with no edge between them have no correctness order. **Global
-  one-at-a-time is an operability choice** — one sequential orchestrator, one
-  halt-capable verification at a time, resume reconstructible from the Status
-  column — and is the first rule to relax if merge wall-clock ever dominates.
-  Each merge is `git -C <repo> merge` onto that repo's `hex/<plan-slug>`,
-  followed by the **owning repo's** documented verification read by an
-  **explicit `Read`** of that repo's project context (never ambient —
-  `--add-dir` does not load a satellite's `CLAUDE.md`). Cross-repo
-  `Depends on` edges are ordinary; the ready-set launcher and the merge
-  playbook are unchanged; the concurrency cap counts across repos.
+- **Merge serialization spans repos (C-306)** — **one merge in flight at a
+  time, across all repos.** *Correctness* needs only per-repo serialization
+  (each merge moves the base under the next); global one-at-a-time is an
+  operability choice — one sequential orchestrator, resume reconstructible
+  from the Status column — and is the first rule to relax if merge
+  wall-clock ever dominates. Each merge is `git -C <repo> merge --no-verify`
+  onto that repo's `hex/<plan-slug>`, with no gate after it. The owning
+  repo's documented verification, read by an **explicit `Read`** of that
+  repo's project context (never ambient — `--add-dir` does not load a
+  satellite's `CLAUDE.md`), runs at the integration gate, as a row of the
+  cross-repo table ([Verification](verify.md#verification)). The job budget
+  is per repo.
 - **`Hex-Plan:` commit trailer (C-307)** — every commit hex makes in a
   satellite carries `Hex-Plan: <remote-slug>:<repo-relative plan path>` in the
   trailer block. Ordinary git-trailer syntax, no new format,
   `git interpret-trailers`-compatible, recoverable via
-  `git -C <repo> log --grep`. The WP is derivable from the ephemeral branch
+  `git -C <repo> log --grep`. The pipeline is derivable from the branch
   name, not the trailer. This is the only satellite-side record of the plan —
   there is never a plan copy. Lead commits do not need it but may carry it
   harmlessly.
-- **`(Repo, path)` disjointness key (C-316)** — the concurrent-WP invariant
-  above ("disjoint file sets") compares **`(Repo, path)` pairs**, not bare
-  paths: `Expected Files` are repo-relative, so satellites routinely declare
-  textually identical paths (`Cargo.toml`, `src/**`) that are nonetheless
-  disjoint across repos — FM5's free parallelism. Merge-time re-validation is
-  unchanged and already repo-scoped (`git -C <repo> diff --name-only` against
-  that WP's satellite-relative set). Vacuous single-repo: every pair is
-  `(., p)`. The plan-time set-intersection check states the same key — see
-  [Parallel-by-default decomposition](decompose.md#parallel-by-default-decomposition).
+- **`(Repo, path)` disjointness key (C-316)** — the concurrent-pipeline
+  invariant above ("disjoint file sets") compares **`(Repo, path)` pairs**,
+  not bare paths: `Expected Files` are repo-relative, so satellites routinely
+  declare textually identical paths (`Cargo.toml`, `src/**`) that are
+  nonetheless disjoint across repos — FM5's free parallelism. Merge-time
+  re-validation is unchanged and already repo-scoped (`git -C <repo> diff
+  --name-only` against that pipeline's satellite-relative set). Vacuous
+  single-repo: every pair is `(., p)`. The plan-time set-intersection check
+  states the same key — see [`decompose.md`](decompose.md).
 - **One frozen base per participating repo (C-317)** — the frozen-base rule
   above is per feature branch, and C-304 gives a federated plan one feature
   branch per repo, so there are **N frozen bases**, one per participating
   repo, **all resolved together in the C-303 pre-gate step** — never lazily at
-  first touch, which would branch a wave-1 satellite WP from a moving
+  first touch, which would branch a satellite pipeline from a moving
   baseline. Each is **persisted as a full 40-character SHA in the plan's
   `Repos:` ledger** (C-324) so resume, review, merge-time re-validation and
   convergence all read the same `<base>` rather than re-resolving a trunk ref
-  that may have moved. A WP's base is its own repo's row.
-
+  that may have moved. A pipeline's base is its own repo's row.

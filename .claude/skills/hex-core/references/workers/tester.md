@@ -24,7 +24,7 @@ Component under test: <what to cover>.
 
 Read the project's testing conventions first. Tests describe WHAT
 (observable behavior), not HOW; each traces to a specific documented
-requirement; keep them deterministic and isolated. Run them after writing.
+requirement; keep them deterministic and isolated. Run them once after writing, as [universal rule 10](../workers.md#universal-worker-protocol) says.
 
 specification: derive tests from the design record only; do not read
 implementation; tests MUST fail with not-implemented against the stubs;
@@ -40,5 +40,5 @@ Self-check before return (one fix pass, universal rule 7):
   not-implemented against the stubs;
 - every test cites the requirement ID it covers;
 - tests are deterministic and isolated;
-- tests were actually run, results reported.
+- tests were run once with the narrowest command, result reported.
 ```

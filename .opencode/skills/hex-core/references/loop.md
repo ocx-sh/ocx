@@ -1,245 +1,97 @@
-# hex Review-Fix Loop
+# hex Run Loop
 
 A topic file of the hex swarm protocol; the spine is
 [`protocol.md`](protocol.md).
 
 ## The Review-Fix Loop
 
-The canonical contract-first loop. **This is the only copy in the bundle —
-every other file links here.** Diff-scoped, bounded, tier-scaled.
+The run loop. **This is the only copy in the bundle — every other file
+links here.** Bounded by count, never by tier.
 
-**Contract-first TDD phases:**
+**Contract wave → pipelines → integration gate ‖ review call → fix →
+release.**
 
-1. **Stub** — a builder (focus `stub`) creates the public surface; gate on
-   the project's compile/type check.
-2. **Specify** — a tester (focus `specification`) writes tests from the
-   design record; they MUST fail against the stubs.
-3. **Implement** — a builder (focus `implement`) fills bodies until the
-   tests pass; run the [scoped check](verify.md#scoped-check) — the WP's own contract
-   tests plus the project's cheapest documented assembly gate —
-   **unconditionally, at every tier**. This gate is **not** coupled to the
-   WP's `Verify` cell, which budgets the merge boundary only — that WP's
-   Review-Fix-Loop exit gate and the merge that immediately follows it
-   ([Parallel-by-default decomposition](decompose.md#parallel-by-default-decomposition)).
-   **The backstop is stated:** tier `xhigh` (and `max`) thereby gives up its pre-merge
-   proof over untouched modules, and what catches a defect in a module no WP
-   touched is [merge rule](worktree.md#worktree-work-package-mechanics) trigger (ii), a
-   [checkpoint](verify.md#checkpoints) — `M = 3` merges, a cleared dependency level,
-   or a high-risk merge, whichever fires first —
-   with the bounded bisection of the post-merge-failure playbook (C-904,
-   [Worktree work-package mechanics](worktree.md#worktree-work-package-mechanics))
-   attributing the failure across at most three merges, trigger (i) at a
-   coordinator join, and trigger (iii), the final gate.
-   **Carve-out for a leaf under a decomposing coordinator:** it runs a
-   scoped compile/parse check only — concurrent full verification in the
-   coordinator's shared worktree would race on shared build artifacts — and
-   the coordinator runs the one authoritative verification at the WP join.
-   **The kind is load-bearing:** a pipeline coordinator splits its WP into no
-   sub-WPs and holds no join, so the carve-out's own backstop does not
-   exist there and a WP under one pays this gate in full.
-4. **Review-Fix** — the loop below.
+1. **Contract wave** — stubs **plus contract tests** for every pipeline,
+   committed once on the feature branch. Contract-first TDD starts here:
+   the tests are red against the stubs, and the wave checks only that the
+   surface builds ([step feedback](verify.md#step-feedback)). A **small
+   task is one pipeline** and has no contract wave.
+2. **Pipelines** — all start together from the contract-wave commit. A
+   pipeline is an ordered chain of **steps** in one worktree
+   ([pipeline worktrees](worktree.md#pipeline-worktree-mechanics)); each
+   step is a fresh `standard` agent with a small brief. Inside a pipeline:
+   serial, shared state, no merge, no review, no gate between steps.
+   Across pipelines: parallel, sharing only the contracts. Inside a step:
+   failing test first, then the body until green; a red phase is not a
+   failure. The only inner check is [step feedback](verify.md#step-feedback).
+   Commits use `--no-verify`, and the step brief says the run's gates
+   satisfy the project's verify-before-commit instructions
+   ([commits and hooks](verify.md#commits-and-hooks)).
+   - A step that edits a contract-wave file shows in `git diff` at its
+     return; the orchestrator re-briefs the affected pipelines. No review is
+     triggered.
+   - A pipeline reviews itself only where the plan marks it.
+3. **Integration** — once every pipeline has landed
+   ([merge and regenerate](worktree.md#pipeline-worktree-mechanics)), the
+   [integration gate](verify.md#the-two-gates) and the review call run
+   **concurrently**.
+4. **Fix** — one fix pass serves both: the review's actionable findings
+   and the gate's failures, run per pipeline in parallel.
+5. **Release** — `/hex-finalize` runs the
+   [release gate](verify.md#the-two-gates).
 
-**The collapse at effective tier `medium`.** The four-phase list above is the
-shape at effective `high` and above; at effective tier `medium`, Stub +
-Specify + Implement collapse into one builder spawn ([the effective
-tier](decompose.md#the-effective-tier)). One builder writes the public surface, then the
-failing tests, then the implementation, in a single turn, and
-**Verify-Architecture does not run**. **The collapsed builder still pays the
-Implement gate's scoped check** ([Scoped check](verify.md#scoped-check)) — that gate
-is unconditional at every tier and nothing here removes it.
+**Workers never wait** on a lock, a gate or a poll; a worker that would
+wait returns. The orchestrator only dispatches and merges; anything slow
+runs in the background, event-driven with a ≥ 20 min fallback.
 
-**The ordering is checked by the orchestrator, not reported by the
-builder**: the collapsed builder commits the stubs and the specification
-tests as its first commit on the WP branch, before the implementation
-commit, the builder's output contract names that commit's SHA, and the
-orchestrator runs the project's test command at that commit and requires it
-to fail — a pass at that commit is a violation and the WP does not proceed,
-and the builder's own prose is not evidence. **That check is budgeted**: it
-runs the WP's [scoped check](verify.md#scoped-check) command **warm**, reusing the
-tree already built, so it costs a test run rather than a build; where the
-older commit forces a cold rebuild, that rebuild **runs once** and is
-recorded in the schedule log
-([Parallel-by-default decomposition](decompose.md#parallel-by-default-decomposition)).
+**Escalation is the orchestrator's alone**, on repeated failure of the same
+step ([`models.md`](models.md)): retry at the same class with the failure
+attached, then one class up, then defer as residue and keep the loop going.
 
-**What is given up is stated**: the *temporal* property is recovered —
-surface before tests, tests before implementation, read off the branch's
-commit graph by a party that did not write it — but **author≠verifier is
-not**, and its backstop is the `L1` leaf review, which runs at every tier
-([Review by join level](#review-by-join-level)). **Model-cell
-resolution**: the collapsed spawn resolves all three source cells
-(`builder:stub`, `builder:implement`, `tester`) and reads the highest, never
-the lowest, disclosed like any other override-driven raise
-([`models.md`](models.md#rules)).
+### Review calls
 
-At effective `high` and above the four-phase list is unchanged in every
-byte.
+- **Default: one `/hex-review` after all pipelines land.** The orchestrator
+  may add at most two more mid-run, for a very big finished chunk with much
+  still to come: **three calls per run at most**. Each reads `anchor..HEAD`
+  ([the last-reviewed anchor](#the-last-reviewed-anchor)), so later edits to
+  reviewed code are included next time.
+- **Seats are `standard` at every tier**; tier scales the seat count only.
+  Seats are split per pipeline, plus one for the seams between pipelines.
+  `deep` seats run only when the user asks.
+- **Adversary seat** (cross-model, tier-scaled) — launches in the same batch
+  as the native seats, never after them; its actionable findings join the
+  same fix pass; one-shot, never loops. Unavailable → log a skip line and
+  never wait for its quota. Batch order, clocks, triage and the failure path
+  are the [Adversary contract](adversary.md#adversary-contract)'s, restated
+  nowhere else.
 
-**The loop:**
+### The loop
 
-- **Round 1** — run the join level's seat on the diff ([Review by join
-  level](#review-by-join-level)); where a level resolves to more than one
-  seat, run them concurrently, blockers-first (spec, correctness).
-  Classify each finding:
-  - **Actionable** — a builder fixes it; re-run only the affected
+- **Round 1** — the review call runs its seats concurrently,
+  blockers-first (spec, correctness). Classify each finding:
+  - **Actionable** — a fixer fixes it; re-run only the affected
     perspectives next round.
   - **Deferred** — surface it in the summary with context; never block the
     loop on it.
-- **Subsequent rounds** — re-run only the perspectives with actionable
-  findings from the prior round. A finding that surfaces two rounds running
+- **Fix rounds** — fix, then re-check the **fix delta only**
+  ([delta scope](#delta-round-scope)), re-running only the perspectives
+  with actionable findings. A finding that surfaces two rounds running
   (oscillating) auto-defers.
-- **Loop cap** — keyed on the **join level** ([Review by join
-  level](#review-by-join-level)), never on tier: the level's `rounds`
-  value, shipped `L0` 0 · `L1` 1 · `L2` 1. **Plan-artifact scope** (a
-  draft plan or ADR under review by its own orchestrator): **one** panel
-  round → the orchestrator applies actionable fixes → **one** re-validation
-  pass by `reviewer` (focus `spec`) *whenever any actionable fix was
-  applied* (skipped only on a clean panel) → anything still actionable
-  escalates to the user. Artifacts are re-checked downstream anyway
-  (Specify and Verify-Architecture gates), so multi-round artifact loops
-  buy little; re-enabling them takes an **explicit** `artifact loop
-  rounds: N` limit in `hex.md › Preferences` — the generic loop-rounds
-  ceiling does not. If actionable findings remain when a cap
-  is hit, **stop and escalate to the user** with the outstanding list —
-  do not loop past the cap.
-- **A `loop rounds` value in `hex.md › Preferences` is a ceiling, never a
-  default and never a raise.** It caps every level's `rounds` *and* any
-  `--loop-rounds` flag: the effective cap at a level is the **lowest of**
-  the stored value, the run's resolved request — `--loop-rounds` when
-  passed, the level's `review.<level>.rounds` otherwise — and the hard
-  maximum of 3. The stored value never raises a level's `rounds`; a
-  `--loop-rounds` flag may still loosen a run up to (never past) the
-  stored ceiling. `limits.*` sit **outside** the later-wins
-  [spawn-selection precedence](protocol.md#spawn-selection-precedence) — a
-  user flag may lower a limit, never raise it past the stored ceiling. The
-  stored value never affects plan-artifact scope — that scope moves only
-  via the explicit `artifact loop rounds: N` limit named above. Both limits
-  are announced at the gate with their source, like every other resolved
-  axis.
-- **Seats, class, input scope and budget** are set per join level, once,
-  in [Review by join level](#review-by-join-level) below — there is no
-  per-WP review budget and no tier-scaled perspective panel in this loop.
-- **Adversary seat** (optional, tier-scaled) — when `adversary=on`, the
-  cross-model adversary **launches in the same batch as the native seat of
-  the join it gates**, never after it (`adr_0016` C-987), and its actionable
-  findings join that join's single builder fix pass (C-988); one-shot, never
-  loops. Batch order, clocks, triage and the failure path are the
-  [Adversary contract](adversary.md#adversary-contract)'s, restated nowhere
-  else.
-- **Exit gate** — no actionable findings remain, the **WP's resolved
-  verification** passes on the final state, and deferred findings are
-  documented for handoff. The resolved verification is what that WP's
-  `Verify` cell sets — grammar, defaults and the scoped/full determination
-  live in [Parallel-by-default
-  decomposition](decompose.md#parallel-by-default-decomposition), stated once there and
-  linked, never restated, here. **This is not the run's final gate** — it
-  fires **once per work package that runs the loop, in that WP's own
-  worktree, before merge**; the plan's terminal verification is a
-  separate, un-lowerable gate enumerated by the merge rule
-  ([Worktree work-package mechanics](worktree.md#worktree-work-package-mechanics)).
-
-### Review by join level
-
-**Review depth is keyed on where a diff joins, never on tier.** Tier scales
-execution — phases and model class ([the effective
-tier](decompose.md#the-effective-tier)) — and nothing else. Every diff is
-reviewed once at the level where it joins, by one seat, reading the diff
-and nothing prose-shaped. Four levels, closed and versioned (`adr_0015`
-C-980):
-
-| Level | Fires at | Seats | Class | Rounds | Budget | Input |
-|---|---|---|---|---|---|---|
-| `L0` inline | every builder return | 0 spawns | — | 0 | — | the builder's evidence table, verified mechanically |
-| `L1` leaf | a leaf's join: a WP or sub-WP branch lands | 1 `reviewer` | fast-balanced | 1 | 10 min | `git diff <base>..<head>` + the WP's contract excerpt |
-| `L2` aggregate | a node joins **N ≥ 2** leaves | 1 `reviewer` | deep-reasoning | 1 | 20 min | the aggregate diff + the leaf verdicts |
-| `L3` trunk | `/hex-review`, on explicit invocation only | that skill's staged panel | that skill's | that skill's | — | the feature branch |
-
-Shipped defaults; the `L1` and `L2` cells, and the checklist sections each
-brief carries (`review.<level>.checklist`), are the `review.<level>.*` keys
-in `hex.md › Preferences` ([`config.md`](config.md#key-vocabulary)), and a
-project overrides them **per level, never per role**. **Every diff passes
-`L1` once, at the join nearest the builder that wrote it; every aggregate
-passes `L2` once, at the node that assembled it.** A node whose child
-already ran its own `L2` takes that verdict as input and does not re-run
-`L1` over the child's diff — the rule is the same at every nesting depth.
-
-- **`L0`** — the builder returns, with its files-changed list, an
-  **evidence table**: one row per requirement ID its excerpt carried,
-  `<ID> → <path>:<line>`, naming the line that satisfies it (a test, a
-  symbol, a doc line). The orchestrator verifies each row **mechanically**
-  — the path is in the diff and the line matches the ID's contract text by
-  grep — and an unverifiable row is an actionable finding sent straight
-  back to the builder, one fix pass. No reviewer is spawned. **A WP is
-  `L0`-only — it runs no `L1` — when its actual diff is documentation
-  only**: every path in `git diff --name-only <base>..<head>` is a markdown
-  file or lies under the project's documented docs convention (`hex.md ›
-  Pointers`), a mechanical read of the file list re-validation already
-  produces. **A doc WP is checked by grep against the implementation it
-  documents, never by a prose panel.** Every other WP runs `L0` and then
-  `L1` at its join. `L0` carries no checklist — a mechanical grep takes no
-  judgement list ([`checklist.md`](checklist.md#composition)).
-  Universal rule 7 is unchanged — the self-check still carries no weight;
-  the evidence table is verified by a party that did not write it, which
-  is what gives it weight.
-- **`L1`** — fires once per leaf join for every WP that is not `L0`-only,
-  at every tier and in every plan shape. One `reviewer` (focus `spec`, phase
-  `post-implementation`), its brief carrying the composed `spec` + `quality`
-  sections of [`checklist.md`](checklist.md#composition), reads the leaf's diff
-  against its recorded base and the contract excerpt — never the plan
-  body, never a summary, never the tree. **A finding must sit on a diff
-  line or name a contradiction the diff introduced**; anything else is
-  out of scope and dropped, not deferred. One round: actionable findings
-  get one `builder` fix pass, re-verified by the WP's resolved
-  verification, and the loop ends. The Verify-Architecture reviewer at
-  effective `high` and above is untouched — it is a phase gate, not a join.
-- **`L2`** — fires when a coordinator, the orchestrator, or any
-  sub-orchestrator between them joins **two or more** leaves whose `L1`
-  passed. One deep-reasoning seat reads the aggregate diff of the join
-  and the leaf verdicts as inputs, looking for what no leaf could see:
-  semantic conflicts between independently correct leaves, a shared
-  symbol changed on one side and called on the other, contract coverage
-  across the set. **At `N = 1` the level is skipped** — there is no
-  aggregate, and the `L1` verdict stands (C-981). The orchestrator's own
-  `L2` fires **once, at the end of the run**, over `<base>..HEAD` of the
-  feature branch with `N` = the WPs merged — never once per merge. The
-  run's `review` overlay axis selects which
-  [`checklist.md`](checklist.md#composition) sections this seat's brief
-  carries ([`hex-execute/overlays.md`](../../hex-execute/overlays.md#review-axis)):
-  the checklist grows, the seat count does not.
-- **`L3`** — the feature branch to the trunk. **Only `/hex-review`, only
-  when invoked.** Nothing in `/hex-execute` arms it, requires it, or
-  records a precondition for it; a plan reaches its terminal review state
-  through `/hex-review` because that skill is the state's sole writer,
-  not because a lower level owed it a backstop. The execution handoff
-  names what `L1`/`L2` deferred and every budget residue, so a trunk
-  pass, if the user runs one, starts from the residue rather than the
-  whole branch.
-
-**Risk raises one level, never the round count** (C-983). A WP whose
-`sec`, `hot` or `door` flag reads `true` ([the effective
-tier](decompose.md#the-effective-tier)) — at spawn time, or at the
-merge-time re-derivation over the actual diff — reviews **one level above**
-the join it is at, in place of that join's own level: `L0 → L1` (a docs-only
-WP gets a leaf reviewer after all); `L1 → L2` (its leaf join runs the `L2`
-seat instead of the `L1` one — the one single-leaf `L2` that runs at
-`N = 1`); `L2 → L2` with the `security` and `performance` checklists forced
-on. It never adds a round and never reaches `L3`. The
-plan's `Review` cell is an author-declared fifth source: `risk` raises the
-same way, legacy `panel` reads `risk`, `self` and `light` are inert, a
-missing column or cell is no hint.
-
-**The budget ends the loop** (C-984). Every level carries a wall-clock
-budget (`review.<level>.budget-minutes`); a seat that has not returned
-inside it is stopped, `review budget expired: <level> <WP> — residue:
-<what was not reviewed>` goes to the handoff's deferred list, and the WP
-**proceeds** — it merges with residue recorded, never waits. Expiry is a
-deferred finding, never a failure and never a re-run.
-
-**Retired, stated so no reader looks for it** (C-986): the per-WP
-`self | light | panel` budget and its guard, the `panel` escape hatch,
-the branch-review precondition (the `adr_0012` backstop), and the
-three-scope "review grows by diversity" model. The loop's other sections
-— anchor, validation, delta scope, the diminishing-returns stop — are
-unchanged and read "round cap" as this section's per-level `rounds`.
+- **Cap: 2 fix rounds** (a red gate re-runs after its fix pass under the
+  same cap, [the two gates](verify.md#the-two-gates)). Actionable findings
+  left after the cap: **stop and escalate to the user** with the outstanding
+  list. A `loop rounds` value in `hex.md › Preferences` or a `--loop-rounds`
+  flag may lower the cap, never raise it.
+- **Plan-artifact scope** (a draft plan or ADR under review by its own
+  orchestrator): **one** round → the orchestrator applies actionable
+  fixes → **one** re-validation pass by `reviewer` (focus `spec`) *only when
+  a Block-severity finding was fixed* → anything still actionable escalates
+  to the user. **Each decision is reviewed once across the chain**: a plan
+  built from an accepted ADR reviews only its decomposition, never the
+  ADR's decisions again ([`/hex-plan`](../../hex-plan/SKILL.md)). Re-enabling multi-round artifact loops takes an **explicit**
+  `artifact loop rounds: N` limit in `hex.md › Preferences`.
+- **Exit** — no actionable findings remain, the integration gate is green
+  on the final state, and deferred findings are documented for handoff.
 
 ### The last-reviewed anchor
 
@@ -247,24 +99,23 @@ unchanged and read "round cap" as this section's per-level `rounds`.
 A review round reads `<last-reviewed>..HEAD`, where `<last-reviewed>` is the
 SHA the previous round **of the same scope** reviewed.
 
-- **WP scope** — inside a Review-Fix Loop in a WP worktree, the anchor is
-  the SHA round N−1 reviewed. It is held in the orchestrator's session state
-  and **is not persisted**, because it never outlives the ephemeral branch
-  it names and therefore cannot go stale.
-- **Branch scope** — across `/hex-review` invocations on the feature branch,
-  the anchor must survive the session and **is persisted** as one
-  Status-block line: `- Reviewed: <full 40-char SHA>`, following the
-  `Repos:` ledger's full-SHA precedent (C-324) for exactly the same reason —
-  a short SHA or a ref name is not a stable identity. **Placement:
-  immediately after `Next:` and *before* the `Repos:` ledger** — this line and
-  the optional `- Verify-default:` line alike, because the `Repos:` ledger is
-  multi-row and unbounded, so a line placed behind it has no stable position.
+- **Round scope** — across the fix rounds inside one review call, the
+  anchor is the SHA round N−1 reviewed. It is held in the orchestrator's
+  session state and **is not persisted**.
+- **Branch scope** — across review calls and `/hex-review` invocations on
+  the feature branch, the anchor must survive the session and **is
+  persisted** as one Status-block line: `- Reviewed: <full 40-char SHA>`,
+  following the `Repos:` ledger's full-SHA precedent (C-324) for exactly the
+  same reason — a short SHA or a ref name is not a stable identity.
+  **Placement: immediately after `Next:` and *before* the `Repos:`
+  ledger**, because the `Repos:` ledger is multi-row and unbounded, so a
+  line placed behind it has no stable position.
 - **One writer rule** — whoever completes a review pass over a diff whose
   head is `<sha>` writes `Reviewed: <sha>`. It means precisely *"every
   commit reachable from this SHA has been through at least one review
   pass"* — nothing about verdicts, and nothing about whether findings
-  remain. A WP-scope round **never** writes the field. Absent field ⇒ never
-  reviewed ⇒ full-branch review.
+  remain. A round-scope round **never** writes the field. Absent field ⇒
+  never reviewed ⇒ full-branch review.
 
 ### Anchor validation
 
@@ -307,69 +158,17 @@ design.
 
 ### Delta round scope
 
-**The mandatory full pass is what makes it safe.**
-Round N ≥ 2 reads **`<last-reviewed>..HEAD` plus finding-adjacent files** —
-the files named by the prior round's actionable findings, in full, even
-where the delta does not touch them, because a fix's correctness is judged
-against its surroundings. Round 1 reads the anchor's range where one is
-valid, the full diff otherwise — **except at a level whose `rounds` is 1, where a
-valid anchor never narrows round 1**: the 1-round cap makes that single
-round the whole loop, so it reads the full scope and *is* the mandatory
-converged pass — the shipped `L1` and `L2` case. **One
-full pass is mandatory at the converged gate** — after actionable findings
-reach zero and before the exit gate — **never delta-scoped, never skipped, not lowerable by any
-config key.** It is a pass, not a second read: a converging round that already
-read the full scope **satisfies** it, and a further read is owed only where
-that round was delta-scoped. An `L0`-only WP runs no loop and has no
-converged gate; its evidence table is its whole review, and the run's `L2`
-aggregate, when one fires, reads its diff like any other. **"Full" resolves per the two scopes above and is not the feature
-branch in both:** a **WP-scope** loop's converged pass reads
-**the WP branch's own full diff against its recorded base** — the scope that
-loop has reviewed all along — and a **branch-scope** pass reads the
-**whole feature branch**. Reading the feature branch at the end of every
-per-WP loop would re-review every already-merged WP once per subsequent WP,
-which is `O(N²)`. The pass absorbs the three miss classes delta
-scoping cannot: **review non-determinism on unchanged code**; **semantic
-conflicts** (two independently correct changes combining broken with zero
-textual overlap); and **collateral breakage through a shared symbol** — a
-fix that changes a signature, contract or invariant and breaks an
-*unchanged* caller, which is in neither the delta nor the finding-adjacent
-set, since that caller is neither touched nor named by the finding. The
-per-finding oscillation rule above is unchanged, and so is the round-N
-perspective-shrinking rule — **delta scoping shrinks the diff *in addition
-to*, never instead of, shrinking the perspective set**.
-
-### The diminishing-returns stop
-
-**A second exit condition, severity-aware.**
-Let `A(N)` be the count of **actionable findings graded `Block` or `High`**
-at the end of round N, after the per-finding auto-defer rule has been
-applied. Severity is orthogonal to the actionable/deferred class
-([Finding severity](severity.md#finding-severity)), so the stop names both axes or it
-counts a naming nit against a data-loss bug. `Warn` and `Suggest` are
-excluded: a round that converts one `Block` into three `Warn`s has
-converged, and a count blind to that would call it oscillation. **Below tier
-`high` the severity ladder is not applied** and the tag is absent, so `A(N)`
-there counts all actionable findings — the same degrade every other
-severity consumer takes. **The stop fires when both hold:**
-`A(N) ≥ A(N−1)` for `N ≥ 2` — the `Block`/`High` count did not **strictly**
-shrink — **and** round N introduced **no new `Block` or `High`** that was
-not present in round N−1. The second clause is what keeps the stop from
-firing on genuine progress: a round that surfaces a *new* serious defect is
-doing its job, and stopping there would escalate a loop that had just found
-something. When it fires the loop **stops and escalates to the user with the
-outstanding list**, byte-for-byte the terminal behaviour hitting the loop
-cap already produces — no new escalation path, no new message shape. The
-strictly-decreasing expectation was derived from the constant-input case,
-where every round re-read the *same* full diff; under delta scoping the
-input shrinks too, so part of any observed decrease is an artifact of the
-scope, and the rule is an **expectation, not a law**. It ships anyway
-because its failure direction is benign: a scope-artifact decrease makes the
-stop fire **late** — the loop runs to its cap, which is the pre-existing
-behaviour — never early, and the severity floor biases it later still.
-`A(N) = 0` is the **exit gate**, not this stop; the stop can only fire
-**earlier** than the loop cap and never raises it, and the
-`hex.md › Preferences` `loop rounds` ceiling is untouched.
+**Round 1 is the full pass.** It reads the anchor's range where one is
+valid (see above), the full branch diff otherwise. Round N ≥ 2 reads **the
+fix delta plus finding-adjacent files** — the files named by the prior
+round's actionable findings, in full, even where the delta does not touch
+them, because a fix's correctness is judged against its surroundings. Round
+1 absorbs what delta scoping cannot: **review non-determinism on unchanged
+code** and **semantic conflicts** (two independently correct changes
+combining broken with zero textual overlap). **Collateral breakage through a
+shared symbol** — a fix changes a signature and breaks an *unchanged*
+caller, in neither the delta nor the adjacent set — is what the gates catch. Delta scoping shrinks the diff *in
+addition to*, never instead of, shrinking the perspective set.
 
 ## Convergence contract
 
@@ -382,11 +181,11 @@ target traces to a plan artifact.
   incomplete against the contract), **contradicts** (delivered behavior
   conflicts with the contract), **unrequested** (delivered behavior no ID
   asked for — the reverse gap).
-- **Append-only growth**: the orchestrator appends gaps as new WP **rows**
+- **Append-only growth**: the orchestrator appends gaps as new pipeline **rows**
   at the end of the plan's Parallelization table, with matching new
-  Implementation Steps entries, `Depends on` the delivered WPs; their
+  Implementation Steps entries, `Depends on` the delivered pipelines; their
   **wave derives** as the next topological level (no explicit wave to
-  assert). Existing WPs, sub-WPs, steps, and IDs are never rewritten or
+  assert). Existing pipelines, steps, and IDs are never rewritten or
   renumbered.
 - **Byte-identical when clean**: nothing unmet → the plan file is not
   touched at all and the report states "Converged".
@@ -406,7 +205,7 @@ target traces to a plan artifact.
   satellite delivery is located via the `Hex-Plan:` commit trailer
   (`git -C <repo> log --grep`), and an appended gap row carries a `Repo` value
   like any other row. `C-`/`S-` IDs stay plan-scoped and are therefore global
-  to the change. A gap delivered in a WP whose `Repo` is **not** `.` is
+  to the change. A gap delivered in a pipeline whose `Repo` is **not** `.` is
   **not** folded into the lead's spec — it is reported "delivered in
   `<repo>`, fold by hand" and left in the plan, because a fold has no correct
   destination across a repo boundary (the [fold-back](archive.md) phase is

@@ -38,10 +38,14 @@ single-area change to an external contract):
 | **high** | One-way-door medium; single area or an internal contract; established pattern applied in a new way, or a bounded novel approach | `storage layout for the new index`, `caching strategy for the lookup path`, `internal event bus vs direct calls` |
 | **xhigh** | One-way-door high; cross-area or an external/public contract; genuinely novel approach; compliance or security-critical | `public plugin API shape`, `wire protocol for the new sync mechanism`, `auth boundary redesign`, `data model migration with no rollback` |
 
-Pick the **highest** tier with at least one clear signal. A single `low` or `medium`
-keyword does not demote a decision whose body describes a one-way-door
-change. `high` is the default working tier — most architecture decisions
-land here.
+Pick the **lowest** tier whose signals all fit the decision. `medium` is the
+default working tier. A higher tier needs a **hard structural signal** — a
+one-way-door decision (`high`), or an external/public contract or
+security-critical irreversible change (`xhigh`) — or the user naming it
+(an explicit tier argument). Area and file counts never raise the tier
+past `high`. Lowering is free; raising needs the user. Reviewed once:
+a decision an accepted ADR already covers is not re-classified or
+re-researched.
 
 ## Confidence rules
 
@@ -61,7 +65,8 @@ the gate handle it*.
 
 The classifier proposes a ranked subset of this catalog based on keywords in
 the decision text; the tier baseline in [`overlays.md`](overlays.md) sets how
-many actually run (`high` 1, `xhigh` 3) — **the user selects which** at the
+many actually run (default 0-1; 3 only when the user asks — an explicit
+`xhigh`/`max` tier or `--research=3`) — **the user selects which** at the
 gate. This is the signature interaction at `/hex-architect`, more central
 here than in any other hex skill.
 
@@ -77,7 +82,8 @@ here than in any other hex skill.
 
 Fewer than 3 candidates surface clearly → the classifier still proposes 3 by
 including the next-best generic matches, flagged as lower-confidence
-suggestions the user can swap out. `hex.md › Preferences` research axes of
+suggestions the user can swap out; plain approval runs only the top-ranked
+one. `hex.md › Preferences` research axes of
 interest fold into these candidates before the gate, ranked alongside the
 keyword-derived ones ([spawn-selection
 precedence](../hex-core/references/protocol.md#spawn-selection-precedence));
