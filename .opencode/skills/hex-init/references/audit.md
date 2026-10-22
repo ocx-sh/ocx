@@ -41,7 +41,81 @@ vague impression that "it's probably in there somewhere."
   found command is proposed for **adoption via pointer**, never invented;
   only what the user consents to record in project context is what hex
   runs — see
-  [`verify.md` § Verification › Scoped check](../../hex-core/references/verify.md#scoped-check).
+  [`verify.md`](../../hex-core/references/verify.md).
+
+### Single-build job count recorded?
+
+- **Look for:** one build's parallel-job setting — the budget live
+  pipelines share (live pipelines × jobs per pipeline ≤ this number).
+- **Where:** build configs (`.cargo/config.toml` `jobs`, `make -j` in a
+  Makefile or task, `bazel --jobs`, `ninja -j`, `pytest -n`), and
+  `hex.md › Pointers`.
+- **Documented looks like:** a `Build jobs: <n>` row, or a number the
+  project documents. Where nothing is configured, record `unset` and
+  propose a number only with consent — never fabricate one.
+- **De facto discovery:** read the configs above; the tool's own default
+  (all cores) counts as the number only when the user confirms it.
+
+### No worker-side build locks?
+
+- **Look for:** an instruction or script that makes a worker wait — a
+  build lock, a semaphore, a "take the heavy slot" step, a serialized
+  wrapper around the build or test command.
+- **Where:** project lessons (`hex.md › Memory`, `.agents/` lessons and
+  worker briefs such as a shared brief file), project scripts and task
+  wrappers (`flock`, lock-directory loops, `*lock*` tasks).
+- **Clean looks like:** none, or the exclusive tool runs at the
+  orchestrator's gates only. Workers never wait: a step that needs an
+  exclusive check hands it to the orchestrator and returns.
+- **Fix:** propose the exact reword or removal as a diff; write it only with
+  consent.
+
+### Verify-before-commit lines carry a hex-run carve-out?
+
+- **Look for:** always-on lines in project context that tell every agent
+  to run the full verification before committing.
+- **Where:** the project-context file(s); also commit hooks (hex commits
+  with `--no-verify`).
+- **Documented looks like:** each such line states that a hex run is the
+  exception — the run's integration and release gates satisfy it. Without
+  that, the line is injected into every subagent and puts the full gate
+  back on every step.
+- **Fix:** propose the one carve-out sentence as a diff; consent-gated.
+
+### Scoped commands that escalate to full?
+
+- **Look for:** a selective or "affected" test command, task or script that
+  falls through to the full suite on some input — a shared crate, a
+  lockfile, a config touched.
+- **Where:** task runners and scripts behind the selective command found
+  above.
+- **Clean looks like:** the narrow command a step may use (package-level
+  test, one test file) never escalates; any escalation is confined to the
+  gates.
+- **Fix:** report it and propose naming the plain narrow command in project
+  context; consent-gated.
+
+### Hub / generated file list documented?
+
+- **Look for:** files pipelines must never commit — lockfiles, baselines,
+  goldens, generated schemas, snapshots — and the minimal command that
+  regenerates each (no dependency upgrade).
+- **Where:** project context; the repo root and test trees.
+- **Documented looks like:** a `Hub files: <location>` row pointing at a
+  list with the regeneration command per entry.
+- **De facto discovery:** lockfiles (`Cargo.lock`, `uv.lock`,
+  `package-lock.json`), `*.snap`, `golden/` or `baselines/` trees, files
+  headed "generated" or "do not edit". Proposed for **adoption via
+  pointer**.
+
+### Release gate no-cache switch documented?
+
+- **Look for:** the project's way to run the full verification fresh, with
+  no cache — the release gate (`/hex-finalize`) runs it that way.
+- **Where:** project context, CI config, task runners.
+- **Documented looks like:** a runnable switch or command — a clean target,
+  `--no-cache`, an env var — recorded as a `Fresh gate:` row; or an explicit
+  "no cache in this project".
 
 ### Commit and landing requirements documented?
 
@@ -229,8 +303,7 @@ asked nothing, and hex never raises the question on its own.
 
 ### Worktree path gitignored?
 
-- **Look for:** whether the path `/hex-execute` uses for parallel work
-  packages (`.agents/worktrees/` by default, or a project-declared
+- **Look for:** whether the path `/hex-execute` uses for parallel pipelines (`.agents/worktrees/` by default, or a project-declared
   alternative) is excluded from version control.
 - **Where:** the ignore file (`.gitignore` or equivalent), and
   `hex.md › Pointers` for a declared alternative path.
@@ -279,7 +352,7 @@ Asked only when a retro home exists (`.agents/retro/`, or the Pointers `Retro:` 
 
 - **Look for:** whether `hex.md › Preferences` carries a `review:` block
   ([`config.md`](../../hex-core/references/config.md#key-vocabulary)
-  `review.<level>.*`), and whether `hex.md › Memory` records a review-config
+  `review.*`), and whether `hex.md › Memory` records a review-config
   or checklist candidate a prior run surfaced under the
   [upkeep step](../../hex-core/references/protocol.md#upkeep-step).
 - **Where:** `.agents/memory/hex.md` only. No network read; executes
@@ -289,39 +362,15 @@ Asked only when a retro home exists (`.agents/retro/`, or the Pointers `Retro:` 
   defaults are accepted.
 - **De facto discovery:** a Memory entry naming a budget expiry, a residue
   line, a round count, or a finding class that recurred — each proposes the
-  matching `review.<level>.*` key, or a project-rule line the
+  matching `review.*` key, or a project-rule line the
   [checklist](../../hex-core/references/checklist.md#composition) will pick
   up, for adoption, folded into Step 4½'s single consent-gated diff.
 - **Optional** — no candidates and no block means the shipped defaults
   apply and the item stays silent.
 
-### Resource profile measured?
-
-- **Look for:** whether `hex.md › Pointers` carries a `Resource profile:`
-  entry — the peak RSS, wall time, and `light`/`heavy` class this
-  project's own documented verification gate measured, plus the
-  heavy-command ceiling derived from them.
-- **Where:** `.agents/memory/hex.md › Pointers`.
-- **Documented looks like:** the four values
-  [`resources.md` § 2](../../hex-core/references/resources.md#2-the-measured-resource-profile)
-  defines, recorded from an actual run on **this host** — never a number
-  picked because it looks right for the ecosystem or the project's size.
-  A project classed `light` (parse-only verification) is no exception;
-  what its ceiling is for is that section's, not restated here.
-- **De facto discovery:** where no `Resource profile:` entry exists,
-  measure it — run the project's own documented verification gate once
-  under the portable peak-RSS ladder and derive the ceiling from what
-  this host measured; see
-  [`resources.md` § The measured resource profile](../../hex-core/references/resources.md#2-the-measured-resource-profile).
-  Where no rung on this host can measure it, record the profile
-  **absent** and announce the degrade — never fabricate a number for a
-  host that could not be measured; the heavy-command ceiling then falls
-  back to its documented floor rather than a guess.
-
 ### Agent worktrees excluded from watchers and indexers?
 
-- **Look for:** whether the path `/hex-execute` uses for parallel work
-  packages (`.agents/worktrees/` by default, or a project-declared
+- **Look for:** whether the path `/hex-execute` uses for parallel pipelines (`.agents/worktrees/` by default, or a project-declared
   alternative) is excluded from IDE file watchers, project-wide search
   indexes, and other background indexing tools — a concern distinct
   from version control: an untracked worktree can still be watched,
@@ -459,18 +508,26 @@ Selective tests: run `<template, e.g. nx affected -t test --base={base}>`
 for the tests a change affects; `<command>` still runs the full suite.
 ```
 
-Two `hex.md › Pointers` rows record where each is documented, in this
-grammar:
+A `hex.md › Pointers` row records where it is documented, in this grammar:
 
 ``- Selective tests: `<location>` — where the selective test command is documented.``
-``- Sensitive paths: `<location>` — where the project's security-sensitive / hot-path convention is documented.``
 
-The second row is the named source the high-risk merge trigger reads —
-distinct from the `Key rules` pointer, which names the rule files
-themselves. It records **where the convention is documented**, never a
-path list and never a judgment, and it is proposed off the [rules
-item](#rules-carry-architectural-context) whether or not a selective
-command was found.
+### Run-cost rows
+
+Three more `hex.md › Pointers` rows, proposed from the run-cost items above
+and written only with consent:
+
+``- Build jobs: `<n>` — one build's parallel jobs; live pipelines × jobs per pipeline stay within it.``
+``- Hub files: `<location>` — lockfiles, baselines, goldens, with regeneration commands; pipelines never commit them.``
+``- Fresh gate: `<command or switch>` — the no-cache full verification the release gate runs.``
+
+When a verify-before-commit line has no carve-out, the proposed sentence
+for project context is:
+
+```markdown
+In a hex run (a /hex-execute pipeline or step), the run's integration and
+release gates satisfy "verify before commit"; commits use `--no-verify`.
+```
 
 ### Spec / plan / ADR conventions block
 

@@ -63,7 +63,7 @@ LIVE_PREFIXES = (
     ".claude/agents/",
     ".claude/hooks/",
 )
-LIVE_FILES = {"CLAUDE.md", "taskfile.yml", "Cargo.toml", "deny.toml", ".licenserc.toml"}
+LIVE_FILES = {"AGENTS.md", "taskfile.yml", "Cargo.toml", "deny.toml", ".licenserc.toml"}
 
 #: Trailing punctuation a path picks up from prose, markdown and doc comments.
 TRAILING = ".,;:`)*\"'"

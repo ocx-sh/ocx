@@ -43,7 +43,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     (
         "taskfile.yml",
         (
-            "- CLAUDE.md (Build & Development Commands section)\n"
+            "- AGENTS.md (Build & Development section)\n"
             "- .claude/rules/quality-core.md (task verify pipeline)\n"
             "- .claude/skills/builder/SKILL.md (Task Runner section)\n"
             "- .claude/skills/qa-engineer/SKILL.md (Task Runner section)"
@@ -53,7 +53,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
     (
         "taskfiles/*",
         (
-            "- CLAUDE.md (Build & Development Commands section)\n"
+            "- AGENTS.md (Build & Development section)\n"
             "- .claude/rules/quality-core.md (task verify pipeline)"
         ),
         "an included Taskfile",
@@ -89,7 +89,7 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         (
             "- .claude/skills/deps/SKILL.md"
             " (if dependencies changed)\n"
-            "- CLAUDE.md (Architecture section, if new crates added)"
+            "- AGENTS.md (Architecture section, if new crates added)"
         ),
         "Cargo.toml",
     ),

@@ -40,6 +40,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Changing a machine-facing surface (`--format json` report, error document, exit code or slug, `OCX_*` env variable, flag grammar, `cli.json`) | [subsystem-interface-contract.md](./rules/subsystem-interface-contract.md) — style guide IC-01…IC-22, counterpart table, semantic-break checklist; [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | CLI help / `--help` text wording | [quality-cli-help.md](./rules/quality-cli-help.md), [subsystem-cli.md](./rules/subsystem-cli.md), [quality-rust.md](./rules/quality-rust.md) (two-register) |
 | Adding a CLI verb (smoke marker + `SUITE_FLOOR` obligation) | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) § Command Summary, [subsystem-tests.md](./rules/subsystem-tests.md) § Smoke Tier and Guards |
+| Shell or PowerShell scripts, installers (`install.sh`, `install.ps1`), a shell emitter or rc editor, a failing script or CI `run:` step | [shell-quality.md](./rules/shell-quality.md), [powershell-quality.md](./rules/powershell-quality.md), [quality-bash.md](./rules/quality-bash.md), skills `installer-script`, `shell-integration`, `shell-port`, `shell-diagnose` |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
 | Diagnosing a slow or hung acceptance run | [subsystem-tests.md](./rules/subsystem-tests.md) "Observing a Running Suite" — the slow-vs-hung discriminator, and the three checks that lie (piped exit codes, `find`, parent CPU time) |
 | Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
@@ -71,12 +72,13 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Rust | [quality-rust.md](./rules/quality-rust.md) | [rust-quality.md](./rules/rust-quality.md), [rust-cargo.md](./rules/rust-cargo.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
 | Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md), [python-quality.md](./rules/python-quality.md) (shareable), [python-packaging.md](./rules/python-packaging.md) (shareable) |
 | TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [typescript-quality.md](./rules/typescript-quality.md) (shareable), [typescript-packaging.md](./rules/typescript-packaging.md) (shareable) |
-| Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
+| Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | [shell-quality.md](./rules/shell-quality.md) (vendored; every shell dialect, CI `run:` steps, Taskfile items) |
+| PowerShell | [powershell-quality.md](./rules/powershell-quality.md) | [shell-quality.md](./rules/shell-quality.md) (vendored) |
 | Astro / Starlight | [quality-vite.md](./rules/quality-vite.md) | [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md) |
 
 ## By subsystem
 
-Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CLAUDE.md` may summarize or reference by pointer.
+Mirrors subsystem table in `AGENTS.md`. Catalog = single source of truth — `AGENTS.md` may summarize or reference by pointer.
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
@@ -118,7 +120,8 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md), [typescript-quality.md](./rules/typescript-quality.md) |
 | `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
 | `**/vite.config.*`, `**/astro.config.*` | [quality-vite.md](./rules/quality-vite.md) |
-| `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
+| `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md), [shell-quality.md](./rules/shell-quality.md) (which also loads on workflow, action and taskfile YAML) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
+| `**/*.ps1`, `**/*.psm1` | [powershell-quality.md](./rules/powershell-quality.md) |
 | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/*.scl`, `**/MODULE.bazel`, `**/MODULE.bazel.lock`, `**/REPO.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel`, `**/WORKSPACE.bzlmod`, `**/.bazelrc`, `**/*.bazelrc`, `**/.bazelrc.*`, `**/.bazelversion`, `**/.bazelignore` | [bazel-quality.md](./rules/bazel-quality.md) |
 | Source files (`**/*.rs`, `**/*.py`, `**/*.ts`, `**/*.go`, … — the rule's `paths:` list) | [code-docs.md](./rules/code-docs.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
@@ -129,7 +132,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
 | `.claude/agents/**`, `.claude/skills/hex-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
-Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
+Globals (always loaded or imported into `AGENTS.md`): [quality-core.md](./rules/quality-core.md),
 [product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md),
 [hex-state.md](./rules/hex-state.md), this catalog.
 
@@ -160,6 +163,9 @@ Exempt from overlap detection (intended broad coupling):
 | `code-docs.md` + `rust-quality.md` | `**/*.rs` |
 | `code-docs.md` + `bazel-quality.md` | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/MODULE.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel` |
 | `code-docs.md` + `python-quality.md` | `**/*.py` |
+| `code-docs.md` + `shell-quality.md` | `**/*.sh`, `**/*.bash`, `**/*.zsh` |
+| `code-docs.md` + `powershell-quality.md` | `**/*.ps1`, `**/*.psm1` |
+| `shell-quality.md` + `subsystem-taskfiles.md` | `**/taskfile.yml` |
 | `code-docs.md` + `typescript-quality.md` | `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` |
 | `code-docs.md` + `bazel-quality.md` | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/MODULE.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel` |
 
@@ -189,4 +195,8 @@ Exempt from overlap detection (intended broad coupling):
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `hex-finalize` |
 | Shortening or cleaning up source comments | `code-docs-cleanup` |
+| Writing or auditing a one-line installer | `installer-script` |
+| Code that writes shell code for several shells, or edits their rc files | `shell-integration` |
+| Porting a shell script to a bash 3.2 or POSIX sh matrix | `shell-port` |
+| A shell script, CI step or PowerShell installer that is already failing | `shell-diagnose` |
 | Suggest next slash command from current state | `next` |

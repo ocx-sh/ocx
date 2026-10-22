@@ -9,7 +9,7 @@ for a complete one.
 
 ## The gate, rendered
 
-The full rung, with a base that advanced and a re-verification that therefore
+The full rung, with a base that advanced and a release-gate re-run that therefore
 ran. Shape is `protocol.md`'s `<label>: <resolved value> (<source>)`.
 
 ```
@@ -34,8 +34,8 @@ Commits: 32 → 3
   Signed-off-by identity: Dana Okafor <dana@example.org>   (git config user.*)
   Other authors on this branch: Sam Reyes <sam@example.org> — Co-authored-by on 1
   Message/diff check: 3/3 pass
-Local verification: green                       (task verify, pre-rewrite)
-Rebase onto main: clean · base advanced 4 commits → verification RE-RAN: green
+Release gate: green                             (task verify, fresh no-cache; hooks+lint over main..HEAD; 1 run)
+Rebase onto main: clean · base advanced 4 commits → release gate RE-RAN: green
 Workflow drift: none — this branch modifies no file under .github/workflows/
 Auto-merge: not armed · no merge queue          (forge PR read)
 Remote acts (3), all against feat/inbox-search and PR #128:
@@ -94,7 +94,7 @@ Workflow drift: 2 files under .github/workflows/ are modified by this branch —
 
 No forge CLI answers at pre-flight (a). The fetch in (c) still succeeds over
 the ordinary git transport, so the rebase base is a real remote target and
-pre-flight, convention discovery, local verification, recomposition and the
+pre-flight, convention discovery, the release gate, recomposition and the
 gate all run unchanged; only the remote phase is withheld. The fence below is
 **elided** — it shows only the lines that differ from the full rung above:
 
@@ -169,7 +169,7 @@ and auto-merge are re-disclosed rather than carried over** — they govern the
 dispatch and the flip, which are exactly the acts a resume still performs, and
 either can have changed since the push. This fence is otherwise **elided**: the
 two convention blocks and the verification and rebase rows are omitted here
-because a resume neither re-verifies nor rebases; a real resume gate renders
+because a resume neither re-runs the release gate nor rebases; a real resume gate renders
 them as they stood at the approved push.
 
 ## The handoff block

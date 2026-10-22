@@ -6,7 +6,9 @@
     "**/.claude/rules/docs-quality/**",
     "**/.claude/rules/python-quality/**",
     "**/.claude/rules/typescript-quality/**",
-    "**/.claude/rules/code-docs/**"
+    "**/.claude/rules/code-docs/**",
+    "**/.claude/rules/powershell-quality/**",
+    "**/.claude/rules/shell-quality/**"
   ],
   "permissions": {
     "allow": [

@@ -2333,7 +2333,7 @@ def prove_selection(scratch: Path) -> int:
     )
     checks += 1
 
-    docs = ["website/src/content/docs/reference/environment.md", "README.md", "CLAUDE.md"]
+    docs = ["website/src/content/docs/reference/environment.md", "README.md", "AGENTS.md"]
     crate_change = ["crates/crate03/src/lib.rs"]
     docs_selected, docs_notes = select_targets(
         docs, rows=rows, modules=modules, crate_of_dir=crate_of_dir
