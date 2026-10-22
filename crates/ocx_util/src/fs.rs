@@ -337,6 +337,104 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"new-content");
     }
 
+    /// UTF-16 length of `path`: the unit Windows counts against `MAX_PATH`.
+    #[cfg(windows)]
+    fn utf16_len(path: &std::path::Path) -> usize {
+        use std::os::windows::ffi::OsStrExt as _;
+        path.as_os_str().encode_wide().count()
+    }
+
+    /// Creates nested directories under `root` until the path is at least `units` long and returns it.
+    ///
+    /// `create_dir_all` goes through std, which spells a long path verbatim itself, so the setup works
+    /// where `tempfile`'s raw `MoveFileExW` call did not.
+    #[cfg(windows)]
+    fn directory_of_at_least(root: &std::path::Path, units: usize) -> std::path::PathBuf {
+        let mut directory = root.to_path_buf();
+        while utf16_len(&directory) < units {
+            directory.push("d".repeat(50));
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// Windows regression: `tempfile` hands both paths to `MoveFileExW` unprefixed, so a
+    /// target of 260 UTF-16 units or more failed with `ERROR_PATH_NOT_FOUND` (os error 3).
+    /// Here only the target is long: the temp file sits in a short directory, so the fix must
+    /// prefix the target alone.
+    #[cfg(windows)]
+    #[test]
+    fn persist_temp_file_publishes_to_a_target_of_260_units_or_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("n".repeat(250));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        assert!(
+            utf16_len(&target) >= 260,
+            "the target must be long: {}",
+            utf16_len(&target)
+        );
+        assert!(
+            utf16_len(tmp.path()) < 260,
+            "only the target may be long: {}",
+            utf16_len(tmp.path())
+        );
+
+        persist_temp_file(tmp, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    /// Windows regression, the other regime: the directory is long, so the temp file's own path is
+    /// 260 units or more too and its `SetFileAttributesW` call fails the same way. The second round
+    /// replaces the first, so the replacing flag survives the long form.
+    #[cfg(windows)]
+    #[test]
+    fn persist_temp_file_publishes_when_the_temp_file_path_is_also_260_units_or_more() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = directory_of_at_least(root.path(), 260);
+        let target = parent.join("out.json");
+
+        for payload in [&b"first"[..], &b"second"[..]] {
+            let mut tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+            assert!(
+                utf16_len(tmp.path()) >= 260,
+                "the temp file path must be long: {}",
+                utf16_len(tmp.path())
+            );
+            tmp.write_all(payload).unwrap();
+
+            persist_temp_file(tmp, &target).unwrap();
+
+            assert_eq!(std::fs::read(&target).unwrap(), payload);
+        }
+    }
+
+    /// Windows regression: the no-clobber publish keeps its contract through the long form, an
+    /// occupied target is left byte-for-byte alone and its content handed back.
+    #[cfg(windows)]
+    #[test]
+    fn persist_noclobber_leaves_an_occupied_target_of_260_units_or_more_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = directory_of_at_least(root.path(), 260);
+        let target = parent.join("record.json");
+
+        let mut first = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        first.write_all(b"first-record").unwrap();
+        match persist_temp_file_noclobber(first, &target).unwrap() {
+            PersistOutcome::Published => {}
+            PersistOutcome::Occupied(_) => panic!("an absent target must accept the publish"),
+        }
+
+        let mut second = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        second.write_all(b"second-record").unwrap();
+        match persist_temp_file_noclobber(second, &target).unwrap() {
+            PersistOutcome::Occupied(_) => {}
+            PersistOutcome::Published => panic!("an occupied target must never be replaced"),
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"first-record");
+    }
+
     /// Baseline (all platforms): a populated directory tree lands at an absent
     /// destination and the source is consumed.
     #[tokio::test]
