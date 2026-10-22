@@ -376,6 +376,56 @@ class TestReleasePrepareGuard:
         assert ("--nocache_test_results" in rendered) is expect_nocache, rendered
 
 
+class TestCommitMsgGateCallSite:
+    """The conventions template's `commit-msg` hook reaches `scripts/commit_gate.py` through
+    ocx's `hooks:repo-commit-msg` task (S1 fit check, item 4).
+
+    The template's own subject regex refuses the `Checkpoint` and `release:` subjects this
+    repository commits, and it prefers the repo task only when one exists, without a word
+    when it does not. The gate's rules are shown red and green by
+    `scripts/tests/test_commit_gate.py`; what drifts here is the wiring.
+    """
+
+    @staticmethod
+    def _task(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess[str]:
+        if shutil.which("task") is None:
+            pytest.skip("`task` is not on PATH (shutil.which returned None)")
+        return subprocess.run(["task", *args], cwd=cwd, capture_output=True, encoding="utf-8", check=False)
+
+    def test_the_repo_task_runs_the_gate_on_the_message_file_unquoted(self) -> None:
+        """CLI_ARGS reaches the task already shell-quoted; quoting it again breaks a path with a space."""
+        assert _task_cmds(REPO_ROOT / "taskfile.yml", "hooks:repo-commit-msg") == [
+            "python3 scripts/commit_gate.py --check-message {{.CLI_ARGS}}"
+        ]
+
+    def test_ocx_defines_no_repo_pre_commit_hook(self) -> None:
+        """ocx keeps no repo pre-commit work: lint and format live behind the verify mark."""
+        listed = self._task("--list-all", "--silent")
+        assert listed.returncode == 0, listed.stderr
+        names = listed.stdout.split()
+        assert "hooks:repo-commit-msg" in names, "the template falls back to its own subject regex without it"
+        assert "hooks:pre-commit" not in names
+
+    @pytest.mark.parametrize(
+        ("subject", "accepted"),
+        [("Checkpoint", True), ("not a conventional subject", False)],
+        ids=["checkpoint-passes", "free-text-is-refused"],
+    )
+    def test_the_template_hook_judges_a_message_file_through_the_repo_gate(
+        self, tmp_path: Path, subject: str, accepted: bool
+    ) -> None:
+        """Both ways, through the call prek makes (`task -x hooks:commit-msg -- <file>`):
+        `Checkpoint` is a subject only the repo gate admits (the template's own regex refuses
+        it), and a free-text subject is refused. The directory name carries a space, so a
+        doubly-quoted CLI_ARGS fails here."""
+        msg_dir = tmp_path / "msg dir"
+        msg_dir.mkdir()
+        msg = msg_dir / "COMMIT_EDITMSG"
+        msg.write_text(f"{subject}\n", encoding="utf-8")
+        result = self._task("-x", "hooks:commit-msg", "--", str(msg))
+        assert (result.returncode == 0) is accepted, (result.returncode, result.stderr)
+
+
 class TestHandMarkScope:
     """`task verify:mark` writes a *scoped* mark whatever the command line says (DX-3).
 
