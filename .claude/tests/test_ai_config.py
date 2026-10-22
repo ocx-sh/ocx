@@ -56,6 +56,7 @@ def _glob_is_live(pattern: str) -> bool:
     """Does `pattern` (a `paths:` glob, relative to the root) match a tracked file?"""
     regex = re.compile(glob.translate(pattern, recursive=True, include_hidden=True))
     return any(regex.fullmatch(path) for path in _tracked_paths())
+AGENTS_MD = ROOT / "AGENTS.md"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 GRIMOIRE_LOCK = ROOT / "grimoire.lock"
 
@@ -115,13 +116,13 @@ def is_vendored(md: Path) -> bool:
 
 
 @pytest.fixture(scope="module")
-def claude_md_text() -> str:
-    return CLAUDE_MD.read_text(encoding="utf-8")
+def agents_md_text() -> str:
+    return AGENTS_MD.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
-def claude_md_lines() -> list[str]:
-    return CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+def agents_md_lines() -> list[str]:
+    return AGENTS_MD.read_text(encoding="utf-8").splitlines()
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +452,7 @@ class TestRuleGlobs:
 
 
 # ---------------------------------------------------------------------------
-# CLAUDE.md consistency
+# AGENTS.md consistency
 # ---------------------------------------------------------------------------
 
 
@@ -526,8 +527,8 @@ class TestCrateSplitSweep:
             f"the sweep read {len(files)} tracked file(s) across {len(self.SWEPT)} root(s); "
             "it has stopped seeing the surface and the assertion below is vacuous"
         )
-        assert any(f.name == "CLAUDE.md" for f in files), (
-            "CLAUDE.md is not among the files read, so the root list no longer resolves"
+        assert any(f.name == "AGENTS.md" for f in files), (
+            "AGENTS.md is not among the files read, so the root list no longer resolves"
         )
 
     def test_no_ai_config_file_names_the_dissolved_crate(self) -> None:
@@ -548,16 +549,16 @@ class TestCrateSplitSweep:
         )
 
 
-class TestClaudeMd:
-    """CLAUDE.md must be internally consistent."""
+class TestAgentsMd:
+    """AGENTS.md — the project instructions every agent reads — must be internally consistent."""
 
-    def test_line_budget(self, claude_md_lines: list[str]) -> None:
-        """CLAUDE.md must stay under 200 lines (context budget rule)."""
-        assert len(claude_md_lines) <= 200, (
-            f"CLAUDE.md is {len(claude_md_lines)} lines (budget: 200)"
+    def test_line_budget(self, agents_md_lines: list[str]) -> None:
+        """AGENTS.md must stay under 200 lines (context budget rule)."""
+        assert len(agents_md_lines) <= 200, (
+            f"AGENTS.md is {len(agents_md_lines)} lines (budget: 200)"
         )
 
-    def test_principle_count_matches_headings(self, claude_md_text: str) -> None:
+    def test_principle_count_matches_headings(self, agents_md_text: str) -> None:
         """The stated number of principles must match the actual count.
 
         Bug captured: Says 'seven principles' but there are eight headings
@@ -566,12 +567,12 @@ class TestClaudeMd:
         # Find the stated count. Match both "These eight principles distill ..."
         # (canonical form) and "Eight principles distill ..." (caveman-compressed
         # form, with the leading "These" filler dropped).
-        match = re.search(r"(?:These\s+)?(\w+) principles distill\b", claude_md_text)
-        assert match, "Could not find 'N principles distill' in CLAUDE.md"
+        match = re.search(r"(?:These\s+)?(\w+) principles distill\b", agents_md_text)
+        assert match, "Could not find 'N principles distill' in AGENTS.md"
         stated = match.group(1)
 
         # Count actual principle headings (### N.)
-        headings = re.findall(r"^### \d+\.", claude_md_text, re.MULTILINE)
+        headings = re.findall(r"^### \d+\.", agents_md_text, re.MULTILINE)
         actual = len(headings)
 
         word_to_num = {
@@ -580,16 +581,16 @@ class TestClaudeMd:
         }
         stated_num = word_to_num.get(stated.lower(), int(stated) if stated.isdigit() else None)
         assert stated_num == actual, (
-            f"CLAUDE.md says '{stated}' principles but has {actual} headings"
+            f"AGENTS.md says '{stated}' principles but has {actual} headings"
         )
 
-    def test_worktree_count_matches_table(self, claude_md_text: str) -> None:
+    def test_worktree_count_matches_table(self, agents_md_text: str) -> None:
         """The stated worktree count must match the table rows.
 
         Bug captured: Says 'Three git worktrees' but table has four entries.
         """
-        match = re.search(r"\*\*Worktrees\*\*: (\w+) git worktrees", claude_md_text)
-        assert match, "Could not find worktree count in CLAUDE.md"
+        match = re.search(r"\*\*Worktrees\*\*: (\w+) git worktrees", agents_md_text)
+        assert match, "Could not find worktree count in AGENTS.md"
         stated = match.group(1)
 
         word_to_num = {
@@ -600,7 +601,7 @@ class TestClaudeMd:
         # Count table rows (lines with | that aren't headers or separators)
         in_worktree = False
         rows = 0
-        for line in claude_md_text.splitlines():
+        for line in agents_md_text.splitlines():
             if "Worktrees" in line:
                 in_worktree = True
                 continue
@@ -610,8 +611,29 @@ class TestClaudeMd:
                 elif line.strip() and not line.strip().startswith("|"):
                     break
         assert stated_num == rows, (
-            f"CLAUDE.md says '{stated}' worktrees but table has {rows} entries"
+            f"AGENTS.md says '{stated}' worktrees but table has {rows} entries"
         )
+
+
+class TestClaudeMdIsTheTemplatePointer:
+    """`CLAUDE.md` is template-owned: the baseline marker line, then `@AGENTS.md`.
+
+    The project instructions live in `AGENTS.md`; `CLAUDE.md` is only how Claude
+    Code reaches them. Prose added to it forks the instructions into a file the
+    other agents never read, and `task baseline:check` reds the edit only after a
+    clone of the template, so this holds the shape offline.
+    """
+
+    def test_claude_md_is_the_marker_and_the_import(self) -> None:
+        lines = CLAUDE_MD.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2, f"CLAUDE.md is {len(lines)} lines; the template renders exactly 2"
+        assert lines[0].startswith("<!-- ocx-baseline:") and lines[0].endswith("-->"), (
+            f"CLAUDE.md line 1 is not the ocx-baseline marker comment: {lines[0]!r}"
+        )
+        assert lines[1] == "@AGENTS.md", f"CLAUDE.md line 2 must import AGENTS.md, got {lines[1]!r}"
+
+    def test_the_import_resolves(self) -> None:
+        assert AGENTS_MD.is_file(), "CLAUDE.md imports AGENTS.md, which is not at the repository root"
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +823,7 @@ class TestRuleCatalog:
     def test_catalog_exists(self) -> None:
         assert self.CATALOG.exists(), (
             "`.claude/rules.md` must exist — it is the authoritative "
-            "rule catalog pointed to from CLAUDE.md."
+            "rule catalog pointed to from AGENTS.md."
         )
 
     def test_catalog_covers_all_rules(self) -> None:
@@ -832,18 +854,18 @@ class TestRuleCatalog:
             f"Catalog references non-existent rule files: {missing}"
         )
 
-    def test_claude_md_points_to_catalog(self) -> None:
-        """CLAUDE.md must link to `.claude/rules.md` so the catalog stays
+    def test_agents_md_points_to_catalog(self) -> None:
+        """AGENTS.md must link to `.claude/rules.md` so the catalog stays
         discoverable for every session."""
-        text = CLAUDE_MD.read_text(encoding="utf-8")
+        text = AGENTS_MD.read_text(encoding="utf-8")
         assert ".claude/rules.md" in text, (
-            "CLAUDE.md must contain a link to `.claude/rules.md` — the "
+            "AGENTS.md must contain a link to `.claude/rules.md` — the "
             "catalog is only valuable if every session sees the pointer."
         )
 
     def test_all_markdown_refs_resolve(self) -> None:
         """Every backticked `*.md` reference in `.claude/**/*.md` and
-        `CLAUDE.md` must resolve to a real file on disk.
+        `AGENTS.md` must resolve to a real file on disk.
 
         Catches drift after renames: if a rule is renamed but a worker,
         skill, or catalog still points at the old name, that reference
@@ -913,11 +935,11 @@ class TestRuleCatalog:
 
         ref_pattern = re.compile(r"`([a-z][a-z0-9_-]*\.md)`")
 
-        targets: list[Path] = [CLAUDE_MD]
+        targets: list[Path] = [AGENTS_MD]
         for md in CLAUDE_DIR.rglob("*.md"):
             # Relative to `.claude/`, never absolute: an agent runs this gate
             # from `.agents/worktrees/<slug>`, so `md.parts` carries `worktrees`
-            # for EVERY file in the tree and the corpus collapsed to `CLAUDE.md`
+            # for EVERY file in the tree and the corpus collapsed to `AGENTS.md`
             # alone — the floor below caught it, which is the whole reason it is
             # there. The same shape was latent in the other three names; a
             # checkout under a directory called `tests` or `state` would have
@@ -971,21 +993,21 @@ class TestRuleCatalog:
         )
 
     def test_catalog_subsystem_coverage(self) -> None:
-        """Every subsystem listed in CLAUDE.md's subsystem table must also
+        """Every subsystem listed in AGENTS.md's subsystem table must also
         appear in the catalog's `By subsystem` section. The catalog is
-        allowed to list more subsystems than CLAUDE.md (it's the fuller
+        allowed to list more subsystems than AGENTS.md (it's the fuller
         reference), but it must never list fewer."""
-        claude_text = CLAUDE_MD.read_text(encoding="utf-8")
+        claude_text = AGENTS_MD.read_text(encoding="utf-8")
         catalog_text = self.CATALOG.read_text(encoding="utf-8")
 
-        # Extract rule names from CLAUDE.md subsystem table rows
+        # Extract rule names from AGENTS.md subsystem table rows
         # Lines look like: "| OCI registry/index | `subsystem-oci.md` | ... |"
         claude_rules = set(re.findall(r"`(subsystem-[a-z-]+\.md)`", claude_text))
         catalog_rules = set(re.findall(r"`(subsystem-[a-z-]+\.md)`", catalog_text))
 
         missing = claude_rules - catalog_rules
         assert not missing, (
-            f"Subsystems listed in CLAUDE.md but missing from catalog "
+            f"Subsystems listed in AGENTS.md but missing from catalog "
             f"`By subsystem` section: {missing}"
         )
 
@@ -1149,7 +1171,7 @@ class TestAiConfigOverhaulPhase1:
         A global rule is any `.claude/rules/*.md` file without a non-empty
         `paths:` frontmatter entry. Post Phase 1 of the AI config overhaul,
         the authoritative count is 4 and the list appears in meta-ai-config.md
-        under `### Current Global Rules`. `rules.md` and `CLAUDE.md` reach
+        under `### Current Global Rules`. `rules.md` and `AGENTS.md` reach
         Claude by a different mechanism (`@`-import / root instructions) and
         are not counted here.
 
@@ -2598,7 +2620,7 @@ class TestBazelGateProse:
 
     Nothing bound this prose to the taskfile. `TestVerifySummary` above holds
     only `taskfile.yml`'s *own* summary against its phase bodies, which is
-    exactly why the taskfile stayed right while `CLAUDE.md`,
+    exactly why the taskfile stayed right while `AGENTS.md`,
     `subsystem-taskfiles.md` and the contributing page all still said "four
     gates" after the fifth and sixth landed. Fourth-plus recurrence of the
     "prose paraphrases an authority with no reader" class; this is the reader.
@@ -2607,7 +2629,7 @@ class TestBazelGateProse:
     _BAZEL_TASKFILE = ROOT / "taskfiles" / "bazel.taskfile.yml"
     _PHASES = (".verify:lint", ".verify:build-test")
     _PROSE = (
-        "CLAUDE.md",
+        "AGENTS.md",
         ".claude/rules/subsystem-taskfiles.md",
         "website/src/content/docs/contributing/bazel.md",
     )

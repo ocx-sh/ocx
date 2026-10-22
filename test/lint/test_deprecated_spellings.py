@@ -167,7 +167,7 @@ ENV_DECLARATIONS: frozenset[Path] = frozenset(
     {
         PROJECT_ROOT / "crates" / "ocx_env" / "src" / "retired.rs",
         PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json",
-        PROJECT_ROOT / "CLAUDE.md",
+        PROJECT_ROOT / "AGENTS.md",
     }
 )
 """Files that name an old environment spelling to declare the rename, not to use it."""
