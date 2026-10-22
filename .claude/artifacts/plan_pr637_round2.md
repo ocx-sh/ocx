@@ -7,8 +7,8 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-22
-- **Active phase:** 1 — caching: G1 done (S1/S2 with the meta-orchestrator)
-- **Step:** G1 done: D13=B (provisional: the cache server refused every upload, so run 2 was cold); next W2 A0
+- **Active phase:** 2 — tiers: W2–W4 (A0, A2 ∥ A3 ∥ A5, A4), scope stops at G2
+- **Step:** /hex-execute → W2 A0 contract wave (render from S1 `7d067fa`)
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
 - **Last update:** 2026-10-22 (after 42d7b3370: chore(hex): P1 landed on plan_pr637_round2, awaiting G1; G1 measurements recorded)
 - **Next:** /hex-execute .claude/artifacts/plan_pr637_round2.md resumes at A0 (W2); before A4 builds the cross variant, re-dispatch verify-deep ×2 once the cache volume is freed and re-apply D13 to run 2 (§ Schedule log, G1)
