@@ -137,7 +137,7 @@ A host without `flock(1)` refuses to run the targets unless you pass `--test_env
 
 Pass `NOCACHE=1` to add `--nocache_test_results` when you want the run regardless of what the cache says. It is deliberately not `--force`. This repository tells everyone to type `task verify --force`. Binding the escape hatch to it would have made every full gate re-run every target.
 
-The caching would then be unreachable from the one command that runs the lane. `release:prepare` always passes `NOCACHE=1`, because a release re-executes the suite rather than trusting a cached verdict.
+The caching would then be unreachable from the one command that runs the lane. `release:prepare` always passes `NOCACHE=1`, through its `release:verify` hook, because a release re-executes the suite rather than trusting a cached verdict.
 
 The lane also carries the shape gates of the suite, which live in the Bazel acceptance lane. `test/SUITE_FLOOR` means the suite never shrinks. `test/SKIP_CEILING` and `test/XFAIL_CEILING` catch a skip added to dodge a red.
 

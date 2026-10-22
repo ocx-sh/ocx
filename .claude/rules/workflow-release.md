@@ -44,6 +44,8 @@ Reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-pub
 
 All commits must follow [Conventional Commits](https://www.conventionalcommits.org/). cocogitto validates in CI. git-cliff generates changelogs from these.
 
+The template's `cliff.toml` renders a commit's **subject only**, with `<` and `>` escaped and no link rewriting. So a subject names no website doc path and carries no `<tag>`: `release:validate` (`changelog:validate`) reds a rendered changelog that holds either, and a repo-relative link in a subject would resolve against no page.
+
 ## Implementation Constraints
 
 ### OCX Package Directory Structure
@@ -56,7 +58,7 @@ When publishing OCX to own registry (`ocx.sh/ocx/cli`), archive must contain `bi
 
 ### Dependency Update Config
 
-Dependency updates run via **Renovate** (`renovate.json`, replaced Dependabot). Groups: `actions`, `rust-deps`, `npm-deps`. `release.yml` is cargo-dist-generated and is excluded from action bumps (it floats by design).
+Dependency updates run via **Renovate** (replaced Dependabot). `renovate.json` is template-owned: it extends the `ocx-sh/conventions` preset (weekly, non-major groups, `chore(deps)` / `ci(deps)`, digest pinning) and then `local>ocx-sh/ocx//.github/renovate-local`. ocx's own rules live in `.github/renovate-local.json`: `release.yml` is cargo-dist-generated and excluded from action bumps (it floats by design), `rules_rs` and `llvm` move in one PR, Dockerfile base images form the `docker-base-images` group, and the website `npm` files are `/^website/`.
 
 ### New Environment Variables
 
@@ -103,18 +105,27 @@ Release creation during normal ceremony driven by cargo-dist in CI — do not in
 Release ceremony = human-driven process with tooling support:
 
 ```bash
-task release:prepare    # Refuse without a fresh full verify mark, prove provenance,
-                         # compute version, update CHANGELOG.md, run verify NOCACHE=1
+task release:prepare BUMP=auto   # or BUMP=patch|minor|major, or VERSION=x.y.z
 # Human reviews the changes
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 # Human decides when to push (never auto-push)
 ```
 
-`release:prepare` (`taskfiles/release.taskfile.yml`) requires a fresh **full** mark from `task verify` before it touches a file (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof` — the release provenance scan on real bytes: green on a `__testing`-free build, red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV) — before any version bump. It ends with `task verify NOCACHE=1`: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict — a release re-runs the suite, it never believes a key.
+`release:prepare` is the conventions template's task (`taskfiles/baseline.taskfile.yml`, template-owned, flattened into the root taskfile). It never tags or pushes, and it calls five optional hooks that `taskfiles/release.taskfile.yml` defines, in this order:
+
+| Step | Owner | What it does |
+|---|---|---|
+| `release:gate` | ocx | Refuses without a fresh **full** mark from `task verify` (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
+| `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, from the version the template computed with `git-cliff --bumped-version`. |
+| git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
+| `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
+| `release:verify` | ocx | `task verify NOCACHE=1` in a fresh process: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict. A release re-runs the suite, it never believes a key. |
+
+The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify without `NOCACHE=1` and a gate without its full-mark or provenance step each turn it red.
 
 After tag pushed, CI takes over: build → test → GitHub Release → publish to registry → deploy website.
 
 ### Version Between Releases
 
-Between releases, `Cargo.toml` retains version from last `release:prepare` run. `release:prepare` task computes correct next version from commit history via `git-cliff --bumped-version` at release time. No automated post-release version bump — `release:prepare` = single versioning mechanism.
+Between releases, `Cargo.toml` retains version from last `release:prepare` run. The task computes the correct next version from commit history via `git-cliff --bumped-version` at release time (or takes `VERSION=`). No automated post-release version bump — `release:prepare` = single versioning mechanism.

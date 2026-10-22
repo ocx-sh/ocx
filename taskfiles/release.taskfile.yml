@@ -207,7 +207,7 @@ tasks:
 
   # The hooks the conventions baseline's `release:prepare` calls (`task release:prepare BUMP=...`, flattened
   # from taskfiles/baseline.taskfile.yml): gate -> bump-files -> git-cliff -> validate -> verify. It never
-  # tags or pushes; `release:tag` is the step that does (workflow-release.md).
+  # tags or pushes (workflow-release.md).
   gate:
     desc: 'Release gate: a fresh full verify mark (commit_gate.py --require-full-mark) and the release provenance proof'
     dir: '{{.ROOT_DIR}}'
