@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:779bd9ade2f416b492e4de3b405552a43a7d8775b3d48bbc25549ce8be2bec14"
+declaration_hash = "sha256:e08d91cf1c0cf8647008592f122f34cf0d2c30604c50199c71d67ddc8879d761"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-20T21:30:40Z"
+generated_at = "2026-10-22T01:02:18Z"
 
 [[tool]]
 name = "actionlint"
@@ -67,19 +67,6 @@ repository = "ocx.sh/git-cliff/git-cliff"
 "linux/arm64" = "sha256:65eec3eda7db0168296dc1bd0d450d899d3e5570fa97a3122dce0ccca800e6f6"
 "windows/amd64" = "sha256:e94d7e09c040a25786a792971bf8284c8f8f8886bd78ab794688eaa719f76b26"
 "windows/arm64" = "sha256:638241beeb14fea7ccf60a8878a2b37b4a2774b609bbefa2b5ad0053e2693a69"
-
-[[tool]]
-name = "go-task"
-group = "default"
-repository = "ocx.sh/go-task/task"
-
-[tool.platforms]
-"darwin/amd64" = "sha256:958d2f88bec42ed62b3ab8e0435bffe5cecdfdad43055c3a8e7ec376564c4886"
-"darwin/arm64" = "sha256:5e4da091444fa604c41b9fb44b956fcdcc37a5f94b8a52c8240a8c3b0c1d7597"
-"linux/amd64" = "sha256:df420d1c99d7e80ce6366104af4e6b57135e95940763e235c907525c438effee"
-"linux/arm64" = "sha256:f5440402699c1f53b2941aa6e26049747c56a10ba730ba9692ffeaea6f429454"
-"windows/amd64" = "sha256:ac4b71cb82926c9e282074ab218e75989efe243836c761a2f4974dd31d34d94c"
-"windows/arm64" = "sha256:4a29127f29db746ab7c1d3991e4b35caa61c0f6687cc4aa2914c6fbb63a7f527"
 
 [[tool]]
 name = "lychee"
@@ -171,6 +158,19 @@ repository = "ocx.sh/shfmt/shfmt"
 "windows/amd64" = "sha256:deb3d51f2c27d681c471bd3da5c9745e47480f15ab76a95ee25e43c8db62a69d"
 
 [[tool]]
+name = "task"
+group = "default"
+repository = "ocx.sh/go-task/task"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:958d2f88bec42ed62b3ab8e0435bffe5cecdfdad43055c3a8e7ec376564c4886"
+"darwin/arm64" = "sha256:5e4da091444fa604c41b9fb44b956fcdcc37a5f94b8a52c8240a8c3b0c1d7597"
+"linux/amd64" = "sha256:df420d1c99d7e80ce6366104af4e6b57135e95940763e235c907525c438effee"
+"linux/arm64" = "sha256:f5440402699c1f53b2941aa6e26049747c56a10ba730ba9692ffeaea6f429454"
+"windows/amd64" = "sha256:ac4b71cb82926c9e282074ab218e75989efe243836c761a2f4974dd31d34d94c"
+"windows/arm64" = "sha256:4a29127f29db746ab7c1d3991e4b35caa61c0f6687cc4aa2914c6fbb63a7f527"
+
+[[tool]]
 name = "uv"
 group = "default"
 repository = "ocx.sh/astral-sh/uv"
@@ -197,3 +197,82 @@ repository = "ocx.sh/project-zot/zot"
 "linux/arm64+libc.glibc" = "sha256:db47881c85243120e19b9a863c6bed82a6b4e593bfb2ef65bf524bac123a42de"
 "windows/amd64" = "sha256:3e765d65aff26b48219bf707d95bc870c75223fddc3f39a639f71cb1abbdff90"
 "windows/arm64" = "sha256:73493ecb40e3dc7cf368686a14bf545f804dd2cd540247248548e69c92738684"
+
+[[tool]]
+name = "actionlint"
+group = "lint"
+repository = "ocx.sh/actionlint/actionlint"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:6f439b6d7556a3824840608eaed7416177ade18d9cfa12eb7c3831caf2f44e3f"
+"darwin/arm64" = "sha256:7482930b8b28c119877a5e11a343995feadd805b6e320f78d8914e54a250d9ad"
+"linux/amd64" = "sha256:f5467fd4be6eebddb0e5eaf18a498f4e44bf3632cdc086c73acfbc271d7d2c64"
+"linux/arm64" = "sha256:85d7cd645e003fbf9b7484bafc9432558e584631006b6e5965fc170c8e6e032a"
+"windows/amd64" = "sha256:20fa0ea63ad2bdffd179c21371b6e9e47a9ec36a80064e88a6bfbe6a272297d0"
+"windows/arm64" = "sha256:686bd57c0af310a195b97b34e1821465a7c45c0c5ad8f47260993a104e07b45c"
+
+[[tool]]
+name = "gitleaks"
+group = "lint"
+repository = "ocx.sh/gitleaks/gitleaks"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:34091f2a708065187d4ecd5173cc0e66aea3c1481df0e5f91e3b32fab9c4adcc"
+"darwin/arm64" = "sha256:52c0c23b047cefca86046e9f45dc8ae4163357bf0a4a17b223f9842b4b4bff74"
+"linux/amd64" = "sha256:6ac92f2da2ba0d678aed69d192c86f9db474f05034696f49bdbae41874a95d28"
+"linux/arm64" = "sha256:138185660364f678d35416d95c345e830a0d43a96c1fac1272ed3962260c25ed"
+"windows/amd64" = "sha256:8dc609427abed8a8688374c59ec93c93fc7bef8c73120d8e3ac946cd323ddc32"
+
+[[tool]]
+name = "grim"
+group = "lint"
+repository = "ocx.sh/grimoire/cli"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:4500862653390bbebd11ed5f6f70ec6d60b8a14a82b8a144156f36ca6f20f55f"
+"darwin/arm64" = "sha256:f19647fabf9bdf82e4151669b6c2b8fbc1f0904c93d20e3f4f6fca968c6adcae"
+"linux/amd64" = "sha256:2ef5983e907167704b14505fc9a4d0bfdc41ad0413d52cbf0621721616111cf7"
+"linux/arm64" = "sha256:1831d9efc4af07333783556f6aa2b246149e0d1bc685fcd929137264103f3814"
+"windows/amd64" = "sha256:ec6f779fd9b9a4c429feb1a841d410b210934a2c013cf7eb3732302ef2a9eb4a"
+"windows/arm64" = "sha256:bcfb88fc6063a6b0808b78a1a943a6c2de633f896747e81e1029651d75c70044"
+
+[[tool]]
+name = "prek"
+group = "lint"
+repository = "ocx.sh/prek/prek"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:cad00b1af1f3363b5028a93b0619ae7c463ace00d816a4a4ecaa57e3ab476f16"
+"darwin/arm64" = "sha256:65e2ca60d40f81e4cec763d9add820b7860b2c652342681d3ea5dcda547dc73f"
+"linux/amd64" = "sha256:5f935ecbefb598f465ae422212b964ac643a34df7ce6fdea3ddc3552c9804a1e"
+"linux/arm64" = "sha256:477b00791b064c90d91b6a5d34ab9e94247aebaa96086cdf1288ea266c40c230"
+"windows/amd64" = "sha256:660152984a2d4d0c53bf5a3329431984b44ad22152abf2ceacd1e57c7fd6309e"
+"windows/arm64" = "sha256:676055622702309a72c67bd03db868834f6d94077f5bf3752f45475b27647992"
+
+[[tool]]
+name = "uv"
+group = "lint"
+repository = "ocx.sh/astral-sh/uv"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:c66b0df03c8f1a33e811ddab8443007f808f38260988793feb32e8b35428c898"
+"darwin/arm64" = "sha256:9148b9d49956c3d0abff8bcef19521cfda506cca7a34463acc274a7110a36c63"
+"linux/amd64" = "sha256:b6ad3246b8d4709c5deac30b4d2a1674fc62f8686e52f7fde5cd63a79c7010b5"
+"linux/amd64+libc.glibc" = "sha256:d60af7fdd663861ef778ae4d1ba933e6c999977163a655f8517adf2b5931480b"
+"linux/arm64" = "sha256:b52ceb7ae1396d4ffe6314ff77d9489821fb9a89ba6dcbb3652867005594fd90"
+"linux/arm64+libc.glibc" = "sha256:6032218a742e03a5d2b91690e716bf44d2fa369259cc0564ae27bb166a1347d9"
+"windows/amd64" = "sha256:75ee3facb7f4a5ed382d6cc0736ec622190b3f8891abf1432a7d7fd6d4361eaf"
+"windows/arm64" = "sha256:b143f13fb9bdb58eaeaaa71ca2c6d3ed4b6190b6aebd0100a914606c2378cb16"
+
+[[tool]]
+name = "git-cliff"
+group = "release"
+repository = "ocx.sh/git-cliff/git-cliff"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:f9052e9ccf49380317d2960d14f009563232d7460ba667bb1e62db1eac108771"
+"darwin/arm64" = "sha256:ce77585755761bc961dbbbca48e57f668e43a5bd14e423ae9113060e089cb6d6"
+"linux/amd64" = "sha256:5d0c2b652a2201f9b5c6d803a400db7ff28d0b59cb8916ba4cffa7015ce3c6b0"
+"linux/arm64" = "sha256:65eec3eda7db0168296dc1bd0d450d899d3e5570fa97a3122dce0ccca800e6f6"
+"windows/amd64" = "sha256:e94d7e09c040a25786a792971bf8284c8f8f8886bd78ab794688eaa719f76b26"
+"windows/arm64" = "sha256:638241beeb14fea7ccf60a8878a2b37b4a2774b609bbefa2b5ad0053e2693a69"
