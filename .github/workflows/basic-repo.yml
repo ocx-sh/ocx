@@ -57,6 +57,9 @@ jobs:
         with:
           # The diff against the pull request's base needs the base commit.
           fetch-depth: 0
+          # The graph tests query Bazel and the coverage test runs `cargo metadata`; both resolve the
+          # forks under `external/`.
+          submodules: true
           persist-credentials: false
       - name: Did the scripts change
         id: changed
@@ -157,10 +160,8 @@ jobs:
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
           version: '0.6.2'
-          # `project: ''` is the action's documented opt-out from project auto-load. This leg wants the
-          # binary and nothing else; the step below pulls three shells with `ocx --remote`, which needs
-          # no project toolchain.
-          project: ''
+          # The project toolchain stays on: `bazel:test:unit` runs `uv run` for its floor check, and the
+          # step below adds three shells beside it with `ocx --remote`.
           cache: false
       - name: Put the elvish, nushell and fish parity arms on PATH
         run: |
