@@ -1989,7 +1989,7 @@ class TestPlanStatusBlock:
 
 
 class TestVerifyDeepBuildMatrix:
-    """Structural invariant: `verify-deep.yml::unit-native` matrix must keep an
+    """Structural invariant: `deep-repo.yml::unit-native` matrix must keep an
     enabled (non-commented-out) `macos-latest` entry on `main`.
 
     Background: ADR `adr_file_lock_unification.md` §CI Integration permits an
@@ -2001,15 +2001,15 @@ class TestVerifyDeepBuildMatrix:
     structural test that physically blocks merge to `main` when macOS is
     missing.
 
-    This test reads `verify-deep.yml` as text and asserts a non-comment line
+    This test reads `deep-repo.yml` as text and asserts a non-comment line
     matching `os: macos-latest` appears in the `unit-native` job's matrix block.
     Pure structural — does not validate the rest of the matrix, just that the
     macOS leg is enabled when the branch lands.
     """
 
-    _WORKFLOW = ROOT / ".github" / "workflows" / "verify-deep.yml"
+    _WORKFLOW = ROOT / ".github" / "workflows" / "deep-repo.yml"
 
-    def test_macos_latest_is_enabled_in_verify_deep_unit_native(self) -> None:
+    def test_macos_latest_is_enabled_in_deep_repo_unit_native(self) -> None:
         assert self._WORKFLOW.exists(), (
             f"workflow missing: {self._WORKFLOW.relative_to(ROOT)}"
         )
@@ -2019,7 +2019,7 @@ class TestVerifyDeepBuildMatrix:
         # (`^  \w[\w-]*:`) or EOF.
         build_match = re.search(r"(?m)^  unit-native:\n", text)
         assert build_match is not None, (
-            "`unit-native:` job not found in verify-deep.yml — workflow shape changed?"
+            "`unit-native:` job not found in deep-repo.yml — workflow shape changed?"
         )
         # Find the start of the next 2-space-indented job (sibling level).
         next_job = re.search(r"(?m)^  [A-Za-z_][A-Za-z0-9_-]*:\n", text[build_match.end():])
@@ -2034,7 +2034,7 @@ class TestVerifyDeepBuildMatrix:
                 return  # invariant holds
         # Fallthrough: macos entry missing or only present as a comment.
         raise AssertionError(
-            "`os: macos-latest` matrix entry missing from `verify-deep.yml::unit-native` "
+            "`os: macos-latest` matrix entry missing from `deep-repo.yml::unit-native` "
             "(or only present as a commented-out line). Restore it before merging "
             "to `main` — see ADR adr_file_lock_unification.md §CI Integration "
             "'Final state diff (must land before main)'. The iteration tactic of "
@@ -2481,6 +2481,57 @@ class TestSelfTestsRunOnAGate:
         assert not orphans, (
             f"{orphans} are not reachable from `task verify` by any `task:` dispatch — a "
             f"self-test outside every gate is a check nobody runs (WP-42 R16)"
+        )
+
+    _BASIC_REPO = ROOT / ".github" / "workflows" / "basic-repo.yml"
+    _VERIFY_DEEP = ROOT / ".github" / "workflows" / "verify-deep.yml"
+
+    def _scripts_tests_job_gaps(self) -> list[str]:
+        """Why `basic-repo.yml`'s `scripts-tests` job is no gate for the self-tests; `[]` when it is.
+
+        A gate runs on every pull request, so the job may not carry an `if:`: a skipped
+        job leaves its required check unknown, and it decides inside whether anything
+        changed.
+        """
+        if not self._BASIC_REPO.exists():
+            return [f"{self._BASIC_REPO.relative_to(ROOT)} does not exist"]
+        jobs = yaml.safe_load(self._BASIC_REPO.read_text(encoding="utf-8")).get("jobs") or {}
+        if "scripts-tests" not in jobs:
+            return [f"{self._BASIC_REPO.name} has no job `scripts-tests` (its jobs: {sorted(jobs)})"]
+        job = jobs["scripts-tests"] or {}
+        gaps = [f"`scripts-tests` can be skipped by `if: {job['if']}`"] if "if" in job else []
+        runs = " ".join(str(step.get("run", "")) for step in job.get("steps") or [])
+        if not any(needle in runs for needle in ("scripts:self-test", "scripts/tests")):
+            gaps.append("`scripts-tests` runs neither `scripts:self-test` nor `scripts/tests`")
+        return gaps
+
+    def _ci_deep_gaps(self) -> list[str]:
+        """Why the `ci:deep` path is no gate for the self-tests; `[]` when it is.
+
+        The template's `deep` job runs `task ci:deep`, and the alias is defined in
+        `taskfiles/ci.taskfile.yml`. That job is label-gated by design, so this path is
+        held to reachability, not to being unskippable.
+        """
+        _, defined = self._graph()
+        if "ci:deep" not in defined:
+            return ["taskfiles/ci.taskfile.yml defines no `deep` task, so there is no `ci:deep`"]
+        reached = self._reachable_from("ci:deep")
+        gaps = [f"`ci:deep` does not reach `{task}`" for task in sorted(self._SELF_TESTS - reached)]
+        jobs = yaml.safe_load(self._VERIFY_DEEP.read_text(encoding="utf-8")).get("jobs") or {}
+        if not any(
+            "task ci:deep" in str(step.get("run", ""))
+            for job in jobs.values()
+            for step in (job or {}).get("steps") or []
+        ):
+            gaps.append(f"no job of {self._VERIFY_DEEP.name} runs `task ci:deep`")
+        return gaps
+
+    def test_the_script_self_tests_run_on_a_ci_gate(self) -> None:
+        """Either gate holds the self-tests: the always-run `scripts-tests` job, or `ci:deep`."""
+        job_gaps, deep_gaps = self._scripts_tests_job_gaps(), self._ci_deep_gaps()
+        assert not job_gaps or not deep_gaps, (
+            f"the script self-tests run on no CI gate. `basic-repo.yml` `scripts-tests` job: "
+            f"{job_gaps}. `ci:deep` path: {deep_gaps}"
         )
 
     def test_rust_verify_is_not_a_gate(self) -> None:

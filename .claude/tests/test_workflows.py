@@ -28,9 +28,15 @@ Two shapes the crate split can break without any workflow going red:
   lane holding the secret reads and writes the shared cache: each `bazel-cache-rc`
   step passes `BAZEL_CACHE_WRITE_AUTH` by name with no event predicate, every Bazel
   lane has such a step before its first lane step and an `if: always()` cleanup
-  after, no workflow spells the upload flag, and a caller of a reusable workflow
-  holding a cache step passes the secret by name. Every one of those assertions is
-  structural; none dials the cache.
+  after, no workflow spells the upload flag, and every caller of a reusable workflow
+  passes each secret that workflow declares by name (no `secrets: inherit`). Every one
+  of those assertions is structural; none dials the cache.
+
+- the shape of the repo-owned workflows behind the conventions template's `repo`
+  jobs (`basic-repo.yml`, `deep-repo.yml`) and the reusable workflows they call
+  (`acceptance.yml`, `cross.yml`, `shell-activation-deep.yml`): the jobs each tier
+  needs, the `workflow_call` inputs and secrets, and the permission ceiling the
+  template's caller imposes.
 
 - S-016's evidence predicate: which `TestResult` counts as a **remote** cache hit.
   Measured, the two BEP fields named for that question answer it wrongly — a
@@ -1039,6 +1045,26 @@ WRITE_SECRET = "BAZEL_CACHE_WRITE_AUTH"
 WRITE_AUTH = "${{ secrets.BAZEL_CACHE_WRITE_AUTH }}"
 RC_ACTION = ".github/actions/bazel-cache-rc"
 
+#: The conventions template renders these two; a `workflow_call` secret they declare is
+#: the baseline check's to hold, so the declare half of the secret sweep skips them.
+TEMPLATE_OWNED_WORKFLOWS = frozenset({"verify-basic.yml", "verify-deep.yml"})
+#: The reusable workflows the repo owns behind the template's `repo` jobs. Each must
+#: exist, so a missing file reads as a finding rather than as nothing to sweep.
+REPO_OWNED_REUSABLE = ("basic-repo.yml", "deep-repo.yml", "acceptance.yml", "cross.yml")
+#: cargo-dist writes this one and a drift check fails a hand edit, so its
+#: `secrets: inherit` cannot be fixed here.
+GENERATED_WORKFLOWS = frozenset({"release.yml"})
+#: `(caller, callee)` edges the new tier shape implies. Fewer callers than this
+#: means the reader stopped matching, which a clean sweep cannot be told from.
+REQUIRED_CALL_EDGES = frozenset(
+    {
+        ("verify-basic.yml", "basic-repo.yml"),
+        ("verify-deep.yml", "deep-repo.yml"),
+        ("basic-repo.yml", "acceptance.yml"),
+        ("deep-repo.yml", "cross.yml"),
+    }
+)
+
 #: Flags whose *presence* is the finding (BZL-CACHE-26): with no `--remote_executor`
 #: a fallback flag is dead configuration, and `--remote_require_cached` is the one
 #: flag that turns a cache outage into a red build.
@@ -1269,34 +1295,49 @@ def _cleanup_gap(steps: list[dict]) -> str | None:
     return None
 
 
-def _cache_workflow_callers(documents: list[tuple[str, dict]]) -> list[tuple[str, str]]:
-    """`(<caller>:<job>, <callee>)` for every job calling a workflow that holds a cache step.
+def _local_callee(job: dict) -> str | None:
+    """The file name of the repo workflow a job calls with `uses: ./.github/workflows/<name>`."""
+    uses = str(job.get("uses", ""))
+    return uses.rsplit("/", 1)[1] if uses.startswith("./.github/workflows/") else None
+
+
+def _declared_secrets(document: dict) -> dict:
+    """The secrets a workflow declares under `on.workflow_call.secrets`."""
+    triggers = document.get("on", document.get(True))
+    called = triggers.get("workflow_call") if isinstance(triggers, dict) else None
+    return (called or {}).get("secrets") or {}
+
+
+def _holds_cache_step(by_name: dict[str, dict], name: str, seen: tuple[str, ...] = ()) -> bool:
+    """Whether a workflow writes the cache rc itself or calls one that does.
 
     "Holds" is transitive: a workflow calling one that does is a path the secret must
     travel through too.
     """
-    by_name = dict(documents)
-
-    def callee_of(job: dict) -> str | None:
-        uses = str(job.get("uses", ""))
-        return uses.rsplit("/", 1)[1] if uses.startswith("./.github/workflows/") else None
-
-    def holds(name: str, seen: tuple[str, ...] = ()) -> bool:
-        if name in seen or name not in by_name:
-            return False
-        for job in (by_name[name].get("jobs") or {}).values():
-            if any(_cache_writer_auth(step) is not None for step in job.get("steps") or []):
-                return True
-            callee = callee_of(job)
-            if callee and holds(callee, (*seen, name)):
-                return True
+    if name in seen or name not in by_name:
         return False
+    for job in (by_name[name].get("jobs") or {}).values():
+        if any(_cache_writer_auth(step) is not None for step in job.get("steps") or []):
+            return True
+        callee = _local_callee(job)
+        if callee and _holds_cache_step(by_name, callee, (*seen, name)):
+            return True
+    return False
 
+
+def _cache_workflow_callers(documents: list[tuple[str, dict]]) -> list[tuple[str, str]]:
+    """`(<caller>:<job>, <callee>)` for every job calling a workflow that holds a cache step."""
+    by_name = dict(documents)
     return [
         (where, callee)
         for where, _, job in _jobs(documents)
-        if (callee := callee_of(job)) and holds(callee)
+        if (callee := _local_callee(job)) and _holds_cache_step(by_name, callee)
     ]
+
+
+def _call_edges(documents: list[tuple[str, dict]]) -> set[tuple[str, str]]:
+    """`(caller file, callee file)` for every `uses: ./.github/workflows/<name>` job."""
+    return {(where.split(":")[0], callee) for where, _, job in _jobs(documents) if (callee := _local_callee(job))}
 
 
 # ---------------------------------------------------------------------------
@@ -1358,21 +1399,42 @@ def _lanes_without_cache_step(
 
 
 def _callers_without_the_secret(documents: list[tuple[str, dict]]) -> list[str]:
-    """C-003(d): a caller of a workflow holding a cache step passes the write secret by name.
+    """A caller passes, by name, each secret the workflow it calls requires, and the cache secret.
 
-    `secrets: inherit` is a zizmor finding, and the called workflow must declare the
-    secret or GitHub withholds it; both ends are checked.
+    A required secret left out fails the run at startup; the cache secret is optional
+    but leaving it out runs the lane uncached and green, so it is owed whenever the
+    callee declares it. Other optional secrets may be withheld on purpose (a dev publish
+    announces nothing). `secrets: inherit` is a zizmor finding, so it is refused outright
+    (the generated workflow aside). The called workflow must declare the cache secret or
+    GitHub withholds it; both ends are checked, and the secret must be passed exactly
+    (`WRITE_AUTH`), never gated. A call to a file that does not exist is a finding too.
     """
     by_name = dict(documents)
     findings = []
-    for where, callee in _cache_workflow_callers(documents):
-        passed = by_name[where.split(":")[0]]["jobs"][where.split(":")[1]].get("secrets")
-        if not isinstance(passed, dict) or " ".join(str(passed.get(WRITE_SECRET, "")).split()) != WRITE_AUTH:
-            findings.append(f"{where} calls {callee} without `secrets: {WRITE_SECRET}: {WRITE_AUTH}`")
-        triggers = by_name[callee].get("on", by_name[callee].get(True))
-        declared = ((triggers or {}).get("workflow_call") or {}).get("secrets") or {}
-        if WRITE_SECRET not in declared:
-            findings.append(f"{callee} holds a cache step but declares no `workflow_call` secret {WRITE_SECRET}")
+    for where, _, job in _jobs(documents):
+        callee = _local_callee(job)
+        caller = where.split(":")[0]
+        if callee is None or caller in GENERATED_WORKFLOWS:
+            continue
+        if callee not in by_name:
+            findings.append(f"{where} calls {callee}, which does not exist")
+            continue
+        passed = job.get("secrets")
+        if passed == "inherit":
+            findings.append(f"{where} calls {callee} with `secrets: inherit`")
+            continue
+        passed = passed if isinstance(passed, dict) else {}
+        findings += [
+            f"{where} calls {callee} without passing the secret {secret}"
+            for secret, spec in _declared_secrets(by_name[callee]).items()
+            if secret not in passed and (secret == WRITE_SECRET or (spec or {}).get("required") is True)
+        ]
+        if WRITE_SECRET in passed and " ".join(str(passed[WRITE_SECRET]).split()) != WRITE_AUTH:
+            findings.append(f"{where} passes {WRITE_SECRET} as {str(passed[WRITE_SECRET]).strip()!r}, not `{WRITE_AUTH}`")
+    called = {callee for _, _, job in _jobs(documents) if (callee := _local_callee(job))}
+    for name in sorted(((called | set(REPO_OWNED_REUSABLE)) & set(by_name)) - TEMPLATE_OWNED_WORKFLOWS):
+        if _holds_cache_step(by_name, name) and WRITE_SECRET not in _declared_secrets(by_name[name]):
+            findings.append(f"{name} holds a cache step but declares no `workflow_call` secret {WRITE_SECRET}")
     return sorted(set(findings))
 
 
@@ -1588,10 +1650,14 @@ def _caller(secrets: str = f"    secrets:\n      {WRITE_SECRET}: {WRITE_AUTH}\n"
 
 
 def _corpus(
-    *steps: str, caller: str | None = None, declared: bool = True
+    *steps: str,
+    caller: str | None = None,
+    declared: bool = True,
+    also_declares: tuple[str, bool] | None = None,
 ) -> list[tuple[str, dict]]:
     steps = steps or (_write(), _run(), _UPLOAD, _CLEANUP)
-    declaration = f"  workflow_call:\n    secrets:\n      {WRITE_SECRET}:\n        required: false\n"
+    extra = f"      {also_declares[0]}:\n        required: {str(also_declares[1]).lower()}\n" if also_declares else ""
+    declaration = f"  workflow_call:\n    secrets:\n      {WRITE_SECRET}:\n        required: false\n{extra}"
     lane = (
         f"name: lane\non:\n{declaration if declared else '  workflow_call: {}\n'}"
         "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -1645,6 +1711,12 @@ _VIOLATIONS = [
         id="d-another-secret-passed",
     ),
     pytest.param("caller-secret", _corpus(declared=False), id="d-callee-declares-nothing"),
+    pytest.param("caller-secret", _corpus(also_declares=("OTHER_SECRET", True)), id="d-required-secret-not-passed"),
+    pytest.param(
+        "caller-secret",
+        [("caller.yml", yaml.safe_load(_caller().replace("lane.yml", "absent.yml")))],
+        id="d-callee-does-not-exist",
+    ),
     pytest.param("rc-writer-cleanup", _corpus(_write(), _run(), _CLEANUP.replace("always()", "success()")), id="cleanup-not-under-always"),
     pytest.param("rc-writer-cleanup", _corpus(_write(), _CLEANUP, _run()), id="cleanup-before-the-last-lane-step"),
     pytest.param("rc-writer-cleanup", _corpus(_write(), _run()), id="cleanup-absent"),
@@ -1747,17 +1819,61 @@ def test_every_bazel_lane_has_the_cache_step() -> None:
     )
 
 
-def test_every_caller_of_a_cache_workflow_passes_the_write_secret_by_name() -> None:
-    """C-003(d). Secrets do not cross `workflow_call` unless declared and passed."""
+def test_every_caller_of_a_reusable_workflow_passes_its_declared_secrets_by_name() -> None:
+    """Secrets do not cross `workflow_call` unless declared and passed.
+
+    Every job calling `./.github/workflows/<name>.yml` passes by name each secret that
+    file requires, and the cache secret; no workflow inherits. A repo-owned reusable
+    workflow that holds a cache step declares `BAZEL_CACHE_WRITE_AUTH`; the two
+    template-owned workflows are the baseline check's to hold on the declare side.
+    """
     documents = _documents()
-    assert _cache_workflow_callers(documents), (
-        "no job calls a reusable workflow holding a cache step — the reader found nothing"
+    edges = _call_edges(documents)
+    assert len(edges) >= len(REQUIRED_CALL_EDGES), (
+        f"found {len(edges)} reusable-workflow call edges, expected at least "
+        f"{len(REQUIRED_CALL_EDGES)}: {sorted(edges)} — the reader stopped matching `uses:`"
+    )
+    missing = sorted(REQUIRED_CALL_EDGES - edges)
+    assert not missing, (
+        f"call edges the tier shape needs and the workflows lack (caller, callee): {missing}. "
+        f"The template's `repo` jobs call `basic-repo.yml` and `deep-repo.yml`; those call "
+        f"`acceptance.yml` and `cross.yml`"
     )
     findings = _callers_without_the_secret(documents)
     assert not findings, (
         f"{findings}. Without both ends the called workflow's cache step sees an empty "
         f"secret and runs uncached, green at full cost"
     )
+
+
+def test_an_optional_secret_may_be_left_unpassed() -> None:
+    """The green control for the required-secret finding: `required: false` is a choice."""
+    assert not _callers_without_the_secret(_corpus(also_declares=("OPTIONAL_SECRET", False)))
+
+
+def test_the_generated_workflow_exemption_is_still_needed() -> None:
+    """An exemption that outlives its reason hides a hand-written `secrets: inherit`."""
+    for name in GENERATED_WORKFLOWS:
+        jobs = (_load(WORKFLOW_DIR / name).get("jobs") or {}).values()
+        assert any(job.get("secrets") == "inherit" for job in jobs), (
+            f"{name} no longer passes `secrets: inherit` — drop it from GENERATED_WORKFLOWS "
+            f"so the sweep covers it"
+        )
+
+
+def test_a_template_owned_callee_is_exempt_from_the_declare_half_only() -> None:
+    """The exemption skips `verify-deep.yml` as a callee that declares nothing, and nothing more."""
+    lane = _corpus(declared=False)[0][1]
+    exempt = [
+        ("verify-deep.yml", lane),
+        ("caller.yml", yaml.safe_load(_caller().replace("lane.yml", "verify-deep.yml"))),
+    ]
+    assert not _callers_without_the_secret(exempt)
+    assert _callers_without_the_secret(_corpus(declared=False)), (
+        "the same callee under a repo-owned name must still be a finding"
+    )
+    inherits = [("verify-deep.yml", lane), ("caller.yml", yaml.safe_load(_caller(secrets="    secrets: inherit\n").replace("lane.yml", "verify-deep.yml")))]
+    assert _callers_without_the_secret(inherits), "an exempt callee does not exempt its caller from `inherit`"
 
 
 def test_every_write_credential_caller_deletes_it_in_an_always_step() -> None:
@@ -2336,4 +2452,302 @@ def test_bazel_test_accept_never_uploads_verdicts_whatever_rc_a_lane_passes() ->
     assert len(invocations) == 1, f"expected one `bazel test` line in `bazel:test:accept`, found {invocations}"
     assert re.search(r"bazel \{\{\.CACHE_RC\}\} test\b.* --remote_upload_local_results=false\b", invocations[0]), (
         f"`bazel:test:accept` must pass `--remote_upload_local_results=false` after `test`: {invocations[0].strip()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The repo-owned workflows behind the conventions template's `repo` jobs; a
+# missing file or job is a finding that names it.
+# ---------------------------------------------------------------------------
+
+BASIC_REPO = WORKFLOW_DIR / "basic-repo.yml"
+DEEP_REPO = WORKFLOW_DIR / "deep-repo.yml"
+ACCEPTANCE = WORKFLOW_DIR / "acceptance.yml"
+CROSS = WORKFLOW_DIR / "cross.yml"
+SHELL_ACTIVATION_DEEP = WORKFLOW_DIR / "shell-activation-deep.yml"
+REUSABLE_REPO_WORKFLOWS = (BASIC_REPO, DEEP_REPO, ACCEPTANCE, CROSS)
+
+#: Where the eight cross-build jobs run: "B" keeps them in the deep tier only, "A"
+#: adds them to every pull request. The slowest warm cross job's wall time decides,
+#: and the measurement is recorded in .claude/artifacts/plan_pr637_round2.md#schedule-log.
+CROSS_VARIANT = "B"
+CROSS_TARGETS = frozenset(
+    {
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-gnullvm",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnullvm",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+    }
+)
+BASIC_REPO_JOBS = frozenset({"binaries", "acceptance", "smoke-acceptance", "conventional-commits", "scripts-tests"})
+DEEP_REPO_JOBS = frozenset(
+    {
+        "cross",
+        "unit-native",
+        "acceptance-native",
+        "satellite-verify",
+        "satellite-contract",
+        "index-conformance-drift",
+        "shell-activation-deep",
+    }
+)
+ACCEPTANCE_INPUTS = {
+    "os": {"type": "string"},
+    "shard-count": {"type": "number", "default": 4},
+    "binary": {"type": "string"},
+    "limits-dir": {"type": "string", "default": "test"},
+    "release-binary": {"type": "boolean", "default": False},
+}
+CROSS_WORKFLOW_CALL = "./.github/workflows/cross.yml"
+
+
+def _repo_workflow(path: Path) -> dict:
+    assert path.exists(), f"{path.relative_to(ROOT)}: no such workflow"
+    return _load(path)
+
+
+def _repo_jobs(path: Path) -> dict[str, dict]:
+    return {name: job or {} for name, job in (_repo_workflow(path).get("jobs") or {}).items()}
+
+
+def _repo_job(path: Path, name: str) -> dict:
+    jobs = _repo_jobs(path)
+    assert name in jobs, f"{path.name}: no job `{name}`; its jobs are {sorted(jobs)}"
+    return jobs[name]
+
+
+def _workflow_call(path: Path) -> dict:
+    document = _repo_workflow(path)
+    triggers = document.get("on", document.get(True))
+    assert isinstance(triggers, dict) and "workflow_call" in triggers, (
+        f"{path.name}: not a reusable workflow, `on` is {triggers!r}"
+    )
+    return triggers["workflow_call"] or {}
+
+
+def _permission_overreach(document: dict) -> list[str]:
+    """Where a workflow or one of its jobs asks for more than `contents: read`.
+
+    The template's caller grants only that, and a called job asking for more fails the
+    whole run at startup. `none` asks for nothing, and an absent key asks for nothing.
+    """
+    scopes = [("workflow", document.get("permissions"))]
+    scopes += [(f"job `{name}`", (job or {}).get("permissions")) for name, job in (document.get("jobs") or {}).items()]
+    found = []
+    for where, granted in scopes:
+        if isinstance(granted, str):
+            found.append(f"{where}: `{granted}`")
+        else:
+            found += [
+                f"{where}: {scope}: {level}"
+                for scope, level in (granted or {}).items()
+                if level != "none" and (scope, level) != ("contents", "read")
+            ]
+    return found
+
+
+def _matrix_targets(document: dict) -> set[str]:
+    """Every `target` a job matrix of the workflow lists, in `target:` or in `include:`."""
+    targets: set[str] = set()
+    for job in (document.get("jobs") or {}).values():
+        matrix = ((job or {}).get("strategy") or {}).get("matrix") or {}
+        if isinstance(matrix.get("target"), list):
+            targets |= set(matrix["target"])
+        targets |= {entry["target"] for entry in matrix.get("include") or [] if isinstance(entry, dict) and "target" in entry}
+    return targets
+
+
+@pytest.mark.parametrize(
+    ("permissions", "overreach"),
+    [
+        pytest.param({}, False, id="nothing"),
+        pytest.param({"contents": "read"}, False, id="contents-read"),
+        pytest.param({"contents": "read", "checks": "none"}, False, id="none-is-nothing"),
+        pytest.param({"contents": "write"}, True, id="contents-write"),
+        pytest.param({"contents": "read", "checks": "write"}, True, id="checks-write"),
+        pytest.param("read-all", True, id="read-all"),
+    ],
+)
+def test_the_permission_reader_flags_more_than_contents_read(permissions: object, overreach: bool) -> None:
+    """The reader's red and green, on a workflow-level and on a job-level grant."""
+    assert bool(_permission_overreach({"permissions": permissions, "jobs": {}})) is overreach
+    assert bool(_permission_overreach({"jobs": {"j": {"permissions": permissions}}})) is overreach
+
+
+@pytest.mark.parametrize("workflow", REUSABLE_REPO_WORKFLOWS, ids=lambda path: path.name)
+def test_a_repo_reusable_workflow_declares_the_cache_secret_as_optional(workflow: Path) -> None:
+    """A fork pull request holds no secrets, so the secret is declared and not required."""
+    declared = _declared_secrets(_repo_workflow(workflow))
+    _workflow_call(workflow)
+    assert WRITE_SECRET in declared, (
+        f"{workflow.name}: `on.workflow_call.secrets` declares {sorted(declared)}, not {WRITE_SECRET}"
+    )
+    assert (declared[WRITE_SECRET] or {}).get("required") is False, (
+        f"{workflow.name}: {WRITE_SECRET} must be declared with `required: false`, got {declared[WRITE_SECRET]!r}"
+    )
+
+
+@pytest.mark.parametrize("workflow", (BASIC_REPO, DEEP_REPO), ids=lambda path: path.name)
+def test_a_tier_workflow_grants_nothing_at_the_top(workflow: Path) -> None:
+    document = _repo_workflow(workflow)
+    assert document.get("permissions") == {} and "permissions" in document, (
+        f"{workflow.name}: top-level `permissions` is {document.get('permissions')!r}, expected `permissions: {{}}`"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow", (*REUSABLE_REPO_WORKFLOWS, SHELL_ACTIVATION_DEEP), ids=lambda path: path.name
+)
+def test_no_job_called_through_the_template_asks_for_more_than_contents_read(workflow: Path) -> None:
+    findings = _permission_overreach(_repo_workflow(workflow))
+    assert not findings, (
+        f"{workflow.name} requests more than `contents: read`: {findings}. The template's `repo` job "
+        f"grants only that, and a nested job asking for more fails the whole run at startup"
+    )
+
+
+def test_basic_repo_has_the_jobs_the_basic_tier_needs() -> None:
+    jobs = set(_repo_jobs(BASIC_REPO))
+    assert BASIC_REPO_JOBS <= jobs, (
+        f"{BASIC_REPO.name}: no job {sorted(BASIC_REPO_JOBS - jobs)}; its jobs are {sorted(jobs)}"
+    )
+
+
+def test_basic_repo_runs_linux_acceptance_on_a_rebuilt_binary() -> None:
+    job = _repo_job(BASIC_REPO, "acceptance")
+    assert job.get("uses") == "./.github/workflows/acceptance.yml", (
+        f"{BASIC_REPO.name}: job `acceptance` uses {job.get('uses')!r}, expected the reusable acceptance.yml"
+    )
+    inputs = job.get("with") or {}
+    assert inputs.get("binary") == "build", (
+        f"{BASIC_REPO.name}: job `acceptance` passes binary={inputs.get('binary')!r}, expected 'build'"
+    )
+    assert str(inputs.get("os", "")).startswith("ubuntu"), (
+        f"{BASIC_REPO.name}: job `acceptance` passes os={inputs.get('os')!r}, expected an ubuntu runner label"
+    )
+
+
+def test_basic_repo_scripts_tests_job_cannot_be_skipped() -> None:
+    """A required job skipped by its own `if:` leaves the gate unknown, not green.
+
+    The job always runs and decides inside whether `scripts/**` changed.
+    """
+    job = _repo_job(BASIC_REPO, "scripts-tests")
+    assert "if" not in job, f"{BASIC_REPO.name}: job `scripts-tests` has `if: {job.get('if')}`"
+
+
+def test_deep_repo_has_the_jobs_the_deep_tier_needs() -> None:
+    jobs = set(_repo_jobs(DEEP_REPO))
+    assert DEEP_REPO_JOBS <= jobs, (
+        f"{DEEP_REPO.name}: no job {sorted(DEEP_REPO_JOBS - jobs)}; its jobs are {sorted(jobs)}"
+    )
+
+
+@pytest.mark.parametrize("name", ["unit-native", "acceptance-native"])
+def test_a_deep_native_leg_waits_for_the_cross_job(name: str) -> None:
+    """A macOS or Windows leg runs the outputs the cross job built in the same run."""
+    needs = _needs(_repo_job(DEEP_REPO, name))
+    assert "cross" in needs, f"{DEEP_REPO.name}: job `{name}` needs {needs}, not `cross`"
+
+
+def test_deep_repo_runs_shell_activation_through_its_reusable_workflow() -> None:
+    job = _repo_job(DEEP_REPO, "shell-activation-deep")
+    assert job.get("uses") == "./.github/workflows/shell-activation-deep.yml", (
+        f"{DEEP_REPO.name}: job `shell-activation-deep` uses {job.get('uses')!r}"
+    )
+
+
+def test_the_cross_jobs_sit_where_the_recorded_variant_puts_them() -> None:
+    """The deep tier always cross-builds; the basic tier does only under variant A."""
+    assert CROSS_VARIANT in {"A", "B"}, f"CROSS_VARIANT is {CROSS_VARIANT!r}, expected 'A' or 'B'"
+    deep = _repo_job(DEEP_REPO, "cross")
+    assert deep.get("uses") == CROSS_WORKFLOW_CALL, (
+        f"{DEEP_REPO.name}: job `cross` uses {deep.get('uses')!r}, expected {CROSS_WORKFLOW_CALL}"
+    )
+    callers = sorted(name for name, job in _repo_jobs(BASIC_REPO).items() if job.get("uses") == CROSS_WORKFLOW_CALL)
+    if CROSS_VARIANT == "A":
+        assert callers, f"{BASIC_REPO.name}: variant A cross-builds on every pull request, but no job calls cross.yml"
+    else:
+        assert not callers, f"{BASIC_REPO.name}: variant B keeps cross in the deep tier, but {callers} call cross.yml"
+
+
+def test_the_cross_workflow_builds_exactly_the_supported_targets() -> None:
+    _workflow_call(CROSS)
+    found = _matrix_targets(_repo_workflow(CROSS))
+    assert found == CROSS_TARGETS, (
+        f"{CROSS.name}: matrix targets differ from the eight supported triples; "
+        f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
+    )
+
+
+def test_shell_activation_deep_is_called_and_never_scheduled() -> None:
+    """The weekly run is the deep tier's job now, so a cron here runs it a second time."""
+    triggers = _on(SHELL_ACTIVATION_DEEP)
+    assert isinstance(triggers, dict) and "workflow_call" in triggers, (
+        f"{SHELL_ACTIVATION_DEEP.name}: `on` is {triggers!r}, expected a `workflow_call` trigger"
+    )
+    assert "schedule" not in triggers, (
+        f"{SHELL_ACTIVATION_DEEP.name}: `on` still has a `schedule` trigger ({sorted(triggers)})"
+    )
+
+
+def test_the_acceptance_workflow_takes_the_documented_inputs() -> None:
+    inputs = _workflow_call(ACCEPTANCE).get("inputs") or {}
+    findings = []
+    for name, want in ACCEPTANCE_INPUTS.items():
+        if name not in inputs:
+            findings.append(f"no input `{name}`")
+            continue
+        got = inputs[name] or {}
+        if got.get("type") != want["type"]:
+            findings.append(f"`{name}` has type {got.get('type')!r}, expected {want['type']!r}")
+        if "default" in want and (got.get("default") != want["default"] or type(got.get("default")) is not type(want["default"])):
+            findings.append(f"`{name}` defaults to {got.get('default')!r}, expected {want['default']!r}")
+    description = str((inputs.get("binary") or {}).get("description", ""))
+    if "build" not in description or "artifact:" not in description:
+        findings.append("`binary` does not document its values `build` and `artifact:<name>`")
+    assert not findings, f"{ACCEPTANCE.name} `on.workflow_call.inputs`: {findings}"
+
+
+def _shard_count_source(document: dict, job: dict, step: dict) -> str | None:
+    """What `EXPECT_SHARDS=` is given in a floor step: the input's expression, or `None`.
+
+    The value reaches the task inline (`${{ inputs.shard-count }}`) or through an `env:`
+    binding of the step, job or workflow (`$SHARD_COUNT`); a literal is neither.
+    """
+    found = re.search(r"EXPECT_SHARDS=(\"?\$\{\{[^}]*\}\}\"?|\S+)", str(step.get("run", "")))
+    if not found:
+        return None
+    value = found.group(1).strip("\"'")
+    variable = re.fullmatch(r"\$\{?(\w+)\}?", value)
+    if variable:
+        for env in (step.get("env"), job.get("env"), document.get("env")):
+            if env and variable.group(1) in env:
+                return str(env[variable.group(1)])
+    return value
+
+
+def test_the_acceptance_workflow_merges_shards_on_the_input_shard_count() -> None:
+    document = _repo_workflow(ACCEPTANCE)
+    jobs = _repo_jobs(ACCEPTANCE)
+    shard_jobs = {name for name, job in jobs.items() if (job.get("strategy") or {}).get("matrix")}
+    floor_steps = {
+        name: [step for step in job.get("steps") or [] if "accept:floor" in str(step.get("run", ""))]
+        for name, job in jobs.items()
+    }
+    merge_jobs = sorted(name for name, steps in floor_steps.items() if steps)
+    assert shard_jobs, f"{ACCEPTANCE.name}: no job has a `strategy.matrix`, so there are no shards"
+    assert len(merge_jobs) == 1, f"{ACCEPTANCE.name}: jobs running the suite floor are {merge_jobs}, expected exactly one"
+    merge = merge_jobs[0]
+    assert set(_needs(jobs[merge])) & shard_jobs, (
+        f"{ACCEPTANCE.name}: merge job `{merge}` needs {_needs(jobs[merge])}, none of the shard jobs {sorted(shard_jobs)}"
+    )
+    sources = [_shard_count_source(document, jobs[merge], step) for step in floor_steps[merge]]
+    assert sources and all(source and "inputs.shard-count" in source for source in sources), (
+        f"{ACCEPTANCE.name}: the floor step in `{merge}` takes EXPECT_SHARDS from {sources}, "
+        f"expected `inputs.shard-count`, never a literal"
     )
