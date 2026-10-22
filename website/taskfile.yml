@@ -74,6 +74,14 @@ tasks:
         msg: "No dist/docs — run `task website:build` first"
     cmd: python3 scripts/check_budget.py dist/docs
 
+  lighthouse:
+    desc: 'Run the Lighthouse budgets (scripts/lighthouse.mjs) against the built site'
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - |
+        echo "website:lighthouse: not implemented yet" >&2
+        exit 1
+
   serve:
     interactive: true
     deps:

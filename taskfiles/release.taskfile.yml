@@ -203,57 +203,32 @@ tasks:
       - task: sdkgen:check
       - task: sdkgen:package
 
-  # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
-  # After this task succeeds, the human reviews and commits.
-  #
-  # Version selection:
-  #   task release:prepare                 # interactive menu: auto | patch | minor | major
-  #   task release:prepare BUMP=minor      # skip the menu, force a bump level
-  #   task release:prepare BUMP=auto VERSION=1.4.0   # pin an exact version (v prefix optional)
-  #
-  # BUMP is a required enum: with interactive mode on (.taskrc.yml) and a TTY it
-  # renders a selection menu; on CI / no TTY it must be passed on the CLI.
-  prepare:
-    desc: 'Prepare a release (interactive: pick auto|patch|minor|major; or BUMP=<level> / VERSION=x.y.z)'
-    deps:
-      - install:cargo-edit
-    requires:
-      vars:
-        - name: BUMP
-          enum: [auto, patch, minor, major]
-    vars:
-      # git-cliff computes the next version from git history. `auto` lets it pick
-      # the bump from conventional commits; otherwise BUMP forces the level.
-      # VERSION pins an exact value and wins over BUMP.
-      NEXT_VERSION:
-        sh: |
-          if [ -n "{{.VERSION}}" ]; then
-            printf 'v%s' "{{.VERSION | default "" | trimPrefix "v"}}"
-          elif [ "{{.BUMP}}" = "auto" ]; then
-            git-cliff --bumped-version
-          else
-            git-cliff --bumped-version --bump "{{.BUMP}}"
-          fi
+  # Hooks the conventions baseline's `release:prepare` calls when they exist.
+  # Each is a stub until the release flow is wired onto the template task.
+  gate:
+    desc: 'Release gate: a fresh full verify mark (commit_gate.py --require-full-mark) and the release provenance proof'
     cmds:
-      # Refuse without a fresh *full* verify mark — the predicate the commit
-      # gate applies to a `release:` subject, run from the same module so the
-      # two cannot drift. `task verify:mark` writes a scoped mark and does not
-      # satisfy it; `task verify` does.
-      - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
-      # Before any file is touched: a release whose build would carry test
-      # provenance stops here, not after the version bump.
-      - task: provenance:proof
-      - echo "Next version:{{.NEXT_VERSION}}"
-      - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
-      - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
-      - task: changelog:validate
-      # NOCACHE=1 reaches `bazel:test:accept` (CLI vars are global), which runs
-      # every acceptance module with `--nocache_test_results`: a release
-      # re-executes the suite instead of trusting cached verdicts.
-      - task verify NOCACHE=1
       - |
-        echo ""
-        echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
-        echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
-        echo "  git tag {{.NEXT_VERSION}}"
-        echo "  git push --atomic origin main {{.NEXT_VERSION}}"
+        echo "release:gate: not implemented yet" >&2
+        exit 1
+
+  bump-files:
+    desc: 'Set the release version in the workspace manifests (cargo set-version)'
+    cmds:
+      - |
+        echo "release:bump-files: not implemented yet" >&2
+        exit 1
+
+  validate:
+    desc: 'Validate what the release rewrote (changelog:validate)'
+    cmds:
+      - |
+        echo "release:validate: not implemented yet" >&2
+        exit 1
+
+  verify:
+    desc: 'The release verification gate: task verify NOCACHE=1'
+    cmds:
+      - |
+        echo "release:verify: not implemented yet" >&2
+        exit 1

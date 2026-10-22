@@ -23,3 +23,40 @@ tasks:
       # generated release.yml is excluded via .github/actionlint.yaml.
       SHELLCHECK_OPTS: '--severity=warning'
     cmd: actionlint
+
+  # The tier aliases the conventions baseline's workflows call. Stubs until each is wired to its tasks.
+
+  lint:
+    desc: 'Lint tier: format, shell, claude, test-lint and bazel gates, licenses, suite census, dead-path sweep, clippy, doc ratchet'
+    cmds:
+      - |
+        echo "ci:lint: not implemented yet" >&2
+        exit 1
+
+  test:
+    desc: 'Test tier: bazel unit tests, the skipped-test run and the website tests'
+    cmds:
+      - |
+        echo "ci:test: not implemented yet" >&2
+        exit 1
+
+  build:
+    desc: 'Build tier: the rust build and the generated reference check'
+    cmds:
+      - |
+        echo "ci:build: not implemented yet" >&2
+        exit 1
+
+  docs:
+    desc: 'Docs tier: build the website and gate the built pages on their quality budget'
+    cmds:
+      - |
+        echo "ci:docs: not implemented yet" >&2
+        exit 1
+
+  deep:
+    desc: 'Deep tier: suite rows check, contract-baseline repository tests and the self-tests of the gate scripts'
+    cmds:
+      - |
+        echo "ci:deep: not implemented yet" >&2
+        exit 1

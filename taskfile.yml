@@ -52,6 +52,9 @@ includes:
   website:
     taskfile: ./website/taskfile.yml
     dir: ./website
+  baseline:
+    taskfile: ./taskfiles/baseline.taskfile.yml
+    flatten: true
 
 tasks:
   ocx:dirty-update:
