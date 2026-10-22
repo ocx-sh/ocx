@@ -3,9 +3,9 @@ agent = []
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:c566c33228738106d21d50e6030e1d53012b97d4d12dfd369d27b0815a939bda"
+declaration_hash = "sha256:c0dc166ac07493f7f0fa4eec633276e411024e8290cec940cffc270798882f8f"
 generated_by = "grim 0.14.3"
-generated_at = "2026-10-04T15:09:13Z"
+generated_at = "2026-10-22T01:24:04Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -33,6 +33,10 @@ tag = "latest"
 
 [[skill.bundles]]
 repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
 tag = "latest"
 
 [[skill.bundles]]
@@ -118,9 +122,33 @@ bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
+name = "installer-script"
+pinned = "ghcr.io/ocx-sh/lore/installer-script@sha256:916d113c1d8abfae9c2809b47a2a6c55cf82b2b26a80c4a16757a9ab14589e72"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
 name = "nox-review"
 pinned = "ghcr.io/michael-herwig/arcana/nox-review@sha256:a74d455996a2b0f1f8fa3e753ff8000fdeab0138ac55db91ab8a6e7751026668"
 bundle = "ghcr.io/michael-herwig/arcana/nox"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-diagnose"
+pinned = "ghcr.io/ocx-sh/lore/shell-diagnose@sha256:5c36130dceb8ae2bf8ea331d9b4731a9c4c9da5e0bdf822810945ae84f2d29dd"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-integration"
+pinned = "ghcr.io/ocx-sh/lore/shell-integration@sha256:f6955152349af754cf26ddc73a936d0c0e21cb289525eb21b02dd67f028ef994"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-port"
+pinned = "ghcr.io/ocx-sh/lore/shell-port@sha256:b05c189ec9d8681729a882ccfc68dbcd8a50c72744f11a89a03cb58ef41c8550"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
 bundle_tag = "latest"
 
 [[rule]]
@@ -146,6 +174,10 @@ repo = "ghcr.io/ocx-sh/lore/rust-essentials"
 tag = "latest"
 
 [[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
+tag = "latest"
+
+[[rule.bundles]]
 repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
 tag = "latest"
 
@@ -159,6 +191,12 @@ bundle_tag = "latest"
 name = "hex-state"
 pinned = "ghcr.io/michael-herwig/arcana/hex-state@sha256:c06128ffd9ea8af07de24f950d351b9fb04358748cc0c3be522be03d8489a52f"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[rule]]
+name = "powershell-quality"
+pinned = "ghcr.io/ocx-sh/lore/powershell-quality@sha256:d2b1e694db41e39d56d6f1ccd4b87c9046fac5c026e374f594bde494b2aab917"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
 bundle_tag = "latest"
 
 [[rule]]
@@ -183,6 +221,12 @@ bundle_tag = "latest"
 name = "rust-quality"
 pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:44ad99505fd8e655f18e1cfaf7aecd6ab1ea99038e4ce815c6ef6006b49e9d2f"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "shell-quality"
+pinned = "ghcr.io/ocx-sh/lore/shell-quality@sha256:737adb8dfab155b1569aec93c709fea413c07af612ec0976e1e1d3aada95cef7"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
 bundle_tag = "latest"
 
 [[rule]]
@@ -383,6 +427,52 @@ id = "ghcr.io/ocx-sh/lore/rust-cargo:latest"
 kind = "rule"
 name = "rust-quality"
 id = "ghcr.io/ocx-sh/lore/rust-quality:latest"
+
+[[bundle]]
+name = "shell-essentials"
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/shell-essentials@sha256:2883d0c80e1ce01c98bf9bd63cb89bca226b4ba0c8de97c9774f9af728154079"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "installer-script"
+id = "ghcr.io/ocx-sh/lore/installer-script:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-diagnose"
+id = "ghcr.io/ocx-sh/lore/shell-diagnose:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-integration"
+id = "ghcr.io/ocx-sh/lore/shell-integration:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-port"
+id = "ghcr.io/ocx-sh/lore/shell-port:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "powershell-quality"
+id = "ghcr.io/ocx-sh/lore/powershell-quality:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "shell-quality"
+id = "ghcr.io/ocx-sh/lore/shell-quality:latest"
 
 [[bundle]]
 name = "typescript-essentials"
