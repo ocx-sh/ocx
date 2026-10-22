@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 RELEASE_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
@@ -152,6 +154,7 @@ def baseline_problems(repo: Path) -> list[str]:
 # --- the repository itself --------------------------------------------------
 
 
+@pytest.mark.deep
 def test_the_checkout_reaches_a_release_tag() -> None:
     """Reader floor: with no tags every rule above reads "no bootstrap" and passes."""
     assert newest_release_tag(PROJECT_ROOT) is not None, (
@@ -159,6 +162,7 @@ def test_the_checkout_reaches_a_release_tag() -> None:
     )
 
 
+@pytest.mark.deep
 def test_the_repository_baseline_matches_the_release_tags() -> None:
     assert baseline_problems(PROJECT_ROOT) == []
 

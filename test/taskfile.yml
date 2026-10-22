@@ -653,6 +653,7 @@ tasks:
       (test/lint/conftest.py refuses each). Fails below test/LINT_FLOOR
       collected, above test/LINT_SKIP_CEILING skipped or
       test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget.
+      The `deep` marker is deselected: `lint:deep` runs those.
     dir: '{{toSlash .TASKFILE_DIR}}'
     # No `sources:`, by design (ADR C-LINT): a sweep's input is the whole tree,
     # so a fingerprint over anything less is a cached green over files the run
@@ -664,11 +665,11 @@ tasks:
       # for the reason `.suite-floor` gives.
       - >-
         floor=$(cat LINT_FLOOR);
-        summary=$(uv run pytest lint/ --collect-only -q --color=no 2>&1 | tail -n 1);
+        summary=$(uv run pytest lint/ -m "not deep" --collect-only -q --color=no 2>&1 | tail -n 1);
         case "$summary" in *error*)
           echo "lint floor: collection failed: $summary" >&2; exit 1;;
         esac;
-        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+) tests? collected.*/\1/p');
+        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+)(\/[0-9]+)? tests? collected.*/\1/p');
         [ -n "$count" ] || { echo "lint floor: no collected count in: $summary" >&2; exit 1; };
         [ "$count" -ge "$floor" ] || {
           echo "lint floor: $count tests collected, floor is $floor (test/LINT_FLOOR) — the lint tier shrank" >&2; exit 1; };
@@ -684,7 +685,7 @@ tasks:
       - >-
         start=$(date +%s);
         set -o pipefail;
-        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ -n auto --basetemp={{.TEST_BASETEMP}}-lint
+        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ -m "not deep" -n auto --basetemp={{.TEST_BASETEMP}}-lint
         {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint.log;
         status=$?;
         echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget 30 s)";
@@ -698,6 +699,41 @@ tasks:
     env:
       # Belt to the conftest's braces: the root conftest's `pytest_sessionstart`
       # starts the registry unless this is set, and no lint test may reach one.
+      OCX_TESTS_NO_REGISTRY: "1"
+
+  lint:deep:
+    desc: >-
+      The deep lint tier (`-m deep` over test/lint/): the lint tests that read
+      repository history, which `lint:structure` deselects. Run by `ci:deep`.
+      Fails below test/LINT_DEEP_FLOOR collected, and on any skip or xfail
+      (the lint tier's ceilings, both 0).
+    dir: '{{toSlash .TASKFILE_DIR}}'
+    # Same admission as `lint:structure` (the lint conftest), its own floor:
+    # moving a test between the two tiers lowers one floor and raises the other
+    # in the same commit, so neither shrinks unseen. No budget of its own: the
+    # tier is two git reads and the conftest's 30 s default still applies.
+    cmds:
+      - >-
+        floor=$(cat LINT_DEEP_FLOOR);
+        summary=$(uv run pytest lint/ -m deep --collect-only -q --color=no 2>&1 | tail -n 1);
+        case "$summary" in *error*)
+          echo "deep lint floor: collection failed: $summary" >&2; exit 1;;
+        esac;
+        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+)(\/[0-9]+)? tests? collected.*/\1/p');
+        [ -n "$count" ] || { echo "deep lint floor: no collected count in: $summary" >&2; exit 1; };
+        [ "$count" -ge "$floor" ] || {
+          echo "deep lint floor: $count tests collected, floor is $floor (test/LINT_DEEP_FLOOR) — the deep lint tier shrank" >&2; exit 1; };
+        echo "deep lint floor: $count tests collected (floor $floor)"
+      - >-
+        set -o pipefail;
+        uv run pytest lint/ -m deep --basetemp={{.TEST_BASETEMP}}-lint-deep
+        {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint-deep.log
+      - task: .suite-ceilings
+        vars:
+          TEST_RUN_LOG: '{{.TEST_BASETEMP}}-lint-deep.log'
+          SKIP_CEILING_FILE: LINT_SKIP_CEILING
+          XFAIL_CEILING_FILE: LINT_XFAIL_CEILING
+    env:
       OCX_TESTS_NO_REGISTRY: "1"
 
   shells:
