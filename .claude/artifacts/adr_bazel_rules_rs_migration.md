@@ -101,7 +101,7 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 
 - **One Linux `build` job** runs the Bazel unit tests (skipped on a push to `main`, where `verify-basic.yml` just ran them), then cross-builds every triple and packs the macOS/Windows unit-test bundles and the acceptance `test-bin` layouts.
 - **macOS and Windows download and execute only**: no Bazel, cargo or Rust toolchain on the runner. Unit tests run from the bundle (`task cross:test:run`, `scripts/test_bundle.py`); acceptance runs the smoke tier on native `zot` (`OCX_TEST_NATIVE_SERVICES=1`).
-- **Linux acceptance** runs in 4 shards (`task test:accept:native SHARD=i/4`) on native `zot`; an `acceptance-merge` job applies `SUITE_FLOOR`, the ceilings and the conformance floor over all shards' JUnit files together.
+- **Linux acceptance** runs in 4 shards (`task test:accept:native SHARD_COUNT=4 SHARD_INDEX=i`, `i` 0-based) on native `zot`; an `acceptance-merge` job applies `SUITE_FLOOR`, the ceilings and the conformance floor over all shards' JUnit files together.
 - **Release is unchanged**: cargo-dist builds MSVC zips.
 
 ### Consequences

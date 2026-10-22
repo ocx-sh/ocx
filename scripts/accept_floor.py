@@ -36,7 +36,7 @@ def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
 
     # Extra reports beyond the expected names are fine (the conformance file, `all.xml`).
     names = {r.name for r in reports}
-    missing = [f"shard-{i}-of-{expect_shards}.xml" for i in range(1, expect_shards + 1)]
+    missing = [f"shard-{i}-of-{expect_shards}.xml" for i in range(expect_shards)]
     missing = [m for m in missing if m not in names]
     if missing:
         print(f"accept floor: missing shard report(s) under {junit}: {', '.join(missing)}", file=sys.stderr)
@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--junit", type=Path, required=True)
     parser.add_argument("--limits-dir", type=Path, default=REPO_ROOT / "test")
     parser.add_argument(
-        "--expect-shards", type=int, default=0, metavar="N", help="require shard-1-of-N.xml .. shard-N-of-N.xml"
+        "--expect-shards", type=int, default=0, metavar="N", help="require shard-0-of-N.xml .. shard-<N-1>-of-N.xml"
     )
     args = parser.parse_args(argv)
     return run(args.junit, args.limits_dir, args.expect_shards)

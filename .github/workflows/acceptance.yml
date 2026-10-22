@@ -76,7 +76,7 @@ jobs:
             *) echo "::error::binary must be 'build' or 'artifact:<name>', got '$BINARY'"; exit 1 ;;
           esac
           {
-            echo "shards=[$(seq -s, 1 "$SHARD_COUNT")]"
+            echo "shards=[$(seq -s, 0 "$((SHARD_COUNT - 1))")]"
             echo "build=$build"
             echo "artifact=$artifact"
           } >> "$GITHUB_OUTPUT"
@@ -133,7 +133,7 @@ jobs:
           retention-days: 1
 
   shard:
-    name: Acceptance (${{ inputs.os }}, shard ${{ matrix.shard }}/${{ inputs.shard-count }})
+    name: Acceptance (${{ inputs.os }}, shard-${{ matrix.shard }}-of-${{ inputs.shard-count }})
     needs: [plan, binary]
     # `binary` is skipped for `binary: artifact:<name>`; anything else but success stops the shards.
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.binary.result) }}
@@ -249,9 +249,9 @@ jobs:
         # same. Fails closed: any value but empty or `0` arms the gate.
         env:
           __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
-          SHARD: ${{ matrix.shard }}
+          SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard-count }}
-        run: task test:accept:native SHARD="$SHARD/$SHARD_COUNT"
+        run: task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"
       - name: Stop native registries
         if: ${{ always() }}
         run: task test:services:native:stop

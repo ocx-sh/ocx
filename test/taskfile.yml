@@ -358,24 +358,29 @@ tasks:
   accept:native:
     desc: >-
       Acceptance suite (or one shard) against the prebuilt test/bin/ binaries, no
-      Bazel call: `task test:accept:native SHARD=3/40`. One JUnit file per run
-      under target/accept/junit/.
+      Bazel call: `task test:accept:native SHARD_COUNT=40 SHARD_INDEX=3`. One JUnit
+      file per run under target/accept/junit/.
     summary: |
       For CI runners that only download the binaries (SKIP_BUILD semantics) and
       for the native-services path (`OCX_TEST_NATIVE_SERVICES=1`, see
       `services:native:start`). Modules come from `scripts/accept_shard.py`, the
-      selector `bazel:test:accept SHARD=` uses, so both paths run the same slice.
-      xdist with `--dist loadgroup`, like `parallel`. Floors are not evaluated
-      here (a shard is a subset): run `task test:accept:floor` over the merged
+      selector `bazel:test:accept SHARD_COUNT= SHARD_INDEX=` uses, so both paths
+      run the same slice (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one
+      variable without the other is refused). With neither, pytest selects as it
+      does anywhere: every module, or only the ones named after `--`. xdist with
+      `--dist loadgroup`, like `parallel`. Floors are not evaluated here (a shard
+      is a subset): run `task test:accept:floor` over the merged
       `target/accept/junit/`.
     vars:
       SHARD_MODULES:
         # No pipe: a failing selector must fail the task, not run pytest over the default testpath.
+        # Without a shard variable nothing is listed, so pytest's own selection applies: the
+        # `testpaths`, or the modules named after `--`.
         sh: |-
-          m=$(python3 {{toSlash .ROOT_DIR}}/scripts/accept_shard.py --format paths {{if .SHARD}}--shard {{.SHARD}}{{end}}) || exit 1
+          {{if or .SHARD_COUNT .SHARD_INDEX}}m=$(python3 {{toSlash .ROOT_DIR}}/scripts/accept_shard.py --format paths {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}} {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}) || exit 1
           [ -n "$m" ] || { echo "accept:native: empty module selection" >&2; exit 1; }
-          echo $m
-      JUNIT_NAME: '{{if .SHARD}}shard-{{.SHARD | replace "/" "-of-"}}{{else}}all{{end}}'
+          echo $m{{else}}true{{end}}
+      JUNIT_NAME: '{{if .SHARD_COUNT}}shard-{{.SHARD_INDEX}}-of-{{.SHARD_COUNT}}{{else}}all{{end}}'
       JUNIT_DIR: '{{toSlash .ROOT_DIR}}/target/accept/junit'
     cmds:
       # Stale shard files would be merged by `accept:floor`; KEEP_JUNIT=1 keeps them to collect several local shards.
@@ -395,7 +400,7 @@ tasks:
     requires:
       vars: [JUNIT_DIR]
     cmds:
-      # EXPECT_SHARDS=N also requires shard-1-of-N.xml … shard-N-of-N.xml.
+      # EXPECT_SHARDS=N also requires shard-0-of-N.xml … shard-<N-1>-of-N.xml.
       - python3 {{toSlash .ROOT_DIR}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}
       - python3 {{toSlash .ROOT_DIR}}/scripts/conformance_floor.py --junit {{.JUNIT_DIR}}
 
