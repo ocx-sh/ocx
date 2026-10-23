@@ -109,12 +109,17 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
         };
     }
 
+    // A pre-release never cascades into a stable alias or `latest`, so it cannot block one.
     // `take_while` relies on `Ord` clustering a variant's versions together.
     let mut current = version.clone();
     let mut levels = Vec::with_capacity(targets.len());
     for target in targets {
         levels.push(CascadeLevel {
-            blockers: others.range((Excluded(&current), Excluded(&target))).cloned().collect(),
+            blockers: others
+                .range((Excluded(&current), Excluded(&target)))
+                .filter(|v| !v.has_prerelease())
+                .cloned()
+                .collect(),
             target: target.clone(),
         });
         current = target;
@@ -123,6 +128,7 @@ pub fn decompose(version: &Version, others: &BTreeSet<Version>) -> CascadeDecomp
     let latest_blockers: Vec<Version> = others
         .range((Excluded(&current), Unbounded))
         .take_while(|v| v.variant() == version.variant())
+        .filter(|v| !v.has_prerelease())
         .cloned()
         .collect();
 
@@ -408,6 +414,29 @@ mod tests {
         let (versions, is_latest) = cascade(&v, vec![Version::new_patch(1, 7, 4)]);
         assert_eq!(versions, vec![v, Version::new_patch(1, 7, 3)]);
         assert!(!is_latest);
+    }
+
+    #[test]
+    fn cascade_higher_prereleases_do_not_block_stable() {
+        let v = Version::new_build(0, 1, 0, "20261023165815");
+        let (versions, is_latest) = cascade(
+            &v,
+            vec![
+                Version::new_prerelease(0, 1, 1, "canary"),
+                Version::new_prerelease_with_build(0, 1, 1, "canary", "20261023"),
+                Version::new_prerelease(1, 0, 0, "rc"),
+            ],
+        );
+        assert_eq!(
+            versions,
+            vec![
+                v,
+                Version::new_patch(0, 1, 0),
+                Version::new_minor(0, 1),
+                Version::new_major(0),
+            ]
+        );
+        assert!(is_latest);
     }
 
     #[test]
