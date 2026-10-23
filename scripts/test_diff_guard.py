@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Refuse a diff that changes what the acceptance suite asserts.
+"""Refuse a crate-split diff that changes what the acceptance suite asserts.
 
     scripts/test_diff_guard.py <base>..<head> [--allow test/tests/<file>.py:<line>]... [--tiered-shapes]
+
+Scope: ranges of the crate split, and nothing else. It is not part of `task verify`,
+and a range outside the split — the rules_rs migration edits the harness under `test/`
+on purpose — is not what it judges.
 
 Proofs: scripts/tests/test_test_diff_guard.py
 
@@ -27,8 +31,8 @@ unmodified at every commit. So under `test/` a merge may only
   - change a `test/` file that a taskfile invokes — tooling the repo drives,
     not part of the pytest proof this guard freezes. `test/scripts/*.sh` is
     the case: `task test:index-conformance-drift` runs
-    `sync_index_conformance.sh` and `verify-deep.yml` runs that task, so the
-    "neither collected, imported nor run" rule below was false for it and
+    `sync_index_conformance.sh` and `deep-repo.yml` (called by `verify-deep.yml`)
+    runs that task, so the "neither collected, imported nor run" rule below was false for it and
     forbade ever maintaining it. A file the collected suite *names* stays
     frozen even when a task also runs it, so this cannot thaw
     `test/docker-compose.yml`,
@@ -1462,8 +1466,8 @@ def check_relocation_only(
         #
         # Below that, "neither collected, imported nor run" was simply false
         # for `test/scripts/*.sh`: `task test:index-conformance-drift` executes
-        # `sync_index_conformance.sh` and `verify-deep.yml` runs that task, so
-        # the relocation-only rule — calibrated for an inert data asset that
+        # `sync_index_conformance.sh` and `deep-repo.yml` (called by
+        # `verify-deep.yml`) runs that task, so the relocation-only rule — calibrated for an inert data asset that
         # merely carries crate paths the split moves — forbade ever maintaining
         # a live script. The fix for a days-old CI red arrived as ten hunks and
         # could not land; `--allow` is line-scoped and one-for-one, so it

@@ -170,12 +170,11 @@ CRATES_DOC_TEST_TARGETS = 22
 """One `rust_doc_test(name = "<crate>_doc_test")` per crate with a `src/lib.rs`
 — every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 22, not only
 the crates carrying a fence today, so a crate's first doctest is run with no
-BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so like
-the seam twin these have no nextest suite: each holds its own
-`crates/TEST_TARGET_MAP.toml` row, the drift reader's parity counts
-`rust_doc_test` beside `rust_test` and `sh_test`, and `bazel_test_floor.py`'s
-skip ceiling leaves them out — an `ignore` fence is documentation, not a skipped
-test (C-034)."""
+BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so these
+have no nextest suite, and a passing one writes an empty `test.log`, so they have
+no `crates/TEST_TARGET_MAP.toml` row either: the drift reader's row parity counts
+`rust_test` and `sh_test` only, and `bazel_test_floor.py` gates them by exit status
+and by `CRATES_DOC_TEST_TARGETS` having run."""
 
 CRATES_BINARY_TARGETS = 4
 """`ocx_schema:ocx_schema_bin`, built so the schema consumers (its own
@@ -589,10 +588,10 @@ def build_drift(
     comparison — skipping it silently is precisely what makes the widened scope
     vacuous for the edges it was widened to cover.
 
-    `rust_test_targets_read` is every test-kind rule the reader counted —
-    `rust_test`, the `sh_test` seam twin and the `rust_doc_test` targets
-    (`CRATES_DOC_TEST_TARGETS`) — because each is a `crates/TEST_TARGET_MAP.toml`
-    row. A doctest target whose row is missing reds `drift-map-parity` here.
+    `rust_test_targets_read` is every map-row test rule the reader counted —
+    `rust_test` and the `sh_test` seam twin — because each is a
+    `crates/TEST_TARGET_MAP.toml` row. A `rust_doc_test` has none: it is gated by
+    exit status.
     """
     findings: list[Finding] = []
 

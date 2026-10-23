@@ -40,10 +40,9 @@ toolchains.toolchain(
 )
 use_repo(toolchains, "default_rust_toolchains")
 
+# Unpatched on purpose: `rust_doc_test` keeps rules_rust's
+# `--discard-stdout-on-success`, so doctests are gated by exit status alone.
 rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
-rules_rust.patch(
-    patches = ["//patches:rules_rust_keep_doctest_stdout.patch"],
-)
 use_repo(rules_rust, "rules_rust")
 
 register_toolchains(

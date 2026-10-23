@@ -89,10 +89,12 @@ tasks:
     cmd: python3 scripts/suite_census.py --check
 
   test-diff-guard:
-    desc: Refuse a diff that changes what the acceptance suite asserts — merge-base(origin/main)..HEAD, plus RANGE=<base>..<tip> when given
+    desc: Refuse a crate-split diff that changes what the acceptance suite asserts — merge-base(origin/main)..HEAD, plus RANGE=<base>..<tip> when given
     summary: |
       The merge predicate's guard (plan_crate_split_workspace.md C-077,
-      DX-17), run over BOTH ranges each merge:
+      DX-17), run over BOTH ranges each merge. It judges crate-split ranges
+      only: a range outside the split, such as the rules_rs migration, edits
+      the harness under `test/` on purpose and is not what it checks.
 
         task scripts:test-diff-guard                      # merge-base(origin/main)..HEAD
         task scripts:test-diff-guard BASE=<sha>           # <sha>..HEAD instead of the merge base

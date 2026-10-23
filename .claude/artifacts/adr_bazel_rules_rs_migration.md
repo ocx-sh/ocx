@@ -29,7 +29,7 @@ Release stays on cargo-dist (MSVC zips, auditable, CycloneDX, `scan-binaries`). 
 - Delete the repin / lockfile / BUILD-hiding machinery.
 - A hermetic C toolchain, so a host's `gcc` and `libstdc++` stop being inputs.
 - One Linux job builds every target; native runners only execute.
-- Hold every existing gate: clippy and rustdoc ratchets, doctest counts, `SUITE_FLOOR`.
+- Hold every existing gate: clippy and rustdoc ratchets, doctests by exit status, `SUITE_FLOOR`.
 
 ## Industry Context & Research
 
@@ -49,7 +49,7 @@ Release stays on cargo-dist (MSVC zips, auditable, CycloneDX, `scan-binaries`). 
 
 | Pros | Cons |
 |------|------|
-| No lockfile beyond `MODULE.bazel.lock`; hermetic linker; cross-compiles every triple | Pre-1.0, weekly releases (exact pins, bump rules_rs and llvm together); a doctest patch; four Bazel-only crate features |
+| No lockfile beyond `MODULE.bazel.lock`; hermetic linker; cross-compiles every triple | Pre-1.0, weekly releases (exact pins, bump rules_rs and llvm together); doctests gated by exit status, not counted; four Bazel-only crate features |
 
 ### Option 3: rules_rs crate resolution with the system C toolchain
 
@@ -73,7 +73,7 @@ Branch `spike/rules-rs`, WSL2 x86_64, Bazel 9.2.0, Rust 1.95.0. Baseline: `34852
 | 4 | `package =` renames | Pass | `rustls-pki-types`, `sha2_oid` compile as-is |
 | 5 | Feature parity vs `cargo metadata` | Partial | 388 of 392 third-party crates identical; 4 Bazel-only extras (below) |
 | 6 | Clippy / rustdoc ratchets | Pass | clippy 169 diagnostics over 41 keys, identical to baseline; rustdoc 63 over 53; seeded warning red (+1), reverted green, for both |
-| 7 | Tests and doctests | Pass for unit tests (partial in the spike) | 65/65 test targets, 9350 cases in 43 targets, identical to baseline; 22 doctest targets, 39 doctests, identical, after the doctest patch; seeded `assert_eq!(1, 2)` goes red. Acceptance was not run in the spike; it runs in CI (below) |
+| 7 | Tests and doctests | Pass for unit tests (partial in the spike) | 65/65 test targets, 9350 cases in 43 targets, identical to baseline; 22 doctest targets pass, 39 doctests with the stdout patch the spike then used (since dropped, Finding A); seeded `assert_eq!(1, 2)` goes red. Acceptance was not run in the spike; it runs in CI (below) |
 | 8 | Cold build <= 1.3x | Pass | 176 s (3221 actions) against 218 s (2066 actions, includes the repin) = 0.81x; fresh output base on a warm disk cache 20 s, 2066/2066 hits |
 
 ### Feature parity: 388/392
@@ -82,7 +82,7 @@ The four Bazel-only extras are `getrandom 0.4.3` (`std`, `sys_rng`), `portable-a
 
 ### Findings
 
-- **A. Doctests print nothing.** `rust_doc_test` in the fork runs the doctest as a build action and passes `--discard-stdout-on-success`, so a passing target writes an empty `test.log` and `bazel_test_floor.py` cannot count doctests. `patches/rules_rust_keep_doctest_stdout.patch` removes the flag; counts then sit in `bazel-bin/crates/<p>/<t>_doc_test.stdout`. Candidate upstream issue against `hermeticbuild/rules_rust`.
+- **A. Doctests print nothing, and that is accepted.** `rust_doc_test` in the fork runs the doctest as a build action and passes `--discard-stdout-on-success`, so a passing target writes an empty `test.log` and no per-doctest count can be read. The spike patched the flag out; the patch is dropped. hermeticbuild/rules_rust added the flag on purpose (completion-order output changed the replay cache key), so removing it upstream would be rejected and carrying the patch means re-checking it on every rules_rs bump. **The rule:** the 22 `rust_doc_test` targets are gated by exit status alone. `bazel_test_floor.py` reds on a doctest target that failed or is missing from the run, `bazel:build:drift` reds on a library with no doctest target or one whose `crate_features` differ, and `crates/TEST_TARGET_MAP.toml` holds no doctest row. A doctest turned into an `ignore` fence or deleted is no longer a red; review catches it.
 - **B. `all_crate_deps` already returns workspace path deps** as `//crates/X`; a hand-written duplicate fails analysis ("Label ... is duplicated"). It also has no `proc_macro*` arguments.
 - **C. Port-script hazard.** A scripted BUILD port stripped `//crates/ocx_test_support:data` from `data` lists and broke four tests; only bare or self-named labels may be removed.
 - **D. Fresh worktrees** need `task website:schema:default` before `bazel build //...` (the `//test:test_schema` input), unrelated to rules_rs.
@@ -119,7 +119,6 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 
 **Risks:**
 - rules_rs is pre-1.0 with roughly weekly releases. Exact pins; Renovate bumps `rules_rs` and `llvm` together; `build:drift` guards feature drift.
-- The doctest patch must be re-checked on each rules_rs bump.
 
 ## Question -> research -> decision: "acceptance runs twice"
 

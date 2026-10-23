@@ -185,14 +185,13 @@ DEP_LABEL_PREFIX = ("@crates//", "//crates/")
 # `ocx_cli:ocx_cli_seam_test`: it runs `ocx_cli_test`'s own binary under a
 # poisoned environment rather than compiling the crate a second time, and it
 # still carries a row (and a floored case count) of its own. `rust_doc_test` is
-# the one `<crate>_doc_test` per library crate (plan_bazel_cargo_port.md C-030):
-# `bazel:test:unit` runs and floors it like any other test target, so it needs a
-# row, and a doctest target added without one reds `drift-map-parity`.
-TEST_RULE_KINDS = frozenset({"rust_test", "sh_test", "rust_doc_test"})
+# not a row: a passing one writes an empty `test.log`, so `bazel_test_floor.py`
+# judges it by exit status and has no count to floor.
+TEST_RULE_KINDS = frozenset({"rust_test", "sh_test"})
 
-#: The map rows `sample_tree()`'s universe needs: every `rust_test` plus one
-#: `rust_doc_test` per lib. No `sh_test` twin — the fixture has none.
-SAMPLE_TEST_ROWS = CRATES_TEST_TARGETS + CRATES_DOC_TEST_TARGETS
+#: The map rows `sample_tree()`'s universe needs: every `rust_test`. No `sh_test`
+#: twin — the fixture has none — and no row for its `rust_doc_test` targets.
+SAMPLE_TEST_ROWS = CRATES_TEST_TARGETS
 
 
 @dataclasses.dataclass
@@ -715,7 +714,8 @@ def _rule(
 def sample_tree() -> tuple[str, dict]:
     """A synthetic tree with this repository's real shape: `CRATE_PACKAGES`
     packages, `DRIFT_TARGET_FLOOR` rule targets, `CRATES_TEST_TARGETS` of them
-    `rust_test` and `CRATES_DOC_TEST_TARGETS` `rust_doc_test` (one per lib), and
+    `rust_test` and `CRATES_DOC_TEST_TARGETS` `rust_doc_test` (one per lib, no
+    map row), and
     a Cargo side that agrees with all of it.
 
     The shape is copied because two of its irregularities are the ones a
@@ -920,7 +920,7 @@ def prove_readers(text: str, metadata: dict) -> int:
     expect(read.orphan_rules == 0, "a well-formed fixture must produce no orphan rules")
     print(
         f"reader GREEN: {len(read.packages)} packages, {read.targets} rule targets, "
-        f"{read.rust_tests} test-kind (rust_test + rust_doc_test), 0 orphan rules"
+        f"{read.rust_tests} map-row test targets (rust_test; rust_doc_test has no row), 0 orphan rules"
     )
     checks += 1
 
@@ -1203,9 +1203,10 @@ def prove_floors(text: str, metadata: dict) -> int:
     print(f"C-010 RED  : {parity[0].message}")
     checks += 1
 
-    # C-033: a `rust_doc_test` is a map row like any test target. Drop one from
-    # the graph and the unchanged row count no longer matches — the reader
-    # counted it, so a doctest target added without a row reds the same way.
+    # A `rust_doc_test` is no map row: it is gated by exit status, with no count to
+    # floor. Dropping one from the graph moves the rule-target tally and the
+    # library walk, and leaves the test-row tally and the row parity alone — a
+    # reader still counting doctests as rows would red `drift-map-parity` here.
     victim = f"crates/{LEAF}"
     head, blocks = _records(text)
     doc_block = next(
@@ -1214,18 +1215,26 @@ def prove_floors(text: str, metadata: dict) -> int:
         if block.startswith(f"{victim}/") and f'name = "{LEAF}_doc_test"' in block
     )
     no_doc = head + "".join("# /abs/path/" + block for block in blocks if block is not doc_block)
+    dropped_read = read_build_output(no_doc)
     expect(
-        read_build_output(no_doc).rust_tests == SAMPLE_TEST_ROWS - 1,
+        f"//{victim}:{LEAF}_doc_test" not in dropped_read.doc_tests,
         "the doctest drop did not land in the text the reader reads",
     )
+    expect(
+        dropped_read.rust_tests == SAMPLE_TEST_ROWS,
+        f"a doctest target was counted as a map row: {dropped_read.rust_tests} test rows",
+    )
     doc_parity = check_drift(build_text=no_doc, metadata=metadata, **baseline)
-    expect("drift-map-parity" in codes(doc_parity), f"got {codes(doc_parity)}")
-    print(f"C-033 RED  : {next(f for f in doc_parity if f.code == 'drift-map-parity').message}")
+    expect("drift-map-parity" not in codes(doc_parity), f"got {codes(doc_parity)}")
+    print(
+        f"C-033 GREEN: dropping a rust_doc_test leaves {dropped_read.rust_tests} map-row test "
+        f"targets and no drift-map-parity; the graph walks name it instead ({codes(doc_parity)})"
+    )
     checks += 1
 
     # A library with no doctest target at all. The doctest rule is re-kinded
-    # rather than dropped, and its map row dropped too, so the target floor and
-    # row parity both hold: only the library walk can see what is missing.
+    # rather than dropped, so the target floor and row parity both hold: only
+    # the library walk can see what is missing.
     expect(not doctest_missing(read_build_output(text)), "every fixture lib must have a doctest")
     rekinded = head + "".join(
         "# /abs/path/" + (block.replace("rust_doc_test(", "filegroup(") if block is doc_block else block)
@@ -1235,12 +1244,7 @@ def prove_floors(text: str, metadata: dict) -> int:
         f"//{victim}:{LEAF}_doc_test" not in read_build_output(rekinded).doc_tests,
         "the re-kinded doctest did not land in the text the reader reads",
     )
-    missing = check_drift(
-        build_text=rekinded,
-        metadata=metadata,
-        label_map=FIXTURE_MAP,
-        test_map_rows=SAMPLE_TEST_ROWS - 1,
-    )
+    missing = check_drift(build_text=rekinded, metadata=metadata, **baseline)
     expect(codes(missing) == ["drift-doctest-missing"], f"got {codes(missing)}")
     expect(f"//{victim}:{LEAF} " in missing[0].message, f"names the wrong lib: {missing[0].message}")
     print(f"C-030 RED  : {missing[0].message[:160]}")

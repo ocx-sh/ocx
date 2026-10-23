@@ -92,6 +92,15 @@ the log's tail as its failure. Same for a target whose log parses clean while th
 build event stream reports it FAILED: the publisher's report must not be quieter
 than the run.
 
+**Doctests are judged by exit status, not read.** rules_rust runs a `rust_doc_test` as a
+build action with `--discard-stdout-on-success`, so a passing target writes an empty
+`test.log` and there is no libtest summary to count (accepted: re-enabling the stdout
+would need a patch to hermeticbuild/rules_rust, which added the flag so completion-order
+output cannot change the replay cache key). `doctest_findings` therefore asks two things
+of the `rust_doc_test` targets the stream names: that `CRATES_DOC_TEST_TARGETS` of them
+ran, and that Bazel passed each one. They carry no `TEST_TARGET_MAP.toml` row, count
+towards no ceiling, and do not appear in `--junit`.
+
 Stdlib only (plan DEC-8) — `xml.etree.ElementTree` writes the report, because a
 hand-rolled emitter is exactly the escaping bug `quality-core.md` § "Don't Own
 Non-Domain Code" keeps as its worked example.
@@ -123,8 +132,9 @@ from bazel_gate_proofs import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-#: One row per test target: every `rust_test`, the seam twin, and every doctest target.
-MAP_ROWS = CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS + CRATES_DOC_TEST_TARGETS
+#: One row per target whose `test.log` carries a libtest summary: every `rust_test` and
+#: the seam twin. Doctest targets have no row (`DOC_TEST_KIND`).
+MAP_ROWS = CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS
 TEST_TARGET_MAP = REPO_ROOT / "crates" / "TEST_TARGET_MAP.toml"
 CEILING_FILE = REPO_ROOT / "crates" / "NEXTEST_SKIP_CEILING"
 
@@ -174,16 +184,13 @@ XML_FORBIDDEN = re.compile(
 PASSING_STATUS = frozenset({"PASSED", "FLAKY"})
 
 #: The BEP's `targetConfigured.targetKind` for a `rust_doc_test` — measured on
-#: bazel 9.2.0, which spells a `rust_test` as `rust_test rule`. The skip ceiling
-#: leaves these targets out (plan_bazel_cargo_port.md C-034): an `ignore` fence is
-#: documentation that rustdoc reports as `ignored`, not a `#[ignore]`d test or a
-#: `--skip` filter, which are what `crates/NEXTEST_SKIP_CEILING` bounds. The
-#: standing guard against a doctest going quiet is the per-target `executed`
-#: floor above: turning a runnable doctest into an `ignore` fence drops
-#: `executed`, which `floor_findings` catches like any other shrink. C-031 was
-#: only the one-time comparison run at the cargo → Bazel port, not an ongoing
-#: check. Keyed on the kind Bazel reports, never the `_doc_test` label suffix,
-#: so a `rust_test` that happens to share the suffix stays under the ceiling.
+#: bazel 9.2.0, which spells a `rust_test` as `rust_test rule`. A passing doctest
+#: target writes an empty `test.log`, so these targets never reach the log readers:
+#: `split_doc_tests` sets them apart and `doctest_findings` judges their exit status.
+#: Keyed on the kind Bazel reports, never the `_doc_test` label suffix, so a
+#: `rust_test` that happens to share the suffix is still counted. A label the stream
+#: gave no kind is read like a `rust_test` and fails loud on its empty log rather than
+#: escaping the floor.
 DOC_TEST_KIND = "rust_doc_test rule"
 
 READER_MSG = (
@@ -206,7 +213,16 @@ SHRANK_MSG = (
 )
 CEILING_MSG = (
     "bazel test ceiling: {ignored} `#[ignore]`d case(s) across {targets} target(s) exceeds "
-    "crates/NEXTEST_SKIP_CEILING ({ceiling}); {doc_tests} rust_doc_test target(s) left out"
+    "crates/NEXTEST_SKIP_CEILING ({ceiling})"
+)
+DOCTEST_READER_MSG = (
+    "bazel test floor read {read} rust_doc_test target(s) from the build event stream and "
+    "scripts/bazel_gate_proofs.py floors at {floor} — a doctest target that did not run is "
+    "not a doctest target that passed, and an exit code cannot say which crate lost its doctests"
+)
+DOCTEST_RED_MSG = (
+    "bazel test floor: {label} is a rust_doc_test target and Bazel reported {status} for it. "
+    "Doctests are gated by exit status alone; the failing output is in {log}"
 )
 EMPTY_MSG = (
     "bazel test floor: {path} holds no `testResult` event. An export of nothing is the one "
@@ -402,8 +418,9 @@ def _read_log(path: Path) -> str:
 
 
 def read_results(bep: Path) -> tuple[dict[str, Counts], list[Finding]]:
-    """`{label: Counts}` over every `TestResult` in `bep`, plus per-target read failures."""
-    return count_results(read_runs(bep))
+    """`{label: Counts}` over every non-doctest `TestResult` in `bep`, plus per-target
+    read failures."""
+    return count_results(split_doc_tests(read_runs(bep))[0])
 
 
 def count_results(runs: dict[str, Run]) -> tuple[dict[str, Counts], list[Finding]]:
@@ -477,36 +494,46 @@ def floor_findings(
     return findings
 
 
-def ceiling_findings(
-    observed: dict[str, Counts], ceiling: int, doc_tests: frozenset[str] = frozenset()
-) -> list[Finding]:
+def ceiling_findings(observed: dict[str, Counts], ceiling: int) -> list[Finding]:
     """C-013 in Bazel's currency. A cache hit replays the target's `test.log`, so the
     ignored count is the test binary's own and cannot move with cache warmth — which is
-    the property the nextest arm buys by never reading a run artifact at all.
-
-    `doc_tests` are left out (`DOC_TEST_KIND`, C-034). A label absent from the stream's
-    `targetConfigured` events has no kind and is counted: an unknown kind stays under
-    the ceiling rather than escaping it."""
-    judged = {label: counts for label, counts in observed.items() if label not in doc_tests}
-    ignored = sum(counts.ignored for counts in judged.values())
+    the property the nextest arm buys by never reading a run artifact at all."""
+    ignored = sum(counts.ignored for counts in observed.values())
     if ignored > ceiling:
         return [
             Finding(
                 "ceiling",
-                CEILING_MSG.format(
-                    ignored=ignored,
-                    targets=len(judged),
-                    ceiling=ceiling,
-                    doc_tests=len(observed) - len(judged),
-                ),
+                CEILING_MSG.format(ignored=ignored, targets=len(observed), ceiling=ceiling),
             )
         ]
     return []
 
 
-def doc_test_labels(runs: dict[str, Run]) -> frozenset[str]:
-    """The labels the stream itself calls `rust_doc_test`."""
-    return frozenset(label for label, run in runs.items() if run.kind == DOC_TEST_KIND)
+def split_doc_tests(runs: dict[str, Run]) -> tuple[dict[str, Run], dict[str, Run]]:
+    """`(runs libtest can be read from, runs the stream itself calls rust_doc_test)`."""
+    docs = {label: run for label, run in runs.items() if run.kind == DOC_TEST_KIND}
+    return {label: run for label, run in runs.items() if label not in docs}, docs
+
+
+def doctest_findings(docs: dict[str, Run]) -> list[Finding]:
+    """The whole doctest gate: enough targets ran, and Bazel passed each of them."""
+    findings: list[Finding] = []
+    if len(docs) < CRATES_DOC_TEST_TARGETS:
+        findings.append(
+            Finding(
+                "doctest-reader",
+                DOCTEST_READER_MSG.format(read=len(docs), floor=CRATES_DOC_TEST_TARGETS),
+            )
+        )
+    for label, run in docs.items():
+        if run.status not in PASSING_STATUS:
+            findings.append(
+                Finding(
+                    "doctest-red",
+                    DOCTEST_RED_MSG.format(label=label, status=run.status or "no status", log=run.log),
+                )
+            )
+    return findings
 
 
 def read_ceiling(path: Path) -> int:
@@ -631,7 +658,7 @@ def run_check(bep: Path, junit: Path | None = None) -> int:
     if not bep.is_file() or bep.stat().st_size == 0:
         print(EMPTY_MSG.format(path=bep), file=sys.stderr)
         return 1
-    runs = read_runs(bep)
+    runs, docs = split_doc_tests(read_runs(bep))
     observed, findings = count_results(runs)
     if not observed and not findings:
         print(EMPTY_MSG.format(path=bep), file=sys.stderr)
@@ -639,8 +666,8 @@ def run_check(bep: Path, junit: Path | None = None) -> int:
     rows = read_rows(TEST_TARGET_MAP)
     findings += floor_findings(observed, rows)
     ceiling = read_ceiling(CEILING_FILE)
-    doc_tests = doc_test_labels(runs)
-    findings += ceiling_findings(observed, ceiling, doc_tests)
+    findings += ceiling_findings(observed, ceiling)
+    findings += doctest_findings(docs)
     if junit is not None:
         written, junit_findings = write_junit(junit, runs, observed)
         findings += junit_findings
@@ -653,15 +680,14 @@ def run_check(bep: Path, junit: Path | None = None) -> int:
                 f"written to {junit}"
             )
     if not findings:
-        fences = sum(observed[label].ignored for label in doc_tests if label in observed)
         print(
             f"bazel test floor: {len(observed)} test target(s) under //crates/... reported "
             f"{sum(c.executed for c in observed.values())} executed case(s), "
-            f"{sum(c.ignored for c in observed.values()) - fences} ignored against the "
-            f"ceiling of {ceiling}, {fences} doctest `ignore` fence(s) across "
-            f"{len(doc_tests)} rust_doc_test target(s) left out of it, "
+            f"{sum(c.ignored for c in observed.values())} ignored against the "
+            f"ceiling of {ceiling}, "
             f"{sum(c.filtered for c in observed.values())} filtered out — every one of "
-            f"{len(rows)} recorded targets at or above its count"
+            f"{len(rows)} recorded targets at or above its count; "
+            f"{len(docs)} rust_doc_test target(s) passed by exit status"
         )
     return report(findings)
 
@@ -719,9 +745,9 @@ def _log(
 
 
 def _fixture_kind(label: str) -> str:
-    """The kind a fixture label is configured as. C-030 names every doctest target
-    `<crate>_doc_test`, so the suffix is what tells the live map's rows apart here; the
-    reader itself only ever trusts the stream's `targetKind`."""
+    """The kind a fixture label is configured as. Every doctest target is named
+    `<crate>_doc_test`, so the suffix is what tells a fixture's doctest targets apart
+    here; the reader itself only ever trusts the stream's `targetKind`."""
     return DOC_TEST_KIND if label.endswith("_doc_test") else "rust_test rule"
 
 
@@ -730,6 +756,7 @@ def _bep(
     entries: dict[str, str],
     *,
     status: str = "PASSED",
+    statuses: dict[str, str] | None = None,
     kinds: dict[str, str] | None = None,
 ) -> Path:
     """A build event stream carrying one `TestResult` per entry, and the noise a real one
@@ -761,7 +788,7 @@ def _bep(
                 {
                     "id": {"testResult": {"label": label, "run": 1, "shard": 1, "attempt": 1}},
                     "testResult": {
-                        "status": status,
+                        "status": (statuses or {}).get(label, status),
                         "testAttemptDuration": "0.051s",
                         "cachedLocally": True,
                         "testActionOutput": [
@@ -785,11 +812,15 @@ def _fixture(
     name: str = "bep.json",
     folder: str = "logs",
     mangled: frozenset[str] = frozenset(),
+    doc_targets: int = CRATES_DOC_TEST_TARGETS,
+    doc_statuses: dict[str, str] | None = None,
 ) -> Path:
-    """The live map, replayed as a stream that satisfies it exactly. Built from the real
-    rows so the green leg is a statement about *this* tree rather than about an invented
-    universe that can drift away from it. `mangled` names the labels whose per-case lines
-    the reader must fail on while their summary still parses."""
+    """The live map, replayed as a stream that satisfies it exactly, plus `doc_targets`
+    passing doctest targets whose `test.log` is empty — what `--discard-stdout-on-success`
+    leaves. Built from the real rows so the green leg is a statement about *this* tree
+    rather than about an invented universe that can drift away from it. `mangled` names
+    the labels whose per-case lines the reader must fail on while their summary still
+    parses; `doc_statuses` overrides a doctest target's status."""
     entries = {
         row.label: _log(
             work / folder / row.label.replace("//", "").replace(":", "/") / "test.log",
@@ -800,7 +831,22 @@ def _fixture(
         )
         for row in rows
     }
-    return _bep(work / name, entries)
+    for index in range(doc_targets):
+        label = _doc_label(index)
+        log = work / folder / "doc" / str(index) / "test.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("", encoding="utf-8")
+        entries[label] = log.as_uri()
+    return _bep(work / name, entries, statuses=doc_statuses)
+
+
+def _doc_label(index: int) -> str:
+    return f"//crates/doc{index:02d}:doc{index:02d}_doc_test"
+
+
+def _units(bep: Path) -> dict[str, Run]:
+    """The runs a fixture stream holds that libtest can be read from."""
+    return split_doc_tests(read_runs(bep))[0]
 
 
 def prove_floor(work: Path, rows: list[Row]) -> int:
@@ -809,17 +855,14 @@ def prove_floor(work: Path, rows: list[Row]) -> int:
     ceiling = read_ceiling(CEILING_FILE)
 
     bep = _fixture(work, rows)
-    runs = read_runs(bep)
-    observed, read_findings = count_results(runs)
+    observed, read_findings = read_results(bep)
     expect(not read_findings, f"the green fixture must read cleanly, got {codes(read_findings)}")
     expect(
         len(observed) == len(rows) == MAP_ROWS,
         f"the fixture must carry all {MAP_ROWS} targets, it carries {len(observed)}",
     )
     total = sum(counts.executed for counts in observed.values())
-    findings = floor_findings(observed, rows) + ceiling_findings(
-        observed, ceiling, doc_test_labels(runs)
-    )
+    findings = floor_findings(observed, rows) + ceiling_findings(observed, ceiling)
     expect(not findings, f"the green fixture must produce no finding, got {codes(findings)}")
     print(
         f"FLOOR GREEN : {len(observed)} targets, {total} executed cases, "
@@ -887,54 +930,90 @@ def prove_floor(work: Path, rows: list[Row]) -> int:
 
 
 def prove_ceiling(work: Path, rows: list[Row]) -> int:
-    """The skip ceiling, red and green, on the same stream the floor reads — and the
-    doctest exclusion (C-034) green on the live map and red where it must not reach."""
+    """The skip ceiling, red and green, on the same stream the floor reads."""
     ceiling = read_ceiling(CEILING_FILE)
     expect(ceiling > 0, f"crates/NEXTEST_SKIP_CEILING is {ceiling} — a ceiling of 0 proves nothing")
-    runs = read_runs(_fixture(work, rows, name="ceiling-bep.json"))
-    observed, _ = count_results(runs)
-    doc_tests = doc_test_labels(runs)
-    expect(
-        len(doc_tests) == CRATES_DOC_TEST_TARGETS,
-        f"the stream must configure {CRATES_DOC_TEST_TARGETS} rust_doc_test targets, it "
-        f"configures {len(doc_tests)}",
-    )
-    live = sum(counts.ignored for label, counts in observed.items() if label not in doc_tests)
-    fences = sum(observed[label].ignored for label in doc_tests)
-    expect(
-        not ceiling_findings(observed, ceiling, doc_tests), f"{live} ignored must be under {ceiling}"
-    )
-    # The green above is only evidence of the exclusion if the doctests' `ignore` fences
-    # would have cleared the ceiling on their own terms. They do on this map.
-    expect(
-        codes(ceiling_findings(observed, ceiling)) == ["ceiling"],
-        f"{live} + {fences} ignore fences must exceed {ceiling} with no exclusion, or the "
-        "green above does not show the exclusion doing anything",
-    )
-    print(
-        f"CEILING GREEN: {live} ignored against a ceiling of {ceiling}; {fences} doctest "
-        f"`ignore` fence(s) across {len(doc_tests)} rust_doc_test target(s) left out"
-    )
+    observed, _ = read_results(_fixture(work, rows, name="ceiling-bep.json"))
+    live = sum(counts.ignored for counts in observed.values())
+    expect(not ceiling_findings(observed, ceiling), f"{live} ignored must be under {ceiling}")
+    print(f"CEILING GREEN: {live} ignored against a ceiling of {ceiling}")
 
     over = dict(observed)
-    victim = next(row.label for row in rows if row.label not in doc_tests)
+    victim = rows[0].label
     over[victim] = dataclasses.replace(observed[victim], ignored=ceiling + 1)
-    red = ceiling_findings(over, ceiling, doc_tests)
-    expect(codes(red) == ["ceiling"], f"an over-ceiling non-doctest target must red, got {codes(red)}")
+    red = ceiling_findings(over, ceiling)
+    expect(codes(red) == ["ceiling"], f"an over-ceiling target must red, got {codes(red)}")
     print(f"CEILING RED  : {red[0].message[:150]}")
 
-    # The exclusion follows the kind the stream reports, not the label: a `rust_test`
-    # that happens to be named `*_doc_test` is still judged.
+    # Doctest-ness follows the kind the stream reports, not the label: a `rust_test`
+    # that happens to be named `*_doc_test` is still read, and still judged.
     label = "//crates/demo:demo_doc_test"
     log = _log(work / "ceiling-kind" / "test.log", passed=1, ignored=ceiling + 1)
-    runs = read_runs(
-        _bep(work / "ceiling-kind.json", {label: log}, kinds={label: "rust_test rule"})
-    )
-    observed, _ = count_results(runs)
-    red = ceiling_findings(observed, ceiling, doc_test_labels(runs))
+    bep = _bep(work / "ceiling-kind.json", {label: log}, kinds={label: "rust_test rule"})
+    observed, _ = read_results(bep)
+    red = ceiling_findings(observed, ceiling)
     expect(codes(red) == ["ceiling"], f"a rust_test named *_doc_test must stay judged, got {codes(red)}")
     print(f"CEILING RED  : {label} configured as `rust_test rule` stays under the ceiling")
     return 3
+
+
+def prove_doctests(work: Path, rows: list[Row]) -> int:
+    """Doctests are gated by exit status: an empty `test.log` is green, a red or a missing
+    target is not, and the live map holds no row for one."""
+    checks = 0
+
+    # An empty log is what a passing doctest target writes. Read as a `rust_test` it is
+    # `floor-unreadable`, so this green is the proof the doctest targets are set apart.
+    bep = _fixture(work, rows, name="doc-green.json", folder="doc-green")
+    runs, docs = split_doc_tests(read_runs(bep))
+    expect(
+        len(docs) == CRATES_DOC_TEST_TARGETS and len(runs) == len(rows),
+        f"the stream must split into {len(rows)} units and {CRATES_DOC_TEST_TARGETS} doctest "
+        f"targets, it split into {len(runs)} and {len(docs)}",
+    )
+    _, read_findings = read_results(bep)
+    expect(
+        not read_findings and not doctest_findings(docs),
+        f"{len(docs)} passing doctest targets with empty logs must produce no finding, got "
+        f"{codes(read_findings + doctest_findings(docs))}",
+    )
+    expect(run_check(bep) == 0, "the live universe plus passing doctest targets must exit 0")
+    print(f"DOCTEST GREEN: {len(docs)} rust_doc_test targets passed with empty test.log files")
+    checks += 1
+
+    # One target Bazel reported red. Its log is empty here, so only the status can say so.
+    victim = _doc_label(0)
+    bep = _fixture(
+        work, rows, name="doc-red.json", folder="doc-red", doc_statuses={victim: "FAILED"}
+    )
+    _, docs = split_doc_tests(read_runs(bep))
+    red = doctest_findings(docs)
+    expect(codes(red) == ["doctest-red"], f"a failed doctest target must red alone, got {codes(red)}")
+    expect(victim in red[0].message, f"the finding must name {victim}: {red[0].message}")
+    expect(run_check(bep) == 1, "a failed doctest target must exit 1")
+    print(f"DOCTEST RED  : {red[0].message[:150]}")
+    checks += 1
+
+    # Fewer doctest targets than the graph has — a crate whose doctests silently stopped
+    # running, or a reader that lost the kind. Zero is the same fact, not a clean tree.
+    for count in (CRATES_DOC_TEST_TARGETS - 1, 0):
+        bep = _fixture(work, rows, name=f"doc-{count}.json", folder=f"doc-{count}", doc_targets=count)
+        _, docs = split_doc_tests(read_runs(bep))
+        expect(len(docs) == count, f"the mutation must land: {len(docs)} doctest targets, wanted {count}")
+        red = doctest_findings(docs)
+        expect(codes(red) == ["doctest-reader"], f"{count} doctest targets must red, got {codes(red)}")
+        expect(run_check(bep) == 1, f"{count} doctest targets must exit 1")
+    print(f"DOCTEST RED  : {red[0].message[:150]}")
+    checks += 1
+
+    # The map has no doctest row, and the doctest targets never reached it.
+    expect(
+        not any(_fixture_kind(row.label) == DOC_TEST_KIND for row in rows),
+        "crates/TEST_TARGET_MAP.toml holds a rust_doc_test row — a passing doctest has no count to floor",
+    )
+    print("DOCTEST GREEN: crates/TEST_TARGET_MAP.toml holds no rust_doc_test row")
+    checks += 1
+    return checks
 
 
 def prove_junit(work: Path, rows: list[Row]) -> int:
@@ -948,7 +1027,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
     bep = _fixture(work, rows, name="junit-bep.json")
     observed, read_findings = read_results(bep)
     expect(not read_findings, f"the green fixture must read cleanly, got {codes(read_findings)}")
-    written, findings = write_junit(reports / "unit-junit.xml", read_runs(bep), observed)
+    written, findings = write_junit(reports / "unit-junit.xml", _units(bep), observed)
     expect(not findings, f"the green fixture must emit no junit finding, got {codes(findings)}")
     document = ET.parse(reports / "unit-junit.xml")
     cases = document.findall(".//testcase")
@@ -986,7 +1065,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
     failing = _log(work / "failing" / "test.log", passed=2, failed=1)
     bep = _bep(work / "junit-fail-bep.json", {label: failing}, status="FAILED")
     observed, _ = read_results(bep)
-    written, findings = write_junit(reports / "fail.xml", read_runs(bep), observed)
+    written, findings = write_junit(reports / "fail.xml", _units(bep), observed)
     expect(not findings, f"a readable failing log must emit no junit finding, got {codes(findings)}")
     document = ET.parse(reports / "fail.xml")
     named = document.find(".//testcase[@name='fixture::fails_0']/failure")
@@ -1014,7 +1093,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
         mangled=frozenset({victim.label}),
     )
     observed, _ = read_results(bep)
-    written, red = write_junit(reports / "one-mangled.xml", read_runs(bep), observed)
+    written, red = write_junit(reports / "one-mangled.xml", _units(bep), observed)
     expect(codes(red) == ["junit-count"], f"one mangled target must red alone, got {codes(red)}")
     expect(len(red) == 1, f"one mangled target must yield one finding, got {len(red)}")
     expect(
@@ -1031,7 +1110,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
         row.label for row in rows
     ))
     observed, _ = read_results(bep)
-    written, red = write_junit(reports / "mangled.xml", read_runs(bep), observed)
+    written, red = write_junit(reports / "mangled.xml", _units(bep), observed)
     expect(
         codes(red) == ["junit-count", "junit-empty"],
         f"a mangled per-case parser must red on both counts, got {codes(red)}",
@@ -1057,7 +1136,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
     bep = _bep(work / "junit-dead.json", {label: dead.as_uri()}, status="TIMEOUT")
     observed, read_findings = read_results(bep)
     expect(codes(read_findings) == ["floor-unreadable"], "the floor must red on a mute log")
-    written, findings = write_junit(reports / "dead.xml", read_runs(bep), observed)
+    written, findings = write_junit(reports / "dead.xml", _units(bep), observed)
     fallback = ET.parse(reports / "dead.xml").find(f".//testcase[@name='{label}']/failure")
     expect(written == 1, f"an unreadable log must still report its target, reported {written}")
     expect(fallback is not None, "the target itself must carry the failure")
@@ -1072,7 +1151,7 @@ def prove_junit(work: Path, rows: list[Row]) -> int:
     crashed = _log(work / "crashed" / "test.log", passed=3)
     bep = _bep(work / "junit-crash.json", {label: crashed}, status="FAILED")
     observed, _ = read_results(bep)
-    written, findings = write_junit(reports / "crash.xml", read_runs(bep), observed)
+    written, findings = write_junit(reports / "crash.xml", _units(bep), observed)
     document = ET.parse(reports / "crash.xml")
     crash = document.find(f".//testcase[@name='{label}']/failure")
     expect(not findings, f"the status fallback must not red the count floor: {codes(findings)}")
@@ -1115,24 +1194,16 @@ def prove_counts(rows: list[Row]) -> int:
     expect(
         len(rows) == MAP_ROWS,
         f"crates/TEST_TARGET_MAP.toml has {len(rows)} rows, "
-        f"bazel_gate_proofs.CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS + "
-        f"CRATES_DOC_TEST_TARGETS is {MAP_ROWS} — the two floors read the same universe "
-        f"and disagree",
-    )
-    doc_rows = [row for row in rows if _fixture_kind(row.label) == DOC_TEST_KIND]
-    expect(
-        len(doc_rows) == CRATES_DOC_TEST_TARGETS,
-        f"crates/TEST_TARGET_MAP.toml has {len(doc_rows)} `_doc_test` rows, "
-        f"CRATES_DOC_TEST_TARGETS is {CRATES_DOC_TEST_TARGETS}",
+        f"bazel_gate_proofs.CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS is {MAP_ROWS} — "
+        f"the two floors read the same universe and disagree",
     )
     expect(
-        sum(row.ignored for row in rows if row not in doc_rows) <= read_ceiling(CEILING_FILE),
+        sum(row.ignored for row in rows) <= read_ceiling(CEILING_FILE),
         "the recorded ignored counts already exceed crates/NEXTEST_SKIP_CEILING",
     )
     print(
-        f"COUNTS      : {len(rows)} rows = CRATES_TEST_TARGETS + twin + "
-        f"{len(doc_rows)} doctest, {sum(r.cases for r in rows)} recorded cases, "
-        f"{sum(r.ignored for r in rows)} ignored ({sum(r.ignored for r in doc_rows)} doctest fences)"
+        f"COUNTS      : {len(rows)} rows = CRATES_TEST_TARGETS + twin, "
+        f"{sum(r.cases for r in rows)} recorded cases, {sum(r.ignored for r in rows)} ignored"
     )
     return 1
 
