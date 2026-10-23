@@ -575,7 +575,8 @@ def _runner_labels(job: dict) -> list[str]:
 # words (so `cargo-nextest` and `bazelisk` read too), and the three setup
 # spellings a Rust toolchain arrives through.
 _BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolchain|setup-rust|build-rust|bazel-cache-rc")
-NATIVE_DEEP_JOBS = frozenset({"unit-native", "acceptance-native"})
+# `acceptance-native` is a call of `acceptance.yml`, so it has no runner of its own to read here.
+NATIVE_DEEP_JOBS = frozenset({"unit-native"})
 
 
 def test_the_cross_workflow_is_the_one_linux_compile() -> None:
@@ -1254,7 +1255,6 @@ LANE_EXCLUSIONS = {
     "acceptance.yml:shard": "test:accept:native runs pytest on the binaries the `binary` job built; "
     "the cache credential stays in that job",
     "deep-repo.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
-    "deep-repo.yml:acceptance-native": "macOS/Windows runner, SKIP_BUILD, prebuilt test-bin",
     "deep-repo.yml:satellite-verify": "cargo builds of ocx-mirror; no Bazel",
     "deep-repo.yml:satellite-contract": "cargo builds plus pytest; no Bazel",
 }
@@ -2562,7 +2562,9 @@ def test_acceptance_binaries_downloaded_for_a_test_run_are_made_executable() -> 
             assert "chmod -R +x test/bin" in runs, (
                 f"{workflow.name} job {name!r} downloads into test/bin but never `chmod -R +x test/bin`"
             )
-    assert len(checked) >= 2, f"read {checked}; the readers found fewer test-bin downloads than the two the tiers have"
+    assert "acceptance.yml:shard" in checked, (
+        f"read {checked}; the readers did not find the shard job, the one that downloads the test-bin artifact"
+    )
 
 
 def test_deploy_docs_grants_nothing_at_the_top_and_triggers_on_main_and_dispatch() -> None:
@@ -2704,6 +2706,7 @@ ACCEPTANCE_INPUTS = {
     "binary": {"type": "string"},
     "limits-dir": {"type": "string", "default": "test"},
     "release-binary": {"type": "boolean", "default": False},
+    "no-docker": {"type": "boolean", "default": False},
 }
 CROSS_WORKFLOW_CALL = "./.github/workflows/cross.yml"
 
@@ -2855,6 +2858,62 @@ def test_a_deep_native_leg_waits_for_the_cross_job(name: str) -> None:
     """A macOS or Windows leg runs the outputs the cross job built in the same run."""
     needs = _needs(_repo_job(DEEP_REPO, name))
     assert "cross" in needs, f"{DEEP_REPO.name}: job `{name}` needs {needs}, not `cross`"
+
+
+def test_the_deep_native_acceptance_legs_run_the_full_suite_per_os_without_docker() -> None:
+    """macOS and Windows each run the whole suite in four shards against their own limits.
+
+    `no-docker` is the declaration `OCX_TEST_NO_DOCKER=1` hangs on; a leg without it would start
+    Docker services on a runner that has none, and the Linux basic tier never passes it.
+    """
+    job = _repo_job(DEEP_REPO, "acceptance-native")
+    assert job.get("uses") == "./.github/workflows/acceptance.yml", (
+        f"{DEEP_REPO.name}: job `acceptance-native` uses {job.get('uses')!r}, expected the reusable acceptance.yml"
+    )
+    inputs = job.get("with") or {}
+    assert inputs.get("no-docker") is True, f"{DEEP_REPO.name}: `acceptance-native` passes no-docker={inputs.get('no-docker')!r}"
+    assert inputs.get("shard-count") == 4, f"{DEEP_REPO.name}: `acceptance-native` passes shard-count={inputs.get('shard-count')!r}"
+    assert inputs.get("binary") == "artifact:test-bin-${{ matrix.job.target }}", (
+        f"{DEEP_REPO.name}: `acceptance-native` passes binary={inputs.get('binary')!r}, expected the artifact `cross` uploads"
+    )
+    assert inputs.get("limits-dir") == "${{ matrix.job.limits }}", f"{DEEP_REPO.name}: limits-dir is {inputs.get('limits-dir')!r}"
+    legs = job["strategy"]["matrix"]["job"]
+    assert {leg["os"]: leg["limits"] for leg in legs} == {
+        "macos-latest": "test/limits/macos",
+        "windows-latest": "test/limits/windows",
+    }, f"{DEEP_REPO.name}: `acceptance-native` legs are {legs}"
+    linux = (_repo_job(BASIC_REPO, "acceptance").get("with") or {})
+    assert not linux.get("no-docker"), f"{BASIC_REPO.name}: Linux stays strict, but `acceptance` passes {linux}"
+
+
+def test_the_windows_limits_are_committed() -> None:
+    """The three files `scripts/accept_floor.py --limits-dir` reads. macOS has none until its first run reports counts."""
+    for name in ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING"):
+        path = ROOT / "test" / "limits" / "windows" / name
+        assert path.is_file(), f"{path.relative_to(ROOT)} is missing"
+        assert path.read_text(encoding="utf-8").strip().isdigit(), f"{path.relative_to(ROOT)} is not a plain integer"
+
+
+def test_the_acceptance_shard_starts_docker_only_when_the_caller_has_it() -> None:
+    """Every Docker step is gated on `no-docker`, and the suite's skip switch is bound to the same input."""
+    shard = _repo_jobs(ACCEPTANCE)["shard"]
+    assert shard["env"].get("OCX_TEST_NO_DOCKER") == "${{ inputs.no-docker && '1' || '' }}", (
+        f"{ACCEPTANCE.name}: `shard` binds OCX_TEST_NO_DOCKER to {shard['env'].get('OCX_TEST_NO_DOCKER')!r}"
+    )
+    docker_steps = [step for step in shard["steps"] if "docker compose" in str(step.get("run", ""))]
+    assert len(docker_steps) >= 3, f"read {len(docker_steps)} Docker steps; the reader stopped matching"
+    ungated = [step.get("name") for step in docker_steps if "!inputs.no-docker" not in str(step.get("if", ""))]
+    assert not ungated, f"{ACCEPTANCE.name}: Docker steps {ungated} run even when the caller declares no-docker"
+
+
+def test_the_acceptance_shard_builds_nothing() -> None:
+    """The shard runs on macOS and Windows too: it downloads and executes, and only `binary` builds."""
+    offending = [
+        step.get("name", step.get("uses", step.get("run")))
+        for step in _repo_jobs(ACCEPTANCE)["shard"]["steps"]
+        if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
+    ]
+    assert not offending, f"{ACCEPTANCE.name}: `shard` has build steps {offending}"
 
 
 def test_deep_repo_runs_shell_activation_through_its_reusable_workflow() -> None:

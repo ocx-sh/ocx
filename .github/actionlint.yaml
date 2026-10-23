@@ -9,13 +9,3 @@ paths:
   .github/workflows/release.yml:
     ignore:
       - ".*"
-
-# The Windows leg of `acceptance-native` puts Git's `usr\bin` on PATH with
-# `echo 'C:\Program Files\Git\usr\bin' >> "$GITHUB_PATH"`. ShellCheck's info-level SC2028
-# wants printf there; the backslashes are literal on purpose and the step moves between
-# workflows byte for byte, so the one finding is ignored rather than the step edited. The
-# repository's own `task ci:actionlint` gates ShellCheck at warning and never saw it; the
-# template's `task workflows:lint` sets no floor.
-  .github/workflows/deep-repo.yml:
-    ignore:
-      - "shellcheck reported issue in this script: SC2028:info:"

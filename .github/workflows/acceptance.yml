@@ -9,9 +9,10 @@ name: Acceptance
 # (pytest against the prebuilt binaries, no Bazel and no cache credential) -> `merge` (floor and ceilings).
 # The cache write credential lives in `binary` alone, so it never shares a runner with the tests.
 #
-# Linux runner labels only: the steps start Docker services and need systemd. macOS and Windows legs
-# need the POSIX-tool provisioning `deep-repo.yml`'s `acceptance-native` does and belong to the readiness
-# workflow.
+# A Linux label starts the Docker services (the registry:2 mirror and the Sigstore stack) and needs
+# systemd. A macOS or Windows label has no Docker: the caller says so with `no-docker`, which starts
+# none and exports `OCX_TEST_NO_DOCKER=1`, so the fixtures that need one skip with a `no docker:`
+# reason (`test/src/helpers.py`). The skip is declared here, never inferred from the runner.
 #
 # Artifact names carry `inputs.os`, so one run can call this workflow once per runner label and no more.
 
@@ -19,7 +20,7 @@ on:
   workflow_call:
     inputs:
       os:
-        description: Runner label the shards run on, a Linux label such as `ubuntu-latest`.
+        description: Runner label the shards run on, one of `ubuntu-latest`, `macos-latest` or `windows-latest`.
         type: string
         required: true
       shard-count:
@@ -38,6 +39,12 @@ on:
         default: test
       release-binary:
         description: The binary under test is a release build. Sets OCX_TEST_RELEASE_BINARY for the shards.
+        type: boolean
+        default: false
+      no-docker:
+        description: >-
+          The runner has no Docker. The shards start no Docker service and set OCX_TEST_NO_DOCKER=1, so the
+          registry:2 and Sigstore fixtures skip with a `no docker:` reason. Leave false on Linux.
         type: boolean
         default: false
     secrets:
@@ -147,6 +154,8 @@ jobs:
     env:
       # Empty when the binary is not a release build; the suite reads it by truthiness.
       OCX_TEST_RELEASE_BINARY: ${{ inputs.release-binary && '1' || '' }}
+      # `1` only when the caller declares it; the suite skips on exactly `1`, never on a missing CLI.
+      OCX_TEST_NO_DOCKER: ${{ inputs.no-docker && '1' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -157,6 +166,22 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      # `test/taskfile.yml` shells out to `python3`, `date`, `tr`, `dirname` and `basename`. A Windows
+      # runner has none of them on the PATH task's shell sees: Git's `usr\bin` carries the coreutils, and
+      # setup-python provides only `python`, so `python3.exe` is a copy of it in the same directory (a copy
+      # elsewhere would lose the DLLs it loads beside itself). Linux images ship `python3`.
+      - name: Setup Python
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Provide POSIX tools and python3 (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          printf '%s\n' 'C:\Program Files\Git\usr\bin' >> "$GITHUB_PATH"
+          py_dir="$(dirname "$(command -v python)")"
+          [ -e "$py_dir/python3.exe" ] || cp "$py_dir/python.exe" "$py_dir/python3.exe"
       # Puts `zot` (and the rest of the project toolchain) on PATH: every pytest
       # session starts its own zot registries from it (`test/conftest.py`); only
       # the registry:2 mirror and the Sigstore stack need Docker.
@@ -178,6 +203,8 @@ jobs:
           name: ${{ needs.plan.outputs.artifact }}-schema
           path: website/src/public/schemas/metadata
       - name: Prepare Binaries
+        # Windows has no executable bit to restore.
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           # An artifact round trip drops every executable bit, nested ones
@@ -187,7 +214,18 @@ jobs:
           for bin in test/bin/ocx test/bin/ocx-shim test/bin/schema/ocx_schema; do
             [ -x "$bin" ] || { echo "::error::$bin is missing or not executable"; exit 1; }
           done
+      # The `binary` job uploads this schema; a prebuilt `artifact:` binary brings none, and
+      # `tests/test_schema.py` reads it from disk. The same generator, run natively.
+      - name: Generate metadata schema
+        if: needs.plan.outputs.build != 'true'
+        shell: bash
+        run: |
+          schema=test/bin/schema/ocx_schema
+          [ -e "$schema" ] || schema="$schema.exe"
+          mkdir -p website/src/public/schemas/metadata
+          "$schema" metadata > website/src/public/schemas/metadata/v1.json
       - name: Start mirror registry
+        if: ${{ !inputs.no-docker }}
         shell: bash
         run: |
           # distribution's registry:2 is the negative fixture for the Referrers
@@ -204,6 +242,7 @@ jobs:
           echo "::error::Mirror registry did not become reachable"
           exit 1
       - name: Start Sigstore stack
+        if: ${{ !inputs.no-docker }}
         shell: bash
         run: |
           # The signing acceptance tests run against a real Fulcio + Rekor +
@@ -225,7 +264,7 @@ jobs:
       # command, but nobody can run that command on a finished runner — without
       # this step a bring-up failure costs a whole second run to diagnose.
       - name: Sigstore stack logs (on failure)
-        if: failure()
+        if: ${{ failure() && !inputs.no-docker }}
         shell: bash
         run: |
           docker compose -f test/docker-compose.yml --profile sigstore ps
@@ -241,14 +280,15 @@ jobs:
         # moved — not that the host lacks it. The `environment.d` prepend has
         # open upstream reports of not landing for PATH (systemd/systemd#40430),
         # so this is the one leg where "skipped" and "passed" must not read the
-        # same. Fails closed: any value but empty or `0` arms the gate.
+        # same. Fails closed: any value but empty or `0` arms the gate. macOS and
+        # Windows have no systemd, so the gate stays off there.
         env:
-          __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
+          __OCX_TESTING_REQUIRE_ENVIRONMENT_D: ${{ runner.os == 'Linux' && '1' || '' }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard-count }}
         run: task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"
       - name: Stop Docker services
-        if: ${{ always() }}
+        if: ${{ always() && !inputs.no-docker }}
         shell: bash
         # `--profile sigstore` is load-bearing: a bare `down` leaves
         # profile-gated services running.
