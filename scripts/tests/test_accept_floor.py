@@ -96,3 +96,29 @@ def test_expect_shards_wants_index_zero_and_rejects_the_one_based_set(
         _shard(tmp_path, f"shard-{i}-of-4", 2)
     assert floor.run(tmp_path / "junit", _limits(tmp_path), 4) == 1
     assert "shard-0-of-4.xml" in capsys.readouterr().err
+
+
+def test_missing_limits_print_the_counts_the_first_run_commits_them_from(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _four_shards(tmp_path)
+    skips = '<testcase name="s1"><skipped/></testcase><testcase name="x1"><skipped type="pytest.xfail"/></testcase>'
+    _shard(tmp_path, "shard-3-of-4", 2, skips)
+    empty = tmp_path / "no-limits"
+    empty.mkdir()
+    assert floor.run(tmp_path / "junit", empty, 4) == 1
+    err = capsys.readouterr().err
+    assert "10 cases, 1 skipped, 1 xfailed, 0 failed or errored" in err
+    assert all(str(empty / name) in err for name in floor.LIMIT_FILES)
+
+
+def test_one_missing_limit_file_reds_with_the_counts_though_the_others_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _four_shards(tmp_path)
+    limits = _limits(tmp_path)
+    (limits / "XFAIL_CEILING").unlink()
+    assert floor.run(tmp_path / "junit", limits, 4) == 1
+    err = capsys.readouterr().err
+    assert str(limits / "XFAIL_CEILING") in err and str(limits / "SUITE_FLOOR") not in err
+    assert "8 cases, 0 skipped" in err

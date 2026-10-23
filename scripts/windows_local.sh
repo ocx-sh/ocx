@@ -171,7 +171,8 @@ fi
     # A host-global commit.gpgsign would break the fixtures' commits.
     printf '%s\r\n' 'set "GIT_CONFIG_COUNT=2"' 'set "GIT_CONFIG_KEY_0=commit.gpgsign"' 'set "GIT_CONFIG_VALUE_0=false"' \
         'set "GIT_CONFIG_KEY_1=tag.gpgsign"' 'set "GIT_CONFIG_VALUE_1=false"'
-    printf '%s\r\n' 'set "SKIP_BUILD=true"' "set \"OCX_TEST_MIRROR_PORT=$PORT_MIRROR\""
+    # The Windows host has no Docker the suite can reach, as on the deep tier's Windows leg.
+    printf '%s\r\n' 'set "SKIP_BUILD=true"' 'set "OCX_TEST_NO_DOCKER=1"' "set \"OCX_TEST_MIRROR_PORT=$PORT_MIRROR\""
     printf '%s\r\n' "set \"TEST_BASETEMP=$own_win\\p-$NAME\"" "set \"TEST_TMPDIR=$own_win\\t-$NAME\""
 } >"$own_wsl/$NAME-env.cmd"
 

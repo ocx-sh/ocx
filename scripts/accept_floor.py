@@ -14,6 +14,10 @@ nothing is not a clean suite.
 The conformance root floor (`conformance_floor.py --junit`) is a separate call
 the tasks make over the same directory.
 
+A limits directory missing one of those files is red too, but it prints the
+counted cases, skips and xfails first: a platform's first run reports the numbers
+its limits are then committed from.
+
 A shard holds a subset, so the floor is evaluated over the merged directory,
 never per shard. `scripts/tests/test_accept_floor.py` shows it red and green.
 """
@@ -26,6 +30,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+LIMIT_FILES = ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING")
 
 
 def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
@@ -56,6 +61,15 @@ def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
                     xfailed += 1
                 else:
                     skipped += 1
+
+    absent = [limits_dir / name for name in LIMIT_FILES if not (limits_dir / name).is_file()]
+    if absent:
+        print(
+            f"accept floor: no limit file {', '.join(str(a) for a in absent)} — counted {cases} cases, "
+            f"{skipped} skipped, {xfailed} xfailed, {bad} failed or errored; commit the limits from these",
+            file=sys.stderr,
+        )
+        return 1
 
     problems = []
     if bad:

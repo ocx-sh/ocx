@@ -29,8 +29,8 @@ services:
   #      against a genuine v2 registry rather than a mock.
   # Session-scoped via the `mirror_registry` / `legacy_registry` fixtures in
   # test/conftest.py, which `docker compose up -d` this one service on first use
-  # and skip when there is no `docker` CLI, so a run that needs neither fixture
-  # never touches Docker.
+  # (and skip only under `OCX_TEST_NO_DOCKER=1`), so a run that needs neither
+  # fixture never touches Docker.
   mirror-registry:
     image: registry:2
     ports:

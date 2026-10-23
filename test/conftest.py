@@ -19,7 +19,12 @@ import pytest
 
 from src import forward_proxy as forward_proxy_mod
 from src import zot
-from src.helpers import PROJECT_ROOT, compose_up_service, registry_is_reachable
+from src.helpers import (
+    PROJECT_ROOT,
+    compose_up_service,
+    registry_is_reachable,
+    skip_without_docker,
+)
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
@@ -130,17 +135,20 @@ def _zot_address(instance: str) -> str:
 def _mirror_address(address: str, fixture: str) -> str:
     """The compose ``mirror-registry`` (registry:2), started on first use.
 
-    Skips only when there is no ``docker`` CLI to start it with. A CLI whose
-    daemon is down, or a service that never answers, is a broken environment and
-    fails: a skip there would empty whole suites while the run still exits 0.
+    Skips only on a job that declares ``OCX_TEST_NO_DOCKER=1``. Without it a
+    missing ``docker`` CLI, a dead daemon and a service that never answers all
+    fail: a skip there would empty whole suites while the run still exits 0.
     """
     if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         pytest.skip("OCX_TESTS_NO_REGISTRY=1: registry:2 fixture not started")
+    skip_without_docker(f"{fixture} (the compose 'mirror-registry')")
     if registry_is_reachable(address):
         return address
     if shutil.which("docker") is None:
-        pytest.skip(
-            f"{fixture}: no registry:2 at {address} and no `docker` to start the compose 'mirror-registry'"
+        pytest.fail(
+            f"{fixture}: no registry:2 at {address} and no `docker` to start the compose "
+            "'mirror-registry'; a job without Docker declares OCX_TEST_NO_DOCKER=1",
+            pytrace=False,
         )
     compose_up_service("mirror-registry")
     if not _wait_for_reachable(lambda: registry_is_reachable(address)):

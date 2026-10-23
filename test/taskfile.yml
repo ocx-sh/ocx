@@ -291,8 +291,9 @@ tasks:
       file per run under target/accept/junit/.
     summary: |
       For CI runners that only download the binaries (SKIP_BUILD semantics), where
-      pytest starts its own zot (`zot` on PATH) and the registry:2 mirror
-      fixtures skip without a `docker` CLI. Modules come from `scripts/accept_shard.py`, the
+      pytest starts its own zot (`zot` on PATH) and a job with no Docker
+      declares `OCX_TEST_NO_DOCKER=1`, which skips the registry:2 mirror and
+      Sigstore fixtures. Modules come from `scripts/accept_shard.py`, the
       selector `bazel:test:accept SHARD_COUNT= SHARD_INDEX=` uses, so both paths
       run the same slice (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one
       variable without the other is refused). With neither, pytest selects as it
@@ -330,7 +331,8 @@ tasks:
       vars: [JUNIT_DIR]
     cmds:
       # EXPECT_SHARDS=N also requires shard-0-of-N.xml … shard-<N-1>-of-N.xml.
-      - python3 {{toSlash .ROOT_DIR}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}
+      # LIMITS_DIR=<dir> reads the three limit files there, else from test/.
+      - python3 {{toSlash .ROOT_DIR}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}{{if .LIMITS_DIR}} --limits-dir {{.LIMITS_DIR}}{{end}}
       - python3 {{toSlash .ROOT_DIR}}/scripts/conformance_floor.py --junit {{.JUNIT_DIR}}
 
   windows-local:
