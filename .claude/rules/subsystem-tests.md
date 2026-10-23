@@ -9,14 +9,14 @@ Pytest acceptance tests with Docker Compose registry at `test/`.
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide isolation on shared registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Every pytest session starts its own **zot** registries (`pytest_configure` in the xdist controller, `test/src/zot.py`) on kernel-chosen ports, so concurrent sessions and Bazel targets share no registry state; pytest-xdist workers inherit the exported ports. UUID-prefixed repo names provide isolation inside the session's registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
 
 ## Structure
 
 | Path | Purpose |
 |------|---------|
 | `test/tests/conftest.py` | Function-scoped fixtures (ocx, published_package, etc.) |
-| `test/conftest.py` | Session-scoped fixtures (registry, ocx_binary) + `pytest_sessionstart` |
+| `test/conftest.py` | Session-scoped fixtures (registry, ocx_binary) + `pytest_configure` / `pytest_unconfigure` (the zot stack) |
 | `test/src/runner.py` | `OcxRunner`: subprocess wrapper with test isolation |
 | `test/src/assertions.py` | Cross-platform assertion helpers |
 | `test/src/helpers.py` | `make_package()`: build + push test packages |
@@ -28,7 +28,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 
 | Fixture | Scope | Purpose |
 |---------|-------|---------|
-| `registry` | session | localhost:5000 **zot** (referrers-capable primary; auto-started via docker-compose; port override `OCX_TEST_REGISTRY_PORT`) |
+| `registry` | session | **zot** on a free port the session started (referrers-capable primary; `OCX_TEST_REGISTRY_PORT` is exported by `pytest_configure`, never read as an override) |
 | `mirror_registry` | session | localhost:5001 registry:2 (mirror-test target; port override `OCX_TEST_MIRROR_PORT`; skips if absent) |
 | `legacy_registry` | session | localhost:5001 registry:2 — referrers-**negative** fixture (no Referrers API) for `test_referrers_capability.py` (#106); same service as `mirror_registry` |
 | `ocx_binary` | session | Path to compiled `ocx` binary |
@@ -38,7 +38,7 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 | `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
 | `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
 
-**Registry topology (#195):** the primary `registry` (5000) is **zot** because it
+**Registry topology (#195):** the primary `registry` is **zot** because it
 serves the OCI 1.1 Referrers API natively — distribution's `registry:2`/`registry:3`
 do NOT (they omit `OCI-Subject` on push and 404 the `/v2/<name>/referrers/<digest>`
 route), and OCX is referrers-only with no tag-schema fallback (#106). The single
@@ -46,9 +46,11 @@ route), and OCX is referrers-only with no tag-schema fallback (#106). The single
 the permanent referrers-unsupported negative fixture. `test_referrers_smoke.py` proves
 the round-trip. Referrers push/list helpers live in `src/registry.py`.
 
-**Native services (`OCX_TEST_NATIVE_SERVICES=1`).** The macOS and Windows CI runners have no Docker, so the registries run as native `zot` processes from the project toolchain: `task test:services:native:start` (`test/src/native_registries.py`) binds the registry, target and prod ports, `…:stop` deletes the stores. With the variable set, `conftest.py` and `src/helpers.py` never call compose — a service that is down is a hard failure naming the start task — and the `registry:2` mirror is not started, so `mirror_registry` / `legacy_registry` tests skip. Native CI scope today: the smoke tier (`task test:smoke`) on macOS and Windows; full-suite parity there is a follow-up. Linux CI also uses native zot, for the sharded run below.
+**Ephemeral zot.** `pytest_configure` (`test/conftest.py`, `test/src/zot.py`) starts the `registry`, `target` and `prod` zot instances from the project toolchain (`zot` on `PATH`, or `OCX_TEST_ZOT`; under Bazel `@tools//:zot` is a `data` input of every target), each with `http.port: "0"`; the port is parsed from zot's info-level log line and the instance counts as up when `GET /v2/` answers 200 within 60 s, else `pytest.UsageError` names the log. It exports `OCX_TEST_{REGISTRY,TARGET,PROD}_PORT` and `OCX_INSECURE_REGISTRIES`. It is skipped in xdist workers, for `--collect-only`, with `OCX_TESTS_NO_REGISTRY=1` and for the lint tier (`test/lint/`). A killed pytest leaves no zot: on POSIX a watchdog child holds a pipe and kills the process groups on EOF (no `preexec_fn`), on Windows zot runs in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Only the `registry:2` mirror and the Sigstore stack still use Docker: `mirror_registry` / `legacy_registry` start the compose `mirror-registry` service on first use and skip when there is no `docker` CLI. CI therefore needs `zot` on `PATH` (`setup-ocx`) and nothing else for the smoke tier on macOS and Windows.
 
-**Sharding and the merged floor.** `scripts/accept_shard.py` splits `test/tests/test_*.py` (sorted by stem, shard `i/n` takes `modules[i-1::n]`); `task bazel:test:accept SHARD=i/n` and `task test:accept:native SHARD=i/n` both use it, so a module lands in the same shard on either path. A shard is a subset, so floors are never evaluated per shard: each writes its own JUnit file under `target/accept/junit/`, and `task test:accept:floor JUNIT_DIR=<dir>` (`scripts/accept_floor.py`, plus `conformance_floor.py`) applies `SUITE_FLOOR`, the ceilings and the conformance floor over the merged directory. An empty directory is red, as is a shard index past the module count.
+**Sharding and the merged floor.** `scripts/accept_shard.py` splits `test/tests/test_*.py` (sorted by stem, shard `I` of `N` takes `modules[I::N]`, `I` 0-based); `task bazel:test:accept SHARD_COUNT=N SHARD_INDEX=I` and `task test:accept:native SHARD_COUNT=N SHARD_INDEX=I` both use it, so a module lands in the same shard on either path. The selector reads the flags first, then Bazel's `TEST_TOTAL_SHARDS` / `TEST_SHARD_INDEX` (touching `TEST_SHARD_STATUS_FILE` when set); exit 2 is a bad request (count below 1, index outside `0..N-1`, one half of a pair), exit 1 an empty selection. A shard is a subset, so floors are never evaluated per shard: each writes its own JUnit file under `target/accept/junit/`, and `task test:accept:floor JUNIT_DIR=<dir>` (`scripts/accept_floor.py`, plus `conformance_floor.py`) applies `SUITE_FLOOR`, the ceilings and the conformance floor over the merged directory. Reports are named `shard-<I>-of-<N>.xml` and `EXPECT_SHARDS=N` requires indices `0..N-1`. An empty directory is red, as is a shard index past the module count.
+
+**Windows from WSL.** `task -x test:windows-local MODE=accept [SHARD_COUNT=N SHARD_INDEX=I] [EXE=<ocx.exe>] -- <pytest args>` (`scripts/windows_local.sh`) runs the suite on the Windows host without a CI round-trip: it cross-builds the gnullvm `ocx.exe` (`cross:test:bin`) unless `EXE` is given, stages the git working tree to `%USERPROFILE%\ocx-wintest\<checkout>\` (the venv and `test/bin` survive between runs), runs `test:accept:native` under `cmd.exe` through the staged `ocx.exe exec zot`; pytest starts its own zot there. The mirror port is `15001`, not 5001: WSL forwards its own compose stack on 5000..5004 to Windows `localhost`, so the default could reach the wrong registry. `-x` is what makes the exit status the child's (pytest's 1, 4 or 5): without it `task` reports 201 for any failed command. Exit 69 is "not WSL with a `cmd.exe`", 2 a shard request the selector refuses, 64 a malformed call. `MODE=unit` runs the `cross:test:bundle` bundle instead, with one optional substring after `--`. Reports come back to `target/windows-local/junit/`. `-n auto` through WSL localhost forwarding flakes now and then (WinError 10054): rerun the failed tests once before investigating.
 
 ## OcxRunner API
 
@@ -144,7 +146,7 @@ The coverage guard (`scripts/scoped_gate.py --check-coverage`, wired as `task te
 
 `test/bazel.bzl`'s `UNCACHED_MODULES` lists acceptance modules whose declared input closure `scripts/bazel_tag_guard.py` cannot yet certify complete; each carries `external`, the only tag that stops a cached verdict being reused, so it re-executes on every `bazel:test:accept` run. The list shrinks only by declaring the input, never by deleting a line. It holds **one named residual**: `tests/test_windows_shim.py` — its `_find_shim_binary` fallback reads `target/{release,debug}/` on two adjacent lines, and `scripts/test_diff_guard.py`'s one-line-for-one-line `--allow` admits only a one-line-for-one-line hunk, so dropping both lines at once is refused by design and the only 1:1 rewrite would hide the read from the tag guard instead of fixing it. The module is `skipif(sys.platform != "win32")` as a whole, so on the Linux lane that runs this suite `external` costs one collection and hides no verdict.
 
-`bazel:test:accept` runs its targets **concurrently** against the one compose stack (no `exclusive` tag), at parity with `test:parallel`'s xdist run — `test/bazel.bzl` § Concurrency. Two obligations follow for a module author: every `xdist_group` a module names — shared with another module or not, because every target is its own process and runs from sibling checkouts overlap — is listed for that module in `test/BUILD.bazel` `module_slots` (the runner's per-group host lock replaces xdist's one-worker placement), spelled in the module itself as a string literal or a module-level dict of literals; and a file only some modules read (anything outside `conftest.py`, `src/`, the `tests/` helpers and the stack config) is declared in those modules' `module_data`, not in `:suite_inputs` — importing a helper counts as reading it. `scripts/bazel_tag_guard.py` reds a missing or extra slot, a group spelled outside a `tests/test_*.py` module, and a read its AST derivation can see; a read it cannot see (a `task` recipe, the lock beside a manifest) is declared in the guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`, and a module that launches `task` or names by string a path under a `test/` directory holding no `:suite_inputs` member reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry (empty when the review finds no read).
+`bazel:test:accept` runs its targets **concurrently**, each on zot registries of its own (no `exclusive` tag, no host locks but the per-target arena) — `test/bazel.bzl` § Concurrency. One obligation follows for a module author: a file only some modules read (anything outside `conftest.py`, `src/`, the `tests/` helpers and the compose file) is declared in those modules' `module_data`, not in `:suite_inputs` — importing a helper counts as reading it. `scripts/bazel_tag_guard.py` reds a read its AST derivation can see; a read it cannot see (a `task` recipe, the lock beside a manifest) is declared in the guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`, and a module that launches `task` or names by string a path under a `test/` directory holding no `:suite_inputs` member reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry (empty when the review finds no read).
 
 ### `--tiered-shapes`
 
@@ -321,7 +323,7 @@ Three checks lie here. Each has produced a wrong verdict in this repo:
 | Leaf process | `pgrep -a -P <pytest-pid>` | the `ocx` subprocess actually working. Legitimately absent *between* tests |
 | Leaf age | `ps -o etime,time -p <leaf-pid>` | a package push older than ~5 min is wedged, not slow |
 | Progress | `ls -1 <basetemp>/pytest-of-*/pytest-0/ \| wc -l` | test directories created; monotonic while progressing |
-| Contention | `pgrep -c -f 'pytest tests/'` | `>1` means another checkout's gate is sharing the registry on `:5000` |
+| Contention | `pgrep -c -f 'pytest tests/'` | `>1` means other sessions run on this host; each has its own zot, so the contention is CPU and disk, not the registry |
 
 Verdict, across two polls 60-120s apart:
 

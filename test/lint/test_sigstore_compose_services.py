@@ -3,9 +3,9 @@
 """The sigstore bring-up starts only the services the profile adds.
 
 `--profile sigstore up -d` with no service names also starts every service
-without a profile — the compose `registry`, `target-registry` and
-`prod-registry`. Under native zot those ports are already taken, so the bare
-`up` fails with "address already in use" and every signing test errors.
+without a profile — the compose `mirror-registry`. A session that never asked for
+the registry:2 mirror (or whose host port is taken) must not create it as a side
+effect of signing.
 
 No docker: `subprocess.run` is a fake compose that knows which services carry
 the profile and reports nothing running.
@@ -19,7 +19,7 @@ import pytest
 
 from src import helpers
 
-_DEFAULT = ["registry", "mirror-registry", "target-registry", "prod-registry", "ctdata"]
+_DEFAULT = ["mirror-registry", "ctdata"]
 _PROFILE = ["dex", "fulcio", "rekor"]
 
 
@@ -49,5 +49,5 @@ def test_the_sigstore_up_names_only_the_profile_services(
     started = fake.ups[0][fake.ups[0].index("-d") + 1 :]
     assert sorted(started) == sorted(_PROFILE), (
         f"`up -d` started {started or 'every service'}; a profile-less service "
-        f"there takes a port the native zot processes already hold"
+        f"there creates a container the session never asked for"
     )

@@ -654,8 +654,17 @@ def test_linux_acceptance_is_four_shards_feeding_a_merge_job() -> None:
     shard, merge = jobs["shard"], jobs["merge"]
     assert shard["runs-on"] == "${{ inputs.os }}", f"acceptance.yml `shard.runs-on` is {shard['runs-on']!r}"
     runs = [str(step.get("run", "")) for step in shard["steps"]]
-    assert 'task test:accept:native SHARD="$SHARD/$SHARD_COUNT"' in runs, (
+    assert 'task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"' in runs, (
         f"acceptance.yml `shard` never runs its shard: {runs}"
+    )
+    run_step = next(step for step in shard["steps"] if "test:accept:native" in str(step.get("run", "")))
+    assert str(run_step["env"]["SHARD_INDEX"]) == "${{ matrix.shard }}", (
+        f"acceptance.yml `shard` index is {run_step['env'].get('SHARD_INDEX')!r}, expected the matrix value"
+    )
+    plan = " ".join(str(step.get("run", "")) for step in jobs["plan"]["steps"])
+    assert 'seq -s, 0 "$((SHARD_COUNT - 1))"' in plan, (
+        "acceptance.yml `plan` does not list the shards 0-based (0..N-1), which is what accept_shard.py "
+        "and the merge job's `shard-<I>-of-<N>.xml` names expect"
     )
     assert _needs(merge) == ["shard"], f"acceptance.yml `merge` needs {_needs(merge)}, expected `shard`"
     assert "!cancelled()" in str(merge.get("if", "")), (

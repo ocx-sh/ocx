@@ -422,14 +422,11 @@ tasks:
       package's filegroups.
 
       **The targets run concurrently, `--local_test_jobs=$ACCEPT_JOBS` on the
-      command line, never in an rc file** (ADR ruling 12). They share one
-      compose stack the way `task test:parallel`'s xdist workers do, and the
-      runner supplies what xdist gave that separate processes lack — one stack
-      bring-up, a basetemp per target, a host lock per xdist group, and the
-      host suite lock taken SHARED so `task test:parallel`'s pytest step
-      (which takes it exclusive) never overlaps the run; a sibling checkout's
-      bazel run does overlap it, at xdist parity (`test/bazel.bzl` §
-      Concurrency, which also names what precedes that pytest step unlocked).
+      command line, never in an rc file** (ADR ruling 12). Each target starts its
+      own zot registries on free ports, so none shares registry state with
+      another target, a sibling checkout's run or a `task test:parallel`
+      session; the runner supplies the zot launcher and a basetemp per target
+      (`test/bazel.bzl` § Concurrency).
       The flag bounds how many pytest sessions run at once. The default is
       `min(8, nproc)` — 8 measured on the 32-core development host, fewer on
       CI's 4-core runner or any smaller machine — and `ACCEPT_JOBS=<n>`
@@ -471,11 +468,12 @@ tasks:
       a red). Read here off the per-case XML rather than off a terminal summary
       line, which is strictly more than the shell parser they replace had.
 
-      **`SHARD=i/n` tests one slice** — `task bazel:test:accept SHARD=3/40` builds
-      and tests only the `//test:<module>` labels `scripts/accept_shard.py`
-      selects (sorted modules, `[i-1::n]`; `test:accept:native` selects the same
-      slice), copies those reports, and skips the floors: a shard sees a subset,
-      so `task test:accept:floor` evaluates them once over the merged reports.
+      **`SHARD_COUNT=n SHARD_INDEX=i` tests one slice** — `task bazel:test:accept
+      SHARD_COUNT=40 SHARD_INDEX=3` builds and tests only the `//test:<module>`
+      labels `scripts/accept_shard.py` selects (sorted modules, `[i::n]`, `i`
+      0-based; `test:accept:native` selects the same slice), copies those reports,
+      and skips the floors: a shard sees a subset, so `task test:accept:floor`
+      evaluates them once over the merged reports.
 
       **The copy names the set it expects; it does not glob the output base.**
       Bazel never prunes `bazel-testlogs` for a target that left the graph, so a
@@ -496,6 +494,8 @@ tasks:
       ACCEPT_JOBS_DEFAULT:
         sh: n=$(nproc 2>/dev/null || echo 8); if [ "$n" -gt 8 ]; then n=8; fi; printf '%s' "$n"
       ACCEPT_JOBS: '{{.ACCEPT_JOBS | default .ACCEPT_JOBS_DEFAULT}}'
+      # Each flag only when its variable is set, so the selector itself refuses one without the other.
+      SHARD_FLAGS: "{{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}} {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}"
     cmds:
       # The generated JSON schemas: several modules read one straight off
       # disk (`src/public/schemas/`, outside this graph), copied there from
@@ -507,12 +507,12 @@ tasks:
           set -o pipefail
           status=0
           started=$(date +%s)
-          # SHARD=i/n tests only that shard's targets (scripts/accept_shard.py is
+          # SHARD_COUNT/SHARD_INDEX test only that shard's targets (scripts/accept_shard.py is
           # the one selector, shared with `test:accept:native`); unset = all.
-          stems=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format stems {{if .SHARD}}--shard '{{.SHARD}}'{{end}}) || exit 1
-          targets=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format labels {{if .SHARD}}--shard '{{.SHARD}}'{{end}}) || exit 1
+          stems=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format stems {{.SHARD_FLAGS}}) || exit $?
+          targets=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format labels {{.SHARD_FLAGS}}) || exit $?
           # adr_test_speed_tiers D6: verdicts stay on the local disk; a flag outranks the CI rc.
-          ocx exec bazel -- bazel {{.CACHE_RC}} test {{if .SHARD}}$targets{{else}}//test:all{{end}} --remote_upload_local_results=false \
+          ocx exec bazel -- bazel {{.CACHE_RC}} test {{if .SHARD_COUNT}}$targets{{else}}//test:all{{end}} --remote_upload_local_results=false \
             --local_test_jobs={{.ACCEPT_JOBS}} {{if .NOCACHE}}--nocache_test_results{{end}} {{.CLI_ARGS}} || status=$?
           reader=0
           EXPECTED="$stems" python3 - '{{.ROOT_DIR}}' '{{.REPORTS}}' <<'PY' || reader=$?
@@ -592,9 +592,9 @@ tasks:
           # The floors (SUITE_FLOOR, ceilings, conformance roots) are one script,
           # scripts/accept_floor.py, over the reports just copied. A shard sees
           # a subset, so it skips them; the merge job runs `test:accept:floor`.
-          {{if not .SHARD}}[ "$reader" -ne 0 ] || python3 '{{.ROOT_DIR}}/scripts/accept_floor.py' --junit '{{.REPORTS}}' || reader=$?{{end}}
+          {{if not .SHARD_COUNT}}[ "$reader" -ne 0 ] || python3 '{{.ROOT_DIR}}/scripts/accept_floor.py' --junit '{{.REPORTS}}' || reader=$?{{end}}
           # The conformance hook's distinct-root floor, off the same reports.
-          {{if not .SHARD}}[ "$reader" -ne 0 ] || python3 '{{.ROOT_DIR}}/scripts/conformance_floor.py' --junit '{{.REPORTS}}' || reader=$?{{end}}
+          {{if not .SHARD_COUNT}}[ "$reader" -ne 0 ] || python3 '{{.ROOT_DIR}}/scripts/conformance_floor.py' --junit '{{.REPORTS}}' || reader=$?{{end}}
           # C-018 escape records: a failed run during a work-package merge
           # names each failing module that the scoped runs of the merged tip
           # never selected. Observation only — it runs after the reader

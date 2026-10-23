@@ -62,70 +62,40 @@ rewritten with the mutated binary's key — so the results came back from
 `--disk_cache`, which is the tier a fresh server has and `local` would have
 suppressed.
 
-## Concurrency: `exclusive` is gone, and xdist parity is the bar
+## Concurrency: `exclusive` is gone, and every target owns its registries
 
 No target is `exclusive`-tagged any more (ADR `adr_test_speed_tiers.md` AM-9).
 
-The targets share one compose stack, exactly as `task test:parallel`'s xdist
-workers do (`-n auto --dist loadgroup`, UUID-scoped repositories per test). So
-whatever is xdist-safe is safe across concurrent pytest processes, except for
-what xdist gives a run that separate processes do not — and the runner below
-supplies each of those instead of serialising the suite (WP-12 A3: 1734 s cold
-serial against ~135 s for `task test:parallel`):
+Every target starts its own zot registries: `test/conftest.py::pytest_configure`
+(`test/src/zot.py`) binds kernel-chosen ports, exports them to the session and
+tears them down with it, and a watchdog kills them if pytest is killed. So two
+targets — and the same target run from sibling checkouts — share no registry
+state, and the host locks that once kept them apart are gone: the suite/turnstile
+pair that kept `task test:parallel` off the targets, the stack bring-up barrier,
+and the per-`xdist_group` slot locks (a group names a singleton on the primary
+registry, which is per session now; xdist still places a group on one worker
+inside a `task test:parallel` run). What stays shared is Docker: the registry:2
+mirror and the Sigstore profile, which behave exactly as under xdist —
+UUID-scoped repositories, nothing to order, and a bring-up serialised by
+`test/src/helpers.py`'s `_COMPOSE_LOCK` inside the fixture that starts it.
 
-* **One stack bring-up.** `test/conftest.py::pytest_sessionstart` brings the
-  stack up in the xdist controller only; N sessions would race `docker compose
-  up`. The runner runs that same hook once per target under an exclusive
-  `acceptance-stack-<port>.lock` — and inside it `test/src/helpers.py`'s
-  host-wide `_COMPOSE_LOCK`, the lock a session's sigstore `up -d` and a
-  registry recycle take — before pytest starts, so each session's own call
-  finds everything reachable and does no compose work.
+The runner supplies what separate processes lack:
+
+* **zot.** `OCX_TEST_ZOT` names the toolchain's launcher (`@tools//:zot`) by
+  rlocationpath and the runner resolves it to an absolute path before pytest
+  starts: a `PATH` lookup would be a host dependency no action key names.
 * **A basetemp per target.** pytest wipes `--basetemp` at start, so the arena
   is `<checkout>-<cksum of the suite path>-bazel/<module stem>` rather than one
   shared directory. The checksum is what keys it: two repositories can both
   hold a worktree named `speed`, and a folder-name key would hand them one
   arena. Two copies of ONE target (`--runs_per_test=N`) still share it, so
-  pytest runs under an innermost exclusive `<basetemp>.lock`.
-* **xdist groups.** `xdist_group` names a registry-wide singleton
-  (`patch_global_slot`: `ocx patch publish --global` writes one reserved
-  repository). xdist runs a group on one worker; here every target is its own
-  process, and two runs of one target — from sibling checkouts sharing the
-  stack — are two processes too. So a module holds
-  `acceptance-slot-<port>-<group>.lock` for its whole run for EVERY group it
-  names, shared with another module or not (`module_slots` below, acquired in
-  sorted order). The per-module list is derived from source and checked by
-  `scripts/bazel_tag_guard.py` (`tag-slot-*`), which also reds a group it
-  cannot resolve to literals and any `xdist_group` spelled outside a
-  `tests/test_*.py` module.
-* **No overlap with `task test:parallel`'s pytest step.** Every target holds the
-  host's `acceptance-suite-<port>.lock` SHARED; `test/taskfile.yml`'s pytest
-  step takes it EXCLUSIVE. Targets overlap each other — including the targets
-  of a bazel run from a sibling checkout on the same stack, at xdist parity —
-  and never that step. flock(2) is not fair, so an exclusive waiter could sit
-  behind overlapping shared holders for a whole bazel run; the step therefore
-  holds `acceptance-turnstile-<port>.lock` while it waits and runs, and every
-  target passes through that turnstile before it takes the suite lock, so no
-  new target joins once the step is queued. What runs before that step is NOT under the lock: its
-  stale-run eviction (which kills processes executing that checkout's
-  `test/bin/ocx`) and its binary rebuild, and `task test:smoke` takes no lock
-  at all. So never start a `task test*` in a checkout whose bazel run is in
-  flight.
+  pytest runs under an exclusive `<basetemp>.lock` — the one host lock left.
 * **No pytest cache writes.** `-p no:cacheprovider`: N processes writing one
   `.pytest_cache/` is a race xdist never had (only its controller writes).
-* **No flock(1), no run.** Without it none of the locks above can be taken, so
-  the runner refuses unless `OCX_ACCEPTANCE_UNSERIALISED=1` reaches it through
+* **No flock(1), no run.** Without it the arena lock cannot be taken, so the
+  runner refuses unless `OCX_ACCEPTANCE_UNSERIALISED=1` reaches it through
   `--test_env` (an action-key input, unlike `env_inherit`). Then it runs pytest
-  with no barrier and no slots: pair it with `--local_test_jobs=1`.
-
-Lock order, everywhere: turnstile (passed, then released) → suite (shared) →
-stack → `_COMPOSE_LOCK` in the barrier; turnstile (passed) → suite (shared) →
-slots in sorted order → the arena's `<basetemp>.lock` in a session, which may
-take `_COMPOSE_LOCK` itself inside pytest; turnstile → suite (exclusive) in
-`test/taskfile.yml`. The runner never holds the turnstile while it waits on
-anything, `_COMPOSE_LOCK` is always innermost and its holders never wait on
-another lock, and no session waits on the stack lock, so no cycle exists.
-Every blocking take is preceded by a `flock -n` probe that says on stderr
-which lock the target is waiting for.
+  with no lock: pair it with `--local_test_jobs=1`.
 
 `--local_test_jobs` stays off every rc file for the reason it always was — an
 rc line is per-command and never per-target-pattern, so a global one would
@@ -134,30 +104,13 @@ throttle the 35 Rust test targets too — and
 bazel:test:accept` passes it on the command line, where it bounds this
 invocation's concurrency and nothing else.
 
-What concurrency does not change: a full registry — and a re-probe that lies.
-Each session's own `pytest_sessionstart` still probes the registry with no
-lock held (the barrier only guarantees the stack was up when it ran), and so
-does xdist's per-worker `registry` fixture. A probe that answers "refuses
-writes" — a full store, or a false negative under load — hands the decision to
-`_recycle_registry`, which re-asks under `_COMPOSE_LOCK` before each of its
-`rm` and `up`, and keeps the lock until the fresh registry accepts writes: a
-registry a sibling session already recycled, or one that answers the second
-time, is left alone, so only a store that still refuses writes under the lock
-is wiped under the targets still running. Every such state is red (a wiped
-registry fails the in-flight pushes, it serves no stale green). An
-"unreachable" answer runs `compose_up`, an unlocked `up -d` of the whole
-stack: from the checkout that created the containers it leaves them alone,
-but from a sibling checkout the bind-mount paths differ, so it recreates
-them under that checkout's running targets (`helpers.py`
-`start_sigstore_stack` says why).
-
 ## What each target declares, and what the unit honestly is
 
 Per target: the module itself, the `uv` launcher, `:suite_inputs` — the one
 shared group carrying what (nearly) every module reads that is not the module
 (`conftest.py`, `pyproject.toml`, `uv.lock`, `ocx.toml`, `ocx.lock`,
 `src/**/*.py`, the non-`test_*` helpers and the fixture tree under `tests/**`,
-`sigstore/**`, `docker-compose.yml`, `zot-config.json`), the binary under test
+`sigstore/**`, `docker-compose.yml`), the binary under test
 and the launcher (`//crates/ocx_cli:ocx`, `//crates/ocx_shim:ocx_shim`) — and
 its `module_data`: the files only a few modules read
 (`taskfile.yml`, `bench/**`, `recordings/**/*.py`, `scenarios/**`,
@@ -195,13 +148,11 @@ stale green to announce:
 
 * **The compose stack's running state is not an action input.** `docker-compose.yml`
   is, so a changed service image reference or a changed port re-keys every
-  target — but a stack that is *up with different content* (a registry holding
+  target — but a stack that is *up with different content* (the mirror holding
   another run's blobs, a Rekor with a different log) does not. Stale-green risk:
   a suite that passed against one live stack reports cached against another.
-  Bounded by the host-wide suite lock the runner takes (no `task
-  test:parallel` pytest step overlaps a bazel run on the same registry port;
-  § Concurrency names what precedes that step unlocked) and by the
-  fact that the fixtures create their own repositories per test.
+  Bounded by the fact that the fixtures create their own repositories per test.
+  The zot registries are not part of this gap: each run starts them empty.
 * **Reads that cross the package boundary are undeclared, and their targets
   are not cached.** `target/**` (cargo output, `.bazelignore`d, cannot be a
   label at all), `website/**`, `crates/**`, `.github/**`, `packaging/**`, the
@@ -300,15 +251,18 @@ _OCX_SHIM = "//crates/ocx_shim:ocx_shim"
 # build. Left to itself uv takes the first compatible `python3` on `PATH` or
 # downloads its own, and the host and the CI image carry different ones.
 _PYTHON = "@tools//:python3"
+
+# The registry every session starts for itself (`test/src/zot.py`), as the
+# project toolchain pins it in `ocx.lock`. Declared as `data` so a zot bump
+# re-keys the targets, and handed over by rlocationpath: `PATH` is not part of
+# any action key.
+_ZOT = "@tools//:zot"
 _BINARY_ENV = {
     "OCX_COMMAND": "$(rlocationpath %s)" % _OCX,
     "OCX_SHIM_BINARY": "$(rlocationpath %s)" % _OCX_SHIM,
     "OCX_TEST_PYTHON": "$(rlocationpath %s)" % _PYTHON,
+    "OCX_TEST_ZOT": "$(rlocationpath %s)" % _ZOT,
 }
-
-# The runner's slot-lock list (§ Concurrency). Spelled once; the tag guard
-# reads the same name off each target's `env`.
-_SLOTS_ENV = "OCX_ACCEPTANCE_SLOTS"
 
 # The tag `UNCACHED_MODULES` adds. The same spelling
 # `scripts/bazel_accept_proofs.py::CACHE_DEFEATING_TAG` measures.
@@ -316,14 +270,13 @@ _UNCACHED_TAG = "external"
 
 # The environment the suite reads that Bazel does not synthesise. `HOME` is
 # uv's cache root and ocx's default store root; `DOCKER_HOST` /
-# `XDG_RUNTIME_DIR` are how a rootless docker daemon is found; the two port
-# knobs are the ones `docker-compose.yml`, `test/conftest.py` and
-# `test/taskfile.yml` all read, so a machine that moved the registry off 5000
-# moves this suite with it.
+# `XDG_RUNTIME_DIR` are how a rootless docker daemon is found; the mirror port
+# knob is the one `docker-compose.yml` and `test/conftest.py` both read, so a
+# machine that moved the registry:2 mirror off 5001 moves this suite with it.
 #
 # With results cached this list is no longer free, and the docstring's third
 # gap is this one: an inherited value is supplied by the client, so a run that
-# reuses a result recorded under a different `OCX_TEST_REGISTRY_PORT` is reusing
+# reuses a result recorded under a different `OCX_TEST_MIRROR_PORT` is reusing
 # a verdict about another stack. The list is kept as short as the runner can
 # work with for exactly that reason — every entry is a value the suite cannot
 # synthesise, not a convenience.
@@ -335,11 +288,10 @@ _UNCACHED_TAG = "external"
 #
 # Where that bites, per name, rather than as a blanket warning:
 #
-#   * `OCX_TEST_REGISTRY_PORT` / `OCX_TEST_MIRROR_PORT` / `DOCKER_HOST` /
-#     `XDG_RUNTIME_DIR` — a machine that moves the registry, or points at
-#     another daemon, reuses a verdict about a different stack. This is the
-#     docstring's stack gap reached through the environment instead of through
-#     `docker-compose.yml`.
+#   * `OCX_TEST_MIRROR_PORT` / `DOCKER_HOST` / `XDG_RUNTIME_DIR` — a machine that
+#     moves the mirror, or points at another daemon, reuses a verdict about a
+#     different stack. This is the docstring's stack gap reached through the
+#     environment instead of through `docker-compose.yml`.
 #   * `__OCX_TESTING_REQUIRE_ENVIRONMENT_D` — the sharp one, because its two
 #     values ask for *different verdicts* from the same test. Unset, an absent
 #     `environment.d` generator is a skip; set, it is a failure. A run that
@@ -360,7 +312,6 @@ _INHERITED_ENV = [
     "DOCKER_HOST",
     "HOME",
     "OCX_TEST_MIRROR_PORT",
-    "OCX_TEST_REGISTRY_PORT",
     "SSH_AUTH_SOCK",
     "USER",
     "XDG_RUNTIME_DIR",
@@ -375,7 +326,7 @@ _INHERITED_ENV = [
     # values are not part of the action key, so a result cached under one value
     # is served under another: a target that passed with
     # `__OCX_TESTING_REQUIRE_ENVIRONMENT_D` unset stays cached when CI sets it.
-    # The names here are host bindings (`HOME`, `DOCKER_HOST`, the two ports)
+    # The names here are host bindings (`HOME`, `DOCKER_HOST`, the mirror port)
     # and lane bindings, not inputs under test, and the lane that sets the two
     # testing names runs on a fresh runner whose cache is populated by the
     # `main` push — which sets them too. `task bazel:test:accept NOCACHE=1`
@@ -461,6 +412,14 @@ UV_PYTHON=$("$python_launcher" -c 'import sys; print(sys.executable)') ||
 UV_PYTHON_DOWNLOADS=never
 export UV_PYTHON UV_PYTHON_DOWNLOADS
 
+# The zot each session starts for itself (`test/src/zot.py` reads OCX_TEST_ZOT).
+# Absolute, because pytest runs in the source tree, and a session with no zot
+# would die in `pytest_configure` naming nothing about this target's env.
+[ -n "${OCX_TEST_ZOT:-}" ] || fail "OCX_TEST_ZOT is unset - the target's env names no zot"
+OCX_TEST_ZOT="$TEST_SRCDIR/$OCX_TEST_ZOT"
+[ -x "$OCX_TEST_ZOT" ] || fail "no executable zot runfile at $OCX_TEST_ZOT (@tools//:zot)"
+export OCX_TEST_ZOT
+
 # The `ocx_schema` binary, on the targets whose `env` names it
 # (`test/BUILD.bazel` `module_env`): Bazel builds it and hands its
 # rlocationpath, never cargo's `target/release/ocx_schema`, which no key names.
@@ -478,8 +437,7 @@ if [ -n "${OCX_SCHEMA_BINARY:-}" ]; then
     PATH="$schema_path:$PATH"
     export OCX_SCHEMA_BINARY PATH
 fi
-OCX_INSECURE_REGISTRIES="localhost:${OCX_TEST_REGISTRY_PORT:-5000}"
-export OCX_COMMAND OCX_SHIM_BINARY OCX_INSECURE_REGISTRIES
+export OCX_COMMAND OCX_SHIM_BINARY
 
 # pytest arenas, and why they are NOT under $TEST_TMPDIR (BZL-TEST-12's usual
 # answer). Measured on 9.2.0: bazel symlinks the workspace's `.git` into
@@ -517,111 +475,31 @@ set -- -p no:cacheprovider --basetemp="$basetemp" "$module" "$@"
 
 cd "$suite"
 
-# The host locks (`bazel.bzl` § Concurrency). All of them live outside the
-# repository and are keyed on the registry port: a `<checkout>/.agents/…` path
-# resolves to a DIFFERENT file in each worktree, so it would exclude nothing
-# across exactly the checkouts that share the stack, and a project on another
-# port is not a competitor. `test/taskfile.yml` computes the suite and
-# turnstile paths the same way; `bazel_accept_proofs.py` holds the two equal.
+# The one host lock left (`bazel.bzl` § Concurrency): the arena. Every other
+# registry is this session's own, so nothing else is shared between targets that
+# a lock could order.
 #
-#   acceptance-turnstile-<port>.lock  PASSED through (taken and released) before
-#                                 every suite take here; HELD by the taskfile's
-#                                 pytest step for its whole run. So an xdist
-#                                 run waiting for the suite lock stops new
-#                                 targets from joining the shared holders, and
-#                                 is not starved by an unbroken chain of them.
-#   acceptance-suite-<port>.lock  SHARED here, EXCLUSIVE in `test/taskfile.yml`'s
-#                                 pytest step: targets overlap each other (a
-#                                 sibling checkout's too), never that step.
-#   acceptance-stack-<port>.lock  EXCLUSIVE around the one-shot bring-up.
-#   ~/.cache/ocx-compose.lock     EXCLUSIVE inside the bring-up; the path is
-#                                 read off `src.helpers._COMPOSE_LOCK`.
-#   acceptance-slot-<port>-<g>    EXCLUSIVE for the whole run, one per xdist
-#                                 group in OCX_ACCEPTANCE_SLOTS, sorted.
-#   <basetemp>.lock               EXCLUSIVE, innermost, around pytest: two
-#                                 copies of one target (`--runs_per_test`)
-#                                 share its arena, which pytest wipes at start.
+#   <basetemp>.lock               EXCLUSIVE around pytest: two copies of one
+#                                 target (`--runs_per_test`) share the arena,
+#                                 which pytest wipes at start.
 #
-# Always taken as `flock -o <file> <command>`: `-o` closes the lock's fd in the
-# command, so a process the suite leaves behind cannot go on holding it.
-# Order (`bazel.bzl` § Concurrency): turnstile (passed, never held), then suite,
-# stack and compose in the barrier; turnstile, then suite, slots in sorted
-# order and the arena for pytest. No cycle.
-lock_dir="$HOME/.cache/ocx"
-mkdir -p "$lock_dir"
-port="${OCX_TEST_REGISTRY_PORT:-5000}"
-suite_lock="$lock_dir/acceptance-suite-$port.lock"
-turnstile="$lock_dir/acceptance-turnstile-$port.lock"
-
+# Taken as `flock -o <file> <command>`: `-o` closes the lock's fd in the command,
+# so a process the suite leaves behind cannot go on holding it.
 if ! command -v flock >/dev/null 2>&1; then
-    # A host with no flock(1) (macOS ships none) can take none of the locks,
-    # so concurrent targets would race one stack. Refused unless asked for by
+    # A host with no flock(1) (macOS ships none) cannot take it, so two copies
+    # of one target would wipe each other's arena. Refused unless asked for by
     # name, through `--test_env` so the choice is part of the action key.
     [ "${OCX_ACCEPTANCE_UNSERIALISED:-}" = 1 ] ||
-        fail "no flock(1) on this host - the suite, stack and slot locks cannot be taken. Install util-linux flock, or pass --test_env=OCX_ACCEPTANCE_UNSERIALISED=1 --local_test_jobs=1 to run without them"
-    echo "acceptance sh_test: no flock(1), OCX_ACCEPTANCE_UNSERIALISED=1 - running with no lock, barrier or slot" >&2
+        fail "no flock(1) on this host - the arena lock cannot be taken. Install util-linux flock, or pass --test_env=OCX_ACCEPTANCE_UNSERIALISED=1 --local_test_jobs=1 to run without it"
+    echo "acceptance sh_test: no flock(1), OCX_ACCEPTANCE_UNSERIALISED=1 - running with no arena lock" >&2
     exec "$uv" run pytest "$@"
 fi
 
-# Says out loud that a lock is contended before blocking on it: a wait is
+# Says out loud that the lock is contended before blocking on it: a wait is
 # otherwise silent, and it is spent out of the target's 900 s timeout.
-waits() {
-    flock -n "$1" "$2" true 2>/dev/null ||
-        echo "acceptance sh_test: $module is waiting for $2" >&2
-}
-
-# Through the turnstile and out again, then the suite lock SHARED.
-enter_suite() {
-    waits -x "$turnstile"
-    flock -o "$turnstile" true
-    waits -s "$suite_lock"
-}
-
-# The stack barrier: the controller-only half of `pytest_sessionstart`, run
-# once per target but only ever one at a time. The first target through does
-# the `docker compose up`; every later one finds the stack reachable and
-# returns. Held under the suite lock too, so no bring-up races an xdist run.
-#
-# And under `_COMPOSE_LOCK`, so its `compose up` cannot race a running
-# session's sigstore `up -d` or registry recycle, which take that lock. Taken
-# in Python, not with flock(1): the recycle path inside the hook takes it too,
-# and a flock belongs to an open file description, so the hook's own attempt
-# on the same file would block on the barrier's hold forever. So the barrier
-# holds the real file for the whole call and points the helpers at a SECOND
-# file (`<lock>.barrier`) — not a re-entrant hold: the real lock stays
-# exclusive against every other process, and the hook's own take succeeds
-# because it takes a different file.
-barrier='import fcntl, conftest, src.helpers as helpers
-lock = helpers._COMPOSE_LOCK
-lock.parent.mkdir(parents=True, exist_ok=True)
-with open(lock, "w") as held:
-    fcntl.flock(held, fcntl.LOCK_EX)
-    helpers._COMPOSE_LOCK = lock.with_name(lock.name + ".barrier")
-    conftest.pytest_sessionstart(None)'
-stack_lock="$lock_dir/acceptance-stack-$port.lock"
-enter_suite
-waits -x "$stack_lock"
-flock -o -s "$suite_lock" flock -o "$stack_lock" \\
-    "$uv" run python -c "$barrier" ||
-    fail "the compose stack did not come up (test/conftest.py pytest_sessionstart)"
-
-case "${OCX_ACCEPTANCE_SLOTS:-}" in
-    *[!a-z0-9_\\ ]*) fail "OCX_ACCEPTANCE_SLOTS='$OCX_ACCEPTANCE_SLOTS' is not a list of [a-z0-9_] names" ;;
-esac
-
-waits -x "$basetemp.lock"
-set -- flock -o "$basetemp.lock" "$uv" run pytest "$@"
-# Word-split on purpose (SC2086): the list is space-separated, and the `case`
-# above has already refused anything but [a-z0-9_] names and spaces.
-# Prepended in REVERSE sorted order, so the first name in sorted order is the
-# outermost lock and therefore the first one taken.
-# shellcheck disable=SC2086
-for slot in $(printf '%s\\n' ${OCX_ACCEPTANCE_SLOTS:-} | sort -ru); do
-    waits -x "$lock_dir/acceptance-slot-$port-$slot.lock"
-    set -- flock -o "$lock_dir/acceptance-slot-$port-$slot.lock" "$@"
-done
-enter_suite
-exec flock -o -s "$suite_lock" "$@"
+flock -n "$basetemp.lock" true 2>/dev/null ||
+    echo "acceptance sh_test: $module is waiting for $basetemp.lock" >&2
+exec flock -o "$basetemp.lock" "$uv" run pytest "$@"
 """
 
 def _acceptance_runner_impl(ctx):
@@ -657,8 +535,7 @@ def acceptance_suite(
         uv = "@tools//:uv",
         extra_pytest_args = None,
         module_data = None,
-        module_env = None,
-        module_slots = None):
+        module_env = None):
     """One `sh_test` per acceptance module, plus the runner they share.
 
     Args:
@@ -677,16 +554,11 @@ def acceptance_suite(
         location expansion included. A value naming a runfile is an
         `rlocationpath`; `_RUNNER` turns the names it knows into absolute
         paths before pytest starts.
-      module_slots: `{module: [group, ...]}` — every xdist group the module
-        names; the runner holds one host lock per group for the
-        module's whole run (§ Concurrency). `scripts/bazel_tag_guard.py`
-        derives the expected value from source and reds a mismatch.
     """
     if not modules:
         fail("acceptance_suite: no modules - `glob([\"tests/test_*.py\"])` matched nothing")
     module_data = module_data or {}
     module_env = module_env or {}
-    module_slots = module_slots or {}
 
     # A listed module that no longer exists would add `external` to nothing and
     # read as a list entry doing its job; a stale `module_data` key would
@@ -695,9 +567,9 @@ def acceptance_suite(
     for module in UNCACHED_MODULES:
         if module not in modules:
             fail("UNCACHED_MODULES names %r, which is not an acceptance module" % module)
-    for module in module_data.keys() + module_env.keys() + module_slots.keys():
+    for module in module_data.keys() + module_env.keys():
         if module not in modules:
-            fail("module_data/module_env/module_slots names %r, which is not an acceptance module" % module)
+            fail("module_data/module_env names %r, which is not an acceptance module" % module)
 
     _acceptance_runner(name = name)
 
@@ -717,10 +589,9 @@ def acceptance_suite(
                 _OCX,
                 _OCX_SHIM,
                 _PYTHON,
+                _ZOT,
             ] + module_data.get(module, []),
-            env = _BINARY_ENV | module_env.get(module, {}) | (
-                {_SLOTS_ENV: " ".join(sorted(module_slots[module]))} if module in module_slots else {}
-            ),
+            env = _BINARY_ENV | module_env.get(module, {}),
             env_inherit = _INHERITED_ENV,
             # Sorted, for the reason `ACCEPTANCE_TAGS` is.
             tags = sorted(ACCEPTANCE_TAGS + ([_UNCACHED_TAG] if module in UNCACHED_MODULES else [])),

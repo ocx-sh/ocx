@@ -23,7 +23,7 @@ The harness sets these environment variables for every script:
 |---|---|
 | `OCX` | Absolute path to the test `ocx` binary |
 | `OCX_HOME` | Per-test isolated `OCX_HOME` |
-| `REGISTRY` | Test registry (default `localhost:5000`) |
+| `REGISTRY` | The session's zot registry (`localhost:<free port>`) |
 | `OCX_DEFAULT_REGISTRY`, `OCX_INSECURE_REGISTRIES` | Forwarded from `OcxRunner` |
 | `SCENARIO_TMP` | Per-test scratch directory (also `cwd`) |
 | `PATH` | The ocx binary's parent prepended; bare `ocx` works |
@@ -33,7 +33,7 @@ For each `self.packages[name]` set up by the scenario subclass:
 | Variable | Example for `name="hello"` |
 |---|---|
 | `PKG_<NAME>` | `s_abcd1234_hello:1.0.0` |
-| `FQ_<NAME>` | `localhost:5000/s_abcd1234_hello:1.0.0` |
+| `FQ_<NAME>` | `localhost:<port>/s_abcd1234_hello:1.0.0` |
 | `REPO_<NAME>` | `s_abcd1234_hello` |
 | `TAG_<NAME>` | `1.0.0` |
 | `MARKER_<NAME>` | `marker-<random hex>` |

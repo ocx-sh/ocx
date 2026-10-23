@@ -31,7 +31,7 @@ uv run pytest -n auto -v
 
 ```
 test/
-  docker-compose.yml         Registry service definition
+  docker-compose.yml         registry:2 mirror and Sigstore service definitions
   pyproject.toml             Python project / pytest config
   README.md
   src/                       Test support code
@@ -72,7 +72,7 @@ Session-scoped fixtures live in `conftest.py`, function-scoped ones in
 | Fixture       | Description |
 |---------------|-------------|
 | `ocx_binary`  | Resolves the `ocx` binary (`$OCX_COMMAND`, else `test/bin/ocx`) |
-| `registry`    | Registry address (default `localhost:5000`); auto-starts docker-compose |
+| `registry`    | Address of the session's own zot (`localhost:<free port>`, started by `pytest_configure`) |
 
 ### Function-scoped (fresh per test)
 
@@ -99,5 +99,5 @@ This design allows tests to run in parallel (`-n auto`) on a shared registry.
 | Environment Variable | Default          | Description |
 |---------------------|------------------|-------------|
 | `OCX_COMMAND`       | `test/bin/ocx`   | Path to the ocx binary |
-| `REGISTRY`          | `localhost:5000` | Registry address |
+| `OCX_TEST_REGISTRY_PORT` | set by the session | Port of the session's own zot registry |
 | `MIRROR_REGISTRY`   | `localhost:5001` | Mirror registry address |

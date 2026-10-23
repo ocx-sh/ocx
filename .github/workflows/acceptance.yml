@@ -76,7 +76,7 @@ jobs:
             *) echo "::error::binary must be 'build' or 'artifact:<name>', got '$BINARY'"; exit 1 ;;
           esac
           {
-            echo "shards=[$(seq -s, 1 "$SHARD_COUNT")]"
+            echo "shards=[$(seq -s, 0 "$((SHARD_COUNT - 1))")]"
             echo "build=$build"
             echo "artifact=$artifact"
           } >> "$GITHUB_OUTPUT"
@@ -133,7 +133,7 @@ jobs:
           retention-days: 1
 
   shard:
-    name: Acceptance (${{ inputs.os }}, shard ${{ matrix.shard }}/${{ inputs.shard-count }})
+    name: Acceptance (${{ inputs.os }}, shard-${{ matrix.shard }}-of-${{ inputs.shard-count }})
     needs: [plan, binary]
     # `binary` is skipped for `binary: artifact:<name>`; anything else but success stops the shards.
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.binary.result) }}
@@ -145,9 +145,6 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     env:
-      # zot runs as native processes from the project toolchain (5000/5003/5004);
-      # only the registry:2 mirror and the Sigstore stack need Docker.
-      OCX_TEST_NATIVE_SERVICES: "1"
       # Empty when the binary is not a release build; the suite reads it by truthiness.
       OCX_TEST_RELEASE_BINARY: ${{ inputs.release-binary && '1' || '' }}
     steps:
@@ -160,7 +157,9 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Setup Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
-      # Puts `zot` (and the rest of the project toolchain) on PATH.
+      # Puts `zot` (and the rest of the project toolchain) on PATH: every pytest
+      # session starts its own zot registries from it (`test/conftest.py`); only
+      # the registry:2 mirror and the Sigstore stack need Docker.
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
@@ -188,8 +187,6 @@ jobs:
           for bin in test/bin/ocx test/bin/ocx-shim test/bin/schema/ocx_schema; do
             [ -x "$bin" ] || { echo "::error::$bin is missing or not executable"; exit 1; }
           done
-      - name: Start native registries
-        run: task test:services:native:start
       - name: Start mirror registry
         shell: bash
         run: |
@@ -215,9 +212,7 @@ jobs:
           # than skipping, because a skip here is indistinguishable from a pass
           # and these are the tests carrying the supply-chain contract.
           #
-          # The services are NAMED: a bare `--profile sigstore up` also starts
-          # the compose `registry`, `target-registry` and `prod-registry`, which
-          # would take ports 5000/5003/5004 from the native zot processes.
+          # The services are NAMED so the profile starts exactly this stack.
           start=$SECONDS
           docker compose -f test/docker-compose.yml --profile sigstore up -d \
             dex sigstore-ct fulcio sigstore-mysql trillian-log-server trillian-log-signer rekor
@@ -249,12 +244,9 @@ jobs:
         # same. Fails closed: any value but empty or `0` arms the gate.
         env:
           __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
-          SHARD: ${{ matrix.shard }}
+          SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard-count }}
-        run: task test:accept:native SHARD="$SHARD/$SHARD_COUNT"
-      - name: Stop native registries
-        if: ${{ always() }}
-        run: task test:services:native:stop
+        run: task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"
       - name: Stop Docker services
         if: ${{ always() }}
         shell: bash
