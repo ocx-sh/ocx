@@ -1,22 +1,18 @@
 // The docs section of ocx.sh: `/docs/` (a claim in the theme's nav.json).
-// Pages live under src/content/docs; `@/` in an include names src/ (the theme's remarkIncludes).
+// Pages live under src/content/docs; `@/` in an include names src/ (the theme's Markdown includes).
 import { copyFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
-import { remarkHeadingIds, remarkIncludes, remarkMdLinks } from '@ocx-sh/theme/remark';
 import ocxTheme from '@ocx-sh/theme/starlight';
 import { defineConfig } from 'astro/config';
 
 import { ocxRedirects } from './plugins/redirects.mjs';
 
 const BASE = '/docs/';
-const srcDir = fileURLToPath(new URL('./src', import.meta.url));
-const root = fileURLToPath(new URL('./src/content/docs', import.meta.url));
 const redirectsDir = fileURLToPath(new URL('./redirects.d', import.meta.url));
 
-// The theme's remarkIncludes refuses a file outside srcDir, and Astro 7.4 fails the build on that error
+// The theme's includes refuse a file outside srcDir, and Astro 7.4 fails the build on that error
 // (7.3 logged it and rendered an empty changelog). So the generated CHANGELOG.md is mirrored into src/.
 const changelog = new URL('../CHANGELOG.md', import.meta.url);
 if (existsSync(changelog)) copyFileSync(changelog, new URL('./src/_changelog.md', import.meta.url));
@@ -36,12 +32,6 @@ export default defineConfig({
   // Starlight reads it before plugins run, so the theme checks it rather than sets it.
   trailingSlash: 'always',
   devToolbar: { enabled: false },
-  markdown: {
-    // Includes first, so headings and links inside included text are rewritten too.
-    processor: unified({
-      remarkPlugins: [[remarkIncludes, { srcDir }], remarkHeadingIds, [remarkMdLinks, { root, base: BASE }]],
-    }),
-  },
   integrations: [
     starlight({
       title: 'ocx',
