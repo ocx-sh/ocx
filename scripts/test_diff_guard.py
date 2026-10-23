@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Refuse a crate-split diff that changes what the acceptance suite asserts.
+"""Refuse a crate-split diff that changes what the acceptance suite asserts (not part of `task verify`).
 
     scripts/test_diff_guard.py <base>..<head> [--allow test/tests/<file>.py:<line>]... [--tiered-shapes]
-
-Scope: ranges of the crate split, and nothing else. It is not part of `task verify`,
-and a range outside the split — the rules_rs migration edits the harness under `test/`
-on purpose — is not what it judges.
 
 Proofs: scripts/tests/test_test_diff_guard.py
 

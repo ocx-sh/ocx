@@ -1,15 +1,12 @@
 """The suite's zot registries: one set per pytest session, on kernel-chosen ports.
 
-``test/conftest.py::pytest_configure`` calls :func:`start` in the xdist controller
-(workers inherit the exported ``OCX_TEST_*_PORT`` variables and never start zot),
-``pytest_unconfigure`` calls :meth:`Stack.stop`. Each instance runs ``port: "0"``:
-zot binds a free port and logs it, which is the only place the number exists.
+``test/conftest.py::pytest_configure`` calls :func:`start` in the xdist controller (workers inherit the
+exported ``OCX_TEST_*_PORT`` variables and never start zot); ``pytest_unconfigure`` calls :meth:`Stack.stop`.
+Each instance runs ``port: "0"`` and logs the port it bound, the only place the number exists.
 
-A killed controller must not leave zot behind. POSIX: a watchdog child holds the
-read end of a pipe whose write end only the controller holds, and kills zot on
-EOF. Windows: zot is assigned to a Job Object with KILL_ON_JOB_CLOSE, closed with
-the controller's last handle. ``preexec_fn`` is out: it is unsafe in a process
-with threads.
+A killed controller must not leave zot behind: on POSIX a watchdog child kills zot on EOF of a pipe only the
+controller holds; on Windows zot sits in a Job Object with KILL_ON_JOB_CLOSE, closed with the controller's last
+handle. ``preexec_fn`` is out: it is unsafe in a process with threads.
 """
 
 from __future__ import annotations
