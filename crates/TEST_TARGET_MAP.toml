@@ -146,7 +146,7 @@ cases = 1
 [[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 1028
+cases = 1030
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"
@@ -277,7 +277,7 @@ cases = 96
 [[target]]
 label = "//crates/ocx_util:ocx_util_test"
 crate = "ocx_util"
-cases = 285
+cases = 290
 
 # ---------------------------------------------------------------------------
 # C-008's suite-level exclusion set: what `cargo nextest list` reports and no
