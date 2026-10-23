@@ -159,6 +159,12 @@ tasks:
       - cargo check -p ocx_shim --locked --all-targets --target x86_64-pc-windows-msvc
       - cargo check -p ocx_shim --locked --all-targets --target aarch64-pc-windows-msvc
 
+  toolchain:
+    desc: Install the rust-toolchain.toml toolchain, serially, before a parallel phase runs cargo or rustc
+    # On a cold RUSTUP_HOME every rustup proxy installs the toolchain (targets included) itself, and two
+    # at once collide ("detected conflict"). The channel is pinned, so an installed one is a no-op.
+    cmd: rustup toolchain install --no-self-update
+
   format:check:
     desc: Check Rust formatting
     cmd: cargo fmt --check

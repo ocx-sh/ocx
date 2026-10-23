@@ -346,6 +346,21 @@ def test_the_task_reader_reaches_through_an_alias_and_stops_at_its_edge(alias: s
     assert (task in _task_reach(alias)) is reached, f"`task {alias}` reaches {sorted(_task_reach(alias))}"
 
 
+@pytest.mark.parametrize(("caller", "phase"), [("ci:lint", "ci:.lint:phase1"), ("verify", ".verify:lint")])
+def test_the_toolchain_installs_before_a_parallel_phase_runs_cargo(caller: str, phase: str) -> None:
+    """A parallel phase runs `cargo fmt` beside tests whose `task --dry` evaluates vars that call
+    `rustc`; on a cold RUSTUP_HOME each proxy installs the toolchain and two at once collide.
+    `rust:toolchain` must run, serially, in the caller's `cmds:` before the phase."""
+    body, namespace = _task_table()[caller]
+    names = [
+        str(entry["task"])[1:] if str(entry["task"]).startswith(":") else f"{namespace}{entry['task']}"
+        for entry in body.get("cmds") or []
+        if isinstance(entry, dict) and "task" in entry
+    ]
+    assert "rust:format:check" in _task_reach(phase), f"{phase} no longer runs cargo; drop this case"
+    assert "rust:toolchain" in names and names.index("rust:toolchain") < names.index(phase), names
+
+
 def test_the_claude_structural_tests_run_in_ci() -> None:
     """This file included. `claude:tests` is a member of `ci:lint`, which the template's
     `lint` job runs — and a workflow that ran neither would leave every shape asserted here,

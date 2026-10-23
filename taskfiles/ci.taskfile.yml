@@ -39,6 +39,7 @@ tasks:
     cmds:
       - task: :git:submodules
       - task: :git:history
+      - task: :rust:toolchain
       - task: .lint:phase1
       - task: :bazel:build:nobuild
       - task: :bazel:build:drift

@@ -6,12 +6,12 @@
 - **State:** executing
 - **Tier:** high
 - **Tier-grammar:** 5
-- **Updated:** 2026-10-22
-- **Active phase:** 2 — tiers: W2–W4 (A0, A2 ∥ A3 ∥ A5, A4), scope stops at G2
-- **Step:** W2–W4 landed, awaiting G2
+- **Updated:** 2026-10-24
+- **Active phase:** 3–5 — test tooling, platform, cleanups: W5–W9 (T1, T2, F1, F2, K), scope stops at G3–G5
+- **Step:** W5–W9 landed, awaiting G3–G5
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-22 (after c83909c69: ci(website): the docs tier audits the pages that already meet every Lighthouse budget)
-- **Next:** G2 (meta gate): push #637, dispatch verify-deep with the `run-deep` label path, then resume /hex-execute after G2 (§ Schedule log, W3–W4)
+- **Last update:** 2026-10-24 (after 37b23ddf4: chore(hex): merge F2 (#633 full suite on macOS and Windows, declared no-docker skips) into the feature branch)
+- **Next:** G3–G5 (meta): push #637, dispatch deep; G4 is blocked on the Windows full-suite residue (§ Schedule log, W5–W9)
 
 ---
 
@@ -298,11 +298,11 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 | A5 | ocx | C-020 | `website/taskfile.yml` | 3 | A0 | — | merged |
 | A4 | ocx | C-014, C-015, D-CROSS, D19, D20 | `.github/workflows/{basic-repo,deep-repo,acceptance,cross}.yml`, hand-written workflows (zizmor fixes; `shell-activation-deep.yml` cron → `workflow_call`), `.claude/tests/test_workflows.py`, `.claude/tests/test_ai_config.py`, `test/lint/test_smoke_coverage.py`, `.claude/rules/subsystem-ci.md` | 4 | A2, A3, A5 | review | merged |
 | A6 | ocx | template-job prerequisites for C-013/C-020 (W4 residue, opened by the orchestrator) | `taskfiles/{ci,git}.taskfile.yml`, `website/scripts/lighthouse.mjs`, `scripts/{test_bundle,bazel_doctor}.py` (+ tests), rule prose | 4 | A3, A5 | — | merged |
-| T1 | ocx | C-030, C-031, S-005 | `scripts/accept_shard.py`, `scripts/accept_floor.py`, `scripts/windows_local.sh`, `scripts/tests/test_accept_{shard,floor}.py`, `test/taskfile.yml`, `taskfiles/bazel.taskfile.yml`, `.github/workflows/acceptance.yml`, `.claude/tests/test_workflows.py`, `adr_test_speed_tiers.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles}.md` | 5 | G2 | — | pending |
-| T2 | ocx | C-032, S-006 | `test/conftest.py`, `test/src/native_registries.py` → `test/src/zot.py` (new), `test/zot-config.json`, `docker-compose.yml`, `test/bazel.bzl`, `test/BUILD.bazel`, `scripts/bazel_accept_proofs.py`, `test/taskfile.yml`, `.github/workflows/{acceptance,basic-repo,deep-repo}.yml`, hard-port readers (`test/tests/fixtures/golden/generate.py`, `test_bench_smoke.py`, `attestations.py`, `test_shell_reconcile.py`), `.claude/rules/subsystem-tests.md` | 6 | T1 | hard | pending |
-| F1 | ocx | C-040, C-041, S-009, S-010 | `crates/ocx_util/src/fs.rs`, `crates/ocx_package/src/bin_scan.rs`, `crates/ocx_cli/src/command/package.rs` (help), `crates/TEST_TARGET_MAP.toml`, `test/tests/test_patch_smoke.py`, `adr_declared_binaries_metadata.md` | 7 | G3 | — | pending |
-| F2 | ocx | C-042 | `.github/workflows/{deep-repo,acceptance}.yml`, `test/limits/{macos,windows}/**` (creation), sigstore/docker fixtures under `test/src/`, workspace_structure tests, `adr_crate_split_workspace.md`, `.claude/rules/{subsystem-tests,subsystem-ci}.md` | 8 | F1 | — | pending |
-| K | ocx | C-050, C-051 | `scripts/{release_provenance_check,test_diff_guard,bazel_test_floor,bazel_build_drift,bazel_gate_proofs,bazel_floor_proofs,bep_to_otlp}.py` (+ tests), `taskfiles/{rust,scripts}.taskfile.yml`, `.github/workflows/deep-repo.yml` (comment), `patches/{rules_rust_keep_doctest_stdout.patch,BUILD.bazel}`, `MODULE.bazel`, `MODULE.bazel.lock`, `crates/TEST_TARGET_MAP.toml`, `adr_test_speed_tiers.md`, `adr_bazel_rules_rs_migration.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles,subsystem-ci}.md` | 9 | G4 | — | pending |
+| T1 | ocx | C-030, C-031, S-005 | `scripts/accept_shard.py`, `scripts/accept_floor.py`, `scripts/windows_local.sh`, `scripts/tests/test_accept_{shard,floor}.py`, `test/taskfile.yml`, `taskfiles/bazel.taskfile.yml`, `.github/workflows/acceptance.yml`, `.claude/tests/test_workflows.py`, `adr_test_speed_tiers.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles}.md` | 5 | G2 | — | merged |
+| T2 | ocx | C-032, S-006 | `test/conftest.py`, `test/src/native_registries.py` → `test/src/zot.py` (new), `test/zot-config.json`, `docker-compose.yml`, `test/bazel.bzl`, `test/BUILD.bazel`, `scripts/bazel_accept_proofs.py`, `test/taskfile.yml`, `.github/workflows/{acceptance,basic-repo,deep-repo}.yml`, hard-port readers (`test/tests/fixtures/golden/generate.py`, `test_bench_smoke.py`, `attestations.py`, `test_shell_reconcile.py`), `.claude/rules/subsystem-tests.md` | 6 | T1 | hard | merged |
+| F1 | ocx | C-040, C-041, S-009, S-010 | `crates/ocx_util/src/fs.rs`, `crates/ocx_package/src/bin_scan.rs`, `crates/ocx_cli/src/command/package.rs` (help), `crates/TEST_TARGET_MAP.toml`, `test/tests/test_patch_smoke.py`, `adr_declared_binaries_metadata.md` | 7 | G3 | — | merged |
+| F2 | ocx | C-042 | `.github/workflows/{deep-repo,acceptance}.yml`, `test/limits/{macos,windows}/**` (creation), sigstore/docker fixtures under `test/src/`, workspace_structure tests, `adr_crate_split_workspace.md`, `.claude/rules/{subsystem-tests,subsystem-ci}.md` | 8 | F1 | — | merged |
+| K | ocx | C-050, C-051 | `scripts/{release_provenance_check,test_diff_guard,bazel_test_floor,bazel_build_drift,bazel_gate_proofs,bazel_floor_proofs,bep_to_otlp}.py` (+ tests), `taskfiles/{rust,scripts}.taskfile.yml`, `.github/workflows/deep-repo.yml` (comment), `patches/{rules_rust_keep_doctest_stdout.patch,BUILD.bazel}`, `MODULE.bazel`, `MODULE.bazel.lock`, `crates/TEST_TARGET_MAP.toml`, `adr_test_speed_tiers.md`, `adr_bazel_rules_rs_migration.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles,subsystem-ci}.md` | 9 | G4 | — | merged |
 | R1 | ocx | C-061 | `test/tests/**` (markers), `test/conftest.py`, `test/pyproject.toml`, `test/src/**` helpers, `test/lint/test_testing_marker.py`, `test/limits/*-release/**`, `.claude/rules/subsystem-tests.md` | 10 | G5 | — | pending |
 | R2 | ocx | C-060, C-062, C-063, C-064, S-007, S-008 | `.github/workflows/{release-readiness,readiness-gate,release,acceptance}.yml`, `dist-workspace.toml`, `scripts/release_readiness_gate.py`, `scripts/tests/test_release_readiness_gate.py`, `taskfiles/release.taskfile.yml`, `.claude/tests/test_workflows.py`, `.claude/rules/{workflow-release,subsystem-ci}.md` | 10 | G5 | hard, review | pending |
 | I1 | ocx | repoint to released satellites, D21 | `.copier-answers.yml`, template-owned files, `grimoire.lock` + outputs, `.claude/rules/subsystem-ci.md` (deviation note out), `.github/actions/bazel-cache-rc/**` + callers (iff D21) | 11 | G7 | — | pending |

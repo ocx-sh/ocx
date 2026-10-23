@@ -194,6 +194,7 @@ tasks:
       # against what `.verify:lint` / `.verify:build-test` run, and this is
       # neither — it is the one-line bootstrap that installs the git hooks.
       - task: git:hooks
+      - task: rust:toolchain
       - task: .verify:lint
       - task: .verify:build-test
       - task: .verify:mark
