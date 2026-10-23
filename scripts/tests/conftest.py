@@ -6,8 +6,8 @@ the only entry point: discovery replaces the hand-kept list, `-n auto` the
 sequential run, and `test_every_gate_script_has_tests` the completeness check.
 
 The session is budgeted like the lint tier: a clean run above
-`OCX_TOOLING_BUDGET_SECONDS` (default 30) wall clock turns red, so a proof that
-starts re-deriving what one pass already computed cannot slow the loop unseen.
+`OCX_TOOLING_BUDGET_SECONDS` (30 s; 180 s on GitHub Actions) turns red, so a
+proof re-deriving what one pass already computed cannot slow the loop unseen.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 BUDGET_ENV = "OCX_TOOLING_BUDGET_SECONDS"
 DEFAULT_BUDGET_SECONDS = 30.0  # 13.5 s alone, 26 s beside the rest of `task verify`'s phase 1
+# A 4-vCPU hosted runner with a cold Bazel server measured 37.6 s and 71.9 s.
+HOSTED_RUNNER_BUDGET_SECONDS = 180.0
 _CLOCK = pytest.StashKey[tuple[float, float]]()
 
 
@@ -40,7 +42,9 @@ def bazel() -> str:
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    budget = float(os.environ.get(BUDGET_ENV, DEFAULT_BUDGET_SECONDS))
+    hosted = os.environ.get("GITHUB_ACTIONS") == "true"
+    default = HOSTED_RUNNER_BUDGET_SECONDS if hosted else DEFAULT_BUDGET_SECONDS
+    budget = float(os.environ.get(BUDGET_ENV, default))
     session.config.stash[_CLOCK] = (time.monotonic(), budget)
 
 

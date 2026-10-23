@@ -652,7 +652,7 @@ tasks:
       uncached with no binary, no registry and no task runner
       (test/lint/conftest.py refuses each). Fails below test/LINT_FLOOR
       collected, above test/LINT_SKIP_CEILING skipped or
-      test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget.
+      test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget (90 s on GitHub Actions).
       The `deep` marker is deselected: `lint:deep` runs those.
     dir: '{{toSlash .TASKFILE_DIR}}'
     # No `sources:`, by design (ADR C-LINT): a sweep's input is the whole tree,
@@ -679,16 +679,19 @@ tasks:
       # test_lint_tier_guards.py shows that red and green. Pinned inline rather
       # than in `env:`, which loses to an inherited variable: a budget the
       # calling environment could raise would not gate the run it measures.
+      # 30 s is the dev host's; a 4-vCPU hosted runner shares phase 1 with
+      # cold rustup and Bazel setup and measured 35 s, so GitHub Actions gets 90.
       #
       # Teed, with `set -o pipefail` so pytest's status survives the tee, for
       # the skip/xfail ceilings below — the acceptance tier's pattern.
       - >-
         start=$(date +%s);
         set -o pipefail;
-        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ -m "not deep" -n auto --basetemp={{.TEST_BASETEMP}}-lint
+        budget=30; [ "${GITHUB_ACTIONS:-}" = true ] && budget=90;
+        OCX_LINT_BUDGET_SECONDS=$budget uv run pytest lint/ -m "not deep" -n auto --basetemp={{.TEST_BASETEMP}}-lint
         {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint.log;
         status=$?;
-        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget 30 s)";
+        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget $budget s)";
         exit $status
       # A skip added to dodge a red is not caught by the collected floor.
       - task: .suite-ceilings
