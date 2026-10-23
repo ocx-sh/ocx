@@ -15,6 +15,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,17 @@ _UNSET = _Unset()
 # ---------------------------------------------------------------------------
 # Docker-compose helpers (the registry:2 mirror and the Sigstore profile)
 # ---------------------------------------------------------------------------
+
+
+#: A job with no Docker declares it with this variable, and the fixtures that need Docker
+#: skip with a `no docker:` reason. Never inferred: a missing CLI or a dead daemon is a red.
+NO_DOCKER_ENV = "OCX_TEST_NO_DOCKER"
+
+
+def skip_without_docker(what: str) -> None:
+    """Skips the calling test or fixture when the job declares ``OCX_TEST_NO_DOCKER=1``."""
+    if os.environ.get(NO_DOCKER_ENV) == "1":
+        pytest.skip(f"no docker: {NO_DOCKER_ENV}=1, {what} is not started")
 
 
 def registry_is_reachable(registry: str) -> bool:
@@ -165,6 +178,7 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
     holding an exclusive lock across a 300s timeout would serialize sessions
     that have nothing left to contend over.
     """
+    skip_without_docker("the Sigstore stack")
     _bring_up_serialized()
     done = subprocess.run(
         [sys.executable, str(_WAIT_FOR_STACK), "--timeout", str(timeout)],

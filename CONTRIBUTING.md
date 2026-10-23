@@ -66,6 +66,10 @@ One variable drives both consumers: the host side of the port mapping in
 `test/docker-compose.yml` and the `MIRROR_REGISTRY` default in `test/conftest.py`.
 Setting `MIRROR_REGISTRY` directly still wins over both.
 
+Without Docker, `export OCX_TEST_NO_DOCKER=1` skips the mirror and Sigstore tests
+(reason `no docker:`). Nothing infers it: with the variable unset, a missing `docker`
+CLI fails those tests.
+
 ## Code Style
 
 ```sh

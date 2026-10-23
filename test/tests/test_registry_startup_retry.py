@@ -7,12 +7,17 @@ Pure and Docker-free: `is_reachable` and `sleep` are both injected, so this
 proves the polling shape (attempt count, backoff between tries, no sleep
 after a final attempt) on a fully controlled input rather than against a real
 registry's boot time, which the acceptance suite already covers end to end.
+It also holds the Docker skip contract: `OCX_TEST_NO_DOCKER=1` skips, nothing infers it.
 """
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
+
+from src import helpers
 
 
 def _load_root_conftest():
@@ -84,3 +89,46 @@ def test_wait_for_reachable_gives_up_after_exhausting_every_attempt() -> None:
     assert result is False
     assert calls == 3, "every attempt is spent before giving up"
     assert sleeps == [0.1, 0.1], "no sleep follows the final, still-failing attempt"
+
+
+NO_DOCKER_REASON = "no docker:"
+
+
+def test_no_docker_flag_skips_the_mirror_fixtures_even_when_a_registry_answers(monkeypatch) -> None:
+    monkeypatch.delenv("OCX_TESTS_NO_REGISTRY", raising=False)
+    monkeypatch.setenv("OCX_TEST_NO_DOCKER", "1")
+    monkeypatch.setattr(conftest, "registry_is_reachable", lambda _address: True)
+
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        conftest._mirror_address("localhost:5001", "mirror_registry")
+
+    assert str(skipped.value).startswith(NO_DOCKER_REASON)
+
+
+def test_no_docker_flag_skips_the_sigstore_stack(monkeypatch) -> None:
+    monkeypatch.setenv("OCX_TEST_NO_DOCKER", "1")
+
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        helpers.start_sigstore_stack()
+
+    assert str(skipped.value).startswith(NO_DOCKER_REASON)
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_nothing_but_the_flag_set_to_one_skips(monkeypatch, value: str | None) -> None:
+    if value is None:
+        monkeypatch.delenv("OCX_TEST_NO_DOCKER", raising=False)
+    else:
+        monkeypatch.setenv("OCX_TEST_NO_DOCKER", value)
+
+    helpers.skip_without_docker("anything")
+
+
+def test_a_missing_docker_cli_fails_when_the_job_declares_nothing(monkeypatch) -> None:
+    monkeypatch.delenv("OCX_TESTS_NO_REGISTRY", raising=False)
+    monkeypatch.delenv("OCX_TEST_NO_DOCKER", raising=False)
+    monkeypatch.setattr(conftest, "registry_is_reachable", lambda _address: False)
+    monkeypatch.setattr(conftest.shutil, "which", lambda _name: None)
+
+    with pytest.raises(pytest.fail.Exception, match="OCX_TEST_NO_DOCKER=1"):
+        conftest._mirror_address("localhost:5001", "mirror_registry")
