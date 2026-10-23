@@ -8,50 +8,6 @@
     "**/.claude/rules/typescript-quality/**",
     "**/.claude/rules/code-docs/**"
   ],
-  "permissions": {
-    "allow": [
-      "Read",
-      "Glob",
-      "Grep",
-      "WebSearch",
-      "Edit",
-      "Write",
-      "NotebookEdit",
-      "mcp__context7__resolve-library-id",
-      "mcp__context7__query-docs",
-      "mcp__sequential-thinking__sequentialthinking",
-      "mcp__ide__getDiagnostics",
-      "mcp__ide__executeCode"
-    ],
-    "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(rm -r:*)",
-      "Bash(sudo:*)",
-
-      "Bash(curl:*)",
-      "Bash(wget:*)",
-
-      "Bash(git commit --no-verify:*)",
-      "Bash(git commit -n:*)",
-      "Bash(git push --no-verify:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "Bash(git push origin --force:*)",
-      "Bash(git push origin -f:*)",
-      "Bash(git reset --hard:*)",
-      "Bash(git clean -f:*)",
-      "Bash(git clean -fd:*)",
-
-      "Bash(docker system prune:*)",
-      "Bash(docker rm:*)",
-      "Bash(docker rmi:*)",
-
-      "Bash(chmod 777:*)"
-    ]
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  },
   "enableAllProjectMcpServers": true,
   "hooks": {
     "SessionStart": [
