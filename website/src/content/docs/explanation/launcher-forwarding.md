@@ -6,7 +6,7 @@ description: "How a generated launcher re-enters ocx with the package root baked
 
 This page explains how a generated launcher embeds its package root and how a running `ocx` forwards its configuration to every `ocx` it spawns.
 
-## Launcher Embedding \{#launcher-embedding\}
+## Launcher Embedding {#launcher-embedding}
 
 When `ocx package install` generates launchers for a package's declared [entrypoints][entry-points], each launcher delegates to the internal `ocx launcher exec` subcommand with the package-root path baked at install time.
 
@@ -31,7 +31,7 @@ The companion `cmake.exe` is a compiled shim. It derives its entry-point name fr
 
 See the [Entry Points][entry-points] in-depth page for the full launcher generation pipeline, character rejection rules, and cross-platform launcher behavior.
 
-## OCX Configuration Forwarding \{#ocx-forwarding\}
+## OCX Configuration Forwarding {#ocx-forwarding}
 
 Whenever ocx spawns a subprocess, it materializes the running ocx's resolution-affecting policy as `OCX_*` env vars on the child. The most common case is the child process under [`ocx package exec`][cmd-package-exec], which may itself invoke a generated [entrypoint launcher][entry-points] that re-shells back into ocx. This is the chokepoint that keeps configuration coherent across the chain.
 

@@ -17,12 +17,15 @@ use ocx_oci::{OperatingSystem, Platform};
 use ocx_util::fs::path::{RelativePath, join_under_root};
 use ocx_util::fs::{DirWalker, WalkDecision};
 
+mod program;
+
 /// Windows extension allowlist the scan strips from a filename stem; frozen, never
 /// read from `%PATHEXT%`, or a scan's result depends on the build host.
 pub const BIN_SCAN_WINDOWS_EXTENSIONS: [&str; 4] = [".exe", ".com", ".bat", ".cmd"];
 
-/// Scans `content_root` for executables under `platform`'s convention in the
-/// directories `metadata`'s install-path-rooted, interface-visible `Path` vars name.
+/// Scans `content_root` for programs under `platform`'s convention in the
+/// directories `metadata`'s install-path-rooted, interface-visible `PATH` vars name;
+/// shared libraries in them are not programs.
 ///
 /// # Errors
 ///
@@ -56,7 +59,7 @@ async fn collect_candidates(
     let wildcard_dirs = wildcard_target_dirs(content_root, strip).await?;
 
     let mut candidates: BTreeMap<BinaryName, Candidate> = BTreeMap::new();
-    for rel in scan_scope(metadata) {
+    for rel in scan_scope(metadata, platform) {
         for wildcard_dir in &wildcard_dirs {
             let Ok(scan_dir) = join_under_root(wildcard_dir, rel.as_path()) else {
                 continue;
@@ -67,13 +70,13 @@ async fn collect_candidates(
     Ok(candidates)
 }
 
-/// The `${installPath}`-relative directories `metadata`'s interface-visible `Path` vars name;
-/// empty when the package names nothing to scan.
-fn scan_scope(metadata: &AuthoringMetadata) -> Vec<RelativePath> {
+/// The `${installPath}`-relative directories `metadata`'s interface-visible `PATH` vars name under
+/// `platform`; empty when the package names no program directory to scan.
+fn scan_scope(metadata: &AuthoringMetadata, platform: &Platform) -> Vec<RelativePath> {
     let AuthoringMetadata::Bundle(bundle) = metadata;
     let mut scope = Vec::new();
     for var in &bundle.env {
-        if !var.visibility.has_interface() {
+        if !var.visibility.has_interface() || !is_path_key(&var.key, platform) {
             continue;
         }
         let Modifier::Path(path_var) = &var.modifier else {
@@ -159,12 +162,35 @@ async fn collect_directory_candidates(
         let Ok(name) = BinaryName::try_from(claim) else {
             continue;
         };
+        // Only the exec-bit convention is blind to shared libraries: GNU ld writes `.so` at 0755.
+        if executable && !is_windows_target(platform) && !is_program_file(&path).await? {
+            continue;
+        }
         candidates
             .entry(name)
             .and_modify(|existing| existing.executable |= executable)
             .or_insert(Candidate { path, executable });
     }
     Ok(())
+}
+
+/// Whether the file at `path` is a program rather than a shared library; see [`program::is_program`].
+async fn is_program_file(path: &Path) -> Result<bool, PackageError> {
+    let probe = path.to_path_buf();
+    tokio::task::spawn_blocking(move || program::is_program(&probe))
+        .await
+        .expect("bin scan program-sniff task panicked")
+        .map_err(|e| super::error::file_error(path, e))
+}
+
+/// Whether `key` names the variable the platform's shell resolves programs through:
+/// exactly `PATH` on Unix, any ASCII case on Windows.
+fn is_path_key(key: &str, platform: &Platform) -> bool {
+    if is_windows_target(platform) {
+        key.eq_ignore_ascii_case("PATH")
+    } else {
+        key == "PATH"
+    }
 }
 
 /// Claims `file_name` as `(name, executable)` under `platform`'s convention:
@@ -307,7 +333,9 @@ async fn resolve_binaries_on_host(
         (ScanMode::Off, _) => Ok(metadata),
         // Refuse, never degrade: Auto would publish a silently absent `binaries`. An empty scope
         // scans nothing on any host, so only a non-empty one makes the host's blind spot matter.
-        (ScanMode::Verify, _) | (ScanMode::Auto, None) if !host_can_scan && !scan_scope(&metadata).is_empty() => {
+        (ScanMode::Verify, _) | (ScanMode::Auto, None)
+            if !host_can_scan && !scan_scope(&metadata, platform).is_empty() =>
+        {
             Err(BinScanError::UnsupportedHostScan {
                 platform: platform.clone(),
             })
@@ -1114,6 +1142,25 @@ mod tests {
             .expect("an empty scan scope must not refuse a Verify on an unscannable host");
     }
 
+    /// The scope is the `PATH` var alone, so a package whose only interface
+    /// `${installPath}` var is `LD_LIBRARY_PATH` scans nothing and has nothing for an
+    /// unscannable host to refuse.
+    #[tokio::test]
+    async fn resolve_binaries_auto_proceeds_when_only_a_non_path_var_names_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_binaries_on_host(
+            dir.path(),
+            keyed_path_metadata(&[("LD_LIBRARY_PATH", "lib")]),
+            &linux_platform(),
+            ScanMode::Auto,
+            false,
+        )
+        .await
+        .expect("a non-PATH var is outside the scan scope, so it must not refuse");
+        assert_eq!(resolved.binaries().map(|binaries| binaries.iter().count()), Some(0));
+    }
+
     /// The other control: `--no-bin-scan` never scans, so it stays a way
     /// through on exactly the host that cannot scan. This is the remedy the
     /// two refusals above name, so it must actually work.
@@ -1130,5 +1177,308 @@ mod tests {
             "Off passes the field through verbatim, undeclared included: {:?}",
             resolved.binaries()
         );
+    }
+
+    // ── PATH-key restriction ────────────────────────────────────────────
+
+    #[cfg(unix)]
+    /// Builds `AuthoringMetadata` with one interface-visible `${installPath}`-rooted
+    /// `Path` var per `(key, rel)` pair.
+    fn keyed_path_metadata(vars: &[(&str, &str)]) -> AuthoringMetadata {
+        let env: Vec<String> = vars
+            .iter()
+            .map(|(key, rel)| {
+                format!(
+                    r#"{{"key":"{key}","type":"path","value":"${{installPath}}/{rel}","required":false,"visibility":"public"}}"#
+                )
+            })
+            .collect();
+        let json = format!(r#"{{"type":"bundle","version":1,"env":[{}]}}"#, env.join(","));
+        serde_json::from_str(&json).expect("fixture metadata parses")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_ignores_non_path_keyed_path_var() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["bin", "lib"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        write_exec_file(&dir.path().join("bin").join("hello"));
+        write_exec_file(&dir.path().join("lib").join("libfoo.so.1"));
+
+        let metadata = keyed_path_metadata(&[("PATH", "bin"), ("LD_LIBRARY_PATH", "lib")]);
+        let found = scan_interface_binaries(dir.path(), &metadata, &linux_platform())
+            .await
+            .expect("scan succeeds");
+
+        assert_eq!(
+            names(&found),
+            vec!["hello"],
+            "only the PATH var's directory is scanned; LD_LIBRARY_PATH's lib/ is not a binary directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_matches_path_key_case_insensitively_for_windows_target_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for sub in ["bin", "tools"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        std::fs::write(dir.path().join("bin").join("foo.exe"), b"").unwrap();
+        std::fs::write(dir.path().join("tools").join("other.exe"), b"").unwrap();
+        write_exec_file(&dir.path().join("bin").join("unix-tool"));
+
+        let metadata = keyed_path_metadata(&[("Path", "bin"), ("TOOLS_PATH", "tools")]);
+        let windows = scan_interface_binaries(dir.path(), &metadata, &windows_platform())
+            .await
+            .expect("scan succeeds");
+        assert_eq!(
+            names(&windows),
+            vec!["foo"],
+            "Windows env keys are case-insensitive: `Path` is scanned, `TOOLS_PATH` is not"
+        );
+
+        let linux = scan_interface_binaries(dir.path(), &metadata, &linux_platform())
+            .await
+            .expect("scan succeeds");
+        assert!(
+            linux.is_empty(),
+            "a Unix target matches `PATH` exactly, so `Path` is not scanned: {:?}",
+            names(&linux)
+        );
+    }
+
+    // ── Shared-library filter over real ELF objects ─────────────────────
+    //
+    // Compiled by the host C toolchain, never hand-written bytes: the filter's whole
+    // job is reading a binary format, and a fixture the parser never faced proves nothing.
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    mod elf_fixtures {
+        use super::*;
+
+        /// Compiles one ELF fixture with `cc` into `dir`.
+        ///
+        /// A missing `cc` is a hard failure, never a skip: linking this very test
+        /// binary already went through a C linker driver, so a skip would be a green
+        /// that never ran.
+        #[expect(
+            clippy::disallowed_types,
+            reason = "test-only `cc` invocation building the ELF fixtures the shared-library filter classifies"
+        )]
+        fn compile(dir: &std::path::Path, name: &str, source: &str, args: &[&str]) -> PathBuf {
+            let source_path = dir.join(format!("{name}.c"));
+            std::fs::write(&source_path, source).expect("write fixture source");
+            let output_path = dir.join(name);
+            let result = std::process::Command::new("cc")
+                .arg("-o")
+                .arg(&output_path)
+                .arg(&source_path)
+                .args(args)
+                .output()
+                .expect("cc must be present: linking this test binary already required a C linker driver");
+            assert!(
+                result.status.success(),
+                "cc failed to build fixture {name}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            std::fs::remove_file(&source_path).expect("remove fixture source");
+            output_path
+        }
+
+        const MAIN: &str = "int main(void) { return 0; }\n";
+
+        /// Scans `bin/` of a fresh package root after `populate` fills it. The control
+        /// `hello` program is always present, so an empty verdict cannot be a scan that read nothing.
+        async fn scan_bin(populate: impl FnOnce(&std::path::Path)) -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            compile(&bin, "hello", MAIN, &["-pie", "-fPIE"]);
+            populate(&bin);
+            let metadata = interface_path_metadata("bin", "interface", None);
+            let found = scan_interface_binaries(dir.path(), &metadata, &linux_platform())
+                .await
+                .expect("scan succeeds");
+            found.iter().map(|name| name.as_str().to_owned()).collect()
+        }
+
+        #[tokio::test]
+        async fn shared_object_and_its_symlink_are_dropped() {
+            let claimed = scan_bin(|bin| {
+                compile(
+                    bin,
+                    "libfoo.so.1",
+                    "int foo(void) { return 1; }\n",
+                    &["-shared", "-fPIC"],
+                );
+                std::os::unix::fs::symlink("libfoo.so.1", bin.join("libfoo.so")).unwrap();
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello"], "a 0755 .so is a library, not a binary");
+        }
+
+        #[tokio::test]
+        async fn loader_shaped_library_with_interp_and_soname_is_dropped() {
+            // libc.so.6 shape: PT_INTERP and DT_SONAME together. Without the SONAME step
+            // the INTERP check alone would claim it.
+            let source = "const char interp[] __attribute__((section(\".interp\"))) = \"/lib/ld.so.1\";\n\
+                          void entry(void) {}\n";
+            let claimed = scan_bin(|bin| {
+                compile(
+                    bin,
+                    "libc.so.6",
+                    source,
+                    &["-shared", "-fPIC", "-Wl,-soname,libc.so.6", "-Wl,-e,entry"],
+                );
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello"]);
+        }
+
+        #[tokio::test]
+        async fn relocatable_object_with_exec_bit_is_dropped() {
+            let claimed = scan_bin(|bin| {
+                let object = compile(bin, "helper.o", "int helper(void) { return 2; }\n", &["-c"]);
+                make_executable(&object);
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello"]);
+        }
+
+        #[tokio::test]
+        async fn pie_no_pie_and_static_pie_programs_are_claimed() {
+            let claimed = scan_bin(|bin| {
+                compile(bin, "nopie", MAIN, &["-no-pie"]);
+                compile(
+                    bin,
+                    "staticpie",
+                    "void _start(void) { __builtin_trap(); }\n",
+                    &["-static-pie", "-nostdlib", "-fPIE"],
+                );
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello", "nopie", "staticpie"]);
+        }
+
+        #[tokio::test]
+        async fn static_non_pie_executable_is_claimed() {
+            // ET_EXEC with no PT_INTERP and no dynamic section (Go, musl-static): only the
+            // ET_EXEC rule keeps it.
+            let claimed = scan_bin(|bin| {
+                compile(
+                    bin,
+                    "staticexec",
+                    "void _start(void) { __builtin_trap(); }\n",
+                    &["-static", "-nostdlib", "-no-pie"],
+                );
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello", "staticexec"]);
+        }
+
+        // The patches below edit a compiled ELF64 little-endian header table in place:
+        // every target this module is gated to is that shape.
+        const ELF_E_PHOFF: usize = 0x20;
+        const ELF_E_SHOFF: usize = 0x28;
+        const ELF_E_PHENTSIZE: usize = 0x36;
+        const ELF_E_PHNUM: usize = 0x38;
+        const ELF_E_SHENTSIZE: usize = 0x3a;
+        const ELF_E_SHNUM: usize = 0x3c;
+        const ELF_E_SHSTRNDX: usize = 0x3e;
+        const PT_DYNAMIC: u32 = 2;
+
+        fn patch_elf(path: &std::path::Path, patch: impl FnOnce(&mut Vec<u8>)) {
+            let mut bytes = std::fs::read(path).expect("read fixture");
+            patch(&mut bytes);
+            std::fs::write(path, bytes).expect("write patched fixture");
+        }
+
+        fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+
+        fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+        }
+
+        /// Drops every section header, or leaves only the null one at the end of the file.
+        fn replace_section_table(bytes: &mut Vec<u8>, keep_null_section: bool) {
+            let (offset, count) = if keep_null_section {
+                bytes.resize(bytes.len().next_multiple_of(8), 0);
+                let offset = bytes.len() as u64;
+                bytes.extend_from_slice(&[0u8; 64]);
+                (offset, 1)
+            } else {
+                (0, 0)
+            };
+            bytes[ELF_E_SHOFF..ELF_E_SHOFF + 8].copy_from_slice(&offset.to_le_bytes());
+            set_u16(bytes, ELF_E_SHENTSIZE, 64);
+            set_u16(bytes, ELF_E_SHNUM, count);
+            set_u16(bytes, ELF_E_SHSTRNDX, 0);
+        }
+
+        /// Rewrites `p_filesz` of the PT_DYNAMIC program header.
+        fn set_dynamic_segment_size(bytes: &mut [u8], size: u64) {
+            let table = u64_at(bytes, ELF_E_PHOFF) as usize;
+            let entry_size = usize::from(u16::from_le_bytes([bytes[ELF_E_PHENTSIZE], bytes[ELF_E_PHENTSIZE + 1]]));
+            let count = usize::from(u16::from_le_bytes([bytes[ELF_E_PHNUM], bytes[ELF_E_PHNUM + 1]]));
+            let header = (0..count)
+                .map(|index| table + index * entry_size)
+                .find(|&header| u32::from_le_bytes(bytes[header..header + 4].try_into().unwrap()) == PT_DYNAMIC)
+                .expect("a static-pie carries PT_DYNAMIC");
+            bytes[header + 32..header + 40].copy_from_slice(&size.to_le_bytes());
+        }
+
+        const STATIC_PIE_SOURCE: &str = "void _start(void) { __builtin_trap(); }\n";
+        const STATIC_PIE_ARGS: [&str; 3] = ["-static-pie", "-nostdlib", "-fPIE"];
+
+        #[tokio::test]
+        async fn static_pie_without_a_dynamic_section_is_still_claimed() {
+            // A section table holding only the null entry has no SHT_DYNAMIC, but the loader
+            // still runs the file from PT_DYNAMIC: the dropped verdict would lose a real program.
+            let claimed = scan_bin(|bin| {
+                let none = compile(bin, "nosections", STATIC_PIE_SOURCE, &STATIC_PIE_ARGS);
+                patch_elf(&none, |bytes| replace_section_table(bytes, false));
+                let null_only = compile(bin, "nullsection", STATIC_PIE_SOURCE, &STATIC_PIE_ARGS);
+                patch_elf(&null_only, |bytes| replace_section_table(bytes, true));
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello", "nosections", "nullsection"]);
+        }
+
+        #[tokio::test]
+        async fn malformed_dynamic_segment_is_kept() {
+            // No section table, so only PT_DYNAMIC speaks; a table cut short is malformed,
+            // not proof of a library.
+            let claimed = scan_bin(|bin| {
+                for (name, size) in [("cut_mid_entry", 8), ("cut_before_terminator", 16)] {
+                    let path = compile(bin, name, STATIC_PIE_SOURCE, &STATIC_PIE_ARGS);
+                    patch_elf(&path, |bytes| {
+                        replace_section_table(bytes, false);
+                        set_dynamic_segment_size(bytes, size);
+                    });
+                }
+            })
+            .await;
+            assert_eq!(claimed, vec!["cut_before_terminator", "cut_mid_entry", "hello"]);
+        }
+
+        #[tokio::test]
+        async fn shebang_script_is_claimed() {
+            let claimed = scan_bin(|bin| {
+                let script = bin.join("run.sh");
+                std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+                make_executable(&script);
+            })
+            .await;
+            assert_eq!(claimed, vec!["hello", "run.sh"]);
+        }
+
+        fn make_executable(path: &std::path::Path) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod fixture");
+        }
     }
 }

@@ -118,7 +118,7 @@ pub enum Package {
         A scan needs a host \
         that can evaluate the target's executable convention. A Windows host targeting \
         anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan, \
-        unless the metadata names no `${installPath}`-rooted `path` variable with interface visibility, which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.\n\n\
+        unless the metadata names no `${installPath}`-rooted `PATH` variable with interface visibility, which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.\n\n\
         An unreadable content directory exits 74.\n\n\
         With `--metadata` and a Linux or `any` target, `create` also checks the libc the binaries \
         need against the `os.features` the platform declares. It reads the ELF interpreter \

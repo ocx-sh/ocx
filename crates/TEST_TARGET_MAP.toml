@@ -146,7 +146,7 @@ cases = 1
 [[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 1030
+cases = 1053
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"
