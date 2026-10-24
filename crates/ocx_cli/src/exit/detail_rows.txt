@@ -419,6 +419,7 @@ resolve_timeout	TempFail	Resolving a binding timed out
 retired_env	ConfigError	A retired OCX environment variable is set
 root_name_mismatch	DataError	The committed index root names a different package
 root_name_mismatch	DataError	The committed index root names a different package
+root_references_unwritten_object	DataError	The announce would commit a root that references an object it does not carry
 root_repository_mismatch	DataError	A derived index root points at another repository
 same_filesystem_check_failed	IoError	Probing whether two paths share a filesystem failed
 sbom_media_type_unsupported	DataError	An unsigned SBOM referrer declares a media type outside the SBOM set

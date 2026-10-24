@@ -122,6 +122,8 @@ pub async fn announce(
             expected: expected_name,
         });
     }
+    // The carry below rewrites `committed_root`; the closure check needs the base as the index holds it.
+    let base_root = committed_root.clone();
     // `committed_bytes` stays the base's bytes: comparing against the carried root would report
     // `unchanged` on exactly the stale runs this rebuild must unfreeze.
     let carried_names = root_read
@@ -133,6 +135,7 @@ pub async fn announce(
     // One timestamp for the whole run, race retry included, so every written object agrees.
     let now = pipeline::current_timestamp();
     let Rebuilt {
+        root: new_root,
         root_bytes: new_root_bytes,
         files,
         observed,
@@ -157,6 +160,16 @@ pub async fn announce(
         &now,
         &root_path,
         &package,
+    )
+    .await?;
+    refuse_unwritten_refs(
+        forge,
+        &root_read.repo,
+        &root_read.base_sha,
+        &package,
+        &new_root,
+        &base_root,
+        &files,
     )
     .await?;
     let mut desc_status = AnnounceStatus::from_changed(desc_updated);
@@ -353,6 +366,7 @@ pub async fn announce(
                             path: root_path.clone(),
                             source,
                         })?;
+                    let head_base_root = head_root.clone();
                     // Skipping the carry would drop on the retry the stale tags the first attempt carried.
                     let carried_names = root_read
                         .carried
@@ -375,6 +389,16 @@ pub async fn announce(
                         &now,
                         &root_path,
                         &package,
+                    )
+                    .await?;
+                    refuse_unwritten_refs(
+                        forge,
+                        retry_repo,
+                        &head_sha,
+                        &package,
+                        &merged.root,
+                        &head_base_root,
+                        &merged.files,
                     )
                     .await?;
                     // Replace, never union: only the retry's lists describe what was announced.
@@ -478,6 +502,7 @@ struct BranchHead {
 
 /// One regenerated announce payload.
 struct Rebuilt {
+    root: Value,
     root_bytes: Vec<u8>,
     /// The root plus every CAS object, committed as one atomic set.
     files: BTreeMap<String, FileChange>,
@@ -604,6 +629,7 @@ async fn observe_and_rebuild(
     let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &plan.removed);
     let body = pipeline::change_body(package, base_root, &plan, &dropped);
     Ok(Rebuilt {
+        root,
         root_bytes,
         files,
         observed: plan.observed,
@@ -613,6 +639,40 @@ async fn observe_and_rebuild(
         durable_missing: plan.durable_missing,
         body,
     })
+}
+
+/// Refuse a root that references an object `files` does not write and `sha` does not hold.
+///
+/// Runs before anything is written or pushed, so a hole never reaches the index.
+///
+/// # Errors
+///
+/// [`AnnounceError::RootReferencesUnwrittenObject`] when a reference the run introduces has no
+/// object anywhere, or any forge failure.
+async fn refuse_unwritten_refs(
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    sha: &str,
+    package: &str,
+    new_root: &Value,
+    base_root: &Value,
+    files: &BTreeMap<String, FileChange>,
+) -> Result<(), AnnounceError> {
+    for candidates in pipeline::unput_introduced_refs(new_root, base_root, package, files)? {
+        let mut found = false;
+        for path in &candidates {
+            if forge.get_file_contents(repo, path, sha).await?.is_some() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(AnnounceError::RootReferencesUnwrittenObject {
+                path: candidates.join(" or "),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Tripwire: refuse an outcome that moves nothing while its open pull request cannot merge.
@@ -2391,6 +2451,71 @@ mod tests {
             Some(bytes.as_slice()),
             "the retry carries the object too"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reference_the_base_already_holds_is_accepted_without_a_put() {
+        let (digest, path, bytes) = branch_only_object();
+        let forge = FakeForge::new().with_file(BASE_SHA, &path, &bytes);
+        let new_root = committed_root(serde_json::json!({ "1.1.0": durable_row(&digest) }));
+        let base_root = committed_root(serde_json::json!({}));
+
+        refuse_unwritten_refs(
+            &forge,
+            &index_repo(),
+            BASE_SHA,
+            "acme/widget",
+            &new_root,
+            &base_root,
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("an object on the base needs no put");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reference_neither_written_nor_on_the_base_is_refused() {
+        let (digest, path, _) = branch_only_object();
+        let forge = FakeForge::new();
+        let new_root = committed_root(serde_json::json!({ "1.1.0": durable_row(&digest) }));
+        let base_root = committed_root(serde_json::json!({}));
+
+        let error = refuse_unwritten_refs(
+            &forge,
+            &index_repo(),
+            BASE_SHA,
+            "acme/widget",
+            &new_root,
+            &base_root,
+            &BTreeMap::new(),
+        )
+        .await
+        .expect_err("the hole is refused");
+
+        assert!(
+            matches!(&error, AnnounceError::RootReferencesUnwrittenObject { path: named } if *named == path),
+            "{error:?}"
+        );
+        assert!(forge.commits().is_empty(), "nothing was pushed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reference_the_base_root_already_records_is_never_probed() {
+        let (digest, _, _) = branch_only_object();
+        let forge = FakeForge::new().failing_reads();
+        let root = committed_root(serde_json::json!({ "1.1.0": durable_row(&digest) }));
+
+        refuse_unwritten_refs(
+            &forge,
+            &index_repo(),
+            BASE_SHA,
+            "acme/widget",
+            &root,
+            &root,
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("an inherited hole is tolerated without a probe");
     }
 
     /// An object the branch head lacks, or holds under bytes that do not hash to the row's
