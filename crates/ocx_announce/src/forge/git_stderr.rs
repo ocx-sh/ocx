@@ -39,9 +39,12 @@ enum MatchScope {
 // A job-token refusal also carries `(pre-receive hook declined)`, so moving that row up makes
 // the 82 promotion unreachable.
 // `not allowed to push` stays a substring so it also matches GitLab's protected-branch wording.
-const REFUSAL_NEEDLES: [(&str, MatchScope, Refusal); 6] = [
+const REFUSAL_NEEDLES: [(&str, MatchScope, Refusal); 7] = [
     ("(stale info)", MatchScope::Body, Refusal::StaleLease),
     ("(fetch first)", MatchScope::Body, Refusal::NonFastForward),
+    // Same verdict as `(fetch first)`: git words it by whether the remote tip is already local,
+    // and a partial clone on git 2.40 says this one. Without the row that push exits 1, not 75.
+    ("(non-fast-forward)", MatchScope::Body, Refusal::NonFastForward),
     (
         "The requested URL returned error: 403",
         MatchScope::Body,
@@ -97,8 +100,8 @@ pub fn classify_push_failure(
     let refusal = REFUSAL_NEEDLES
         .iter()
         .find(|&&(needle, scope, _)| match scope {
-            // Both streams: `--porcelain` writes `(fetch first)` and `(stale info)` to stdout,
-            // so reading stderr alone exits a non-fast-forward as 1.
+            // Both streams: `--porcelain` writes the `(fetch first)`, `(non-fast-forward)` and
+            // `(stale info)` verdicts to stdout, so reading stderr alone exits a non-fast-forward as 1.
             MatchScope::Body => stdout.as_str().contains(needle) || stderr.as_str().contains(needle),
             MatchScope::RemoteLine => stderr
                 .as_str()
@@ -215,7 +218,7 @@ mod tests {
     /// Where a recorded phrase's text actually came from — the annotation C-044
     /// requires on every row, kept here rather than flattened away.
     ///
-    /// Two of the six are real evidence about git's wording. The other four are
+    /// Four of the seven are real evidence about git's wording. The other three are
     /// written by the fixture itself (its own `pre-receive` hook, or its 403
     /// answers), so those rows prove this classifier's **wiring** and not the
     /// phrase, and stay unproved against a real forge until release gate 4. The
@@ -304,8 +307,8 @@ mod tests {
     /// Every recorded refusal shape maps to its named variant, driven from the
     /// production table so the two cannot drift.
     ///
-    /// The arity assertion is the load-bearing half: a seventh recorded shape in
-    /// `OBSERVED_REFUSAL_STDERR` forces a seventh needle here or this reds,
+    /// The arity assertion is the load-bearing half: an eighth recorded shape in
+    /// `OBSERVED_REFUSAL_STDERR` forces an eighth needle here or this reds,
     /// which is what stops a new refusal wording from landing silently on the
     /// fallback. The pairing is positional, so the table's **order** — which is
     /// its precedence — is pinned too. `recorded.contains(needle)` ties each
@@ -316,7 +319,7 @@ mod tests {
     /// promotable set from the generic hook decline.
     ///
     /// Reds on: deleting or reordering a needle, changing a needle's text,
-    /// changing a row's `Refusal`, or adding a seventh row.
+    /// changing a row's `Refusal`, or adding an eighth row.
     #[test]
     fn classifier_maps_each_phrase() {
         let expected = [
@@ -332,6 +335,13 @@ mod tests {
                 "(fetch first)",
                 Source::GitClient,
                 " ! [rejected]        HEAD -> ocx/claim/acme (fetch first)",
+                Outcome::NonFastForward,
+            ),
+            (
+                "(non-fast-forward)",
+                "(non-fast-forward)",
+                Source::GitClient,
+                " ! [rejected]        HEAD -> ocx/claim/acme (non-fast-forward)",
                 Outcome::NonFastForward,
             ),
             (
@@ -482,7 +492,7 @@ mod tests {
         }
     }
 
-    /// git's own three phrases are decided before the preflight is consulted, so
+    /// git's own four phrases are decided before the preflight is consulted, so
     /// the status cannot change them.
     ///
     /// The cell that matters is `(fetch first)` under `unknown`: a classifier
@@ -499,6 +509,10 @@ mod tests {
         let cases = [
             (
                 " ! [rejected]        HEAD -> ocx/claim/acme (fetch first)",
+                Outcome::NonFastForward,
+            ),
+            (
+                " ! [rejected]        HEAD -> ocx/claim/acme (non-fast-forward)",
                 Outcome::NonFastForward,
             ),
             (
@@ -562,27 +576,29 @@ mod tests {
         );
     }
 
-    /// `(stale info)` is matched before `(fetch first)`.
+    /// `(stale info)` is matched before `(fetch first)` and `(non-fast-forward)`.
     ///
-    /// Both map to exit 75, so an exit-code assertion could not tell the arms
+    /// All three map to exit 75, so an exit-code assertion could not tell the arms
     /// apart — and the retry paths differ: a stale lease rebuilds the lease, a
     /// non-fast-forward re-fetches. `(stale info)` is reachable only under
     /// `--force-with-lease` and is therefore the more specific signal.
     ///
-    /// Reds on: swapping the first two table rows. An exit-code assertion would
-    /// stay green under that swap, which is why every assertion in this file is
-    /// on the variant.
+    /// Reds on: moving `(stale info)` below either non-fast-forward row. An
+    /// exit-code assertion would stay green under that move, which is why every
+    /// assertion in this file is on the variant.
     #[test]
     fn a_stale_lease_outranks_a_non_fast_forward() {
-        let body = push_stderr(
-            " ! [rejected]        HEAD -> ocx/claim/acme (stale info)\n\
-              ! [rejected]        HEAD -> ocx/claim/acme (fetch first)",
-        );
-        assert_eq!(
-            outcome_of(&classify(&body, CheckStatus::Passed)),
-            Outcome::StaleLease,
-            "a body carrying both reject reasons is the leased one"
-        );
+        for phrase in ["(fetch first)", "(non-fast-forward)"] {
+            let body = push_stderr(&format!(
+                " ! [rejected]        HEAD -> ocx/claim/acme (stale info)\n\
+                  ! [rejected]        HEAD -> ocx/claim/acme {phrase}"
+            ));
+            assert_eq!(
+                outcome_of(&classify(&body, CheckStatus::Passed)),
+                Outcome::StaleLease,
+                "a body carrying both reject reasons is the leased one, against {phrase}"
+            );
+        }
     }
 
     /// One row, two needles, one outcome — including the recorded body that
@@ -727,34 +743,38 @@ mod tests {
     /// empty.
     ///
     /// This is the shipped shape after `--porcelain`: git writes the per-ref
-    /// verdict to stdout as `!\t<refspec>\t[rejected] (fetch first)` and the
-    /// prose frame to stderr. It is also the exact state CI was observed in —
-    /// a rejected push whose stderr arrived empty on both Linux and macOS,
-    /// where reading stderr alone made an ordinary concurrent-writer rejection
-    /// an unclassified exit 1.
+    /// verdict to stdout as `!\t<refspec>\t[rejected] (fetch first)` or
+    /// `(non-fast-forward)` and the prose frame to stderr. It is also the exact
+    /// state CI was observed in — a rejected push whose stderr arrived empty on
+    /// both Linux and macOS, where reading stderr alone made an ordinary
+    /// concurrent-writer rejection an unclassified exit 1.
     ///
     /// RED: drop `stdout.as_str().contains(needle) ||` from the `Body` arm of
     /// the needle scan — the row falls through to `Unrecognised`, which is the
     /// defect this pair exists to keep out.
     #[test]
     fn a_porcelain_reject_on_stdout_classifies_with_an_empty_stderr() {
-        let porcelain = "To file:///tmp/remote\n\
-             !\trefs/heads/claim:refs/heads/claim\t[rejected] (fetch first)\n\
-             Done\n";
-        let classified = classify_push_failure(
-            STATUS.to_string(),
-            &redacted(porcelain),
-            redacted(""),
-            &preflight(CheckStatus::Unknown),
-            BRANCH,
-            REPO,
-            REMOTE,
-        );
-        assert_eq!(
-            outcome_of(&classified),
-            Outcome::NonFastForward,
-            "the verdict is on stdout under `--porcelain`; an empty stderr must not lose it, got {classified:?}"
-        );
+        for phrase in ["(fetch first)", "(non-fast-forward)"] {
+            let porcelain = format!(
+                "To file:///tmp/remote\n\
+                 !\trefs/heads/claim:refs/heads/claim\t[rejected] {phrase}\n\
+                 Done\n"
+            );
+            let classified = classify_push_failure(
+                STATUS.to_string(),
+                &redacted(&porcelain),
+                redacted(""),
+                &preflight(CheckStatus::Unknown),
+                BRANCH,
+                REPO,
+                REMOTE,
+            );
+            assert_eq!(
+                outcome_of(&classified),
+                Outcome::NonFastForward,
+                "the verdict is on stdout under `--porcelain`; an empty stderr must not lose it, got {classified:?}"
+            );
+        }
 
         // The stale-lease reason travels the same channel, so the two rows move
         // together or neither does.
@@ -988,7 +1008,7 @@ mod tests {
     /// Written out here rather than assembled from [`CREDENTIAL_REJECTIONS`]:
     /// an expectation built from the table it is checking agrees with any
     /// mistake in it. The needle is asserted to be a substring of the recording
-    /// instead, which is the same discipline the six-row refusal walk applies.
+    /// instead, which is the same discipline the seven-row refusal walk applies.
     const RECORDED_REJECTIONS: [(&str, u16); 3] = [
         (
             "fatal: could not read Username for 'https://gitlab.example': terminal prompts disabled",
