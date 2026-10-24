@@ -440,9 +440,9 @@ mod tests {
     /// segment-list equality can go red: no Unix segment can hold the separator,
     /// so nothing tears, and a result segment can only turn relative by way of a
     /// list that already changed — the absoluteness assertion has no independent
-    /// Unix red and none is claimed. Where it reds is the `windows-latest` leg of
-    /// `.github/workflows/verify-deep.yml`'s "Build & Unit Test" matrix, which
-    /// runs this same `cargo nextest run --workspace` on `x86_64-pc-windows-msvc`.
+    /// Unix red and none is claimed. Where it reds is the Windows leg of
+    /// `.github/workflows/deep-repo.yml`'s `unit-native` job, which runs the
+    /// cross-compiled workspace unit tests on `x86_64-pc-windows-gnullvm`.
     #[test]
     fn remove_segment_plants_no_segment_the_ambient_did_not_have() {
         let ambient = OsString::from(REJOIN_AMBIENT);

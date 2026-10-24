@@ -8,13 +8,13 @@ This page covers how to build, test and read the Bazel graph behind OCX's Rust w
 
 ## Orientation {#contributing-bazel-orientation}
 
-OCX's Rust workspace builds twice: once through `cargo`, and once through a second, parallel graph that [Bazel][bazel] walks to check the first one honestly. Eight gates run in two lanes. Seven of them run on every change. The eighth, the acceptance suite, runs on the deep lane only. Locally `task verify` runs all eight.
+OCX's Rust workspace builds twice: once through `cargo`, and once through a second, parallel graph that [Bazel][bazel] walks to check the first one honestly. Eight gates guard that graph, and `task verify` runs all eight locally. Seven of them also run on every pull request. The eighth, the acceptance suite, runs under `task verify` and the release gate.
 
 Four of the eight read the graph itself. They are a pin check, a loading-phase sanity build, a dependency-drift comparison against `Cargo.toml`, and a sandbox-tag audit. Two lint what declares it. `bazel:lint` runs buildifier over every `BUILD.bazel` and `.bzl` file. `bazel:mod:check` refuses a stale `MODULE.bazel.lock`.
 
 The last two run tests. `bazel:test:unit` runs the workspace's own unit tests, floored per target off the build event stream rather than a bare pass/fail. `bazel:test:accept` runs the acceptance suite as one target per test module. The targets of `bazel:test:unit` include, one per library crate, a `rust_doc_test`, so the workspace's doctests run here too, never as a separate cargo step.
 
-`bazel:test:accept` is the one that is not on every change. `verify-basic.yml` runs the other seven. It is the only workflow that runs the Bazel gates on a pull request. The acceptance gate lives in `verify-deep.yml`, which has no `pull_request` trigger.
+`bazel:test:accept` is the one that CI does not run. `verify-basic.yml` runs the other seven on every pull request. CI runs the Linux acceptance suite as a sharded pytest job instead. The nightly deep tier adds macOS and Windows.
 
 Together the gates catch the class of defect a green `cargo build` cannot see on its own: a `BUILD.bazel` target that quietly stopped matching the crate it describes.
 
@@ -30,7 +30,7 @@ Nobody types `bazel` directly. [`task`][task-runner] is the one command anyone r
 
 Before your first Bazel build, run `/init-bazel-config`, or `task bazel:doctor` for the checks alone. `.bazelrc` and `MODULE.bazel` are committed and already correct. A first build gets host state wrong, and no gate here can see it. That state is the output root, the RAM envelope and the remote-cache reader credential. It belongs in `~/.bazelrc`, never `.bazelrc.user`.
 
-All eight live in `taskfiles/bazel.taskfile.yml` as `task` targets: `bazel:pin:check`, `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard`, `bazel:lint`, `bazel:mod:check`, `bazel:test:unit`, and `bazel:test:accept`. `task verify` runs all of them. On CI the first seven are `verify-basic.yml`'s and `bazel:test:accept` is `verify-deep.yml`'s. None needs a `bazel` invocation typed by hand.
+All eight live in `taskfiles/bazel.taskfile.yml` as `task` targets: `bazel:pin:check`, `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard`, `bazel:lint`, `bazel:mod:check`, `bazel:test:unit`, and `bazel:test:accept`. `task verify` runs all of them. On CI the first seven are `verify-basic.yml`'s. `bazel:test:accept` runs under `task verify` only. None needs a `bazel` invocation typed by hand.
 
 :::tip[Bazel is a pinned tool, not a system dependency]
 `ocx exec bazel -- bazel --version` resolves the exact binary every one of those gates uses, straight from `ocx.lock`. It is the same mechanism that resolves `uv`, `shellcheck`, and every other tool in the [project toolchain][project-toolchain]. There is nothing to install with a system package manager and no [bazelisk][bazelisk] version file to maintain.
@@ -43,11 +43,13 @@ $ ocx exec bazel -- bazel --version
 bazel 9.2.0
 ```
 
-**Third-party crates need no setup step.** [rules_rs][rules-rs] resolves them straight from `Cargo.lock`, so a fresh clone builds without a generated lockfile, a repin or a bootstrap task. The three forks under `external/` are picked up from the `[patch.crates-io]` paths as they are.
+**Third-party crates need no setup step.** [rules_rs][rules-rs] resolves them straight from `Cargo.lock`. A fresh clone therefore builds without a generated lockfile, a repin or a bootstrap task. The three forks under `external/` are picked up from the `[patch.crates-io]` paths as they are.
 
 **The C and C++ toolchain is hermetic.** The `llvm` module ([hermetic-llvm][hermetic-llvm]) supplies the compiler, linker and sysroots, so the build reads no host `gcc`, `libstdc++` or system linker.
 
-**One Linux host builds every platform.** `task cross:targets` lists the supported triples and `task cross:build TARGET=<triple>` cross-builds `ocx` for one of them into `target/cross/<triple>/`. The Windows targets use `gnullvm`. Cross builds pass `-c opt`, because an unoptimised Windows binary overflows its 1 MiB main-thread stack at startup. On CI this is how macOS and Windows get their binaries: they are built once on Linux, and the native runners only download and execute them.
+**One Linux host builds every platform.** `task cross:targets` lists the supported triples and `task cross:build TARGET=<triple>` cross-builds `ocx` for one of them into `target/cross/<triple>/`. The Windows targets use `gnullvm`. Cross builds pass `-c opt`, because an unoptimised Windows binary overflows its 1 MiB main-thread stack at startup.
+
+On CI this is how macOS and Windows get their binaries. They are built once on Linux, and the native runners only download and execute them.
 
 **Host state lives in `~/.bazelrc`, never a per-checkout file.** This machine carries four fixed worktrees of this repository plus disposable agent checkouts under `.agents/worktrees/`. Nothing host-specific should need setting up once per checkout. Examples are the JVM heap cap, the local `--jobs` cap and the cache reader credential below.
 
@@ -106,7 +108,7 @@ The directory is therefore deleted whatever the build did.
 
 `task bazel:test:accept` runs `bazel test //test:all --local_test_jobs=<n>`. Here `<n>` is the smaller of 8 and the machine's core count, and `ACCEPT_JOBS=<n>` overrides it. The target set is one `sh_test` per acceptance test module, named `//test:<module stem>`.
 
-Check the live `ACCEPTANCE_MODULE_TARGETS` in `scripts/bazel_gate_proofs.py`, because the count changes as modules are added, move to the uncached `test/lint/` tier or get ported to Rust. Each target shells to `uv run pytest` against the docker-compose services this repository already starts. The task replaces the direct `task test:parallel` call in `task verify` and in the acceptance job of `verify-deep.yml`. `task test:parallel` still exists and still runs the suite through pytest-xdist. Its pytest step never overlaps a bazel run on one machine (see below for what does).
+Check the live `ACCEPTANCE_MODULE_TARGETS` in `scripts/bazel_gate_proofs.py`, because the count changes as modules are added, move to the uncached `test/lint/` tier or get ported to Rust. Each target shells to `uv run pytest`. The task replaces the direct `task test:parallel` call in `task verify`. `task test:parallel` still exists and still runs the suite through pytest-xdist. Its pytest step never overlaps a bazel run on one machine (see below for what does).
 
 What the lane buys instead is **selection and caching**. Edit one module and one target re-runs, while editing a doc re-runs none. The structural sweeps (`test_smoke_coverage`, `test_no_crate_path_assertions`, `test_patch_global_slot`, `test_doc_scripts_publish_structure`) live in the uncached lint tier (`test/lint/`, `task test:lint:structure`), outside this package. Run it twice on an unchanged tree and Bazel reports `Executed 0 out of <n> tests`. That is only sound because the inputs are declared.
 
@@ -168,7 +170,7 @@ INFO: Build completed successfully, 336 total actions
 INFO: Elapsed time: 1.913s
 ```
 
-**The remote cache is a second layer above that, and the reader realm is live.** The committed `.bazelrc` points at it with `build --remote_cache=https://bazel-cache.ocx.sh/v1`, beside `build --remote_upload_local_results=false`. The file says of that line: "a contributor and a fork PR never write"; only CI lanes holding the write secret do, through an rc they pass on the command line. Reading it needs a `--remote_header` credential line in your own `~/.bazelrc`, never a repo file. Ask a maintainer for a `dev-read` account:
+**The remote cache is a second layer above that, and the reader realm is live.** The committed baseline, `bazel/baseline.bazelrc`, points at it with `build --remote_cache=https://bazel-cache.ocx.sh/v1`, beside `build --remote_upload_local_results=false`. Only CI lanes holding the write secret ever write, through an rc they pass on the command line. Reading it needs a `--remote_header` credential line in your own `~/.bazelrc`, never a repo file. Ask a maintainer for a `dev-read` account:
 
 ```sh
 # ~/.bazelrc, appended to the block above
@@ -187,7 +189,9 @@ the space before the base64 payload splits the flag from an unquoted second word
 
 Without the header the `auth_basic` realm of the server answers 401 to every request. Your builds then run on `--disk_cache` alone, which is a slower first build and nothing worse.
 
-**CI writes the cache from every lane that holds the secret.** Each Bazel job passes `write-auth` the secret `BAZEL_CACHE_WRITE_AUTH` on every trigger. The `.github/actions/bazel-cache-rc` action turns it into a CI-only rc under `$RUNNER_TEMP`. That rc names a credential helper for the cache host and grants the upload. The credential's user is in both realms, so one header reads and writes. A structural test in `.claude/tests/test_workflows.py` holds every Bazel lane to that step.
+**CI writes the cache from every lane that holds the secret.** Repo-owned jobs pass the secret `BAZEL_CACHE_WRITE_AUTH` to `.github/actions/bazel-cache-rc` as `write-auth`. Template-owned jobs pass it to the conventions `setup` action as `cache-write-auth`, with `bazel-cache: trusted`. Either way it becomes a CI-only rc under `$RUNNER_TEMP`.
+
+That rc names a credential helper for the cache host and grants the upload. The credential's user is in both realms, so one header reads and writes. No CI lane holds a separate read credential. A structural test in `.claude/tests/test_workflows.py` holds every Bazel lane to that step.
 
 A fork PR still sees none of it. [GitHub Actions withholds a repository's secrets from a run triggered by a fork's `pull_request` event][github-actions-secrets-forks]. So that lane gets no rc and compiles cold over `--disk_cache`, by design and not by omission.
 

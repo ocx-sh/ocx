@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Accepted (2026-09-23 — owner decision recorded at execution start: accept on Stage 5 landing; Amendment 2026-09-22 AM-1 … AM-8 binding; Amendment 2026-09-23 AM-9 … AM-12 proposed)
+**Status:** Accepted (2026-09-23 — owner decision recorded at execution start: accept on Stage 5 landing; Amendment 2026-09-22 AM-1 … AM-8 binding; Amendment 2026-09-23 AM-9 … AM-12 proposed; Amendment 2026-10-24 AM-13 … AM-14 supersede parts of AM-9, AM-10 and AM-12)
 **Date:** 2026-09-22
 **Deciders:** Michael Herwig (owner), architect (hex-architect Phase 4, revised Phase 5 round 1)
 **Beads Issue:** N/A
@@ -491,6 +491,15 @@ Status: proposed; the owner may veto any row. Raised by the speed-up workstream 
 
 **Options weighed for AM-9 / AM-11.** (a) Concurrent targets behind host locks — chosen: removes the serial cost at its source and keeps one T2 engine. (b) Keep `exclusive` and route WP-merge T2 to `test:parallel` (OQ2's recommendation) — rejected: two T2 engines, and the full mark would rest on a run that caches nothing. (c) `--local_test_jobs` in an rc file — rejected: per-command, so it would also throttle the Rust test targets.
 
+## Amendment 2026-10-24 (ephemeral zot and the CI tiers)
+
+Status: records what the PR 637 round-2 review landed. Rows above stay as written; these rows override the parts they name. Every `verify-deep.yml` acceptance reference above is historical: the full Linux suite runs in `basic-repo.yml` through `acceptance.yml`, and the macOS and Windows legs run in `deep-repo.yml` (see `adr_bazel_rules_rs_migration.md` AM-1 … AM-3).
+
+| # | Section amended | Change |
+|---|---|---|
+| AM-13 | AM-9 host locks; AM-10 `zot-config.json` input | **Each pytest session starts its own zot registries.** `pytest_configure` (`test/conftest.py`, `test/src/zot.py`) starts the `registry`, `target` and `prod` instances on kernel-chosen ports and exports `OCX_TEST_{REGISTRY,TARGET,PROD}_PORT`. The compose `registry` service on port 5000 and `zot-config.json` are gone, so `:suite_inputs` no longer lists the file. Two targets, or the same target from sibling checkouts, share no registry state. The stack bring-up barrier, the per-`xdist_group` slot locks (`module_slots`, `tag-slot-*`), the suite lock and the turnstile are deleted. Two locks remain. The exclusive `<basetemp>.lock` still guards two `--runs_per_test` copies of one target. `helpers._COMPOSE_LOCK` still serialises bring-up of the Docker services, which are the `registry:2` mirror and the Sigstore stack. `--local_test_jobs` stays on the `task bazel:test:accept` command line only. |
+| AM-14 | AM-12 and D6 remote writer | **Every Bazel lane writes build and unit-test results to the remote cache** with `BAZEL_CACHE_WRITE_AUTH`, through `.github/actions/bazel-cache-rc` or the conventions setup action. The CI read credential is retired, and a developer's read header in `~/.bazelrc` stays. CI and local runs now test the same Bazel-built `//crates/ocx_cli:ocx`, so AM-12's one-binary-profile precondition holds. D6 stands for acceptance verdicts: CI runs the suite as sharded pytest jobs, never `bazel:test:accept`, so no lane uploads a verdict. |
+
 ## Links
 
 - `.claude/artifacts/system_design_test_tiers.md`
@@ -524,3 +533,4 @@ Not applied: gap G4 (`--lf`/`--nf`) — deferred to Follow-ups, no evidence it m
 | 2026-09-22 | architect | Amendment 2026-09-22 (plan review): AM-1 … AM-8; status unchanged (Proposed) |
 | 2026-09-23 | owner | Accepted on Stage 5 landing, Amendment AM-1 … AM-8 binding (decision recorded at execution start) |
 | 2026-09-23 | architect | Amendment 2026-09-23 (speed-up workstream): AM-9 … AM-12 proposed; OQ2 closed by AM-11; Consequences "stays serial" superseded by AM-9 |
+| 2026-10-24 | architect | Amendment 2026-10-24 (PR 637 round 2): AM-13 ephemeral zot supersedes AM-9's host locks and AM-10's `zot-config.json`; AM-14 write credential on every Bazel lane supersedes AM-12 |

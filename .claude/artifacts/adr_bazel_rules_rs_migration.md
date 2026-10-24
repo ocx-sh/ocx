@@ -33,7 +33,7 @@ Release stays on cargo-dist (MSVC zips, auditable, CycloneDX, `scan-binaries`). 
 
 ## Industry Context & Research
 
-**Research artifact:** the spike evidence on `spike/rules-rs` (`.claude/artifacts/spike_rules_rs_evidence.md`, HEAD 47f2a2bb5) is summarised below.
+**Research artifact:** the spike ran on the local branch `spike/rules-rs` (HEAD 47f2a2bb5), which was never pushed and left no evidence file in the tree. The summary below is the surviving record.
 **Trending approaches:** [rules_rs](https://github.com/hermeticbuild/rules_rs) resolves crates from `Cargo.lock` inside Bazel (no generated lockfile) and bundles a [hermeticbuild fork of rules_rust](https://github.com/hermeticbuild/rules_rust); [hermetic-llvm](https://github.com/hermeticbuild/hermetic-llvm) (BCR module `llvm`) is a self-contained cross C/C++ toolchain that rules_rs already depends on.
 **Key insight:** the rule names (`rust_library`, `rust_test`, `rust_doc_test`, the clippy aspect) survive, so the BUILD files and the lint plumbing port mechanically.
 
@@ -99,6 +99,8 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 
 ### CI shape
 
+Superseded by the Amendment 2026-10-24 below. The list records the shape as decided on 2026-10-21.
+
 - **One Linux `build` job** runs the Bazel unit tests (skipped on a push to `main`, where `verify-basic.yml` just ran them), then cross-builds every triple and packs the macOS/Windows unit-test bundles and the acceptance `test-bin` layouts.
 - **macOS and Windows download and execute only**: no Bazel, cargo or Rust toolchain on the runner. Unit tests run from the bundle (`task cross:test:run`, `scripts/test_bundle.py`); acceptance runs the smoke tier on native `zot` (`OCX_TEST_NATIVE_SERVICES=1`).
 - **Linux acceptance** runs in 4 shards (`task test:accept:native SHARD_COUNT=4 SHARD_INDEX=i`, `i` 0-based) on native `zot`; an `acceptance-merge` job applies `SUITE_FLOOR`, the ceilings and the conformance floor over all shards' JUnit files together.
@@ -128,6 +130,20 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 
 **Decision.** The acceptance shards consume the Linux jobs' artifacts: `ocx` and its acceptance binaries come from the per-triple `cross` matrix (8 parallel legs; one serial job took 2h+ cold), the schema from `build`. Deep's `build` skips `bazel:test:unit` on `push` events.
 
+## Amendment 2026-10-24 (CI shape after the PR 637 round-2 review)
+
+The decision stands: rules_rs, hermetic llvm and a Linux cross-build. Only the CI shape above and the "acceptance runs twice" decision are replaced.
+
+| # | Change |
+|---|---|
+| AM-1 | CI has two tiers. Basic runs on every pull request, push, merge group and dispatch: `verify-basic.yml` plus `basic-repo.yml`. Deep runs nightly, on dispatch and on the `run-deep` label: `verify-deep.yml` plus `deep-repo.yml`. |
+| AM-2 | The full Linux acceptance suite is a basic job. `basic-repo.yml` calls `acceptance.yml`, which rebuilds `ocx` from the warm cache, runs the suite in shards (`--shard-count N --shard-index I`, 0-based) with Docker and Sigstore, and judges the floors once over all shards. Linux unit tests run as Bazel targets in `ci:test`. |
+| AM-3 | Cross-builds are a deep job. `deep-repo.yml` calls `cross.yml` for every triple. macOS and Windows then download the artifacts and run the unit tests (`unit-native`) and the full acceptance suite (`acceptance-native`, four shards) on native zot without Docker. Each OS is judged against its own `test/limits/<os>`. This replaces the single Linux `build` job and the smoke-tier-only native acceptance. |
+| AM-4 | Each pytest session starts its own zot registries on free ports, so `OCX_TEST_NATIVE_SERVICES` is gone. See `adr_test_speed_tiers.md` AM-13. |
+| AM-5 | Every Bazel lane writes the remote cache with `BAZEL_CACHE_WRITE_AUTH`. The separate CI read credential is retired. A developer's read header in `~/.bazelrc` stays. |
+| AM-6 | `release-readiness.yml` (dispatch only) builds the cargo-dist bytes at the exact SHA and runs the full suite on them per platform against `test/limits/<os>-release`. `task release:tag` refuses without a green run. Release still ships MSVC zips, so the gnullvm gap stands. |
+| AM-7 | The rules_rust doctest-stdout patch is deleted. The doctest floor rests on the exit code alone. |
+
 ## Validation
 
 - `task verify` and `verify-deep.yml` (build, unit-native, sharded acceptance with merged floor, acceptance-native) green on the migration branch.
@@ -145,3 +161,4 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-10-21 | Michael Herwig | Accepted |
+| 2026-10-24 | Michael Herwig | Amendment: two CI tiers, Linux acceptance in basic, cross-builds and native legs in deep, write credential on every lane, readiness on the exact SHA; spike evidence pointer dropped |
