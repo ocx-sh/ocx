@@ -191,6 +191,17 @@ pub enum AnnounceError {
     )]
     CommittedTagsDropped { path: String, tags: Vec<String> },
 
+    /// The regenerated root references an object that neither this run's file
+    /// set nor the commit's base carries; committing it would index a hole.
+    #[error("the new root references {path}, which this run neither writes nor finds on the base")]
+    // Never `TempFail`: a rerun rebuilds the same root, so a retrying publisher would loop.
+    #[exit(
+        DataError,
+        slug = "root_references_unwritten_object",
+        summary = "The announce would commit a root that references an object it does not carry"
+    )]
+    RootReferencesUnwrittenObject { path: String },
+
     /// Listing the physical repository's tags failed (`--tags-from-registry`).
     #[error("failed to list the tags on {repository}")]
     #[exit(delegate = source)]

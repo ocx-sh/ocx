@@ -436,6 +436,7 @@ impl ErrorDetail {
             Self::ResolveTimeout => Some(ExitCode::TempFail),
             Self::RetiredEnv => Some(ExitCode::ConfigError),
             Self::RootNameMismatch => Some(ExitCode::DataError),
+            Self::RootReferencesUnwrittenObject => Some(ExitCode::DataError),
             Self::RootRepositoryMismatch => Some(ExitCode::DataError),
             Self::SameFilesystemCheckFailed => Some(ExitCode::IoError),
             Self::SbomMediaTypeUnsupported => Some(ExitCode::DataError),

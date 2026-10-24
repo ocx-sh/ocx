@@ -280,6 +280,7 @@ Input data is malformed or fails verification.
 | `repository_mismatch` | A re-claim supplied a repository other than the committed one |
 | `reserved_env_key` | A package env entry sets a reserved OCX key |
 | `root_name_mismatch` | The committed index root names a different package |
+| `root_references_unwritten_object` | The announce would commit a root that references an object it does not carry |
 | `root_repository_mismatch` | A derived index root points at another repository |
 | `sbom_media_type_unsupported` | An unsigned SBOM referrer declares a media type outside the SBOM set |
 | `selection_ambiguous` | The selection matches more than one package |

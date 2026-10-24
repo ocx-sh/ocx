@@ -3307,6 +3307,8 @@ pub enum ErrorDetail {
     RetiredEnv,
     /// The committed index root names a different package
     RootNameMismatch,
+    /// The announce would commit a root that references an object it does not carry
+    RootReferencesUnwrittenObject,
     /// A derived index root points at another repository
     RootRepositoryMismatch,
     /// Probing whether two paths share a filesystem failed
@@ -3952,6 +3954,7 @@ impl ErrorDetail {
             Self::ResolveTimeout => "resolve_timeout",
             Self::RetiredEnv => "retired_env",
             Self::RootNameMismatch => "root_name_mismatch",
+            Self::RootReferencesUnwrittenObject => "root_references_unwritten_object",
             Self::RootRepositoryMismatch => "root_repository_mismatch",
             Self::SameFilesystemCheckFailed => "same_filesystem_check_failed",
             Self::SbomMediaTypeUnsupported => "sbom_media_type_unsupported",
@@ -4476,6 +4479,7 @@ impl ErrorDetail {
             "resolve_timeout" => Self::ResolveTimeout,
             "retired_env" => Self::RetiredEnv,
             "root_name_mismatch" => Self::RootNameMismatch,
+            "root_references_unwritten_object" => Self::RootReferencesUnwrittenObject,
             "root_repository_mismatch" => Self::RootRepositoryMismatch,
             "same_filesystem_check_failed" => Self::SameFilesystemCheckFailed,
             "sbom_media_type_unsupported" => Self::SbomMediaTypeUnsupported,

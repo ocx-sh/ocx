@@ -846,30 +846,79 @@ fn object_path(package_repo: &str, digest: &ocx_oci::Digest, extension: &str) ->
     format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}")
 }
 
-/// Every CAS object a root references, with its path extension (`None` for the
-/// logo, whose extension the root does not record).
+/// Every CAS reference a root records, as written, with its path extension
+/// (`None` for the logo, whose extension the root does not record).
+fn referenced_raw(root: &Value) -> Vec<(&str, Option<&'static str>)> {
+    let description = root.get("desc");
+    let tags = root.get("tags").and_then(Value::as_object);
+    let contents = tags
+        .into_iter()
+        .flat_map(|tags| tags.values())
+        .map(|entry| (entry.get("content"), Some("json")));
+    let readme = (description.and_then(|desc| desc.get("readme")), Some("md"));
+    let logo = (description.and_then(|desc| desc.get("logo")), None);
+    contents
+        .chain([readme, logo])
+        .filter_map(|(raw, extension)| Some((raw?.as_str()?, extension)))
+        .collect()
+}
+
+/// Every CAS object a root references, with its path extension.
 ///
 /// Malformed digests are dropped: the output builds paths from remote data.
 fn referenced_objects(root: &Value) -> Vec<(ocx_oci::Digest, Option<&'static str>)> {
-    let mut objects = Vec::new();
-    let mut push = |raw: Option<&Value>, extension: Option<&'static str>| {
-        let Some(raw) = raw.and_then(Value::as_str) else {
-            return;
-        };
-        match ocx_oci::Digest::try_from(raw) {
-            Ok(digest) => objects.push((digest, extension)),
-            Err(_) => tracing::debug!(reference = %raw, "index root references a malformed digest; skipped"),
+    referenced_raw(root)
+        .into_iter()
+        .filter_map(|(raw, extension)| match ocx_oci::Digest::try_from(raw) {
+            Ok(digest) => Some((digest, extension)),
+            Err(_) => {
+                tracing::debug!(reference = %raw, "index root references a malformed digest; skipped");
+                None
+            }
+        })
+        .collect()
+}
+
+/// The object paths `new_root` references that `base_root` does not and `files`
+/// does not write, one entry per reference: a logo lists its `.png` and `.svg`
+/// path, either of which satisfies it.
+///
+/// A reference the base already records is inherited and never checked, so a
+/// hole the index already carries cannot block an unrelated announce.
+///
+/// # Errors
+///
+/// [`AnnounceError::RootReferencesUnwrittenObject`] when a reference the base
+/// does not record is not a parseable digest.
+pub(crate) fn unput_introduced_refs(
+    new_root: &Value,
+    base_root: &Value,
+    package_repo: &str,
+    files: &BTreeMap<String, FileChange>,
+) -> Result<Vec<Vec<String>>, AnnounceError> {
+    let inherited: HashSet<(&str, Option<&str>)> = referenced_raw(base_root).into_iter().collect();
+    let mut suspects: Vec<Vec<String>> = Vec::new();
+    for (raw, extension) in referenced_raw(new_root) {
+        if inherited.contains(&(raw, extension)) {
+            continue;
         }
-    };
-    if let Some(tags) = root.get("tags").and_then(Value::as_object) {
-        for entry in tags.values() {
-            push(entry.get("content"), Some("json"));
+        let digest = ocx_oci::Digest::try_from(raw)
+            .map_err(|_| AnnounceError::RootReferencesUnwrittenObject { path: raw.to_string() })?;
+        let candidates: Vec<String> = match extension {
+            Some(extension) => vec![object_path(package_repo, &digest, extension)],
+            None => ["png", "svg"]
+                .iter()
+                .map(|extension| object_path(package_repo, &digest, extension))
+                .collect(),
+        };
+        let written = candidates
+            .iter()
+            .any(|path| matches!(files.get(path), Some(FileChange::Put(_))));
+        if !written && !suspects.contains(&candidates) {
+            suspects.push(candidates);
         }
     }
-    let description = root.get("desc");
-    push(description.and_then(|desc| desc.get("readme")), Some("md"));
-    push(description.and_then(|desc| desc.get("logo")), None);
-    objects
+    Ok(suspects)
 }
 
 /// The object paths `previous_root` referenced that `new_root` does not.
@@ -2090,6 +2139,120 @@ mod tests {
         );
         assert_eq!(written(&files, "p/acme/widget.json"), Some(b"root-bytes".as_slice()));
         assert!(files.contains_key(&format!("p/acme/widget/o/sha256/{hex}.json")));
+    }
+
+    // ── unput_introduced_refs ────────────────────────────────────────────────
+
+    fn root_referencing(content: &[String], logo: Option<&str>) -> Value {
+        let tags: Map<String, Value> = content
+            .iter()
+            .enumerate()
+            .map(|(index, digest)| (format!("{index}.0.0"), json!({ "content": digest })))
+            .collect();
+        json!({ "tags": Value::Object(tags), "desc": { "logo": logo } })
+    }
+
+    fn put(path: &str) -> (String, FileChange) {
+        (path.to_string(), FileChange::Put(Vec::new()))
+    }
+
+    #[test]
+    fn an_introduced_reference_without_a_put_is_reported() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let suspects =
+            unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(
+            suspects,
+            vec![vec![format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64))]]
+        );
+    }
+
+    #[test]
+    fn an_introduced_reference_with_a_put_is_satisfied() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let files = BTreeMap::from([put(&format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64)))]);
+        let suspects = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &files).unwrap();
+        assert!(suspects.is_empty(), "{suspects:?}");
+    }
+
+    #[test]
+    fn a_delete_does_not_satisfy_an_introduced_reference() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let files = BTreeMap::from([(
+            format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64)),
+            FileChange::Delete,
+        )]);
+        let suspects = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &files).unwrap();
+        assert_eq!(suspects.len(), 1);
+    }
+
+    #[test]
+    fn an_inherited_reference_is_never_checked_even_when_malformed() {
+        let digests = [digest_string('b'), "not-a-digest".to_string()];
+        let base = root_referencing(&digests, None);
+        let suspects = unput_introduced_refs(&base, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert!(suspects.is_empty(), "{suspects:?}");
+    }
+
+    #[test]
+    fn a_logo_is_satisfied_by_its_png_or_its_svg_put() {
+        let logo = digest_string('c');
+        let new_root = root_referencing(&[], Some(&logo));
+        let base = root_referencing(&[], None);
+        let unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(
+            unwritten,
+            vec![vec![
+                format!("p/acme/widget/o/sha256/{}.png", "c".repeat(64)),
+                format!("p/acme/widget/o/sha256/{}.svg", "c".repeat(64)),
+            ]]
+        );
+        for extension in ["png", "svg"] {
+            let files = BTreeMap::from([put(&format!("p/acme/widget/o/sha256/{}.{extension}", "c".repeat(64)))]);
+            let suspects = unput_introduced_refs(&new_root, &base, "acme/widget", &files).unwrap();
+            assert!(suspects.is_empty(), "{extension}: {suspects:?}");
+        }
+    }
+
+    #[test]
+    fn a_readme_is_satisfied_only_by_its_markdown_put_and_inherited_when_the_base_names_it() {
+        let readme = digest_string('d');
+        let new_root = json!({ "tags": {}, "desc": { "readme": readme } });
+        let base = root_referencing(&[], None);
+        let path = format!("p/acme/widget/o/sha256/{}.md", "d".repeat(64));
+
+        let unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(unwritten, vec![vec![path.clone()]]);
+
+        let wrong_kind = BTreeMap::from([put(&path.replace(".md", ".json"))]);
+        let still_unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &wrong_kind).unwrap();
+        assert_eq!(still_unwritten.len(), 1, "a .json put does not cover the readme");
+
+        let files = BTreeMap::from([put(&path)]);
+        assert!(
+            unput_introduced_refs(&new_root, &base, "acme/widget", &files)
+                .unwrap()
+                .is_empty()
+        );
+
+        let inherited = unput_introduced_refs(&new_root, &new_root, "acme/widget", &BTreeMap::new()).unwrap();
+        assert!(
+            inherited.is_empty(),
+            "a readme the base names is inherited: {inherited:?}"
+        );
+    }
+
+    #[test]
+    fn an_introduced_unparseable_digest_is_an_error() {
+        let new_root = root_referencing(&["sha256:short".to_string()], None);
+        let result = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &BTreeMap::new());
+        assert!(
+            matches!(result, Err(AnnounceError::RootReferencesUnwrittenObject { ref path }) if path == "sha256:short"),
+            "{result:?}"
+        );
     }
 
     // ── write_out ────────────────────────────────────────────────────────────
