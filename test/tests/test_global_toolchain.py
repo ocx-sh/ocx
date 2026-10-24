@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re as _re_gt
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,10 @@ from src.shell_eval import run_after_sourcing
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # --global + --project conflict
 EXIT_DATA = 65  # LockOutOfSync → DataError (whole-file drift on a mutator)
+
+#: What a POSIX shell runs for the package's ``gtool``: ``make_package`` writes ``gtool.bat``
+#: on Windows, and Git Bash resolves a bare name to ``.exe`` only.
+GTOOL = "gtool.bat" if sys.platform == "win32" else "gtool"
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +150,7 @@ def test_global_add_install_select_then_fresh_shell_sees_tool(
 
     # Eval the output in a non-interactive shell → gtool must be on PATH.
     result = _source_env_sh_script(
-        ocx, tmp_path, env_result.stdout, "command -v gtool && gtool"
+        ocx, tmp_path, env_result.stdout, f"command -v {GTOOL} && {GTOOL}"
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"sourced non-interactive shell must resolve the global tool via "
@@ -605,7 +610,7 @@ def test_global_update_takes_effect_without_select(
 
     # Step 6: source the export lines and run the tool; it must print the v2 marker.
     shell_result = _source_env_sh_script(
-        ocx, tmp_path, env_result.stdout, f"command -v {bin_name} && {bin_name}"
+        ocx, tmp_path, env_result.stdout, f"command -v {GTOOL} && {GTOOL}"
     )
     assert shell_result.returncode == EXIT_SUCCESS, (
         f"global tool must be reachable after --global update with no select step; "
