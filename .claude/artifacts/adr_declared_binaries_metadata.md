@@ -152,6 +152,7 @@ pub async fn scan_interface_binaries(
 
 **Algorithm:**
 1. Collect every `Var` in `metadata`'s `env` where `modifier` is `Path` **and**
+   `key` is `PATH` (ASCII case-insensitive on a Windows target; #619) **and**
    `visibility.has_interface()` **and** the value template is exactly
    `${installPath}/<rel>` (no combination with `${deps.*}`, no extra literal
    segments). Vars not matching this exact shape are excluded from scan scope
@@ -187,6 +188,9 @@ pub async fn scan_interface_binaries(
      "traversable"; `tokio::fs::metadata` **follows symlinks**, so
      `bin/gcc -> gcc-13` counts as a claim named `gcc`; a dangling symlink's
      metadata error is swallowed, excluded from claims, not a hard error).
+     **Amended (#619):** an exec-bit file is then header-sniffed and dropped when it is a
+     shared library, in `elfutils` `eu-elfclassify --executable` order for ELF and
+     `MH_EXECUTE`-only for Mach-O; scripts and unparseable files are kept.
    - **Windows platform:** strip the extension against a **new fixed
      allowlist constant** `BIN_SCAN_WINDOWS_EXTENSIONS = [".exe", ".com",
      ".bat", ".cmd"]` — deliberately the same set as
@@ -681,7 +685,7 @@ Recorded, not redesigned — tightened during implementation review, no decision
   deliberate omission, so a cross-host build shipped an unchecked claim silently. Amended
   2026-07-29; the mode table above is unchanged for every host that *can* scan. Narrowed
   2026-10-22: the refusal fires only when the scan scope (interface-visible `${installPath}`-rooted
-  `path` vars) is non-empty, because an env-only package scans nothing on any host and proceeds.
+  `PATH` vars) is non-empty, because an env-only package scans nothing on any host and proceeds.
 - **`--bin-scan` requires `--metadata`.** Verify mode needs a declaration to verify against;
   `--bin-scan` without `-m`/`--metadata` is now a usage error (exit 64), not a silent no-op.
 

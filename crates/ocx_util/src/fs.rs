@@ -213,7 +213,9 @@ fn persist_at(
     #[cfg(windows)]
     {
         if let Some(paths) = long_path::api_pair(tmp.path(), target) {
-            return long_path::persist(tmp, paths, replace);
+            let mut tmp = tmp;
+            return long_path::persist(&mut tmp, paths, replace)
+                .map_err(|error| tempfile::PersistError { error, file: tmp });
         }
     }
     match replace {

@@ -60,7 +60,7 @@ fn api_spelling(path: &Path) -> (PathBuf, bool) {
 
 /// `old` and `new` spelled for the Windows API, or `None` when neither path needs the long form.
 #[cfg(windows)]
-pub fn api_pair(old: &Path, new: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(super) fn api_pair(old: &Path, new: &Path) -> Option<(PathBuf, PathBuf)> {
     let (old, old_long) = api_spelling(old);
     let (new, new_long) = api_spelling(new);
     (old_long || new_long).then_some((old, new))
@@ -68,13 +68,14 @@ pub fn api_pair(old: &Path, new: &Path) -> Option<(PathBuf, PathBuf)> {
 
 /// `tempfile`'s publish, with the paths of [`api_pair`]: it clears the temporary attribute, then moves.
 ///
-/// A failure hands `tmp` back unpublished, as `tempfile` does, so the caller's retry loop can run again.
+/// A failure leaves `tmp` unpublished in the caller's hands, so its retry loop can run again. The error is a plain
+/// `io::Error`, so that `tempfile::PersistError` stays in `persist_at` and crosses no `pub` signature.
 #[cfg(windows)]
-pub fn persist(
-    mut tmp: tempfile::NamedTempFile,
+pub(super) fn persist(
+    tmp: &mut tempfile::NamedTempFile,
     (old, new): (PathBuf, PathBuf),
     replace: Replace,
-) -> Result<(), tempfile::PersistError> {
+) -> std::io::Result<()> {
     use std::iter;
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -93,10 +94,7 @@ pub fn persist(
     // A file still marked temporary must not be reported published: it lacks a published file's write-back guarantee.
     // SAFETY: `old` is NUL-terminated and outlives the call.
     if unsafe { SetFileAttributesW(old.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
-        return Err(tempfile::PersistError {
-            error: std::io::Error::last_os_error(),
-            file: tmp,
-        });
+        return Err(std::io::Error::last_os_error());
     }
     let flags = match replace {
         Replace::Existing => MOVEFILE_REPLACE_EXISTING,
@@ -108,7 +106,7 @@ pub fn persist(
         // Best effort: the file is still usable without the attribute, and the move's error is the one to report.
         // SAFETY: `old` is NUL-terminated and outlives the call.
         let _ = unsafe { SetFileAttributesW(old.as_ptr(), FILE_ATTRIBUTE_TEMPORARY) };
-        return Err(tempfile::PersistError { error, file: tmp });
+        return Err(error);
     }
     // The old name is gone; a drop that deleted it would remove whatever has since taken the name.
     tmp.disable_cleanup(true);
