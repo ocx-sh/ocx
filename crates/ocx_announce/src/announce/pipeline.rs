@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use super::error::AnnounceError;
 use super::request::TagSelection;
-use crate::forge::{FileChange, Forge, RepoCoordinate};
+use crate::forge::{FileChange, Forge, RefUpdate, RepoCoordinate};
 use ocx_oci::annotations;
 use ocx_oci::client::{ManifestPresence, NotFoundCode, ReadAddressing};
 use ocx_oci::tag::InternalTag;
@@ -434,6 +434,28 @@ pub(crate) fn change_body(package: &str, committed: &Value, plan: &TagPlan, drop
         }
     }
     body
+}
+
+/// The body lines naming what a rebuild did beyond the tag delta: the branch-only tags it
+/// carried, and that it replaced the branch head with a commit on the base.
+///
+/// Names pass the tag grammar like the other labels: the body is a push option with no markdown.
+pub(crate) fn rebuild_notes(carried: &[String], base_sha: &str, ref_update: RefUpdate) -> String {
+    let mut carried: Vec<&str> = carried
+        .iter()
+        .map(String::as_str)
+        .filter(|tag| ocx_oci::client::is_valid_oci_tag(tag))
+        .collect();
+    carried.sort_unstable();
+    let mut notes = String::new();
+    if !carried.is_empty() {
+        notes.push_str(&format!("\nCarried: {}\n", carried.join(", ")));
+    }
+    if ref_update == RefUpdate::Reset {
+        let short: String = base_sha.chars().take(12).collect();
+        notes.push_str(&format!("\nRebuilt on {short}, replacing the branch head\n"));
+    }
+    notes
 }
 
 /// Observe the `__ocx.desc` artifact, comparing its tag digest with the
@@ -3233,6 +3255,35 @@ mod tests {
             "no link or mention: {body}"
         );
         assert!(body.contains("1.0.0"), "a valid name is still listed: {body}");
+    }
+
+    // ── rebuild_notes ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rebuild_notes_name_the_sorted_carried_tags_and_the_short_base() {
+        let carried = vec!["2.0.0".to_string(), "1.1.0".to_string()];
+
+        let notes = rebuild_notes(&carried, "0123456789abcdef0123456789abcdef01234567", RefUpdate::Reset);
+
+        assert_eq!(
+            notes,
+            "\nCarried: 1.1.0, 2.0.0\n\nRebuilt on 0123456789ab, replacing the branch head\n"
+        );
+    }
+
+    #[test]
+    fn rebuild_notes_are_empty_without_a_carry_or_a_reset() {
+        assert_eq!(rebuild_notes(&[], "0123456789abcdef", RefUpdate::FastForward), "");
+        assert_eq!(rebuild_notes(&[], "0123456789abcdef", RefUpdate::Accumulate), "");
+    }
+
+    #[test]
+    fn rebuild_notes_leave_out_a_name_outside_the_tag_grammar() {
+        let carried = vec!["1.1.0".to_string(), "__ocx](http://x) @u".to_string()];
+
+        let notes = rebuild_notes(&carried, "0123456789abcdef", RefUpdate::FastForward);
+
+        assert_eq!(notes, "\nCarried: 1.1.0\n");
     }
 
     // ── Shared clock (C-007) ─────────────────────────────────────────────────

@@ -159,6 +159,7 @@ pub async fn announce(
                 head,
                 tags: &carried_names,
             }),
+            ref_update: branch_state.ref_update(),
         },
         &request,
         &now,
@@ -392,6 +393,7 @@ pub async fn announce(
                                 head,
                                 tags: &carried_names,
                             }),
+                            ref_update: branch_state.ref_update(),
                         },
                         &request,
                         &now,
@@ -498,6 +500,8 @@ struct RootBase<'a> {
     sha: &'a str,
     /// The rows carried onto `root` from a stale branch, whose objects only that branch holds.
     carried: Option<CarriedRows<'a>>,
+    /// How the commit lands on its branch; `Reset` replaces a stale head.
+    ref_update: RefUpdate,
 }
 
 /// The stale branch's rows carried onto a base root, and the head holding their objects.
@@ -642,7 +646,20 @@ async fn observe_and_rebuild(
         &orphans,
     );
     let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &plan.removed);
-    let body = pipeline::change_body(package, base_root, &plan, &dropped);
+    let mut body = pipeline::change_body(package, base_root, &plan, &dropped);
+    // A carried tag the pass then removed is not carried.
+    let carried: Vec<String> = base
+        .carried
+        .map(|carried| {
+            carried
+                .tags
+                .iter()
+                .filter(|tag| !plan.removed.contains(tag))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    body.push_str(&pipeline::rebuild_notes(&carried, base.sha, base.ref_update));
     Ok(Rebuilt {
         root,
         root_bytes,
@@ -1076,6 +1093,7 @@ mod tests {
                 repo: &request.index_repo,
                 sha: BASE_SHA,
                 carried: None,
+                ref_update: RefUpdate::FastForward,
             },
             request,
             "2026-07-25T00:00:00Z",
@@ -2504,6 +2522,59 @@ mod tests {
             put_at(&commits[0], &object(&listed, "json")).is_some(),
             "the listed tag's object is committed too"
         );
+    }
+
+    /// A reviewer reads the request body to know what merging does: a rebuild that
+    /// carries a branch-only tag and repoints the branch must say both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_rebuild_names_the_carried_tag_and_the_reset_in_the_body() {
+        let (digest, path, bytes) = branch_only_object();
+        let (registry, _) = seed_tags(&["2.0.0"]);
+        let forge = stale_forge_carrying(&digest, &path, &bytes);
+
+        run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+
+        for text in forge.request_bodies().iter().chain(&forge.commit_messages()) {
+            assert!(text.contains("\nCarried: 1.1.0\n"), "the carried tag is named: {text}");
+            assert!(
+                text.contains("\nRebuilt on base, replacing the branch head\n"),
+                "the reset is named: {text}"
+            );
+        }
+        assert!(!forge.request_bodies().is_empty(), "a request body was sent");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fast_forward_without_a_carry_adds_neither_line_to_the_body() {
+        let (registry, _) = seed_tags(&["2.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+
+        run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the announce lands");
+
+        let bodies = forge.request_bodies();
+        assert!(!bodies.is_empty(), "a request body was sent");
+        for text in bodies.iter().chain(&forge.commit_messages()) {
+            assert!(
+                !text.contains("Carried:") && !text.contains("Rebuilt on"),
+                "no carry and no reset: {text}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
