@@ -7,7 +7,7 @@
 # reachable from a check (plan C-029), so every property below is established
 # against a scratch `$RUNNER_TEMP` and a fake credential this script invents.
 #
-# Six properties, each shown **both** red and green, because a green whose red
+# Seven properties, each shown **both** red and green, because a green whose red
 # was never reachable is indistinguishable from a check that never ran
 # (quality-core.md § Unchecked Green):
 #
@@ -20,6 +20,8 @@
 #   5. nothing already at those paths is ever written through
 #   6. a credential already configured in an rc Bazel reads is refused, and the
 #      refusal is not the leak
+#   7. a run with no `RUNNER_TEMP`, or a credential that is not
+#      `<header>=<value>`, is refused before anything is written
 #
 # The step bodies are read out of `action.yml` with a YAML parser rather than
 # copied here, so this script cannot drift into proving something the action no
@@ -452,5 +454,129 @@ run_guarded "$SUBJECT" "$temp" "$SECRET" >/dev/null
 [ -f "$temp/bazel-cache.rc" ] || fail "a commented-out rc header was read as a live source"
 green "a commented-out header is not a source; the rc was written"
 rm -f "$GITHUB_WORKSPACE/.bazelrc"
+
+# Red (c)-(e): the spellings of a configured credential that (a) and (b) do not
+# reach: a helper rather than a header, its space-separated flag, and a header
+# name in another case (`Authorization=` is `authorization=` on the wire).
+# `$1` = case id, `$2` = the line planted in `$HOME/.bazelrc`.
+assert_rc_line_refused() {
+    local temp output
+    temp="$(scratch "t6-$1")"
+    printf '%s\n' "$2" >"$HOME/.bazelrc"
+    if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET")"; then
+        fail "a credential was written beside: $2"
+    fi
+    assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
+    grep -qF "$HOME/.bazelrc:1" <<<"$output" || fail "the refusal does not name the file and line it found: $output"
+    red "$2 -> refused, naming \$HOME/.bazelrc:1"
+}
+
+# Red by mutation: the same rc line with the named piece of the reader removed.
+# The mutant must write the rc beside the line, or the red measures nothing.
+assert_rc_line_mutant_writes() {
+    local temp
+    temp="$(scratch "t6-$1-mutant")"
+    printf '%s\n' "$2" >"$HOME/.bazelrc"
+    run_guarded "$3" "$temp" "$SECRET" >/dev/null
+    [ -f "$temp/bazel-cache.rc" ] || fail "the $1 mutant wrote nothing - the red is not measuring that branch"
+    red "without the $1 branch the rc lands beside: $2"
+}
+
+HELPER_LINE='build --credential_helper=bazel-cache.ocx.sh=/tmp/elsewhere/helper'
+assert_rc_line_refused helper-equals "$HELPER_LINE"
+assert_rc_line_refused helper-space 'build --credential_helper bazel-cache.ocx.sh=/tmp/elsewhere/helper'
+mutant="$(scratch m6c)"
+mutate 'if AUTHORIZATION_HEADER.search(line) or CREDENTIAL_HELPER.search(line)' \
+    'if AUTHORIZATION_HEADER.search(line)' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+assert_rc_line_mutant_writes helper-equals "$HELPER_LINE" "$mutant"
+assert_rc_line_mutant_writes helper-space \
+    'build --credential_helper bazel-cache.ocx.sh=/tmp/elsewhere/helper' "$mutant"
+
+UPPER_LINE="build --remote_header=Authorization=Basic b3RoZXI6c2VjcmV0"
+assert_rc_line_refused header-upper-case "$UPPER_LINE"
+mutant="$(scratch m6e)"
+mutate ', re.IGNORECASE)
+
+#: A credential helper' ')
+
+#: A credential helper' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+assert_rc_line_mutant_writes header-upper-case "$UPPER_LINE" "$mutant"
+rm -f "$HOME/.bazelrc"
+
+# ---------------------------------------------------------------------------
+printf '\n[7] no RUNNER_TEMP, or a credential that is not <header>=<value>, is refused before anything is written\n'
+# ---------------------------------------------------------------------------
+# A run with a credential but no `$RUNNER_TEMP` would resolve both files against
+# the working directory, which is the workspace on a runner. The run starts in an
+# empty scratch directory so a mutant that writes there is seen.
+temp="$(scratch t7a)"
+if output="$(cd "$temp" && GITHUB_ACTION_PATH="$SUBJECT" WRITE_AUTH="$SECRET" env -u RUNNER_TEMP bash -c "$WRITE_BODY" 2>&1)"; then
+    fail "a credential was accepted with no RUNNER_TEMP"
+fi
+grep -qF 'RUNNER_TEMP is unset' <<<"$output" || fail "the refusal is not the contracted one: $output"
+assert_nothing_written "$temp" || fail "the refusal still wrote into the working directory: $(ls -A "$temp")"
+green "no RUNNER_TEMP -> refused, and the working directory is still empty"
+
+mutant="$(scratch m7a)"
+mutate '    if not runner_temp:
+        sys.exit("bazel cache: RUNNER_TEMP is unset; this action only runs on a runner")' \
+    '    pass  # MUTANT' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t7ar)"
+(cd "$temp" && GITHUB_ACTION_PATH="$mutant" WRITE_AUTH="$SECRET" env -u RUNNER_TEMP bash -c "$WRITE_BODY" >/dev/null 2>&1) || true
+red "without the guard the working directory holds: $(ls -A "$temp" | tr '\n' ' ')"
+if assert_nothing_written "$temp"; then
+    fail "the guard-less mutant wrote nothing - the check cannot see the working-directory write"
+fi
+
+# The three shapes `split_credential` refuses, each with the text a leak would
+# repeat and the length a diagnostic may state instead.
+assert_malformed_refused() {
+    local temp output
+    temp="$(scratch "t7-$1")"
+    if output="$(run_guarded "$SUBJECT" "$temp" "$2")"; then
+        fail "a credential $1 was accepted"
+    fi
+    grep -qF 'is not `<header>=<value>`' <<<"$output" || fail "the refusal is not the contracted one: $output"
+    grep -qF "(${#2} characters)" <<<"$output" || fail "the refusal does not state the credential's length: $output"
+    if [ -n "$3" ] && grep -qF "$3" <<<"$output"; then
+        fail "the refusal repeats the credential: $output"
+    fi
+    assert_nothing_written "$temp" || fail "the refusal still wrote: $(ls -A "$temp")"
+    red "$1 -> refused, stating its length and not its value"
+}
+
+# Red by mutation: the same malformed credential, a guard removed. It must write.
+assert_malformed_mutant_writes() {
+    local temp
+    temp="$(scratch "t7-$1-mutant")"
+    run_guarded "$3" "$temp" "$2" >/dev/null
+    [ -f "$temp/bazel-cache.rc" ] || fail "the mutant for a credential $1 wrote nothing - the red is not measuring that clause"
+    red "with that guard removed, a credential $1 reaches the helper"
+}
+
+NO_SEPARATOR='NoSeparatorSecretValue'
+NO_HEADER='=EmptyHeaderSecretValue'
+NO_VALUE='authorization='
+assert_malformed_refused "without a separator" "$NO_SEPARATOR" NoSeparatorSecretValue
+assert_malformed_refused "without a header" "$NO_HEADER" EmptyHeaderSecretValue
+assert_malformed_refused "without a value" "$NO_VALUE" ""
+
+GUARD='if not separator or not header.strip() or not value.strip():'
+mutant="$(scratch m7b)"
+mutate "$GUARD" 'if False:  # MUTANT' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+assert_malformed_mutant_writes "without a separator" "$NO_SEPARATOR" "$mutant"
+assert_malformed_mutant_writes "without a header" "$NO_HEADER" "$mutant"
+assert_malformed_mutant_writes "without a value" "$NO_VALUE" "$mutant"
+
+# One clause each, for the two shapes only that clause refuses. `not separator`
+# is not mutated alone: a credential with no `=` has no value either, so the
+# value clause refuses it too, and deleting one of two guards over one property
+# leaves the check green.
+mutant="$(scratch m7c)"
+mutate ' or not header.strip()' '' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+assert_malformed_mutant_writes "without a header" "$NO_HEADER" "$mutant"
+mutant="$(scratch m7d)"
+mutate ' or not value.strip()' '' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+assert_malformed_mutant_writes "without a value" "$NO_VALUE" "$mutant"
 
 printf '\nselftest: every property above shown red and green\n'
