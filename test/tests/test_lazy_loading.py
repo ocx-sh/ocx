@@ -58,6 +58,8 @@ from tests.test_patches import assert_no_index_footprint
 
 pytestmark = pytest.mark.command("launcher/shim", "env", "which", "clean")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs.
 EXIT_SUCCESS = 0
 EXIT_DATA_ERROR = 65

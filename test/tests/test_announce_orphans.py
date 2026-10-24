@@ -48,6 +48,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 #: `--fork` plus the index coordinate: every row here commits, so every row
 #: needs the branch the commit lands on.
 FORK_ARGS = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]

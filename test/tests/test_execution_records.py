@@ -113,6 +113,8 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 
 pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*", "install")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

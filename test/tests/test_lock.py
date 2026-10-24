@@ -39,6 +39,8 @@ from src.runner import OcxRunner, current_platform, registry_dir
 
 pytestmark = pytest.mark.command("lock")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

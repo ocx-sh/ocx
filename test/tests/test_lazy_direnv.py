@@ -38,6 +38,8 @@ from src.shell_eval import run_after_sourcing
 
 pytestmark = pytest.mark.command("direnv*")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 EXIT_SUCCESS = 0
 
 PUBLIC_BIN_PATH = [

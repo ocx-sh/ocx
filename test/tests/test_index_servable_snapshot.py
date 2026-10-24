@@ -95,6 +95,8 @@ pytestmark = pytest.mark.command(
     "index_catalog",
 )
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 NAMESPACE = "ocx.sh"
 
 # The shared refresh loop fans out over at most `INDEX_REFRESH_CONCURRENCY`

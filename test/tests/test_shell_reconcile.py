@@ -59,6 +59,8 @@ pytestmark = [
     ),
 ]
 
+pytestmark = [*pytestmark, pytest.mark.requires_testing_build]
+
 _OCX = matrix.ocx_binary()
 
 pytestmark.append(

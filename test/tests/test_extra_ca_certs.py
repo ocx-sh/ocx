@@ -60,6 +60,8 @@ from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner
 from src.tls_index import MintedPki, TlsStaticIndexServer, mint_ca_and_leaf, running_tls
 
+pytestmark = pytest.mark.requires_testing_build
+
 # The logical namespace the HTTPS index serves. Distinct from `ocx.sh` so the
 # compiled-in `index.ocx.sh` entry never enters the picture.
 _NAMESPACE = "corp.example"

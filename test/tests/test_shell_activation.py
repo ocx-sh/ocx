@@ -91,6 +91,8 @@ pytestmark = [
     pytest.mark.skipif(_OCX is None, reason="no ocx binary (set OCX_ACTIVATION_BINARY / OCX_COMMAND, or build test/bin/ocx)."),
 ]
 
+pytestmark = [*pytestmark, pytest.mark.requires_testing_build]
+
 
 def _require(binary: str) -> str:
     """Absolute path of ``binary``, or skip naming exactly what is missing.
