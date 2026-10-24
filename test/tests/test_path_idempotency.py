@@ -144,11 +144,18 @@ def _run(recipe: ShellRecipe, script: str) -> str:
     stays clean to prove the emitted statement is self-contained.
     """
     interpreter = shutil.which(recipe.interpreter) or recipe.interpreter
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    if sys.platform == "win32":
+        # A Windows child needs SYSTEMROOT (Python's subprocess docs). Without it pwsh on arm64
+        # FailFasts at startup (0x80131623) in its SAFER probe, which also writes to TEMP.
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            if key in os.environ:
+                env[key] = os.environ[key]
     proc = subprocess.run(
         [interpreter, *recipe.argv[1:], script],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, check=False,
+        env=env, check=False,
     )
     assert proc.returncode == 0, (
         f"{recipe.interpreter} eval failed (rc={proc.returncode})\n"
