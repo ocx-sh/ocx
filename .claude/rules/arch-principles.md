@@ -13,7 +13,7 @@ Auto-load on every Rust file edit. Provide stable architectural context — "why
 The ADR map as corrected by D-037. `scripts/crate_map.toml` is the machine-readable
 form and the only allowed-edge table — `deps_direction` reads it against
 `cargo metadata` every run, so this table describes and that one enforces.
-Tier in brackets; tiers are defined in `CLAUDE.md` § Stability tiers.
+Tier in brackets; tiers are defined in `AGENTS.md` § Stability tiers.
 
 | Crate | Purpose | May depend on |
 |-------|---------|---------------|

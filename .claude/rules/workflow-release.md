@@ -68,7 +68,6 @@ Two new env vars introduced:
 - `OCX_NO_MODIFY_PATH` — disables shell profile modification during install (truthy: `1`, `true`, `yes`)
 
 Both must add to:
-- `CLAUDE.md` environment variable table
 - `ocx_env` doc blocks, then `task website:reference:generate` (never hand-edit `website/src/content/docs/reference/environment.md`)
 - Env var parsing use same truthy-value logic as `OCX_OFFLINE` and `OCX_REMOTE`
 

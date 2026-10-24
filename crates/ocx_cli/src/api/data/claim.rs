@@ -284,7 +284,7 @@ mod tests {
     /// vocabulary fields are held as enums rather than as `String`s — so this is
     /// the check that the typing bought no wire change. It is a golden
     /// document, deliberately: a published report schema is an interface
-    /// (CLAUDE.md § Stability tiers), and a per-field assertion would let a
+    /// (AGENTS.md § Stability tiers), and a per-field assertion would let a
     /// seventh field's spelling drift unwatched.
     ///
     /// Between the two rows: `status` `updated`, `forge` `github`/`gitlab`,

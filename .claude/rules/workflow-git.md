@@ -20,7 +20,7 @@ Shared branch-and-commit hygiene for OCX. Used by `/commit` skill (working phase
 
 - **Never commit on `main`.** If on `main`, stop and switch to feature/worktree branch first.
 - **Never push.** Push triggers CI, real cost. Human decides when push. No skill, agent, automation push on own.
-- **Never `--no-verify`, `--no-gpg-sign`, or any hook-skipping flag.** Hook fail → fix root cause, new commit — hook fail means commit did not happen, so `--amend` would rewrite *previous* commit. One exception: inside a hex run, step commits and merges on hex-owned branches may use `--no-verify` (CLAUDE.md principle 2).
+- **Never `--no-verify`, `--no-gpg-sign`, or any hook-skipping flag.** Hook fail → fix root cause, new commit — hook fail means commit did not happen, so `--amend` would rewrite *previous* commit. One exception: inside a hex run, step commits and merges on hex-owned branches may use `--no-verify` (`AGENTS.md` principle 2).
 - **Never `Co-Authored-By`** in commit messages. OCX convention.
 
 ## Two-Phase Model
@@ -46,7 +46,7 @@ Full cheat sheet: [`commit_reference.md`](../skills/commit/commit_reference.md) 
 
 - Format: `<type>[optional scope]: <description>`
 - Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`
-- **`chore:`** for AI/tooling files (`.claude/`, `CLAUDE.md`, skills, rules, hooks, taskfiles) — keeps out of user-facing changelog
+- **`chore:`** for AI/tooling files (`.claude/`, `CLAUDE.md`, `AGENTS.md`, skills, rules, hooks, taskfiles) — keeps out of user-facing changelog
 - Imperative mood, lowercase description, no trailing period, subject ≤72 chars
 - Body explains **why**, not what. Only when non-obvious.
 - Breaking changes: `!` before colon **and** `BREAKING CHANGE:` footer
@@ -117,4 +117,4 @@ Code in `external/` (e.g., `rust-oci-client`) is fork of upstream repo. Three ru
 - [`commit_reference.md`](../skills/commit/commit_reference.md) — Conventional Commits v1.0.0 cheat sheet
 - [workflow-feature.md](./workflow-feature.md) — where commits fit in broader feature flow
 - [workflow-release.md](./workflow-release.md) — release-time branch handling
-- `CLAUDE.md` — worktree layout, "Landing a feature" section
+- `AGENTS.md` — worktree layout and landing, in the "Workflow" section
