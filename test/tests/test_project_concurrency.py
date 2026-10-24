@@ -362,6 +362,10 @@ def test_flock_on_ocx_toml_itself_does_not_block_a_mutation(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="windows: replacing a file a reader holds open is refused (os error 5), FILE_SHARE_DELETE included",
+)
 def test_unlocked_reader_sees_one_document_across_a_split_read(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

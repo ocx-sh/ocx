@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -487,6 +488,29 @@ def bundle_text(bundle: Path, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def copy_tree_keeping_links(src: Path, dst: Path) -> None:
+    """``shutil.copytree(symlinks=True)`` that also keeps NTFS junctions as links.
+
+    Every store link OCX writes on Windows is a directory junction, which ``copytree`` follows
+    by design; the ``refs/`` junctions point back into the tree they sit in, so the copy
+    recurses until the path overflows.
+    """
+    if sys.platform != "win32":
+        shutil.copytree(src, dst, symlinks=True)
+        return
+    import _winapi
+
+    dst.mkdir()
+    for entry in os.scandir(src):
+        target = dst / entry.name
+        if entry.is_junction() or entry.is_symlink():
+            _winapi.CreateJunction(os.readlink(entry.path).removeprefix("\\\\?\\"), str(target))
+        elif entry.is_dir():
+            copy_tree_keeping_links(Path(entry.path), target)
+        else:
+            shutil.copy2(entry.path, target)
+
+
 def shim_bin_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
     """Every published shim launcher directory belonging to ``repo``.
 
@@ -646,6 +670,14 @@ def make_package(
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
     bin_names = bins or ["hello"]
+    # `create` refuses to fill an absent `binaries` claim for an OS whose executable convention
+    # the host cannot read (a Windows host and any non-Windows target), so such a fixture is
+    # published claim-less.
+    scan_args = (
+        ["--no-bin-scan"]
+        if no_bin_scan or (sys.platform == "win32" and not plat.startswith(("windows/", "wasip")))
+        else []
+    )
 
     # Sanitize repo for use in filesystem paths: replace `/` and other
     # path-separator characters so pathlib does not treat the segment as
@@ -750,7 +782,7 @@ def make_package(
         str(bundle_l0),
         "-p",
         plat,
-        *(["--no-bin-scan"] if no_bin_scan else []),
+        *scan_args,
         str(pkg_dir),
     )
 
@@ -771,6 +803,7 @@ def make_package(
             str(bundle_ln),
             "-p",
             plat,
+            *scan_args,
             str(layer_dir),
         )
         all_bundles.append(bundle_ln)
