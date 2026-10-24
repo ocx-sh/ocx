@@ -7,11 +7,11 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-24
-- **Active phase:** G6 — release-readiness dry run on #637 HEAD (deep and basic green on a65416882)
-- **Step:** readiness 40103031491 (97ef924b1) red only on Windows arm64 pwsh startup; fixed in c7c3a2e26; awaiting push + readiness re-dispatch
+- **Active phase:** G6 — release-readiness dry run on #637 HEAD; closing /hex-review (97ef924b1) findings fixed
+- **Step:** /hex-execute → review-fix loop (I8, last cycle) done: Block, High 1-3, Warn 1-15 and the cheap Suggests; awaiting push + readiness/deep re-dispatch
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after c7c3a2e26: test(shell): the PATH idempotency shells start with SYSTEMROOT on Windows, so pwsh runs on arm64)
-- **Next:** G6 (meta): push, dispatch release-readiness on the new tip; then the integration `task verify` + one /hex-review
+- **Last update:** 2026-10-24 (after 3587d0ce6: chore(scripts): windows-local's unit filter is documented as a bundle-target label substring)
+- **Next:** G6 (meta): push, dispatch release-readiness and deep on the new tip; the integration `task verify` waits on the owner (permission denied in review-637)
 
 ---
 
@@ -303,8 +303,8 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 | F1 | ocx | C-040, C-041, S-009, S-010 | `crates/ocx_util/src/fs.rs`, `crates/ocx_package/src/bin_scan.rs`, `crates/ocx_cli/src/command/package.rs` (help), `crates/TEST_TARGET_MAP.toml`, `test/tests/test_patch_smoke.py`, `adr_declared_binaries_metadata.md` | 7 | G3 | — | merged |
 | F2 | ocx | C-042 | `.github/workflows/{deep-repo,acceptance}.yml`, `test/limits/{macos,windows}/**` (creation), sigstore/docker fixtures under `test/src/`, workspace_structure tests, `adr_crate_split_workspace.md`, `.claude/rules/{subsystem-tests,subsystem-ci}.md` | 8 | F1 | — | merged |
 | K | ocx | C-050, C-051 | `scripts/{release_provenance_check,test_diff_guard,bazel_test_floor,bazel_build_drift,bazel_gate_proofs,bazel_floor_proofs,bep_to_otlp}.py` (+ tests), `taskfiles/{rust,scripts}.taskfile.yml`, `.github/workflows/deep-repo.yml` (comment), `patches/{rules_rust_keep_doctest_stdout.patch,BUILD.bazel}`, `MODULE.bazel`, `MODULE.bazel.lock`, `crates/TEST_TARGET_MAP.toml`, `adr_test_speed_tiers.md`, `adr_bazel_rules_rs_migration.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles,subsystem-ci}.md` | 9 | G4 | — | merged |
-| R1 | ocx | C-061 | `test/tests/**` (markers), `test/conftest.py`, `test/pyproject.toml`, `test/src/**` helpers, `test/lint/test_testing_marker.py`, `test/limits/*-release/**`, `.claude/rules/subsystem-tests.md` | 10 | G5 | — | pending |
-| R2 | ocx | C-060, C-062, C-063, C-064, S-007, S-008 | `.github/workflows/{release-readiness,readiness-gate,release,acceptance}.yml`, `dist-workspace.toml`, `scripts/release_readiness_gate.py`, `scripts/tests/test_release_readiness_gate.py`, `taskfiles/release.taskfile.yml`, `.claude/tests/test_workflows.py`, `.claude/rules/{workflow-release,subsystem-ci}.md` | 10 | G5 | hard, review | pending |
+| R1 | ocx | C-061 | `test/tests/**` (markers), `test/conftest.py`, `test/pyproject.toml`, `test/src/**` helpers, `test/lint/test_testing_marker.py`, `test/limits/*-release/**`, `.claude/rules/subsystem-tests.md` | 10 | G5 | — | merged |
+| R2 | ocx | C-060, C-062, C-063, C-064, S-007, S-008 | `.github/workflows/{release-readiness,readiness-gate,release,acceptance}.yml`, `dist-workspace.toml`, `scripts/release_readiness_gate.py`, `scripts/tests/test_release_readiness_gate.py`, `taskfiles/release.taskfile.yml`, `.claude/tests/test_workflows.py`, `.claude/rules/{workflow-release,subsystem-ci}.md` | 10 | G5 | hard, review | merged |
 | I1 | ocx | repoint to released satellites, D21 | `.copier-answers.yml`, template-owned files, `grimoire.lock` + outputs, `.claude/rules/subsystem-ci.md` (deviation note out), `.github/actions/bazel-cache-rc/**` + callers (iff D21) | 11 | G7 | — | pending |
 
 Fewer parallel pipelines than file count allows, by design: phases run in the owner's order; T1→T2 share
@@ -726,10 +726,12 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     Unit: 43/43 targets, 8886 passed, 0 failed, 6 ignored. `test/limits/windows/` committed from these counts
     (87ea8bb07: floor 3690, skip ceiling 1537, xfail ceiling 2), replacing the Linux placeholder.
   - Deferred: `test/limits/macos/` still absent (TODO(G4) at the leg) — committed from the first deep run's counts.
+    Since present: 0575b1d6e committed it from the first deep run's four shards.
 - 2026-10-24 — **G6 readiness reds fixed** (feature tip after aa06ec568). Deep
   [40098959951](https://github.com/ocx-sh/ocx/actions/runs/40098959951) and basic
   [40098963479](https://github.com/ocx-sh/ocx/actions/runs/40098963479) green on a65416882; readiness
-  [40094740730](https://github.com/ocx-sh/ocx/actions/runs/40094740730) on b16518983 red on three causes:
+  [40098724914](https://github.com/ocx-sh/ocx/actions/runs/40098724914) on b16518983 red on three causes
+  (the earlier readiness [40094740730](https://github.com/ocx-sh/ocx/actions/runs/40094740730) ran on 65cabc429):
   - **Windows arm64, all 4 shards** → `uv sync` built cryptography 46.0.7 from source (openssl-sys finds no OpenSSL).
     PyPI: win_arm64 wheels exist only for 46.0.0–46.0.3; upstream "dropped support for win_arm64 wheels" in 46.0.4,
     none through 50.0.2. Options weighed: pin ≤ 46.0.3 on that marker (an unsupported release), source build (an arm64
@@ -758,3 +760,42 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     now gets SYSTEMROOT, WINDIR, TEMP and TMP on Windows (the runner's and git fixture's set); PATH unchanged, the
     script seeds its own. c7c3a2e26. Windows-local: 6 passed (bash, dash, direnv cases), 12 skipped (pwsh is absent
     on this host, so CI is the proof); Linux: 14 passed / 4 skipped.
+- 2026-10-24 — **G1 warm numbers on a65416882** (deep [40098959951](https://github.com/ocx-sh/ocx/actions/runs/40098959951)):
+  slowest cross leg 5:49 (`x86_64-pc-windows-gnullvm`), then 4:22 (musl) and 3:41 (aarch64 gnullvm); 3729 of 4474
+  actions were remote-cache hits. **D13 = B stands** (5:49 > 3:00). [#638](https://github.com/ocx-sh/ocx/issues/638)
+  is still open; closing it with these numbers is a meta act.
+- 2026-10-24 — **Closing /hex-review on 97ef924b1: REQUEST CHANGES, fixed (I8, last cycle)** from a31494b7e, seven
+  sonnet workers, file-disjoint, merged one at a time (`--no-verify`), tip 3587d0ce6.
+  - **Block:** taskfile paths given to `rm`/`mkdir`/`cp`/`mv` are quoted tree-wide (15 sites), held by
+    `test/lint/test_taskfile_path_quoting.py` (red on the old `rm -rf {{.JUNIT_DIR}}`, reader floor 250 commands).
+  - **High 1:** `verify-version` moved from a cargo-dist plan job to a `local-artifacts-jobs` entry, so it and the
+    readiness gate need only `plan` and `host` reads both results itself. `release.yml` stays fully generated
+    (`dist generate --check` with 0.31.0 green, all of the file still watched), so `allow-dirty` was not needed.
+    `host`'s generated `if:` still names `skipped` for both, but neither can skip once `plan` succeeds and
+    `publishing == 'true'`. `test_no_job_upstream_of_host_can_fail_into_a_skip` pins it (red on the old file).
+  - **High 2:** release skip ceilings re-derived from measured merge jobs, max of 40098724914 and 40103031491 plus 6:
+    linux 1512, macos 1772, windows 2204. Both runs predate the marker fix, so the next readiness run tightens them.
+  - **High 3:** a step-level `if:` on a cache writer is a C-003(a) finding (two `_VIOLATIONS` cases, red without the
+    check); `BAZEL_LANE_FLOOR` = 15, the live count.
+  - **Warns:** live-shell arms pinned by tag + digest; `overwrite: true` on all 7 uploads reachable from readiness;
+    `--no-bin-scan` only for an interface PATH entry under `${installPath}`; marker lint reads the Rust seam set and
+    doc scripts with reader floors (14 false markers removed, 845 cases now run on release bytes; one doc script
+    marked); pytester cases for the release-bytes skip, `_wants_zot` and the deadline; zot spawns inside the crash
+    guard (POSIX launcher waits on a go-ahead byte; Windows controller joins the job before spawning), probe bypasses
+    proxies; readiness-gate stub fixed so 69 is reachable, stderr asserted; selftest.sh covers its 4 refusal
+    branches; windows_local.sh: `--ignore-missing-args`, safe filter, staging containment, complete binary set;
+    test_bundle takes CACHE_RC from the task and floors on CRATES_TEST_TARGETS; bench and manual rigs start zot;
+    stale docs and ADR amendments; long sentences split; plan IDs and 11 over-cap blocks cut (baselines only fell).
+  - **Suggests applied:** AGENTS.md count 179, bazel_doctor's retired read secret (and init-bazel-config Step 5),
+    zot.py's narrowed `except`, `release:tag` drops its local tag on a rejected push; plus `cross:test:run` takes
+    its values through `env:`, not shell text.
+  - **Verify on 3c48291c3 + 86ac656bf..3587d0ce6:** Linux `ocx exec -- task -x test:parallel --force` (full suite)
+    3536 passed / 150 skipped / 5 xfailed / 0 failed; windows-local accept (install, doc_scripts, execution records
+    ×2, frozen, managed_config, patch_smoke, patches) 228 passed / 106 skipped / 0 failed; windows-local unit 43/43
+    targets, 8931 passed / 0 failed (incl. the new `persist_temp_file` case), and again on 3587d0ce6's
+    `cross:test:run` env path with filter `ocx_util` 249 passed; `test:lint:structure` 540 passed (LINT_FLOOR 540);
+    `scripts:self-test` 826 passed; `claude:tests` 507 passed / 21 skipped; `scripts:suite-census` as pinned;
+    `test:rows:check` and `scoped_gate.py --check-coverage` OK; ruff (test/, scripts/) clean; `workflows:lint`
+    no findings; `dist generate --check` (0.31.0) clean. Not run: `task verify` (owner decision pending).
+  - **Not proven here:** the release-bytes run of the unmarked modules and the Windows arm64 legs (next readiness);
+    a controller killed mid-spawn on Windows (the orderly path ran in windows-local accept).
