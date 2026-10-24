@@ -8,10 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-24
 - **Active phase:** G6 — release-readiness dry run on #637 HEAD; closing /hex-review (97ef924b1) findings fixed
-- **Step:** /hex-execute → review-fix loop (I8, last cycle) done: Block, High 1-3, Warn 1-15 and the cheap Suggests; awaiting push + readiness/deep re-dispatch
+- **Step:** /hex-execute → review-fix loop (I8, last cycle) done: Block, High 1-3, Warn 1-15 (incl. the full report's sub-items) and the cheap Suggests; awaiting push + readiness/deep re-dispatch
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after 3587d0ce6: chore(scripts): windows-local's unit filter is documented as a bundle-target label substring)
-- **Next:** G6 (meta): push, dispatch release-readiness and deep on the new tip; the integration `task verify` waits on the owner (permission denied in review-637)
+- **Last update:** 2026-10-24 (after 8cabf0c64: test: the Windows zot guard test runs its controller on the base interpreter, so only the guard's job can end the zots)
+- **Next:** G6 (meta): push, dispatch release-readiness and deep on the new tip; the integration `task verify` is review-637's gate rerun
 
 ---
 
@@ -190,7 +190,7 @@ in the same run, and `test_workflows.py` pins whichever variant G1 recorded.
   without the other. Exit 1: empty selection (today's rule). Reports `shard-<I>-of-<N>.xml`;
   `accept_floor --expect-shards N` requires indices `0..N-1`. Task vars `SHARD_COUNT`/`SHARD_INDEX` on
   `accept:native` and `bazel:test:accept`.
-- **C-031 Windows local run.** `task test:windows-local MODE=accept|unit [SHARD_COUNT= SHARD_INDEX=] [EXE=<path>] -- <pytest args>`
+- **C-031 Windows local run.** `task -x test:windows-local MODE=accept|unit [SHARD_COUNT= SHARD_INDEX=] [EXE=<path>] -- <pytest args>`
   → `scripts/windows_local.sh`: exit 69 unless WSL with `cmd.exe`; cross-builds gnullvm `ocx.exe` (+ test bundle
   for `unit`) unless `EXE` names one; stages `git ls-files -co --exclude-standard` working-tree content into the
   fixed `%USERPROFILE%\ocx-wintest\<checkout-name>\` (rsync `--delete`, venv kept); runs `task test:accept:native`
@@ -264,7 +264,7 @@ in the same run, and `test_workflows.py` pins whichever variant G1 recorded.
 | S-002 | Fork PR | no rc, lane runs as today | — |
 | S-003 | Scheduled deep goes red, then green | one `nightly-red` issue opened/updated; next green closes it | cancelled run → no issue change |
 | S-004 | Maintainer adds `run-deep` to a PR | deep runs on that PR | other labels → no run |
-| S-005 | `task test:windows-local MODE=accept -- -k patch` in WSL | staged on `C:`, suite runs, exit = pytest's | outside WSL → 69 |
+| S-005 | `task -x test:windows-local MODE=accept -- -k patch` in WSL | staged on `C:`, suite runs, exit = pytest's (only under `-x`) | outside WSL → 69 |
 | S-006 | `kill -9` the pytest controller | no zot process remains | zot not ready in 60 s → UsageError naming the log |
 | S-007 | `task release:tag` on a prepared release commit | refuses without a green readiness run for HEAD; proceeds with one; a bypass run is accepted and its reason printed | `gh` unauthenticated → 69, refused; `task release:prepare` without a full mark → refused |
 | S-008 | Tag pushed without a readiness run for its SHA | `readiness-gate` red; `host` never runs; nothing published | — |
@@ -761,9 +761,12 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     script seeds its own. c7c3a2e26. Windows-local: 6 passed (bash, dash, direnv cases), 12 skipped (pwsh is absent
     on this host, so CI is the proof); Linux: 14 passed / 4 skipped.
 - 2026-10-24 — **G1 warm numbers on a65416882** (deep [40098959951](https://github.com/ocx-sh/ocx/actions/runs/40098959951)):
-  slowest cross leg 5:49 (`x86_64-pc-windows-gnullvm`), then 4:22 (musl) and 3:41 (aarch64 gnullvm); 3729 of 4474
-  actions were remote-cache hits. **D13 = B stands** (5:49 > 3:00). [#638](https://github.com/ocx-sh/ocx/issues/638)
-  is still open; closing it with these numbers is a meta act.
+  cross legs 5:49 (`x86_64-pc-windows-gnullvm`), 4:22 (`x86_64-unknown-linux-musl`), 3:41 (`aarch64-pc-windows-gnullvm`),
+  3:38 (`aarch64-apple-darwin`), 2:45 (`x86_64-unknown-linux-gnu`), 2:44 (`aarch64-unknown-linux-musl`), 2:20
+  (`aarch64-unknown-linux-gnu`), 2:05 (`x86_64-apple-darwin`). On the gnullvm job 3729 of 4474 processes were
+  remote-cache hits, with 0 HTTP 500 and 0 HTTP 401 in its log. **D13 = B stands** (5:49 > 3:00). Then
+  [#638](https://github.com/ocx-sh/ocx/issues/638) meets its own close condition (remote hits above zero on a cross
+  job); closing it is a meta act.
 - 2026-10-24 — **Closing /hex-review on 97ef924b1: REQUEST CHANGES, fixed (I8, last cycle)** from a31494b7e, seven
   sonnet workers, file-disjoint, merged one at a time (`--no-verify`), tip 3587d0ce6.
   - **Block:** taskfile paths given to `rm`/`mkdir`/`cp`/`mv` are quoted tree-wide (15 sites), held by
@@ -796,6 +799,51 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     `cross:test:run` env path with filter `ocx_util` 249 passed; `test:lint:structure` 540 passed (LINT_FLOOR 540);
     `scripts:self-test` 826 passed; `claude:tests` 507 passed / 21 skipped; `scripts:suite-census` as pinned;
     `test:rows:check` and `scoped_gate.py --check-coverage` OK; ruff (test/, scripts/) clean; `workflows:lint`
-    no findings; `dist generate --check` (0.31.0) clean. Not run: `task verify` (owner decision pending).
+    no findings; `dist generate --check` (0.31.0) clean. Not run here: `task verify` (review-637's gate rerun is the
+    integration gate).
   - **Not proven here:** the release-bytes run of the unmarked modules and the Windows arm64 legs (next readiness);
     a controller killed mid-spawn on Windows (the orderly path ran in windows-local accept).
+- 2026-10-24 — **W10 decisions, recorded at the closing review** (readiness gate, R2; ad72f094f, a9d200725):
+  - `stage` job → the release archive holds `ocx` alone and the suite also drives `ocx-shim` and `ocx_schema` →
+    each target builds those two natively beside the archive and lays out `test/bin`; the `ocx` under test stays
+    the release bytes.
+  - `toolchain-group` input → on a leg whose `ocx.lock` lacks a leaf for a default tool (macOS x64, Windows arm64)
+    installing the whole project exits 78 → those legs install only the `test` group; `test_workflows.py` derives
+    the set from `ocx.lock`.
+  - Release limits → floor and xfail as the non-release limits; `SKIP_CEILING` = the readiness merge jobs' observed
+    skips plus 6, re-derived at the closing review (H2) and tightened by the next readiness run.
+  - Windows arm64 → readiness builds `aarch64-pc-windows-msvc` natively on `windows-11-arm`, while `release.yml`
+    cross-compiles it with cargo-xwin; the bytes differ, an owner question in the closing review's deferred list.
+  - `artifact-metadata` → `docker-publish.yml` requests `artifact-metadata: write`, which the generated
+    `custom-docker-publish` job did not grant (a startup failure on the next tag) → granted in `dist-workspace.toml`
+    `github-custom-job-permissions`, `release.yml` regenerated.
+- 2026-10-24 — **Records the closing review found missing.**
+  - 1780fe19f moves the announce push refused as `(non-fast-forward)` from exit 1 to the documented 75, so the caller
+    re-fetches and retries (partial clones on git 2.40.0.windows.1 word the rejection that way). Red before the row
+    (`cargo test -p ocx_announce --lib git_stderr`): 3 failed / 19 passed; green 22 passed; hoisting the row above
+    `(stale info)` reds the precedence tests; Linux `test_git_http_fixture.py` + `test_transport_git.py` 117 passed.
+  - 75b4ade0b red run: on Windows (`task -x test:windows-local MODE=unit -- ocx_config`) with the loop reverted to
+    extension-outermost, `resolve_command_windows_searches_path_directories_before_extensions` failed (608 passed /
+    1 failed: the later directory's `my_tool.exe` won); restored, 609 passed.
+- 2026-10-24 — **Gap pass over review-637's full report** (items the summary ledger lacked), four sonnet workers,
+  file-disjoint, merged b92fd5cd8..7cf286fc2, then 8cabf0c64.
+  - Rules and records: release limits described as observed + 6, arm64 legs on the x64 sets; the diff guard scoped to
+    crate-split ranges, not `task verify`; the rules_rs ADR names cross.yml's 8 legs, the 4-shard native acceptance,
+    the merge job and deep-repo.yml, and that 44 of 49 Bazel-skipped testcases run on macOS/Windows (5 need cargo);
+    pointers to the old CLAUDE.md body name AGENTS.md; `git:history` in the taskfile table.
+  - Pins: the acceptance shard's `OCX_TEST_RELEASE_BINARY` mapping; MODULE.bazel `platform_triples` == the cross
+    targets (reader floor 8); `BAZEL_LANE_FLOOR` tracks the live count. Each shown red by a planted edit.
+  - Harness: no zot for `--fixtures`/`--markers`; a failed zot start is a `pytest.UsageError` naming the cause; the
+    60 s readiness wait pinned; `_serves_v2` closed-port and 401/404/204 cases (red under `return True`); a win32
+    test terminates the controller and requires every zot gone — on Windows red with `_KILL_ON_JOB_CLOSE = 0` (a
+    process outlived the controller), green restored. The first version passed under that mutant: the venv
+    launcher's own kill-on-close job ended the zots, so the controller now runs on the base interpreter.
+  - Scripts: windows_local.sh usage moved to `--help` / exit 64, grep exit 2 fails the run, cp errors visible,
+    header under the cap; selftest.sh proves the `seen` import-cycle guard (red: killed by the 10 s bound) and its
+    headers are under the cap; the readiness gate refuses `cancelled`, `skipped` and `""` conclusions.
+  - Verify: `test:lint:structure` 555 passed (LINT_FLOOR 555); `scripts:self-test` 833 passed; `claude:tests` 509
+    passed / 21 skipped; Linux `test:parallel --force` on test_offline_portability + test_install 16 passed;
+    windows-local accept test_offline_portability 7 passed, lint/test_zot.py 6 passed / 12 skipped, unit ocx_config
+    609 passed;
+    `scripts:suite-census` as pinned; `test:rows:check` and coverage OK; ruff (test/) and `scripts:lint` clean;
+    `workflows:lint` no findings; `dist generate --check` clean; code-docs length, ids and pointers checks clean.
