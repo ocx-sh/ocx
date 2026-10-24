@@ -4,9 +4,10 @@
 //! The `ocx package announce` report; keys shared with the claim report render through
 //! [`forge_report`](super::forge_report). It carries no `owners` or `author`: announce records no governance.
 
-use ocx_announce::announce::AnnounceOutcome;
-use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_announce::announce::{AnnounceOutcome, BranchStateKind};
+use ocx_announce::forge::{ForgeCredentials, ForgeKind, RefUpdate, WriteTransport};
 use ocx_console::{Cell, Column};
+use ocx_util::wire_words;
 use serde::Serialize;
 
 use super::forge_report::{
@@ -14,6 +15,56 @@ use super::forge_report::{
     push_credential_kind,
 };
 use crate::api::Printable;
+
+wire_words! {
+    /// What the announce branch was worth when the run began.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum BranchState {
+        /// No announce branch yet: the first announce for the package.
+        Absent = "absent",
+        /// Unmerged commits that fast-forward onto the index base; the run adds to them.
+        Live = "live",
+        /// Nothing the index base needs (merged, or closed unmerged); the run rebuilds from the base.
+        Spent = "spent",
+        /// Unmerged commits the index base moved away from, with a pull request still open; the run
+        /// rebuilds on the base and carries the branch's tags.
+        Stale = "stale",
+    }
+}
+
+impl From<BranchStateKind> for BranchState {
+    fn from(kind: BranchStateKind) -> Self {
+        match kind {
+            BranchStateKind::Absent => Self::Absent,
+            BranchStateKind::Live => Self::Live,
+            BranchStateKind::Spent => Self::Spent,
+            BranchStateKind::Stale => Self::Stale,
+        }
+    }
+}
+
+wire_words! {
+    /// How the run moved the announce branch.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+    pub enum BranchRefUpdate {
+        /// The commit sits on the branch head; a branch that moved meanwhile is refused.
+        FastForward = "fast_forward",
+        /// The commit tolerates a branch head the run did not read.
+        Accumulate = "accumulate",
+        /// The branch was repointed at a commit on the index base, replacing its head.
+        Reset = "reset",
+    }
+}
+
+impl From<RefUpdate> for BranchRefUpdate {
+    fn from(update: RefUpdate) -> Self {
+        match update {
+            RefUpdate::FastForward => Self::FastForward,
+            RefUpdate::Accumulate => Self::Accumulate,
+            RefUpdate::Reset => Self::Reset,
+        }
+    }
+}
 
 /// Result of a successful `ocx package announce`.
 ///
@@ -77,6 +128,26 @@ pub struct AnnounceReport {
     /// mode only when the run made no pull request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fork: Option<String>,
+    /// The announce branch's state when the run began; absent under `--output`, which has no
+    /// branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_state: Option<BranchState>,
+    /// The index commit the run read the committed root at, and the base of its commit.
+    ///
+    /// The announce branch head while the branch is `live`, the index `main` otherwise; absent
+    /// when the run read no root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    /// How the run moved the announce branch; absent when it committed nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_update: Option<BranchRefUpdate>,
+    /// Tags carried onto the rebuilt root from a `stale` branch, sorted; absent when none were.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub carried: Vec<String>,
+    /// The login of the pull request's author; absent when the run made no pull request or the
+    /// forge did not name one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request_author: Option<String>,
     /// The relative paths written under the `--output` directory; empty outside `--output`.
     pub written_paths: Vec<String>,
     /// Every preflight row, including the ones that did not apply.
@@ -112,6 +183,8 @@ impl AnnounceReport {
         transport: WriteTransport,
         credentials: &ForgeCredentials,
     ) -> Self {
+        let mut carried = outcome.carried;
+        carried.sort_unstable();
         Self {
             package: outcome.package,
             status: outcome.status.into(),
@@ -129,6 +202,14 @@ impl AnnounceReport {
                 .map(|pull_request| pull_request.html_url.clone()),
             pull_request_number: outcome.pull_request.as_ref().map(|pull_request| pull_request.number),
             fork: outcome.fork.map(|fork| fork.full_path),
+            branch_state: outcome.branch_state.map(Into::into),
+            base_sha: outcome.base_sha,
+            ref_update: outcome.ref_update.map(Into::into),
+            carried,
+            pull_request_author: outcome
+                .pull_request
+                .as_ref()
+                .and_then(|pull_request| pull_request.author.clone()),
             written_paths: outcome.written_paths,
             // Every row, `Skipped` included: the report contract forbids filtering them out.
             capability_checks: CapabilityCheckEntry::from_checks(outcome.capability_checks.checks()),
@@ -175,13 +256,13 @@ impl Printable for AnnounceReport {
 
 #[cfg(test)]
 mod tests {
-    use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus};
+    use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus, BranchStateKind};
     use ocx_announce::forge::{
-        ForgeCredentials, ForgeKind, ForgeToken, ForkIdentity, PullRequest, PushAccess, WriteTransport,
+        ForgeCredentials, ForgeKind, ForgeToken, ForkIdentity, PullRequest, PushAccess, RefUpdate, WriteTransport,
     };
     use ocx_console::{DataInterface, Printer};
 
-    use super::AnnounceReport;
+    use super::{AnnounceReport, BranchRefUpdate, BranchState};
     use crate::api::Printable as _;
 
     /// The three boundary-resolved values `from_outcome` now takes, as an
@@ -260,6 +341,10 @@ mod tests {
             desc_status: AnnounceStatus::Unchanged,
             branch: "indexbot-announce-acme-widget".to_string(),
             capability_checks: PushAccess::skipped_all(),
+            branch_state: None,
+            base_sha: None,
+            ref_update: None,
+            carried: Vec::new(),
         }
     }
 
@@ -276,6 +361,10 @@ mod tests {
             desc_status: AnnounceStatus::Unchanged,
             branch: "indexbot-announce-acme-widget".to_string(),
             capability_checks: PushAccess::skipped_all(),
+            branch_state: None,
+            base_sha: None,
+            ref_update: None,
+            carried: Vec::new(),
         }
     }
 
@@ -327,6 +416,72 @@ mod tests {
         );
     }
 
+    /// A rebuilt stale branch states its state, base, ref update, carried tags and the request's author.
+    #[test]
+    fn branch_facts_are_reported_when_the_run_has_them() {
+        let mut outcome = outcome_updated();
+        outcome.branch_state = Some(BranchStateKind::Stale);
+        outcome.base_sha = Some("a".repeat(40));
+        outcome.ref_update = Some(RefUpdate::Reset);
+        outcome.carried = vec!["2.0.0".to_string(), "1.0.0".to_string()];
+        if let Some(pull_request) = outcome.pull_request.as_mut() {
+            pull_request.author = Some("octocat".to_string());
+        }
+        let value = serde_json::to_value(report(outcome)).unwrap();
+        assert_eq!(value["branch_state"], "stale");
+        assert_eq!(value["base_sha"], "a".repeat(40));
+        assert_eq!(value["ref_update"], "reset");
+        assert_eq!(value["carried"], serde_json::json!(["1.0.0", "2.0.0"]));
+        assert_eq!(value["pull_request_author"], "octocat");
+    }
+
+    /// Each state and ref update spells its documented word.
+    #[test]
+    fn branch_state_and_ref_update_spell_their_wire_words() {
+        let words = |kinds: &[BranchStateKind]| -> Vec<&'static str> {
+            kinds.iter().map(|kind| BranchState::from(*kind).as_str()).collect()
+        };
+        assert_eq!(
+            words(&[
+                BranchStateKind::Absent,
+                BranchStateKind::Live,
+                BranchStateKind::Spent,
+                BranchStateKind::Stale
+            ]),
+            ["absent", "live", "spent", "stale"]
+        );
+        let updates: Vec<&str> = [RefUpdate::FastForward, RefUpdate::Accumulate, RefUpdate::Reset]
+            .into_iter()
+            .map(|update| BranchRefUpdate::from(update).as_str())
+            .collect();
+        assert_eq!(updates, ["fast_forward", "accumulate", "reset"]);
+    }
+
+    /// A run that has none of the branch facts omits every key, never null or empty.
+    #[test]
+    fn branch_facts_are_omitted_when_unset() {
+        let mut outcome = outcome_unchanged();
+        outcome.pull_request = Some(PullRequest {
+            number: 7,
+            html_url: "https://github.com/ocx-sh/index/pull/7".to_string(),
+            updated: false,
+            author: None,
+        });
+        let value = serde_json::to_value(report(outcome)).unwrap();
+        for key in [
+            "branch_state",
+            "base_sha",
+            "ref_update",
+            "carried",
+            "pull_request_author",
+        ] {
+            assert!(
+                value.get(key).is_none(),
+                "{key} is omitted, never null or empty: {value}"
+            );
+        }
+    }
+
     #[test]
     fn unchanged_no_op_omits_pull_request_fields() {
         let report = report(outcome_unchanged());
@@ -371,6 +526,10 @@ mod tests {
             desc_status: AnnounceStatus::Unchanged,
             branch: String::new(),
             capability_checks: PushAccess::skipped_all(),
+            branch_state: None,
+            base_sha: None,
+            ref_update: None,
+            carried: Vec::new(),
         };
         let report = report(outcome);
         let value = serde_json::to_value(&report).unwrap();

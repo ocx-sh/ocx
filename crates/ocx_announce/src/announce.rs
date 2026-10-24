@@ -13,7 +13,7 @@ pub(crate) mod pipeline;
 pub mod request;
 
 pub use error::AnnounceError;
-pub use request::{AnnounceOutcome, AnnounceRequest, AnnounceStatus, AnnounceTarget, TagSelection};
+pub use request::{AnnounceOutcome, AnnounceRequest, AnnounceStatus, AnnounceTarget, BranchStateKind, TagSelection};
 
 use std::collections::BTreeMap;
 
@@ -77,6 +77,10 @@ pub async fn announce(
             capability_checks,
             removed: Vec::new(),
             durable_missing: Vec::new(),
+            branch_state: None,
+            base_sha: None,
+            ref_update: None,
+            carried: Vec::new(),
         });
     }
 
@@ -148,6 +152,7 @@ pub async fn announce(
         mut removed,
         mut durable_missing,
         mut dropped_carried,
+        mut carried,
         body,
     } = observe_and_rebuild(
         publisher,
@@ -221,6 +226,10 @@ pub async fn announce(
                 capability_checks,
                 removed,
                 durable_missing,
+                branch_state: None,
+                base_sha: Some(root_read.base_sha),
+                ref_update: None,
+                carried,
             })
         }
         AnnounceTarget::Fork(_) | AnnounceTarget::Direct => {
@@ -241,6 +250,10 @@ pub async fn announce(
                         capability_checks: capability_checks.clone(),
                         removed,
                         durable_missing,
+                        branch_state: Some(branch_state.kind()),
+                        base_sha: Some(root_read.base_sha),
+                        ref_update: None,
+                        carried,
                     });
                 }
                 // `branch_sha` is `Some` only for `Live`.
@@ -263,6 +276,10 @@ pub async fn announce(
                         capability_checks: capability_checks.clone(),
                         removed,
                         durable_missing,
+                        branch_state: Some(branch_state.kind()),
+                        base_sha: Some(root_read.base_sha),
+                        ref_update: None,
+                        carried,
                     });
                 }
                 // No other state carries unmerged work; opening a request here yields a spent branch's unmergeable one.
@@ -278,6 +295,10 @@ pub async fn announce(
                     capability_checks: capability_checks.clone(),
                     removed,
                     durable_missing,
+                    branch_state: Some(branch_state.kind()),
+                    base_sha: Some(root_read.base_sha),
+                    ref_update: None,
+                    carried,
                 });
             }
             // After the unchanged return, so a no-op run neither creates a fork nor demands push permission.
@@ -304,10 +325,11 @@ pub async fn announce(
                 None => (request.index_repo.clone(), INDEX_BASE_REF),
             };
             let base_sha = root_read.base_sha;
+            let mut committed_base_sha = base_sha.clone();
             // INFO (the default level) so a lost tag can be traced to the base each announce committed on.
             tracing::info!(
                 branch = %branch,
-                state = branch_state.name(),
+                state = branch_state.kind().as_str(),
                 base_ref = %base_branch,
                 base_sha = %base_sha,
                 ref_update = ?branch_state.ref_update(),
@@ -425,6 +447,8 @@ pub async fn announce(
                     removed = merged.removed;
                     durable_missing = merged.durable_missing;
                     dropped_carried = merged.dropped_carried;
+                    carried = merged.carried;
+                    committed_base_sha = head_sha.clone();
                     desc_status = AnnounceStatus::from_changed(merged.desc_updated);
                     // Identical racing announces regenerate the same bytes; committing would push an empty-diff
                     // commit, a governance threat the index bot flags.
@@ -443,7 +467,7 @@ pub async fn announce(
                         // The retry commits on a different base than the first log line named.
                         tracing::info!(
                             branch = %branch,
-                            state = branch_state.name(),
+                            state = branch_state.kind().as_str(),
                             base_ref = %retry_branch,
                             base_sha = %head_sha,
                             ref_update = ?branch_state.ref_update(),
@@ -495,6 +519,11 @@ pub async fn announce(
                 capability_checks: capability_checks.clone(),
                 removed,
                 durable_missing,
+                branch_state: Some(branch_state.kind()),
+                base_sha: Some(committed_base_sha),
+                // A retry that found nothing left to commit moved no ref.
+                ref_update: (status == AnnounceStatus::Updated).then(|| branch_state.ref_update()),
+                carried,
             })
         }
     }
@@ -547,6 +576,8 @@ struct Rebuilt {
     durable_missing: Vec<String>,
     /// Carried tags whose object the stale head lacked and the registry no longer serves.
     dropped_carried: Vec<String>,
+    /// The carried tags this pass still holds: those it did not drop.
+    carried: Vec<String>,
     /// The commit and request body describing this pass's changes.
     body: String,
 }
@@ -686,6 +717,7 @@ async fn observe_and_rebuild(
         removed: plan.removed,
         durable_missing: plan.durable_missing,
         dropped_carried,
+        carried,
         body,
     })
 }
@@ -856,13 +888,13 @@ enum BranchState {
 }
 
 impl BranchState {
-    /// The state's name, for the commit log line.
-    fn name(&self) -> &'static str {
+    /// The state without its payload.
+    fn kind(&self) -> BranchStateKind {
         match self {
-            Self::Absent => "absent",
-            Self::Live => "live",
-            Self::Stale(_) => "stale",
-            Self::Spent => "spent",
+            Self::Absent => BranchStateKind::Absent,
+            Self::Live => BranchStateKind::Live,
+            Self::Stale(_) => BranchStateKind::Stale,
+            Self::Spent => BranchStateKind::Spent,
         }
     }
 
@@ -2724,10 +2756,28 @@ mod tests {
                 branch: BRANCH.to_string(),
             })]);
 
-        run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
             .expect("the rebuild retries and lands");
 
+        assert_eq!(
+            outcome.base_sha.as_deref(),
+            Some("moved"),
+            "the report names the base the retry committed on"
+        );
+        assert_eq!(outcome.carried, strings(&["0.9.0"]));
+        let messages = forge.commit_messages();
+        assert_eq!(messages.len(), 2, "both attempts committed");
+        for text in [
+            &messages[1],
+            forge.request_bodies().last().expect("a request body was sent"),
+        ] {
+            assert!(text.contains("\nCarried: 0.9.0\n"), "the retry names the carry: {text}");
+            assert!(
+                text.contains("\nRebuilt on moved, replacing the branch head\n"),
+                "{text}"
+            );
+        }
         let commits = forge.commits();
         assert_eq!(commits.len(), 2, "the retry committed the carried delta");
         assert!(
@@ -2821,7 +2871,7 @@ mod tests {
         let (registry, _) = seed_tags(&["2.0.0"]);
         let forge = stale_forge_carrying(&digest, &path, &bytes);
 
-        run_announce(
+        let outcome = run_announce(
             &forge,
             TagSelection::UnionFile(strings(&["2.0.0"])),
             AnnounceTarget::Direct,
@@ -2830,6 +2880,13 @@ mod tests {
         .await
         .expect("the stale rebuild lands");
 
+        assert_eq!(outcome.branch_state, Some(BranchStateKind::Stale));
+        assert_eq!(outcome.base_sha.as_deref(), Some("base"));
+        assert_eq!(outcome.ref_update, Some(RefUpdate::Reset));
+        assert_eq!(outcome.carried, strings(&["1.1.0"]));
+
+        assert!(!forge.commit_messages().is_empty(), "a commit message was sent");
+        assert!(!forge.request_bodies().is_empty(), "a request body was sent");
         for text in forge.request_bodies().iter().chain(&forge.commit_messages()) {
             assert!(text.contains("\nCarried: 1.1.0\n"), "the carried tag is named: {text}");
             assert!(
@@ -2837,7 +2894,42 @@ mod tests {
                 "the reset is named: {text}"
             );
         }
+    }
+
+    /// A reset that carries nothing still tells the reviewer the branch head was replaced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_rebuild_without_a_carry_names_the_reset_but_no_carried_line() {
+        let (registry, digest) = seed_tags(&["1.0.0", "2.0.0"]);
+        let shared = committed_root(serde_json::json!({
+            "1.0.0": { "content": digest, "observed": "2026-07-01T00:00:00Z" }
+        }));
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &shared)
+            .with_cas_object("base", &digest)
+            .with_root("branch", &shared)
+            .stale_with(pull_request(5));
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+
+        assert_eq!(outcome.ref_update, Some(RefUpdate::Reset));
+        assert!(!forge.commit_messages().is_empty(), "a commit message was sent");
         assert!(!forge.request_bodies().is_empty(), "a request body was sent");
+        for text in forge.request_bodies().iter().chain(&forge.commit_messages()) {
+            assert!(!text.contains("Carried:"), "nothing was carried: {text}");
+            assert!(
+                text.contains("\nRebuilt on base, replacing the branch head\n"),
+                "the reset is named: {text}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2847,7 +2939,7 @@ mod tests {
             .with_ref(MAIN_REF, &[Some("base")])
             .with_root("base", &committed_root(serde_json::json!({})));
 
-        run_announce(
+        let outcome = run_announce(
             &forge,
             TagSelection::UnionFile(strings(&["2.0.0"])),
             AnnounceTarget::Direct,
@@ -2855,6 +2947,11 @@ mod tests {
         )
         .await
         .expect("the announce lands");
+
+        assert_eq!(outcome.branch_state, Some(BranchStateKind::Absent));
+        assert_eq!(outcome.base_sha.as_deref(), Some("base"));
+        assert_eq!(outcome.ref_update, Some(RefUpdate::FastForward));
+        assert!(outcome.carried.is_empty(), "nothing was carried");
 
         let bodies = forge.request_bodies();
         assert!(!bodies.is_empty(), "a request body was sent");
@@ -2884,6 +2981,86 @@ mod tests {
             put_at(&commits[0], &path),
             Some(bytes.as_slice()),
             "the kept row keeps its object"
+        );
+    }
+
+    /// The base already names the carried row's digest under another tag, so its object is in the
+    /// base tree: the stale head is never asked for it, and the row is kept, not re-observed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_carried_digest_the_base_already_names_is_not_read_from_the_head() {
+        let (digest, path, bytes) = branch_only_object();
+        let (registry, _) = seed_tags(&["3.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root(
+                "base",
+                &committed_root(serde_json::json!({ "2.0.0": durable_row(&digest) })),
+            )
+            .with_file("base", &path, &bytes)
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({ "1.1.0": durable_row(&digest) })),
+            )
+            .stale_with(pull_request(5));
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["3.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+
+        assert_eq!(outcome.carried, strings(&["1.1.0"]), "the row is carried, not dropped");
+        assert!(
+            committed_root_bytes(&forge.commits()[0]).contains("1.1.0"),
+            "the carried row rides the rebuild"
+        );
+        assert!(
+            !forge.object_reads().contains(&path),
+            "the head is not read for an object the base holds: {:?}",
+            forge.object_reads()
+        );
+    }
+
+    /// A carried row whose `content` is not a string names no object: it is re-observed from the
+    /// registry, never carried bare into the index.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_carried_row_without_a_readable_digest_is_re_observed() {
+        let (registry, listed) = seed_tags(&["1.1.0", "2.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({
+                    "1.1.0": { "content": 5, "observed": "2026-07-01T00:00:00Z" }
+                })),
+            )
+            .stale_with(pull_request(5));
+
+        run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+
+        let root: Value =
+            serde_json::from_str(&committed_root_bytes(&forge.commits()[0])).expect("the committed root is JSON");
+        assert_eq!(
+            root["tags"]["1.1.0"]["content"],
+            Value::String(listed.clone()),
+            "the row follows the registry"
+        );
+        assert!(
+            put_at(&forge.commits()[0], &object(&listed, "json")).is_some(),
+            "the re-observed object is committed"
         );
     }
 
@@ -3046,12 +3223,25 @@ mod tests {
         .expect("a row nothing backs is dropped, not refused");
 
         assert_eq!(outcome.removed, strings(&["1.1.0"]));
+        assert!(
+            outcome.carried.is_empty(),
+            "a dropped tag is not reported as carried: {:?}",
+            outcome.carried
+        );
         let commit = &forge.commits()[0];
         assert_eq!(
             tag_keys(committed_root_bytes(commit).as_bytes()),
             strings(&["2.0.0"]),
             "no row survives without its object"
         );
+        let bodies = forge.request_bodies();
+        assert!(!bodies.is_empty(), "a request body was sent");
+        for text in bodies.iter().chain(&forge.commit_messages()) {
+            assert!(
+                !text.contains("Carried:"),
+                "a dropped tag is not named as carried: {text}"
+            );
+        }
     }
 
     /// S-024's half that announce controls: an unchanged run on a live branch
