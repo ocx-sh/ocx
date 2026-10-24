@@ -702,3 +702,8 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
   - Found, not in scope: cargo-dist `release.yml` `custom-docker-publish` grants no `artifact-metadata` that
     `docker-publish.yml` requests (startup failure on the next tag; fix in `dist-workspace.toml` + regenerate); listed
     as a known gap in the permission test.
+- 2026-10-24 — **W5–W9 landed, awaiting G3–G5** (outage recovery; entry completed below as the Windows triage closes).
+  - **#631 red proof** (Windows host, `task test:windows-local MODE=unit -- //crates/ocx_util:ocx_util_test`): at
+    28dc10b17 (the test commit, before fix 0d0eea897) 240 passed / 3 failed — `fs::tests::persist_temp_file_publishes_to_a_target_of_260_units_or_more`,
+    `…_when_the_temp_file_path_is_also_260_units_or_more`, `persist_noclobber_leaves_an_occupied_target_of_260_units_or_more_untouched`,
+    each `Os { code: 3, kind: NotFound }` ("The system cannot find the path specified"); green after 0d0eea897.
