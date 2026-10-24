@@ -255,7 +255,10 @@ pub enum AnnounceError {
     Forge(#[from] crate::forge::ForgeError),
 
     /// No base ref was found on the fork to commit the announce branch onto.
-    #[error("no base ref found on {repo} to commit onto")]
+    #[error(
+        "no base ref found on {repo} to commit onto (a private repository answers an anonymous read 404; set \
+         OCX_ANNOUNCE_TOKEN, or check it can read the repository)"
+    )]
     #[exit(
         defer(Failure),
         slug = "missing_base_ref",
@@ -321,6 +324,24 @@ fn no_curated_tags_message(reserved_dropped: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub and GitLab answer an anonymous read of a private repository 404, which the drivers
+    /// cannot tell from an absent branch, so the message is where the operator learns the fix.
+    #[test]
+    fn missing_base_ref_names_the_token_a_private_repository_needs() {
+        let message = AnnounceError::MissingBaseRef {
+            repo: "acme/index".to_string(),
+        }
+        .to_string();
+        assert!(
+            message.contains("acme/index"),
+            "the message must name the repository: {message}"
+        );
+        assert!(
+            message.contains("set OCX_ANNOUNCE_TOKEN, or check it can read the repository"),
+            "the message must name the variable and say the token may lack read access: {message}"
+        );
+    }
 
     #[test]
     fn ssrf_variant_classifies_via_the_inner_error() {
