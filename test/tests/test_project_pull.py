@@ -45,7 +45,7 @@ import pytest
 
 from src import registry_dir
 from src.helpers import make_package, rglob_no_links
-from src.runner import OcxRunner
+from src.runner import OcxRunner, current_platform
 
 pytestmark = pytest.mark.command("pull")
 
@@ -1636,12 +1636,12 @@ tool = "{ocx.registry}/{repo}:{tag}"
     decl_hash = decl_match.group(1)
     bare_repo = repo_match.group(1)
 
-    # Craft a fake leaf digest for a non-host platform.  We use "darwin/arm64"
-    # as a portable non-host key on the Linux CI runner (and on darwin/amd64
-    # runners).  We pick the lexicographically smallest key that is NOT the
-    # host platform's canonical key to ensure the host-key lookup fails.
+    # Craft a fake leaf digest under a platform key that is never the host's,
+    # so the host-key lookup fails on Linux, macOS and Windows alike.
     fake_leaf = "b" * 64
-    non_host_platform = "darwin/arm64"
+    non_host_platform = next(
+        p for p in ("linux/amd64", "darwin/arm64", "linux/arm64") if p != current_platform()
+    )
 
     (project / "ocx.lock").write_text(
         f"""\

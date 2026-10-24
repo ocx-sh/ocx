@@ -2444,6 +2444,9 @@ def test_child_env_matches_the_allowlist(
     allowed = set(EXPECTED_PASSTHROUGH) | set(EXPECTED_SET_ENV) | set(INJECTED_ENV) | SHIM_LOCALE_ARTEFACT
     if sys.platform == "win32":
         allowed |= set(EXPECTED_WINDOWS_PASSTHROUGH)
+    if sys.platform == "darwin":
+        # macOS CoreFoundation injects this into the recording CPython shim's own environment.
+        allowed |= {"__CF_USER_TEXT_ENCODING"}
     assert set(push.env) <= allowed, (
         "C-035's tables are the whole child environment; these names are outside "
         f"them: {sorted(set(push.env) - allowed)}"

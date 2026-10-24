@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
-import time
+import sys
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -262,6 +262,28 @@ def test_concurrent_lock_command_serialized(
 # ---------------------------------------------------------------------------
 
 
+_HOLD_FLOCK = (
+    "import fcntl, sys, time\n"
+    "f = open(sys.argv[1])\n"
+    "fcntl.flock(f, fcntl.LOCK_EX)\n"
+    "print('held', flush=True)\n"
+    "time.sleep(10)\n"
+)
+
+
+def _hold_flock(path: Path) -> subprocess.Popen[str]:
+    """Start a child holding an exclusive ``flock(2)`` on ``path`` for 10 s and
+    return once it reports the lock is held. Portable: macOS has no ``flock(1)``."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_FLOCK, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "held", "the holder never took the lock"
+    return holder
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason="POSIX flock(2) advisory contract; Windows uses LockFileEx with different semantics",
@@ -307,9 +329,8 @@ def test_mutation_lock_holder_blocks_other_writers(
         f"the mutation lock must never land beside the data; found {sidecars} in the project"
     )
 
-    holder = subprocess.Popen(["flock", "-x", str(lock_file), "-c", "sleep 10"])
+    holder = _hold_flock(lock_file)
     try:
-        time.sleep(0.5)
         result = _run_in(ocx, project, "add", f"{ocx.registry}/{repo_second}:1.0.0")
         assert result.returncode == EXIT_TEMP_FAIL, (
             f"ocx add must exit {EXIT_TEMP_FAIL} while another process holds the mutation "
@@ -331,7 +352,7 @@ def test_flock_on_ocx_toml_itself_does_not_block_a_mutation(
 
     The inverse of the test above, and the one that states what moved: the
     manifest is published by rename, so it is not the lock target any more.
-    An editor, a ``flock(1)`` wrapper or a descriptor a crashed process left
+    An editor, a ``flock(2)`` holder or a descriptor a crashed process left
     behind cannot stop a mutation.
     """
     short = uuid4().hex[:8]
@@ -342,9 +363,8 @@ def test_flock_on_ocx_toml_itself_does_not_block_a_mutation(
     project.mkdir()
     toml_path = _write_ocx_toml(project, "[tools]\n")
 
-    holder = subprocess.Popen(["flock", "-x", str(toml_path), "-c", "sleep 10"])
+    holder = _hold_flock(toml_path)
     try:
-        time.sleep(0.5)
         result = _run_in(ocx, project, "add", f"{ocx.registry}/{repo}:1.0.0")
         assert result.returncode == EXIT_SUCCESS, (
             "a flock on ocx.toml must not block the mutation lock; "
