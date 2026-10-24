@@ -128,19 +128,20 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(skip)
 
 
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> object:
+@pytest.fixture(autouse=True)
+def _test_deadline(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """A test still running after ``OCX_TEST_DEADLINE_SECONDS`` (default 600) dumps every
     thread's stack to ``<basetemp>/deadline-<pid>.log`` and kills its process, which xdist
     reports as a crashed worker naming the test. Without it a spin, such as a walk through
     the store's junction cycle on Windows, holds a CI shard until the six-hour job limit.
+    The clock covers the test body and its function-scoped fixtures, not session or module ones.
     """
     deadline = float(os.environ.get("OCX_TEST_DEADLINE_SECONDS", "600"))
-    log = item.config._tmp_path_factory.getbasetemp() / f"deadline-{os.getpid()}.log"
+    log = tmp_path_factory.getbasetemp() / f"deadline-{os.getpid()}.log"
     with log.open("w", encoding="utf-8") as fh:
         faulthandler.dump_traceback_later(deadline, exit=True, file=fh)
         try:
-            return (yield)
+            yield
         finally:
             faulthandler.cancel_dump_traceback_later()
 
