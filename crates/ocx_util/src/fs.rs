@@ -467,20 +467,50 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"first-record");
     }
 
-    /// Windows: a failure under a long path stays a plain `NotFound` and the verbatim prefix,
-    /// which is the helper's own spelling, never reaches the error a caller reports.
-    #[cfg(windows)]
+    /// The directory a publish lands in: 260 UTF-16 units or more on Windows, where the `\\?\` route
+    /// publishes there, and the plain temp root elsewhere.
+    fn publish_directory(root: &std::path::Path) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            directory_of_at_least(root, 260)
+        }
+        #[cfg(not(windows))]
+        {
+            root.to_path_buf()
+        }
+    }
+
+    /// A publish into a missing directory fails with the bare OS error, so the `\\?\` spelling only
+    /// the Windows helper knows cannot reach a caller's message; an error rebuilt from text has no
+    /// OS code. `NotFound` alone pins nothing, since an unprefixed 260-unit path fails with the same
+    /// code, so the same target must publish once its directory exists.
     #[test]
-    fn persist_temp_file_into_a_missing_long_directory_fails_without_the_verbatim_prefix() {
+    fn persist_temp_file_into_a_missing_directory_fails_with_the_bare_os_error() {
         let root = tempfile::tempdir().unwrap();
-        let parent = directory_of_at_least(root.path(), 260);
-        let target = parent.join("missing").join("out.json");
+        let parent = publish_directory(root.path());
+        let missing = parent.join("missing");
+        let target = missing.join("out.json");
         let tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        #[cfg(windows)]
+        assert!(
+            utf16_len(tmp.path()) >= 260,
+            "the temp file path must be long: {}",
+            utf16_len(tmp.path())
+        );
 
         let err = persist_temp_file(tmp, &target).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "unexpected: {err}");
-        assert!(!err.to_string().contains(r"\\?\"), "the prefix leaked: {err}");
+        assert!(
+            err.raw_os_error().is_some(),
+            "the OS error was rebuilt from text: {err}"
+        );
+
+        std::fs::create_dir(&missing).unwrap();
+        let mut tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        persist_temp_file(tmp, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
     }
 
     /// Baseline (all platforms): a populated directory tree lands at an absent

@@ -69,6 +69,18 @@ def test_skip_over_ceiling_reds_but_xfail_is_counted_apart(tmp_path: Path, capsy
     assert _run(tmp_path) == 0
 
 
+def test_xfail_over_ceiling_reds_and_is_not_counted_as_a_skip(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _four_shards(tmp_path)
+    xfails = '<testcase name="x1"><skipped type="pytest.xfail"/></testcase>' * 2
+    _shard(tmp_path, "shard-3-of-4", 2, xfails)
+    assert _run(tmp_path, xfail=1) == 1
+    err = capsys.readouterr().err
+    assert "2 xfailed exceeds test/XFAIL_CEILING (1)" in err
+    assert "skipped exceeds" not in err
+
+
 def test_empty_dir_reds_the_reader_floor(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (tmp_path / "junit").mkdir()
     assert _run(tmp_path) == 1

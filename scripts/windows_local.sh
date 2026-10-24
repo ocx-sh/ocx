@@ -14,9 +14,11 @@
 #         ocx-shim.exe and schema/ocx_schema.exe are taken from beside it.
 # unit:   ARGS is at most one substring that filters the bundle's testcases.
 #
-# Exit: the child's status; 64 usage; 66 --exe missing; 69 not WSL with a
-# cmd.exe; 2 a shard request accept_shard.py refuses.
-# WINDOWS_LOCAL_CMD_EXE names a different cmd.exe (the proof that 69 is reachable).
+# Exit: the child's status; 64 usage; 66 --exe, or ocx-shim.exe / schema/ocx_schema.exe beside it, missing;
+# 69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-wintest;
+# 2 a shard request accept_shard.py refuses.
+# WINDOWS_LOCAL_CMD_EXE names a different cmd.exe (the proof that 69 is reachable); WINDOWS_LOCAL_DRIVE_ROOT the
+# directory it starts in (default /mnt/c). Both exist for scripts/tests/test_windows_local.py's stubs.
 
 set -euo pipefail
 
@@ -32,6 +34,15 @@ die() {
     shift
     printf 'windows_local: %s\n' "$*" >&2
     exit "$status"
+}
+
+# Sets QUOTED to "$1" for a line of a batch file. cmd.exe has no escape for a `"` inside quotes and a line break
+# ends the line, so either is refused; `%` expands even inside quotes, so it is doubled.
+batch_quote() {
+    case $1 in
+        *\"* | *$'\n'* | *$'\r'*) die 64 "'$1' holds a double quote or a line break, which cmd.exe cannot carry" ;;
+    esac
+    QUOTED=\"${1//\%/%%}\"
 }
 
 mode='' shard_count='' shard_index='' exe=''
@@ -54,11 +65,10 @@ while [ $# -gt 0 ]; do
         *) die 64 "unknown argument '$1'" ;;
     esac
 done
-# Quoted for a batch file: every argument in double quotes, an inner double quote escaped, % doubled.
 args=''
 for a in "$@"; do
-    a=${a//\%/%%}
-    args="$args \"${a//\"/\\\"}\""
+    batch_quote "$a"
+    args="$args $QUOTED"
 done
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -70,6 +80,10 @@ esac
 if [ "$mode" = unit ]; then
     [ -z "$exe" ] || die 64 "--exe applies to --mode accept only"
     [ $# -le 1 ] || die 64 "--mode unit takes at most one filter substring"
+    # Past cmd.exe the Taskfile puts the filter inside double quotes in a shell command, where these still act.
+    case ${1:-} in
+        *'$'* | *'`'* | *\\*) die 64 "the filter '$1' holds a \$, a backtick or a backslash; use a plain substring of the test name" ;;
+    esac
     [ -z "$shard_count$shard_index" ] || die 64 "--shard-count and --shard-index apply to --mode accept only"
 fi
 # The selector is the authority on what a shard request means (exit 2), and it answers
@@ -82,7 +96,15 @@ if [ -n "$shard_count$shard_index" ]; then
     python3 "$ROOT/scripts/accept_shard.py" --format stems "${select_flags[@]}" >/dev/null || status=$?
     [ "$status" -eq 0 ] || exit "$status"
 fi
+# The set comes from one build: a missing sibling would leave the previous run's copy beside the new ocx.exe.
+require_siblings() {
+    local f
+    for f in ocx-shim.exe schema/ocx_schema.exe; do
+        [ -f "$1/$f" ] || die 66 "$1/$f is missing; stage the whole binary set from one build"
+    done
+}
 [ -z "$exe" ] || [ -f "$exe" ] || die 66 "--exe '$exe' is not a file"
+[ -z "$exe" ] || require_siblings "$(dirname "$exe")"
 
 CMD_EXE=${WINDOWS_LOCAL_CMD_EXE:-$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)}
 { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; } && [ -x "$CMD_EXE" ] ||
@@ -93,7 +115,7 @@ NAME=$(basename "$ROOT")
 
 # cmd.exe starts in a drive directory: from a \\wsl$ cwd it prints a warning and
 # falls back to the Windows directory.
-win_profile=$(cd /mnt/c && "$CMD_EXE" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r') ||
+win_profile=$(cd "${WINDOWS_LOCAL_DRIVE_ROOT:-/mnt/c}" && "$CMD_EXE" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r') ||
     die 69 "cmd.exe did not answer"
 [ -n "$win_profile" ] || die 69 "cmd.exe reported no %USERPROFILE%"
 base_wsl="$(wslpath -u "$win_profile")/ocx-wintest"
@@ -125,6 +147,7 @@ if [ "$mode" = accept ]; then
         bin_src=$(dirname "$exe")
     else
         (cd "$ROOT" && "$TASK" cross:test:bin TARGET="$TRIPLE")
+        require_siblings "$bin_src"
     fi
     # Several modules read the generated metadata schema straight off disk.
     (cd "$ROOT" && "$TASK" schema:generate)
@@ -136,11 +159,23 @@ fi
 # the tree is; rsync cannot both take a file list and delete, so files git no longer
 # lists are swept first. Kept across runs: the venv, caches, test/bin, target/.
 mkdir -p "$stage_wsl" "$own_wsl"
+# The sweep below deletes whatever git does not list, so a stage that resolves anywhere but
+# <profile>/ocx-wintest/<name> (a link, a junction WSL reports as one) would delete from where it points.
+profile_real=$(cd "$(wslpath -u "$win_profile")" && pwd -P)
+for dir in "$stage_wsl" "$own_wsl"; do
+    [ "$(cd "$dir" && pwd -P)" = "$profile_real/ocx-wintest/$(basename "$dir")" ] ||
+        die 77 "$dir is a link or resolves outside $profile_real/ocx-wintest; remove it"
+done
 list=$(mktemp "${TMPDIR:-/tmp}/windows-local.XXXXXX")
 have=$(mktemp "${TMPDIR:-/tmp}/windows-local.XXXXXX")
-trap 'rm -f "$list" "$have"' EXIT
-# external/ is the three submodule checkouts; .agents/ holds other tasks' worktrees.
-(cd "$ROOT" && git ls-files -co --exclude-standard -z) | { grep -zv -e '^external/' -e '^\.agents/' || true; } >"$list"
+gone=$(mktemp "${TMPDIR:-/tmp}/windows-local.XXXXXX")
+trap 'rm -f "$list" "$have" "$gone"' EXIT
+# external/ is the three submodule checkouts; .agents/ holds other tasks' worktrees. `ls-files -c` still names a
+# tracked file deleted from the working tree, which rsync exits 23 on, so the deleted ones are subtracted. Each git
+# call is the head of its own pipeline: a failing git must stop the script, not empty $list and sweep the stage.
+(cd "$ROOT" && git ls-files -d -z) | sort -z >"$gone"
+(cd "$ROOT" && git ls-files -co --exclude-standard -z) | sort -zu | comm -z -23 - "$gone" |
+    { grep -zv -e '^external/' -e '^\.agents/' || true; } >"$list"
 if [ "$mode" = accept ] && [ -d "$ROOT/website/src/public/schemas" ]; then
     # Generated and gitignored, so git does not list it.
     (cd "$ROOT" && find website/src/public/schemas -type f -print0) >>"$list"
@@ -154,11 +189,7 @@ if [ "$mode" = accept ]; then
     mkdir -p "$stage_wsl/test/bin/schema"
     cp -f "${exe:-$bin_src/ocx.exe}" "$stage_wsl/test/bin/ocx.exe"
     for f in ocx-shim.exe schema/ocx_schema.exe; do
-        if [ -f "$bin_src/$f" ]; then
-            cp -f "$bin_src/$f" "$stage_wsl/test/bin/$f"
-        else
-            printf 'windows_local: warning: %s is not beside the ocx.exe; modules that read it will fail\n' "$f" >&2
-        fi
+        cp -f "$bin_src/$f" "$stage_wsl/test/bin/$f"
     done
 fi
 
@@ -207,7 +238,10 @@ else
     cp -f "$ROOT/target/cross/$TRIPLE/unit-tests.tar.gz" "$own_wsl/$NAME-unit-tests.tar.gz"
     junit_win="$stage_win\\target\\windows-local\\unit-junit.xml"
     filter=''
-    [ -z "${1:-}" ] || filter=" FILTER=\"$1\""
+    if [ -n "${1:-}" ]; then
+        batch_quote "$1"
+        filter=" FILTER=$QUOTED"
+    fi
     win "task -x cross:test:run BUNDLE=\"$bundle_win\" JUNIT=\"$junit_win\"$filter" || rc=$?
     if [ -f "$stage_wsl/target/windows-local/unit-junit.xml" ]; then
         mkdir -p "$ROOT/target/windows-local"
