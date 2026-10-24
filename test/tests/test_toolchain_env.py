@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 import os
 import re as _re_te
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -728,6 +728,10 @@ def test_env_shell_bash_explicit_emits_export_lines(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="windows: ocx emits native C:\\ paths into the sourced bash PATH, which MSYS bash splits at the drive colon",
+)
 def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -1896,9 +1900,9 @@ def _exec_path_dirs(
     `ocx env` has no ambient half to report and the two lists would otherwise
     never be comparable.
     """
-    printenv = shutil.which("printenv")
-    assert printenv, "printenv is required to read a child process's PATH back"
-    result = run_in(ocx, project, "exec", *args, "--", printenv, "PATH", env_extra=extra_env)
+    # Not `printenv`: on Windows that is an MSYS binary and rewrites `C:\x;…` to `/c/x:…`.
+    reader = [sys.executable, "-c", "import os; print(os.environ['PATH'])"]
+    result = run_in(ocx, project, "exec", *args, "--", *reader, env_extra=extra_env)
     assert result.returncode == EXIT_SUCCESS, f"`ocx exec` failed:\n{result.stderr}"
     ambient = set((extra_env or {}).get("PATH", ocx.env["PATH"]).split(os.pathsep))
     return [segment for segment in result.stdout.strip().split(os.pathsep) if segment and segment not in ambient]

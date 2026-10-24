@@ -787,7 +787,9 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
             f"exists; got {located}"
         )
         root = Path(located["path"])
-        assert (root / "content" / "bin" / "hello").exists(), (
+        # `make_package` writes `hello.bat` on Windows.
+        launcher = "hello.bat" if sys.platform == "win32" else "hello"
+        assert (root / "content" / "bin" / launcher).exists(), (
             f"S-007: {policy or 'no policy flag'} must report the real package root; got {root}"
         )
 

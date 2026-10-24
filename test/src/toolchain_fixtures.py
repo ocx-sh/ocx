@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -58,6 +59,7 @@ __all__ = [
     "bin_entries",
     "entry_link",
     "git",
+    "is_link",
     "link_entries",
     "links_group",
     "links_root",
@@ -72,6 +74,8 @@ __all__ = [
     "shell_bin",
     "snapshot_tree",
     "toolchain_home",
+    "trampoline_files",
+    "trampoline_name",
     "two_branch_checkout",
     "write_toolchain_dir_config",
 ]
@@ -89,6 +93,29 @@ LINKS_DIR = "links"
 SHELLS_DIR = "shells"
 ACTIVE_LINK = "active"
 DEFAULT_SHELL = "default"
+
+def is_link(path: Path) -> bool:
+    """Whether ``path`` is a symlink or, on Windows, a directory junction.
+
+    ``Path.is_symlink`` answers ``False`` for a junction, and the toolchain
+    tree's entry links are junctions there; every link observation here goes
+    through this so a Windows tree is not read as "no links".
+    """
+    return path.is_symlink() or os.path.isjunction(path)
+
+
+def trampoline_name(name: str) -> str:
+    """The file a user runs for exposed binary ``name``: ``<name>.exe`` on
+    Windows, ``<name>`` elsewhere. A bare ``name`` resolves to it through
+    ``PATH``/``PATHEXT``."""
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def trampoline_files(name: str) -> list[str]:
+    """Every ``bin/`` entry exposed binary ``name`` occupies: the trampoline
+    alone on POSIX, and on Windows the ``.exe`` plus its ``.exec`` sidecar."""
+    return [f"{name}.exe", f"{name}.exec"] if sys.platform == "win32" else [name]
+
 
 #: Every subprocess here is bounded. ``OcxRunner`` passes no ``timeout=`` and
 #: the suite configures no ``pytest-timeout``, so a regression that reintroduced
@@ -353,11 +380,11 @@ def snapshot_tree(root: Path) -> dict[str, tuple[str, str]]:
     reason C-003 refuses to stamp mtime.
     """
     out: dict[str, tuple[str, str]] = {}
-    if not root.exists() and not root.is_symlink():
+    if not root.exists() and not is_link(root):
         return out
     for path in sorted(root.rglob("*")):
         key = str(path.relative_to(root))
-        if path.is_symlink():
+        if is_link(path):
             out[key] = ("symlink", os.readlink(path))
         elif path.is_dir():
             out[key] = ("dir", "")
@@ -397,10 +424,10 @@ def link_entries(home: Path) -> dict[str, str]:
     if not root.is_dir():
         return out
     for group in sorted(root.iterdir()):
-        if not group.is_dir() or group.is_symlink():
+        if not group.is_dir() or is_link(group):
             continue
         for entry in sorted(group.iterdir()):
-            if entry.is_symlink():
+            if is_link(entry):
                 out[f"{group.name}/{entry.name}"] = os.readlink(entry)
     return out
 
@@ -484,8 +511,8 @@ class ToolchainProject:
     def default_trampoline(self) -> Path:
         """``<home>/shells/default/bin/<binary name>`` — keyed on the exposed
         name, never the ``[tools]`` key, and named by the **physical**
-        spelling, not through ``active``."""
-        return shell_bin(self.home) / self.default_binary
+        spelling, not through ``active``. ``<name>.exe`` on Windows."""
+        return shell_bin(self.home) / trampoline_name(self.default_binary)
 
     def config_body(
         self, *, pinned: bool | None = None, group: str | None = None
@@ -702,7 +729,7 @@ class TwoBranchCheckout:
         and the digest root outlives the link, so that spelling is true in both
         states this predicate exists to tell apart.
         """
-        return (self.main_group_dir / self.main_group_key).is_symlink()
+        return is_link(self.main_group_dir / self.main_group_key)
 
     def expected_links(self, branch: str) -> set[str]:
         """The ``"group/entry"`` keys ``branch``'s ``ocx.lock`` declares.
@@ -724,14 +751,13 @@ class TwoBranchCheckout:
         }
 
     def expected_bin(self, branch: str) -> list[str]:
-        """The exposed binary names ``branch`` puts in the trampoline directory.
+        """The ``bin/`` entries ``branch`` puts in the trampoline directory.
 
         Default group only (C-045), so the group tool contributes nothing here —
         which is itself part of what the sync test pins.
         """
-        if branch == self.main_branch:
-            return sorted([self.binary, self.main_only_binary])
-        return sorted([self.binary, self.other_only_binary])
+        only = self.main_only_binary if branch == self.main_branch else self.other_only_binary
+        return sorted(f for name in (self.binary, only) for f in trampoline_files(name))
 
 
 def two_branch_checkout(
