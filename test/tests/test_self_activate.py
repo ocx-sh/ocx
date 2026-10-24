@@ -39,7 +39,6 @@ pytestmark = [
         reason="self activate output tests require POSIX shell semantics.",
     ),
     pytest.mark.command("self_group/activate"),
-    pytest.mark.requires_testing_build,
 ]
 
 
