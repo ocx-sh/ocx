@@ -5,7 +5,7 @@ paths:
 
 # Test Subsystem
 
-Pytest acceptance tests with Docker Compose registry at `test/`.
+Pytest acceptance tests at `test/`, each session against its own ephemeral zot registries.
 
 ## Design Rationale
 
@@ -72,7 +72,7 @@ Returned by `published_package` / `published_two_versions`:
 | `repo` | `"cmake"` |
 | `tag` | `"1.0.0"` |
 | `short` | `"cmake:1.0.0"` |
-| `fq` | `"localhost:5000/cmake:1.0.0"` |
+| `fq` | `"localhost:<port>/cmake:1.0.0"` |
 | `marker` | UUID-based unique string |
 
 ## make_package()
@@ -128,7 +128,7 @@ Four tiers (ADR `adr_test_speed_tiers.md` § C-TIER; plan `plan_test_speed_tiers
 | **T0 lint** | `task test:lint:structure` (pytest over `test/lint/`, uncached) + `scripts/scoped_gate.py --check-coverage` (`task test:rows:check`) | verify phase 1; every `verify:scoped`, regardless of decision (an escalate reaches it through `verify`) | ≤ 30 s wall (`OCX_LINT_BUDGET_SECONDS`), floored on `test/LINT_FLOOR`, ceilinged on `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` |
 | **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents — its `rust_doc_test` targets are the doctests) + `cargo clippy -p <crate>` per changed crate + the workspace `rust:doc:ratchet` + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
 | **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
-| **T3 deep** | `verify-deep.yml` | push to `main`, merge queue, `workflow_dispatch` | CI, cold disk |
+| **T3 deep** | `verify-deep.yml` (its `repo` job calls `deep-repo.yml`) | nightly cron, `workflow_dispatch`, the `run-deep` pull request label | CI, cold disk |
 
 ### Lint tier admission (`test/lint/`)
 
@@ -169,9 +169,9 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   glob must collect at least one test, or the run fails.
 - **Floor files.** `test/SUITE_FLOOR` (collected count, only ever rises — in the commit that
   adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. A platform with its own counts keeps the three
-  in `test/limits/<os>/` (`windows` today), which the deep tier's merge job reads through `LIMITS_DIR`;
+  in `test/limits/<os>/` (`macos`, `windows` and the `*-release` sets the readiness gate judges), which each `acceptance.yml` merge job reads through `LIMITS_DIR`;
   `scripts/accept_floor.py` with no such file prints the counted cases, skips and xfails and reds, so a
-  new platform's first run reports the numbers its limits are committed from (macOS awaits that run). `task test` (and `test:quick` /
+  new platform's first run reports the numbers its limits are committed from. `task test` (and `test:quick` /
   `test:parallel`, which route through it) refuses below the floor before the run and above a
   ceiling after it, both as `cmds:` (`--force` skips `preconditions:`). `test/CONFORMANCE_FLOOR`
   is the minimum count of distinct `--format json` schema roots a full run validated; the
@@ -226,12 +226,12 @@ runs the live gate (its log left with the nextest bracket); its proof runs under
   unit suite is under 1 second.* Not "every unit test on every platform" —
   `platforms: [linux]`, the guard the sibling floor/ceiling tasks carry because
   cfg-gated tests make counts platform-dependent. The uncovered legs, named
-  rather than papered over: `verify-deep.yml`'s `Build & Unit Test` matrix runs
-  **raw** `cargo nextest run --workspace --target=…`, not through `task`, on
-  Linux, macOS and Windows; `build-windows-shims.yml` runs three crates the
-  same way. Deep is moving to manual dispatch, so a copy of this gate there
-  would be a green nobody could tell from one that never ran — the hole stays
-  named.
+  rather than papered over: Linux unit tests run as Bazel `rust_test` targets in
+  `ci:test`, which print no per-test timing. The macOS and Windows legs
+  (`deep-repo.yml`'s `unit-native`) run the cross-compiled test bundle through
+  `task cross:test:run`. `build-windows-shims.yml` runs three crates through raw
+  `cargo nextest`. A copy of this gate on any of them would be a green nobody
+  could tell from one that never ran — the hole stays named.
 - **Hard on CI, advisory elsewhere.** With `CI` set (GitHub Actions always sets
   it) an over-budget unlisted test fails the run; without it the same findings
   print and the run exits 0. Wall clock on a shared machine measures a test's
@@ -239,7 +239,8 @@ runs the live gate (its log left with the nextest bracket); its proof runs under
   1.0-1.2 s on a 32-core box under load 27, and allowlisting those would file a
   false reason for tests that are fast everywhere it matters. **Not an
   off-switch** — *advisory here; the gate is the Linux CI leg of
-  `verify-basic.yml`, which runs on every pull request.* Both modes print which
+  `verify-basic.yml`, which runs on every pull request.* That wording is the
+  script's own message, and no lane runs the live gate today. Both modes print which
   one they ran in, on every run, green or red. Only the budget verdict is
   advisory: the reader floor and the unbounded-pattern refusal fail in both
   modes, being wiring faults rather than slow tests. A load-average check is
@@ -305,7 +306,7 @@ runs the live gate (its log left with the nextest bracket); its proof runs under
 
 An acceptance run that has gone quiet is either **slow** or **hung**, and the two
 need opposite actions. Never guess — poll four fields and let the discriminator
-decide. Contention with another checkout's gate over the shared registry is the
+decide. Contention with another checkout's gate over CPU and disk is the
 usual cause of slow, and it is indistinguishable from hung until measured.
 
 Three checks lie here. Each has produced a wrong verdict in this repo:
