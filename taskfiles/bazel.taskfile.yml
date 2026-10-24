@@ -712,7 +712,7 @@ tasks:
     cmds:
       # The selection reaches `@crates` the moment it is non-empty, so this
       # needs the lockfile for the same reason `build:nobuild` does.
-      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      - mkdir -p "{{.ROOT_DIR}}/target/bazel"
       # The selector. It writes the list rather than piping it, so the answer
       # survives the run and S-004 has a subject to read; the echo is for the
       # operator, never for a gate to parse.

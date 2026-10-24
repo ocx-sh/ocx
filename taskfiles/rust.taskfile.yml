@@ -392,7 +392,7 @@ tasks:
     # just happened rather than of some earlier one (same shape as
     # test/taskfile.yml's `.suite-ceilings`).
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/nextest
+      - mkdir -p "{{.ROOT_DIR}}/target/nextest"
       - >-
         set -o pipefail;
         cargo nextest run --workspace --release --locked -E 'not test(real_binary::)' {{.CLI_ARGS}}
@@ -438,7 +438,7 @@ tasks:
       inherits — restating it here would be a second source of truth for a
       host RAM cap.
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      - mkdir -p "{{.ROOT_DIR}}/target/bazel"
       - >-
         set -o pipefail;
         floor=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import bazel_gate_proofs; print(bazel_gate_proofs.CRATES_TEST_TARGETS)' '{{.ROOT_DIR}}/scripts');
@@ -757,7 +757,7 @@ tasks:
     deps:
       - install:nextest
     cmds:
-      - rm -f {{.NEXTEST_RUN_LOG}}
+      - rm -f -- "{{.NEXTEST_RUN_LOG}}"
       - >-
         set -o pipefail;
         floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);
