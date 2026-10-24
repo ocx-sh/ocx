@@ -1181,7 +1181,6 @@ mod tests {
 
     // ── PATH-key restriction ────────────────────────────────────────────
 
-    #[cfg(unix)]
     /// Builds `AuthoringMetadata` with one interface-visible `${installPath}`-rooted
     /// `Path` var per `(key, rel)` pair.
     fn keyed_path_metadata(vars: &[(&str, &str)]) -> AuthoringMetadata {
