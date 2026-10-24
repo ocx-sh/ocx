@@ -80,7 +80,7 @@ Question → research → decision. Findings already decided are not repeated.
 | D18 | Where do contract-baseline tag drift, `test:rows:check`, live proofs, full scripts/tests go? | Finding 9/10 | `ci:deep` only; `task verify` unchanged locally |
 | D19 | scripts/tests PR job on `scripts/**`: path filter? | A path filter on a gated workflow leaves a required check skipped | A changed-files step inside the job; the job always runs, exits early when untouched |
 | D20 | Acceptance binary on PRs: artifact or rebuild? | Reusable workflows share the caller's run, so artifacts would work; a rebuild from the warm cache is fewer moving parts | `binary: build` rebuilds `//crates/ocx_cli:ocx` in `acceptance.yml`; `binary: artifact:<name>` only where the bytes must be the release bytes (R2) |
-| D21 | Two cache rc writers after adoption (ocx action + conventions setup)? | S1 adds `bazel-cache: trusted` to the setup action | I1 switches repo-owned jobs to the conventions setup cache step and deletes `.github/actions/bazel-cache-rc` iff the two rc goldens (C-002, C-010) are identical; else both stay and C-003 covers both |
+| D21 | Two cache rc writers after adoption (ocx action + conventions setup)? | S1 adds `bazel-cache: trusted` to the setup action | Both stay and C-003 covers both (decided 2026-10-24). The goldens are identical, but the conventions setup action restores setup-ocx's object store with no `cache: false` input, and repo-owned jobs hold the write credential |
 | D22 | How do repo workflows get secrets from template callers? | `secrets: inherit` is a zizmor finding | Answer `repo_workflows = { secrets = [...] }`; the template maps each name explicitly |
 | D23 | Why `zizmor_ignore`? | `release.yml` is cargo-dist-generated and drift-checked; it cannot be hand-fixed | Answer lists generated workflows only; hand-written ones are fixed (A4) |
 | D24 | Fork PRs after P1? | Q1: no secrets → no rc → the lane runs as it does today | Unchanged; S-002 |
@@ -305,7 +305,7 @@ creation, `test/LINT_FLOOR` (+ the deep floor C-013 adds), `test/scoped_rows.tom
 | K | ocx | C-050, C-051 | `scripts/{release_provenance_check,test_diff_guard,bazel_test_floor,bazel_build_drift,bazel_gate_proofs,bazel_floor_proofs,bep_to_otlp}.py` (+ tests), `taskfiles/{rust,scripts}.taskfile.yml`, `.github/workflows/deep-repo.yml` (comment), `patches/{rules_rust_keep_doctest_stdout.patch,BUILD.bazel}`, `MODULE.bazel`, `MODULE.bazel.lock`, `crates/TEST_TARGET_MAP.toml`, `adr_test_speed_tiers.md`, `adr_bazel_rules_rs_migration.md`, `.claude/rules/{subsystem-tests,subsystem-taskfiles,subsystem-ci}.md` | 9 | G4 | — | merged |
 | R1 | ocx | C-061 | `test/tests/**` (markers), `test/conftest.py`, `test/pyproject.toml`, `test/src/**` helpers, `test/lint/test_testing_marker.py`, `test/limits/*-release/**`, `.claude/rules/subsystem-tests.md` | 10 | G5 | — | merged |
 | R2 | ocx | C-060, C-062, C-063, C-064, S-007, S-008 | `.github/workflows/{release-readiness,readiness-gate,release,acceptance}.yml`, `dist-workspace.toml`, `scripts/release_readiness_gate.py`, `scripts/tests/test_release_readiness_gate.py`, `taskfiles/release.taskfile.yml`, `.claude/tests/test_workflows.py`, `.claude/rules/{workflow-release,subsystem-ci}.md` | 10 | G5 | hard, review | merged |
-| I1 | ocx | repoint to released satellites, D21 | `.copier-answers.yml`, template-owned files, `grimoire.lock` + outputs, `.claude/rules/subsystem-ci.md` (deviation note out), `.github/actions/bazel-cache-rc/**` + callers (iff D21) | 11 | G7 | — | pending |
+| I1 | ocx | repoint to released satellites, D21 | `.copier-answers.yml`, template-owned files, `grimoire.lock` + outputs, `.claude/rules/subsystem-ci.md` (deviation note out), no `.github/actions/bazel-cache-rc/**` change (D21) | 11 | G7 | — | pending |
 
 Fewer parallel pipelines than file count allows, by design: phases run in the owner's order; T1→T2 share
 `test/taskfile.yml` and `acceptance.yml`; F1→F2 is finding 7's dependency; K is one pipeline because its three
@@ -509,7 +509,7 @@ point is a follow-up, not `v0.2.1` inside this goal.
 
 ### I1 — repoint + finalize (W11)
 `copier update --vcs-ref v0.2.0` and the setup action SHA; `grim update bazel-essentials` to the released digest;
-delete the D5 note; D21; regenerate hubs; full `task verify`; push; basic, deep and readiness green; close #634;
+delete the D5 note; regenerate hubs; full `task verify`; push; basic, deep and readiness green; close #634;
 remove the `sat-*` worktrees; force-with-lease at finalize.
 
 ## Coverage
@@ -847,3 +847,8 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     609 passed;
     `scripts:suite-census` as pinned; `test:rows:check` and coverage OK; ruff (test/) and `scripts:lint` clean;
     `workflows:lint` no findings; `dist generate --check` clean; code-docs length, ids and pointers checks clean.
+- 2026-10-24 — **D21 decided: both cache writers stay**, C-003 covering both. The rc goldens are byte-identical
+  (`.github/actions/bazel-cache-rc/selftest.sh` and conventions `tests/golden/trusted-cache.rc`: the helper line plus
+  `--remote_upload_local_results=true`). Switching would still move each repo-owned job onto the conventions setup
+  action, which calls setup-ocx with its default `cache: true` and has no input to turn it off. A restored object store
+  is runner-executable content, and those jobs hold the write credential, so I1 keeps `bazel-cache-rc` and its callers.
