@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::forge::{ForkIdentity, PullRequest, PushAccess, RepoCoordinate};
+use crate::forge::{ForkIdentity, PullRequest, PushAccess, RefUpdate, RepoCoordinate};
 
 /// Which tags the run is given; a committed row outside that set is carried verbatim.
 ///
@@ -91,6 +91,31 @@ impl AnnounceStatus {
     }
 }
 
+/// What the per-package announce branch was worth when the run began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchStateKind {
+    /// No announce branch yet.
+    Absent,
+    /// Unmerged commits that fast-forward onto the index base.
+    Live,
+    /// Nothing the base needs: merged, or closed unmerged.
+    Spent,
+    /// Unmerged commits the base moved away from, with a pull request still open.
+    Stale,
+}
+
+impl BranchStateKind {
+    /// The state's lowercase name, for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Live => "live",
+            Self::Spent => "spent",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 /// The result of an announce run.
 #[derive(Debug)]
 pub struct AnnounceOutcome {
@@ -121,4 +146,14 @@ pub struct AnnounceOutcome {
     pub removed: Vec<String>,
     /// Durable rows whose tag is gone but that the run kept, since nothing named them.
     pub durable_missing: Vec<String>,
+    /// The announce branch's state when the run began; `None` when the run
+    /// never classified one (`--output`, or an empty `--tags-file`).
+    pub branch_state: Option<BranchStateKind>,
+    /// The commit the committed root was read at; `None` when the run never read one.
+    pub base_sha: Option<String>,
+    /// How the branch ref was updated; `None` when the run committed nothing.
+    pub ref_update: Option<RefUpdate>,
+    /// Tags carried onto the rebuilt root from a stale branch; empty
+    /// when none were.
+    pub carried: Vec<String>,
 }
