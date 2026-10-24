@@ -201,6 +201,8 @@ research-axes:
 - Retro candidate (checklist-item): "worker-builder must not git stash in a worktree shared with another writer" — ledger worker-builder-stash-shared-worktree, .agents/retro/reports/2026-09-30.md.
 - Retro candidate (project-context): "Take .agents/build.lock with flock -o; a bazel server inherits the fd and wedges the lock" — ledger project-build-lock-bazel-fd-inherit, .agents/retro/reports/2026-09-30.md.
 - Retro candidate (project-context): "Free-disk preflight before a build wave; cargo fmt truncated files at 0 bytes free" — ledger project-disk-full-fmt-truncation, .agents/retro/reports/2026-09-30.md.
+- Retro candidate (checklist-item): "A gate worktree's TMPDIR lives outside every checkout; project-discovery tests walk up into ocx.toml" — ledger project-gate-tmpdir-inside-checkout, .agents/retro/reports/2026-10-24.md.
+- Retro candidate (project-context): "zot-missing hint should name `ocx exec -- task …`; `ocx exec zot --` leaks OCX_GLOBAL=1" — ledger project-zot-hint-global-trampoline, .agents/retro/reports/2026-10-24.md.
 
 - **Plan (hex/patch-lock-advisory-tag, 2026-09-29, review): `.claude/artifacts/plan_patch_lock_advisory_tag.md`** — tag-scoped patch rules vs `ocx.lock`; WP1+WP2 merged, L2 fixed; hex-review (high) round-2 findings applied (one lock-currency predicate); next `/hex-review`.
 - **Plan (hex/code-docs-cleanup, 2026-09-28, plan-approved): `.claude/artifacts/plan_code_docs_cleanup.md`** —
