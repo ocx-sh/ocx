@@ -8,9 +8,9 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-24
 - **Active phase:** G6 — release-readiness dry run on #637 HEAD (deep and basic green on a65416882)
-- **Step:** readiness 40094740730 (b16518983) red on three causes; two fixed in 55850ad8d and aa06ec568, one already in a65416882; awaiting push + readiness re-dispatch
+- **Step:** readiness 40103031491 (97ef924b1) red only on Windows arm64 pwsh startup; fixed in c7c3a2e26; awaiting push + readiness re-dispatch
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after aa06ec568: ci: Windows arm64 acceptance runs on an emulated x64 Python, since cryptography ships no win_arm64 wheel)
+- **Last update:** 2026-10-24 (after c7c3a2e26: test(shell): the PATH idempotency shells start with SYSTEMROOT on Windows, so pwsh runs on arm64)
 - **Next:** G6 (meta): push, dispatch release-readiness on the new tip; then the integration `task verify` + one /hex-review
 
 ---
@@ -751,3 +751,10 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
   - Pitfall (retro entry): conftest's "run under `ocx exec zot -- ...`" resolves `uv` to the global trampoline,
     which leaks `OCX_GLOBAL=1` into pytest; the cosign fixture's `ocx --project … status` then exits 64.
     `ocx exec -- task …` is the working invocation.
+  - **Readiness [40103031491](https://github.com/ocx-sh/ocx/actions/runs/40103031491) on 97ef924b1** (deep
+    40103033216 and basic 40103035785 green): both arm64 fixes and the conformance floor held; red only on Windows
+    arm64 shard 2, `test_path_idempotency` `[pwsh]` ×2 → pwsh FailFast at startup (0x80131623, Win32 126 in
+    `SecuritySupport.GetSaferPolicy` under `TestSaferPolicy`) because `_run` spawned it with `PATH` alone. The child
+    now gets SYSTEMROOT, WINDIR, TEMP and TMP on Windows (the runner's and git fixture's set); PATH unchanged, the
+    script seeds its own. c7c3a2e26. Windows-local: 6 passed (bash, dash, direnv cases), 12 skipped (pwsh is absent
+    on this host, so CI is the proof); Linux: 14 passed / 4 skipped.
