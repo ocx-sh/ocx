@@ -224,6 +224,8 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
         if gb is None:
             pytest.skip("Git-for-Windows bash not found (bare bash = WSL launcher)")
         cmd[0] = gb
+    elif shutil.which(cmd[0]) is None:
+        pytest.skip(f"{cmd[0]} not installed")
     ep_dir = shim_entrypoint["ep_dir"]
     env = dict(shim_entrypoint["env"])
     env["PATH"] = f"{ep_dir}{os.pathsep}{env.get('PATH', '')}"

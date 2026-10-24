@@ -43,6 +43,17 @@ _TESTING_PROVENANCE = {
     "__OCX_BUILD_CHANNEL": "test",
 }
 
+# `@rules_rust//rust/platform` selector -> the triple the binary reports. It has
+# no gnullvm selector; its msvc one matches the same os and cpu constraints.
+_TARGET_TRIPLES = {
+    "aarch64-apple-darwin": "aarch64-apple-darwin",
+    "aarch64-pc-windows-msvc": "aarch64-pc-windows-gnullvm",
+    "aarch64-unknown-linux-gnu": "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin": "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc": "x86_64-pc-windows-gnullvm",
+    "x86_64-unknown-linux-gnu": "x86_64-unknown-linux-gnu",
+}
+
 rust_library(
     name = "ocx_cli",
     srcs = glob(["src/**/*.rs"]),
@@ -58,12 +69,8 @@ rust_library(
     crate_name = "ocx",
     edition = "2024",
     rustc_env = select({
-        "@rules_rust//rust/platform:" + triple: _TESTING_PROVENANCE | {"VERGEN_CARGO_TARGET_TRIPLE": triple}
-        for triple in [
-            "aarch64-apple-darwin",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-gnu",
-        ]
+        "@rules_rust//rust/platform:" + selector: _TESTING_PROVENANCE | {"VERGEN_CARGO_TARGET_TRIPLE": triple}
+        for selector, triple in _TARGET_TRIPLES.items()
     } | {"//conditions:default": _TESTING_PROVENANCE}),
     version = "0.6.2",
     deps = all_crate_deps(normal = True),
