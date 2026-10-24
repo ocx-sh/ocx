@@ -606,6 +606,21 @@ def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
     )
 
 
+def _scans_a_directory(env: list[dict]) -> bool:
+    """Whether `ocx package create` scans a directory for `env`: an interface-visible `PATH` entry
+    whose whole value is `${installPath}/<dir>`, as `scan_scope` in `ocx_package`'s `bin_scan.rs` reads it."""
+    prefix = "${installPath}/"
+    return any(
+        entry.get("type") == "path"
+        and entry.get("key") == "PATH"
+        and entry.get("visibility", "private") in ("public", "interface")
+        and (value := str(entry.get("value", ""))).startswith(prefix)
+        and "${" not in value[len(prefix) :]
+        and ".." not in value[len(prefix) :].split("/")
+        for entry in env
+    )
+
+
 def make_package(
     ocx: OcxRunner,
     repo: str,
@@ -714,15 +729,6 @@ def make_package(
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
     bin_names = bins or ["hello"]
-    # `create` refuses to fill an absent `binaries` claim for an OS whose executable convention
-    # the host cannot read (a Windows host and any non-Windows target), so such a fixture is
-    # published claim-less.
-    scan_args = (
-        ["--no-bin-scan"]
-        if no_bin_scan or (sys.platform == "win32" and not plat.startswith(("windows/", "wasip")))
-        else []
-    )
-
     # Sanitize repo for use in filesystem paths: replace `/` and other
     # path-separator characters so pathlib does not treat the segment as
     # a subdirectory. The repo value is still passed unchanged to ocx
@@ -790,6 +796,12 @@ def make_package(
             "visibility": "public",
         },
     ]
+    # `create` refuses to fill an absent `binaries` claim for an OS whose executable convention
+    # the host cannot read (a Windows host and any non-Windows target) once the scan scope is
+    # non-empty, so only such a fixture is published claim-less; the rest let `create` run.
+    host_cannot_scan = sys.platform == "win32" and not plat.startswith(("windows/", "wasip"))
+    refused = host_cannot_scan and binaries is _UNSET and _scans_a_directory(metadata_env)
+    scan_args = ["--no-bin-scan"] if no_bin_scan or refused else []
     metadata_obj: dict = {
         "type": "bundle",
         "version": 1,
