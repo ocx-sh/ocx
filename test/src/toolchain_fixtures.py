@@ -197,14 +197,12 @@ def copy_tree(
 ) -> None:
     """``shutil.copytree`` for a tree that holds links, on every platform.
 
-    ``shutil.copytree`` treats a Windows junction as a directory and walks into
-    it, so ``symlinks=True`` does not preserve one and ``symlinks=False`` meets
-    the package store's own ``refs/blobs`` junctions, which point at files and
-    cannot be copied. With ``dereference`` a link becomes a real copy of what
-    it names (``cp -rL``); a link that names nothing readable is left out.
-    Without it the link is recreated; on Windows, where a junction holds only an
-    absolute target, one aimed inside ``src`` is aimed inside ``dst`` instead
-    when ``retarget`` is set, as a POSIX relative link moves with its tree.
+    ``shutil.copytree`` walks into a Windows junction and cannot copy the
+    store's ``refs/blobs`` junctions, which point at files. With ``dereference``
+    a link becomes a real copy of its target (``cp -rL``); one naming nothing
+    readable is left out. Without it the link is recreated; with ``retarget`` a
+    Windows junction (absolute target only) aimed inside ``src`` is aimed inside
+    ``dst``, as a POSIX relative link moves with its tree.
     """
     dst.mkdir(parents=True)
     for entry in sorted(src.iterdir()):

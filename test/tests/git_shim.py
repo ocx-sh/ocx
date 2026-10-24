@@ -34,14 +34,11 @@ either would shadow the real `git` for every other acceptance module, for
 `task verify`, and for the developer's own shell. The validation exists because
 "there is no `git` in `test/bin/`" cannot be turned red without writing one.
 
-**On Windows the shim is a native `git.exe`.** `ocx` resolves `git` through `which` and
-spawns the result by path. An extension-less file is not found there, and a
-`git.cmd` is found but cannot be run: Rust refuses batch-file arguments that carry a
-newline, which every multi-line commit message does. So `git.exe` is a small
-trampoline compiled once with `rustc` (see `_windows_trampoline`) that runs the shim's
-Python with the caller's arguments and returns its exit code. `CreateProcess`
-resolves a bare `git` against the *parent's* `PATH`, never the child's `env`, so a
-test that runs the shim itself passes `executable` (`git_http_fixture.git_program`).
+**On Windows the shim is a native `git.exe`:** `ocx` spawns `git` by path, and neither an
+extension-less file nor a `git.cmd` works there (Rust refuses batch-file arguments with
+a newline, as every multi-line commit message has). So `git.exe` is a trampoline compiled
+once with `rustc` (`_windows_trampoline`). A bare `git` resolves against the *parent's*
+`PATH`, so a test running the shim itself passes `executable` (`git_http_fixture.git_program`).
 """
 
 from __future__ import annotations
@@ -427,8 +424,7 @@ def render_shim_source(
 
     `version_override` bakes a fixed `git --version` answer; `None` delegates the
     version query like any other subcommand. `shim_path` names the executable the
-    caller ran when that is not this script (the Windows trampoline); `None` is
-    the script itself.
+    caller ran when it is not this script (the Windows trampoline).
     """
     own_path = "Path(__file__).resolve()" if shim_path is None else f"Path({str(shim_path)!r})"
     literals = "\n".join(

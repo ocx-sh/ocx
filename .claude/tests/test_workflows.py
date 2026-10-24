@@ -3289,7 +3289,7 @@ def test_the_readiness_gate_workflow_runs_the_script_on_the_tagged_commit() -> N
 
 
 def test_release_host_needs_the_readiness_gate() -> None:
-    """Red readiness-gate -> `host` never runs -> nothing is released (S-008)."""
+    """Red readiness-gate -> `host` never runs -> nothing is released."""
     config = _dist_config()
     assert config["local-artifacts-jobs"] == ["./readiness-gate"], config.get("local-artifacts-jobs")
     assert config["github-custom-job-permissions"]["readiness-gate"] == {"contents": "read", "actions": "read"}
