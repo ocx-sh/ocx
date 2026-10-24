@@ -65,8 +65,9 @@ def _wants_zot(config: pytest.Config) -> bool:
     """Whether this process starts the session's zot registries.
 
     Not the xdist workers (they read the controller's ports from the
-    environment), not a run that executes no test (`--collect-only`, `--help`),
-    not a run that opted out, and not the lint tier, which may reach no registry.
+    environment), not a run that executes no test (`--collect-only`, `--help`,
+    `--version`, `--fixtures`, `--markers`), not a run that opted out, and not
+    the lint tier, which may reach no registry.
     """
     if hasattr(config, "workerinput") or os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         return False
@@ -74,6 +75,8 @@ def _wants_zot(config: pytest.Config) -> bool:
         config.getoption("collectonly")
         or config.getoption("help")
         or config.getoption("version")
+        or config.getoption("showfixtures")
+        or config.getoption("markers")
     ):
         return False
     invoked_from = Path(config.invocation_params.dir)
@@ -122,7 +125,9 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skips every `requires_testing_build` test by name when the binary under test is release bytes."""
     if os.environ.get("OCX_TEST_RELEASE_BINARY") != "1":
         return
-    skip = pytest.mark.skip(reason="release bytes: the release binary lacks the `__testing` seams this test drives")
+    skip = pytest.mark.skip(
+        reason="release bytes: the release binary lacks the `__testing` seams this test drives"
+    )
     for item in items:
         if item.get_closest_marker("requires_testing_build"):
             item.add_marker(skip)
