@@ -31,6 +31,7 @@ a fresh clone per call, never a shared working tree that two workers would
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -38,8 +39,11 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from src.helpers import make_package, rglob_no_links, write_ocx_toml
 from src.runner import OcxRunner, PackageInfo
@@ -54,26 +58,35 @@ __all__ = [
     "ToolchainProject",
     "TwoBranchCheckout",
     "active_link",
+    "active_target",
     "assert_key_and_binary_namespaces_stay_disjoint",
     "back_reference_entries",
     "bin_entries",
+    "copy_tree",
     "entry_link",
+    "expected_bin",
     "git",
     "is_link",
     "link_entries",
     "links_group",
     "links_root",
     "locked_project",
+    "make_link",
     "path_facing_bin",
+    "read_link",
+    "read_only_dir",
     "read_render_stamp",
+    "remove_link",
     "render_stamp_path",
     "resolved_toolchain_bin",
     "resolved_toolchain_home",
     "run_in",
+    "rust_debug",
     "sha256_of",
     "shell_bin",
     "snapshot_tree",
     "toolchain_home",
+    "trampoline_body",
     "trampoline_files",
     "trampoline_name",
     "two_branch_checkout",
@@ -117,6 +130,129 @@ def trampoline_files(name: str) -> list[str]:
     return [f"{name}.exe", f"{name}.exec"] if sys.platform == "win32" else [name]
 
 
+def expected_bin(*names: str) -> list[str]:
+    """The sorted ``bin/`` entries exposed binaries ``names`` occupy, so a
+    comparison with :func:`bin_entries` holds on Windows's ``.exe`` + ``.exec``
+    pair as well as on POSIX's single file."""
+    return sorted(file for name in names for file in trampoline_files(name))
+
+
+def read_link(path: Path) -> str:
+    """``os.readlink`` without the ``\\\\?\\`` prefix Windows adds to a junction's
+    target, so a target compares equal to the path ocx wrote or reported."""
+    target = os.readlink(path)
+    return target.removeprefix("\\\\?\\") if sys.platform == "win32" else target
+
+
+def make_link(target: str | Path, link: Path) -> None:
+    """Plant a directory link at ``link``: a symlink on POSIX, a junction on
+    Windows -- the kind ocx itself writes there, and one that needs no privilege.
+
+    A junction holds an absolute target only, so a relative ``target`` is
+    resolved against ``link``'s directory, as a symlink would resolve it.
+    """
+    if sys.platform != "win32":
+        os.symlink(target, link)
+        return
+    absolute = Path(target)
+    if not absolute.is_absolute():
+        absolute = link.parent / absolute
+    # ``_winapi.CreateJunction`` refuses a target that does not exist, which the
+    # dangling and self-referential cases here need; ``mklink /J`` accepts it.
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), os.path.normpath(absolute)],
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+
+def trampoline_body(trampoline: Path) -> Path:
+    """The file that carries a trampoline's baked project root: the trampoline
+    itself on POSIX, its ``.exec`` sidecar on Windows, where the ``.exe`` is a
+    shared launcher blob with the same bytes in every project."""
+    return trampoline.with_suffix(".exec") if sys.platform == "win32" else trampoline
+
+
+def active_target(home: Path, shell: str = DEFAULT_SHELL) -> str:
+    """What ``read_link`` reports for a correct ``active``: the relative
+    ``shells/<shell>`` on POSIX, the absolute ``<home>\\shells\\<shell>`` a
+    Windows junction can hold."""
+    if sys.platform == "win32":
+        return str(home / SHELLS_DIR / shell)
+    return f"{SHELLS_DIR}/{shell}"
+
+
+def remove_link(path: Path) -> None:
+    """Remove the link at ``path`` itself, never what it points at. A Windows
+    junction is a directory to ``unlink``, so it goes through ``rmdir``."""
+    if sys.platform == "win32" and os.path.isjunction(path):
+        os.rmdir(path)
+    else:
+        path.unlink()
+
+
+def copy_tree(
+    src: Path, dst: Path, *, dereference: bool = False, retarget: bool = True
+) -> None:
+    """``shutil.copytree`` for a tree that holds links, on every platform.
+
+    ``shutil.copytree`` treats a Windows junction as a directory and walks into
+    it, so ``symlinks=True`` does not preserve one and ``symlinks=False`` meets
+    the package store's own ``refs/blobs`` junctions, which point at files and
+    cannot be copied. With ``dereference`` a link becomes a real copy of what
+    it names (``cp -rL``); a link that names nothing readable is left out.
+    Without it the link is recreated; on Windows, where a junction holds only an
+    absolute target, one aimed inside ``src`` is aimed inside ``dst`` instead
+    when ``retarget`` is set, as a POSIX relative link moves with its tree.
+    """
+    dst.mkdir(parents=True)
+    for entry in sorted(src.iterdir()):
+        target = dst / entry.name
+        if is_link(entry) and not dereference:
+            aimed = read_link(entry)
+            if retarget and sys.platform == "win32":
+                with contextlib.suppress(ValueError):
+                    aimed = str(dst / Path(aimed).relative_to(src))
+            make_link(aimed, target)
+        elif entry.is_dir():
+            copy_tree(entry, target, dereference=dereference, retarget=retarget)
+        elif entry.is_file():
+            shutil.copy2(entry, target)
+
+
+def rust_debug(text: str) -> str:
+    """``text`` as ocx's CWE-117-safe warnings spell a path: ``{:?}``-escaped,
+    which doubles every Windows backslash and is the identity on POSIX paths
+    that hold no quote or control character."""
+    return text.replace("\\", "\\\\")
+
+
+@contextlib.contextmanager
+def read_only_dir(path: Path) -> Iterator[None]:
+    """``path`` made unwritable for the block, then restored.
+
+    Skips -- on the observation, not an assumption -- when the mode bits do not
+    stop a write here (root; Windows, where ``chmod`` only toggles the
+    read-only attribute and a directory ignores it): a case about an
+    unwritable directory has nothing to provoke then.
+    """
+    mode = path.stat().st_mode
+    os.chmod(path, 0o555)
+    probe = path / f".writable-probe-{uuid4().hex[:8]}"
+    try:
+        try:
+            probe.write_bytes(b"")
+        except OSError:
+            pass
+        else:
+            probe.unlink()
+            pytest.skip(f"directory mode bits do not stop a write on this host: {path}")
+        yield
+    finally:
+        os.chmod(path, mode)
+
+
 #: Every subprocess here is bounded. ``OcxRunner`` passes no ``timeout=`` and
 #: the suite configures no ``pytest-timeout``, so a regression that reintroduced
 #: the trampoline re-entry loop (D-V1) would hang the run instead of failing it.
@@ -150,6 +286,7 @@ def run_in(
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=env,
         # Detached, never inherited -- see `OcxRunner.run`, which states the
         # SIGTTIN failure this closes.
@@ -173,6 +310,7 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         # Detached: git prompts for credentials on a terminal. These rows drive
         # a purely local repository, so a prompt could only ever be a hang.
         stdin=subprocess.DEVNULL,
@@ -328,7 +466,7 @@ def render_stamp_path(ocx: OcxRunner, home: Path) -> Path | None:
         if not candidate.exists():
             continue
         try:
-            payload = json.loads(candidate.read_text())
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
         if payload.get("home") == str(home):
@@ -339,7 +477,7 @@ def render_stamp_path(ocx: OcxRunner, home: Path) -> Path | None:
 def read_render_stamp(ocx: OcxRunner, home: Path) -> dict | None:
     """The parsed render stamp for ``home``, or ``None`` when none was written."""
     path = render_stamp_path(ocx, home)
-    return json.loads(path.read_text()) if path else None
+    return json.loads(path.read_text(encoding="utf-8")) if path else None
 
 
 def write_toolchain_dir_config(ocx: OcxRunner, value: str | Path) -> Path:
@@ -351,7 +489,7 @@ def write_toolchain_dir_config(ocx: OcxRunner, value: str | Path) -> Path:
     """
     path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     text = value.as_posix() if isinstance(value, Path) else str(value)
-    path.write_text(f'toolchain_dir = "{text}"\n')
+    path.write_text(f'toolchain_dir = "{text}"\n', encoding="utf-8")
     return path
 
 
@@ -382,15 +520,25 @@ def snapshot_tree(root: Path) -> dict[str, tuple[str, str]]:
     out: dict[str, tuple[str, str]] = {}
     if not root.exists() and not is_link(root):
         return out
-    for path in sorted(root.rglob("*")):
-        key = str(path.relative_to(root))
+    for path in _walk(root):
+        key = path.relative_to(root).as_posix()
         if is_link(path):
-            out[key] = ("symlink", os.readlink(path))
+            out[key] = ("symlink", read_link(path))
         elif path.is_dir():
             out[key] = ("dir", "")
         else:
             out[key] = ("file", sha256_of(path))
     return out
+
+
+def _walk(root: Path) -> Iterator[Path]:
+    """Every path under ``root``, a link listed but never entered -- Windows's
+    ``rglob`` walks into a junction, so a tree's snapshot would otherwise
+    include (and lose, when a package is cleaned) what its links point at."""
+    for path in sorted(root.iterdir()):
+        yield path
+        if path.is_dir() and not is_link(path):
+            yield from _walk(path)
 
 
 def bin_entries(home: Path, shell: str = DEFAULT_SHELL) -> list[str]:
@@ -428,7 +576,7 @@ def link_entries(home: Path) -> dict[str, str]:
             continue
         for entry in sorted(group.iterdir()):
             if is_link(entry):
-                out[f"{group.name}/{entry.name}"] = os.readlink(entry)
+                out[f"{group.name}/{entry.name}"] = read_link(entry)
     return out
 
 

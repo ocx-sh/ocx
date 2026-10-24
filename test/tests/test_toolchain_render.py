@@ -61,23 +61,34 @@ from src.toolchain_fixtures import (
     LINKS_DIR,
     SHELLS_DIR,
     active_link,
+    active_target,
     assert_key_and_binary_namespaces_stay_disjoint,
     back_reference_entries,
     bin_entries,
+    copy_tree,
     entry_link,
+    expected_bin,
     git,
+    is_link,
     link_entries,
     locked_project,
+    make_link,
     path_facing_bin,
+    read_link,
+    read_only_dir,
     read_render_stamp,
+    remove_link,
     render_stamp_path,
     resolved_toolchain_bin,
     resolved_toolchain_home,
     run_in,
+    rust_debug,
     sha256_of,
     shell_bin,
     snapshot_tree,
     toolchain_home,
+    trampoline_body,
+    trampoline_name,
     two_branch_checkout,
     write_toolchain_dir_config,
 )
@@ -104,14 +115,14 @@ def test_exec_scoped_to_a_named_group_repoints_that_groups_stale_link(
     project = locked_project(ocx, tmp_path)
 
     assert_symlink_exists(project.default_link)
-    other_digest_root = os.readlink(project.default_link)
+    other_digest_root = read_link(project.default_link)
 
     ci_link = project.group_link
     ci_link.parent.mkdir(parents=True, exist_ok=True)
-    if ci_link.is_symlink() or ci_link.exists():
-        ci_link.unlink()
-    os.symlink(other_digest_root, ci_link)
-    assert os.readlink(ci_link) == other_digest_root, (
+    if is_link(ci_link) or ci_link.exists():
+        remove_link(ci_link)
+    make_link(other_digest_root, ci_link)
+    assert read_link(ci_link) == other_digest_root, (
         "precondition: the ci link names a different real digest root"
     )
 
@@ -128,7 +139,7 @@ def test_exec_scoped_to_a_named_group_repoints_that_groups_stale_link(
     )
 
     assert_symlink_exists(ci_link)
-    assert os.readlink(ci_link) != other_digest_root, (
+    assert read_link(ci_link) != other_digest_root, (
         "C-070: `ocx exec -g ci` must heal the ci group's link, not the default "
         f"group's; it still names {other_digest_root!r}"
     )
@@ -185,7 +196,7 @@ def test_a_tools_key_is_never_a_bin_entry_and_a_binary_name_is_never_a_link(
     """
     project = locked_project(ocx, tmp_path)
 
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         f"C-045 — `bin/` exposes the default group's binary names and nothing "
         f"else; got {bin_entries(project.home)}"
     )
@@ -221,13 +232,20 @@ def test_a_hostile_project_path_is_single_quoted_into_the_body_and_never_runs(
     hostile.mkdir()
     project = locked_project(ocx, tmp_path, directory=hostile)
 
-    body = project.default_trampoline.read_text()
-    assert f"'{hostile}'" in body, (
-        f"C-030 — the baked root must appear inside single quotes; body:\n{body}"
-    )
-    assert f'"{hostile}"' not in body, (
-        f"C-030 — the baked root must never be double-quoted; body:\n{body}"
-    )
+    body = trampoline_body(project.default_trampoline).read_text(encoding="utf-8")
+    if sys.platform == "win32":
+        # The `.exec` sidecar is data a launcher reads, not a script a shell
+        # runs, so the root is baked verbatim and nothing can expand it.
+        assert body.splitlines()[0] == str(hostile), (
+            f"C-030 — the sidecar carries the root unchanged; body:\n{body}"
+        )
+    else:
+        assert f"'{hostile}'" in body, (
+            f"C-030 — the baked root must appear inside single quotes; body:\n{body}"
+        )
+        assert f'"{hostile}"' not in body, (
+            f"C-030 — the baked root must never be double-quoted; body:\n{body}"
+        )
 
     watched = tmp_path / "watched"
     watched.mkdir()
@@ -264,7 +282,10 @@ def test_a_project_path_carrying_a_launcher_unsafe_character_is_not_rendered(
     containing an apostrophe.
     """
     project_dir = tmp_path / name
-    project_dir.mkdir()
+    try:
+        project_dir.mkdir()
+    except OSError as error:
+        pytest.skip(f"this host cannot create a directory named {name!r}: {error}")
     project = locked_project(ocx, tmp_path, directory=project_dir, pull=False)
 
     result = run_in(ocx, project_dir, "pull")
@@ -277,7 +298,7 @@ def test_a_project_path_carrying_a_launcher_unsafe_character_is_not_rendered(
     )
     assert (
         described in result.stderr
-        and str(project_dir.name.split("\n")[0]) in result.stderr
+        and rust_debug(str(project_dir.name.split("\n")[0])) in result.stderr
     ), (
         f"item 2 — the refusal names the offending character and the path; "
         f"stderr:\n{result.stderr}"
@@ -334,16 +355,16 @@ def test_rendering_the_same_project_from_a_different_directory_rewrites_every_bo
     snapshot function that always returns the same thing.
     """
     project = locked_project(ocx, tmp_path)
-    original = project.default_trampoline.read_bytes()
+    original = trampoline_body(project.default_trampoline).read_bytes()
 
     moved = tmp_path / "relocated"
-    shutil.copytree(project.directory, moved, symlinks=True)
+    copy_tree(project.directory, moved)
     shutil.rmtree(toolchain_home(moved), ignore_errors=True)
     result = run_in(ocx, moved, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    relocated_body = (
-        shell_bin(toolchain_home(moved)) / project.default_binary
+    relocated_body = trampoline_body(
+        shell_bin(toolchain_home(moved)) / trampoline_name(project.default_binary)
     ).read_bytes()
     assert relocated_body != original, (
         "item 12 — a body bakes the project root, so the same project rendered "
@@ -438,18 +459,18 @@ def test_a_branch_switch_leaves_a_stale_link_that_the_next_composing_emit_heals(
     pulled = run_in(ocx, checkout.directory, "pull")
     assert pulled.returncode == EXIT_SUCCESS, pulled.stderr
 
-    on_main = os.readlink(checkout.link)
+    on_main = read_link(checkout.link)
     switched = git(checkout.directory, "checkout", "-q", checkout.other_branch)
     assert switched.returncode == EXIT_SUCCESS, switched.stderr
 
-    assert os.readlink(checkout.link) == on_main, (
+    assert read_link(checkout.link) == on_main, (
         "the control: a branch switch writes nothing, so the link must still "
         "name the previous branch's package before anything composes"
     )
 
     emitted = run_in(ocx, checkout.directory, "--format", "json", "env")
     assert emitted.returncode == EXIT_SUCCESS, emitted.stderr
-    assert os.readlink(checkout.link) != on_main, (
+    assert read_link(checkout.link) != on_main, (
         f"C-051 — the composing emit must heal the link; it still names {on_main!r}"
     )
 
@@ -469,12 +490,12 @@ def test_pull_dry_run_performs_no_heal_on_a_poisoned_link(
     """
     project = locked_project(ocx, tmp_path)
     poison = str(tmp_path)
-    project.default_link.unlink()
-    os.symlink(poison, project.default_link)
+    remove_link(project.default_link)
+    make_link(poison, project.default_link)
 
     result = run_in(ocx, project.directory, "pull", "--dry-run")
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert os.readlink(project.default_link) == poison, (
+    assert read_link(project.default_link) == poison, (
         "C-049 — a dry run performs no heal; the poisoned link must survive it"
     )
 
@@ -532,21 +553,21 @@ def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_
     home = toolchain_home(project)
     copied = entry_link(home, DEFAULT_GROUP, f"cpkey{label}")
     emptied = entry_link(home, DEFAULT_GROUP, f"mtkey{label}")
-    assert copied.is_symlink() and emptied.is_symlink(), (
+    assert is_link(copied) and is_link(emptied), (
         f"the control: both entries render as links first; got {link_entries(home)}"
     )
 
     # Arm 1 — the `cp -rL` outcome, reproduced exactly: the link is replaced by
     # a real directory copy of the package it named.
     package_root = copied.resolve()
-    copied.unlink()
-    shutil.copytree(package_root, copied, symlinks=False)
+    remove_link(copied)
+    copy_tree(package_root, copied, dereference=True)
     payload = sorted(p for p in copied.rglob("*") if p.is_file())
     assert payload, "the control: a dereferenced copy must carry real files"
     contents_before = {p: p.read_bytes() for p in payload}
 
     # Arm 2 — the same kind, with nothing in it.
-    emptied.unlink()
+    remove_link(emptied)
     emptied.mkdir()
 
     result = run_in(ocx, project, "pull")
@@ -558,10 +579,10 @@ def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_
     assert {p: p.read_bytes() for p in payload} == contents_before, (
         "RUL-32 — the populated copy is never removed recursively"
     )
-    assert copied.is_dir() and not copied.is_symlink(), (
+    assert copied.is_dir() and not is_link(copied), (
         "…and it is not removed at all: WP-0 names this state, it does not heal it"
     )
-    assert str(copied) in result.stderr, (
+    assert rust_debug(str(copied)) in result.stderr, (
         f"C-082 — the skip names the exact path to delete; stderr:\n{result.stderr}"
     )
     assert "cp -rL" in result.stderr, (
@@ -570,19 +591,19 @@ def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_
     assert "ocx pull" in result.stderr, (
         f"C-082 — …and what to run once it is gone; stderr:\n{result.stderr}"
     )
-    assert str(copied) not in result.stdout, (
+    assert rust_debug(str(copied)) not in result.stdout, (
         f"the skip warning belongs on stderr only; stdout:\n{result.stdout}"
     )
 
-    assert emptied.is_symlink(), (
+    assert is_link(emptied), (
         f"C-082 — an empty directory is removed with a non-recursive `remove_dir` "
         f"and the link written; `{emptied}` is still "
         f"{'a directory' if emptied.is_dir() else 'absent'}"
     )
-    assert Path(os.readlink(emptied)).is_dir(), (
+    assert Path(read_link(emptied)).is_dir(), (
         "…and the healed link names a real digest root, not a dangling path"
     )
-    assert sorted(bin_entries(home)) == sorted([f"cpbin{label}", f"mtbin{label}"]), (
+    assert bin_entries(home) == expected_bin(f"cpbin{label}", f"mtbin{label}"), (
         f"…and the render continued past the skip; bin/ holds {bin_entries(home)}"
     )
 
@@ -605,18 +626,18 @@ def test_a_regular_file_where_an_entry_link_belongs_is_still_replaced(
     """
     project = locked_project(ocx, tmp_path)
     entry = project.default_link
-    target_before = os.readlink(entry)
-    entry.unlink()
+    target_before = read_link(entry)
+    remove_link(entry)
     entry.write_text("not a link\n")
 
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert entry.is_symlink(), (
+    assert is_link(entry), (
         f"C-082 — a regular file at an entry name is replaced, not refused; "
         f"stderr:\n{result.stderr}"
     )
-    assert os.readlink(entry) == target_before, (
+    assert read_link(entry) == target_before, (
         "…by the link the lock derives, unchanged"
     )
     assert "cp -rL" not in result.stderr, (
@@ -646,10 +667,9 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
     """
     project = locked_project(ocx, tmp_path)
     entry = project.default_link
-    entry.unlink()
+    remove_link(entry)
     group = entry.parent
-    os.chmod(group, 0o555)
-    try:
+    with read_only_dir(group):
         result = run_in(ocx, project.directory, "pull")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — the render continues; rc={result.returncode}\n{result.stderr}"
@@ -665,8 +685,6 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
         assert "cp -rL" not in result.stderr, (
             f"…and never borrows the directory remedy; stderr:\n{result.stderr}"
         )
-    finally:
-        os.chmod(group, 0o755)
 
 
 # ---------------------------------------------------------------------------
@@ -788,11 +806,19 @@ def test_a_valid_name_still_parses(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: A location ocx refuses as a ``toolchain_dir`` root for being a system one,
+#: and the root of the filesystem; forward slashes so a TOML basic string holds them.
+_SYSTEM_DIR = "C:/Windows" if sys.platform == "win32" else "/usr"
+_FILESYSTEM_ROOT = "C:/" if sys.platform == "win32" else "/"
+
+
 def _outside_both_anchors(ocx: OcxRunner) -> Path:
     """A directory outside ``$HOME`` and outside ``$OCX_HOME`` — S-011's
     ``/tmp/ocx-tc``, created owner-owned and mode 0700 so the refusal can only be
-    containment."""
-    candidate = Path("/tmp") / f"ocx-tc-{uuid4().hex[:12]}"
+    containment. On Windows the drive root stands in for ``/tmp``, the one place
+    that is under neither anchor."""
+    base = Path("C:/") if sys.platform == "win32" else Path("/tmp")
+    candidate = base / f"ocx-tc-{uuid4().hex[:12]}"
     home = Path(ocx.env["HOME"]).resolve()
     ocx_home = Path(ocx.env["OCX_HOME"]).resolve()
     assert home not in candidate.parents and ocx_home not in candidate.parents, (
@@ -816,12 +842,16 @@ def test_a_containment_refusal_fires_even_for_an_owner_owned_private_directory(
     """
     project = locked_project(ocx, tmp_path, pull=False)
     root = _outside_both_anchors(ocx)
-    root.mkdir(mode=0o700)
     try:
-        assert stat.S_IMODE(root.stat().st_mode) == 0o700, (
-            "the control: the refused directory must be owner-private, or the "
-            "refusal could be C-019's rather than C-017's"
-        )
+        root.mkdir(mode=0o700)
+    except OSError as error:
+        pytest.skip(f"this host cannot create {root}, outside both anchors: {error}")
+    try:
+        if sys.platform != "win32":
+            assert stat.S_IMODE(root.stat().st_mode) == 0o700, (
+                "the control: the refused directory must be owner-private, or the "
+                "refusal could be C-019's rather than C-017's"
+            )
         write_toolchain_dir_config(ocx, root)
         result = run_in(ocx, project.directory, "--format", "json", "shell", "state")
         assert result.returncode == EXIT_CONFIG, (
@@ -877,10 +907,12 @@ def test_each_toolchain_dir_refusal_exits_78_and_names_its_failing_property(
     elif case == "inside_the_global_toolchain_home":
         value = ocx_home / "toolchain" / "nested"
     elif case == "system_prefix":
-        value = "/usr"
+        value = _SYSTEM_DIR
     elif case == "filesystem_root":
-        value = "/"
+        value = _FILESYSTEM_ROOT
     elif case == "group_or_world_writable":
+        if sys.platform == "win32":
+            pytest.skip("the group/world-writable refusal reads Unix mode bits; Windows has no such state")
         loose = ocx_home / f"loose-{uuid4().hex[:8]}"
         loose.mkdir()
         os.chmod(loose, 0o777)
@@ -919,7 +951,7 @@ def test_a_refused_toolchain_dir_also_stops_a_pull_and_names_the_environment_tie
     """
     project = locked_project(ocx, tmp_path, pull=False)
 
-    write_toolchain_dir_config(ocx, "/usr")
+    write_toolchain_dir_config(ocx, _SYSTEM_DIR)
     blocked = run_in(ocx, project.directory, "pull")
     assert blocked.returncode == EXIT_CONFIG, (
         f"item 18 — a refused root must stop the writer too; rc={blocked.returncode}\n"
@@ -937,7 +969,7 @@ def test_a_refused_toolchain_dir_also_stops_a_pull_and_names_the_environment_tie
         "json",
         "shell",
         "state",
-        env_extra={"OCX_TOOLCHAIN_DIR": "/usr"},
+        env_extra={"OCX_TOOLCHAIN_DIR": _SYSTEM_DIR},
     )
     assert from_env.returncode == EXIT_CONFIG, from_env.stderr
     assert "OCX_TOOLCHAIN_DIR" in from_env.stderr, (
@@ -1032,18 +1064,18 @@ def test_no_install_back_reference_is_taken_for_any_toolchain_link(
     )
 
     # Non-vacuity: the same walker must be able to see one.
-    target = os.readlink(project.default_link)
+    target = read_link(project.default_link)
     decoy_dir = Path(target).parent / "refs" / "symlinks"
     decoy_dir.mkdir(parents=True, exist_ok=True)
     decoy = decoy_dir / "decoy"
-    decoy.symlink_to(project.directory)
+    make_link(project.directory, decoy)
     try:
         assert back_reference_entries(ocx), (
             "the walker must be able to report a back-reference, or its empty "
             "answer above is indistinguishable from never having looked"
         )
     finally:
-        decoy.unlink()
+        remove_link(decoy)
 
 
 # ---------------------------------------------------------------------------
@@ -1068,8 +1100,7 @@ def test_a_render_that_cannot_write_warns_on_stderr_and_still_exits_zero(
     project = locked_project(ocx, tmp_path, pull=False)
     parent = project.directory / ".ocx"
     shutil.rmtree(project.home, ignore_errors=True)
-    os.chmod(parent, 0o555)
-    try:
+    with read_only_dir(parent):
         result = run_in(ocx, project.directory, "pull")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — a write failure never fails the pull; rc={result.returncode}\n"
@@ -1078,7 +1109,7 @@ def test_a_render_that_cannot_write_warns_on_stderr_and_still_exits_zero(
         assert "Skipping toolchain render" in result.stderr, (
             f"C-050 — the skip is warned on stderr; stderr:\n{result.stderr}"
         )
-        assert str(project.home) in result.stderr, (
+        assert rust_debug(str(project.home)) in result.stderr, (
             f"C-050 — …naming the home it could not prepare; stderr:\n{result.stderr}"
         )
         assert "Skipping toolchain render" not in result.stdout, (
@@ -1097,8 +1128,6 @@ def test_a_render_that_cannot_write_warns_on_stderr_and_still_exits_zero(
         assert project.default_package.marker in composed.stdout, (
             f"…and they resolve the lock's package; stdout:\n{composed.stdout!r}"
         )
-    finally:
-        os.chmod(parent, 0o755)
 
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1199,7 @@ def test_an_orphan_trampoline_is_pruned_and_every_group_link_is_left_alone(
         f"C-044 — `bin/` is a whole-directory reconcile; {orphan.name} must be "
         f"pruned. `bin/` holds {bin_entries(project.home)}"
     )
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         f"…and nothing inside the computed set may go with it; got "
         f"{bin_entries(project.home)}"
     )
@@ -1217,13 +1246,13 @@ def test_an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline(
     assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
 
     home = toolchain_home(project)
-    assert sorted(bin_entries(home)) == sorted([f"keepbin{label}", f"leavebin{label}"])
+    assert bin_entries(home) == expected_bin(f"keepbin{label}", f"leavebin{label}")
 
     write_ocx_toml(project, f'[tools]\nkeepkey{label} = "{keeper.fq}"\n')
     relocked = run_in(ocx, project, "lock")
     assert relocked.returncode == EXIT_SUCCESS, relocked.stderr
 
-    assert bin_entries(home) == [f"keepbin{label}"], (
+    assert bin_entries(home) == expected_bin(f"keepbin{label}"), (
         f"class 2 — the departed entry's trampoline must be gone; got {bin_entries(home)}"
     )
     assert sorted(link_entries(home)) == [f"{DEFAULT_GROUP}/keepkey{label}"], (
@@ -1269,13 +1298,13 @@ def test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_
     assert not empty.exists(), (
         f"class 3 — an emptied orphan group directory is removed; {empty} survived"
     )
-    assert payload.read_text() == "keep me\n", (
+    assert payload.read_text(encoding="utf-8") == "keep me\n", (
         "class 3 — a populated orphan group is never removed recursively"
     )
     assert populated.name in result.stderr, (
         f"…and the skip is reported, naming it; stderr:\n{result.stderr}"
     )
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         "…and the render continued past the skip"
     )
 
@@ -1302,7 +1331,7 @@ def test_an_orphan_directory_in_bin_is_skipped_and_never_removed_recursively(
     assert result.returncode == EXIT_SUCCESS, (
         f"RUL-32 — the render continues; rc={result.returncode}\n{result.stderr}"
     )
-    assert (hostile / "payload").read_text() == "keep me\n", (
+    assert (hostile / "payload").read_text(encoding="utf-8") == "keep me\n", (
         "class 4 — the directory is never removed recursively"
     )
     assert hostile.name in result.stderr, (
@@ -1311,7 +1340,7 @@ def test_an_orphan_directory_in_bin_is_skipped_and_never_removed_recursively(
     assert hostile.name not in result.stdout, (
         f"the skip warning belongs on stderr only; stdout:\n{result.stdout}"
     )
-    assert project.default_binary in bin_entries(project.home), (
+    assert trampoline_name(project.default_binary) in bin_entries(project.home), (
         "class 4 — later entries still render past the skip"
     )
 
@@ -1386,19 +1415,19 @@ def test_shifting_a_trampolines_mtime_perturbs_neither_the_stamp_nor_the_tree(
     project = locked_project(ocx, tmp_path)
     stamp_file = render_stamp_path(ocx, project.home)
     assert stamp_file is not None
-    before = json.loads(stamp_file.read_text())
-    assert "mtime" not in stamp_file.read_text(), (
-        f"C-003 — no field of the stamp records an mtime:\n{stamp_file.read_text()}"
+    before = json.loads(stamp_file.read_text(encoding="utf-8"))
+    assert "mtime" not in stamp_file.read_text(encoding="utf-8"), (
+        f"C-003 — no field of the stamp records an mtime:\n{stamp_file.read_text(encoding="utf-8")}"
     )
 
-    trampoline = project.default_trampoline
+    trampoline = trampoline_body(project.default_trampoline)
     inode = trampoline.lstat().st_ino
     os.utime(trampoline, (1_000_000, 1_000_000))
 
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert json.loads(stamp_file.read_text()) == before, (
+    assert json.loads(stamp_file.read_text(encoding="utf-8")) == before, (
         "C-003 — an mtime-only change must leave the stamp identical"
     )
     assert trampoline.lstat().st_ino == inode, (
@@ -1410,14 +1439,14 @@ def test_shifting_a_trampolines_mtime_perturbs_neither_the_stamp_nor_the_tree(
     )
 
     # The positive control: a byte change *is* noticed.
-    tampered = trampoline.read_text() + "# tamper\n"
-    trampoline.write_text(tampered)
+    tampered = trampoline.read_text(encoding="utf-8") + "# tamper\n"
+    trampoline.write_text(tampered, encoding="utf-8")
     assert run_in(ocx, project.directory, "pull").returncode == EXIT_SUCCESS
-    assert not trampoline.read_text().endswith("# tamper\n"), (
+    assert not trampoline.read_text(encoding="utf-8").endswith("# tamper\n"), (
         "C-003 — a changed body must be noticed and rewritten, or the mtime "
         "assertion above cannot tell 'unchanged' from 'never inspected'"
     )
-    restored = json.loads(stamp_file.read_text())
+    restored = json.loads(stamp_file.read_text(encoding="utf-8"))
     assert restored["names"] == before["names"]
     assert {
         name: entry["content_hash"]
@@ -1426,8 +1455,8 @@ def test_shifting_a_trampolines_mtime_perturbs_neither_the_stamp_nor_the_tree(
         name: entry["content_hash"] for name, entry in before["bin_fingerprint"].items()
     }, "…and the restored tree stamps back to the same content fingerprint"
     assert (
-        restored["bin_fingerprint"][project.default_binary]["file_id"]
-        != before["bin_fingerprint"][project.default_binary]["file_id"]
+        restored["bin_fingerprint"][trampoline.name]["file_id"]
+        != before["bin_fingerprint"][trampoline.name]["file_id"]
     ), (
         "…while `file_id` moves, because the repair is an atomic replace — which "
         "is why the mtime assertion above checks the inode rather than the stamp "
@@ -1463,17 +1492,17 @@ def test_pinned_suppresses_the_whole_link_pass_and_leaves_bin_byte_identical(
     project = locked_project(ocx, tmp_path)
     bin_before = snapshot_tree(shell_bin(project.home))
     poison = str(tmp_path)
-    project.default_link.unlink()
-    os.symlink(poison, project.default_link)
+    remove_link(project.default_link)
+    make_link(poison, project.default_link)
 
     write_ocx_toml(project.directory, project.config_body(pinned=True))
     pinned = run_in(ocx, project.directory, "pull")
     assert pinned.returncode == EXIT_SUCCESS, pinned.stderr
 
-    assert os.readlink(project.default_link) == poison, (
+    assert read_link(project.default_link) == poison, (
         "RUL-23 — a pinned render writes no link, so the poisoned target stands"
     )
-    assert project.group_link.is_symlink(), (
+    assert is_link(project.group_link), (
         "RUL-23 — …and prunes none either, so every other link stays on disk"
     )
     assert snapshot_tree(shell_bin(project.home)) == bin_before, (
@@ -1494,7 +1523,7 @@ def test_pinned_suppresses_the_whole_link_pass_and_leaves_bin_byte_identical(
     unpinned = run_in(ocx, project.directory, "pull")
     assert unpinned.returncode == EXIT_SUCCESS, unpinned.stderr
 
-    assert os.readlink(project.default_link) != poison, (
+    assert read_link(project.default_link) != poison, (
         "C-046 — flipping back re-renders the links"
     )
     assert snapshot_tree(shell_bin(project.home)) == bin_before, (
@@ -1537,7 +1566,7 @@ def test_relocating_the_home_renders_the_new_tree_and_abandons_the_old_one_in_pl
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert bin_entries(relocated) == [project.default_binary], (
+    assert bin_entries(relocated) == expected_bin(project.default_binary), (
         f"item 34 — the new home renders; it holds {bin_entries(relocated)}"
     )
     assert snapshot_tree(project.home) == abandoned, (
@@ -1662,7 +1691,7 @@ def test_a_managed_config_tier_relocates_every_project_tree_under_the_fleet_root
 
     pulled = run_in(ocx, project.directory, "pull", env_extra=managed)
     assert pulled.returncode == EXIT_SUCCESS, pulled.stderr
-    assert bin_entries(reported) == [project.default_binary], (
+    assert bin_entries(reported) == expected_bin(project.default_binary), (
         f"S-004 — the project tree renders under the fleet root; {reported} holds "
         f"{bin_entries(reported)}"
     )
@@ -1783,7 +1812,7 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
         f"the control: and exactly its two trampolines; got "
         f"{bin_entries(checkout.home)}"
     )
-    on_main = os.readlink(checkout.link)
+    on_main = read_link(checkout.link)
 
     # The checkout, exactly as a user makes it: git swaps both files at once.
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
@@ -1874,11 +1903,11 @@ def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
             f"…while the link ocx itself wrote is pruned (run {run}) — that "
             f"asymmetry is the whole rule"
         )
-        assert str(checkout.main_group_dir) in result.stderr, (
+        assert rust_debug(str(checkout.main_group_dir)) in result.stderr, (
             f"S-001 — …and the skip names the path, on every render, not once "
             f"(run {run}); stderr:\n{result.stderr}"
         )
-        assert str(checkout.main_group_dir) not in result.stdout, (
+        assert rust_debug(str(checkout.main_group_dir)) not in result.stdout, (
             f"the skip warning belongs on stderr only (run {run}); stdout:\n"
             f"{result.stdout}"
         )
@@ -1919,7 +1948,7 @@ def test_a_foreign_file_in_a_live_group_directory_is_reported_never_removed(
         f"RUL-32 — a file ocx did not write survives the prune byte-for-byte; "
         f"{planted.parent} holds {sorted(p.name for p in planted.parent.iterdir())}"
     )
-    assert str(planted) in result.stderr, (
+    assert rust_debug(str(planted)) in result.stderr, (
         f"C-050 — …and the skip names it, so the user is not left guessing; "
         f"stderr:\n{result.stderr}"
     )
@@ -1985,7 +2014,7 @@ def test_a_skipped_group_directory_says_why_and_what_to_do(
     result = run_in(ocx, checkout.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert str(checkout.main_group_dir) in result.stderr, (
+    assert rust_debug(str(checkout.main_group_dir)) in result.stderr, (
         "the control: the skip names the path"
     )
     assert "not empty" in result.stderr.lower(), (
@@ -2024,13 +2053,13 @@ def test_a_dereferenced_toolchain_copy_reports_the_same_entry_on_every_pull(
     """
     project = locked_project(ocx, tmp_path)
     alt = tmp_path / "dereferenced"
-    shutil.copytree(project.directory, alt, symlinks=False)
+    copy_tree(project.directory, alt, dereference=True)
     alt_home = toolchain_home(alt)
     entry = entry_link(alt_home, DEFAULT_GROUP, project.default_key)
 
-    assert entry.is_dir() and not entry.is_symlink(), (
+    assert entry.is_dir() and not is_link(entry), (
         f"the control: the copy dereferenced the entry link into a real "
-        f"directory; {entry} is {'a link' if entry.is_symlink() else 'absent'}"
+        f"directory; {entry} is {'a link' if is_link(entry) else 'absent'}"
     )
     payload = sorted(p for p in entry.rglob("*") if p.is_file())
     assert payload, "the control: a dereferenced copy carries real files"
@@ -2042,7 +2071,7 @@ def test_a_dereferenced_toolchain_copy_reports_the_same_entry_on_every_pull(
             f"C-050 — one unhealable entry never fails the render (run {run}); "
             f"rc={result.returncode}\n{result.stderr}"
         )
-        assert str(entry) in result.stderr, (
+        assert rust_debug(str(entry)) in result.stderr, (
             f"row 2 — the entry is reported on run {run}, not only on run 1; "
             f"stderr:\n{result.stderr}"
         )
@@ -2058,7 +2087,7 @@ def test_a_dereferenced_toolchain_copy_reports_the_same_entry_on_every_pull(
         # that did so was win32-only and runs on no CI leg (#419); this is the
         # same assertion on the leg that actually executes.
         assert_symlink_exists(active_link(alt_home))
-        assert os.readlink(active_link(alt_home)) == f"{SHELLS_DIR}/{DEFAULT_SHELL}", (
+        assert read_link(active_link(alt_home)) == active_target(alt_home), (
             f"item 47(b) — a copy that dereferenced `active` into a directory is "
             f"healed back into a link on run {run}, not left as the copy made it"
         )
@@ -2091,7 +2120,7 @@ def test_an_emptied_shells_directory_is_repopulated_by_the_next_pull(
         f"{bin_entries(project.home)}, expected {before}"
     )
     assert_symlink_exists(active_link(project.home))
-    assert os.readlink(active_link(project.home)) == f"{SHELLS_DIR}/{DEFAULT_SHELL}", (
+    assert read_link(active_link(project.home)) == active_target(project.home), (
         "…and `active` still names the shell the render re-created (C-083's "
         "order: the directory before the link that points at it)"
     )
@@ -2135,7 +2164,7 @@ def test_a_project_copied_to_a_new_path_does_not_expose_the_sources_trampolines(
     )
 
     moved = tmp_path / "moved"
-    shutil.copytree(project.directory, moved, symlinks=True)
+    copy_tree(project.directory, moved)
     allowed = run_in(ocx, moved, "shell", "allow")
     assert allowed.returncode == EXIT_SUCCESS, allowed.stderr
     state = json.loads(run_in(ocx, moved, "--format", "json", "shell", "state").stdout)
@@ -2156,7 +2185,7 @@ def test_a_project_copied_to_a_new_path_does_not_expose_the_sources_trampolines(
     )
     planted.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source_stamp, planted)
-    assert json.loads(planted.read_text())["home"] == str(project.home), (
+    assert json.loads(planted.read_text(encoding="utf-8"))["home"] == str(project.home), (
         "the control: the planted stamp records the **source** home, so only "
         "the identity gate can still refuse it"
     )
@@ -2188,17 +2217,19 @@ def test_a_copied_tree_still_bakes_the_source_root_until_a_render_runs(
     """
     project = locked_project(ocx, tmp_path)
     moved = tmp_path / "moved"
-    shutil.copytree(project.directory, moved, symlinks=True)
+    copy_tree(project.directory, moved)
     assert run_in(ocx, moved, "shell", "allow").returncode == EXIT_SUCCESS
-    body = (shell_bin(toolchain_home(moved)) / project.default_binary).read_bytes()
+    body = trampoline_body(
+        shell_bin(toolchain_home(moved)) / trampoline_name(project.default_binary)
+    ).read_bytes()
     assert str(project.directory).encode() in body, (
         "the control: a copied trampoline body names the source project root"
     )
 
     _path_segments(ocx, moved)
 
-    assert (
-        shell_bin(toolchain_home(moved)) / project.default_binary
+    assert trampoline_body(
+        shell_bin(toolchain_home(moved)) / trampoline_name(project.default_binary)
     ).read_bytes() == body, (
         "row 10 — a prompt neither rewrites nor prunes a stale body; the copy is "
         "byte-identical after the prompt ran"
@@ -2238,8 +2269,9 @@ def test_a_home_restored_at_the_same_absolute_path_passes_the_gate(
     # the staged ones, so the churn this row needs is deterministic.
     home_staged = home.with_name(home.name + ".restored")
     state_staged = state.with_name(state.name + ".restored")
-    shutil.copytree(home, home_staged, symlinks=True)
-    shutil.copytree(state, state_staged, symlinks=True)
+    # No retarget: the restored junctions must still name the original path.
+    copy_tree(home, home_staged, retarget=False)
+    copy_tree(state, state_staged, retarget=False)
     shutil.rmtree(home)
     shutil.rmtree(state)
     os.replace(home_staged, home)
@@ -2275,17 +2307,14 @@ def test_a_read_only_home_skips_rather_than_fails(
     the exit code becomes non-zero and the first assertion reds.
     """
     project = locked_project(ocx, tmp_path)
-    os.chmod(project.home, stat.S_IRUSR | stat.S_IXUSR)
-    try:
+    with read_only_dir(project.home):
         result = run_in(ocx, project.directory, "pull")
-    finally:
-        os.chmod(project.home, stat.S_IRWXU)
 
     assert result.returncode == EXIT_SUCCESS, (
         f"row 13 — an unwritable home skips; rc={result.returncode}\n{result.stderr}"
     )
     assert "warning:" in result.stderr, f"…and says so on stderr; stderr:\n{result.stderr}"
-    assert str(project.home) in result.stderr, (
+    assert rust_debug(str(project.home)) in result.stderr, (
         f"…naming the home it could not write; stderr:\n{result.stderr}"
     )
     assert "panicked" not in result.stderr and "RUST_BACKTRACE" not in result.stderr, (
@@ -2329,6 +2358,7 @@ def test_two_concurrent_pulls_leave_one_consistent_tree(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
         )
         for _ in range(2)
     ]
@@ -2392,7 +2422,7 @@ def test_a_legacy_bin_directory_beside_the_new_names_is_pruned_when_empty_and_re
         f"row 17 — an empty legacy `bin/` is removed by the depth-1 scan; "
         f"{legacy} survived"
     )
-    assert str(legacy) not in first.stderr, (
+    assert rust_debug(str(legacy)) not in first.stderr, (
         f"…silently: a `Pruned` outcome emits no warning; stderr:\n{first.stderr}"
     )
 
@@ -2401,13 +2431,13 @@ def test_a_legacy_bin_directory_beside_the_new_names_is_pruned_when_empty_and_re
     (legacy / "oldtool").write_text("#!/bin/sh\necho legacy\n")
     second = run_in(ocx, project.directory, "pull")
     assert second.returncode == EXIT_SUCCESS, second.stderr
-    assert (legacy / "oldtool").read_text() == "#!/bin/sh\necho legacy\n", (
+    assert (legacy / "oldtool").read_text(encoding="utf-8") == "#!/bin/sh\necho legacy\n", (
         "RUL-32 — a populated legacy `bin/` is never removed recursively"
     )
-    assert str(legacy) in second.stderr, (
+    assert rust_debug(str(legacy)) in second.stderr, (
         f"…and the skip names it; stderr:\n{second.stderr}"
     )
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         f"…and the real trampoline directory is untouched by either arm; it "
         f"holds {bin_entries(project.home)}"
     )
@@ -2448,11 +2478,11 @@ def test_a_legacy_group_directory_at_the_home_root_is_reported_and_never_deleted
         assert (legacy / "payload").read_bytes() == b"legacy bytes\n", (
             f"C-076 / RUL-32 — a legacy tree is never deleted (run {run})"
         )
-        assert str(project.home / "oldgroup") in result.stderr, (
+        assert rust_debug(str(project.home / "oldgroup")) in result.stderr, (
             f"C-076 — …and is reported per render, naming the directory to "
             f"remove (run {run}); stderr:\n{result.stderr}"
         )
-        assert str(project.home / "oldgroup") not in result.stdout, (
+        assert rust_debug(str(project.home / "oldgroup")) not in result.stdout, (
             f"…on stderr only (run {run}); stdout:\n{result.stdout}"
         )
 
@@ -2502,8 +2532,8 @@ def test_an_escaping_active_link_is_repointed_and_nothing_is_written_through_it(
     evil = tmp_path / "evil"
     evil.mkdir()
     active = active_link(project.home)
-    os.unlink(active)
-    os.symlink(str(evil), active)
+    remove_link(active)
+    make_link(str(evil), active)
 
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, (
@@ -2515,11 +2545,11 @@ def test_an_escaping_active_link_is_repointed_and_nothing_is_written_through_it(
         f"{sorted(p.name for p in evil.rglob('*'))}"
     )
     assert_symlink_exists(active)
-    assert os.readlink(active) == f"{SHELLS_DIR}/{DEFAULT_SHELL}", (
+    assert read_link(active) == active_target(project.home), (
         f"C-081 — …and the link is back at its one legal target; it names "
-        f"{os.readlink(active)!r}"
+        f"{read_link(active)!r}"
     )
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         f"…with the trampolines in the physical directory where they belong; "
         f"`bin/` holds {bin_entries(project.home)}"
     )
@@ -2539,17 +2569,17 @@ def test_an_absent_active_is_recreated_silently(ocx: OcxRunner, tmp_path: Path) 
     presence half still passes.
     """
     project = locked_project(ocx, tmp_path)
-    os.unlink(active_link(project.home))
-    assert not active_link(project.home).is_symlink(), (
+    remove_link(active_link(project.home))
+    assert not is_link(active_link(project.home)), (
         "the control: `active` is genuinely gone before the render runs"
     )
 
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert_symlink_exists(active_link(project.home))
-    assert os.readlink(active_link(project.home)) == f"{SHELLS_DIR}/{DEFAULT_SHELL}", (
+    assert read_link(active_link(project.home)) == active_target(project.home), (
         f"row 24 — …at its derived target; it names "
-        f"{os.readlink(active_link(project.home))!r}"
+        f"{read_link(active_link(project.home))!r}"
     )
     assert "warning:" not in result.stderr, (
         f"row 24 — an ordinary heal is not a warning; stderr:\n{result.stderr}"
@@ -2581,21 +2611,23 @@ def test_a_dangling_active_is_repointed_not_pruned(
     """
     project = locked_project(ocx, tmp_path)
     active = active_link(project.home)
-    os.unlink(active)
-    os.symlink(f"{SHELLS_DIR}/ghost", active)
-    assert os.readlink(active) == f"{SHELLS_DIR}/ghost", "the control: it dangles"
+    remove_link(active)
+    make_link(f"{SHELLS_DIR}/ghost", active)
+    assert read_link(active) == active_target(project.home, "ghost"), (
+        "the control: it dangles"
+    )
 
     result = run_in(ocx, project.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert snapshot_tree(project.home)[ACTIVE_LINK] == (
         "symlink",
-        f"{SHELLS_DIR}/{DEFAULT_SHELL}",
+        active_target(project.home),
     ), (
         f"row 25 — a dangling `active` is repointed, not pruned; the snapshot "
         f"holds {snapshot_tree(project.home).get(ACTIVE_LINK)!r}"
     )
-    assert bin_entries(project.home) == [project.default_binary], (
+    assert bin_entries(project.home) == expected_bin(project.default_binary), (
         "…and the render it gated went on to write the trampolines"
     )
 
@@ -2626,14 +2658,14 @@ def test_a_repointed_active_withholds_the_project_from_the_prompt(
     )
 
     shell_bin(project.home, "other").mkdir(parents=True)
-    os.unlink(active_link(project.home))
-    os.symlink(f"{SHELLS_DIR}/other", active_link(project.home))
+    remove_link(active_link(project.home))
+    make_link(f"{SHELLS_DIR}/other", active_link(project.home))
 
     segments, emitted = _path_segments(ocx, project.directory)
     assert str(path_facing_bin(project.home)) not in segments, (
         f"row 30 — a repointed `active` withholds the project; segments {segments}"
     )
-    assert os.readlink(active_link(project.home)) == f"{SHELLS_DIR}/other", (
+    assert read_link(active_link(project.home)) == active_target(project.home, "other"), (
         "C-080 — …and the prompt healed nothing on its way there: a prompt is "
         "read-only, and the render is what repairs this"
     )
@@ -2665,7 +2697,7 @@ def test_a_junction_dereferencing_copy_leaves_a_real_directory_at_active(
     """
     project = locked_project(ocx, tmp_path)
     copied = tmp_path / "explorer-copy"
-    shutil.copytree(project.directory, copied, symlinks=False)
+    copy_tree(project.directory, copied, dereference=True)
     copied_home = toolchain_home(copied)
     assert copied_home.joinpath(ACTIVE_LINK).is_dir(), (
         "the control: the dereferencing copy left a real directory at `active`"
@@ -2673,7 +2705,7 @@ def test_a_junction_dereferencing_copy_leaves_a_real_directory_at_active(
 
     assert run_in(ocx, copied, "pull").returncode == EXIT_SUCCESS
     assert_symlink_exists(active_link(copied_home))
-    assert os.readlink(active_link(copied_home)) == f"{SHELLS_DIR}\\{DEFAULT_SHELL}"
+    assert read_link(active_link(copied_home)) == active_target(copied_home)
 
 
 @pytest.mark.parametrize(
@@ -2704,20 +2736,20 @@ def test_a_prompt_writes_nothing_however_corrupt_the_tree_is(
     active = active_link(project.home)
     outside = tmp_path / "outside"
     outside.mkdir()
-    os.unlink(active)
+    remove_link(active)
     if state == "absent":
         pass
     elif state == "dangling":
-        os.symlink(f"{SHELLS_DIR}/ghost", active)
+        make_link(f"{SHELLS_DIR}/ghost", active)
     elif state == "escaping":
-        os.symlink(str(outside), active)
+        make_link(str(outside), active)
     elif state == "regular-file":
         active.write_bytes(b"not a link\n")
     elif state == "real-directory":
         active.mkdir()
         (active / "payload").write_bytes(b"foreign\n")
     else:
-        os.symlink(ACTIVE_LINK, active)
+        make_link(ACTIVE_LINK, active)
 
     before = snapshot_tree(project.home)
     _path_segments(ocx, project.directory)
