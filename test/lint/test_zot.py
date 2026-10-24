@@ -445,9 +445,16 @@ if sys.platform == "win32":
         """The Windows twin of the SIGKILL test above: the job object, not a watchdog, ends the zots."""
         # `start()` runs `<binary> serve <config>`, so python runs the script named `serve` in its cwd.
         write_fake_zot(tmp_path / "serve")
+        # The base interpreter, not the venv launcher: the launcher holds its child in a
+        # kill-on-close job of its own, which ends the zots even with the guard's job removed.
+        base_python = getattr(sys, "_base_executable", sys.executable)
+        # zot.py is stdlib-only; `src/__init__.py` imports what the base interpreter lacks.
         controller_source = (
-            "import json, os, sys, time\n"
-            "from src import zot\n"
+            "import importlib.util, json, os, sys, time\n"
+            f"spec = importlib.util.spec_from_file_location('zot', {str(TEST_ROOT / 'src' / 'zot.py')!r})\n"
+            "zot = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['zot'] = zot\n"
+            "spec.loader.exec_module(zot)\n"
             f"os.chdir({str(tmp_path)!r})\n"
             "stack = zot.start(sys.executable, timeout=60)\n"
             "print(json.dumps({'self': os.getpid(), 'pids': stack.pids, 'root': str(stack.root)}), flush=True)\n"
@@ -458,7 +465,7 @@ if sys.platform == "win32":
         env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(tmp_path)
         env.pop("FAKE_ZOT_MODE", None)
         launcher = subprocess.Popen(
-            [sys.executable, "-c", controller_source],
+            [base_python, "-c", controller_source],
             cwd=TEST_ROOT,
             env=env,
             stdout=subprocess.PIPE,
@@ -473,8 +480,7 @@ if sys.platform == "win32":
                 f"the controller exited before announcing its zots: {launcher.stderr.read()}"
             )
             announced = json.loads(line)
-            # A venv's python.exe is a launcher that runs the real interpreter as its child: the
-            # pid the controller reports for itself, and the fake's own pid files, name the real ones.
+            # The fakes' own pid files name the serving processes, whatever `Popen` returned.
             fake_pids = [
                 int(pid_file.read_text(encoding="utf-8"))
                 for pid_file in Path(announced["root"]).glob("*/pid")
