@@ -86,17 +86,12 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
-  custom-verify-version:
-    uses: ./.github/workflows/verify-version.yml
-    secrets: inherit
-
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-      - custom-verify-version
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
@@ -171,10 +166,20 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  custom-verify-version:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
+    uses: ./.github/workflows/verify-version.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "read"
+
   custom-readiness-gate:
     needs:
       - plan
-      - custom-verify-version
     if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
     uses: ./.github/workflows/readiness-gate.yml
     with:
@@ -189,6 +194,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-verify-version
       - custom-readiness-gate
     runs-on: "ubuntu-22.04"
     env:
@@ -255,6 +261,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-verify-version
       - custom-readiness-gate
     uses: ./.github/workflows/scan-binaries.yml
     with:
@@ -267,11 +274,12 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-verify-version
       - custom-readiness-gate
       - build-global-artifacts
       - custom-scan-binaries
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-scan-binaries.result == 'skipped' || needs.custom-scan-binaries.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-readiness-gate.result == 'skipped' || needs.custom-readiness-gate.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-scan-binaries.result == 'skipped' || needs.custom-scan-binaries.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-verify-version.result == 'skipped' || needs.custom-verify-version.result == 'success') && (needs.custom-readiness-gate.result == 'skipped' || needs.custom-readiness-gate.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

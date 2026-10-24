@@ -135,6 +135,7 @@ jobs:
         with:
           name: ${{ needs.plan.outputs.artifact }}
           path: test/bin/
+          overwrite: true
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -143,6 +144,7 @@ jobs:
         with:
           name: ${{ needs.plan.outputs.artifact }}-schema
           path: website/src/public/schemas/metadata/v1.json
+          overwrite: true
           if-no-files-found: error
           retention-days: 1
 
@@ -323,6 +325,8 @@ jobs:
         with:
           name: accept-junit-${{ inputs.os }}-shard-${{ matrix.shard }}
           path: target/accept/junit/*.xml
+          # A rerun of the shard uploads this name again, and the action refuses a name the run holds.
+          overwrite: true
           retention-days: 1
 
   # The floor and the skip/xfail ceilings are properties of the whole suite, so

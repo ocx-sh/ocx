@@ -117,6 +117,7 @@ jobs:
         with:
           name: shell-latency-macos
           path: test/bench/results/shell-latency*.json
+          overwrite: true
           retention-days: 7
 
   windows:
