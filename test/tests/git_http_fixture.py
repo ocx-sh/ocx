@@ -443,16 +443,12 @@ class RefusalShape(enum.StrEnum):
     """The seven server-side refusals whose verbatim client stderr the Rust phrase
     table is written against.
 
-    Named as a closed set so the producer test cannot silently lose a row: its
-    red state is "git 2.54 emits a phrase the table does not contain", and a
-    table keyed by an open-ended string could never notice a missing key.
-
-    The two 403 shapes are separate members because they are answered on
-    different requests and produce *different* client-side stderr.
-
-    `FETCH_FIRST` and `NON_FAST_FORWARD` are one verdict worded two ways: git says
-    `(fetch first)` while the remote tip is absent from the client's object store
-    and `(non-fast-forward)` once it is present and not an ancestor of the push.
+    A closed set, so the producer test cannot silently lose a row: its red state is
+    "git emits a phrase the table does not contain", which an open-ended string key
+    could never notice. The two 403 shapes are separate members: answered on different
+    requests, they produce different stderr. `FETCH_FIRST` and `NON_FAST_FORWARD` are one
+    verdict worded two ways: git says `(fetch first)` while the remote tip is absent from
+    the client's object store, `(non-fast-forward)` once it is present and not an ancestor.
     """
 
     PRE_RECEIVE_DECLINED = "pre-receive-declined"

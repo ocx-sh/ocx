@@ -4,12 +4,11 @@
 
 `rm -rf {{.JUNIT_DIR}}` under a checkout at `/home/u/ocx work` runs
 `rm -rf /home/u/ocx work/target/accept/junit` and deletes `/home/u/ocx`, a
-sibling checkout. Taskfile commands run through task's built-in shell
-(mvdan/sh) on every platform, where `'…'` and `"…"` both quote, so an unquoted
-`{{…}}` value in an argument position of one of these four commands is the
-defect. The taskfiles are read with a YAML parser; the shell text inside each
-command is then scanned for quote state, so `rm` in a `desc:` paragraph or as
-a `docker compose rm` argument is not a command position.
+sibling checkout. Task's built-in shell (mvdan/sh) runs every command on every
+platform, where `'…'` and `"…"` both quote, so an unquoted `{{…}}` value in an
+argument position of one of these four commands is the defect. The shell text
+of each parsed command is scanned for quote state, so `rm` in a `desc:`
+paragraph or as a `docker compose rm` argument is not a command position.
 """
 
 from __future__ import annotations

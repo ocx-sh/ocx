@@ -6,18 +6,10 @@
     python3 scripts/accept_shard.py --shard-count 40 --shard-index 3 --format labels   # bazel:test:accept
     python3 scripts/accept_shard.py --shard-count 40 --shard-index 3 --format paths    # test:accept:native
 
-Modules are `test/tests/test_*.py`, sorted by stem; shard `I` of `N` (0-based) takes
-`modules[I::N]`. Both execution paths (the Bazel targets and the native pytest
-run) call this, so a module lands in the same shard on either. Without a shard
-every module is printed. Flags win; with none, Bazel's test-sharding variables
-`TEST_TOTAL_SHARDS` and `TEST_SHARD_INDEX` are read, and `TEST_SHARD_STATUS_FILE`
-is touched when set (the protocol's "this runner shards" signal).
-
-Exit 2 is a bad request: a count below 1, an index outside `0..N-1`, a non-integer,
-or one half of a pair. Exit 1 is an empty selection: a shard past the module count
-would otherwise run nothing and report green.
-
-Stdlib only; `scripts/tests/test_accept_shard.py` shows it red and green.
+Modules are `test/tests/test_*.py`, sorted by stem; shard `I` of `N` (0-based) takes `modules[I::N]`.
+The Bazel targets and the native pytest run both call this, so a module lands in the same shard on
+either. Without a shard every module is printed; flags win, else Bazel's `TEST_TOTAL_SHARDS` and
+`TEST_SHARD_INDEX` are read. Exit 2 is a bad request, exit 1 an empty selection.
 """
 
 from __future__ import annotations
@@ -88,6 +80,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     parser.add_argument("--root", type=Path, default=REPO_ROOT)
     args = parser.parse_args(argv)
 
+    # Touched when set: Bazel's protocol signal that this runner shards.
     status_file = env.get(ENV_STATUS_FILE)
     if status_file:
         try:
@@ -106,6 +99,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         print(f"accept shard: no acceptance module under {args.root / 'test' / 'tests'}", file=sys.stderr)
         return 1
     chosen = stems if shard is None else select(stems, *shard)
+    # A shard past the module count would otherwise run nothing and report green.
     if not chosen:
         print(f"accept shard: shard {shard[1]} of {shard[0]} selects none of the {len(stems)} modules", file=sys.stderr)
         return 1

@@ -3,15 +3,13 @@
 # Copyright 2026 The OCX Authors
 """Cross-built unit tests as a bundle that a native runner executes without a toolchain.
 
-Linux builds (`bundle`, `bin`); Windows and macOS only unpack and execute (`run`).
-`run` is stdlib-only and works on any Python 3.8+.
+Linux builds (`bundle`, `bin`); Windows and macOS only unpack and execute (`run`, stdlib-only, Python 3.8+).
 
   test_bundle.py bundle --target <triple> [--out PATH] [--cache-rc ARG]
   test_bundle.py run    --bundle PATH [--source-root DIR] [--junit PATH] [--timeout SECS] [--filter SUBSTR]
   test_bundle.py bin    --target <triple> [--out DIR] [--cache-rc ARG]
 
-`--cache-rc` is the root taskfile's `CACHE_RC`, passed in by the cross tasks: whether the
-CI cache credential applies is decided there, once.
+`--cache-rc` is the root taskfile's `CACHE_RC`: the cross tasks decide once whether the CI cache credential applies.
 """
 
 from __future__ import annotations

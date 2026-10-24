@@ -779,8 +779,8 @@ def test_rejection_hook_writes_literal_refusal_line(
     """The `pre-receive` hook writes the refusal line WITHOUT a `remote: ` prefix.
 
     `send-pack` adds that prefix itself. A hook echoing the ADR's quoted string
-    verbatim produces `remote: remote: …`, and an exact-line assertion in WP-12
-    then reds for a reason that has nothing to do with the classifier.
+    verbatim produces `remote: remote: …`, and an exact-line assertion in the stderr
+    classifier's tests then reds for a reason that has nothing to do with the classifier.
     """
     line = "GL-HOOK-ERR: You are not allowed to push code to this project."
     fake_forge.git_http_pre_receive_refusal = line
@@ -801,7 +801,7 @@ def test_rejection_hook_writes_literal_refusal_line(
 def test_server_side_rejection_texts_are_recorded(
     fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """The PRODUCER for WP-12's phrase table: every refusal shape, verbatim.
+    """The PRODUCER for the stderr classifier's phrase table: every refusal shape, verbatim.
 
     `OBSERVED_REFUSAL_STDERR` ships as seven empty strings. This test drives all
     seven shapes against the local `git`, asserts every published value is
@@ -820,7 +820,7 @@ def test_server_side_rejection_texts_are_recorded(
     phrase verbatim, and `NOT_ALLOWED_TO_PUSH`'s contains
     `PRE_RECEIVE_DECLINED`'s. So a table that published one phrase under BOTH
     keys of either pair would pass this loop — which is precisely the state that
-    destroys WP-12's ability to tell seven shapes apart. Distinctness and the two
+    destroys the classifier's ability to tell seven shapes apart. Distinctness and the two
     reachable asymmetric guards are what close that.
     """
     observed = {shape: _refusal_stderr(fake_forge, tmp_path, shape) for shape in RefusalShape}

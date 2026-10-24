@@ -28,7 +28,7 @@ on:
 permissions: {}
 
 jobs:
-  # One parallel leg per triple (variant B of plan_pr637_round2.md D13: cross-builds in the deep tier
+  # One parallel leg per triple (variant B: cross-builds in the deep tier
   # only). The artifacts it uploads belong to this run, which is how the native legs below find them.
   cross:
     name: Cross-build
@@ -154,10 +154,9 @@ jobs:
 
   satellite-verify:
     name: Satellite Verify (ocx-mirror)
-    # NON-BLOCKING until ocx-sh/ocx-mirror re-points at the split crates
-    # (plan_crate_split_workspace.md DEC-4). The flip is deleting the
-    # `continue-on-error` line below and nothing else; the ocx-mirror
-    # follow-up PR that WP-39 specifies carries it. While the line is set
+    # NON-BLOCKING until ocx-sh/ocx-mirror re-points at the split crates.
+    # The flip is deleting the `continue-on-error` line below and nothing
+    # else; the ocx-mirror follow-up PR carries it. While the line is set
     # this job must NEVER be made a required check: the job's own check run
     # still concludes `failure` (only the workflow run and `needs.*.result`
     # read `success`), so a required check on it would block every merge
