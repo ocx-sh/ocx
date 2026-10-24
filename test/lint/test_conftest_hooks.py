@@ -10,6 +10,7 @@ registry: the inner sessions set `OCX_TESTS_NO_REGISTRY`.
 
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src import zot
 from src.helpers import rglob_no_links
 
 TEST_ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +113,16 @@ def test_the_session_starts_zot_unless_every_target_is_the_lint_tier(
 
 
 @pytest.mark.parametrize(
-    "opt_out", ["worker", "no_registry", "collectonly", "help", "version"]
+    "opt_out",
+    [
+        "worker",
+        "no_registry",
+        "collectonly",
+        "help",
+        "version",
+        "showfixtures",
+        "markers",
+    ],
 )
 def test_the_session_does_not_start_zot_when_it_opts_out_or_runs_no_test(
     root_conftest, monkeypatch: pytest.MonkeyPatch, opt_out: str
@@ -123,6 +134,92 @@ def test_the_session_does_not_start_zot_when_it_opts_out_or_runs_no_test(
     else:
         config = _config(["tests"], **{opt_out: True})
     assert root_conftest._wants_zot(config) is False
+
+
+@pytest.mark.parametrize(
+    "flag", ["--collect-only", "--help", "--version", "--fixtures", "--markers"]
+)
+def test_the_no_test_flags_are_read_under_pytests_own_option_names(
+    pytester: pytest.Pytester,
+    root_conftest,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+) -> None:
+    """A fake config answers any name; only the real parser knows `--fixtures` is `showfixtures`."""
+    monkeypatch.delenv("OCX_TESTS_NO_REGISTRY", raising=False)
+    assert (
+        root_conftest._wants_zot(pytester.parseconfig("-p", "no:cacheprovider")) is True
+    ), "control: without a no-test flag the same real config starts zot"
+    config = pytester.parseconfig("-p", "no:cacheprovider", flag)
+    assert root_conftest._wants_zot(config) is False
+
+
+def _configure(
+    pytester: pytest.Pytester,
+    root_conftest,
+    monkeypatch: pytest.MonkeyPatch,
+    start,
+) -> pytest.Config:
+    """A real config that wants zot, with `zot.start` replaced by `start`."""
+    monkeypatch.delenv("OCX_TESTS_NO_REGISTRY", raising=False)
+    monkeypatch.setattr(root_conftest.zot, "start", start)
+    return pytester.parseconfig("-p", "no:cacheprovider")
+
+
+def test_a_zot_that_fails_to_start_aborts_the_session_as_a_usage_error_naming_the_cause(
+    pytester: pytest.Pytester, root_conftest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cause = (
+        "zot `registry` did not answer GET /v2/ with 200 within 60 s; log: /x/zot.log"
+    )
+
+    def start(*args, **kwargs):
+        raise zot.ZotError(cause)
+
+    config = _configure(pytester, root_conftest, monkeypatch, start)
+    with pytest.raises(pytest.UsageError) as failure:
+        root_conftest.pytest_configure(config)
+    assert str(failure.value) == cause
+    assert root_conftest._ZOT not in config.stash
+    # Nothing was started, so unconfigure has nothing to stop.
+    root_conftest.pytest_unconfigure(config)
+
+
+def test_a_started_stack_is_exported_stashed_and_stopped_at_unconfigure(
+    pytester: pytest.Pytester, root_conftest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list = []
+
+    class Stack:
+        def env(self) -> dict[str, str]:
+            return {"OCX_TEST_REGISTRY_PORT": "4242"}
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    stack = Stack()
+
+    def start(*args, **kwargs):
+        events.append((args, kwargs))
+        return stack
+
+    config = _configure(pytester, root_conftest, monkeypatch, start)
+    monkeypatch.setenv("OCX_TEST_REGISTRY_PORT", "0")  # restored at teardown
+    root_conftest.pytest_configure(config)
+    assert os.environ["OCX_TEST_REGISTRY_PORT"] == "4242"
+    assert config.stash[root_conftest._ZOT] is stack
+    assert events == [((), {})], "the session passes no timeout: the default governs"
+    root_conftest.pytest_unconfigure(config)
+    assert events[-1] == "stop"
+
+
+def test_the_wait_the_session_gives_zot_is_sixty_seconds() -> None:
+    """The session calls `zot.start()` bare (test above), so this default is the wait."""
+    assert zot.READY_TIMEOUT_SECONDS == 60.0
+    assert (
+        inspect.signature(zot.start).parameters["timeout"].default
+        == zot.READY_TIMEOUT_SECONDS
+    )
 
 
 def _hanging_run(
