@@ -859,24 +859,16 @@ def read_uncached_modules(text: str | None = None) -> frozenset[str]:
 
 
 # ---------------------------------------------------------------------------
-# The runner's host locks (`test/bazel.bzl` § Concurrency). Judged by RUNNING
-# the generated script against a fake `flock` and a fake `uv` that log what
-# they were handed, not by grepping its text: a text check passes a script
-# whose loop never runs, and this one cannot.
+# The runner's arena lock and zot hand-over (`test/bazel.bzl` § Concurrency).
+# Judged by RUNNING the generated script against a fake `flock` and a fake `uv`
+# that log what they were handed, not by grepping its text: a text check passes
+# a script whose lock never runs, and this one cannot.
 # ---------------------------------------------------------------------------
 
 RUNNER_NAME = "_RUNNER"
 UNSERIALISED_ENV = "OCX_ACCEPTANCE_UNSERIALISED"
-RUNNER_PROBE_SLOTS = ("b_slot", "a_slot")
-"""Handed to the runner out of order and must come back sorted, one lock each."""
-RUNNER_PORT = "5317"
-"""Not the default 5000, so a runner that hard-codes the default is told apart."""
-RUNNER_TOOLS = ("basename", "cksum", "cut", "dirname", "ln", "mkdir", "readlink", "sort", "tr", "true")
+RUNNER_TOOLS = ("basename", "cksum", "cut", "dirname", "ln", "mkdir", "readlink", "tr", "true")
 """The external commands the runner and the two fakes call — the whole PATH."""
-TEST_TASKFILE = REPO_ROOT / "test" / "taskfile.yml"
-TASKFILE_LOCKED = 'LOCKED="flock -o {{.ACCEPTANCE_TURNSTILE}} flock -o {{.ACCEPTANCE_LOCK}}";'
-"""The taskfile pytest step's lock prefix: the turnstile held, then the suite
-lock exclusive, each with `-o`."""
 
 # Logs every lock as `flock <mode> <-o|hold> <full path> <command>`, and a `-n`
 # probe as `probe <mode> <full path>` without running anything.
@@ -901,38 +893,14 @@ shift
 exec "$@"
 """
 
-# Logs the call; runs a `python -c` for real, so the barrier's Python executes
-# against the stub suite below instead of being judged by its text.
+# Logs the call and the zot path pytest would have been handed.
 _FAKE_UV = r"""#!/bin/sh
 { printf 'uv'; printf ' %s' "$@"; } | tr '\n' ' ' >> "$RUNNER_PROBE_LOG"
 echo >> "$RUNNER_PROBE_LOG"
-if [ "$1 $2 $3" = "run python -c" ]; then exec "$RUNNER_PYTHON" -c "$4"; fi
+printf 'zot %s\n' "${OCX_TEST_ZOT:-}" >> "$RUNNER_PROBE_LOG"
 """
 
-# The stub `src.helpers` and `conftest` the barrier imports. `pytest_sessionstart`
-# records whether the real compose lock is held during the call, and whether
-# the lock the helpers now name can be taken — the hook's own recycle path takes
-# it, so a `0` there is the self-deadlock the redirect exists to avoid.
-_STUB_HELPERS = 'import os, pathlib\n_COMPOSE_LOCK = pathlib.Path(os.environ["RUNNER_COMPOSE_LOCK"])\n'
-_STUB_CONFTEST = """import fcntl, os
-import src.helpers as helpers
-
-def _free(path):
-    with open(path, "a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0
-        return 1
-
-def pytest_sessionstart(session):
-    held = 1 - _free(os.environ["RUNNER_COMPOSE_LOCK"])
-    takeable = _free(helpers._COMPOSE_LOCK)
-    with open(os.environ["RUNNER_PROBE_LOG"], "a") as log:
-        log.write(f"barrier-probe held={held} takeable={takeable}\\n")
-"""
-
-RUNNER_MSG = "runner locks: {problem} (test/bazel.bzl `_RUNNER`, § Concurrency)"
+RUNNER_MSG = "runner: {problem} (test/bazel.bzl `_RUNNER`, § Concurrency)"
 
 
 def read_runner(text: str | None = None) -> str:
@@ -949,62 +917,35 @@ def read_runner(text: str | None = None) -> str:
         and any(isinstance(t, ast.Name) and t.id == RUNNER_NAME for t in node.targets)
     ]
     if len(values) != 1 or not (isinstance(values[0], ast.Constant) and isinstance(values[0].value, str)):
-        raise SystemExit(f"runner locks: {ACCEPTANCE_BZL.name} `{RUNNER_NAME}` is not one literal string")
+        raise SystemExit(f"runner: {ACCEPTANCE_BZL.name} `{RUNNER_NAME}` is not one literal string")
     return values[0].value
-
-
-def taskfile_lock_paths(home: Path, text: str | None = None) -> dict[str, str]:
-    """`test/taskfile.yml`'s `ACCEPTANCE_LOCK` / `ACCEPTANCE_TURNSTILE`, evaluated
-    the way go-task does (the folded `sh:` scalar run by a shell) for `home` and
-    `RUNNER_PORT`. Refused rather than guessed when either is not that shape."""
-    if text is None:
-        text = TEST_TASKFILE.read_text(encoding="utf-8")
-    paths: dict[str, str] = {}
-    for name in ("ACCEPTANCE_LOCK", "ACCEPTANCE_TURNSTILE"):
-        found = re.search(rf"^  {name}:\n    sh: >-\n((?:      \S.*\n)+)", text, re.MULTILINE)
-        if found is None:
-            raise SystemExit(f"runner locks: test/taskfile.yml `{name}` is not a folded `sh:` scalar")
-        script = " ".join(line.strip() for line in found.group(1).splitlines())
-        # `mkdir` is the one external command the scalar runs; no ambient
-        # environment is read (C-029 holds this file to that).
-        mkdir = shutil.which("mkdir")
-        if mkdir is None:
-            raise SystemExit("runner locks: `mkdir` is not on PATH")
-        env = {"HOME": str(home), "OCX_TEST_REGISTRY_PORT": RUNNER_PORT, "PATH": str(Path(mkdir).parent)}
-        paths[name] = subprocess.run(
-            ["/bin/sh", "-c", script], env=env, capture_output=True, encoding="utf-8", check=True
-        ).stdout
-    return paths
 
 
 RUNNER_BINARIES = {
     "OCX_COMMAND": "_main/probe/ocx",
     "OCX_SHIM_BINARY": "_main/probe/ocx-shim",
     "OCX_TEST_PYTHON": "_main/probe/python3",
+    "OCX_TEST_ZOT": "_main/probe/zot",
 }
 """Stand-ins for the rlocationpaths `test/bazel.bzl`'s `_BINARY_ENV` expands
 to, which the runner resolves under `$TEST_SRCDIR`; the runner reads only the
 env value, so the fake runfiles tree need not mirror the real labels."""
 
 
-def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tuple[int, str, list[str]]:
-    """Run `runner` once in a fake runfiles tree: `(rc, stderr, probe log lines)`."""
+def _run_runner(
+    runner: str, scratch: Path, *, flock: bool, opt_in: bool, drop: str | None = None
+) -> tuple[int, str, list[str]]:
+    """Run `runner` once in a fake runfiles tree: `(rc, stderr, probe log lines)`.
+
+    `drop` removes one name from the env the target would have handed it."""
     root = Path(tempfile.mkdtemp(dir=scratch))
     suite = root / "checkout" / "test"
     (suite / "tests").mkdir(parents=True)
-    (suite / "src").mkdir()
-    for name, text in (
-        ("pyproject.toml", ""),
-        ("tests/test_probe.py", ""),
-        ("conftest.py", _STUB_CONFTEST),
-        ("src/helpers.py", _STUB_HELPERS),
-    ):
-        (suite / name).write_text(text, encoding="utf-8")
+    for name in ("pyproject.toml", "tests/test_probe.py", "conftest.py"):
+        (suite / name).write_text("", encoding="utf-8")
     srcdir = root / "srcdir"
     (srcdir / "_main" / "test").mkdir(parents=True)
     (srcdir / "_main" / "test" / "conftest.py").symlink_to(suite / "conftest.py")
-    # The two binaries every target carries as runfiles (`test/bazel.bzl`
-    # `_BINARY_ENV`), named by rlocationpath in the env below.
     for binary in RUNNER_BINARIES.values():
         (srcdir / binary).parent.mkdir(parents=True, exist_ok=True)
         (srcdir / binary).write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1023,7 +964,7 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
     for tool in RUNNER_TOOLS:
         found = shutil.which(tool)
         if found is None:
-            raise SystemExit(f"runner locks: `{tool}` is not on PATH, so the runner cannot be exercised")
+            raise SystemExit(f"runner: `{tool}` is not on PATH, so the runner cannot be exercised")
         (tools / tool).symlink_to(found)
     path = str(tools)
     if flock:
@@ -1045,12 +986,10 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
         "TEST_WORKSPACE": "_main",
         "TEST_TMPDIR": str(root / "tmp"),
         "RUNNER_PROBE_LOG": str(log),
-        "RUNNER_PYTHON": sys.executable,
-        "RUNNER_COMPOSE_LOCK": str(root / "compose.lock"),
-        "OCX_TEST_REGISTRY_PORT": RUNNER_PORT,
-        "OCX_ACCEPTANCE_SLOTS": " ".join(RUNNER_PROBE_SLOTS),
         **RUNNER_BINARIES,
     }
+    if drop is not None:
+        del env[drop]
     if opt_in:
         env[UNSERIALISED_ENV] = "1"
     done = subprocess.run(
@@ -1064,41 +1003,15 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
     return done.returncode, done.stderr, log.read_text(encoding="utf-8").splitlines()
 
 
-def _chains(lines: list[str]) -> list[tuple[list[str], str]]:
-    """The log as `[(locks taken, in order, for one uv call), that uv call)]`.
-
-    A lock whose command is `true` is a pass-through (taken and released at
-    once) and reads `pass <path>`; the rest read `<mode> <-o|hold> <path>`.
-    Probe lines are not locks and are left to the caller."""
-    chains: list[tuple[list[str], str]] = []
-    locks: list[str] = []
-    for line in lines:
-        if line.startswith("flock "):
-            mode, close, path, command = line.removeprefix("flock ").split(" ")
-            locks.append(f"pass {path}" if command == "true" else f"{mode} {close} {path}")
-        elif line.startswith("uv"):
-            chains.append((locks, line))
-            locks = []
-    if locks:
-        chains.append((locks, ""))
-    return chains
-
-
-def runner_lock_findings(
-    runner: str | None = None, scratch: Path | None = None, taskfile: str | None = None
-) -> list[Finding]:
-    """The runner passes the turnstile and takes the suite lock SHARED around every
-    uv call, at the paths `test/taskfile.yml` computes; runs the stack barrier
-    under the stack lock with the real `_COMPOSE_LOCK` held and the helpers
-    pointed elsewhere; holds one slot lock per `OCX_ACCEPTANCE_SLOTS` name in
-    sorted order and the arena's lock around pytest; takes every lock with `-o`
-    and probes each blocking one first; and refuses a host with no flock(1)
-    unless `OCX_ACCEPTANCE_UNSERIALISED=1`. The taskfile's own step holds the
-    turnstile and the suite lock, both with `-o`."""
+def runner_lock_findings(runner: str | None = None, scratch: Path | None = None) -> list[Finding]:
+    """The runner takes the arena's lock EXCLUSIVE with `-o` around the one pytest
+    call, probes it with `flock -n` first, hands pytest `OCX_TEST_ZOT` as an
+    absolute path under `$TEST_SRCDIR` (and refuses a target that names none),
+    gives two checkouts of one folder name different arenas, and refuses a host
+    with no flock(1) unless `OCX_ACCEPTANCE_UNSERIALISED=1`. It takes no other
+    lock: every registry the suite writes is the session's own."""
     if runner is None:
         runner = read_runner()
-    if taskfile is None:
-        taskfile = TEST_TASKFILE.read_text(encoding="utf-8")
     if scratch is None:
         scratch = REPO_ROOT / ".tmp"
         scratch.mkdir(exist_ok=True)
@@ -1107,64 +1020,35 @@ def runner_lock_findings(
     def red(code: str, problem: str) -> None:
         findings.append(Finding(code, RUNNER_MSG.format(problem=problem)))
 
-    if TASKFILE_LOCKED not in taskfile:
-        red("runner-taskfile", f"test/taskfile.yml's pytest step does not lock as `{TASKFILE_LOCKED}`")
     with tempfile.TemporaryDirectory(dir=scratch) as directory:
         work = Path(directory)
-        expected = taskfile_lock_paths(work / "home", taskfile)
-        lock_dir = work / "home" / ".cache" / "ocx"
-        suite = f"shared -o {expected['ACCEPTANCE_LOCK']}"
-        turnstile = f"pass {expected['ACCEPTANCE_TURNSTILE']}"
-        stack = f"exclusive -o {lock_dir}/acceptance-stack-{RUNNER_PORT}.lock"
-        slots = [f"exclusive -o {lock_dir}/acceptance-slot-{RUNNER_PORT}-{g}.lock" for g in sorted(RUNNER_PROBE_SLOTS)]
         rc, stderr, lines = _run_runner(runner, work, flock=True, opt_in=False)
-        chains = _chains(lines)
+        calls = [line for line in lines if line.startswith("uv ")]
         if rc != 0:
             red("runner-exit", f"exited {rc} with flock(1) present: {stderr.strip()[-300:]}")
-        if not chains:
-            red("runner-silent", "made no uv call at all, so nothing below was judged")
-        for locks, call in chains:
-            if locks[:2] != [turnstile, suite]:
-                red("runner-suite-lock", f"`{call[:60]}` ran under {locks}, not first under {[turnstile, suite]}")
-        taken = [lock for locks, _ in chains for lock in locks]
-        if any(" -o " not in lock for lock in taken if not lock.startswith("pass ")):
-            red("runner-close", f"a lock was taken without -o, so a leftover process keeps it: {taken}")
-        probed = {line.split(" ", 2)[2] for line in lines if line.startswith("probe ")}
-        quiet = sorted({lock.rsplit(" ", 1)[1] for lock in taken} - probed)
-        if quiet:
-            red("runner-quiet", f"blocks on {quiet} without a `flock -n` probe saying so first")
-        barrier = [i for i, (_, call) in enumerate(chains) if "pytest_sessionstart" in call]
-        tests = [i for i, (_, call) in enumerate(chains) if call.startswith("uv run pytest")]
-        if len(barrier) != 1:
-            red("runner-barrier", f"{len(barrier)} stack-barrier call(s), expected 1: {lines}")
+        if len(calls) != 1 or not calls[0].startswith("uv run pytest"):
+            red("runner-silent", f"expected one `uv run pytest` call, got {calls}")
         else:
-            locks, call = chains[barrier[0]]
-            if locks != [turnstile, suite, stack]:
-                red("runner-barrier", f"the barrier ran under {locks}, expected {[turnstile, suite, stack]}")
-            ran = [line for line in lines if line.startswith("barrier-probe ")]
-            if ran != ["barrier-probe held=1 takeable=1"]:
-                red(
-                    "runner-barrier",
-                    f"the barrier's Python reported {ran}: it must hold the real _COMPOSE_LOCK through "
-                    "pytest_sessionstart (held=1) and point the helpers at a lock the hook can take (takeable=1)",
-                )
-            if tests and barrier[0] > tests[0]:
-                red("runner-barrier", "pytest started before the stack barrier")
-        if len(tests) != 1:
-            red("runner-slots", f"{len(tests)} pytest call(s), expected 1: {lines}")
-        else:
-            locks, call = chains[tests[0]]
-            arena = next((w.removeprefix("--basetemp=") for w in call.split() if w.startswith("--basetemp=")), "")
-            want = [turnstile, suite, *slots, f"exclusive -o {arena}.lock"]
-            if not arena or locks != want:
-                red("runner-slots", f"pytest ran under {locks}, expected {want}")
+            arena = next((w.removeprefix("--basetemp=") for w in calls[0].split() if w.startswith("--basetemp=")), "")
+            locks = [line for line in lines if line.startswith("flock ")]
+            want = f"flock exclusive -o {arena}.lock uv"
+            if not arena or locks != [want]:
+                red("runner-arena-lock", f"pytest ran under {locks}, expected [{want!r}]")
+            probes = [line for line in lines if line.startswith("probe ")]
+            if probes != [f"probe exclusive {arena}.lock"]:
+                red("runner-quiet", f"the wait on {arena}.lock is not announced by a `flock -n` probe: {probes}")
+        zot = [line.removeprefix("zot ") for line in lines if line.startswith("zot ")]
+        if len(zot) != 1 or not Path(zot[0]).is_absolute() or not zot[0].endswith("/" + RUNNER_BINARIES["OCX_TEST_ZOT"]):
+            red("runner-zot", f"pytest was handed OCX_TEST_ZOT={zot}, not the zot runfile as an absolute path")
+        rc, _, lines = _run_runner(runner, work, flock=True, opt_in=False, drop="OCX_TEST_ZOT")
+        if rc == 0 or any(line.startswith("uv ") for line in lines):
+            red("runner-zot", f"a target with no OCX_TEST_ZOT exited {rc} and called {lines}")
 
         # Two checkouts with one folder name (the fake tree is always
         # `checkout/test`) must not share an arena: pytest wipes `--basetemp`.
-        _, _, again = _run_runner(runner, work, flock=True, opt_in=False)
         arenas = [
-            {word for word in lines_ if word.startswith("--basetemp=")}
-            for lines_ in (" ".join(lines).split(), " ".join(again).split())
+            {word for word in " ".join(_run_runner(runner, work, flock=True, opt_in=False)[2]).split() if word.startswith("--basetemp=")}
+            for _ in range(2)
         ]
         if not arenas[0] or arenas[0] == arenas[1]:
             red("runner-arena", f"two checkouts named alike got the arenas {arenas}")
@@ -1173,7 +1057,7 @@ def runner_lock_findings(
         if rc == 0 or lines:
             red("runner-no-flock", f"with no flock(1) and no {UNSERIALISED_ENV} it exited {rc} and called {lines}")
         rc, _, lines = _run_runner(runner, work, flock=False, opt_in=True)
-        if rc != 0 or [call for _, call in _chains(lines) if call.startswith("uv run pytest")] == []:
+        if rc != 0 or not any(line.startswith("uv run pytest") for line in lines):
             red("runner-no-flock", f"{UNSERIALISED_ENV}=1 with no flock(1) exited {rc} and called {lines}")
     return findings
 
@@ -2333,7 +2217,7 @@ def prove_selection(scratch: Path) -> int:
     )
     checks += 1
 
-    docs = ["website/src/content/docs/reference/environment.md", "README.md", "CLAUDE.md"]
+    docs = ["website/src/content/docs/reference/environment.md", "README.md", "AGENTS.md"]
     crate_change = ["crates/crate03/src/lib.rs"]
     docs_selected, docs_notes = select_targets(
         docs, rows=rows, modules=modules, crate_of_dir=crate_of_dir
@@ -2751,90 +2635,58 @@ def prove_uncached_list() -> int:
 
 RUNNER_MUTATIONS = {
     # name: (text in the live runner, replacement, the code that must red)
-    "slot loop emptied": (
-        '    set -- flock -o "$lock_dir/acceptance-slot-$port-$slot.lock" "$@"\n',
-        "    :\n",
-        "runner-slots",
+    "arena lock dropped (--runs_per_test)": (
+        'exec flock -o "$basetemp.lock" "$uv" run pytest "$@"',
+        'exec "$uv" run pytest "$@"',
+        "runner-arena-lock",
     ),
-    "suite lock exclusive": ('exec flock -o -s "$suite_lock" "$@"', 'exec flock -o "$suite_lock" "$@"', "runner-suite-lock"),
-    "suite lock absent": ('exec flock -o -s "$suite_lock" "$@"', 'exec "$@"', "runner-suite-lock"),
-    "barrier dropped": ('"$uv" run python -c "$barrier" ||', '"$uv" run python -c pass ||', "runner-barrier"),
-    "barrier outside the suite lock": (
-        'flock -o -s "$suite_lock" flock -o "$stack_lock"',
-        'flock -o "$stack_lock"',
-        "runner-suite-lock",
+    "-o dropped from the arena lock": (
+        'exec flock -o "$basetemp.lock" "$uv" run pytest "$@"',
+        'exec flock "$basetemp.lock" "$uv" run pytest "$@"',
+        "runner-arena-lock",
     ),
-    "barrier without _COMPOSE_LOCK": ("    fcntl.flock(held, fcntl.LOCK_EX)\n", "    pass\n", "runner-barrier"),
-    "barrier redirect dropped (self-deadlock)": (
-        '    helpers._COMPOSE_LOCK = lock.with_name(lock.name + ".barrier")\n',
-        "",
-        "runner-barrier",
-    ),
-    "sessionstart outside the held lock": (
-        "\n    conftest.pytest_sessionstart(None)'",
-        "\nconftest.pytest_sessionstart(None)'",
-        "runner-barrier",
-    ),
+    "wait probe dropped": ('flock -n "$basetemp.lock" true 2>/dev/null ||\n', "true ||\n", "runner-quiet"),
     "arena keyed on the folder name": (
         """suite_key=$(printf '%s' "$suite" | cksum | cut -d ' ' -f 1)""",
         "suite_key=x",
         "runner-arena",
     ),
-    "arena lock dropped (--runs_per_test)": (
-        'set -- flock -o "$basetemp.lock" "$uv" run pytest "$@"',
-        'set -- "$uv" run pytest "$@"',
-        "runner-slots",
+    "zot left as an rlocationpath": (
+        'OCX_TEST_ZOT="$TEST_SRCDIR/$OCX_TEST_ZOT"\n',
+        "",
+        "runner-zot",
+    ),
+    "zot refusal dropped": (
+        '[ -n "${OCX_TEST_ZOT:-}" ] || fail "OCX_TEST_ZOT is unset - the target\'s env names no zot"\n',
+        'OCX_TEST_ZOT="${OCX_TEST_ZOT:-}"\n',
+        "runner-zot",
     ),
     "no-flock refusal dropped": (
         f'    [ "${{{UNSERIALISED_ENV}:-}}" = 1 ] ||\n        fail ',
         "    true ||\n        fail ",
         "runner-no-flock",
     ),
-    "lock dir inside the checkout": ('lock_dir="$HOME/.cache/ocx"', 'lock_dir="$suite/.locks"', "runner-suite-lock"),
-    "default port hard-coded": ('port="${OCX_TEST_REGISTRY_PORT:-5000}"', "port=5000", "runner-suite-lock"),
-    "-o dropped from the stack lock": (
-        'flock -o -s "$suite_lock" flock -o "$stack_lock"',
-        'flock -o -s "$suite_lock" flock "$stack_lock"',
-        "runner-close",
-    ),
-    "turnstile skipped": ('    flock -o "$turnstile" true\n', "", "runner-suite-lock"),
-    "wait probe dropped": ('waits -x "$stack_lock"\n', "", "runner-quiet"),
-}
-
-TASKFILE_MUTATIONS = {
-    # name: (text in test/taskfile.yml, replacement, the code that must red)
-    "taskfile suite lock path drifts": ("acceptance-suite-%s.lock", "acceptance-suites-%s.lock", "runner-suite-lock"),
-    "taskfile turnstile path drifts": ("acceptance-turnstile-%s.lock", "acceptance-gate-%s.lock", "runner-suite-lock"),
-    "taskfile suite lock without -o": (TASKFILE_LOCKED, TASKFILE_LOCKED.replace("flock -o {{.ACCEPTANCE_LOCK}}", "flock {{.ACCEPTANCE_LOCK}}"), "runner-taskfile"),
-    "taskfile turnstile not held": (TASKFILE_LOCKED, 'LOCKED="flock -o {{.ACCEPTANCE_LOCK}}";', "runner-taskfile"),
 }
 
 
 def prove_runner_locks(scratch: Path) -> int:
-    """The runner's host locks, green on the live `_RUNNER` and `test/taskfile.yml`
-    and red per mutation of either."""
+    """The runner's arena lock and zot hand-over, green on the live `_RUNNER`
+    and red per mutation of it."""
     checks = 0
     runner = read_runner()
-    taskfile = TEST_TASKFILE.read_text(encoding="utf-8")
     rc, _, lines = _run_runner(runner, scratch, flock=True, opt_in=False)
-    expect(rc == 0 and len(_chains(lines)) == 2, f"the live runner made {len(_chains(lines))} uv call(s), rc {rc}")
-    green = runner_lock_findings(runner, scratch, taskfile)
+    expect(rc == 0 and sum(line.startswith("uv ") for line in lines) == 1, f"the live runner made calls {lines}, rc {rc}")
+    green = runner_lock_findings(runner, scratch)
     expect(green == [], f"the live runner must be silent, got {[f.message for f in green]}")
     print(f"runner GREEN: live `_RUNNER` took {lines}")
     checks += 1
-    for target, mutations in (("runner", RUNNER_MUTATIONS), ("taskfile", TASKFILE_MUTATIONS)):
-        for name, (old, new, code) in mutations.items():
-            subject = runner if target == "runner" else taskfile
-            mutated = subject.replace(old, new)
-            expect(subject.count(old) == 1 and mutated != subject, f"the {name!r} mutation did not land")
-            found = (
-                runner_lock_findings(mutated, scratch, taskfile)
-                if target == "runner"
-                else runner_lock_findings(runner, scratch, mutated)
-            )
-            expect(code in codes(found), f"{name}: expected {code}, got {codes(found)}")
-            print(f"runner RED  : {name}: {next(f.message for f in found if f.code == code)[:300]}")
-            checks += 1
+    for name, (old, new, code) in RUNNER_MUTATIONS.items():
+        mutated = runner.replace(old, new)
+        expect(runner.count(old) == 1 and mutated != runner, f"the {name!r} mutation did not land")
+        found = runner_lock_findings(mutated, scratch)
+        expect(code in codes(found), f"{name}: expected {code}, got {codes(found)}")
+        print(f"runner RED  : {name}: {next(f.message for f in found if f.code == code)[:300]}")
+        checks += 1
     return checks
 
 

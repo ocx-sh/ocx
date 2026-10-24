@@ -1,0 +1,16 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+# Shared remote cache (read-only by default; CI enables uploads through the setup action).
+build --remote_cache=https://bazel-cache.ocx.sh/v1
+build --remote_upload_local_results=false
+build --remote_timeout=30s
+build --remote_retries=2
+
+build:ci --remote_download_minimal
+build:ci --remote_download_regex=.*/test\.(xml|log)$
+build:ci --jobs=auto
+
+# basic = every PR; deep = nightly (all sizes, no tag filter).
+test:basic --test_size_filters=small,medium --test_tag_filters=-deep
+test:deep --test_size_filters=small,medium,large,enormous
+
+try-import %workspace%/.bazelrc.user

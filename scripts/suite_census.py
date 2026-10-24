@@ -113,7 +113,10 @@ SUITE = REPO_ROOT / "test"
 #: skipped 113 -> 121: the eight self-apply cases in `test_self_update.py`
 #: need a pty, so each skips on Windows; the env-contract tests also add a
 #: `win32` skip for POSIX-only bash output (re-measure).
-PINNED = {"tests": 2885, "skipped": 122, "xfailed": 4, "parametrized": 147}
+#: skipped 122 -> 127: five `win32` skips for POSIX-only behaviour, added when
+#: the full suite started running natively on Windows (project concurrency,
+#: shell hook, toolchain env, trampoline exec, git transport permission bits).
+PINNED = {"tests": 2885, "skipped": 127, "xfailed": 4, "parametrized": 147}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

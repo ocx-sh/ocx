@@ -4,7 +4,8 @@
 """The commit and push gate git itself runs.
 
 Two entry points, because the two hooks are installed by different owners:
-`commit-msg` is a prek hook declared in `.pre-commit-config.yaml`, and
+`commit-msg` is prek's commit-msg stage, which the template's `hooks:commit-msg`
+hands to the repo-owned `hooks:repo-commit-msg` task, and
 `pre-push` is `scripts/pre-push.sh`, copied into git's hooks directory —
 prek hands a declared hook no stdin and skips the pre-push run for a delete
 or a ref-creating `--all`, which the push gate must see. Both armed by
@@ -73,7 +74,8 @@ realpath'd working tree is recorded in the mark and compared here.
 Stdlib only. Its proofs (`_self_test_cases`) run as pytest, from
 `scripts/tests/test_commit_gate.py`, and drive real git: it builds throwaway
 repositories under `.tmp/`, arms each one the way `task git:hooks` arms a
-clone — `prek install` against the real `.pre-commit-config.yaml`, plus the
+clone — `prek install` against a one-hook config whose entry is the one
+`hooks:repo-commit-msg` runs, plus the
 real `scripts/pre-push.sh` — and runs actual `git commit` / `git push`
 through a shell, asserting the exit code and the reason text — including with
 the hooks disarmed, so a denial is attributable to the gate and not to a
@@ -95,7 +97,21 @@ from pathlib import Path
 from scoped_gate import mark_file, read_mark, worktree_id, write_mark
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PREK_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
+PREK_CONFIG_NAME = ".pre-commit-config.yaml"
+# The template-owned config hands the message file to `task hooks:commit-msg`, which a
+# scratch repository has no taskfile or `ocx.toml` to run. The fixture declares the
+# one hook that task ends in, so a case still goes through prek's generated shim.
+PREK_CONFIG_TEXT = """\
+default_install_hook_types: [commit-msg]
+repos:
+  - repo: local
+    hooks:
+      - id: commit-gate
+        name: conventional subject and a fresh verify mark
+        language: system
+        stages: [commit-msg]
+        entry: python3 scripts/commit_gate.py --check-message
+"""
 PRE_PUSH_SCRIPT = REPO_ROOT / "scripts" / "pre-push.sh"
 
 TTL_SECONDS = 300
@@ -111,7 +127,7 @@ def _admitted_subject_form(subject: str) -> bool:
     return subject.startswith(RELEASE_PREFIX) or bool(_AUTOSQUASH_RE.match(subject))
 
 # Verbatim from the retired conventional_commit_validator.py: the accepted
-# types are CLAUDE.md's, and a commit refused here must be refused for the
+# types are AGENTS.md's, and a commit refused here must be refused for the
 # same reason it was before.
 _CONVENTIONAL_RE = re.compile(
     r"^(feat|fix|refactor|ci|chore|docs|test|perf|build|style)(\(.+\))?(!)?\s*: .+"
@@ -479,16 +495,14 @@ def _env_for(project_dir: Path) -> dict[str, str]:
 def _arm(repo: Path) -> None:
     """Install both hooks into ``repo``, the way `task git:hooks` does.
 
-    The config and the push script are the repository's own, so a case that
-    goes green went green against what a developer actually runs. `prek
-    install` writes its shim into this repo's own `.git/hooks`, and the push
-    script is copied there.
+    The push script is the repository's own, so a case that goes green went
+    green against what a developer actually runs. `prek install` writes its
+    shim into this repo's own `.git/hooks`, and the push script is copied there.
 
-    The config is copied VERBATIM, which means its `entry` stays
-    repository-relative — so `scripts/` is symlinked in rather than rewritten,
-    and a typo in the real `entry` fails these cases instead of hiding behind a
-    fixture that spelled the path its own way. git is told to ignore the
-    symlink so `git add -A` in a case cannot stage it.
+    The commit-msg entry stays repository-relative — so `scripts/` is symlinked
+    in rather than rewritten, and a typo in `scripts/commit_gate.py` fails these
+    cases instead of hiding behind a fixture that spelled the path its own way.
+    git is told to ignore the symlink so `git add -A` in a case cannot stage it.
 
     `.claude/` is ignored for a sharper reason, and it is the real
     `.gitignore:32` rule, not a fixture convenience: prek reverts every
@@ -498,7 +512,7 @@ def _arm(repo: Path) -> None:
     commit against a mark two steps old (measured). The real repository
     ignores the mark, and so must these.
     """
-    shutil.copyfile(PREK_CONFIG, repo / PREK_CONFIG.name)
+    (repo / PREK_CONFIG_NAME).write_text(PREK_CONFIG_TEXT, encoding="utf-8")
     (repo / "scripts").symlink_to(REPO_ROOT / "scripts")
     git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
     (git_dir / "info").mkdir(exist_ok=True)
@@ -857,7 +871,9 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             # refused exactly the same.
             "a redirected push": (f"git push origin main > {log} 2>&1", True),
             "a fully qualified refspec": ("git push origin HEAD:refs/heads/main", True),
-            "a bare push on main": ("git push -u origin", True),
+            # `push.default=current` pins what a bare push means: without a developer's
+            # `push.autoSetupRemote`, git refuses it for want of an upstream before the hook runs.
+            "a bare push on main": ("git -c push.default=current push -u origin", True),
             "a branch merely spelled like main": ("git push origin main:feature/main-fix", False),
         }
         for name, (script, refused) in cases.items():
@@ -981,7 +997,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         outage, and this is the case that reds when the flag is dropped.
         """
         repo = _make_repo(tmp / "no-config")
-        (repo / PREK_CONFIG.name).unlink()
+        (repo / PREK_CONFIG_NAME).unlink()
         _dirty(repo)
         _mark(repo, repo, "scoped")
         commit = _shell(repo, "git commit -m 'chore: x'", repo)

@@ -28,7 +28,7 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner
-from src.helpers import inspect_entry, inspect_names, make_package
+from src.helpers import inspect_entry, inspect_names, make_package, rglob_no_links
 from src.runner import registry_dir
 
 pytestmark = pytest.mark.command("package_inspect")
@@ -387,7 +387,7 @@ def test_inspect_default_has_no_install_side_effects(
 
     packages_root = home / "packages"
     if packages_root.exists():
-        for entry in packages_root.rglob("metadata.json"):
+        for entry in rglob_no_links(packages_root, "metadata.json"):
             assert unique_repo not in entry.read_text(), (
                 f"inspect must not assemble a package for {unique_repo}: {entry}"
             )

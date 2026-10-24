@@ -1,6 +1,18 @@
 name: Verify Version
+# Called by release.yml as a cargo-dist `local-artifacts-jobs` entry (dist-workspace.toml),
+# not a plan job: `host` must see this job's failure itself.
+
 on:
   workflow_call:
+    inputs:
+      plan:
+        description: The cargo-dist plan manifest. cargo-dist passes it to every custom job; unused here.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
   verify-version:

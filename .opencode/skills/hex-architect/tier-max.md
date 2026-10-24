@@ -16,7 +16,7 @@ As [`tier-xhigh.md` § Phase 1](tier-xhigh.md#phase-1-discover-single-worker-ful
 
 ## Phase 2: Research (5 axes, gate-selected — mandatory, one `competitive-research`)
 
-As [`tier-xhigh.md` § Phase 2](tier-xhigh.md#phase-2-research-3-axes-gate-selected--mandatory)
+As [`tier-xhigh.md` § Phase 2](tier-xhigh.md#phase-2-research-0-1-axis-3-when-the-user-asked)
 with **5** `researcher` workers: four axes from the gate's ranked
 candidates, the fifth always focus `competitive-research`
 ([`workers/researcher.md`](../hex-core/references/workers/researcher.md)),

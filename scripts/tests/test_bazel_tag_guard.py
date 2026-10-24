@@ -32,7 +32,6 @@ GRAPH_PROOFS = [
     pytest.param(guard.prove_suite_inputs, marks=_B, id="prove_suite_inputs"),
     pytest.param(guard.prove_sweep, marks=_A, id="prove_sweep"),
     pytest.param(guard.prove_uncached, marks=_A, id="prove_uncached"),
-    pytest.param(guard.prove_slots, marks=_B, id="prove_slots"),
     pytest.param(guard.prove_hand_reads, marks=_A, id="prove_hand_reads"),
 ]
 

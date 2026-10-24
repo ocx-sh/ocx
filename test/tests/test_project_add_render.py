@@ -29,6 +29,7 @@ from src.toolchain_fixtures import (
     run_in,
     shell_bin,
     toolchain_home,
+    trampoline_name,
 )
 
 pytestmark = pytest.mark.command("add")
@@ -71,7 +72,7 @@ def test_add_renders_the_toolchain_home_on_a_whole_batch_no_op(
 
     home = toolchain_home(project_dir)
     link = entry_link(home, DEFAULT_GROUP, key)
-    trampoline = shell_bin(home) / binary
+    trampoline = shell_bin(home) / trampoline_name(binary)
     assert not link.exists(), (
         "precondition: a cold store cannot resolve the surface, so the render "
         f"writes nothing; found {link}"

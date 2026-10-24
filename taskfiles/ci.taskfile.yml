@@ -23,3 +23,110 @@ tasks:
       # generated release.yml is excluded via .github/actionlint.yaml.
       SHELLCHECK_OPTS: '--severity=warning'
     cmd: actionlint
+
+  # The tier aliases the conventions baseline's workflows call. Membership is the contract:
+  # `task --dry ci:<tier>` lists exactly these tasks. `task verify` keeps its own list; the aliases are
+  # what the template's jobs run, so a tier can be re-run alone. Actionlint is the template's
+  # `workflows:lint`, not repeated here.
+
+  lint:
+    desc: 'Lint tier: format, shell, claude, test-lint and bazel gates, licenses, suite census, dead-path sweep, clippy, doc ratchet'
+    # Submodules first: the template's checkout fetches none, and every Bazel gate below plus cargo-deny and
+    # cargo-about resolve the graph the forks under `external/` patch. History second: the lint tier's
+    # git readers need the release tags and `origin/main`, which that checkout lacks too. Then phase 1 of `task verify` (parallel,
+    # builds nothing), then phase 2's lint members in its order: the Bazel gates after `bazel:build:nobuild`,
+    # which proves the graph loads, and the two Bazel aspect passes last.
+    cmds:
+      - task: :git:submodules
+      - task: :git:history
+      - task: :rust:toolchain
+      - task: .lint:phase1
+      - task: :bazel:build:nobuild
+      - task: :bazel:build:drift
+      - task: :bazel:tag:guard
+      - task: :bazel:lint
+      - task: :bazel:mod:check
+      - task: :rust:license:check
+      - task: :rust:license:deps
+      - task: :rust:license:notice:check
+      - task: :scripts:suite-census
+      - task: :scripts:dead-path-sweep
+      - task: :rust:clippy:check
+      - task: :rust:doc:ratchet
+
+  # `lint`'s phase 1, its own task only because `deps:` run before `cmds:` and the submodules must come first.
+  .lint:phase1:
+    internal: true
+    deps:
+      - task: :rust:format:check
+      - task: :shell:verify
+      - task: :claude:verify
+      - task: :test:lint
+      - task: :test:lint:structure
+      - task: :bazel:pin:check
+
+  test:
+    desc: 'Test tier: bazel unit tests, the skipped-test run and the website tests'
+    cmds:
+      - task: :git:submodules
+      - task: :bazel:test:unit
+      # The template's test job publishes `target/reports/junit/*.xml`; the unit run's per-case report is
+      # the one `bazel:test:unit` already writes. Linux only, like the task (no report elsewhere).
+      - cmd: |
+          if [ -f target/bazel/junit.xml ]; then
+            mkdir -p target/reports/junit
+            cp target/bazel/junit.xml target/reports/junit/unit.xml
+          fi
+        silent: true
+      - task: :rust:test:bazel-skipped
+      - task: :website:test
+
+  build:
+    desc: 'Build tier: the rust build and the generated reference check'
+    cmds:
+      - task: :git:submodules
+      - task: :rust:build
+      - task: :website:reference:check
+
+  docs:
+    desc: 'Docs tier: build the website and gate the built pages on their Lighthouse budgets'
+    # The build generates the schemas through Bazel and the SBOM through cargo, so it needs the submodules too.
+    # Lighthouse needs a Chrome: CHROME_PATH, CHROME_BIN (the runner images set it) or the Playwright one.
+    cmds:
+      - task: :git:submodules
+      - task: :website:build
+      # ponytail: audits only the pages that met every budget on the 2026-10-22 full build (18 of the
+      # 89 measured; the rest miss performance 100, dom <= 800 or bytes <= 147 KiB). A page joins the
+      # list once it passes; drop the list for the whole tree when the docs backlog is empty.
+      - task: :website:lighthouse
+        vars:
+          CLI_ARGS: >-
+            --page /
+            --page /404.html
+            --page /explanation/project-groups/
+            --page /explanation/records-and-sbom/
+            --page /explanation/records-launcher-frames/
+            --page /explanation/toolchain-render/
+            --page /getting-started/first-package/
+            --page /getting-started/first-project/
+            --page /guides/authenticate/
+            --page /guides/choose-versions/
+            --page /guides/clean-up/
+            --page /guides/configure-ocx/
+            --page /guides/find-packages/
+            --page /guides/lock-and-reproduce/
+            --page /guides/run-with-dependencies/
+            --page /integration/
+            --page /integration/bazel/
+            --page /integration/devcontainers-and-editors/
+
+  deep:
+    desc: 'Deep tier: suite rows check, contract-baseline repository tests and the full self-tests of the gate scripts'
+    # The self-tests that read the live Bazel graph need the submodules; the deep lint tier reads the
+    # release tags, which the template's depth-1 checkout does not carry.
+    cmds:
+      - task: :git:submodules
+      - task: :git:history
+      - task: :test:rows:check
+      - task: :test:lint:deep
+      - task: :scripts:self-test

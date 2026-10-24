@@ -41,6 +41,8 @@ pytestmark = pytest.mark.skipif(
     reason="State-file path assertions use POSIX paths.",
 )
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 _STATE_DIR_SUFFIX = Path("state") / "update-check"
 
 

@@ -75,15 +75,15 @@ tasks:
       A convenience entry point, not a gate: nothing in `taskfile.yml`, in
       `.github/workflows/**` or in `scripts/scoped_gate.py` calls this task,
       and no rule prescribes it as *the* per-task gate any more (that used to
-      contradict CLAUDE.md's `verify:scoped` model — plan_test_speed_tiers.md
+      contradict AGENTS.md's `verify:scoped` model — plan_test_speed_tiers.md
       C-022 swept the wording). It stays as a Rust-only convenience for a
       manual review-fix loop when only Rust changed. Anything it runs that
       must also gate a
       merge is wired into `.verify:build-test` or a workflow job in its own
       right — never left to this list, which no CI run and no commit hook
       evaluates. `check:windows-cfg` below is reachable only from here; the
-      MSVC property it checks is gated natively by verify-deep.yml's
-      `Build & Unit Test (Windows)` job.
+      Windows unit tests run natively in deep-repo.yml's `Unit Test (Windows)`
+      leg, on the gnullvm bundle cross.yml builds from Linux.
 
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
@@ -144,20 +144,26 @@ tasks:
 
       So the workspace's own `cfg(windows)` code is covered elsewhere, and is
       covered — the claim that nothing sees it is wrong:
-        * `Build & Unit Test (Windows)` in verify-deep.yml runs
-          `cargo nextest run --workspace` on windows-latest for every
-          non-draft pull request, the merge queue and every push to main,
-          which compiles the lib and every test target natively. It is the
-          gate that has actually caught these breaks (basic has no Windows
-          leg, D5).
-        * `check:windows` below is its local mirror, through cargo-xwin in
-          Docker, and now carries `--all-targets` for the same reason.
+        * `Unit Test (Windows)` in deep-repo.yml (called by verify-deep.yml:
+          nightly, dispatch, the `run-deep` label) runs the
+          `x86_64-pc-windows-gnullvm` unit-test bundle that cross.yml
+          cross-compiles from Linux, so the lib and every test target compile
+          for Windows and then run natively. A pull request gets it only with
+          the label (basic has no Windows leg).
+        * `check:windows` below is the local MSVC check, through cargo-xwin in
+          Docker, and carries `--all-targets` for the same reason.
       Both inherit `-D warnings` from `[workspace.lints.rust]`, so neither
       needs a RUSTFLAGS of its own.
     sources: *rust-sources
     cmds:
       - cargo check -p ocx_shim --locked --all-targets --target x86_64-pc-windows-msvc
       - cargo check -p ocx_shim --locked --all-targets --target aarch64-pc-windows-msvc
+
+  toolchain:
+    desc: Install the rust-toolchain.toml toolchain, serially, before a parallel phase runs cargo or rustc
+    # On a cold RUSTUP_HOME every rustup proxy installs the toolchain (targets included) itself, and two
+    # at once collide ("detected conflict"). The channel is pinned, so an installed one is a no-op.
+    cmd: rustup toolchain install --no-self-update
 
   format:check:
     desc: Check Rust formatting
@@ -203,14 +209,10 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-clippy-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/clippy-bep.json'
-      # `bazel:test:unit`'s CACHE_RC, and why it is derived from the file.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - task: :bazel:bootstrap
       - cmd: |
           status=0
           ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/... --output_groups=clippy_output \
@@ -258,13 +260,10 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-rustdoc-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/rustdoc-bep.json'
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: :bazel:bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - task: :bazel:bootstrap
       - cmd: |
           status=0
           ocx exec bazel -- bazel {{.CACHE_RC}} build {{.BAZEL_ARGS | default ""}} //crates/... --output_groups=rustdoc_diagnostics \
@@ -387,17 +386,17 @@ tasks:
       - install:nextest
     # `real_binary::` is the generated SDK's run against the Bazel-built `ocx`,
     # whose path only that Bazel target compiles in; under cargo it fails by
-    # design, so it is filtered here as in verify-deep.yml's cargo legs.
+    # design, so it is filtered here.
     # `set -o pipefail` so nextest's own exit status survives the `tee`; the
     # tee is what lets `test:ceiling` read the Summary line of the run that
     # just happened rather than of some earlier one (same shape as
     # test/taskfile.yml's `.suite-ceilings`).
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/nextest
+      - mkdir -p "{{.ROOT_DIR}}/target/nextest"
       - >-
         set -o pipefail;
         cargo nextest run --workspace --release --locked -E 'not test(real_binary::)' {{.CLI_ARGS}}
-        2>&1 | tee {{.NEXTEST_RUN_LOG}}
+        2>&1 | tee "{{.NEXTEST_RUN_LOG}}"
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
       # configured for it (taskfiles/telemetry.taskfile.yml). The default
       # profile's path, so a run passing `-- --profile ci` pushes nothing —
@@ -439,14 +438,14 @@ tasks:
       inherits — restating it here would be a second source of truth for a
       host RAM cap.
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      - mkdir -p "{{.ROOT_DIR}}/target/bazel"
       - >-
         set -o pipefail;
         floor=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import bazel_gate_proofs; print(bazel_gate_proofs.CRATES_TEST_TARGETS)' '{{.ROOT_DIR}}/scripts');
         [ -n "$floor" ] || { echo "bazel unit: could not read CRATES_TEST_TARGETS from scripts/bazel_gate_proofs.py — the floor has no value, and a comparison against an empty one is not a floor" >&2; exit 1; };
         status=0;
-        bazel test //crates/... {{.CLI_ARGS}} 2>&1 | tee {{.BAZEL_RUN_LOG}} || status=$?;
-        selected=$(sed -E 's/\x1b\[[0-9;]*m//g' {{.BAZEL_RUN_LOG}} | sed -nE 's/^Executed [0-9]+ out of ([0-9]+) tests?:.*/\1/p' | tail -n 1);
+        bazel test //crates/... {{.CLI_ARGS}} 2>&1 | tee "{{.BAZEL_RUN_LOG}}" || status=$?;
+        selected=$(sed -E 's/\x1b\[[0-9;]*m//g' "{{.BAZEL_RUN_LOG}}" | sed -nE 's/^Executed [0-9]+ out of ([0-9]+) tests?:.*/\1/p' | tail -n 1);
         selected=${selected:-0};
         [ "$selected" -ge "$floor" ] || {
           echo "bazel unit: the run selected $selected test target(s) under //crates/..., floor is $floor (CRATES_TEST_TARGETS in scripts/bazel_gate_proofs.py) — an empty or partial Rust test graph is not a pass; bazel exited $status" >&2; exit 1; };
@@ -614,11 +613,10 @@ tasks:
       `cfg(windows)` code — `check:windows-cfg` cannot reach it on the host
       (see there) — and
       it covers the aarch64 arm that no CI leg on a pull request does. Not in
-      `verify`: it needs Docker and a ~250 MiB SDK download, and every
-      non-draft pull request already runs verify-deep.yml's `Build & Unit
-      Test (Windows)`, which compiles the same code natively. Run it before
-      marking a PR ready with anything under a `cfg(windows)` or
-      `cfg(not(unix))` branch and save a CI round-trip.
+      `verify`: it needs Docker and a ~250 MiB SDK download, and deep-repo.yml's
+      `Unit Test (Windows)` leg already runs the same code's tests, cross-built
+      for gnullvm. Run it before marking a PR ready with anything under a
+      `cfg(windows)` or `cfg(not(unix))` branch and save a CI round-trip.
 
       Not a `verify-basic.yml` leg either, and a plain host `cargo check
       --target` is not a cheaper substitute for one: `ocx_oci` pulls
@@ -643,9 +641,9 @@ tasks:
     summary: |
       Runs `cargo xwin build --release` for x86_64-pc-windows-msvc and
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
-      Mirrors the CI cross-compile (verify-deep.yml) byte-for-byte modulo
-      the Docker-from-host scaffolding. Produces
-      target/xwin/<triple>/release/ocx.exe. Shares caches
+      Not the CI cross-build: cross.yml runs Bazel's gnullvm one
+      (`task cross:build`), and the release ships the cargo-dist MSVC zips.
+      Produces target/xwin/<triple>/release/ocx.exe. Shares caches
       with check:windows under .cache/xwin/.
     cmds:
       - task: xwin-build-x86:exec
@@ -703,10 +701,12 @@ tasks:
   test:bazel-skipped:
     desc: Every testcase a `rust_test` target `--skip`s, run under cargo nextest
     summary: |
-      `bazel:test:unit` is the only unit-test run in `task verify`, and its
-      `rust_test` targets `--skip` testcases that walk `crates/*/src` of
+      `bazel:test:unit` is the only whole-suite unit-test run in `task verify`,
+      and its `rust_test` targets `--skip` testcases that walk `crates/*/src` of
       crates they do not depend on or need a process of their own. Without this
-      step those ran on verify-deep's macOS and Windows legs alone.
+      step those ran nowhere on Linux. The macOS and Windows legs run them from
+      the Linux-built bundle (`cross:test:run SOURCE_ROOT=`), minus the few that
+      shell out to `cargo`.
 
       scripts/bazel_skipped_tests.py derives the list from the `--skip=` args
       of every crates/*/BUILD.bazel and maps each to its cargo package and test
@@ -758,7 +758,7 @@ tasks:
     deps:
       - install:nextest
     cmds:
-      - rm -f {{.NEXTEST_RUN_LOG}}
+      - rm -f -- "{{.NEXTEST_RUN_LOG}}"
       - >-
         set -o pipefail;
         floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);
@@ -859,18 +859,22 @@ tasks:
       be this run's. Run `task rust:test:floor` then `task rust:test:unit`
       first.
 
-      **What a green here claims, exactly: every unit test that runs in the
-      Linux unit suite is under 1 second.** Not "every unit test on every
+      **No workflow runs this task.** The nextest bracket that wrote its log
+      left CI with the Bazel lane swap, so nothing in CI decides this budget:
+      it runs by hand, and from `rust:verify`, on the cargo engine.
+
+      **What a green here claims, exactly: every unit test in the nextest run
+      whose log it read is under 1 second.** Not "every unit test on every
       platform" — `platforms: [linux]`, the guard `test:floor` and
       `test:ceiling` already carry because cfg-gated tests make the counts
       platform-dependent. The gap is real and named rather than papered over:
-      `verify-deep.yml`'s `Build & Unit Test` matrix runs **raw**
-      `cargo nextest run --workspace --target=… --profile ci --locked` on
-      Linux, macOS and Windows, not through `task`, so this gate never judges
-      the macOS or Windows legs; `build-windows-shims.yml` runs three crates
-      the same way. Extending the gate there would be worse than the gap: deep
-      is moving to manual dispatch, so a copy of this step living on it would
-      be a green nobody can tell from one that never ran.
+      the Linux unit suite in CI is `bazel:test:unit`, which prints no per-test
+      timing; deep-repo.yml's `Unit Test` legs run the cross-built bundle on
+      macOS and Windows through `task cross:test:run`, so this gate never
+      judges them; `build-windows-shims.yml` runs three crates through raw
+      `cargo nextest`. Extending the gate there would be worse than the gap:
+      deep runs nightly and on dispatch, not on every change, so a copy of this
+      step living on it would be a green nobody can tell from one that never ran.
 
       A unit test is a function call with its dependencies faked; one that
       takes a second is waiting on something real — a lock timeout, a retry
@@ -889,14 +893,13 @@ tasks:
       and a gate that reds on a busy laptop for code nobody touched is a gate
       someone turns off.
 
-      It is not an off-switch, and the mode line says so on every run:
-      `verify-basic.yml`'s smoke job runs on **every pull request** with `CI`
-      set, so the hard mode runs on every change, and `.claude/tests/` asserts
-      that step's presence. Both modes name themselves on every run, green or
-      red — a reader must never have to infer whether the run in front of them
-      could have failed. Only the *budget verdict* is advisory: a log this
-      reader cannot judge and an unbounded allowlist pattern fail in both
-      modes, being wiring faults rather than slow tests.
+      With no workflow running it, the hard mode is reached only by running
+      this with `CI=1`; the advisory mode line says so. Both modes name
+      themselves on every run, green or red — a reader must never have to infer
+      whether the run in front of them could have failed. Only the *budget
+      verdict* is advisory: a log this reader cannot judge and an unbounded
+      allowlist pattern fail in both modes, being wiring faults rather than slow
+      tests.
 
       A load-average check was the alternative and is the wrong instrument: a
       nextest run saturates the box by design, so load at gate time describes
@@ -906,10 +909,10 @@ tasks:
 
       **Headroom.** The budget is 1.0 s of wall clock as observed on the run's
       own log. ubuntu-latest measures roughly 2x this project's dev box for the
-      scan-heavy tests and worse for process-spawning ones, and CI is where the
-      gate gates — so a test sitting above ~0.7 s on CI is a latent red, not a
-      pass. Once the allowlist's debt rows land fast, the slowest unlisted test
-      on CI is about 0.8 s, which is thin on purpose. The budget does NOT get
+      scan-heavy tests and worse for process-spawning ones, and a `CI=1` run is
+      the verdict that counts — so a test sitting above ~0.7 s on CI is a latent
+      red, not a pass. Once the allowlist's debt rows land fast, the slowest
+      unlisted test on CI is about 0.8 s, which is thin on purpose. The budget does NOT get
       raised above 1.0 s to buy headroom; 1.0 s is the contract.
 
       `crates/NEXTEST_SLOW_ALLOWLIST` is the tolerated set, one line per entry

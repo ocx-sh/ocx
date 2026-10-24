@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261024T153258Z-b8b74e4c.json"
+  ],
+  "first_seen": "2026-10-24T15:32:58Z",
+  "fixed": null,
+  "folded_at": "2026-10-24T17:05:26Z",
+  "folds": 1,
+  "id": "project-gate-tmpdir-inside-checkout",
+  "kind": "pitfall",
+  "last_seen": "2026-10-24T15:32:58Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "a gate run with TMPDIR inside the checkout reds project-discovery tests",
+  "v": 1,
+  "versions": []
+}

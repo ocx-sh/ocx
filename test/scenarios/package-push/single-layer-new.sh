@@ -18,7 +18,7 @@ cat >metadata.json <<'EOF'
 EOF
 
 # Per-test repo so parallel xdist workers do not collide.
-repo="t_$(uuidgen | tr -d '-' | head -c 8)_pushdemo"
+repo="t_$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]' | head -c 8)_pushdemo"
 fq="$REGISTRY/$repo:1.0.0"
 
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64

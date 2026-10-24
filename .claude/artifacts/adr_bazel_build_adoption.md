@@ -1,5 +1,7 @@
 # ADR: Adopt Bazel 9 under Taskfile to cache test execution per crate
 
+> **Superseded in part by [`adr_bazel_rules_rs_migration.md`](./adr_bazel_rules_rs_migration.md):** rules_rust 0.74 with crate_universe is replaced by rules_rs and the hermetic `@llvm` toolchain; everything else here (gates, lanes, cache, acceptance targets) stands.
+
 ## Metadata
 
 **Status:** Accepted (2026-09-21, meta-orchestrator under the owner's /goal; owner may revert) — the four-stage **scope** is owner-ratified (dossier G3 + the
@@ -112,7 +114,8 @@ decision is.
 zero cache reach**: GitHub withholds secrets from fork PRs, so such a lane can present
 no credential and every action executes locally against `--disk_cache` only. Branch
 **(a)** is taken — a **read-only** credential for same-repo lanes and the local loop,
-forks accepting disk-cache-only. This is an **orchestrator ruling pending owner
+forks accepting disk-cache-only *(amended 2026-10-22, ruling 5b: same-repo CI lanes
+now read with the write secret; the read-only credential is the local loop's)*. This is an **orchestrator ruling pending owner
 ratification**; its mechanism is § Cache staging ruling 5b, its fallback is branch
 (b) if the owner rejects the server change, and both are recorded in § Orchestrator
 rulings pending owner ratification.
@@ -706,7 +709,7 @@ read posture is the § Context contradiction, unresolved until WP-0 runs the `cu
 | `MODULE.bazel.lock` | Committed; regenerated only by `bazel mod deps`, never hand-edited; a JSON-aware merge driver registered (BZL-MOD-02/03/04). | yes |
 | `.bazelrc` | Cache URI with an explicit `https://` scheme; `--remote_download_minimal` on CI, `toplevel` default locally (BZL-CACHE-11) **with the BZL-CACHE-12 position beside it** (§ Cache staging ruling 10); `--remote_timeout` and `--remote_retries` set explicitly (ruling 11); `--remote_instance_name` carrying the generation salt (ruling 6b); **no credential of any kind, and no `--credential_helper` line at all** (BZL-CACHE-04, MUST); `try-import %workspace%/.bazelrc.user` as the last non-comment line (BZL-FLAG-19). | yes |
 | `.bazelrc.user` | Local opt-in: `--disk_cache` and local flag overrides **only**. **No `--credential_helper` of any kind** — see ruling 4a. | **gitignored** |
-| `$RUNNER_TEMP/bazel-cache.rc` | The **CI-only** rc file, written by a composite action on a trusted event, carrying the one `--credential_helper=bazel-cache.ocx.sh=…` line; consumed with `--bazelrc=$RUNNER_TEMP/bazel-cache.rc` on that lane's command line; deleted in an `if: always()` step. Never tracked, never `%workspace%`-relative. | **never written to the workspace** |
+| `$RUNNER_TEMP/bazel-cache.rc` | The **CI-only** rc file, written by a composite action whenever the job holds `BAZEL_CACHE_WRITE_AUTH` *(amended 2026-10-22, ruling 5: was "on a trusted event")*, carrying the `--credential_helper=bazel-cache.ocx.sh=…` line and `--remote_upload_local_results=true`; consumed with `--bazelrc=$RUNNER_TEMP/bazel-cache.rc` on that lane's command line; deleted in an `if: always()` step. Never tracked, never `%workspace%`-relative. | **never written to the workspace** |
 | `.bazelignore` | `.agents/`, `target/`, `.tmp/`, `external/rust-oci-client/target`, `external/docker_credential/target`, `external/sigstore-rs/target`, `.agents/worktrees`. See the semantics note below. | yes |
 | `crates/<name>/BUILD.bazel` × 20 | One `rust_library`; one `rust_test` for the lib's unit tests; **one further `rust_test` per `crates/<name>/tests/*.rs`** (14 across five crates — § Stage 1). `deps` mirroring `Cargo.toml`. | yes |
 | `crates/TEST_TARGET_MAP.toml` | The per-target expected-count table the floor reader floors on. § Stage 2. | yes |
@@ -729,13 +732,13 @@ list, leaving `/hex-plan` no work-package surface for them. One row per surface.
 | `ocx.toml` / `ocx.lock` | Add `bazel = "ocx.sh/bazelbuild/bazel:9.2.0"` (exact tag, not `:9` — § pin authority) and `agg = "ocx.sh/asciinema/agg:<v>"` once the mirror package exists. Relock. |
 | `taskfile.yml` | `.verify:build-test` — four of fourteen steps swapped (§ The hook point). `verify:scoped` — a Bazel-native per-crate equivalent beside `:206`, `:223`, `:225` (§ The second call site). New `bazel:pin:check`, `bazel:build:drift`, `bazel:tag:guard` wired into `.verify:lint`. |
 | `taskfiles/rust.taskfile.yml` | `test:floor` / `test:ceiling` re-derived against the Bazel reader; `test:unit` gains the Bazel arm. The `:228-234` "no `sources:`" comment is **preserved and re-pointed** at the new bracket, not deleted. |
-| `.github/workflows/verify-basic.yml` | `smoke` job: the nextest sub-sequence swapped; an explicit job-level `permissions: { contents: read }`; the credential supplied only through a trusted-event-conditioned expression (§ Cache staging ruling 5). |
-| `.github/workflows/verify-deep.yml` | Linux matrix leg: the nextest step swapped, plus the ungated report-only parity probe (§ Stage 2 ruling 6). `--remote_upload_local_results=false` and no credential on **every** trigger including `push` to `main`. No floor/ceiling introduced (ruling 2). |
-| `.github/actions/` (bazel bootstrap) | Bazel arrives through `setup-ocx` + `ocx.lock`; **no new third-party action** is introduced, and every existing one stays SHA-pinned (`subsystem-ci.md:98`). The credential-helper rc writer is a composite action here — and the ref gate is **not** placed in it (§ Cache staging ruling 5a). |
+| `.github/workflows/verify-basic.yml` | `smoke` job: the nextest sub-sequence swapped; an explicit job-level `permissions: { contents: read }`; the credential passed by name with no event predicate *(amended 2026-10-22: was a trusted-event-conditioned expression; § Cache staging ruling 5)*. |
+| `.github/workflows/verify-deep.yml` | Linux matrix leg: the nextest step swapped, plus the ungated report-only parity probe (§ Stage 2 ruling 6). Receives `BAZEL_CACHE_WRITE_AUTH` by name (`workflow_call.secrets`) and writes on every trigger that supplies it *(amended 2026-10-22, ruling 5: was `--remote_upload_local_results=false` and no credential on every trigger)*. No floor/ceiling introduced (ruling 2). |
+| `.github/actions/` (bazel bootstrap) | Bazel arrives through `setup-ocx` + `ocx.lock`; **no new third-party action** is introduced, and every existing one stays SHA-pinned (`subsystem-ci.md:98`). The credential-helper rc writer is a composite action here with one mode — write, when `write-auth` is non-empty; no ref gate exists anywhere *(amended 2026-10-22, ruling 5a: was "the ref gate is not placed in it")*. |
 | `website/taskfile.yml`, `website/recordings.taskfile.yml` | Call `bazel build //website:site` / the cast targets; their existing `sources:` lists stay as the non-Bazel path. |
 | `.claude/rules.md` | The `bazel-quality.md` auto-load row is **widened to match that rule's own `paths:` frontmatter** — claim diff 14 (`discover_bazel_full_adoption.md:37`) found the catalog row narrower, verified: `.claude/rules/bazel-quality.md:18` carries `- "**/*.scl"` among globs the row omits. A `meta-ai-config.md`-flagged drift, and it starts mattering the moment Bazel files exist. |
 | `CLAUDE.md` § Build & Development | Name `bazel` as a `task`-dispatched engine, not a command anyone types. |
-| `.claude/rules/subsystem-ci.md` | The cache section: lane gating, the write predicate, the BEP→OTLP push beside junit2otlp. |
+| `.claude/rules/subsystem-ci.md` | The cache section: which lanes write *(amended 2026-10-22: every lane holding the secret; was "lane gating, the write predicate")*, the BEP→OTLP push beside junit2otlp. |
 | `.claude/rules/subsystem-taskfiles.md` | The `.verify:build-test` step list and the caching contract's new Bazel neighbour. |
 | **New** dev-setup docs page under `website/src/docs/` | Claim diff 17 (`discover_bazel_full_adoption.md:40`) confirmed **ABSENT** — "no `contributing.md`, no `contributing/` directory" — so this is a **new page**, not an edit to one. |
 
@@ -1051,6 +1054,12 @@ workflows carry the floor/ceiling bracket. They do not:
    `--remote_upload_local_results=false` unconditionally and no credential at all** —
    BZL-CACHE-01's verification treats the *absence* of that flag in a lane as the
    finding, so "it has no credential anyway" is not the control.
+
+   > **SUPERSEDED 2026-10-22 by [`plan_pr637_round2.md`](./plan_pr637_round2.md) D2 ([#638](https://github.com/ocx-sh/ocx/issues/638)).** The
+   > leg now receives `BAZEL_CACHE_WRITE_AUTH` by name and writes; § Cache staging
+   > ruling 5's amendment states the policy. The `push`-to-`main` write that this
+   > ruling stopped the leg from attempting is the intended behaviour.
+
 4. **`crates/NEXTEST_FLOOR` = 8213** (verified current file content) and does not
    change. The file stays; only the reader changes.
 5. **`$XML_OUTPUT_FILE` is the design; the BEP + libtest grammar is the fallback.**
@@ -1517,7 +1526,8 @@ runner, with an explicit `--experimental_disk_cache_gc_max_size` or `_max_age` �
 both default to `"0"`, unbounded, even on a version that supports them,
 BZL-CACHE-17) → **remote cache read-only, everywhere** (explicit `https://`
 scheme; both remote flags default to `grpcs` on a scheme-less URI) → **writes on
-the main lane only** → **no remote execution, ever, under this ADR**.
+the main lane only** *(amended 2026-10-22, ruling 5: every lane holding the write
+secret writes)* → **no remote execution, ever, under this ADR**.
 
 #### Rulings the research demands
 
@@ -1729,13 +1739,16 @@ file-set table did — is that literal violation. In this design reads present n
 credential at all, so a helper on a developer machine can only be a **write** helper:
 an unreviewed writer to the shared Action Cache, running unsandboxed builds of
 whatever branch is checked out. That is the Stripe/`#4276` threat model the ADR
-accepts elsewhere only on the strength of "writes on one main-only lane".
+accepts elsewhere only on the strength of "writes on one main-only lane"
+*(superseded 2026-10-22: ruling 5 amendment)*.
 
 **The resolved shape, stated once:**
 
 - The credential lives in a **CI-only rc file written by a composite action on a
-  trusted event** — `$RUNNER_TEMP/bazel-cache.rc`, carrying the single line
-  `build --credential_helper=bazel-cache.ocx.sh=$RUNNER_TEMP/bazel-cache-helper`,
+  trusted event** *(amended 2026-10-22, ruling 5: whenever the job holds the
+  secret)* — `$RUNNER_TEMP/bazel-cache.rc`, carrying the single line
+  `build --credential_helper=bazel-cache.ocx.sh=$RUNNER_TEMP/bazel-cache-helper`
+  *(plus `build --remote_upload_local_results=true`, same amendment)*,
   consumed with `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`. Outside the workspace, not
   tracked, not `%workspace%`-relative: -03 and -04 both satisfied.
 - **The tracked `.bazelrc` carries no `--credential_helper` line of any kind**, so
@@ -1835,6 +1848,43 @@ in a workspace file; restore; show green.
    it cannot be the control. Its true counterpart is added: **on a same-repo PR run,
    assert `BAZEL_CACHE_WRITE` is empty.**
 
+   > **AMENDED 2026-10-22 by [`plan_pr637_round2.md`](./plan_pr637_round2.md) D2 ([#638](https://github.com/ocx-sh/ocx/issues/638)).** The trusted-event
+   > expression, "write happens only under the predicate above" and the
+   > `--remote_upload_local_results=false` on every non-main lane are replaced.
+   >
+   > * **Policy.** Every CI lane that holds the secret `BAZEL_CACHE_WRITE_AUTH`
+   >   writes the shared cache: same-repo PRs, merge queue, push to `main`,
+   >   dispatch, schedule. The untrusted path is the fork PR, to which GitHub
+   >   gives no secrets: it holds none, writes no rc file and runs as before
+   >   (`--disk_cache` only).
+   > * **Mechanism.** `.github/actions/bazel-cache-rc` has one mode. With
+   >   `write-auth` it writes `$RUNNER_TEMP/bazel-cache.rc` (0600) holding
+   >   `build --credential_helper=bazel-cache.ocx.sh=$RUNNER_TEMP/bazel-cache-helper`
+   >   (helper 0700) and `build --remote_upload_local_results=true`; an empty
+   >   input writes no file. Callers pass
+   >   `write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}` unconditionally.
+   >   Cleanup under `if: always()` is unchanged.
+   > * **Where the grant lives.** In that rc, beside the credential: `--bazelrc`
+   >   loads after `.bazelrc`, so the tracked `=false` stays the default for every
+   >   lane without the rc, and no step passes the flag on its command line.
+   >   Root `taskfile.yml` holds the one `CACHE_RC` var and every
+   >   `ocx exec bazel -- bazel` line passes it.
+   > * **Why.** Finding 2 of [#638](https://github.com/ocx-sh/ocx/issues/638): cross builds and most lanes never
+   >   warmed the cache, and a main-only writer left every PR lane cold.
+   > * **Trust.** Anyone who can push a same-repo branch already has write access
+   >   to the repository, so the lane adds no actor the repository does not already
+   >   trust. BZL-CACHE-01's "any pull request, fork or same-repo" is a deliberate
+   >   deviation (`subsystem-ci.md` § Bazel remote cache). What stays: one
+   >   server-side account (4a), `--credential_helper` from a CI-only rc outside
+   >   the workspace (4a, 4b), never `pull_request_target`, and 6a's standing
+   >   invariant, which now binds every lane holding the secret.
+   > * **Control.** `.claude/tests/test_workflows.py` holds the policy: every
+   >   writer passes the secret with no event predicate; no step passes
+   >   `--remote_upload_local_results`; every Bazel lane has the cache step;
+   >   callers of reusable workflows pass the secret by name. The "assert
+   >   `BAZEL_CACHE_WRITE` is empty on a same-repo PR" control above becomes the
+   >   same assertion on a **fork-PR** lane.
+
 5b. **The read credential — new, because reads are 401 (§ Context).** The design
    assumed anonymous reads; measurement says otherwise, so a read path has to be
    built rather than inherited. **Orchestrator ruling, pending owner ratification.**
@@ -1870,6 +1920,16 @@ in a workspace file; restore; show green.
    **Fork PRs carry neither and get `--disk_cache` only** — that is a real capability
    difference for outside contributors and it belongs in the new dev-setup docs page,
    not only here.
+
+   > **AMENDED 2026-10-22 by [`plan_pr637_round2.md`](./plan_pr637_round2.md) D2 ([#638](https://github.com/ocx-sh/ocx/issues/638)).** **The CI half only.**
+   > `BAZEL_CACHE_READ_AUTH` and the action's `read-auth` input are retired: every
+   > CI lane that reads holds the write secret (one credential reads and writes,
+   > per the realm note above), and the fork-PR lane holds neither, so no CI read
+   > lane remains. Reads are still 401 without a credential, so the
+   > **developer-side** half stands exactly as recorded: the local read
+   > credential, the two reconciliations below and the server-side realm split.
+   > The red state's "both empty on a fork-PR lane" now reads: the write secret is
+   > empty and no rc file is written.
 
    **Two rule reconciliations, written out so a later reviewer does not re-raise a
    closed finding:**
@@ -1925,6 +1985,17 @@ in a workspace file; restore; show green.
      job-level `permissions: { contents: read }`**, per `subsystem-ci.md:100`
      ("declare at workflow level, elevate per-job"). No new third-party action is
      introduced, and `ocx-sh/setup-ocx` stays SHA-pinned (`verify-basic.yml:58`).
+
+   > **AMENDED 2026-10-22 by [`plan_pr637_round2.md`](./plan_pr637_round2.md) D2 ([#638](https://github.com/ocx-sh/ocx/issues/638)).** No ref gate is left,
+   > so the first bullet's rule (place it only in a non-reusable workflow) has no
+   > subject, and the caller-context hazard goes with it. The rule that replaces
+   > it: a reusable workflow that holds a cache step receives the secret **by
+   > name** (`verify-deep.yml` declares it under `workflow_call.secrets`,
+   > `release-readiness.yml` passes it), never `secrets: inherit`. The second bullet
+   > reverses: `merge_group`, `workflow_dispatch` and `schedule` hold the secret and
+   > **do write**, so the merge-queue run now warms the cache before the merge. The
+   > `permissions:` bullet is untouched.
+
 6. **The residual risk, named — and what it operates on.** With no remote
    execution, the write path is "main-branch CI runs `bazel test` on a
    GitHub-hosted runner, then uploads". That is the "CI is the trusted uploader"
@@ -1954,13 +2025,15 @@ in a workspace file; restore; show green.
 6a. **Read as a content channel — the anonymous half is now moot, the invariant is
    not.** § Context measured reads at **401**, so there is no *anonymous* content
    channel to analyse: the exposure is bounded to whoever holds
-   `BAZEL_CACHE_READ_AUTH` (ruling 5b), which is CI lanes and developers. The
+   `BAZEL_CACHE_READ_AUTH` (ruling 5b), which is CI lanes and developers
+   *(amended 2026-10-22: the CI lanes now hold `BAZEL_CACHE_WRITE_AUTH`; the read
+   credential is developer-side only)*. The
    analysis below is retained in full anyway, for two reasons — it is the correct
    analysis if the owner ever opens the read side (§ Context branch (c)), and its
    **standing invariant is independent of who can read** and is the part that gates.
 
    Under stage 1 every `rust_test` target's outputs — `test.xml` and `test.log`
-   among them — are uploaded to the CAS from the credential-holding main lane and
+   among them — are uploaded to the CAS from the credential-holding lanes *(amended 2026-10-22: was "main lane")* and
    are readable by anyone who computes the key. **Keys are not guessed**: they are
    deterministic functions of a public tree, a public `BUILD.bazel` and a pinned
    toolchain, so any reader with the same checkout derives them (research 3 finding
@@ -2296,7 +2369,7 @@ later reader does not read the sequencing as the mandate being weakened.
 | **Scalability** | **Target count, re-derived against the corrected shapes — and it is roughly double what the previous draft estimated.** 23 `rust_library` (20 members + 3 `external/`) + **34** `rust_test` (§ Stage 1) + **39** cast (§ Stage 3) + **172** acceptance `sh_test` (one per `test/tests/test_*.py`, enumerated; the previous draft's "~15" counted `SCOPED_ROWS` rows, which § Stage 4 no longer uses as the unit) + ~6 website/schema ≈ **274 rule targets**. **BZL-CI-01 (MUST, pinned) is quoted rather than paraphrased, because its own verification names a bad paraphrase as the finding**: "Cross into 'consider target selection' **only when** the whole-repo job's median wall-clock on the widest CI runner is consistently past **~40 minutes**; treat **~300 rule targets** as the tripwire that says **measure the wall-clock now, not as the trigger itself**. Present both numbers as a derived tripwire, never as a published threshold." So ~300 is **not half of a trigger** — it is the signal that says *go measure*, and 274 crosses it. The switch point is the wall-clock, and only the wall-clock. Consequences: whole-repo `bazel test //...` stays the default, bazel-diff and target-determinator stay out of scope, and **what 274 obliges is the measurement WP-1c already owes**, read off `bazel query 'kind(rule, //...)' \| wc -l` beside the median. Adopting a selection tool below that switch point is what the rule calls premature adoption, and citing 274 as a reason to would be the "industry threshold" misreading its verification catches. (The previous draft's "both are below" was true only of a target set that undercounted stage 4 by an order of magnitude; stage 4's 172 targets are also why `--local_test_jobs=1` (§ Stage 4) is a real wall-clock cost rather than a footnote.) |
 | **Availability** | The cache is a single Hetzner host with no failover. **BZL-CACHE-26 records, measured on 8.7.0 and 9.2.0 against an HTTP cache on Linux** (not against `bazel-cache.ocx.sh`, which this repository has never run Bazel against): with the endpoint refusing connections, `WARNING: Remote Cache: Connection refused`, every action executed locally, **exit 0**; all four combinations of `--remote_local_fallback` and `--incompatible_remote_local_fallback_for_remote_cache` produce the identical outcome, because with no `--remote_executor` there is nothing to fall back *from* (MUST: do not cite those flags as an outage policy). **Ruling: a cache outage degrades to a full local build, green and slow. Accepted; no pre-flight reachability probe.** `--remote_upload_local_results=false` is the *untrusted-lane write* control, not an outage control. **The degraded case is different and is ruled separately** (§ Cache staging ruling 11) — a slow cache is worse than a dead one and has no Bazel-side signal. **And the tool path does not share this posture:** with rules_ocx as the sole tool path from stage 3, an unreachable git remote **fails the build closed** (ruling 9). |
 | **Latency** | **Unmeasured, and treated as such.** Hetzner ↔ GitHub-hosted runners at thousands of AC lookups per build is a WP-1c measurement, never an assumption. Measurement shape: median wall-clock of `bazel test //crates/...` from a GH-hosted runner with a warm remote cache, against the current `cargo nextest run --workspace` baseline on the same commit; the observed per-lookup RTT; the CAS working-set size per cold build and per one-crate change (ruling 10); and the `bunx vitepress build` chain's cold/warm wall-clock and invocation frequency (§ Stage 3). The `--disk_cache` layering question is decided by the same measurement. **The threshold is a decision, not a measurement, and it is written in this ADR before the numbers arrive** — Open Question #2 carries a proposed number for the owner to ratify or override. |
-| **Security** | § Cache staging, in full. Summary: writes on one main-only lane, credential supplied only through a trusted-event-conditioned expression and carried by `--credential_helper` from a **CI-only rc file outside the workspace** (rulings 4a/4b/5); **no developer-machine write helper** (ruling 4a); reads are **401 — measured, not assumed** — so a read-only credential is supplied to same-repo lanes and the local loop while fork PRs get `--disk_cache` only (§ Context; ruling 5b, which also records why that read credential is not the BZL-CACHE-02 violation F2 closed); no `pull_request_target`; no remote execution; the AC/CAS asymmetry named with a generation salt, a detection alert and a rotation cadence (ruling 6b); `git_override` bumps reviewed as analysis-time code, on a protected branch (ruling 9). Residual risk (a flaky trusted uploader) accepted and named. |
+| **Security** | § Cache staging, in full. Summary: writes on every CI lane that holds the write secret, the fork-PR path holding none, credential passed by name with no event predicate *(amended 2026-10-22, ruling 5; was "one main-only lane" behind a trusted-event-conditioned expression)* and carried by `--credential_helper` from a **CI-only rc file outside the workspace** (rulings 4a/4b/5); **no developer-machine write helper** (ruling 4a); reads are **401 — measured, not assumed** — so a read-only credential is supplied to the local loop while fork PRs get `--disk_cache` only *(amended 2026-10-22, ruling 5b: the CI read credential is retired; CI lanes that read hold the write secret)* (§ Context; ruling 5b, which also records why that read credential is not the BZL-CACHE-02 violation F2 closed); no `pull_request_target`; no remote execution; the AC/CAS asymmetry named with a generation salt, a detection alert and a rotation cadence (ruling 6b); `git_override` bumps reviewed as analysis-time code, on a protected branch (ruling 9). Residual risk (a flaky trusted uploader) accepted and named. |
 | **Cost** | No new service, no new host, no new vendor. The 50 GB cache is already provisioned and already scraped — **that is about the host, not about the size**; whether 50 GB fits this working set is a WP-1c measurement (ruling 10). Incremental infrastructure cost ≈ bandwidth + one Grafana dashboard + one alert rule. The real cost is **maintenance**: `BUILD.bazel` as a second source of truth beside `Cargo.toml` (mitigated by the drift gate), a hand-written Starlark rule for the website, a second Rust-version pin, and four bespoke scripts (`bep_to_otlp`, `bazel_pin_check`, `bazel_build_drift`, `bazel_tag_guard` — the first of them a BEP reader with no upstream maintainer) — four surfaces that did not exist before. The **delivery** cost is priced in the trade-off matrix's own row rather than left out of it. |
 | **Operability** | `task` stays the only entry point anyone is expected to type; `task verify` stays the gate. A contributor who never runs `bazel` is unaffected. Local opt-outs live in the gitignored `.bazelrc.user` (`try-import`, last line). Rollback is `git rm` of the file set plus restoring four Taskfile steps — the artifacts are deletable; what is not cheaply reversible is rules_ocx having become a real consumer and the CI lane swap. |
 
@@ -2393,7 +2466,7 @@ is left dangling.
 | bazel#29114 (repin crash on Bazel 9.0.1) | **DECISION — closed** | Mitigated on the rules_rust side since PR #3932 (in 0.74.0). Pin 9.2.0; do not wait for 9.3.0 GA. WP-1a still runs `CARGO_BAZEL_REPIN=1 bazel fetch --repo=@<repo>` once as a smoke (BZL-RUST-03's spelling; `bazel sync` was deleted at 9.0.0). |
 | rules_ocx on 9.x (pinned 8.7.0 today) | **PLAN DOCKET — WP-0b, resized** | **A version bump and a Bazel-9 verification, not a build**: rules_ocx is **v0.4.0** @ `825f20b` with `ocx.project()` already implemented (§ rules_ocx — the dossier's "API 0.1.0" was wrong). Work in `../rules_ocx/.agents/worktrees/<slug>`, own branch, consumed via `git_override`. **Blocks stage 3, not stage 1** — stages 1 and 2 consume no rules_ocx-provided tool (§ Stage 1 sequencing). WP-0b also records whether the repository is public (ruling 9) and how it pins the `ocx` binary (docket below). |
 | How `bazel test` reproduces the 8213 floor and the skip ceiling | **DECISION (contract) + SPIKE — WP-1b** | Contract in § Stage 2, including both exit codes, both messages and the reader floor. The two mechanism assumptions (libtest's `test result:` line reachable via `TestResult.test_action_output`; a cached target still yielding a parseable log) are WP-1b verification items, each with a named fallback. |
-| Which CI lane holds the bazel-cache write credential | **DECISION — closed** | `verify-basic.yml`, push-to-`main` only (`github.event_name == 'push' && github.ref == 'refs/heads/main'`), carried by `--credential_helper` from `$RUNNER_TEMP` — never `--remote_header`, never a committed `.bazelrc` (BZL-CACHE-01/02/03/04). Every other lane carries `--remote_upload_local_results=false` and no credential at all. New plumbing; no existing job-level ref gate to copy. |
+| Which CI lane holds the bazel-cache write credential | **DECISION — closed; amended 2026-10-22** | **Every lane that holds `BAZEL_CACHE_WRITE_AUTH`** — same-repo PRs, merge queue, push to `main`, dispatch, schedule; the fork-PR path holds none — carried by `--credential_helper` from `$RUNNER_TEMP`, never `--remote_header`, never a committed `.bazelrc` (BZL-CACHE-02/03/04; BZL-CACHE-01 deviated from, ruling 5). *(Was: `verify-basic.yml`, push-to-`main` only, every other lane `--remote_upload_local_results=false` with no credential.)* |
 | `.bazelversion` ↔ `ocx.lock` drift check | **DECISION — closed** | § The pin authority. Compares `.bazelversion` against `bazel --version` from the resolved binary (`ocx.lock` carries **no** semver field — verified), with three distinct exit-1 messages including a reader floor, and both red halves demonstrated before the check may be cited. |
 | Cache latency Hetzner ↔ GH runners; is `--disk_cache` layering worth it | **SPIKE — WP-1c** | Must produce: median wall-clock of `bazel test //crates/...` from a GH-hosted runner with a warm remote cache vs. the `cargo nextest run --workspace` baseline on the same commit; observed per-lookup RTT; CAS working-set bytes per cold build and per one-crate change (ruling 10); the `bunx vitepress build` chain's cold/warm wall-clock and invocation frequency (§ Stage 3); a yes/no on `--disk_cache` layering. Its **threshold** is Open Question **#2**, which carries a proposed number rather than asking whether a number is needed. |
 | pexpect under this host's sandbox | **DECISION — closed, no spike** | Expected red; [bazel#5373](https://github.com/bazelbuild/bazel/issues/5373) is closed `not_planned`. Casts are tagged `no-sandbox, requires-network, local` from day one, so the answer gates nothing. Spiking it would spend a work package to confirm a closed upstream issue. |
@@ -2508,7 +2581,8 @@ rather than beside it.
 - Pin drift: the three cases in § The pin authority.
 - BUILD drift: the five cases in § Stage 1.
 - Tag guard: the three cases in § Cache staging ruling 1a.
-- **Credential absence (the control).** On a **same-repo** PR run, assert the job's
+- **Credential absence (the control).** *(Amended 2026-10-22, ruling 5: on a
+  **fork-PR** run; a same-repo PR now holds the secret.)* On a **same-repo** PR run, assert the job's
   `BAZEL_CACHE_WRITE` is the empty string and that no rc file was written under
   `$RUNNER_TEMP`. Its red half: remove the trusted-event condition from the `env:`
   expression in a scratch workflow and show the assertion fail. This is the
@@ -2724,7 +2798,8 @@ and doing so ratifies these two along with everything else.
 ### R1 — the read-credential branch (replaces the former open question)
 
 **Decided:** branch **(a)** — a read-only credential for same-repo lanes and the
-local loop; fork PRs get `--disk_cache` only.
+local loop; fork PRs get `--disk_cache` only *(amended 2026-10-22, ruling 5b: the
+read-only credential is now the local loop's alone)*.
 
 **Evidence it rests on:** `nginx/config/main/conf.d/ocx-sh-10-bazel-cache.conf:29-33`
 on hetzner1 — `location /` carries `auth_basic` + `auth_basic_user_file` with no
@@ -2835,7 +2910,7 @@ the questions being quietly dropped.
 - *A flaky trusted uploader poisons the shared cache* (bazel#4276 — no adversary
   needed). Mitigation: no remote execution; the only sandboxed cacheable stage
   gated on a hermeticity check with both halves shown; writes restricted to one
-  main-only lane.
+  main-only lane *(amended 2026-10-22, ruling 5: to lanes holding the write secret)*.
 - *The website rule's declared inputs are incomplete.* Mitigation: the
   cross-path + mutated-input check is a precondition, not a follow-up; until it
   is green the rule carries `no-remote-cache`.
@@ -2854,7 +2929,9 @@ the questions being quietly dropped.
 - *A same-repo PR carries the write credential.* GitHub withholds secrets from
   fork PRs only, and every PR here is same-repo. Mitigation: the credential is
   supplied through a trusted-event-conditioned expression so it is **absent**, not
-  merely unused, and A2's control asserts that on a real PR run.
+  merely unused, and A2's control asserts that on a real PR run. *(Superseded
+  2026-10-22, ruling 5: a same-repo PR holds the secret and writes by design; the
+  fork-PR path is the one that holds none.)*
 - *A poisoned AC entry has no exit.* Wiping a 50 GB shared cache is not feasible.
   Mitigation: a generation salt in `--remote_instance_name`, so abandoning a
   suspected generation is a one-string bump; plus a PUT-outside-the-window alert
@@ -2897,3 +2974,4 @@ the questions being quietly dropped.
 | 2026-09-22 | Owner decision, executed | **Stage 4's "cache-result caching is disabled, deliberately" ruling reversed.** The acceptance suite runs as `task bazel:test:accept` (`bazel test //test:all --local_test_jobs=1`) in `task verify` phase 2 and in `verify-deep.yml`'s acceptance job, **with results cached**. The ruling's own exit condition was the precondition and it is met in the same change: `external` and `local` both off (measured — `local`'s `no-remote` half suppresses the disk-cache hit on a fresh server), `no-sandbox` in their place, the real input set declared through `//test:suite_inputs`, `bazel:tag:guard` advanced to stage 4 and narrowed so it refuses an acceptance target that stops declaring the binary and the compose definition, and `--check-s015` rebuilt around the binary-swap control. A4's red half 2 is inverted, half 3 is promoted from defence in depth to the control, and A4's 50 % wall-clock abort condition is recorded as **breached and overruled** with its three numbers in `plan_bazel_build_adoption.md`'s DX-97 row. The residual under-declaration (the live compose stack, and ~20 modules reading across a package boundary) is named in `test/bazel.bzl`'s docstring rather than closed. |
 | 2026-09-21 | Architect (`/hex-architect high`, R2 fix pass) | Closes the R2 residual, which was one systematic substitution the previous pass introduced. `54` (all `//crates/...` targets) replaced by **34** (test targets) at the five sites whose subject is test targets, `rust-suites` or `TEST_TARGET_MAP` rows, and by **57** at the two whose subject is every target in the 23 Rust BUILD files; the drift gate's false "the two floors cannot disagree" claim replaced by four floors each named on its own reader's universe (34 / 57 / 54 / ≥ 274); "23-crate pilot" corrected to 20; the `GITHUB_*` enumeration mirrored into the disposition table; BZL-CI-01 quoted instead of paraphrased, so ~300 reads as the signal to measure rather than half a trigger; the decision file's empty-cell count taken from the quoted check (three rows) instead of by eye, and the `Build owner` Answer cell filled; `build.rs` cited `:35-42`. NC#3 retired to WP-0b as a lookup rather than a decision, leaving **two** markers — three is a cap, not a quota. Every `hex.md` citation converted from a line number to a quoted phrase, that file being appended to at the top. |
 | 2026-09-25 | `plan_bazel_cargo_port.md` execution | Doctests, clippy, rustdoc diagnostics and schema generation ported off cargo onto Bazel — doctests as `rust_doc_test` targets inside `bazel:test:unit`, clippy and rustdoc as cached aspects (`rust:clippy:check`, `rust:doc:ratchet`), schemas as the `//crates/ocx_schema:schemas` genrule. Superseded blockquotes added at the C4 sketch, § Stage 1's "doctests stay on cargo" ruling, and § Stage 2's scoped-arm table. |
+| 2026-10-22 | [`plan_pr637_round2.md`](./plan_pr637_round2.md) P1 (C-004) | Cache staging rulings 5, 5a and 5b amended in place, with the Security row, the file-set and rollout rows and the closed write-lane decision: every CI lane holding `BAZEL_CACHE_WRITE_AUTH` writes (same-repo PRs, merge queue, `main`, dispatch, schedule); the fork-PR path holds none. The CI read credential is retired; the developer-side read credential stands. [#638](https://github.com/ocx-sh/ocx/issues/638). |

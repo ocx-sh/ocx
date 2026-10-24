@@ -422,20 +422,30 @@ impl Env {
         Some(pruned)
     }
 
-    /// Windows-only: probe `path` with each extension from this env's PATHEXT, in order.
+    /// Windows-only: probe each `path` directory with each extension from this env's PATHEXT, in order.
     ///
     /// `path` is the caller's lookup copy; reading the stored `PATH` would bypass its filtering.
     #[cfg(windows)]
     fn resolve_command_windows(&self, command: &OsStr, path: Option<&OsStr>, cwd: &std::path::Path) -> Option<PathBuf> {
-        for ext in self.pathext() {
-            let mut candidate = command.to_os_string();
-            candidate.push(&ext);
-            if let Ok(found) = which::which_in(&candidate, path, cwd) {
-                return Some(found);
-            }
+        let extensions = self.pathext();
+        let probe = |dirs: Option<&OsStr>| {
+            extensions
+                .iter()
+                .find_map(|ext| {
+                    let mut candidate = command.to_os_string();
+                    candidate.push(ext);
+                    which::which_in(&candidate, dirs, cwd).ok()
+                })
+                .or_else(|| which::which_in(command, dirs, cwd).ok())
+        };
+        if command_is_path(command) {
+            return probe(path);
         }
-
-        which::which_in(command, path, cwd).ok()
+        // Directory outermost, as cmd and CreateProcess search: extension-outermost lets a
+        // later-PATH `tool.exe` shadow an earlier-PATH `tool.bat`, so a package's tool loses to the host's.
+        std::env::split_paths(path?)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .find_map(|dir| probe(Some(dir.as_os_str())))
     }
 
     /// Windows-only: this env's PATHEXT (else the default), in order.
@@ -2529,6 +2539,31 @@ mod tests {
             resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
             "my_tool.exe",
             "resolve_command must probe .exe even when child PATHEXT omits it"
+        );
+    }
+
+    /// An earlier `PATH` directory wins over a later one even when its extension comes later in
+    /// PATHEXT, matching cmd: a package's `tool.bat` must not lose to the host's `tool.exe`.
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_windows_searches_path_directories_before_extensions() {
+        use std::fs;
+
+        let early = tempfile::tempdir().unwrap();
+        let late = tempfile::tempdir().unwrap();
+        fs::write(early.path().join("my_tool.bat"), b"@echo off").unwrap();
+        fs::write(late.path().join("my_tool.exe"), b"MZ").unwrap();
+
+        let mut env = Env::clean();
+        let path = std::env::join_paths([early.path(), late.path()]).unwrap();
+        env.set("PATH", path.to_str().unwrap());
+        env.set("PATHEXT", ".EXE;.BAT");
+
+        let resolved = env.resolve_command("my_tool").expect("my_tool resolves");
+        assert_eq!(
+            resolved.parent().unwrap(),
+            early.path(),
+            "the earlier PATH directory must win, got {resolved:?}"
         );
     }
 

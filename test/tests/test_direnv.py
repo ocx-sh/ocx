@@ -74,7 +74,7 @@ def test_direnv_init_creates_envrc(ocx: OcxRunner, tmp_path: Path) -> None:
     )
     envrc = tmp_path / ".envrc"
     assert envrc.exists(), "expected .envrc to be created"
-    assert envrc.read_text() == EXPECTED_ENVRC
+    assert envrc.read_text(encoding="utf-8") == EXPECTED_ENVRC
 
 
 def test_direnv_init_refuses_when_envrc_exists(
@@ -89,7 +89,7 @@ def test_direnv_init_refuses_when_envrc_exists(
         f"got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert envrc.read_text() == "user content\n", (
+    assert envrc.read_text(encoding="utf-8") == "user content\n", (
         "user content must be preserved without --force"
     )
 
@@ -105,7 +105,7 @@ def test_direnv_init_force_overwrites(
         f"expected exit 0 with --force; got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert envrc.read_text() == EXPECTED_ENVRC
+    assert envrc.read_text(encoding="utf-8") == EXPECTED_ENVRC
 
 
 def test_bare_direnv_defaults_to_init(ocx: OcxRunner, tmp_path: Path) -> None:
@@ -123,7 +123,7 @@ def test_bare_direnv_defaults_to_init(ocx: OcxRunner, tmp_path: Path) -> None:
     )
     envrc = tmp_path / ".envrc"
     assert envrc.exists(), "bare `ocx direnv` must write .envrc"
-    assert envrc.read_text() == EXPECTED_ENVRC
+    assert envrc.read_text(encoding="utf-8") == EXPECTED_ENVRC
 
 
 # ---------------------------------------------------------------------------

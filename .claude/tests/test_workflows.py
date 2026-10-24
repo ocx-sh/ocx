@@ -1,38 +1,41 @@
-"""Structural tests for `.github/workflows/*.yml` (plan_crate_split_workspace.md C-016, C-023).
+"""Structural tests for `.github/workflows/*.yml`.
 
 Two shapes the crate split can break without any workflow going red:
 
 - a `paths:` / `paths-ignore:` entry whose last file moved. The workflow then
   never fires, and a workflow that never fires is a green nobody can tell
   from a pass. Every entry must match at least one tracked file.
-- `verify-deep.yml`'s trigger shape, which is what makes it a manual gate:
-  NO `pull_request` trigger and no job guarding on a `github.event.pull_request`
-  context (a deep run is ≈113 runner-minutes against basic's ≈18, so it is
-  opt-in per branch), `workflow_dispatch` — now the only way a human runs it —
-  and `push` to `main` (the one full run over the tree a rebase-only merge
-  actually landed, DX-16).
-- the merge-queue shape of BOTH tiers — `merge_group` and a
-  `cancel-in-progress` that leaves queue runs alone — since either workflow's
-  checks can be marked required.
+- the deep tier's trigger shape, which is what makes it opt-in: the conventions
+  template's `verify-deep.yml` runs nightly, by `workflow_dispatch`, from the
+  readiness gate (`workflow_call`) and on a pull request only once it carries the
+  `run-deep` label. A push to `main` runs the basic tier alone.
+- the merge-queue shape of the basic tier — `merge_group` and a `cancel-in-progress`
+  that cancels pull-request runs only, so a queue run is never a cancelled check.
 - the shell zoo's checkout and its task graph, which are one contract: that
   job omits `submodules:` on purpose, so a task it runs must not reach
   `:website:schema:default` and through it a cargo build of a workspace whose
   `external/` patch sources are not on disk.
-- the tier partition (D5): `verify-basic.yml` is what a pull request pays
-  for, so it runs on Linux only, and the Windows and macOS unit legs are
-  `verify-deep.yml`'s `build` matrix. A leg re-added to basic is a cost every
+- the tier partition: `verify-basic.yml` and `basic-repo.yml` are what a pull
+  request pays for, so they run on Linux only, and the Windows and macOS unit legs
+  are `deep-repo.yml`'s `unit-native` matrix. A leg re-added to basic is a cost every
   push pays twice; a leg dropped from deep's matrix is a `cfg(windows)` /
   `cfg(target_os = "macos")` arm nothing compiles anywhere.
 
-- the stage-2 Bazel remote-cache credential boundary (plan_bazel_build_adoption.md
-  C-015/C-016/C-017/C-029, S-005 … S-008, S-016). Whether the write credential is
-  gated on a trusted event is the BZL-CACHE-01 control, and it is a property of the
-  workflow file: a same-repo pull request gets the full `secrets` context, so nothing
-  but that predicate keeps a cache-write token off a lane an untrusted contributor can
-  trigger. See the section comment above `CACHE_HOST` for why every one of those
-  assertions is structural and none of them dials the cache.
+- the Bazel remote-cache lane policy. Every same-repo
+  lane holding the secret reads and writes the shared cache: each `bazel-cache-rc`
+  step passes `BAZEL_CACHE_WRITE_AUTH` by name with no event predicate, every Bazel
+  lane has such a step before its first lane step and an `if: always()` cleanup
+  after, no workflow spells the upload flag, and every caller of a reusable workflow
+  passes each secret that workflow declares by name (no `secrets: inherit`). Every one
+  of those assertions is structural; none dials the cache.
 
-- S-016's evidence predicate: which `TestResult` counts as a **remote** cache hit.
+- the shape of the repo-owned workflows behind the conventions template's `repo`
+  jobs (`basic-repo.yml`, `deep-repo.yml`) and the reusable workflows they call
+  (`acceptance.yml`, `cross.yml`, `shell-activation-deep.yml`): the jobs each tier
+  needs, the `workflow_call` inputs and secrets, and the permission ceiling the
+  template's caller imposes.
+
+- The evidence predicate: which `TestResult` counts as a **remote** cache hit.
   Measured, the two BEP fields named for that question answer it wrongly — a
   `--disk_cache` hit reports `cachedRemotely: true` with no remote cache configured
   at all — so the predicate keys on `executionInfo.strategy`, and its red and green
@@ -50,14 +53,14 @@ Run:
 
 from __future__ import annotations
 
-import base64
+import copy
+import functools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -69,46 +72,22 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 VERIFY_DEEP = ROOT / ".github" / "workflows" / "verify-deep.yml"
 VERIFY_BASIC = ROOT / ".github" / "workflows" / "verify-basic.yml"
-# The merge-queue shape belongs to both tiers, not to deep alone.
-TIERS = (VERIFY_BASIC, VERIFY_DEEP)
 # Runner-label prefixes: `ubuntu-latest`, `macos-14`, `windows-2025` all
 # belong to their family, so a version pin never reads as a lost OS.
 OS_FAMILIES = ("ubuntu", "macos", "windows")
 
-# No deep job may condition on a pull request any more: the workflow does not
-# fire on one, so such a guard is either dead text or evidence the trigger came
-# back. The whole `github.event.pull_request` context is the needle, so the
-# former draft guard and any other shape of it read the same.
-PULL_REQUEST_CONTEXT = "github.event.pull_request"
-# Both checks below this point are negative — "`pull_request` is not among the
-# triggers", "no job's `if:` names that context" — and a negative over a
-# collection passes identically when the collection is empty, mis-keyed, or
-# read by a loader that returned nothing. The reader self-test that used to
-# floor this file went with the draft-guard parser it proved, so these two sets
-# are the floor instead: each check asserts what it *saw* before asserting what
-# it did not. They are exact rather than a count, so the failure names the
-# drift. Adding a trigger or a job to the deep tier reds one of them, which is
-# the review it deserves.
-DEEP_TRIGGERS = frozenset({"workflow_dispatch", "workflow_call", "push", "merge_group", "schedule"})
-DEEP_JOBS = frozenset(
-    {
-        "index-conformance-drift",
-        "build",
-        "cross-compile",
-        "acceptance-tests",
-        "test-results",
-        "satellite-verify",
-        "satellite-contract",
-    }
-)
-# A cancelled merge-queue run counts as a failed check and drops the entry
-# from the queue, so queue runs are never cancelled; `main` keeps its carve-out.
-MERGE_QUEUE_SAFE_CANCEL = (
-    "${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}"
-)
-# Exact, not "contains the schedule clause": any wider `if:` can keep that
-# clause and still admit no dispatch, which leaves the 3-OS matrix unreachable.
-DEEP_BUILD_IF = "github.event_name != 'schedule' || inputs.full"
+# The label a pull request carries to start the deep tier. The template's `pull_request` trigger is
+# `labeled` only, so a push to a labelled pull request does not re-run it.
+RUN_DEEP_LABEL = "run-deep"
+# Both checks that read deep's triggers and jobs are over a collection, and a check over a collection
+# passes identically when the collection is empty, mis-keyed or read by a loader that returned nothing.
+# These sets are the floor: exact rather than a count, so the failure names the drift.
+DEEP_TRIGGERS = frozenset({"workflow_dispatch", "workflow_call", "schedule", "pull_request"})
+DEEP_JOBS = frozenset({"deep", "repo", "nightly-red"})
+# The template's expression cancels a pull-request run and nothing else. A queue run has the event
+# `merge_group` and a push to `main` the event `push`, so neither is ever cancelled — a cancelled
+# merge-queue run is a failed check and drops the entry from the queue.
+CANCEL_ONLY_PULL_REQUESTS = "${{ github.event_name == 'pull_request' }}"
 
 
 def _load(workflow: Path) -> dict:
@@ -178,111 +157,97 @@ def test_path_filters_match_tracked_files(workflow: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C-016: verify-deep.yml is a manual gate that survives the merge queue
+# The deep tier is opt-in, and the basic tier survives the merge queue
 # ---------------------------------------------------------------------------
 
 
-def test_deep_does_not_run_on_pull_requests() -> None:
+def test_deep_runs_on_a_pull_request_only_when_it_is_labelled() -> None:
     """The deep tier is opt-in, not per-PR.
 
-    A deep run is ≈113 runner-minutes against `verify-basic.yml`'s ≈18, most of
-    it Windows and macOS minutes, and every pull request paid it on every push.
-    Re-adding the trigger is a real decision about cost and about what the
-    basic tier is for — so it reds here rather than arriving in a diff nobody
-    reads. The coverage this gives up is named in subsystem-ci.md.
+    A deep run is the cross-builds plus macOS and Windows minutes, and every pull
+    request used to pay it on every push. The template's one pull-request trigger is
+    `labeled`, and the `run-deep` guard on its jobs (the next test) is what keeps any
+    other label from starting it. Adding `synchronize` or `opened` is a real decision
+    about cost and about what the basic tier is for, so it reds here rather than
+    arriving in a diff nobody reads. The coverage this gives up is named in
+    subsystem-ci.md.
     """
     on = _on(VERIFY_DEEP)
-    assert "pull_request" not in on, (
-        f"verify-deep.yml `on` has {sorted(on)}, including `pull_request` — the deep tier "
-        f"is opt-in per branch (`gh workflow run verify-deep.yml --ref <branch>`), and a "
-        f"pull request pays for the basic tier only. If this is deliberate, this assertion "
-        f"and subsystem-ci.md's 'Verification tiers' table change together"
+    assert on.get("pull_request") == {"types": ["labeled"]}, (
+        f"verify-deep.yml `on.pull_request` is {on.get('pull_request')!r}, expected only "
+        f"`types: [labeled]` — any other type runs the deep tier on every push to every pull request"
     )
-    # The floor: the assertion above is a negative, and an `on:` block this
-    # reader got back empty or under a key it does not know would satisfy it
-    # while proving nothing.
+    # The floor: the assertion above is a negative on every other trigger, and an `on:` block
+    # this reader got back empty or under a key it does not know would satisfy it while proving
+    # nothing.
     assert set(on) == DEEP_TRIGGERS, (
         f"verify-deep.yml `on` is {sorted(on)}, expected exactly {sorted(DEEP_TRIGGERS)} — "
-        f"a trigger gained or lost changes when the deep tier runs, and the `pull_request` "
-        f"assertion above is only evidence if this reader saw the real `on:` block"
+        f"a trigger gained or lost changes when the deep tier runs"
     )
 
 
 def test_deep_is_dispatched_by_hand() -> None:
-    """`workflow_dispatch` is now the load-bearing trigger: with `pull_request`
-    gone it is the only way a branch gets Windows, macOS or full-acceptance
-    coverage before it lands. Lose it and the deep tier runs nowhere but on
-    `main`, after the merge."""
+    """`workflow_dispatch` is how a human runs the deep tier on a branch whose pull
+    request is not open yet. Lose it and the tier runs nightly and on a label only."""
     on = _on(VERIFY_DEEP)
     assert "workflow_dispatch" in on, (
-        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_dispatch` — the deep tier "
-        f"no longer runs per pull request, so this is the only way a human runs it on a "
-        f"branch; without it nothing deep happens until the merge lands on `main`"
+        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_dispatch` — the one way to "
+        f"run the deep tier on a branch before a pull request carries the label"
     )
 
 
-def test_deep_runs_on_every_push_to_main() -> None:
-    """Merges are rebase-only and there is no queue (DX-16): a PR verified at
-    its own head lands on a `main` that moved since, so the push is the one
-    full run over the tree that actually landed."""
+def test_deep_runs_nightly_and_for_the_readiness_gate() -> None:
+    """A push to `main` runs the basic tier alone, so the nightly schedule is the
+    only automatic full run; `workflow_call` stays because the template owns the file."""
     on = _on(VERIFY_DEEP)
-    assert "push" in on, (
-        f"verify-deep.yml `on` has {sorted(on)} and no `push` — nothing full-suite runs on "
-        f"`main` after a rebase-only merge (DX-16)"
+    assert "schedule" in on, f"verify-deep.yml `on` has {sorted(on)} and no `schedule` — nothing deep runs unattended"
+    assert "workflow_call" in on, (
+        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_call` — the template's trigger set changed"
     )
-    branches = (on["push"] or {}).get("branches") or []
-    assert "main" in branches, f"verify-deep.yml `on.push.branches` is {branches}, missing `main`"
 
 
-@pytest.mark.parametrize("workflow", TIERS, ids=lambda workflow: workflow.name)
-def test_each_tier_triggers_in_the_merge_queue(workflow: Path) -> None:
-    """Both tiers, because either one can be marked required: a required check
-    that never runs on the queued merge commit blocks the queue forever, and
-    basic's `merge_group: {}` exists for exactly that."""
-    on = _on(workflow)
+def test_basic_triggers_in_the_merge_queue() -> None:
+    """A required check that never runs on the queued merge commit blocks the queue forever,
+    and `basic-gate` is the one required check."""
+    on = _on(VERIFY_BASIC)
     assert "merge_group" in on, (
-        f"{workflow.name} `on` has {sorted(on)} and no `merge_group` — a required check that "
+        f"verify-basic.yml `on` has {sorted(on)} and no `merge_group` — a required check that "
         f"never runs on the queued merge commit blocks the queue forever"
     )
 
 
-def test_no_deep_job_guards_on_a_pull_request() -> None:
-    """The other half of the trigger removal, and the half a diff hides.
+def test_every_deep_job_starts_only_on_the_label_or_the_schedule() -> None:
+    """The other half of the trigger shape, and the half a diff hides.
 
-    Every job used to carry `github.event_name != 'pull_request' ||
-    github.event.pull_request.draft == false`. With no `pull_request` trigger
-    that term is always true — dead text that reads like a live gate, and the
-    shape someone restoring the trigger would find already in place. The needle
-    is the whole `github.event.pull_request` context rather than that one
-    expression, so a rewritten guard reds too.
+    A pull request event reaches every job of the workflow, so a job with no guard runs
+    for *any* label a maintainer adds. Each job either names the `run-deep` label or is
+    the scheduled `nightly-red` reporter.
     """
     jobs = _load(VERIFY_DEEP)["jobs"]
-    # The floor, before the negative below: a job set this reader got back
-    # empty — or six jobs it read past because the loader returned them under
-    # some other shape — sweeps clean and says nothing.
+    # The floor, before the negative below: a job set this reader got back empty — or one it
+    # read past because the loader returned it under some other shape — sweeps clean and says
+    # nothing.
     assert set(jobs) == DEEP_JOBS, (
         f"verify-deep.yml jobs are {sorted(jobs)}, expected exactly {sorted(DEEP_JOBS)} — a "
-        f"job added here must be checked for a pull-request guard by the assertion below, "
-        f"and one removed means this sweep now reads less than it claims to"
+        f"job added here must be checked for a label guard by the assertion below"
     )
-    guarded = {
-        name: job["if"] for name, job in jobs.items() if PULL_REQUEST_CONTEXT in str(job.get("if", ""))
+    unguarded = {
+        name: job.get("if")
+        for name, job in jobs.items()
+        if RUN_DEEP_LABEL not in str(job.get("if", "")) and "'schedule'" not in str(job.get("if", ""))
     }
-    assert not guarded, (
-        f"verify-deep.yml jobs whose `if:` reads `{PULL_REQUEST_CONTEXT}`: {guarded}. The "
-        f"workflow has no `pull_request` trigger, so that context is never populated: the "
-        f"term is dead text if the trigger is still gone, and a re-added trigger belongs "
-        f"in `test_deep_does_not_run_on_pull_requests` above, not here"
+    assert not unguarded, (
+        f"verify-deep.yml jobs whose `if:` names neither the `{RUN_DEEP_LABEL}` label nor the "
+        f"schedule: {unguarded}. A pull request `labeled` event with any other label would run them"
     )
 
 
-@pytest.mark.parametrize("workflow", TIERS, ids=lambda workflow: workflow.name)
-def test_each_tier_cancel_in_progress_spares_the_merge_queue(workflow: Path) -> None:
-    value = _load(workflow)["concurrency"]["cancel-in-progress"]
-    assert value == MERGE_QUEUE_SAFE_CANCEL, (
-        f"{workflow.name} `concurrency.cancel-in-progress` is `{value}`, expected "
-        f"`{MERGE_QUEUE_SAFE_CANCEL}` — a cancelled merge-queue run is a failed check and "
-        f"drops the entry from the queue"
+def test_basic_cancel_in_progress_cancels_pull_requests_only() -> None:
+    value = _load(VERIFY_BASIC)["concurrency"]["cancel-in-progress"]
+    assert value == CANCEL_ONLY_PULL_REQUESTS, (
+        f"verify-basic.yml `concurrency.cancel-in-progress` is `{value}`, expected "
+        f"`{CANCEL_ONLY_PULL_REQUESTS}` — a cancelled merge-queue run is a failed check and "
+        f"drops the entry from the queue, and a cancelled run on `main` leaves a merge unverified"
     )
 
 
@@ -304,11 +269,102 @@ def _disarmed(job: dict, step: dict) -> list[str]:
     return reasons
 
 
+# ---------------------------------------------------------------------------
+# What a `task <name>` step runs: the template's jobs run `task ci:lint|test|build|docs|deep`,
+# and the tasks each tier holds are listed in `taskfiles/ci.taskfile.yml`, so a test asking
+# "does CI run X" reads the task graph, not the workflow text.
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def _task_table() -> dict[str, tuple[dict, str]]:
+    """Every task of the root taskfile and its includes, `{qualified name: (body, namespace)}`.
+
+    A task of an included taskfile is qualified by the include's key, so `:rust:build` and
+    `rust:build` are one entry. Hidden tasks (`.ensure-cargo-tool`) are in it. An include that
+    does not exist raises: a reader that silently skipped it would read a smaller graph.
+    """
+    table: dict[str, tuple[dict, str]] = {}
+
+    def read(path: Path, namespace: str) -> None:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name, body in (document.get("tasks") or {}).items():
+            table[f"{namespace}{name}"] = (body if isinstance(body, dict) else {}, namespace)
+        for key, include in (document.get("includes") or {}).items():
+            target = include if isinstance(include, str) else include["taskfile"]
+            read((path.parent / target).resolve(), f"{namespace}{key}:")
+
+    read(ROOT / "taskfile.yml", "")
+    return table
+
+
+@functools.cache
+def _task_reach(name: str) -> frozenset[str]:
+    """Every task `task <name>` can run: itself, its `deps:` and the `task:` entries of its `cmds:`.
+
+    Transitive, and an over-approximation: a `task:` entry guarded by `if:` or `platforms:`
+    counts as reached. That is the right side to err on for a reader that names a task the
+    tier lists, and the wrong one for "this ran on this runner" — which no static read proves.
+    """
+    table = _task_table()
+    seen: set[str] = set()
+    stack = [name]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        body, namespace = table.get(current, ({}, ""))
+        for key in ("deps", "cmds"):
+            for entry in body.get(key) or []:
+                if isinstance(entry, dict) and "task" in entry:
+                    target = str(entry["task"])
+                    stack.append(target[1:] if target.startswith(":") else f"{namespace}{target}")
+    return frozenset(seen)
+
+
+def _step_reaches(step: dict, task: str) -> bool:
+    """Whether the step's `run:` is `task <alias-or-task>` and `<task>` is among what that reaches."""
+    found = re.match(r"task ([\w:.-]+)(?![\w:-])", str(step.get("run", "")).strip())
+    return bool(found) and task in _task_reach(found.group(1))
+
+
+@pytest.mark.parametrize(
+    ("alias", "task", "reached"),
+    [
+        pytest.param("ci:lint", "claude:tests", True, id="lint-reaches-the-claude-tests"),
+        pytest.param("ci:lint", "bazel:build:drift", True, id="lint-reaches-a-bazel-gate"),
+        pytest.param("ci:build", "rust:build", True, id="build-reaches-the-build"),
+        pytest.param("ci:build", "claude:tests", False, id="build-does-not-reach-the-claude-tests"),
+        pytest.param("ci:docs", "bazel:test:unit", False, id="docs-does-not-reach-the-unit-tests"),
+    ],
+)
+def test_the_task_reader_reaches_through_an_alias_and_stops_at_its_edge(alias: str, task: str, reached: bool) -> None:
+    """The reader's own red and green: a graph read as empty reaches nothing, one read as
+    everything reaches everything, and each answers the sweeps below the same way."""
+    assert (task in _task_reach(alias)) is reached, f"`task {alias}` reaches {sorted(_task_reach(alias))}"
+
+
+@pytest.mark.parametrize(("caller", "phase"), [("ci:lint", "ci:.lint:phase1"), ("verify", ".verify:lint")])
+def test_the_toolchain_installs_before_a_parallel_phase_runs_cargo(caller: str, phase: str) -> None:
+    """A parallel phase runs `cargo fmt` beside tests whose `task --dry` evaluates vars that call
+    `rustc`; on a cold RUSTUP_HOME each proxy installs the toolchain and two at once collide.
+    `rust:toolchain` must run, serially, in the caller's `cmds:` before the phase."""
+    body, namespace = _task_table()[caller]
+    names = [
+        str(entry["task"])[1:] if str(entry["task"]).startswith(":") else f"{namespace}{entry['task']}"
+        for entry in body.get("cmds") or []
+        if isinstance(entry, dict) and "task" in entry
+    ]
+    assert "rust:format:check" in _task_reach(phase), f"{phase} no longer runs cargo; drop this case"
+    assert "rust:toolchain" in names and names.index("rust:toolchain") < names.index(phase), names
+
+
 def test_the_claude_structural_tests_run_in_ci() -> None:
-    """This file included. No workflow invoked `task claude:tests`, so every
-    shape asserted here — the D5 partition below among them — held on a
-    developer's machine and nowhere else: a leg deleted from deep's matrix
-    was green in CI.
+    """This file included. `claude:tests` is a member of `ci:lint`, which the template's
+    `lint` job runs — and a workflow that ran neither would leave every shape asserted here,
+    the tier-partition tests below among them, true on a developer's machine and nowhere else: a leg
+    deleted from deep's matrix was green in CI.
 
     Presence is half of it: a step whose failure is tolerated or skipped is
     the same green as no step. One carrier must run unconditionally and be
@@ -319,14 +375,15 @@ def test_the_claude_structural_tests_run_in_ci() -> None:
         for workflow in WORKFLOWS
         for name, job in (_load(workflow).get("jobs") or {}).items()
         for step in (job.get("steps") or [])
-        if "task claude:tests" in str(step.get("run", ""))
+        if _step_reaches(step, "claude:tests")
     ]
     assert carriers, (
-        "no workflow step runs `task claude:tests` — the structural tests of `.claude/` "
-        "are then a gate nothing in CI executes, and this assertion is the one that says so"
+        "no workflow step runs `task claude:tests` or a `ci:*` alias that reaches it — the "
+        "structural tests of `.claude/` are then a gate nothing in CI executes, and this "
+        "assertion is the one that says so"
     )
     assert any(not reasons for _, _, reasons in carriers), (
-        f"every workflow step running `task claude:tests` is disarmed: "
+        f"every workflow step reaching `task claude:tests` is disarmed: "
         f"{[(workflow, job, reasons) for workflow, job, reasons in carriers]} — a tolerated or "
         f"skipped failure is the same green as no step at all, so one carrier must be "
         f"unconditional and able to fail its job"
@@ -366,7 +423,27 @@ _JOB_CLAIM = re.compile(r"`([a-z0-9-]+\.yml)`(?:'s)?\s+`([A-Za-z0-9_-]+)`\s+(?:j
 # lacks is that document's correct content, and this needle cannot tell a
 # deletion record from an assertion of coverage.
 _STALE_JOB_CLAIMS = frozenset(
-    {".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke-windows"}
+    {
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke-windows",
+        # The adoption of the conventions template retired the repo-written
+        # `verify-basic.yml` `smoke` / `workflow-lint` jobs and `verify-deep.yml` `build` /
+        # `satellite-verify` jobs: the template owns those two files now and the repo-owned jobs
+        # moved to `basic-repo.yml` and `deep-repo.yml`. The records below are dated and quote what
+        # existed when they were written, so each is a deletion record in the sense above.
+        ".claude/artifacts/adr_bazel_build_adoption.md: verify-basic.yml smoke",
+        ".claude/artifacts/adr_test_speed_tiers.md: verify-basic.yml smoke",
+        ".claude/artifacts/adr_toolchain_activation.md: verify-deep.yml build",
+        ".claude/artifacts/issue_drafts_crate_split_satellites.md: verify-deep.yml satellite-verify",
+        ".claude/artifacts/migration_plan_bazel.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_bazel_build_adoption.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml workflow-lint",
+        ".claude/artifacts/plan_crate_split_workspace.md: verify-deep.yml build",
+        ".claude/artifacts/plan_test_speed_tiers.md: verify-basic.yml smoke",
+        ".claude/artifacts/research_test_tier_operability.md: verify-basic.yml smoke",
+        ".claude/artifacts/review_adr_bazel_quality.md: verify-basic.yml smoke",
+        ".claude/artifacts/review_adr_bazel_security.md: verify-basic.yml smoke",
+    }
 )
 
 
@@ -437,57 +514,180 @@ def test_no_claude_document_claims_a_job_its_workflow_lacks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D5: basic runs on Linux only; deep's `build` matrix owns the three OSes
+# Basic runs on Linux only; deep's native jobs own macOS and Windows
 # ---------------------------------------------------------------------------
+
+
+def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[str, str]]:
+    """`(jobs read, {<workflow>:<job>: runner label})` for every job of `workflow` not on a literal `ubuntu-*`.
+
+    A job that calls a repo workflow is followed into it with its `with:` as the callee's
+    `inputs`, so `runs-on: ${{ inputs.os }}` is read as the label the caller passed. Any other
+    expression is returned as written, which reads as non-Linux — a shape this file cannot resolve
+    is one it must not wave through.
+    """
+    read = 0
+    off: dict[str, str] = {}
+    for name, job in (_load(workflow).get("jobs") or {}).items():
+        if callee := _local_callee(job):
+            count, found = _off_linux(WORKFLOW_DIR / callee, job.get("with") or {})
+            read, off = read + count, off | found
+            continue
+        read += 1
+        label = re.sub(
+            r"\$\{\{\s*inputs\.([\w-]+)\s*\}\}",
+            lambda match: str((inputs or {}).get(match.group(1), match.group(0))),
+            str(job.get("runs-on", "")),
+        )
+        if not label.startswith("ubuntu-"):
+            off[f"{workflow.name}:{name}"] = label
+    return read, off
 
 
 def test_basic_runs_on_linux_only() -> None:
     """Strict on purpose: a list or a `${{ matrix.* }}` expression cannot be
-    read as Linux here, so only a literal `ubuntu-*` label passes."""
-    jobs = _load(VERIFY_BASIC)["jobs"]
-    assert jobs, "verify-basic.yml has no jobs"
-    off_linux = {
-        name: job.get("runs-on")
+    read as Linux here, so only a literal `ubuntu-*` label passes. The basic tier is the
+    template's `verify-basic.yml` and, through its `repo` job, `basic-repo.yml` and the
+    reusable workflows that calls."""
+    read, off = _off_linux(VERIFY_BASIC)
+    assert read >= 10, f"read {read} basic-tier jobs, expected at least 10 — a caller was not followed"
+    assert not off, (
+        f"basic-tier jobs not on a literal `ubuntu-*` runner: {off}. Basic is the tier a pull request "
+        f"pays for (D5); Windows and macOS unit coverage is deep-repo.yml's `unit-native`, so a leg here "
+        f"runs the same suite twice on every push"
+    )
+
+
+def test_the_linux_reader_reds_an_off_linux_job_and_resolves_an_input(tmp_path: Path) -> None:
+    """The reader's red and green: a Windows job is reported, and `${{ inputs.os }}` is the label
+    the caller passed, so the same workflow is Linux for one caller and not for another."""
+    workflow = tmp_path / "w.yml"
+    workflow.write_text(
+        "on: {workflow_call: {}}\njobs:\n  a: {runs-on: windows-latest}\n  b: {runs-on: '${{ inputs.os }}'}\n",
+        encoding="utf-8",
+    )
+    read, off = _off_linux(workflow, {"os": "macos-latest"})
+    assert (read, set(off)) == (2, {"w.yml:a", "w.yml:b"}), off
+    read, off = _off_linux(workflow, {"os": "ubuntu-24.04"})
+    assert (read, set(off)) == (2, {"w.yml:a"}), off
+
+
+def _runner_labels(job: dict) -> list[str]:
+    """The runner labels a job can land on, the matrix expanded.
+
+    Only `${{ matrix.job.os }}` is expanded; any other expression is returned
+    as written, which reads as non-Linux — a shape this file cannot resolve is
+    one it must not wave through.
+    """
+    runs_on = str(job.get("runs-on", ""))
+    if runs_on == "${{ matrix.job.os }}":
+        return [str(entry["os"]) for entry in job["strategy"]["matrix"]["job"]]
+    return [runs_on]
+
+
+# What a download-and-execute job must not do: build. `cargo` and `bazel` as
+# words (so `cargo-nextest` and `bazelisk` read too), and the three setup
+# spellings a Rust toolchain arrives through.
+_BUILD_TOOLING = re.compile(r"\b(cargo|bazel|bazelisk|rustup|rustc)\b|rust-toolchain|setup-rust|build-rust|bazel-cache-rc")
+# `acceptance-native` is a call of `acceptance.yml`, so it has no runner of its own to read here.
+NATIVE_DEEP_JOBS = frozenset({"unit-native"})
+
+
+def test_the_cross_workflow_is_the_one_linux_compile() -> None:
+    """Every binary the deep tier tests is compiled on one Linux host, in `cross.yml`.
+
+    The macOS and Windows legs download what that workflow built (the next test holds them to
+    it), so a second compile site is a second toolchain to drift.
+    """
+    cross = _load(CROSS)["jobs"]["cross"]
+    assert cross.get("runs-on") == "ubuntu-latest", (
+        f"cross.yml `cross.runs-on` is `{cross.get('runs-on')}` — every binary in the deep tier is "
+        f"compiled on one Linux host"
+    )
+    assert any(str(step.get("run", "")).strip().startswith("task cross:build") for step in cross["steps"]), (
+        "cross.yml `cross` never runs `task cross:build`"
+    )
+
+
+def test_deep_cross_matrix_is_every_supported_target() -> None:
+    """One `cross` leg per `task cross:targets` triple: a missing leg is a
+    platform whose binary the run never builds, and nothing else would red."""
+    vars_ = _load(ROOT / "taskfiles" / "cross.taskfile.yml")["vars"]
+    targets = vars_["TARGETS"].split()
+    assert len(targets) >= 8, f"read {targets} from cross.taskfile.yml TARGETS"
+    matrix = _load(CROSS)["jobs"]["cross"]["strategy"]["matrix"]
+    assert sorted(matrix["target"]) == sorted(targets), (
+        f"cross.yml `cross` matrix is {sorted(matrix['target'])}, "
+        f"`task cross:targets` is {sorted(targets)}"
+    )
+
+
+def test_deep_non_linux_jobs_only_download_and_execute() -> None:
+    """Every non-ubuntu job of deep-repo.yml contains no build tooling.
+
+    All compilation happens in `cross.yml`; a macOS or Windows runner that grows a
+    `cargo`, `bazel` or Rust-toolchain step is paying 10x-minute rates for a second compile and
+    reintroducing the toolchain drift the cross-build removed. A job that calls a reusable
+    workflow has no runner of its own and is read in that workflow (the shell activation matrix
+    is `shell-activation-deep.yml`'s, and installs what it tests).
+    """
+    jobs = {name: job for name, job in _repo_jobs(DEEP_REPO).items() if "uses" not in job}
+    native = {
+        name: job
         for name, job in jobs.items()
-        if not str(job.get("runs-on", "")).startswith("ubuntu-")
+        if any(not label.startswith("ubuntu-") for label in _runner_labels(job))
     }
-    assert not off_linux, (
-        f"verify-basic.yml jobs not on a literal `ubuntu-*` runner: {off_linux}. Basic is the "
-        f"tier a pull request pays for (D5); Windows and macOS unit coverage is "
-        f"verify-deep.yml's `build` matrix, so a leg here runs the same suite twice on every "
-        f"push to `main`"
+    # The floor, before the negative below: a reader that found no native job
+    # sweeps clean and says nothing.
+    assert set(native) == NATIVE_DEEP_JOBS, (
+        f"deep-repo.yml non-Linux jobs are {sorted(native)}, expected exactly "
+        f"{sorted(NATIVE_DEEP_JOBS)}"
     )
+    for name, job in native.items():
+        labels = _runner_labels(job)
+        missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
+        assert not missing, f"deep-repo.yml `{name}` runs on {labels}, no {missing} entry"
+        assert "exclude" not in job["strategy"]["matrix"], f"deep-repo.yml `{name}` matrix has an `exclude`"
+        offending = [
+            step.get("name", step.get("uses", step.get("run")))
+            for step in job["steps"]
+            if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
+        ]
+        assert not offending, (
+            f"deep-repo.yml `{name}` runs on a non-Linux runner and has build steps {offending} — "
+            f"non-Linux jobs download what `cross` cross-compiled and execute it, nothing more"
+        )
 
 
-def test_deep_build_matrix_covers_the_three_oses() -> None:
-    """The matrix, and everything between a dispatch and it: the `if:` that
-    admits one, the `runs-on` that reads the matrix, and no `exclude` carving
-    an OS back out."""
-    build = _load(VERIFY_DEEP)["jobs"]["build"]
-    assert build.get("if") == DEEP_BUILD_IF, (
-        f"verify-deep.yml `build.if` is `{build.get('if')}`, expected `{DEEP_BUILD_IF}` — any "
-        f"other shape can keep the schedule clause and still admit no dispatch, which leaves "
-        f"a branch with zero Windows/macOS coverage (basic has none, D5, and no pull request "
-        f"fires this workflow)"
+def test_linux_acceptance_is_four_shards_feeding_a_merge_job() -> None:
+    """Sharding is only a coverage claim if the floor is judged over the merge."""
+    inputs = _workflow_call(ACCEPTANCE)["inputs"]
+    assert inputs["shard-count"]["default"] == 4, f"acceptance.yml `shard-count` defaults to {inputs['shard-count']}"
+    passed = (_repo_job(BASIC_REPO, "acceptance").get("with") or {}).get("shard-count", 4)
+    assert passed == 4, f"basic-repo.yml `acceptance` passes shard-count={passed!r}, expected the default 4"
+    jobs = _repo_jobs(ACCEPTANCE)
+    shard, merge = jobs["shard"], jobs["merge"]
+    assert shard["runs-on"] == "${{ inputs.os }}", f"acceptance.yml `shard.runs-on` is {shard['runs-on']!r}"
+    runs = [str(step.get("run", "")) for step in shard["steps"]]
+    assert 'task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"' in runs, (
+        f"acceptance.yml `shard` never runs its shard: {runs}"
     )
-    assert build.get("runs-on") == "${{ matrix.job.os }}", (
-        f"verify-deep.yml `build.runs-on` is `{build.get('runs-on')}`, not "
-        f"`${{{{ matrix.job.os }}}}` — the matrix below decides nothing unless the job runs on "
-        f"its `os`"
+    run_step = next(step for step in shard["steps"] if "test:accept:native" in str(step.get("run", "")))
+    assert str(run_step["env"]["SHARD_INDEX"]) == "${{ matrix.shard }}", (
+        f"acceptance.yml `shard` index is {run_step['env'].get('SHARD_INDEX')!r}, expected the matrix value"
     )
-    matrix = build["strategy"]["matrix"]
-    assert "exclude" not in matrix, (
-        f"verify-deep.yml `build` matrix has `exclude: {matrix['exclude']}` — an excluded OS "
-        f"is one the `job` list below still names and nothing runs"
+    plan = " ".join(str(step.get("run", "")) for step in jobs["plan"]["steps"])
+    assert 'seq -s, 0 "$((SHARD_COUNT - 1))"' in plan, (
+        "acceptance.yml `plan` does not list the shards 0-based (0..N-1), which is what accept_shard.py "
+        "and the merge job's `shard-<I>-of-<N>.xml` names expect"
     )
-    runners = [str(entry.get("os", "")) for entry in matrix["job"]]
-    missing = [
-        family for family in OS_FAMILIES if not any(os.startswith(f"{family}-") for os in runners)
-    ]
-    assert not missing, (
-        f"verify-deep.yml `build` matrix runs on {runners}, no {missing} entry — basic has no "
-        f"such leg (D5), so this is the only gate that compiles and runs the `cfg` arms for "
-        f"that OS on a pull request"
+    assert _needs(merge) == ["shard"], f"acceptance.yml `merge` needs {_needs(merge)}, expected `shard`"
+    assert "!cancelled()" in str(merge.get("if", "")), (
+        "acceptance.yml `merge` has no `!cancelled()` — a red shard would skip the merge "
+        "and the floor would never be judged over what did run"
+    )
+    assert any(str(step.get("run", "")).startswith("task test:accept:floor ") for step in merge["steps"]), (
+        "acceptance.yml `merge` never runs `task test:accept:floor`"
     )
 
 
@@ -548,6 +748,10 @@ def test_the_unit_lane_runs_its_floor_parser_and_that_parser_s_self_test() -> No
 
 
 _DURATION_PROOF = "uv run --project test pytest scripts/tests/test_unit_test_duration_gate.py -q"
+#: The proof also runs inside `task scripts:self-test`, whose recipe is `pytest scripts/tests` — the
+#: directory holding that module (asserted below, so a moved module cannot leave this standing).
+_DURATION_PROOF_MODULE = ROOT / "scripts" / "tests" / "test_unit_test_duration_gate.py"
+_SELF_TEST_RUN = "task scripts:self-test"
 
 
 def test_the_duration_budget_is_proved_where_it_runs() -> None:
@@ -567,21 +771,28 @@ def test_the_duration_budget_is_proved_where_it_runs() -> None:
     the second assertion is what keeps this test honest: the self-test must run
     somewhere. Re-adding the budget without its fixtures reds the loop; deleting
     the fixtures reds the floor.
+
+    The proof runs as the explicit command or as a member of `task scripts:self-test`
+    (`basic-repo.yml`'s `scripts-tests` and the template's `ci:deep`), which collects the whole
+    of `scripts/tests`.
     """
+    assert _DURATION_PROOF_MODULE.is_file(), f"{_DURATION_PROOF_MODULE.relative_to(ROOT)} is gone"
     proved: list[str] = []
     for name, document in _documents():
         for job_name, job in (document.get("jobs") or {}).items():
             runs = {str(step.get("run", "")).strip() for step in (job.get("steps") or [])}
-            if _DURATION_PROOF in runs:
+            proves = _DURATION_PROOF in runs or _SELF_TEST_RUN in runs
+            if proves:
                 proved.append(f"{name}:{job_name}")
             if "task rust:test:duration" not in runs:
                 continue
-            assert _DURATION_PROOF in runs, (
+            assert proves, (
                 f"{name}:{job_name} runs `task rust:test:duration` and never "
-                f"`{_DURATION_PROOF}` — the budget parser is then proved nowhere the budget runs"
+                f"`{_DURATION_PROOF}` or `{_SELF_TEST_RUN}` — the budget parser is then proved "
+                f"nowhere the budget runs"
             )
     assert proved, (
-        f"no workflow runs `{_DURATION_PROOF}` — the budget parser's "
+        f"no workflow runs `{_DURATION_PROOF}` or `{_SELF_TEST_RUN}` — the budget parser's "
         "red/red/green fixtures then run nowhere, and the loop above is vacuous"
     )
 
@@ -628,7 +839,15 @@ def test_the_unit_lane_passes_the_cache_credential_only_when_it_exists(tmp_path:
     failing. **Without** it, the flag must be absent: `--bazelrc` naming a missing
     file is a hard error (9.2.0: exit 2, `Unable to read .bazelrc file`), and that is
     the fork-PR lane, which must read anonymously rather than fail.
+
+    The expression is the root `taskfile.yml`'s `CACHE_RC` var (the one definition every
+    task and include inherits); it is read from there as well as rendered, so a second
+    definition shadowing it cannot leave this test measuring the wrong one.
     """
+    expression = yaml.safe_load((ROOT / "taskfile.yml").read_text(encoding="utf-8"))["vars"]["CACHE_RC"]["sh"]
+    assert "printf '%s'" in expression and "printf --" not in expression, (
+        f"root taskfile.yml `CACHE_RC` is {expression!r}; go-task's shell takes `printf --` as the format"
+    )
     (tmp_path / "bazel-cache.rc").write_text("build --remote_header='x=y'\n", encoding="utf-8")
 
     with_credential = _rendered_unit_lane(tmp_path)
@@ -647,31 +866,169 @@ def test_the_unit_lane_passes_the_cache_credential_only_when_it_exists(tmp_path:
         )
 
 
+_USER_RC_SILENT = "build --jobs=4\n"
+_USER_RC_IMPORTS_THE_CACHE_RC = "try-import {rc}\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="go-task's shell runs an external `grep`")
+@pytest.mark.parametrize(
+    ("user_rc", "cache_rc_exists", "passes_the_flag"),
+    [
+        pytest.param(None, False, False, id="no-rc-file"),
+        pytest.param(_USER_RC_SILENT, True, True, id="rc-file-user-rc-silent"),
+        pytest.param(_USER_RC_IMPORTS_THE_CACHE_RC, True, False, id="user-rc-already-imports-it"),
+    ],
+)
+def test_the_cache_rc_is_read_once_whichever_way_it_arrives(
+    tmp_path: Path, user_rc: str | None, cache_rc_exists: bool, passes_the_flag: bool
+) -> None:
+    """`CACHE_RC` in its three states, through go-task's own shell, on the real expression.
+
+    The setup action's trusted mode writes `$RUNNER_TEMP/bazel-cache.rc` and imports it from
+    `.bazelrc.user`; a `--bazelrc=` for the same file would then load it twice and repeat its
+    `--remote_header`. So the flag is passed only when the file exists **and** `.bazelrc.user`
+    does not already name it. A `.bazelrc.user` that merely exists changes nothing: the check
+    is on its text. The expression is read from the root `taskfile.yml` and evaluated in a
+    scratch taskfile, so `{{.ROOT_DIR}}` is the scratch directory and a developer's own
+    `.bazelrc.user` is never read or written.
+    """
+    expression = yaml.safe_load((ROOT / "taskfile.yml").read_text(encoding="utf-8"))["vars"]["CACHE_RC"]["sh"]
+    rc = tmp_path / "bazel-cache.rc"
+    if cache_rc_exists:
+        rc.write_text("build --remote_header='x=y'\n", encoding="utf-8")
+    if user_rc is not None:
+        (tmp_path / ".bazelrc.user").write_text(user_rc.format(rc=rc), encoding="utf-8")
+    (tmp_path / "Taskfile.yml").write_text(
+        yaml.safe_dump(
+            {
+                "version": "3",
+                "vars": {"CACHE_RC": {"sh": expression}},
+                "tasks": {"show": {"silent": True, "cmds": ['echo "[{{.CACHE_RC}}]"']}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    environment = {**os.environ, "RUNNER_TEMP": str(tmp_path)}
+    rendered = subprocess.run(
+        ["task", "show"], capture_output=True, encoding="utf-8", cwd=tmp_path, env=environment, check=False
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    expected = f"[--bazelrc={rc}]" if passes_the_flag else "[]"
+    assert rendered.stdout.strip() == expected, (
+        f"CACHE_RC rendered {rendered.stdout.strip()!r}, expected {expected!r}. Passing the flag with "
+        f"`.bazelrc.user` already importing the file loads the credential twice; dropping it with no "
+        f"import leaves every request an anonymous 401"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `cross:*` tasks take their values from the task call, as one literal word each
+# ---------------------------------------------------------------------------
+
+CROSS_TASKFILE = ROOT / "taskfiles" / "cross.taskfile.yml"
+# Stands in for `python3 scripts/test_bundle.py`: it prints the argv it was handed.
+_ARGV_STUB = "import json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+
+
+def _run_cross(tmp_path: Path, task_name: str, args: list[str], exported: dict[str, str]):
+    """`task <task_name> <args>` on the real cross taskfile, `PY` swapped for the argv stub."""
+    stub = tmp_path / "argv_stub.py"
+    stub.write_text(_ARGV_STUB, encoding="utf-8")
+    interpreter = f"{shlex.quote(sys.executable)} {shlex.quote(str(stub))}"
+    return subprocess.run(
+        ["task", "--taskfile", str(CROSS_TASKFILE), task_name, *args, f"PY={interpreter}", "CACHE_RC="],
+        capture_output=True,
+        encoding="utf-8",
+        cwd=tmp_path,
+        env={**os.environ, **exported},
+        check=False,
+    )
+
+
+def _argv(done: subprocess.CompletedProcess[str]) -> list[str]:
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_cross_test_run_takes_its_arguments_over_exported_variables_of_the_same_name(tmp_path: Path) -> None:
+    """An exported `FILTER` (or `BUNDLE`, `SOURCE_ROOT`, `JUNIT`) must not replace the task argument.
+
+    Run through go-task's own shell on the real `test:run`. A task `env:` block that mirrors the
+    arguments lets the caller's shell value win, so a stale `export FILTER=...` silently runs the
+    wrong subset and the summary still reads green.
+    """
+    exported = {name: f"exported-{name}" for name in ("BUNDLE", "SOURCE_ROOT", "JUNIT", "FILTER")}
+    args = ["BUNDLE=b.tar", "SOURCE_ROOT=src", "JUNIT=j.xml", "FILTER=arg"]
+    assert _argv(_run_cross(tmp_path, "test:run", args, exported)) == [
+        "scripts/test_bundle.py",
+        "run",
+        "--bundle",
+        "b.tar",
+        "--source-root",
+        "src",
+        "--junit",
+        "j.xml",
+        "--filter",
+        "arg",
+    ]
+
+
+def test_cross_test_run_passes_shell_metacharacters_as_one_literal_word(tmp_path: Path) -> None:
+    """A `"`, `$(`, backtick or `'` in a value never runs and never splits.
+
+    Both command-substitution spellings create the canary, so a value that reaches the shell line
+    unquoted or in the wrong quote style shows as a file, not only as a changed argv.
+    """
+    canary = tmp_path / "canary"
+    hostile = f"a\"$(touch {canary})`touch {canary}`'q r"
+    root = f"{tmp_path}/with space"
+    done = _run_cross(tmp_path, "test:run", ["BUNDLE=b.tar", f"SOURCE_ROOT={root}", f"FILTER={hostile}"], {})
+    assert _argv(done) == [
+        "scripts/test_bundle.py",
+        "run",
+        "--bundle",
+        "b.tar",
+        "--source-root",
+        root,
+        "--filter",
+        hostile,
+    ]
+    assert not canary.exists(), "a value executed as shell text"
+
+
+@pytest.mark.parametrize("task_name", ["build", "test:bundle", "test:bin"])
+@pytest.mark.parametrize("breaker", ["x';touch {canary};'", 'x"$(touch {canary})"'], ids=["single-quote", "subshell"])
+def test_cross_target_with_shell_metacharacters_is_refused_not_run(
+    tmp_path: Path, task_name: str, breaker: str
+) -> None:
+    """`TARGET` is checked against the supported list as one literal word, before anything runs.
+
+    A `'` in the value ends a single-quoted `'{{.TARGET}}'`; a `"` ends the double-quoted refusal
+    message and lets `$(…)` run. The refusal line is matched whole: go-task echoes each command
+    before running it, so a substring match would also pass on the echo of the unexpanded text.
+    """
+    canary = tmp_path / "canary"
+    hostile = breaker.format(canary=canary)
+    done = _run_cross(tmp_path, task_name, [f"TARGET={hostile}"], {})
+    assert not canary.exists(), "a TARGET value executed as shell text"
+    assert f"unsupported TARGET '{hostile}'; see: task cross:targets" in done.stderr.splitlines(), done.stderr
+
+
 # ---------------------------------------------------------------------------
 # CI runs every step of `.verify:build-test` (B5R-4)
 # ---------------------------------------------------------------------------
 
-#: Phase steps a workflow other than `verify-basic.yml` runs, and the spelling
-#: that file uses. Every row is asserted live below: an exemption whose target
-#: is gone forbids nothing while reading as coverage, so a task dropped from
-#: the phase, or a workflow that stopped running one, reds here.
+#: Phase steps no `ci:*` alias reaches, and the workflow that runs each under the spelling given.
+#: Every row is asserted live below: an exemption whose target is gone forbids nothing while
+#: reading as coverage, so a task dropped from the phase, or a workflow that stopped running one,
+#: reds here.
 _BUILD_TEST_ELSEWHERE = {
     "rust:license:check": ("verify-licenses.yml", "task rust:license:check"),
     "rust:license:deps": ("verify-licenses.yml", "task rust:license:deps"),
     "rust:license:notice:check": ("verify-licenses.yml", "task rust:license:notice:check"),
-    # The deep workflow runs the acceptance suite. It once spelled this
-    # `task test`, the SERIAL pytest entry point (21:41 for 3819 tests on an
-    # idle four-core runner), then `task test:parallel`, and now the Bazel
-    # lane: 171 `sh_test` targets with their results cached, run concurrently
-    # behind the runner's host locks. `verify-basic.yml` is
-    # deliberately not the home for it — that workflow is the fast PR gate and
-    # the acceptance suite is the deep one's long half.
-    "bazel:test:accept": ("verify-deep.yml", "task bazel:test:accept"),
-    # The testcases the Bazel `rust_test` targets skip. The deep workflow's
-    # macOS and Windows legs run the whole workspace under nextest, these
-    # included — which is where the uncovered ocx_util `pub` and the spawn
-    # outside launch that added this step to `task verify` went red.
-    "rust:test:bazel-skipped": ("verify-deep.yml", "cargo nextest run --workspace"),
+    # The acceptance suite is `acceptance.yml`'s: four pytest shards over the rebuilt binaries
+    # (`task test:accept:native`), floored by a merge job. The local gate still runs the Bazel lane.
+    "bazel:test:accept": ("acceptance.yml", "task test:accept:native"),
 }
 
 
@@ -694,11 +1051,12 @@ def _runs(workflow: str, command: str) -> bool:
     """Whether any job of `workflow` runs `command` in a way that can fail it.
 
     Matched on the step's own `run:`, prefix-anchored so a task is not found
-    inside a longer task's name. A step tolerated by `continue-on-error` is
+    inside a longer task's name, or on a `task ci:<tier>` step whose tier reaches the task
+    (`_step_reaches`). A step tolerated by `continue-on-error` is
     not coverage — that green cannot be told from no step at all — unless it
     carries an `id` a later step of the same job reads, which is section 3 of
-    subsystem-ci.md's deliberate shape: `verify-basic.yml`'s lint steps never
-    block the test results and the job's last step exits 1 on their outcomes.
+    subsystem-ci.md's deliberate shape: a lint step never blocks the test results
+    and the job's last step exits 1 on their outcomes.
 
     `if:` is deliberately not weighed here. A trigger or platform condition
     is scheduling, not disarming, and which events fire which workflow is
@@ -710,7 +1068,8 @@ def _runs(workflow: str, command: str) -> bool:
             continue
         steps = job.get("steps") or []
         for index, step in enumerate(steps):
-            if not re.match(rf"{re.escape(command)}(?![\w:-])", str(step.get("run", "")).strip()):
+            literal = re.match(rf"{re.escape(command)}(?![\w:-])", str(step.get("run", "")).strip())
+            if not (literal or _step_reaches(step, command.removeprefix("task "))):
                 continue
             if step.get("continue-on-error", False) is False:
                 return True
@@ -726,14 +1085,12 @@ def _runs(workflow: str, command: str) -> bool:
 def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
     """A step of the full local gate that no workflow runs is a gate CI skips.
 
-    `verify-basic.yml` re-lists `.verify:build-test`'s steps by hand, and the
-    since-deleted `rust:test:doc` (the doctests now run as `rust_doc_test`
-    targets inside `bazel:test:unit`) was added to the phase and not to the
-    file: it appeared in none of the workflows, in no spelling, so CI ran zero
-    doctests while every local `task verify` ran them. That is DX-5/C-008's
-    pattern — a gate outside the full gate is a gate nobody runs — and a
-    hand-kept second list is how it recurs, so the two are held together here
-    instead.
+    The template's `lint`, `test`, `build` and `docs` jobs run `task ci:lint`, `ci:test`,
+    `ci:build` and `ci:docs`, so a phase step is covered when `verify-basic.yml` runs a tier
+    that reaches it. The since-deleted `rust:test:doc` was added to the phase and not to the
+    workflow: it appeared in none of them, in no spelling, so CI ran zero doctests while every
+    local `task verify` ran them. A gate outside the full gate is a gate nobody runs, and a
+    hand-kept second list is how that recurs, so the two are held together here instead.
     """
     if task in _BUILD_TEST_ELSEWHERE:
         workflow, command = _BUILD_TEST_ELSEWHERE[task]
@@ -744,9 +1101,9 @@ def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
         )
         return
     assert _runs("verify-basic.yml", f"task {task}"), (
-        f"`.verify:build-test` runs `{task}` and verify-basic.yml does not — CI would skip it "
-        f"entirely. Add the step, or add a `_BUILD_TEST_ELSEWHERE` row naming the workflow that "
-        f"runs it (the row is asserted live)"
+        f"`.verify:build-test` runs `{task}` and verify-basic.yml reaches it through no `ci:*` tier "
+        f"— CI would skip it entirely. Add it to a tier in taskfiles/ci.taskfile.yml, or add a "
+        f"`_BUILD_TEST_ELSEWHERE` row naming the workflow that runs it (the row is asserted live)"
     )
 
 
@@ -926,89 +1283,47 @@ def test_the_shell_zoo_runs_no_task_its_checkout_cannot_build() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WP-21: the stage-2 remote-cache credential boundary
+# Bazel remote-cache lane policy
 #
-# plan_bazel_build_adoption.md C-015, C-016, C-017, C-029; S-005 … S-008, S-016.
-# adr_bazel_build_adoption.md § Cache staging rulings 4a/4b/5/5b and § A2.
-# bazel-quality/caching.md BZL-CACHE-01 (the control), -03, -04, -26.
-#
-# **C-029 governs the shape of everything below.** The remote cache realm is
-# owner-gated: `bazel-cache.ocx.sh` answers 401 to every method today, the reader
-# realm exists only on an unpushed `server-hetzner1` branch, and the two GitHub
-# secrets do not exist. So every assertion here is a property of the *configuration*,
-# read from workflow YAML and tracked rc files, and passes with both
-# `BAZEL_CACHE_READ_AUTH` and `BAZEL_CACHE_WRITE_AUTH` unset and no route to the
-# cache host. Exactly one test dials the network, only when its secret is exported,
-# and it names the owner action in its skip message.
-#
-# **What is live today and what is not.** At the time these were written no workflow
-# step ran `bazel` — WP-23 (`verify-basic.yml`) and WP-24 (`verify-deep.yml`) land
-# the lane swap. A live assertion over zero lanes is the unchecked green this plan
-# exists to avoid, so each lane assertion skips with its *observed* cause, and its
-# red state lives permanently in `_VIOLATIONS` below: every sweep runs against a
-# compliant fixture (must find nothing) and against a fixture built to violate it
-# (must find something), on every invocation, today. Two sweeps — `$RUNNER_TEMP`
-# uploads and interpolated credentials — are already live over the whole workflow
-# corpus and floored on their own readers.
-#
-# **The secret's two spellings.** ADR ruling 5's snippet writes `BAZEL_CACHE_WRITE`;
-# ruling 5b and plan C-029 write `BAZEL_CACHE_WRITE_AUTH`. Both are live in the
-# corpus, so the needles match the common prefix and a rename is caught rather than
-# silently unmatched.
+# Every same-repo lane that holds the secret reads *and writes* the shared cache:
+# each cache step passes the write secret by name, with no event predicate, and the
+# rc file the action writes carries the credential helper and the upload grant. A
+# fork PR holds no secrets, so the action writes no rc and the lane runs uncached.
+# Every assertion is a property of workflow YAML or tracked rc files and needs
+# neither a secret nor a network; each reader has a compliant and a violating
+# fixture below, run on every invocation.
 # ---------------------------------------------------------------------------
 
 #: The one host this repository's lanes may point `--remote_cache` at.
 CACHE_HOST = "bazel-cache.ocx.sh"
-CACHE_ENDPOINT = f"https://{CACHE_HOST}/"
-#: The read credential's variable. It is exported only where it is meant to be used,
-#: so its presence is this suite's opt-in to touching the network at all.
-READ_CREDENTIAL = "BAZEL_CACHE_READ_AUTH"
-#: The cache host sits behind a CDN edge, which rejects the default `Python-urllib/*`
-#: signature with **403 and body `error code: 1010`** before the request reaches nginx.
-#: Measured 2026-09-21: `Python-urllib` -> 403 from the edge; `bazel/9.2.0`, `curl/8.5.0`
-#: and a browser string all -> `401 WWW-Authenticate: Basic realm="bazel cache"` from the
-#: origin. Probing with the default agent would therefore red forever on a bot filter
-#: rather than on the auth realm the assertion is about — a gate measuring a neighbouring
-#: property. This exact string was measured reaching the origin.
-PROBE_USER_AGENT = "bazel/9.2.0 (ocx wp-21 structural probe)"
+WRITE_SECRET = "BAZEL_CACHE_WRITE_AUTH"
+#: The only binding a cache step may carry: no event predicate, no fallback.
+WRITE_AUTH = "${{ secrets.BAZEL_CACHE_WRITE_AUTH }}"
+RC_ACTION = ".github/actions/bazel-cache-rc"
 
-#: The trusted event, as two terms rather than one string: `(A && B) && secrets.X`
-#: and `A && B && secrets.X` are the same gate, and a reader accepting only the first
-#: reports a compliant lane as a finding.
-TRUSTED_EVENT_TERMS = ("github.event_name == 'push'", "github.ref == 'refs/heads/main'")
-#: The two triggers a credential binding can tell apart, because ruling 5's gate tells
-#: apart exactly these. `merge_group` is a `pull-request` here rather than a third case:
-#: it is not a push to `main`, so every expression in this file answers it the way it
-#: answers a pull request. A **fork** PR is not a case either — GitHub empties every
-#: `secrets.*` there, so its source count is zero by construction and the anonymous
-#: `--disk_cache` fallback is the documented behaviour, not a finding.
-TRIGGERS = ("push-to-main", "pull-request")
-#: BZL-CACHE-01's verification column. Matched as a whole token, never as a substring:
-#: `# --remote_upload_local_results=false is NOT set` contains it too.
-UPLOAD_OFF = "--remote_upload_local_results=false"
-#: The grant it is the negation of, in the one spelling this repository uses. The
-#: committed `.bazelrc` sets `UPLOAD_OFF` unconditionally and is read on every
-#: invocation, so the grant is a **command-line build option** — measured on the pinned
-#: 9.2.0 by reading the build event stream's canonical command line, which carries
-#: `=true` and no `=false` when the flag is passed and `=false` when it is not. No rc
-#: file changes, and the lane that carries it appends it after the command word:
-#: `--remote_upload_local_results` is a build option, unlike `--bazelrc`.
-UPLOAD_ON = "--remote_upload_local_results=true"
-#: ADR ruling 5's expression with the grant as its payload — the credential's gate and
-#: the grant's gate are one shape, read by one function, so neither can be loosened
-#: without the other's assertions noticing. Written out literally rather than composed
-#: from `TRUSTED_EVENT_TERMS`, for `_GATED`'s reason: a fixture built from the constants
-#: the reader is checked against moves with them and can never red.
-_UPLOAD_GRANT = (
-    "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-    f" && '{UPLOAD_ON}' || '' }}}}"
+#: The conventions template renders these two; a `workflow_call` secret they declare is
+#: the baseline check's to hold, so the declare half of the secret sweep skips them.
+TEMPLATE_OWNED_WORKFLOWS = frozenset({"verify-basic.yml", "verify-deep.yml"})
+#: The reusable workflows the repo owns behind the template's `repo` jobs. Each must
+#: exist, so a missing file reads as a finding rather than as nothing to sweep.
+REPO_OWNED_REUSABLE = ("basic-repo.yml", "deep-repo.yml", "acceptance.yml", "cross.yml")
+#: cargo-dist writes this one and a drift check fails a hand edit, so its
+#: `secrets: inherit` cannot be fixed here.
+GENERATED_WORKFLOWS = frozenset({"release.yml"})
+#: `(caller, callee)` edges the new tier shape implies. Fewer callers than this
+#: means the reader stopped matching, which a clean sweep cannot be told from.
+REQUIRED_CALL_EDGES = frozenset(
+    {
+        ("verify-basic.yml", "basic-repo.yml"),
+        ("verify-deep.yml", "deep-repo.yml"),
+        ("basic-repo.yml", "acceptance.yml"),
+        ("deep-repo.yml", "cross.yml"),
+    }
 )
 
-#: Flags whose *presence* is the finding (BZL-CACHE-26, measured on 8.7.0 and 9.2.0:
-#: with no `--remote_executor` there is nothing to fall back from, so all four
-#: combinations produce `WARNING: Remote Cache: Connection refused`, every action
-#: local, exit 0). `--remote_require_cached` is the opposite defect and the same
-#: finding — it is the one flag that does turn an outage into a failed build.
+#: Flags whose *presence* is the finding (BZL-CACHE-26): with no `--remote_executor`
+#: a fallback flag is dead configuration, and `--remote_require_cached` is the one
+#: flag that turns a cache outage into a red build.
 OUTAGE_POLICY_FLAGS = frozenset(
     {
         "remote_local_fallback",
@@ -1018,29 +1333,49 @@ OUTAGE_POLICY_FLAGS = frozenset(
     }
 )
 
-_WRITE_SECRET = re.compile(r"secrets\.(BAZEL_CACHE_WRITE\w*)")
+#: A job is a Bazel lane when a `run:` body names Bazel or any of these: tasks that
+#: reach it through nested `task` calls. Detection is deliberately broad; a job that
+#: provably reaches no Bazel is named in `LANE_EXCLUSIONS` instead.
+_LANE_NEEDLES = (
+    "task cross:",
+    "task ci:",
+    "schema:generate",
+    "rust:build",
+    "rust:clippy:check",
+    "rust:doc:ratchet",
+    "test:smoke",
+    "test:accept:native",
+    "satellite:",
+    "recordings:",
+    "website:",
+    "test_bundle.py",
+)
+#: Lane jobs the reader found (exclusions included). A lower count means the reader
+#: stopped matching, which a clean tree cannot be told from. The floor tracks the live
+#: lane count: a new lane raises it, so a later reader failure cannot hide behind the slack.
+BAZEL_LANE_FLOOR = 15
+#: Detected lanes that get no cache credential (least privilege), with the reason each
+#: reaches no Bazel. A row whose job is no longer a detected lane is a finding.
+LANE_EXCLUSIONS = {
+    "basic-repo.yml:smoke-acceptance": "pytest on the ocx-binary artifact; CI sets SKIP_BUILD, "
+    "so test:.build-binaries is skipped",
+    "acceptance.yml:shard": "test:accept:native runs pytest on the binaries the `binary` job built; "
+    "the cache credential stays in that job",
+    "deep-repo.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
+    "deep-repo.yml:satellite-verify": "cargo builds of ocx-mirror; no Bazel",
+    "deep-repo.yml:satellite-contract": "cargo builds plus pytest; no Bazel",
+}
+
+_WRITE_SECRET_REF = re.compile(r"secrets\.BAZEL_CACHE_WRITE\w*")
 _CACHE_SECRET = re.compile(r"secrets\.(BAZEL_CACHE_\w*)")
-# `(?<!\.)` keeps a *filename* from reading as an invocation: `\b` treats the dot
-# in `crates/ocx_shim/BUILD.bazel` as a boundary, so a `git log` pathspec naming a
-# BUILD file classified `build-windows-shims.yml:build` -- a job that runs no bazel
-# at all -- as a cache lane owing a credential. `.bazelrc` and `--bazelrc` were
-# never matches (no boundary after `bazel`), and `bazel-out` still is. Measured:
-# the narrowing drops exactly that one job and leaves the other eight lanes.
+#: `(?<!\.)` keeps a filename (`crates/ocx_shim/BUILD.bazel`) from reading as an invocation.
 _BAZEL = re.compile(r"(?<!\.)\bbazel(?:isk)?\b", re.IGNORECASE)
 _RUNNER_TEMP = re.compile(r"RUNNER_TEMP|runner\.temp", re.IGNORECASE)
-#: A condition that varies with the *trigger*. C-017 requires `UPLOAD_OFF` to hold on
-#: every trigger, `push` to `main` included; a platform condition
-#: (`matrix.job.os == 'ubuntu-latest'`) is scheduling, not a trigger, and passes.
-_TRIGGER_CONDITION = re.compile(r"github\.(?:event_name|event\.|ref\b|ref_name\b)")
+#: Any spelling of the upload flag, `=false` and the `no` negation included: the rc the
+#: action writes is the one place it is set.
+_UPLOAD_FLAG = re.compile(r"--(?:no)?remote_upload_local_results")
 #: A `${{ … }}` span. A flag inside one is conditional by construction.
 _GITHUB_EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.DOTALL)
-#: Every spelling that **enables** upload, and none that disables it. A bare
-#: `--remote_upload_local_results` is `true` on Bazel's boolean parser, so the value is
-#: optional here; the trailing lookahead is what keeps `=false` and `=0` out, and
-#: `--noremote_upload_local_results` never matches because the literal `--remote_` does
-#: not appear in it. A needle that caught the negation would report the default-safe
-#: flag as the grant it is the opposite of.
-_UPLOAD_ON = re.compile(r"--remote_upload_local_results(?:=(?:true|yes|1))?(?![=\w-])")
 #: A `#` comment to end of line. A flag that survives this is one bazel is passed.
 _SHELL_COMMENT = re.compile(r"(?m)(?:^|\s)#.*$")
 _FLAG = re.compile(r"--[A-Za-z0-9_]+(?:=\S+)?")
@@ -1049,25 +1384,28 @@ _SPACED_CONFIG = re.compile(r"--config\s+(\S+)")
 #: One rc stanza: `build:ci --remote_cache=…`. `common` and `build` both reach a
 #: `bazel test`, so all three command words are read.
 _RC_STANZA = re.compile(r"(?m)^[ \t]*(build|common|test)(?::([\w.-]+))?[ \t]+(.*)$")
-#: A `--remote_header` carrying an `Authorization`, matched case-insensitively because
-#: HTTP header names are: Bazel passes the name through verbatim, so `Authorization=`
-#: and `authorization=` arrive as one header. Matched with the shell quote optional,
-#: since an rc-bound value is quoted and a command-line one usually is not.
-_AUTHORIZATION_HEADER = re.compile(r"--remote_header=[\"']?authorization=", re.IGNORECASE)
+#: Where the write secret may be named: as a cache step's credential input (the repo action's
+#: `write-auth`, the template setup action's `cache-write-auth`), or passed through by name to a
+#: reusable workflow.
+_WRITE_SECRET_SPOTS = frozenset(
+    {("with", "write-auth"), ("with", "cache-write-auth"), ("secrets", WRITE_SECRET)}
+)
+#: The conventions template's setup action. Its `trusted` cache mode presents the write credential
+#: on every event that carries it, which is `write-auth` under another name; it owns the credential's
+#: lifetime itself, since a composite action has no `post:` hook and the template's jobs add no cleanup.
+TEMPLATE_SETUP = "ocx-sh/conventions/.github/actions/setup"
 
 
 # ---------------------------------------------------------------------------
-# Readers — each with its own red state, since a reader that stopped matching
-# leaves every sweep below green over an empty list
+# Readers
 # ---------------------------------------------------------------------------
 
 
 def _scalars(node: object, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], str]]:
     """Every string leaf of a parsed document, with the key path that reaches it.
 
-    A credential can be bound at workflow, job or step `env:`, or passed as a
-    composite action's `with:` input; a sweep keyed on one of those placements misses
-    the other three.
+    A credential can be bound at workflow, job or step `env:`, or passed as an
+    action's `with:` input; a sweep keyed on one placement misses the others.
     """
     if isinstance(node, dict):
         for key, value in node.items():
@@ -1079,216 +1417,21 @@ def _scalars(node: object, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[s
         yield path, node
 
 
-def _unwrap_parens(term: str) -> str:
-    """`term` with its enclosing parentheses removed — only when there are any.
-
-    `(a) && (b)` starts with `(` and ends with `)` and is **not** parenthesised: the
-    first `(` is closed by the third character, not the last. Stripping there yields
-    `a) && (b`, which reads as one opaque term and silently loses the `&&`.
-    """
-    term = term.strip()
-    while term.startswith("(") and term.endswith(")"):
-        depth = 0
-        for index, char in enumerate(term):
-            depth += (char == "(") - (char == ")")
-            if depth == 0 and index < len(term) - 1:
-                return term
-        term = term[1:-1].strip()
-    return term
-
-
-def _split_top_level(expression: str, operator: str) -> list[str]:
-    """`expression` split on `operator` at paren depth 0 and outside string literals.
-
-    GitHub writes a literal `'` as `''`, so toggling on every `'` returns to the same
-    state and no escape handling is needed.
-    """
-    parts: list[str] = []
-    depth = start = index = 0
-    quoted = False
-    while index < len(expression):
-        char = expression[index]
-        if char == "'":
-            quoted = not quoted
-        elif quoted:
-            pass
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        elif depth == 0 and expression.startswith(operator, index):
-            parts.append(expression[start:index])
-            index = start = index + len(operator)
-            continue
-        index += 1
-    parts.append(expression[start:])
-    return [part.strip() for part in parts]
-
-
-def _strip_expression(value: str) -> str:
-    """One `${{ … }}` wrapper removed and whitespace collapsed.
-
-    PyYAML folds a multi-line plain scalar into one line with newlines as spaces, but
-    a block scalar keeps them; collapsing makes the two spellings of one expression
-    compare equal.
-    """
-    collapsed = re.sub(r"\s+", " ", str(value)).strip()
-    if collapsed.startswith("${{") and collapsed.endswith("}}"):
-        return collapsed[3:-2].strip()
-    return collapsed
-
-
-def _conjuncts(expression: str) -> frozenset[str] | None:
-    """Every term ANDed into `expression`, or `None` when some term can be absent.
-
-    `None` on any reachable `||`, at any depth: in `(A || B) && secrets.X` the
-    credential is released when `B` alone holds, so the set of terms that must be true
-    is not what the expression's shape suggests. Refusing is the point — a reader
-    returning `{A, B, secrets.X}` there would call an open gate closed.
-    """
-    expression = _unwrap_parens(_strip_expression(expression))
-    if len(_split_top_level(expression, "||")) > 1:
-        return None
-    terms = _split_top_level(expression, "&&")
-    if len(terms) == 1:
-        return frozenset({expression})
-    collected: set[str] = set()
-    for term in terms:
-        nested = _conjuncts(term)
-        if nested is None:
-            return None
-        collected |= nested
-    return frozenset(collected)
-
-
-def _trusted_event_conjuncts(expression: str) -> frozenset[str] | None:
-    """The terms `expression` requires, when it releases its payload on a push to `main`.
-
-    The shape ADR ruling 5 names, and nothing looser:
-    `${{ <condition> && <payload> || '' }}`, where `<condition>` carries both
-    trusted-event terms as conjuncts with no reachable `||`, and the other branch is
-    the empty string. `None` for anything else.
-
-    The empty-string branch is half the rule and the easy half to drop. BZL-CACHE-01
-    is "absent from that lane's environment, **not merely unused**": any other
-    fallback leaves the value bound on an untrusted lane, and `UPLOAD_OFF` is then
-    the only thing between a pull request and the shared Action Cache — which the rule
-    calls its verification column, not its control.
-
-    The payload is left to the caller to identify, because the gate now guards two of
-    them: the write **credential** and the `--remote_upload_local_results=true` that
-    makes it do anything. One shape reader, so the two can never drift into meaning
-    different things by the same name.
-    """
-    branches = _split_top_level(_strip_expression(expression), "||")
-    if len(branches) != 2:
-        return None
-    condition, fallback = branches
-    if _unwrap_parens(fallback) not in ("''", '""'):
-        return None
-    terms = _conjuncts(condition)
-    if terms is None or not all(term in terms for term in TRUSTED_EVENT_TERMS):
-        return None
-    return terms
-
-
-def _gated_on_the_trusted_event(value: str) -> bool:
-    """Whether `value` yields a **credential** only on a push to `main`."""
-    terms = _trusted_event_conjuncts(value)
-    return terms is not None and any(term.startswith("secrets.") for term in terms)
-
-
-def _negated_trusted_event_conjuncts(expression: str) -> frozenset[str] | None:
-    """The terms `expression` requires, when it releases its payload on **every other** trigger.
-
-    `_trusted_event_conjuncts`' mirror, and it has to exist rather than be inferred:
-    DX-81 gives the `main` push the write credential *alone*, so the read binding is
-    the same gate negated — `${{ !(<condition>) && <payload> || '' }}` — and a reader
-    that knows only the positive shape calls that binding unreadable.
-
-    Exactly one negated conjunct, and it must be ruling 5's condition whole. Two
-    negations, or a negation of something else, are a different gate wearing this one's
-    punctuation, and `None` is the honest answer for both.
-    """
-    branches = _split_top_level(_strip_expression(expression), "||")
-    if len(branches) != 2 or _unwrap_parens(branches[1]) not in ("''", '""'):
-        return None
-    terms = _conjuncts(branches[0])
-    if terms is None:
-        return None
-    negations = [term for term in terms if term.startswith("!")]
-    if len(negations) != 1:
-        return None
-    inner = _conjuncts(_unwrap_parens(negations[0][1:]))
-    if inner is None or not all(term in inner for term in TRUSTED_EVENT_TERMS):
-        return None
-    return terms
-
-
-def _credential_triggers(value: str) -> frozenset[str] | None:
-    """Which of `TRIGGERS` leave `value` holding a credential. `None` when unreadable.
-
-    Three shapes are read and nothing else is guessed at:
-
-    * a bare `${{ secrets.BAZEL_CACHE_* }}` — every trigger;
-    * ruling 5's gate — the `main` push alone;
-    * ruling 5's gate negated — every trigger but the `main` push.
-
-    `None` for anything else, and that is a *finding* at the caller rather than an
-    empty set. A credential binding this file cannot evaluate is one whose per-trigger
-    count nothing has established, which is the state DX-81 exists to end; reading it
-    as "no credential here" would turn an unknown gate into a silent green.
-
-    An empty set for a scalar naming no cache secret, which is most of them.
-    """
-    if not _CACHE_SECRET.search(value):
-        return frozenset()
-    terms = _conjuncts(_unwrap_parens(_strip_expression(value)))
-    if terms is not None and all(term.startswith("secrets.") for term in terms):
-        return frozenset(TRIGGERS)
-    for reader, triggers in (
-        (_trusted_event_conjuncts, frozenset({"push-to-main"})),
-        (_negated_trusted_event_conjuncts, frozenset({"pull-request"})),
-    ):
-        gate = reader(value)
-        if gate is not None and any(term.startswith("secrets.") for term in gate):
-            return triggers
-    return None
-
-
-def _workflow_triggers(document: dict) -> list[str]:
-    """The `TRIGGERS` this workflow can actually fire on.
-
-    PyYAML parses a bare `on:` as the boolean `True`, which is why the key is looked up
-    both ways. A workflow declaring neither is evaluated on both anyway: an expression
-    that cannot be reached is not a reason to check nothing, and every workflow in this
-    corpus declares both.
-    """
-    triggers = document.get("on", document.get(True)) or {}
-    keys = set(triggers) if isinstance(triggers, dict | list) else {triggers}
-    found = ["push-to-main"] if "push" in keys else []
-    if keys & {"pull_request", "pull_request_target", "merge_group"}:
-        found.append("pull-request")
-    return found or list(TRIGGERS)
-
-
 def _flags(text: str) -> list[str]:
     """The `--flags` bazel is actually passed by `text`.
 
-    Two spellings are removed first, and each is a way a green here matches its own
-    negation: a `#` comment (`# --remote_upload_local_results=false is NOT set`
-    contains the token) and a `${{ … }}` span (a flag GitHub may or may not expand is
-    not a flag the lane carries on every trigger).
+    A `#` comment (`# --keep_going is NOT set` contains the token) and a `${{ … }}`
+    span (a flag GitHub may or may not expand is not one the lane always carries) are
+    removed first; each is a way a match reads its own negation.
     """
     return _FLAG.findall(_SHELL_COMMENT.sub("", _GITHUB_EXPRESSION.sub(" ", text)))
 
 
 def _flag_names(flags: Iterable[str]) -> set[str]:
-    """Flag names without the leading dashes, the `=value`, or the `no` negation.
+    """Flag names without the dashes, the `=value`, or the `no` negation.
 
-    `--noremote_local_fallback` and `--remote_local_fallback=true` are the same flag
-    under BZL-CACHE-26, whose finding is that either is *cited at all*. The bare form
-    is yielded alongside the stripped one rather than instead of it, so a real flag
+    `--noremote_local_fallback` and `--remote_local_fallback=true` are one flag under
+    BZL-CACHE-26. The bare form is yielded beside the stripped one, so a real flag
     beginning `no` is never renamed into something else.
     """
     names: set[str] = set()
@@ -1303,15 +1446,10 @@ def _flag_names(flags: Iterable[str]) -> set[str]:
 def _rc_flags(rc_texts: Iterable[str], configs: Iterable[str]) -> list[str]:
     """`build` / `common` / `test` flags from rc text that the lane's configs activate.
 
-    The tracked `.bazelrc` is where a default-safe `UPLOAD_OFF` belongs (ADR ruling 5
-    speaks of every non-write lane carrying it *in its effective flags*), so a sweep
-    reading only the workflow step would report a compliant tree as a finding. Config
-    activation is a fixpoint because one stanza may name another config.
-
-    `import` / `try-import` directives are deliberately not followed: what they pull in
-    is `.bazelrc.user`, which is gitignored and therefore outside the tracked set this
-    reads. A flag reachable only through one is reported absent — a loud red, not a
-    silent pass.
+    Config activation is a fixpoint because one stanza may name another config.
+    `import` / `try-import` are not followed: they pull in the gitignored
+    `.bazelrc.user`, outside the tracked set, so a flag reachable only through one is
+    reported absent, a loud red rather than a silent pass.
     """
     stanzas = [
         (config, _flags(body)) for text in rc_texts for _, config, body in _RC_STANZA.findall(text)
@@ -1346,70 +1484,34 @@ def _documents(workflows: Iterable[Path] | None = None) -> list[tuple[str, dict]
     return [(workflow.name, _load(workflow)) for workflow in (workflows or WORKFLOWS)]
 
 
-def _bazel_lanes(documents: list[tuple[str, dict]]) -> list[tuple[str, dict, dict, dict]]:
-    """Every `(where, workflow, job, step)` whose `run:` invokes bazel.
+def _jobs(documents: list[tuple[str, dict]]) -> Iterator[tuple[str, dict, dict]]:
+    """`(<workflow>:<job>, workflow, job)` for every job of every document."""
+    for name, document in documents:
+        for job_name, job in (document.get("jobs") or {}).items():
+            yield f"{name}:{job_name}", document, job
 
-    Deliberately broad — a bare `bazel`, a `bazelisk`, or a `task bazel:…` dispatch all
-    match. A step that merely mentions bazel in a comment does not: the comment is
-    stripped first, so the needle reads the command rather than the prose beside it.
-    """
+
+def _is_lane_step(step: dict) -> bool:
+    run = _SHELL_COMMENT.sub("", str(step.get("run", "")))
+    return bool(_BAZEL.search(run)) or any(needle in run for needle in _LANE_NEEDLES)
+
+
+def _lane_jobs(documents: list[tuple[str, dict]]) -> dict[str, tuple[dict, list[int]]]:
+    """`{<workflow>:<job>: (job, indices of its lane steps)}` for every Bazel lane."""
+    lanes = {}
+    for where, _, job in _jobs(documents):
+        indices = [i for i, step in enumerate(job.get("steps") or []) if _is_lane_step(step)]
+        if indices:
+            lanes[where] = (job, indices)
+    return lanes
+
+
+def _lane_steps(documents: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
     return [
-        (f"{name}:{job_name}", document, job, step)
-        for name, document in documents
-        for job_name, job in (document.get("jobs") or {}).items()
-        for step in (job.get("steps") or [])
-        if _BAZEL.search(_SHELL_COMMENT.sub("", str(step.get("run", ""))))
+        (where, step)
+        for where, (job, indices) in _lane_jobs(documents).items()
+        for step in (job["steps"][i] for i in indices)
     ]
-
-
-def _holds_the_write_credential(document: dict, job: dict) -> bool:
-    """Whether the write secret is named anywhere in this job's scope."""
-    return any(
-        _WRITE_SECRET.search(value)
-        for source in (document.get("env") or {}, job)
-        for _, value in _scalars(source)
-    )
-
-
-def _upload_grants(value: str) -> tuple[list[str], list[str]]:
-    """`(gated, ungated)` citations of the upload grant in one scalar.
-
-    **`_flags` is the wrong reader here, and the difference is the whole point.** It
-    drops a `${{ … }}` span, because a flag GitHub may or may not expand is not a flag
-    the lane carries on every trigger — which is exactly the shape the grant must take.
-    A sweep built on `_flags` would therefore see no grant at all and be green over a
-    lane uploading from a pull request. Comments are still stripped: prose naming the
-    flag is prose.
-
-    A citation is *gated* only when the `${{ … }}` span enclosing it is ADR ruling 5's
-    expression and the flag itself is that expression's payload. Everything else —
-    outside any span, inside a span with a looser condition, inside a span whose
-    payload is something else — is ungated, and the whole span is consumed so nothing
-    is counted twice.
-    """
-    text = _SHELL_COMMENT.sub("", value)
-    gated: list[str] = []
-    for span in _GITHUB_EXPRESSION.findall(text):
-        citations = _UPLOAD_ON.findall(span)
-        if not citations:
-            continue
-        terms = _trusted_event_conjuncts(span)
-        if terms is not None and any(
-            _UPLOAD_ON.fullmatch(term.strip("'\"")) for term in terms
-        ):
-            gated.extend(citations)
-            text = text.replace(span, " ", 1)
-    return gated, _UPLOAD_ON.findall(text)
-
-
-def _step_upload_grants(step: dict) -> tuple[list[str], list[str]]:
-    """`_upload_grants` over every scalar of a step — `run:`, `env:` and `with:` alike.
-
-    The grant can be written into the command, bound to a variable the command expands,
-    or handed to a composite action; a reader keyed on `run:` alone misses two of three.
-    """
-    found = [_upload_grants(value) for _, value in _scalars(step)]
-    return [c for gated, _ in found for c in gated], [c for _, up in found for c in up]
 
 
 def _effective_flags(step: dict, rc_texts: Iterable[str]) -> list[str]:
@@ -1421,283 +1523,223 @@ def _effective_flags(step: dict, rc_texts: Iterable[str]) -> list[str]:
     return [*command_line, *_rc_flags(rc_texts, configs)]
 
 
-# ---------------------------------------------------------------------------
-# Sweeps — one function per property, each returning the findings it made. Every
-# one runs against a compliant fixture and a violating fixture below, so both
-# halves of its red/green are shown on every invocation.
-# ---------------------------------------------------------------------------
+def _truthy_input(step: dict, name: str) -> bool:
+    """A `with:` input YAML may have parsed as a bool, a string, or an expression."""
+    return str((step.get("with") or {}).get(name)).strip().lower() == "true"
 
 
-def _ungated_write_credentials(documents: list[tuple[str, dict]]) -> list[str]:
-    """S-005, the BZL-CACHE-01 **control**: the write credential on a trusted event only.
-
-    A2 says this is the control in as many words. The write-isolation test (run the PR
-    lane *with* the credential and confirm zero `PUT`s) is defence in depth and
-    explicitly not this — it constructs the very state BZL-CACHE-01 forbids, so its
-    green cannot discharge the rule. Nothing here may be relaxed on the grounds that
-    `UPLOAD_OFF` would have caught it.
-
-    S-005's second half is narrower than "no rc file on a PR lane", and the narrowing
-    is deliberate: since the read credential landed, a same-repo PR *does* write an rc
-    file — one holding a `build --remote_header=…` line and nothing else. What no lane
-    but the `main` push may hold is the **write** credential and the
-    `--credential_helper` that carries it, and that is a consequence of this sweep
-    rather than a separate check: the composite action emits the helper line only when
-    `write-auth` is non-empty (C-015), and a gated binding is the empty string
-    everywhere else. The rc file's own deletion is `_rc_writers_without_cleanup`, which
-    counts either credential.
-    """
-    return [
-        f"{name}:{'.'.join(path)} = {value.strip()}"
-        for name, document in documents
-        for path, value in _scalars(document)
-        if _WRITE_SECRET.search(value) and not _gated_on_the_trusted_event(value)
-    ]
+def _is_rc_step(step: dict) -> bool:
+    return RC_ACTION in str(step.get("uses", ""))
 
 
-def _lanes_not_disabling_upload(
-    documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
-) -> list[str]:
-    """C-017 / BZL-CACHE-01's verification: `UPLOAD_OFF` on every non-write bazel lane.
-
-    Two exemptions, both principled. A lane holding the write credential is the lane
-    allowed to upload, and on it the flag's other half comes from the CI-only rc file
-    (ADR ruling 4a) that lives outside the workspace and this sweep cannot read —
-    `_ungated_write_credentials` is what governs that lane. A lane with no
-    `--remote_cache` reaches no remote cache to upload to.
-
-    Everything else carries it **unconditionally**: not inside a `${{ … }}` (`_flags`
-    drops those) and not under a job or step `if:` that varies with the trigger, since
-    C-017 requires it on `push` to `main` as much as on a pull request.
-    """
-    rc_texts = list(rc_texts)
-    findings = []
-    for where, document, job, step in _bazel_lanes(documents):
-        if _holds_the_write_credential(document, job):
-            continue
-        flags = _effective_flags(step, rc_texts)
-        if not any(flag.startswith("--remote_cache=") for flag in flags):
-            continue
-        if UPLOAD_OFF not in flags:
-            findings.append(f"{where}: effective flags carry no `{UPLOAD_OFF}`")
-            continue
-        # A job or step `if:` can only make the flag conditional when the flag
-        # comes from the step's own `run:`. An unconditional tracked rc stanza
-        # holds on every trigger by construction, and a job `if:` is then a
-        # *scheduling* condition over a lane that already carries the flag —
-        # the same distinction the platform/trigger split above draws, one
-        # level up. Reading it the other way reported `verify-deep.yml:build`,
-        # whose draft-PR guard decides whether the lane runs at all and nothing
-        # about what flags it runs with.
-        from_the_run = UPLOAD_OFF in _flags(str(step.get("run", "")))
-        conditions = [
-            str(node["if"])
-            for node in (job, step)
-            if from_the_run and _TRIGGER_CONDITION.search(str(node.get("if", "")))
-        ]
-        if conditions:
-            findings.append(f"{where}: `{UPLOAD_OFF}` is under a trigger condition {conditions}")
-    return findings
+def _rc_writes(step: dict) -> bool:
+    return _is_rc_step(step) and not _truthy_input(step, "cleanup")
 
 
-def _write_lane_jobs(documents: list[tuple[str, dict]]) -> list[str]:
-    """Every `<workflow>:<job>` that names the write secret anywhere in its scope."""
-    return sorted(
-        f"{name}:{job_name}"
-        for name, document in documents
-        for job_name, job in (document.get("jobs") or {}).items()
-        if _holds_the_write_credential(document, job)
+def _is_template_cache_step(step: dict) -> bool:
+    """The template setup action in the mode that writes the cache rc. The same action called with only
+    `report:` (the telemetry push) or in another mode writes nothing and is no cache step."""
+    return (
+        str(step.get("uses", "")).startswith(f"{TEMPLATE_SETUP}@")
+        and str((step.get("with") or {}).get("bazel-cache", "")) == "trusted"
     )
 
 
-def _extra_write_lanes(documents: list[tuple[str, dict]]) -> list[str]:
-    """The "only" half of the ruling: **one** job in the corpus may hold the credential.
+def _cache_writer_auth(step: dict) -> str | None:
+    """The credential a step hands a cache-rc writer, `None` when it writes no rc.
 
-    A trusted-event gate makes a second holder invisible to
-    `_ungated_write_credentials`, and `_lanes_not_disabling_upload` *exempts* whatever
-    holds the credential — so a job quietly acquiring `write-auth` would widen the write
-    surface and narrow the sweep that governs it in the same edit. Naming the surplus
-    rather than the set, because the finding is the second one, not the first.
+    The writer is `bazel-cache-rc` (`write-auth`) or the template setup action in `trusted` mode
+    (`cache-write-auth`).
     """
-    return _write_lane_jobs(documents)[1:]
+    if _is_template_cache_step(step):
+        return str((step.get("with") or {}).get("cache-write-auth", ""))
+    return str((step.get("with") or {}).get("write-auth", "")) if _rc_writes(step) else None
 
 
-def _lanes_enabling_upload_off_the_write_lane(documents: list[tuple[str, dict]]) -> list[str]:
-    """The grant's containment: `UPLOAD_ON` on the `main` push and nowhere else.
+def _cleanup_gap(steps: list[dict]) -> str | None:
+    """Why the rc a job writes outlives it, `None` when an `if: always()` cleanup follows.
 
-    `_lanes_not_disabling_upload` cannot carry this and is not asked to. It reads
-    `_effective_flags`, which drops `${{ … }}` spans, so a gated grant is invisible to
-    it by construction; and it exempts the write lane wholesale, which is the one lane
-    this governs. Two findings, because they are two defects:
-
-    * a lane citing the grant while holding no write credential — an anonymous or
-      read-credentialled `PUT`, and on a pull request the state BZL-CACHE-01 forbids;
-    * a grant that is not gated on the trusted event. The credential is released only
-      on the `main` push, but an *unconditional* grant still makes every other trigger
-      attempt uploads it cannot authenticate — failed `PUT`s reported as warnings,
-      which is a lane that looks like it is populating the cache and is not.
+    No `post:` hook exists for a composite action, so deletion is the caller's step. It
+    must follow the last step that uses the rc (an earlier one leaves later steps
+    uncached) and run under `always()`, because the job a leftover credential matters
+    on is the cancelled one.
     """
-    findings = []
-    for where, document, job, step in _bazel_lanes(documents):
-        gated, ungated = _step_upload_grants(step)
-        if not (gated or ungated):
-            continue
-        if not _holds_the_write_credential(document, job):
-            findings.append(
-                f"{where}: cites {sorted(set(gated + ungated))} and its job holds no write "
-                f"credential"
-            )
-            continue
-        if ungated:
-            findings.append(f"{where}: cites {sorted(set(ungated))} outside a trusted-event gate")
-    return findings
+    last = max((i for i, s in enumerate(steps) if _is_lane_step(s) or _rc_writes(s)), default=-1)
+    cleanups = [i for i, s in enumerate(steps) if _is_rc_step(s) and _truthy_input(s, "cleanup")]
+    if not cleanups:
+        return "no `cleanup: true` step"
+    if not any(i > last and "always()" in str(steps[i].get("if", "")) for i in cleanups):
+        return f"no `cleanup: true` step under `if: always()` after step {last}"
+    return None
 
 
-def _write_lanes_uploading_nothing(documents: list[tuple[str, dict]]) -> list[str]:
-    """The silent no-op the grant exists to prevent: the credential without the flag.
+def _local_callee(job: dict) -> str | None:
+    """The file name of the repo workflow a job calls with `uses: ./.github/workflows/<name>`."""
+    uses = str(job.get("uses", ""))
+    return uses.rsplit("/", 1)[1] if uses.startswith("./.github/workflows/") else None
 
-    The committed `.bazelrc` sets `UPLOAD_OFF` unconditionally and is read on every
-    invocation, so a job holding the write credential and citing no override **uploads
-    nothing** — a green lane at full cost, with a live write credential written to the
-    runner and deleted again having done no work. Nothing else in this file reports it:
-    every other sweep here is satisfied by a lane that cannot upload.
 
-    Keyed on the job, because `$RUNNER_TEMP` is job-scoped and any of its bazel steps
-    may be the one that uploads.
+def _declared_secrets(document: dict) -> dict:
+    """The secrets a workflow declares under `on.workflow_call.secrets`."""
+    triggers = document.get("on", document.get(True))
+    called = triggers.get("workflow_call") if isinstance(triggers, dict) else None
+    return (called or {}).get("secrets") or {}
+
+
+def _holds_cache_step(by_name: dict[str, dict], name: str, seen: tuple[str, ...] = ()) -> bool:
+    """Whether a workflow writes the cache rc itself or calls one that does.
+
+    "Holds" is transitive: a workflow calling one that does is a path the secret must
+    travel through too.
     """
-    uploading = {
-        where
-        for where, _, _, step in _bazel_lanes(documents)
-        if any(_step_upload_grants(step))
-    }
+    if name in seen or name not in by_name:
+        return False
+    for job in (by_name[name].get("jobs") or {}).values():
+        if any(_cache_writer_auth(step) is not None for step in job.get("steps") or []):
+            return True
+        callee = _local_callee(job)
+        if callee and _holds_cache_step(by_name, callee, (*seen, name)):
+            return True
+    return False
+
+
+def _cache_workflow_callers(documents: list[tuple[str, dict]]) -> list[tuple[str, str]]:
+    """`(<caller>:<job>, <callee>)` for every job calling a workflow that holds a cache step."""
+    by_name = dict(documents)
     return [
-        f"{where} holds the write credential and no bazel step of it cites `{UPLOAD_ON}`"
-        for where in _write_lane_jobs(documents)
-        if where not in uploading
+        (where, callee)
+        for where, _, job in _jobs(documents)
+        if (callee := _local_callee(job)) and _holds_cache_step(by_name, callee)
     ]
 
 
-def _credential_sources(
-    document: dict, job: dict, step: dict, trigger: str
-) -> tuple[list[str], list[str]]:
-    """`(sources, unreadable)` reaching this bazel step on `trigger`.
+def _call_edges(documents: list[tuple[str, dict]]) -> set[tuple[str, str]]:
+    """`(caller file, callee file)` for every `uses: ./.github/workflows/<name>` job."""
+    return {(where.split(":")[0], callee) for where, _, job in _jobs(documents) if (callee := _local_callee(job))}
 
-    Three routes, because there are three ways a credential arrives at one invocation
-    and a counter keyed on one of them is blind to the other two:
 
-    * an **rc-writer input** — `read-auth` becomes a `build --remote_header=…` line and
-      `write-auth` a `build --credential_helper=…` line, and Bazel applies both from
-      the `--bazelrc=` the lane passes. Keyed on the job, which is the scope
-      `$RUNNER_TEMP` and the runner live in; the `cleanup: true` call is not a writer.
-    * a **`--remote_header=…authorization=`** anywhere in the step, `run:`, `env:` or
-      `with:`. Counted on every trigger even inside a `${{ … }}`: a header GitHub may
-      or may not expand is still a second source on the trigger where it does, and
-      over-counting a conditional one reds rather than passes.
-    * an **`env:` binding of a cache secret** visible to the step — step, job, then
-      workflow. Nothing in Bazel reads such a variable by itself, and that is not the
-      point: a lane that exports one is a lane wiring it into the invocation somehow,
-      and DX-81's count is of credentials presented, not of flags proven effective.
+# ---------------------------------------------------------------------------
+# Sweeps — one function per property, each returning the findings it made
+# ---------------------------------------------------------------------------
+
+
+def _write_credential_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    """Every cache step passes the write secret exactly, and nothing reads a read one.
+
+    "Exactly" means no event predicate, no fallback and no step-level `if:`: a gate would
+    withhold the cache from lanes that should share it, and an `|| ''` is the shape a gate
+    takes. The write secret is named only as a credential input or a by-name pass-through.
     """
-    sources: list[str] = []
-    unreadable: list[str] = []
-
-    def classify(where: str, value: str) -> None:
-        triggers = _credential_triggers(value)
-        if triggers is None:
-            unreadable.append(where)
-        elif trigger in triggers:
-            sources.append(where)
-
-    action = _RC_WRITER.parent.as_posix()
-    for writer in job.get("steps") or []:
-        inputs = writer.get("with") or {}
-        if action not in str(writer.get("uses", "")) or _truthy_input(writer, "cleanup"):
-            continue
-        for name in ("read-auth", "write-auth"):
-            if str(inputs.get(name, "")).strip():
-                classify(f"`{name}` -> {action}", str(inputs[name]))
-
-    for path, value in _scalars(step):
-        sources += [
-            f"`{header}` in step {'.'.join(path)}"
-            for header in _AUTHORIZATION_HEADER.findall(_SHELL_COMMENT.sub("", value))
-        ]
-
-    for scope, node in (("step", step), ("job", job), ("workflow", document)):
-        for path, value in _scalars(node.get("env") or {}):
-            classify(f"{scope} env `{'.'.join(path)}`", value)
-
-    return sources, unreadable
-
-
-def _lanes_not_carrying_exactly_one_credential_source(
-    documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
-) -> list[str]:
-    """DX-81, the ruling: **one credential source per lane, per trigger, by construction.**
-
-    Measured against a local sink with both credential routes live, one cache `PUT`
-    carried *three* `Authorization` headers — the helper's, a `~/.bazelrc`
-    `--remote_header`, and a command-line one. Bazel `add`s a header per configured
-    source rather than replacing it, so which credential authenticates a request is
-    decided by the origin's parsing of a list it was never meant to receive. A design
-    that depends on which duplicate an origin keeps is the defect, whichever one it
-    keeps, so the count is what this asserts and the origin's behaviour is not recorded
-    anywhere in this repository.
-
-    **Two** is the finding DX-81 names and **zero** is the finding it replaces: before
-    the read credential landed, every CI request to the shared cache was an anonymous
-    401 and the unit lane compiled cold on every run, while `--remote_cache` sat in the
-    tracked `.bazelrc` and every flag assertion in this file was green. A flag naming a
-    host is not reach. `!= 1` is therefore one predicate over both defects rather than
-    two sweeps that could disagree.
-
-    Scoped to the lanes that actually dial the shared cache, from their effective flags
-    — a step reaching no cache has no request to authenticate, and
-    `_lanes_without_remote_cache_reach` is what forbids *that*.
-
-    This is the structural half of the ruling and it is exact about what it covers: the
-    sources a workflow file spells. The ones it cannot see — a runner's `~/.bazelrc`, a
-    system rc, an `import`ed `.bazelrc.user` — are refused at runtime by `write_rc.py`,
-    which walks that chain before writing anything. Neither half covers the other's.
-    """
-    rc_texts = list(rc_texts)
     findings = []
-    for where, document, job, step in _bazel_lanes(documents):
-        flags = _effective_flags(step, rc_texts)
-        if not any(flag.startswith(f"--remote_cache=https://{CACHE_HOST}") for flag in flags):
-            continue
-        for trigger in _workflow_triggers(document):
-            sources, unreadable = _credential_sources(document, job, step, trigger)
-            if unreadable:
-                findings.append(
-                    f"{where} on a {trigger}: credential bindings this file cannot "
-                    f"evaluate: {sorted(set(unreadable))}"
-                )
-            elif len(sources) != 1:
-                findings.append(
-                    f"{where} on a {trigger}: {len(sources)} credential sources "
-                    f"{sorted(set(sources))}, expected exactly 1"
-                )
+    for where, _, job in _jobs(documents):
+        for index, step in enumerate(job.get("steps") or []):
+            auth = _cache_writer_auth(step)
+            if auth is not None and " ".join(auth.split()) != WRITE_AUTH:
+                findings.append(f"{where}[{index}] passes {auth.strip()!r}, not `{WRITE_AUTH}`")
+            if auth is not None and "if" in step:
+                findings.append(f"{where}[{index}] gates the cache credential with `if: {step['if']}`")
+    for name, document in documents:
+        for path, value in _scalars(document):
+            if "read-auth" in path or "BAZEL_CACHE_READ_AUTH" in value:
+                findings.append(f"{name}:{'.'.join(path)} names the retired read credential")
+            if _WRITE_SECRET_REF.search(value) and path[-2:] not in _WRITE_SECRET_SPOTS:
+                findings.append(f"{name}:{'.'.join(path)} binds the write secret outside `write-auth`")
     return findings
+
+
+def _upload_flag_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    """No step passes `--remote_upload_local_results`, with any value.
+
+    The rc file the action writes carries the grant, so a workflow that spells the flag
+    either duplicates it or overrides it on one lane.
+    """
+    return [
+        f"{name}:{'.'.join(path)} passes `{match}`"
+        for name, document in documents
+        for path, value in _scalars(document)
+        for match in _UPLOAD_FLAG.findall(_SHELL_COMMENT.sub("", value) if path[-1] == "run" else value)
+    ]
+
+
+def _lanes_without_cache_step(
+    documents: list[tuple[str, dict]], excluded: Iterable[str] = ()
+) -> list[str]:
+    """Every Bazel lane writes the cache before its first lane step and cleans up after.
+
+    The cleanup half is the caller's duty for `bazel-cache-rc` only; the template's setup action
+    in `trusted` mode has no cleanup to add (see `TEMPLATE_SETUP`).
+    """
+    findings = []
+    for where, (job, lane) in _lane_jobs(documents).items():
+        if where in excluded:
+            continue
+        steps = job.get("steps") or []
+        writers = [i for i, step in enumerate(steps) if _cache_writer_auth(step) is not None]
+        if not writers or writers[0] > lane[0]:
+            findings.append(f"{where}: no cache write step before its first lane step ({lane[0]})")
+        elif _is_rc_step(steps[writers[0]]) and (gap := _cleanup_gap(steps)):
+            findings.append(f"{where}: {gap}")
+    return findings
+
+
+def _callers_without_the_secret(documents: list[tuple[str, dict]]) -> list[str]:
+    """A caller passes, by name, each secret the workflow it calls requires, and the cache secret.
+
+    A required secret left out fails the run at startup; the cache secret is optional
+    but leaving it out runs the lane uncached and green, so it is owed whenever the
+    callee declares it. Other optional secrets may be withheld on purpose (a dev publish
+    announces nothing). `secrets: inherit` is a zizmor finding, so it is refused outright
+    (the generated workflow aside). The called workflow must declare the cache secret or
+    GitHub withholds it; both ends are checked, and the secret must be passed exactly
+    (`WRITE_AUTH`), never gated. A call to a file that does not exist is a finding too.
+    """
+    by_name = dict(documents)
+    findings = []
+    for where, _, job in _jobs(documents):
+        callee = _local_callee(job)
+        caller = where.split(":")[0]
+        if callee is None or caller in GENERATED_WORKFLOWS:
+            continue
+        if callee not in by_name:
+            findings.append(f"{where} calls {callee}, which does not exist")
+            continue
+        passed = job.get("secrets")
+        if passed == "inherit":
+            findings.append(f"{where} calls {callee} with `secrets: inherit`")
+            continue
+        passed = passed if isinstance(passed, dict) else {}
+        findings += [
+            f"{where} calls {callee} without passing the secret {secret}"
+            for secret, spec in _declared_secrets(by_name[callee]).items()
+            if secret not in passed and (secret == WRITE_SECRET or (spec or {}).get("required") is True)
+        ]
+        if WRITE_SECRET in passed and " ".join(str(passed[WRITE_SECRET]).split()) != WRITE_AUTH:
+            findings.append(f"{where} passes {WRITE_SECRET} as {str(passed[WRITE_SECRET]).strip()!r}, not `{WRITE_AUTH}`")
+    called = {callee for _, _, job in _jobs(documents) if (callee := _local_callee(job))}
+    for name in sorted(((called | set(REPO_OWNED_REUSABLE)) & set(by_name)) - TEMPLATE_OWNED_WORKFLOWS):
+        if _holds_cache_step(by_name, name) and WRITE_SECRET not in _declared_secrets(by_name[name]):
+            findings.append(f"{name} holds a cache step but declares no `workflow_call` secret {WRITE_SECRET}")
+    return sorted(set(findings))
+
+
+def _rc_writers_without_cleanup(documents: list[tuple[str, dict]]) -> list[str]:
+    """The caller's half of the credential cleanup: a job that writes the rc through the action also deletes it."""
+    return [
+        f"{where}: {gap}"
+        for where, _, job in _jobs(documents)
+        if any(_rc_writes(step) for step in job.get("steps") or [])
+        and (gap := _cleanup_gap(job["steps"]))
+    ]
 
 
 def _lanes_with_an_outage_policy_flag(
     documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
 ) -> list[str]:
-    """S-008 / BZL-CACHE-26: no lane may make a cache outage fatal, or pretend to.
-
-    A cache-only deployment has no `--remote_executor`, so there is nothing to fall
-    back *from*: measured on 8.7.0 and 9.2.0, all four fallback-flag combinations gave
-    `WARNING: Remote Cache: Connection refused`, every action local, exit 0. Citing
-    either fallback flag is therefore dead configuration presented as an outage policy,
-    and its **presence** is the finding. `--remote_require_cached` is the one flag that
-    genuinely converts an outage into a red build, which S-008 forbids from the other
-    side; both are the same finding here.
-    """
+    """BZL-CACHE-26: no lane may make a cache outage fatal, or pretend to."""
     rc_texts = list(rc_texts)
     return [
         f"{where}: `{flag}`"
-        for where, _, _, step in _bazel_lanes(documents)
+        for where, step in _lane_steps(documents)
         for flag in _effective_flags(step, rc_texts)
         if _flag_names([flag]) & OUTAGE_POLICY_FLAGS
     ]
@@ -1706,20 +1748,15 @@ def _lanes_with_an_outage_policy_flag(
 def _lanes_without_remote_cache_reach(
     documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
 ) -> list[str]:
-    """S-016's structural half: a bazel lane must actually point somewhere.
+    """The structural half of the remote-hit check: a lane must actually point at the shared cache.
 
-    "Zero hits → the lane is green with no cache reach at all, indefinitely and
-    silently" is the failure S-016 exists to catch, and a lane carrying no
-    `--remote_cache` is that failure in its loudest, cheapest-to-detect form. The host
-    is pinned too, and the scheme must be an explicit `https://`, because both remote
+    A lane with no `--remote_cache` is green with no cache reach at all, silently. The
+    host is pinned too, and an explicit `https://` is required, because both remote
     flags default to `grpcs` on a scheme-less URI and would dial a port nothing serves.
-
-    The *hit count* is not establishable from configuration. What counts as a hit is,
-    and `remote_cache_hits` is where that lives.
     """
     rc_texts = list(rc_texts)
     findings = []
-    for where, _, _, step in _bazel_lanes(documents):
+    for where, step in _lane_steps(documents):
         endpoints = [
             flag.split("=", 1)[1].strip("\"'")
             for flag in _effective_flags(step, rc_texts)
@@ -1727,27 +1764,21 @@ def _lanes_without_remote_cache_reach(
         ]
         if not endpoints:
             findings.append(f"{where}: no `--remote_cache=` in its effective flags")
-            continue
-        wrong = [endpoint for endpoint in endpoints if urlsplit(endpoint).hostname != CACHE_HOST]
+        wrong = [e for e in endpoints if urlsplit(e).hostname != CACHE_HOST]
         if wrong:
-            findings.append(
-                f"{where}: `--remote_cache` points at {wrong}, not https://{CACHE_HOST}"
-            )
+            findings.append(f"{where}: `--remote_cache` points at {wrong}, not https://{CACHE_HOST}")
     return findings
 
 
 def _runner_temp_uploads(documents: list[tuple[str, dict]]) -> list[str]:
     """ADR ruling 4b line 4: no upload step may take a path under `$RUNNER_TEMP`.
 
-    `$RUNNER_TEMP` is where the CI-only rc file and the credential helper live, and
-    `verify-basic.yml`'s `smoke` job — the job that will hold the write credential —
-    already runs `actions/upload-artifact`. An artifact is a download for anyone who
-    can read the run.
+    That directory holds the rc file and the credential helper, and an uploaded
+    artifact is a download for anyone who can read the run.
     """
     return [
-        f"{name}:{job_name} step `{step.get('uses')}` path={value.strip()!r}"
-        for name, document in documents
-        for job_name, job in (document.get("jobs") or {}).items()
+        f"{where} step `{step.get('uses')}` path={value.strip()!r}"
+        for where, _, job in _jobs(documents)
         for step in (job.get("steps") or [])
         if "upload" in str(step.get("uses", ""))
         for _, value in _scalars(step.get("with") or {})
@@ -1758,10 +1789,8 @@ def _runner_temp_uploads(documents: list[tuple[str, dict]]) -> list[str]:
 def _interpolated_credentials(documents: list[tuple[str, dict]]) -> list[str]:
     """ADR ruling 4b line 1: a cache secret reaches a `run:` body through `env:` only.
 
-    GitHub materialises every step script to a file under `/home/runner/work/_temp/`
-    before running it, so the `${{ secrets.X }}` spelling writes the credential to a
-    second on-disk location and through the expression-expansion path. `env:` passes it
-    as a process environment variable and never renders it into the script text.
+    GitHub materialises every step script to a file under `_temp/`, so the
+    `${{ secrets.X }}` spelling writes the credential to a second on-disk location.
     """
     return [
         f"{name}:{'.'.join(path)} interpolates {sorted(set(_CACHE_SECRET.findall(value)))}"
@@ -1771,83 +1800,38 @@ def _interpolated_credentials(documents: list[tuple[str, dict]]) -> list[str]:
     ]
 
 
-def _rc_writers_without_cleanup(documents: list[tuple[str, dict]]) -> list[str]:
-    """C-015's second half: a job that writes the credential also deletes it.
+_PACKAGE_FETCH = re.compile(r"\bpackage\s+(?:env|pull|install|exec)\s+([^\n]*)")
 
-    A composite action has no `post:` hook — the runner's action schema gives
-    `post`/`post-if` to `node-runs` and `container-runs` only — so the deletion is
-    an **obligation on the caller**, stated in prose in `action.yml`'s `cleanup`
-    input and, until this sweep, enforced by nothing. DX-34 split the clause that
-    way on purpose ("the step body is WP-22's, the `if: always()` caller is
-    WP-23/WP-24's") and then WP-24 was aborted, which left the caller half with no
-    owner and no check.
 
-    Keyed on the *job*, because that is the scope `$RUNNER_TEMP` and the runner
-    live in. Three things must hold together, and each is a separate finding so a
-    half-wired caller names its own gap:
+def _unpinned_package_fetches(documents: list[tuple[str, dict]]) -> list[str]:
+    """A job holding the cache credential fetches each ocx package by digest.
 
-    * a second step of the same job `uses:` the action with `cleanup` truthy;
-    * that step carries an `if:` mentioning `always()` — a cancelled or failed job
-      is exactly the one an unconditional cleanup would skip;
-    * the write step is not itself the cleanup step.
-
-    The write step is recognised by a **non-blank** `read-auth` or `write-auth`,
-    not by their mere presence: with both blank `write_rc.py` returns before
-    touching the filesystem, so nothing needs cleaning up and treating that as a
-    writer would make the compliant no-op lane red. Either one alone puts an rc
-    file under `$RUNNER_TEMP` — the read credential is a `--remote_header` line
-    and no helper — and a credential on a runner is a credential to delete
-    whichever half it is, so both count.
+    Whatever such a job fetches runs beside the rc and the helper the credential lives in, so
+    a tag that moves must not be able to change it.
     """
-    action = _RC_WRITER.parent.as_posix()
     findings = []
-    for name, document in documents:
-        for job_name, job in (document.get("jobs") or {}).items():
-            steps = [
-                step for step in (job.get("steps") or []) if action in str(step.get("uses", ""))
-            ]
-            writers = [
-                step
-                for step in steps
-                if any(
-                    str((step.get("with") or {}).get(credential, "")).strip()
-                    for credential in ("read-auth", "write-auth")
-                )
-                and not _truthy_input(step, "cleanup")
-            ]
-            if not writers:
-                continue
-            cleanups = [step for step in steps if _truthy_input(step, "cleanup")]
-            if not cleanups:
-                findings.append(
-                    f"{name}:{job_name} passes a cache credential and calls "
-                    f"`{action}` with no `cleanup: true` step"
-                )
-                continue
-            if not any("always()" in str(step.get("if", "")) for step in cleanups):
-                findings.append(
-                    f"{name}:{job_name} has a `cleanup: true` step whose `if:` is "
-                    f"{[str(step.get('if', '<absent>')) for step in cleanups]} — not `always()`, "
-                    f"so a cancelled or failed job leaves the credential on the runner"
-                )
+    for where, _, job in _jobs(documents):
+        steps = job.get("steps") or []
+        if not any(_cache_writer_auth(step) is not None for step in steps):
+            continue
+        for index, step in enumerate(steps):
+            run = _SHELL_COMMENT.sub("", str(step.get("run", ""))).replace("\\\n", " ")
+            for fetch in _PACKAGE_FETCH.finditer(run):
+                for token in fetch[1].split():
+                    if token == "--":
+                        break
+                    if not token.startswith("-") and "@sha256:" not in token:
+                        findings.append(f"{where}[{index}] fetches {token!r} without a digest")
     return findings
-
-
-def _truthy_input(step: dict, name: str) -> bool:
-    """A `with:` input YAML may have parsed as a bool, a string, or an expression."""
-    value = (step.get("with") or {}).get(name)
-    return str(value).strip().lower() == "true"
 
 
 def _rc_files_configuring_a_credential_helper(rc_files: Iterable[Path]) -> list[str]:
     """BZL-CACHE-04 (MUST): `--credential_helper` never from a shipped rc file.
 
-    Bazel resolves and spawns the helper with the full client environment, before the
-    sandbox, with no check on where the flag came from — a read-only `bazel query
-    //...` on a fresh clone is enough to execute it (reproduced on 9.2.0, closed by the
-    vendor as intended, bazel#30439). The helper belongs in
-    `$RUNNER_TEMP/bazel-cache.rc`, written by WP-22's composite action on a trusted
-    event and consumed through `--bazelrc=` (ADR ruling 4a).
+    Bazel spawns the helper with the full client environment, before the sandbox, with
+    no check on where the flag came from: a read-only `bazel query //...` on a fresh
+    clone runs it (bazel#30439, closed as intended). The helper belongs in
+    `$RUNNER_TEMP/bazel-cache.rc`, written by the action.
     """
     return [
         f"{path}:{number}: {line.strip()}"
@@ -1858,218 +1842,23 @@ def _rc_files_configuring_a_credential_helper(rc_files: Iterable[Path]) -> list[
 
 
 # ---------------------------------------------------------------------------
-# The reader red states
+# Reader red states
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("term", "expected"),
-    [
-        pytest.param("(a) && (b)", "(a) && (b)", id="not-parenthesised"),
-        pytest.param("((a && b))", "a && b", id="doubly-parenthesised"),
-        pytest.param(" (a) ", "a", id="parenthesised"),
-        pytest.param("a && b", "a && b", id="bare"),
-    ],
-)
-def test_the_paren_reader_strips_only_an_enclosing_pair(term: str, expected: str) -> None:
-    assert _unwrap_parens(term) == expected
-
-
-@pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        pytest.param("a && b", frozenset({"a", "b"}), id="flat"),
-        pytest.param("(a && b) && c", frozenset({"a", "b", "c"}), id="nested"),
-        pytest.param("a && (b && (c && d))", frozenset({"a", "b", "c", "d"}), id="deep"),
-        pytest.param("a || b", None, id="top-level-or"),
-        pytest.param("(a || b) && c", None, id="nested-or"),
-        pytest.param("a && (b || c)", None, id="or-in-a-conjunct"),
-        pytest.param("x == 'a || b'", frozenset({"x == 'a || b'"}), id="or-inside-a-literal"),
-        pytest.param("${{ a && b }}", frozenset({"a", "b"}), id="expression-wrapped"),
-    ],
-)
-def test_the_conjunct_reader_refuses_a_reachable_or(
-    expression: str, expected: frozenset[str] | None
-) -> None:
-    """A `||` anywhere it can be reached means a term is optional, so the reader refuses
-    rather than returning a set that reads as mandatory."""
-    assert _conjuncts(expression) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "gated"),
-    [
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            True,
-            id="the-adr-spelling",
-        ),
-        pytest.param(
-            "${{ github.event_name == 'push' && github.ref == 'refs/heads/main'"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            True,
-            id="unparenthesised-but-identical",
-        ),
-        pytest.param("${{ secrets.BAZEL_CACHE_WRITE_AUTH }}", False, id="ungated"),
-        pytest.param(
-            "${{ github.event_name == 'push' && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            False,
-            id="event-without-ref",
-        ),
-        pytest.param(
-            "${{ github.ref == 'refs/heads/main' && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            False,
-            id="ref-without-event",
-        ),
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main'"
-            " || github.event_name == 'pull_request') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            False,
-            id="an-or-widens-the-gate",
-        ),
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || secrets.BAZEL_CACHE_WRITE_AUTH }}",
-            False,
-            id="fallback-is-the-credential",
-        ),
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || 'unset' }}",
-            False,
-            id="fallback-is-not-empty",
-        ),
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/next')"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            False,
-            id="another-branch",
-        ),
-    ],
-)
-def test_the_trusted_event_gate_reader_discriminates(value: str, gated: bool) -> None:
-    assert _gated_on_the_trusted_event(value) is gated
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        pytest.param(f"bazel test //... {UPLOAD_OFF}", ([], []), id="the-negation-is-not-a-grant"),
-        pytest.param(
-            "bazel test //... --noremote_upload_local_results",
-            ([], []),
-            id="the-no-prefixed-negation-is-not-a-grant",
-        ),
-        pytest.param(
-            f"bazel test //...  # {UPLOAD_ON} would go here", ([], []), id="prose-is-not-a-grant"
-        ),
-        pytest.param(
-            f"bazel test //... {UPLOAD_ON}", ([], [UPLOAD_ON]), id="unconditional-is-ungated"
-        ),
-        pytest.param(
-            "bazel test //... --remote_upload_local_results",
-            ([], ["--remote_upload_local_results"]),
-            id="the-bare-flag-is-true",
-        ),
-        pytest.param(
-            f"task bazel:test:unit -- {_UPLOAD_GRANT}", ([UPLOAD_ON], []), id="the-adr-gate"
-        ),
-        pytest.param(
-            f"task bazel:test:unit -- ${{{{ github.event_name == 'push' && '{UPLOAD_ON}' || '' }}}}",
-            ([], [UPLOAD_ON]),
-            id="half-a-gate-is-no-gate",
-        ),
-        pytest.param(
-            f"task bazel:test:unit -- ${{{{ (github.event_name == 'push' && github.ref =="
-            f" 'refs/heads/main') && '{UPLOAD_ON}' || '{UPLOAD_ON}' }}}}",
-            ([], [UPLOAD_ON, UPLOAD_ON]),
-            id="both-branches-grant",
-        ),
-    ],
-)
-
-def test_the_upload_grant_reader_discriminates(
-    value: str, expected: tuple[list[str], list[str]]
-) -> None:
-    """The reader's own red and green, on the three distinctions it exists to draw.
-
-    `UPLOAD_OFF` shares every character of `UPLOAD_ON` but four, a `#` comment naming
-    the grant is prose, and — the one `_flags` gets deliberately backwards — a grant
-    inside a `${{ … }}` is the *compliant* shape here rather than an invisible one.
-    """
-    assert _upload_grants(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        pytest.param("${{ secrets.BAZEL_CACHE_READ_AUTH }}", set(TRIGGERS), id="unconditional"),
-        pytest.param(
-            "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}",
-            {"push-to-main"},
-            id="ruling-5-gate",
-        ),
-        pytest.param(
-            "${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_READ_AUTH || '' }}",
-            {"pull-request"},
-            id="ruling-5-gate-negated",
-        ),
-        pytest.param("plain text", set(), id="names-no-cache-secret"),
-        pytest.param("${{ secrets.OTEL_OTLP_AUTH }}", set(), id="names-another-secret"),
-        # The `''` branch is half the gate and the easy half to drop: any other
-        # fallback leaves the credential live on the trigger the condition withholds
-        # it from, which is the same defect as no gate.
-        pytest.param(
-            "${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && secrets.BAZEL_CACHE_READ_AUTH || 'none' }}",
-            None,
-            id="negated-gate-falls-back-to-a-non-empty-string",
-        ),
-        # `!(A)` alone is not ruling 5 negated — it withholds the credential from every
-        # push, `main` or not, which is a different lane split wearing the same shape.
-        pytest.param(
-            "${{ !(github.event_name == 'push') && secrets.BAZEL_CACHE_READ_AUTH || '' }}",
-            None,
-            id="negation-of-something-else",
-        ),
-        # Two negations: the terms are there and the gate they compose is not this one.
-        pytest.param(
-            "${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main')"
-            " && !github.event.pull_request.draft && secrets.BAZEL_CACHE_READ_AUTH || '' }}",
-            None,
-            id="two-negated-conjuncts",
-        ),
-    ],
-)
-def test_the_credential_trigger_reader_discriminates(
-    value: str, expected: set[str] | None
-) -> None:
-    """DX-81's reader, with its refusals. A shape it guessed at would turn an
-    unevaluated gate into a source count nothing established."""
-    triggers = _credential_triggers(value)
-    assert triggers == (None if expected is None else frozenset(expected))
-
-@pytest.mark.parametrize(
     ("run", "expected"),
     [
-        pytest.param(f"bazel test //... {UPLOAD_OFF}", [UPLOAD_OFF], id="passed"),
-        pytest.param(f"bazel test //...  # {UPLOAD_OFF} is NOT set", [], id="in-a-comment"),
+        pytest.param("bazel test //... --keep_going", ["--keep_going"], id="passed"),
+        pytest.param("bazel test //...  # --keep_going is NOT set", [], id="in-a-comment"),
         pytest.param(
-            f"bazel test //... ${{{{ github.ref == 'refs/heads/main' && '' || '{UPLOAD_OFF}' }}}}",
+            "bazel test //... ${{ github.ref == 'refs/heads/main' && '' || '--keep_going' }}",
             [],
             id="in-an-expression",
         ),
         pytest.param(
-            "bazel test //... --remote_upload_local_results=true",
-            ["--remote_upload_local_results=true"],
-            id="the-opposite-value",
-        ),
-        pytest.param(
-            f"bazel test //... \\\n  --remote_cache=https://{CACHE_HOST} \\\n  {UPLOAD_OFF}",
-            [f"--remote_cache=https://{CACHE_HOST}", UPLOAD_OFF],
+            f"bazel test //... \\\n  --remote_cache=https://{CACHE_HOST} \\\n  --keep_going",
+            [f"--remote_cache=https://{CACHE_HOST}", "--keep_going"],
             id="line-continued",
         ),
     ],
@@ -2077,8 +1866,7 @@ def test_the_credential_trigger_reader_discriminates(
 def test_the_flag_reader_reads_past_a_comment_and_an_expression(
     run: str, expected: list[str]
 ) -> None:
-    """The substring trap, pinned. `UPLOAD_OFF in run` is true for four of these five
-    and the property those four assert is true for exactly two."""
+    """The substring trap, pinned: `"--keep_going" in run` is true for three of these four."""
     assert _flags(run) == expected
 
 
@@ -2098,11 +1886,11 @@ def test_the_flag_name_reader_finds_the_outage_flag(flags: list[str], expected: 
 @pytest.mark.parametrize(
     ("configs", "expected"),
     [
-        pytest.param([], [UPLOAD_OFF], id="unconditional-only"),
-        pytest.param(["ci"], [UPLOAD_OFF, f"--remote_cache=https://{CACHE_HOST}"], id="active"),
+        pytest.param([], ["--keep_going"], id="unconditional-only"),
+        pytest.param(["ci"], ["--keep_going", f"--remote_cache=https://{CACHE_HOST}"], id="active"),
         pytest.param(
             ["dev"],
-            [UPLOAD_OFF, "--config=ci", f"--remote_cache=https://{CACHE_HOST}"],
+            ["--keep_going", "--config=ci", f"--remote_cache=https://{CACHE_HOST}"],
             id="chained",
         ),
     ],
@@ -2113,461 +1901,18 @@ def test_the_rc_reader_follows_an_active_config(configs: list[str], expected: li
     stanza is never in effect, and the `query:` one never reaches a `bazel test`."""
     rc = "\n".join(
         [
-            f"build {UPLOAD_OFF}",
+            "build --keep_going",
             "# build --remote_cache=https://commented.example",
             f"build:ci --remote_cache=https://{CACHE_HOST}",
             "build:dev --config=ci",
-            "query:ci --keep_going",
+            "query:ci --verbose_failures",
         ]
     )
     assert sorted(_rc_flags([rc], configs)) == sorted(expected)
 
 
-# ---------------------------------------------------------------------------
-# Every sweep's red and green, shown on every run
-#
-# The fixtures are the tree WP-22/23/24 are expected to produce, and the same tree
-# with one property broken. Each violating fixture is *constructed* from the same
-# template with one substitution changed, rather than patched with `str.replace`
-# afterwards: there is then no needle that can drift and leave the compliant tree
-# standing in for a mutation — the harness-is-not-exempt case in `quality-core.md`
-# § Unchecked Green.
-# ---------------------------------------------------------------------------
-
-#: The gate ADR ruling 5 specifies, written once and substituted into the fixtures.
-_GATED = (
-    "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main')"
-    " && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}"
-)
-
-#: DX-81's other half: the same gate negated, carrying the **read** credential, so the
-#: `main` push presents the write credential alone and every other trigger presents
-#: this one alone. The truthy branch carries the secret in both, because GitHub's
-#: `a && b || c` yields `c` whenever `b` is falsy and `''` is falsy — a binding written
-#: `<trusted> && '' || secrets.READ` hands the read secret to the `main` push, which is
-#: the exact state the gate exists to forbid.
-_NEGATED_GATE = (
-    "${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main')"
-    " && secrets.BAZEL_CACHE_READ_AUTH || '' }}"
-)
-
-#: The write lane: `verify-basic.yml`'s `smoke` after the swap. It carries no literal
-#: `UPLOAD_OFF` because on this lane the committed `.bazelrc`'s copy is overridden —
-#: which is why `_lanes_not_disabling_upload` exempts a write lane and
-#: `_ungated_write_credentials` plus the three grant sweeps govern it instead.
-#:
-#: **Both credentials, on complementary gates** (DX-81). This job serves every trigger
-#: — there is no separate main-push job — so it must carry a binding for each, and the
-#: two must never be live at once. It is the one fixture where the per-trigger count
-#: has something to discriminate, which is why the violations built from it are the
-#: ruling's own failure shapes.
-_WRITE_LANE = """
-name: verify-basic
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: ./.github/actions/bazel-cache-rc
-        with:
-          read-auth: %(read_credential)s
-          write-auth: %(credential)s
-      - name: Unit tests
-        run: |
-          bazel --bazelrc="$RUNNER_TEMP/bazel-cache.rc" test //... --remote_cache=https://%(host)s %(grant)s
-      - uses: actions/upload-artifact@v4
-        with:
-          path: %(upload)s
-%(cleanup)s%(second_job)s"""
-
-#: A second job holding the write credential — substituted in rather than appended, so
-#: the violating fixture is *built* with two write lanes instead of patched into one.
-_SECOND_WRITE_JOB = """
-  smoke-again:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/bazel-cache-rc
-        if: always()
-        with:
-          cleanup: 'true'
-      - uses: ./.github/actions/bazel-cache-rc
-        with:
-          write-auth: %(credential)s
-      - name: Unit tests again
-        run: |
-          bazel test //... --remote_cache=https://%(host)s %(grant)s
-"""
-
-#: C-015's caller half, which a composite action cannot carry itself: no `post:`
-#: hook exists for `using: composite`, so the deletion is a second `uses:` under
-#: `if: always()` in the same job. Substituted rather than appended, so the
-#: violating fixture is *built* without it instead of patched afterwards.
-_CLEANUP_STEP = """      - uses: ./.github/actions/bazel-cache-rc
-        if: always()
-        with:
-          cleanup: 'true'
-"""
-
-#: The read-only lane: `verify-deep.yml`'s Linux leg. Its `if:` is a platform
-#: condition, which C-017 allows — what it forbids is a *trigger* condition.
-_READ_LANE = """
-name: verify-deep
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-jobs:
-  build:
-    runs-on: ${{ matrix.job.os }}
-    steps:
-      - name: Unit tests (Bazel)
-        if: %(guard)s
-        env:
-          BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-        run: |
-          %(invocation)s
-"""
-
-#: The read-credential lane: the shape both real workflows took once the cache
-#: stopped being read anonymously. It calls the rc writer with `read-auth` and
-#: **no** `write-auth` in any spelling, so it is not a write lane — but it does
-#: put an rc file under `$RUNNER_TEMP`, which is what obliges it to the same
-#: `if: always()` deletion. The credential is bound unconditionally on purpose:
-#: every lane may read, and a fork PR is given the empty string by GitHub rather
-#: than by an expression here.
-_READ_CREDENTIAL_LANE = """
-name: verify-basic
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/bazel-cache-rc
-        with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      - name: Unit tests (Bazel)
-        run: |
-          %(invocation)s
-%(cleanup)s"""
-
-_COMPLIANT_INVOCATION = f"bazel test //... --remote_cache=https://{CACHE_HOST} {UPLOAD_OFF}"
-_PLATFORM_GUARD = "matrix.job.os == 'ubuntu-latest'"
-
-
-def _read_credential_lane(cleanup: str = _CLEANUP_STEP) -> str:
-    return _READ_CREDENTIAL_LANE % {"invocation": _COMPLIANT_INVOCATION, "cleanup": cleanup}
-
-
-def _write_lane(
-    credential: str = _GATED,
-    upload: str = "target/nextest/ci/junit.xml",
-    cleanup: str = _CLEANUP_STEP,
-    grant: str = _UPLOAD_GRANT,
-    second_job: str = "",
-    read_credential: str = _NEGATED_GATE,
-    invocation: str | None = None,
-) -> str:
-    substitutions = {"credential": credential, "host": CACHE_HOST, "grant": grant}
-    rendered = _WRITE_LANE % {
-        **substitutions,
-        "read_credential": read_credential,
-        "upload": upload,
-        "cleanup": cleanup,
-        "second_job": second_job % substitutions if second_job else "",
-    }
-    if invocation is None:
-        return rendered
-    # The `bazel …` line, replaced whole. Substituting it through the template would
-    # mean a second `%(…)s` that every caller has to spell, for one violation.
-    original = next(line for line in rendered.splitlines() if line.strip().startswith("bazel "))
-    return rendered.replace(original, f"{original.split('bazel ')[0]}{invocation}")
-
-
-def _read_lane(invocation: str = _COMPLIANT_INVOCATION, guard: str = _PLATFORM_GUARD) -> str:
-    return _READ_LANE % {"invocation": invocation, "guard": guard}
-
-
-_COMPLIANT = {
-    "write-lane": _write_lane(),
-    "read-lane": _read_lane(),
-    "read-credential-lane": _read_credential_lane(),
-}
-
-_SWEEPS = {
-    "one-credential-source": _lanes_not_carrying_exactly_one_credential_source,
-    "write-credential-gate": _ungated_write_credentials,
-    "extra-write-lane": _extra_write_lanes,
-    "upload-grant": _lanes_enabling_upload_off_the_write_lane,
-    "write-lane-uploads-nothing": _write_lanes_uploading_nothing,
-    "upload-off": _lanes_not_disabling_upload,
-    "outage-policy-flag": _lanes_with_an_outage_policy_flag,
-    "remote-cache-reach": _lanes_without_remote_cache_reach,
-    "runner-temp-upload": _runner_temp_uploads,
-    "interpolated-credential": _interpolated_credentials,
-    "rc-writer-cleanup": _rc_writers_without_cleanup,
-}
-
-_VIOLATIONS = [
-    # DX-81, the ruling's own failure shape and the reason it exists: the `main` push
-    # presenting the read credential *as well as* the write one. Everything else about
-    # this lane is correct — the write credential is gated, the grant is gated, the
-    # credential is cleaned up — and Bazel would send both headers on every `PUT`,
-    # leaving the origin's parsing to decide which one authenticated the write.
-    pytest.param(
-        "one-credential-source",
-        _write_lane(read_credential="${{ secrets.BAZEL_CACHE_READ_AUTH }}"),
-        id="one-credential-source-read-header-beside-the-write-credential",
-    ),
-    # The mirror: a pull request carrying the helper credential beside its read header.
-    # `write-credential-gate` also reds this, and that is the point — it is the *only*
-    # sweep that would have, so a gate loosened in a shape that sweep accepts (a second
-    # trusted-event term, say) would land with nothing counting the headers.
-    pytest.param(
-        "one-credential-source",
-        _write_lane(credential="${{ secrets.BAZEL_CACHE_WRITE_AUTH }}"),
-        id="one-credential-source-helper-on-a-pull-request-lane",
-    ),
-    # The third source in the measured trio, and the one neither credential binding can
-    # show: a `--remote_header` on the invocation itself, beside the rc file's.
-    pytest.param(
-        "one-credential-source",
-        _write_lane(
-            invocation=f'bazel --bazelrc="$RUNNER_TEMP/bazel-cache.rc" test //... '
-            f"--remote_cache=https://{CACHE_HOST} "
-            f'--remote_header="authorization=Basic $CACHE_AUTH"'
-        ),
-        id="one-credential-source-remote-header-on-the-invocation",
-    ),
-    # Zero is the same finding as two, and is the defect this replaced: every request an
-    # anonymous 401, the lane compiling cold, green at full cost, with `--remote_cache`
-    # in the effective flags the whole time.
-    pytest.param(
-        "one-credential-source",
-        _write_lane(read_credential="''"),
-        id="one-credential-source-none-at-all-on-a-pull-request",
-    ),
-    # A binding whose shape the reader cannot evaluate is a finding, not an empty set:
-    # its per-trigger count has been established by nothing. This one falls back to a
-    # non-empty string, so the credential is live on a trigger its condition names as
-    # the one to withhold it from.
-    pytest.param(
-        "one-credential-source",
-        _write_lane(
-            read_credential="${{ github.event_name != 'push'"
-            " && secrets.BAZEL_CACHE_READ_AUTH || 'fallback' }}"
-        ),
-        id="one-credential-source-binding-the-reader-refuses",
-    ),
-    # S-005's red half, verbatim from A2: "remove the trusted-event condition from the
-    # `env:` expression in a scratch workflow and show the assertion fail".
-    pytest.param(
-        "write-credential-gate",
-        _write_lane(credential="${{ secrets.BAZEL_CACHE_WRITE_AUTH }}"),
-        id="write-credential-gate-removed",
-    ),
-    pytest.param(
-        "write-credential-gate",
-        _write_lane(
-            credential="${{ (github.event_name == 'push'"
-            " || github.event_name == 'pull_request') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}"
-        ),
-        id="write-credential-gate-admits-a-pull-request",
-    ),
-    pytest.param(
-        "write-credential-gate",
-        _write_lane(
-            credential="${{ (github.event_name == 'push'"
-            " && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_WRITE_AUTH || 'none' }}"
-        ),
-        id="write-credential-gate-falls-back-to-a-non-empty-string",
-    ),
-    # The ruling's "only the main-push job", in its three failure shapes. Each is a
-    # state a reviewer waves through, because in each the *other* half is visibly
-    # correct: a gate with nothing behind it, a grant with no gate, a credential with
-    # no grant.
-    #
-    # A lane an untrusted contributor triggers, uploading. `_READ_LANE` is
-    # `verify-deep.yml`'s Linux leg, which runs on `pull_request` — and the grant here
-    # is correctly *gated*, so this reds on containment alone and not on the gate.
-    pytest.param(
-        "upload-grant",
-        _read_lane(invocation=f"{_COMPLIANT_INVOCATION} {_UPLOAD_GRANT}"),
-        id="upload-grant-on-a-lane-without-the-write-credential",
-    ),
-    # The grant on the right lane with the gate dropped: the credential is still
-    # `main`-only, so every other trigger attempts uploads it cannot authenticate.
-    pytest.param(
-        "upload-grant",
-        _write_lane(grant=UPLOAD_ON),
-        id="upload-grant-not-gated-on-the-trusted-event",
-    ),
-    # The silent no-op this whole lane exists to avoid: the write credential written
-    # to the runner, deleted again, and the committed `.bazelrc` disabling every
-    # upload it could have made in between.
-    pytest.param(
-        "write-lane-uploads-nothing",
-        _write_lane(grant=""),
-        id="write-lane-holds-the-credential-and-cites-no-grant",
-    ),
-    # "Only the main-push job" has an "only" in it. A second holder is invisible to
-    # `write-credential-gate` when it is gated, and exempts itself from `upload-off`
-    # by holding the credential at all.
-    pytest.param(
-        "extra-write-lane",
-        _write_lane(second_job=_SECOND_WRITE_JOB),
-        id="a-second-job-holds-the-write-credential",
-    ),
-    # The substring trap: the token is in the file and not in the flags.
-    pytest.param(
-        "upload-off",
-        _read_lane(
-            invocation=f"bazel test //... --remote_cache=https://{CACHE_HOST}\n"
-            f"          # {UPLOAD_OFF} is handled elsewhere"
-        ),
-        id="upload-off-only-in-a-comment",
-    ),
-    pytest.param(
-        "upload-off",
-        _read_lane(
-            invocation=f"bazel test //... --remote_cache=https://{CACHE_HOST}"
-            " --remote_upload_local_results=true"
-        ),
-        id="upload-off-set-to-true",
-    ),
-    # C-017: unconditional on every trigger, `push` to `main` included.
-    pytest.param(
-        "upload-off",
-        _read_lane(guard="github.event_name == 'pull_request'"),
-        id="upload-off-under-a-trigger-condition",
-    ),
-    pytest.param(
-        "outage-policy-flag",
-        _read_lane(invocation=f"{_COMPLIANT_INVOCATION} --remote_local_fallback=true"),
-        id="outage-policy-fallback-flag-cited",
-    ),
-    pytest.param(
-        "outage-policy-flag",
-        _read_lane(invocation=f"{_COMPLIANT_INVOCATION} --experimental_remote_require_cached"),
-        id="outage-policy-outage-made-fatal",
-    ),
-    # S-016's silent failure: a lane green with no cache reach at all.
-    pytest.param(
-        "remote-cache-reach",
-        _read_lane(invocation=f"bazel test //... {UPLOAD_OFF}"),
-        id="remote-cache-reach-absent",
-    ),
-    pytest.param(
-        "remote-cache-reach",
-        _read_lane(
-            invocation=f"bazel test //... --remote_cache=https://elsewhere.example {UPLOAD_OFF}"
-        ),
-        id="remote-cache-reach-wrong-host",
-    ),
-    pytest.param(
-        "remote-cache-reach",
-        _read_lane(invocation=f"bazel test //... --remote_cache={CACHE_HOST} {UPLOAD_OFF}"),
-        id="remote-cache-reach-scheme-less",
-    ),
-    pytest.param(
-        "runner-temp-upload",
-        _write_lane(upload="${{ runner.temp }}/bep.json"),
-        id="runner-temp-upload-expression",
-    ),
-    pytest.param(
-        "runner-temp-upload",
-        _write_lane(upload="$RUNNER_TEMP/bazel-cache.rc"),
-        id="runner-temp-upload-shell-variable",
-    ),
-    pytest.param(
-        "interpolated-credential",
-        _read_lane(
-            invocation="echo '${{ secrets.BAZEL_CACHE_READ_AUTH }}' >> .bazelrc.user\n"
-            f"          {_COMPLIANT_INVOCATION}"
-        ),
-        id="interpolated-credential-into-a-run-body",
-    ),
-    # C-015's caller half. The first is the state WP-24 would have landed in had
-    # it landed at all — a write with no deletion; the second is the one a
-    # reviewer waves through, because a cleanup step is visibly present and it is
-    # the *condition* that is wrong.
-    pytest.param(
-        "rc-writer-cleanup",
-        _write_lane(cleanup=""),
-        id="rc-writer-cleanup-absent",
-    ),
-    pytest.param(
-        "rc-writer-cleanup",
-        _write_lane(
-            cleanup="""      - uses: ./.github/actions/bazel-cache-rc
-        if: success()
-        with:
-          cleanup: 'true'
-"""
-        ),
-        id="rc-writer-cleanup-not-under-always",
-    ),
-    # The same obligation, reached through the **read** credential. A lane
-    # passing only `read-auth` writes no helper and holds no write credential,
-    # and that is exactly why it reads as exempt: the rc file it does leave
-    # under `$RUNNER_TEMP` carries a live `--remote_header`.
-    pytest.param(
-        "rc-writer-cleanup",
-        _read_credential_lane(cleanup=""),
-        id="rc-writer-cleanup-absent-on-a-read-only-caller",
-    ),
-]
-
-
-@pytest.mark.parametrize("sweep", sorted(_SWEEPS), ids=lambda sweep: sweep)
-@pytest.mark.parametrize("lane", sorted(_COMPLIANT), ids=lambda lane: lane)
-def test_every_sweep_passes_the_compliant_fixture(sweep: str, lane: str) -> None:
-    """The green half. A compliant lane some sweep reports is a sweep whose red below
-    proves nothing — it would fire on the tree WP-22/23/24 are asked to write."""
-    document = yaml.safe_load(_COMPLIANT[lane])
-    assert _bazel_lanes([(lane, document)]), (
-        f"the {lane} fixture has no bazel lane — it parsed, and every sweep reading it "
-        f"reads an empty list"
-    )
-    findings = _SWEEPS[sweep]([(f"{lane}.yml", document)])
-    assert not findings, f"`{sweep}` reports the compliant {lane} fixture: {findings}"
-
-
-@pytest.mark.parametrize(("sweep", "fixture"), _VIOLATIONS)
-def test_every_sweep_reds_its_violating_fixture(sweep: str, fixture: str) -> None:
-    """The red half, and the proof that the mutation landed.
-
-    The fixture is asserted different from both compliant ones first: a substitution
-    that silently produced the compliant tree would leave the sweep correctly finding
-    nothing, and that green reads as "the property survived a violation" when it means
-    "no violation was built".
-    """
-    assert fixture not in _COMPLIANT.values(), (
-        f"the `{sweep}` violating fixture is byte-identical to a compliant one — it "
-        f"mutates nothing, so a finding here would be impossible for the right reason"
-    )
-    document = yaml.safe_load(fixture)
-    assert _bazel_lanes([("violating", document)]), "violating fixture has no bazel lane"
-    assert _SWEEPS[sweep]([("violating.yml", document)]), (
-        f"`{sweep}` found nothing in a fixture built to violate it — the sweep is a habit, "
-        f"not a check"
-    )
-
-
 def test_the_credential_helper_sweep_reads_an_rc_file(tmp_path: Path) -> None:
-    """BZL-CACHE-04's sweep, both halves. Its live counterpart below is parametrized
-    over the tracked set, which is empty until WP-11 lands an rc file — and an empty
-    parameter set is a visible skip, not a silent pass."""
+    """BZL-CACHE-04's sweep, both halves, on rc files this test writes."""
     clean = tmp_path / ".bazelrc"
     clean.write_text(
         f"build --remote_cache=https://{CACHE_HOST}\n# build --credential_helper=x\n",
@@ -2584,368 +1929,373 @@ def test_the_credential_helper_sweep_reads_an_rc_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Every sweep's red and green, shown on every run
+#
+# The corpus is a lane workflow and its caller; each violation
+# is the same corpus built with one property changed, rather than patched with
+# `str.replace` afterwards, so no needle can drift and leave the compliant tree
+# standing in for a mutation.
+# ---------------------------------------------------------------------------
+
+_RC_STEP = "      - uses: ./.github/actions/bazel-cache-rc\n"
+_CLEANUP = f"{_RC_STEP}        if: always()\n        with:\n          cleanup: 'true'\n"
+_UPLOAD = "      - uses: actions/upload-artifact@v4\n        with:\n          path: target/x.xml\n"
+_FIXTURE_RC = f"build --remote_cache=https://{CACHE_HOST}\n"
+
+
+def _write(auth: str = WRITE_AUTH, extra: str = "") -> str:
+    return f"{_RC_STEP}        with:\n          write-auth: {auth}\n{extra}"
+
+
+def _run(command: str = "task bazel:test:unit") -> str:
+    return f"      - run: {command}\n"
+
+
+def _caller(secrets: str = f"    secrets:\n      {WRITE_SECRET}: {WRITE_AUTH}\n") -> str:
+    return (
+        "name: caller\non:\n  workflow_dispatch: {}\njobs:\n  deep:\n"
+        f"    uses: ./.github/workflows/lane.yml\n{secrets}"
+    )
+
+
+def _corpus(
+    *steps: str,
+    caller: str | None = None,
+    declared: bool = True,
+    also_declares: tuple[str, bool] | None = None,
+) -> list[tuple[str, dict]]:
+    steps = steps or (_write(), _run(), _UPLOAD, _CLEANUP)
+    extra = f"      {also_declares[0]}:\n        required: {str(also_declares[1]).lower()}\n" if also_declares else ""
+    declaration = f"  workflow_call:\n    secrets:\n      {WRITE_SECRET}:\n        required: false\n{extra}"
+    lane = (
+        f"name: lane\non:\n{declaration if declared else '  workflow_call: {}\n'}"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        f"{''.join(steps)}"
+    )
+    return [("lane.yml", yaml.safe_load(lane)), ("caller.yml", yaml.safe_load(caller or _caller()))]
+
+
+def _template_write(auth: str = WRITE_AUTH, mode: str = "trusted", extra: str = "") -> str:
+    return (
+        f"      - uses: {TEMPLATE_SETUP}@7d067fa0a28f195bb5833be434449dea12113551 # v0\n"
+        f"        with:\n          bazel-cache: {mode}\n          cache-write-auth: {auth}\n{extra}"
+    )
+
+
+_SWEEPS = {
+    "write-credential": _write_credential_findings,
+    "no-upload-flag": _upload_flag_findings,
+    "lane-cache-step": _lanes_without_cache_step,
+    "caller-secret": _callers_without_the_secret,
+    "rc-writer-cleanup": _rc_writers_without_cleanup,
+    "outage-policy": lambda docs: _lanes_with_an_outage_policy_flag(docs, [_FIXTURE_RC]),
+    "remote-cache-reach": lambda docs: _lanes_without_remote_cache_reach(docs, [_FIXTURE_RC]),
+    "runner-temp-upload": _runner_temp_uploads,
+    "interpolated-credential": _interpolated_credentials,
+    "unpinned-package": _unpinned_package_fetches,
+}
+
+_EVENT_GATE = "${{ github.ref == 'refs/heads/main' && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}"
+_VIOLATIONS = [
+    pytest.param("write-credential", _corpus(_write(auth=_EVENT_GATE), _run(), _CLEANUP), id="a-event-predicate"),
+    pytest.param("write-credential", _corpus(_write(auth="''"), _run(), _CLEANUP), id="a-empty-credential"),
+    pytest.param(
+        "write-credential",
+        _corpus(_write(extra="        if: github.ref == 'refs/heads/main'\n"), _run(), _CLEANUP),
+        id="a-step-level-if",
+    ),
+    pytest.param(
+        "write-credential",
+        _corpus(_write(extra="          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}\n"), _run(), _CLEANUP),
+        id="a-read-credential-beside-it",
+    ),
+    pytest.param(
+        "write-credential",
+        _corpus(_write(), f"{_run()}        env:\n          T: {WRITE_AUTH}\n", _CLEANUP),
+        id="a-write-secret-bound-in-env",
+    ),
+    pytest.param("no-upload-flag", _corpus(_write(), _run("task bazel:test:unit -- --remote_upload_local_results=true"), _CLEANUP), id="b-run-body"),
+    pytest.param("no-upload-flag", _corpus(_write(), _run("task bazel:test:unit -- --remote_upload_local_results=false"), _CLEANUP), id="b-run-body-false"),
+    pytest.param(
+        "no-upload-flag",
+        _corpus(_write(), f"{_UPLOAD}          args: --noremote_upload_local_results\n", _CLEANUP),
+        id="b-with-input",
+    ),
+    pytest.param("lane-cache-step", _corpus(_run(), _CLEANUP), id="c-no-write-step"),
+    pytest.param("lane-cache-step", _corpus(_run(), _write(), _CLEANUP), id="c-write-step-after-the-lane"),
+    pytest.param("lane-cache-step", _corpus(_run("task cross:build TARGET=x")), id="c-lane-found-by-task-name"),
+    pytest.param("lane-cache-step", _corpus(_write(), _run()), id="c-no-cleanup"),
+    pytest.param("caller-secret", _corpus(caller=_caller(secrets="    secrets: inherit\n")), id="d-inherit"),
+    pytest.param("caller-secret", _corpus(caller=_caller(secrets="")), id="d-no-secrets"),
+    pytest.param(
+        "caller-secret",
+        _corpus(caller=_caller(secrets=f"    secrets:\n      {WRITE_SECRET}: ${{{{ secrets.OTHER }}}}\n")),
+        id="d-another-secret-passed",
+    ),
+    pytest.param("caller-secret", _corpus(declared=False), id="d-callee-declares-nothing"),
+    pytest.param("caller-secret", _corpus(also_declares=("OTHER_SECRET", True)), id="d-required-secret-not-passed"),
+    pytest.param(
+        "caller-secret",
+        [("caller.yml", yaml.safe_load(_caller().replace("lane.yml", "absent.yml")))],
+        id="d-callee-does-not-exist",
+    ),
+    pytest.param("rc-writer-cleanup", _corpus(_write(), _run(), _CLEANUP.replace("always()", "success()")), id="cleanup-not-under-always"),
+    pytest.param("rc-writer-cleanup", _corpus(_write(), _CLEANUP, _run()), id="cleanup-before-the-last-lane-step"),
+    pytest.param("rc-writer-cleanup", _corpus(_write(), _run()), id="cleanup-absent"),
+    pytest.param("outage-policy", _corpus(_write(), _run("task bazel:test:unit -- --remote_local_fallback=true"), _CLEANUP), id="outage-fallback-flag"),
+    pytest.param("outage-policy", _corpus(_write(), _run("task bazel:test:unit -- --experimental_remote_require_cached"), _CLEANUP), id="outage-made-fatal"),
+    pytest.param("remote-cache-reach", _corpus(_write(), _run("bazel test //... --remote_cache=https://elsewhere.example"), _CLEANUP), id="reach-wrong-host"),
+    pytest.param("remote-cache-reach", _corpus(_write(), _run(f"bazel test //... --remote_cache={CACHE_HOST}"), _CLEANUP), id="reach-scheme-less"),
+    pytest.param(
+        "runner-temp-upload",
+        _corpus(_write(), _run(), "      - uses: actions/upload-artifact@v4\n        with:\n          path: ${{ runner.temp }}/bep.json\n", _CLEANUP),
+        id="runner-temp-upload",
+    ),
+    pytest.param(
+        "interpolated-credential",
+        _corpus(_write(), _run(f"echo '{WRITE_AUTH}' >> .bazelrc.user"), _CLEANUP),
+        id="interpolated-credential",
+    ),
+    pytest.param(
+        "unpinned-package",
+        _corpus(_write(), _run('eval "$(ocx --remote package env nushell/nushell:0.116.1 --shell=bash)"'), _CLEANUP),
+        id="unpinned-package-by-tag",
+    ),
+    pytest.param(
+        "unpinned-package",
+        _corpus(_write(), f'      - run: |\n          ocx package env a/b:1@sha256:{"0" * 64} \\\n            c/d:2 --shell=bash\n', _CLEANUP),
+        id="unpinned-package-after-a-continuation",
+    ),
+]
+
+
+@pytest.mark.parametrize("sweep", sorted(_SWEEPS))
+def test_every_sweep_passes_the_compliant_corpus(sweep: str) -> None:
+    """The green half. A compliant corpus some sweep reports is a sweep whose red below
+    proves nothing."""
+    corpus = _corpus()
+    assert _lane_jobs(corpus) and _cache_workflow_callers(corpus), (
+        "the corpus fixture has no lane or no caller — every sweep reading it reads nothing"
+    )
+    findings = _SWEEPS[sweep](corpus)
+    assert not findings, f"`{sweep}` reports the compliant corpus: {findings}"
+
+
+@pytest.mark.parametrize(("sweep", "corpus"), _VIOLATIONS)
+def test_every_sweep_reds_its_violating_corpus(sweep: str, corpus: list[tuple[str, dict]]) -> None:
+    """The red half, and the proof that the mutation landed: a corpus equal to the
+    compliant one would leave the sweep correctly finding nothing."""
+    assert corpus != _corpus(), f"the `{sweep}` violating corpus mutates nothing"
+    assert _SWEEPS[sweep](corpus), f"`{sweep}` found nothing in a corpus built to violate it"
+
+
+@pytest.mark.parametrize(
+    ("steps", "sweep", "findings"),
+    [
+        pytest.param((_template_write(), _run()), "lane-cache-step", False, id="trusted-step-before-the-lane-needs-no-cleanup"),
+        pytest.param((_template_write(), _run()), "write-credential", False, id="trusted-step-passing-the-secret-by-name"),
+        pytest.param((_template_write(auth=_EVENT_GATE), _run()), "write-credential", True, id="trusted-step-with-an-event-predicate"),
+        pytest.param(
+            (_template_write(extra="        if: github.event_name == 'push'\n"), _run()),
+            "write-credential",
+            True,
+            id="trusted-step-with-a-step-level-if",
+        ),
+        pytest.param((_run(), _template_write()), "lane-cache-step", True, id="trusted-step-after-the-lane"),
+        pytest.param((_template_write(mode="read"), _run()), "lane-cache-step", True, id="read-mode-writes-no-rc"),
+        pytest.param((_write(), _run()), "lane-cache-step", True, id="the-repo-action-still-owes-its-cleanup"),
+    ],
+)
+def test_the_template_setup_step_is_a_cache_writer_in_trusted_mode_only(
+    steps: tuple[str, ...], sweep: str, findings: bool
+) -> None:
+    """Red and green for the template's `bazel-cache: trusted` step as a cache writer."""
+    assert bool(_SWEEPS[sweep](_corpus(*steps))) is findings
+
+
+def test_a_pinned_package_fetch_is_green() -> None:
+    run = _run(f'eval "$(ocx --remote package env a/b:1@sha256:{"0" * 64} --shell=bash)"')
+    assert not _unpinned_package_fetches(_corpus(_write(), run, _CLEANUP))
+
+
+def test_a_named_exclusion_skips_its_lane() -> None:
+    corpus = _corpus(_run(), _CLEANUP)
+    assert _lanes_without_cache_step(corpus)
+    assert not _lanes_without_cache_step(corpus, {"lane.yml:build": "no Bazel"})
+
+
+# ---------------------------------------------------------------------------
 # The live assertions
 # ---------------------------------------------------------------------------
 
-_RC_WRITER = PurePosixPath(".github/actions/bazel-cache-rc/action.yml")
 
-
-def _no_bazel_lane() -> str:
-    """The observed cause, named rather than assumed — a skip whose message names a
-    cause it never observed is itself a defect."""
-    return (
-        "no step of any `.github/workflows/*.yml` has a `run:` invoking bazel — observed by "
-        "reading every step of every workflow in this tree. WP-23 (`verify-basic.yml`) and "
-        "WP-24 (`verify-deep.yml`) were to land the lane swap and **WP-30 returned NO-GO**, "
-        "so on current plan no lane lands and this assertion stays skipped rather than "
-        "pending. Its red state runs today in `test_every_sweep_reds_its_violating_fixture`."
-    )
-
-
-def _rc_writer_callers(credential: str | None = None) -> list[str]:
-    """Every workflow step that `uses:` the rc writer, as `<workflow>:<job>`.
-
-    File existence is not the property these floors mean. `_documents()` reads
-    `.github/workflows/*.yml` only, so nothing inside `.github/actions/**` can turn
-    them green — only a workflow that calls the action can. WP-22 lands the action in
-    wave 3 and WP-23/WP-24 wire it in wave 8; keying on the file would fail the floors
-    for those five waves against an action that is doing nothing wrong.
-
-    With `credential` given, only the callers passing that input **non-blank**. The
-    two halves are wired by different changes — the read credential goes on every
-    lane, the write credential on the `main` push alone — so a floor keyed on "any
-    caller" reports a read-only lane as a workflow that forgot its write secret.
-    """
-    action = _RC_WRITER.parent.as_posix()
-    return [
-        f"{name}:{job_name}"
-        for name, document in _documents()
-        for job_name, job in (document.get("jobs") or {}).items()
-        for step in (job.get("steps") or [])
-        if action in str(step.get("uses", ""))
-        and (credential is None or str((step.get("with") or {}).get(credential, "")).strip())
-    ]
-
-
-def _no_rc_writer(credential: str | None = None) -> str:
-    """The observed cause, for the floors that go live with their first caller.
-
-    Both halves are wired today. The objection that parked the write half — that the
-    tracked `.bazelrc` sets `UPLOAD_OFF` unconditionally, so granting write would mean
-    flipping a shipped default — dissolved on measurement: a **command-line** build
-    option outranks every rc file, so the `main`-push lane passes `UPLOAD_ON` after the
-    command word and `.bazelrc` is not touched. Measured on the pinned 9.2.0 by reading
-    the build event stream's canonical command line (`=true` and no `=false` with the
-    flag, `=false` without it) and behaviourally with `--disk_cache` pointed at a path
-    no rc file names, which Bazel then created.
-
-    These messages stay because a floor's honesty is its skip: if the corpus ever loses
-    its write caller again, the assertions below must say so rather than pass over an
-    empty list. Their red halves run on every invocation against `_VIOLATIONS`.
-    """
-    named = f"a non-blank `{credential}`" if credential else "it"
-    return (
-        f"no workflow step calls `{_RC_WRITER.parent}` with {named} — observed by reading "
-        f"every step of every workflow in this tree. Callers of the action itself: "
-        f"{_rc_writer_callers() or 'none'}. This floor goes live with the first such caller."
-    )
-
-
-def test_the_write_credential_is_gated_on_a_trusted_event() -> None:
-    """S-005 / C-016 — the BZL-CACHE-01 control.
-
-    A same-repo pull request receives the full `secrets` context; GitHub withholds
-    secrets from **fork** PRs only, and same-repo is the only PR shape this project
-    uses. So nothing about the event type keeps the write credential off a PR lane —
-    only this predicate does. `verify-basic.yml`'s `smoke` job is the precedent that
-    makes the failure concrete: an unconditional job-level `env:` block hands
-    `secrets.SCCACHE_AWS_SECRET_ACCESS_KEY` to every same-repo PR run today.
-    """
+def test_every_cache_step_passes_the_write_secret_and_nothing_else() -> None:
+    """Floored on its reader: a tree with no cache step is not a clean one."""
     documents = _documents()
-    named = [
-        value
-        for _, document in documents
-        for _, value in _scalars(document)
-        if _WRITE_SECRET.search(value)
-    ]
-    if not named:
-        pytest.skip(
-            "no workflow names a `BAZEL_CACHE_WRITE*` secret — observed by walking every "
-            "scalar of every workflow. WP-22 (the rc writer) and WP-23 "
-            "(`verify-basic.yml`) introduce it; this assertion goes live with them, and its "
-            "red state runs today in `test_every_sweep_reds_its_violating_fixture"
-            "[write-credential-gate-removed]`."
-        )
-    ungated = _ungated_write_credentials(documents)
-    assert not ungated, (
-        f"the cache **write** credential is reachable without a trusted event: {ungated}. "
-        f"BZL-CACHE-01 (MUST) requires it absent from any lane an untrusted contributor can "
-        f"trigger — not merely unused. Bind it as `${{{{ ({TRUSTED_EVENT_TERMS[0]} && "
-        f"{TRUSTED_EVENT_TERMS[1]}) && secrets.<NAME> || '' }}}}`. `{UPLOAD_OFF}` does not "
-        f"discharge this: the rule calls that its verification column, not its control"
-    )
-
-
-def test_a_write_credential_exists_once_the_rc_writer_does() -> None:
-    """The floor under the test above. Its skip is honest only while nothing names the
-    secret; once a workflow passes `write-auth`, a corpus that still names no write
-    credential means the gate is asserted over nothing — the shape of a check that never
-    ran, not of a clean tree.
-
-    Keyed on a caller passing **`write-auth`**, not on any caller at all. The read
-    credential gave the action its first caller while the write half stayed unwired,
-    and the broader key read that legitimate state as "the rc writer is wired to
-    nothing" — a floor firing on the absence of work nobody has started.
-    """
-    if not _rc_writer_callers("write-auth"):
-        pytest.skip(_no_rc_writer("write-auth"))
     assert any(
-        _WRITE_SECRET.search(value)
-        for _, document in _documents()
-        for _, value in _scalars(document)
-    ), (
-        "a workflow step passes `write-auth` to the `bazel-cache-rc` action and no workflow "
-        "passes it a `BAZEL_CACHE_WRITE*` secret — the rc writer is wired to nothing, and "
-        "every credential assertion in this file is skipping over an empty corpus"
+        _cache_writer_auth(step) is not None
+        for _, _, job in _jobs(documents)
+        for step in job.get("steps") or []
+    ), f"no workflow job writes a cache rc through `{RC_ACTION}` — the reader found nothing"
+    findings = _write_credential_findings(documents)
+    assert not findings, (
+        f"cache steps that do not pass `{WRITE_AUTH}` exactly, or workflows naming the retired "
+        f"read credential: {findings}. Every same-repo lane holding the secret writes the "
+        f"cache; a fork PR holds no secrets, so the empty binding is the fork lane and needs "
+        f"no predicate"
     )
 
 
-def test_every_bazel_lane_carries_exactly_one_credential_source() -> None:
-    """DX-81: per lane, per trigger, **one** credential source — never none, never two.
+def test_no_step_passes_the_upload_flag() -> None:
+    """The rc the action writes carries `--remote_upload_local_results=true`."""
+    findings = _upload_flag_findings(_documents())
+    assert not findings, (
+        f"steps passing the upload flag: {findings}. Each task passes the action's rc with "
+        f"`--bazelrc` when it exists; a second spelling in a workflow overrides it on one lane"
+    )
 
-    Both halves of `!= 1` are measured defects of this repository.
 
-    **Zero** is what this file used to assert alone. Before the read credential landed
-    every request from a workflow lane was an anonymous 401 and `Unit tests (Bazel)`
-    compiled cold on every run, while `--remote_cache` sat in the tracked `.bazelrc`
-    and every flag assertion here was green: a flag naming a host is not reach.
+def test_no_job_holding_the_cache_credential_fetches_an_unpinned_package() -> None:
+    """Floored on its reader: at least one credentialed job fetches a package."""
+    documents = _documents()
+    fetches = [
+        fetch
+        for _, _, job in _jobs(documents)
+        if any(_cache_writer_auth(step) is not None for step in job.get("steps") or [])
+        for step in job.get("steps") or []
+        for fetch in _PACKAGE_FETCH.finditer(str(step.get("run", "")))
+    ]
+    assert fetches, "no credentialed job runs `ocx package env|pull|install|exec` — the reader found nothing"
+    findings = _unpinned_package_fetches(documents)
+    assert not findings, (
+        f"{findings}. The job also holds the Bazel cache write credential; pin each package to "
+        f"`<tag>@sha256:<index digest>` (see the comment in basic-repo.yml)"
+    )
 
-    **Two** is what replaced it. With a credential helper and a read header both
-    configured, a cache `PUT` was measured carrying three `Authorization` headers —
-    Bazel `add`s one per source and sends them all. Which one an origin honours is that
-    origin's business, and a design needing to know is the defect whichever way the
-    answer goes, so nothing in this repository records or depends on that answer. The
-    lanes are disjoint instead: the `main` push presents the write credential alone,
-    whose user is in both realms, and every other trigger presents the read credential
-    alone.
 
-    A **fork** PR is not a third case. GitHub empties every `secrets.*` there, so the
-    runtime count is zero by construction, the action writes no rc file,
-    `bazel:test:unit` omits `--bazelrc` and the lane reads anonymously over
-    `--disk_cache` — the documented fallback, because a step that fails loudly on a
-    fork is the defect.
+def test_the_lane_reader_is_not_asleep() -> None:
+    """The floor under every lane assertion, so it fails when the reader stops matching."""
+    lanes = _lane_jobs(_documents())
+    assert len(lanes) >= BAZEL_LANE_FLOOR, (
+        f"found {len(lanes)} Bazel lane jobs, expected at least {BAZEL_LANE_FLOOR}: "
+        f"{sorted(lanes)} — `_LANE_NEEDLES` no longer match how the workflows spell a lane"
+    )
+
+
+def test_every_lane_exclusion_names_a_lane() -> None:
+    stale = sorted(set(LANE_EXCLUSIONS) - set(_lane_jobs(_documents())))
+    assert not stale, f"exclusions for jobs that are no longer detected as lanes: {stale}"
+
+
+def test_every_bazel_lane_has_the_cache_step() -> None:
+    """Without the step a lane compiles cold and the cache never gains an entry."""
+    findings = _lanes_without_cache_step(_documents(), LANE_EXCLUSIONS)
+    assert not findings, (
+        f"Bazel lanes without a cache write step before their first lane step, or without "
+        f"an `if: always()` cleanup after it: {findings}. A lane that provably reaches no "
+        f"Bazel belongs in `LANE_EXCLUSIONS` with its reason; the credential is not "
+        f"granted to a job that cannot use it"
+    )
+
+
+def test_every_caller_of_a_reusable_workflow_passes_its_declared_secrets_by_name() -> None:
+    """Secrets do not cross `workflow_call` unless declared and passed.
+
+    Every job calling `./.github/workflows/<name>.yml` passes by name each secret that
+    file requires, and the cache secret; no workflow inherits. A repo-owned reusable
+    workflow that holds a cache step declares `BAZEL_CACHE_WRITE_AUTH`; the two
+    template-owned workflows are the baseline check's to hold on the declare side.
     """
     documents = _documents()
-    if not _bazel_lanes(documents):
-        pytest.skip(_no_bazel_lane())
-    findings = _lanes_not_carrying_exactly_one_credential_source(documents, _rc_texts())
-    assert not findings, (
-        f"bazel lanes reaching {CACHE_HOST} with other than one credential source: "
-        f"{findings}. None means every request is an anonymous 401 and the lane compiles "
-        f"cold — green, at full cost. Two means Bazel sends both headers and the origin "
-        f"picks; bind the read credential on `${{{{ !({TRUSTED_EVENT_TERMS[0]} && "
-        f"{TRUSTED_EVENT_TERMS[1]}) && secrets.<READ> || '' }}}}` and the write one on "
-        f"the same gate un-negated, so the two can never be live together"
+    edges = _call_edges(documents)
+    assert len(edges) >= len(REQUIRED_CALL_EDGES), (
+        f"found {len(edges)} reusable-workflow call edges, expected at least "
+        f"{len(REQUIRED_CALL_EDGES)}: {sorted(edges)} — the reader stopped matching `uses:`"
     )
+    missing = sorted(REQUIRED_CALL_EDGES - edges)
+    assert not missing, (
+        f"call edges the tier shape needs and the workflows lack (caller, callee): {missing}. "
+        f"The template's `repo` jobs call `basic-repo.yml` and `deep-repo.yml`; those call "
+        f"`acceptance.yml` and `cross.yml`"
+    )
+    findings = _callers_without_the_secret(documents)
+    assert not findings, (
+        f"{findings}. Without both ends the called workflow's cache step sees an empty "
+        f"secret and runs uncached, green at full cost"
+    )
+
+
+def test_an_optional_secret_may_be_left_unpassed() -> None:
+    """The green control for the required-secret finding: `required: false` is a choice."""
+    assert not _callers_without_the_secret(_corpus(also_declares=("OPTIONAL_SECRET", False)))
+
+
+def test_the_generated_workflow_exemption_is_still_needed() -> None:
+    """An exemption that outlives its reason hides a hand-written `secrets: inherit`."""
+    for name in GENERATED_WORKFLOWS:
+        jobs = (_load(WORKFLOW_DIR / name).get("jobs") or {}).values()
+        assert any(job.get("secrets") == "inherit" for job in jobs), (
+            f"{name} no longer passes `secrets: inherit` — drop it from GENERATED_WORKFLOWS "
+            f"so the sweep covers it"
+        )
+
+
+def test_a_template_owned_callee_is_exempt_from_the_declare_half_only() -> None:
+    """The exemption skips `verify-deep.yml` as a callee that declares nothing, and nothing more."""
+    lane = _corpus(declared=False)[0][1]
+    exempt = [
+        ("verify-deep.yml", lane),
+        ("caller.yml", yaml.safe_load(_caller().replace("lane.yml", "verify-deep.yml"))),
+    ]
+    assert not _callers_without_the_secret(exempt)
+    assert _callers_without_the_secret(_corpus(declared=False)), (
+        "the same callee under a repo-owned name must still be a finding"
+    )
+    inherits = [("verify-deep.yml", lane), ("caller.yml", yaml.safe_load(_caller(secrets="    secrets: inherit\n").replace("lane.yml", "verify-deep.yml")))]
+    assert _callers_without_the_secret(inherits), "an exempt callee does not exempt its caller from `inherit`"
 
 
 def test_every_write_credential_caller_deletes_it_in_an_always_step() -> None:
-    """C-015's caller half — the obligation a composite action cannot carry.
-
-    `using: composite` has no `post:` hook, so the credential's deletion is the
-    caller's step, stated in `action.yml`'s `cleanup` input and enforced here. The
-    latency this closes is specific: `test_a_write_credential_exists_once_the_rc_writer_does`
-    fires on the *presence* of a caller, so the first workflow to wire `write-auth`
-    could land with no cleanup step and every other assertion in this file would
-    stay green.
-
-    Skipped, not pending, while no caller exists: WP-24 was aborted after WP-30
-    returned NO-GO and the machinery is parked rather than retired (the reopen
-    condition is in the plan). The skip names the cause it observed, and the red
-    half runs on every invocation in
-    `test_every_sweep_reds_its_violating_fixture[rc-writer-cleanup-absent]` and
-    `[rc-writer-cleanup-not-under-always]`.
-    """
-    documents = _documents()
-    if not _rc_writer_callers():
-        pytest.skip(_no_rc_writer())
-    findings = _rc_writers_without_cleanup(documents)
+    """The caller's half of the credential cleanup: `using: composite` has no `post:` hook, so the deletion is a
+    second `uses:` of the action under `if: always()`, after the last step needing the rc."""
+    findings = _rc_writers_without_cleanup(_documents())
     assert not findings, (
-        f"jobs that write the cache credential and do not delete it: {findings}. A composite "
-        f"action has no `post:` hook, so `$RUNNER_TEMP/bazel-cache.rc` and its helper survive "
-        f"the job unless the caller runs `{_RC_WRITER.parent}` a second time with "
-        f"`cleanup: 'true'` under `if: always()` — `success()` is not enough, because the job "
-        f"a leftover credential matters on is the cancelled one (C-015)"
-    )
-
-
-def test_only_the_write_lane_may_upload() -> None:
-    """The ruling's first half: `UPLOAD_ON` in the `main`-push job and nowhere else.
-
-    The committed `.bazelrc` keeps `UPLOAD_OFF` for every lane, and this is what keeps
-    the one override where it belongs — cited by a job that holds the write credential,
-    under the same trusted-event gate that releases it. A grant anywhere else is a lane
-    an untrusted contributor can trigger writing to a cache every consumer reads.
-    """
-    documents = _documents()
-    if not _bazel_lanes(documents):
-        pytest.skip(_no_bazel_lane())
-    findings = _lanes_enabling_upload_off_the_write_lane(documents)
-    assert not findings, (
-        f"bazel lanes granting upload off the `main` push: {findings}. `{UPLOAD_ON}` belongs "
-        f"on the one job holding the write credential, inside `${{{{ ({TRUSTED_EVENT_TERMS[0]} "
-        f"&& {TRUSTED_EVENT_TERMS[1]}) && '{UPLOAD_ON}' || '' }}}}` — a command-line build "
-        f"option, appended after the command word, so the committed `.bazelrc` needs no edit"
-    )
-
-
-def test_the_write_lane_actually_uploads() -> None:
-    """The ruling's second half, and the defect it is easiest to ship.
-
-    A job that holds the write credential and cites no grant writes the credential to
-    the runner, runs the build with the committed `.bazelrc`'s `UPLOAD_OFF` in force,
-    and deletes the credential again. Every other assertion in this file is green on
-    that job: it is gated, it is cleaned up, it reaches the cache, it makes no outage
-    fatal. The cache simply never gains an entry, at full cost, indefinitely.
-    """
-    documents = _documents()
-    if not _rc_writer_callers("write-auth"):
-        pytest.skip(_no_rc_writer("write-auth"))
-    findings = _write_lanes_uploading_nothing(documents)
-    assert not findings, (
-        f"{findings} — the committed `.bazelrc` sets `{UPLOAD_OFF}` unconditionally and is "
-        f"read on every invocation, so this lane uploads nothing. Pass `{UPLOAD_ON}` after "
-        f"the command word on the lane that should populate the cache, or stop passing "
-        f"`write-auth` to a job that does not"
-    )
-
-
-def test_exactly_one_job_holds_the_cache_write_credential() -> None:
-    """The "only" in "only the main-push job".
-
-    `_ungated_write_credentials` judges each binding on its own, so a second job with a
-    correctly gated `write-auth` passes it — while `_lanes_not_disabling_upload` stops
-    governing that job the moment it holds the credential. A widening of the write
-    surface would therefore land green twice over, which is what this refuses.
-    """
-    documents = _documents()
-    if not _rc_writer_callers("write-auth"):
-        pytest.skip(_no_rc_writer("write-auth"))
-    findings = _extra_write_lanes(documents)
-    assert not findings, (
-        f"more than one job names a `BAZEL_CACHE_WRITE*` secret: {_write_lane_jobs(documents)}. "
-        f"The surplus is {findings}. One lane writes to the shared cache and it is the `main` "
-        f"push; every other job reads with `read-auth` and nothing else"
-    )
-
-
-def test_the_bazel_lane_reader_is_not_asleep() -> None:
-    """The floor under every lane assertion. Once the rc writer exists the lane swap is
-    landing, and a reader finding no lane has drifted rather than found a clean tree — a
-    difference a skip cannot express on its own."""
-    if not _rc_writer_callers():
-        pytest.skip(_no_rc_writer())
-    assert _bazel_lanes(_documents()), (
-        "no workflow step invokes bazel although a workflow already calls the rc writer — either the "
-        "lane swap is wired nowhere, or `_BAZEL` no longer matches how the lane spells its "
-        "invocation. Both leave every lane assertion below green over an empty list"
-    )
-
-
-def test_every_non_write_bazel_lane_disables_upload() -> None:
-    """C-017 / S-006 / S-007 — `UPLOAD_OFF` in the effective flags of every lane that is
-    not the write lane, unconditionally on every trigger.
-
-    S-006's fork lane needs no separate assertion about the secrets themselves: GitHub
-    withholds them from a fork PR by construction. What remains checkable, and what this
-    covers, is that such a lane cannot upload; that it does not *require* remote reach is
-    `test_no_bazel_lane_makes_a_cache_outage_fatal`.
-    """
-    documents = _documents()
-    if not _bazel_lanes(documents):
-        pytest.skip(_no_bazel_lane())
-    findings = _lanes_not_disabling_upload(documents, _rc_texts())
-    assert not findings, (
-        f"bazel lanes that may upload to the shared cache: {findings}. BZL-CACHE-01's "
-        f"verification treats the absence of `{UPLOAD_OFF}` on an untrusted lane as the "
-        f"finding, and C-017 requires it on `verify-deep.yml`'s Linux leg on every trigger, "
-        f"`push` to `main` included. Put it in the step's `run:`, or in a tracked rc stanza "
-        f"the lane's `--config` activates — both are read here"
-    )
-
-
-def test_a_trigger_condition_is_only_a_finding_when_the_flag_is_in_the_run() -> None:
-    """Both sides of the `from_the_run` branch, on two documents differing in one place.
-
-    `_lanes_not_disabling_upload` reports a trigger-varying `if:` because a flag written
-    into the step's own `run:` under such a guard holds on some triggers and not others.
-    That reasoning does not reach a flag supplied by the **tracked** `.bazelrc`, which is
-    unconditional by construction: there the `if:` decides whether the lane runs at all,
-    which is scheduling. Read the other way it reported `verify-deep.yml:build` — whose
-    guard is the draft-PR gate — so the permissive half is pinned here rather than left
-    to the live tree, where the shape that exercises it can be edited away.
-    """
-    guard = "github.event_name == 'pull_request'"
-    rc = f"build --remote_cache=https://{CACHE_HOST}\nbuild {UPLOAD_OFF}\n"
-
-    in_the_run = yaml.safe_load(_read_lane(guard=guard))
-    findings = _lanes_not_disabling_upload([("in-the-run.yml", in_the_run)])
-    assert findings and "trigger condition" in findings[0], (
-        f"a lane whose own `run:` carries `{UPLOAD_OFF}` under `{guard}` must still be a "
-        f"finding — that flag really does hold on one trigger and not the others. Got "
-        f"{findings}"
-    )
-
-    from_the_rc = yaml.safe_load(_read_lane(invocation="bazel test //... --config=ci", guard=guard))
-    assert _bazel_lanes([("from-the-rc.yml", from_the_rc)]), "the rc-supplied fixture has no lane"
-    assert not _lanes_not_disabling_upload([("from-the-rc.yml", from_the_rc)], [rc]), (
-        f"the same `{guard}` guard over a lane taking `{UPLOAD_OFF}` from an unconditional "
-        f"tracked rc stanza is not a finding: the stanza holds on every trigger, so the "
-        f"`if:` governs whether the lane runs, not what flags it runs with"
+        f"jobs that write the cache rc and do not delete it: {findings}. "
+        f"`$RUNNER_TEMP/bazel-cache.rc` and its helper survive the job unless the caller runs "
+        f"`{RC_ACTION}` again with `cleanup: 'true'` under `if: always()`; `success()` is not "
+        f"enough, because the job a leftover credential matters on is the cancelled one"
     )
 
 
 def test_no_bazel_lane_makes_a_cache_outage_fatal() -> None:
-    """S-008 — an unreachable cache host is a warning and exit 0, by construction.
+    """An unreachable cache host is a warning and exit 0, by construction.
 
-    There is nothing to assert *for* here: with no `--remote_executor` an outage is
-    already non-fatal on every Bazel version measured. What can go wrong is a lane citing
-    a fallback flag as though it governed this (BZL-CACHE-26, whose finding is the flag's
-    presence) or requiring a cache hit outright.
+    With no `--remote_executor` an outage is already non-fatal on every Bazel version
+    measured. What can go wrong is a lane citing a fallback flag as though it governed
+    this (BZL-CACHE-26), or requiring a cache hit outright.
     """
-    documents = _documents()
-    if not _bazel_lanes(documents):
-        pytest.skip(_no_bazel_lane())
-    findings = _lanes_with_an_outage_policy_flag(documents, _rc_texts())
+    findings = _lanes_with_an_outage_policy_flag(_documents(), _rc_texts())
     assert not findings, (
         f"lanes citing a flag that does not govern a cache-only outage, or that makes one "
-        f"fatal: {findings}. Measured on 8.7.0 and 9.2.0, all four fallback-flag "
-        f"combinations give `WARNING: Remote Cache: Connection refused`, every action local, "
-        f"exit 0 — so a fallback flag here is dead configuration presented as an outage "
-        f"policy (BZL-CACHE-26), and `--remote_require_cached` turns the outage into the red "
-        f"build S-008 forbids"
+        f"fatal: {findings}. Measured on 8.7.0 and 9.2.0, all four fallback-flag combinations "
+        f"give `WARNING: Remote Cache: Connection refused`, every action local, exit 0"
     )
 
 
 def test_a_bazel_lane_reaches_the_remote_cache() -> None:
-    """S-016's structural half — a lane pointing nowhere is the silent zero-hit lane.
+    """The structural half of the remote-hit check — a lane pointing nowhere is the silent zero-hit lane.
 
-    "Zero hits → the lane is green with no cache reach at all, indefinitely and silently"
-    is what S-016 exists to catch, and the configuration half of it is checkable here and
-    now: a `--remote_cache` in the effective flags, with an explicit `https://` scheme and
-    this repository's host. The **hit count** is not derivable from configuration; what
-    counts as a hit is `remote_cache_hits`, and
-    `test_s016_is_not_satisfiable_by_a_disk_cache_hit` is its red and green.
+    The **hit count** is not derivable from configuration; what counts as a hit is
+    `remote_cache_hits`, and `test_s016_is_not_satisfiable_by_a_disk_cache_hit` is its
+    red and green.
     """
     documents = _documents()
-    if not _bazel_lanes(documents):
-        pytest.skip(_no_bazel_lane())
+    assert _lane_steps(documents), "no lane step found — the reader stopped matching"
     findings = _lanes_without_remote_cache_reach(documents, _rc_texts())
     assert not findings, (
-        f"bazel lanes with no reach to the shared cache: {findings}. A lane that reads no "
-        f"cache is green forever at full cost, which is the whole value proposition going "
-        f"unasserted (S-016); a scheme-less URI is worse than none, since both remote flags "
-        f"default to `grpcs` and would dial a port nothing serves"
+        f"Bazel lanes with no reach to the shared cache: {findings}. A lane that reads no "
+        f"cache is green forever at full cost; a scheme-less URI is worse than none, since "
+        f"both remote flags default to `grpcs` and would dial a port nothing serves"
     )
 
 
@@ -2955,45 +2305,33 @@ def test_a_bazel_lane_reaches_the_remote_cache() -> None:
 def test_no_tracked_rc_file_configures_a_credential_helper(rc_file: Path) -> None:
     """BZL-CACHE-04 (MUST) / ADR ruling 4a — the helper is never in a shipped rc file.
 
-    Parametrized over the tracked set rather than looped inside one test: with no tracked
-    rc file the parameter set is empty and pytest reports the case as skipped, which is a
-    visible "nothing was read". A loop would report the same green as a clean tree.
+    Parametrized over the tracked set rather than looped: an empty set is a visible
+    skip, a loop would report the same green as a clean tree.
     """
     findings = _rc_files_configuring_a_credential_helper([rc_file])
     assert not findings, (
         f"a tracked rc file configures `--credential_helper`: {findings}. Bazel spawns that "
         f"program with the full client environment, before the sandbox, on a read-only "
-        f"`bazel query //...` from a fresh clone (bazel#30439, closed as intended). The "
-        f"helper belongs in `$RUNNER_TEMP/bazel-cache.rc`, written by "
-        f"`.github/actions/bazel-cache-rc` on a trusted event (ADR ruling 4a)"
+        f"`bazel query //...` from a fresh clone (bazel#30439). The helper belongs in "
+        f"`$RUNNER_TEMP/bazel-cache.rc`, written by `{RC_ACTION}`"
     )
 
 
 def test_no_upload_step_takes_a_runner_temp_path() -> None:
-    """ADR ruling 4b line 4. Live over the whole workflow corpus, not only bazel lanes:
-    the rc file and the credential helper live under `$RUNNER_TEMP`, and an uploaded
-    artifact is a download for anyone who can read the run.
+    """ADR ruling 4b line 4. Live over the whole workflow corpus, not only Bazel lanes.
 
-    Floored on its reader — no upload step found means the sweep stopped reading, which is
-    not the same as the tree being clean.
+    Floored on its reader: no upload step found means the sweep stopped reading.
     """
     documents = _documents()
-    uploads = [
-        step
-        for _, document in documents
-        for job in (document.get("jobs") or {}).values()
-        for step in (job.get("steps") or [])
-        if "upload" in str(step.get("uses", ""))
-    ]
-    assert uploads, (
-        "no workflow step uses an upload action — the reader found nothing, which is not "
-        "the same as no step taking a `$RUNNER_TEMP` path"
-    )
+    assert any(
+        "upload" in str(step.get("uses", ""))
+        for _, _, job in _jobs(documents)
+        for step in job.get("steps") or []
+    ), "no workflow step uses an upload action — the reader found nothing"
     findings = _runner_temp_uploads(documents)
     assert not findings, (
         f"upload steps taking a path under `$RUNNER_TEMP`: {findings}. That directory holds "
-        f"the CI-only rc file and the credential helper, whose whole job is to print the "
-        f"credential on stdout; `bep_to_otlp.py`'s inputs are written elsewhere"
+        f"the rc file and the credential helper, whose whole job is to print the credential"
     )
 
 
@@ -3010,9 +2348,8 @@ def test_no_run_body_interpolates_a_cache_credential() -> None:
     findings = _interpolated_credentials(documents)
     assert not findings, (
         f"`run:` bodies interpolating a cache credential: {findings}. GitHub materialises "
-        f"every step script to a file under `/home/runner/work/_temp/`, so the "
-        f"`${{{{ secrets.X }}}}` spelling writes the credential to a second on-disk location "
-        f"and through the expression-expansion path. Pass it as a step `env:` entry instead"
+        f"every step script to a file under `_temp/`, so the `${{{{ secrets.X }}}}` spelling "
+        f"writes the credential to a second on-disk location. Pass it as a step `env:` entry"
     )
 
 
@@ -3162,96 +2499,6 @@ def test_s016_is_not_satisfiable_by_a_disk_cache_hit() -> None:
         "the control must be unable to tell the disk-served run from the remote-served one "
         "while the restated predicate separates them — otherwise this test is not showing "
         "the false green it exists to close"
-    )
-
-
-# ---------------------------------------------------------------------------
-# S-016's owner-gated half
-# ---------------------------------------------------------------------------
-
-
-def _authorization(credential: str) -> str:
-    """The `Authorization` header value for `credential`.
-
-    `BAZEL_CACHE_READ_AUTH` feeds `--remote_header=authorization=…` (ADR ruling 5b), so it
-    is normally a complete header value. A bare `user:pass` is encoded rather than sent
-    verbatim: a red because the value had the wrong shape is indistinguishable from the red
-    this test exists for, and an indistinguishable red is as useless as an indistinguishable
-    green.
-    """
-    if ":" in credential and " " not in credential:
-        return "Basic " + base64.b64encode(credential.encode()).decode()
-    return credential
-
-
-def test_the_remote_cache_serves_the_read_credential() -> None:
-    """S-016 — owner-gated, and the one test here that touches the network.
-
-    **Why this cannot be structural.** S-016's subject is that a warm same-repo PR lane
-    reports *nonzero* remote cache hits. No property of the configuration establishes that:
-    a perfectly-configured lane reads zero blobs from a realm answering 401 to every
-    method, which is what `bazel-cache.ocx.sh` does today (plan M-04). The reader realm
-    exists only on an unpushed `server-hetzner1` branch and applying it is owner-only, so a
-    test *requiring* it would sit permanently skipped — the unchecked green C-029 forbids.
-
-    **What this asserts, and its red state.** Precondition: `BAZEL_CACHE_READ_AUTH`
-    exported — observable, and independent of the outcome, so the assertion is not its own
-    precondition. Assertion: the cache host answers that credential with something other
-    than 401/403, i.e. the reader realm is deployed and the account works. Red today, on
-    demand and for the right reason: export any value and the host 401s. Green is
-    unreachable until the owner acts, and saying so is the honest half of this.
-
-    **What this does not assert.** The hit count itself — that needs a warm cache and a
-    real build on a lane, and WP-30 returned NO-GO, so no such lane lands. What a hit *is*
-    no longer waits on any of that: `test_s016_is_not_satisfiable_by_a_disk_cache_hit`
-    settles it here, red and green, against real BEP bytes.
-    """
-    credential = os.environ.get(READ_CREDENTIAL, "")
-    if not credential:
-        pytest.skip(
-            f"`{READ_CREDENTIAL}` is unset in this process environment — observed via "
-            f"`os.environ`. The GitHub secret does not exist and the reader realm of "
-            f"{CACHE_ENDPOINT} is not deployed (plan M-04, C-029). **Owner action that "
-            f"unblocks this:** apply `server-hetzner1` branch `bazel-cache-reader-realm`, "
-            f"create repository secrets `{READ_CREDENTIAL}` and `BAZEL_CACHE_WRITE_AUTH`, "
-            f"then export `{READ_CREDENTIAL}` for this run. The nonzero-hit half of S-016 "
-            f"needs a bazel lane, which WP-30's NO-GO means nothing lands; its predicate is "
-            f"asserted here regardless by "
-            f"`test_s016_is_not_satisfiable_by_a_disk_cache_hit`."
-        )
-    request = urllib.request.Request(
-        CACHE_ENDPOINT,
-        method="HEAD",
-        headers={
-            "Authorization": _authorization(credential),
-            "User-Agent": PROBE_USER_AGENT,
-        },
-    )
-    try:
-        answer = urllib.request.urlopen(request, timeout=10)
-        status, headers = answer.status, answer.headers
-    except urllib.error.HTTPError as refused:
-        status, headers = refused.code, refused.headers
-    except OSError as unreachable:
-        pytest.skip(
-            f"`{READ_CREDENTIAL}` is set but {CACHE_ENDPOINT} is unreachable from this host: "
-            f"{unreachable!r}. That is a transport failure, not a verdict on the realm — "
-            f"S-008 is the assertion that an unreachable cache is survivable."
-        )
-    # nginx's `auth_basic` always offers a challenge; the CDN edge's signature block does
-    # not. Without this the probe reports the edge's verdict under the realm's name.
-    if status == 403 and "WWW-Authenticate" not in headers:
-        pytest.skip(
-            f"{CACHE_ENDPOINT} answered 403 with no `WWW-Authenticate` challenge "
-            f"(CF-RAY={headers.get('CF-RAY')!r}, server={headers.get('Server')!r}) — the "
-            f"CDN edge refused this client before nginx saw it, so this is not a "
-            f"verdict on the reader realm. Probe from a host the edge admits."
-        )
-    assert status not in (401, 403), (
-        f"{CACHE_ENDPOINT} answered {status} to `{READ_CREDENTIAL}` — the reader realm is not "
-        f"deployed, or this account is not in `bazel-cache-readers.htpasswd`. Every lane "
-        f"holding this credential then reads zero blobs and stays green at full cost, which "
-        f"is exactly the silent failure S-016 exists to make loud"
     )
 
 
@@ -3406,13 +2653,14 @@ def test_oci_publish_bare_download_is_the_scanned_set() -> None:
     )
 
 
-def test_cross_compile_scans_its_release_build() -> None:
-    """AM-2: the one release build (no `__testing`) on every `main` push scans green on real bytes."""
-    steps = _run_steps(_load(VERIFY_DEEP)["jobs"]["cross-compile"])
-    scans = [index for index, run in steps if f"{PROVENANCE_CHECK} --scan" in run]
-    builds = [index for index, run in steps if "cargo xwin build --release" in run]
-    assert scans, "verify-deep.yml `cross-compile` has no `release_provenance_check.py --scan` step"
-    assert builds and min(scans) > min(builds), f"--scan at step {scans}, build at step {builds}"
+def test_deep_does_not_scan_the_bazel_built_binaries() -> None:
+    """The Bazel-built `ocx` carries `__testing` placeholder provenance by design, so a
+    provenance `--scan` of it reds; the scan lives in `scan-binaries.yml` over release bytes."""
+    text = VERIFY_DEEP.read_text(encoding="utf-8")
+    assert f"{PROVENANCE_CHECK} --scan" not in text, (
+        "verify-deep.yml scans its binaries, which are the `_TESTING_PROVENANCE` Bazel build — "
+        "that scan can only red; release and deploy-dev scan the real release bytes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3474,6 +2722,30 @@ def test_deploy_docs_checks_the_built_site_before_uploading_it() -> None:
     assert runs.index("task test:doc-scripts:drift") < uploads[0]
 
 
+def test_acceptance_binaries_downloaded_for_a_test_run_are_made_executable() -> None:
+    """An artifact round trip drops every executable bit: each job that downloads into
+    `test/bin` on a runner that has them runs `chmod -R +x test/bin`, or a missing one reds
+    deep in the suite instead of at the step that lost it."""
+    checked = []
+    for workflow in (DEEP_REPO, ACCEPTANCE):
+        for name, job in _repo_jobs(workflow).items():
+            steps = job.get("steps") or []
+            if not any(
+                str(s.get("uses", "")).startswith("actions/download-artifact@")
+                and (s.get("with") or {}).get("path") == "test/bin"
+                for s in steps
+            ):
+                continue
+            checked.append(f"{workflow.name}:{name}")
+            runs = "\n".join(str(s.get("run", "")) for s in steps)
+            assert "chmod -R +x test/bin" in runs, (
+                f"{workflow.name} job {name!r} downloads into test/bin but never `chmod -R +x test/bin`"
+            )
+    assert "acceptance.yml:shard" in checked, (
+        f"read {checked}; the readers did not find the shard job, the one that downloads the test-bin artifact"
+    )
+
+
 def test_deploy_docs_grants_nothing_at_the_top_and_triggers_on_main_and_dispatch() -> None:
     """top-level `permissions: {}`, push to `main` plus `workflow_dispatch`, nothing else."""
     document = _load(DEPLOY_DOCS)
@@ -3490,3 +2762,982 @@ def test_the_retired_pages_deploy_workflows_are_gone() -> None:
         assert not (ROOT / ".github" / "workflows" / name).exists(), f"{name} is back"
     jobs = _load(ROOT / ".github" / "workflows" / "release.yml")["jobs"]
     assert "custom-deploy-website-release" not in jobs
+
+
+# ---------------------------------------------------------------------------
+# One `CACHE_RC`, and every Bazel call a task makes carries it
+# ---------------------------------------------------------------------------
+
+#: `--bazelrc` is a startup option, so it must sit immediately after the second `bazel`;
+#: a call without it reads the shared cache anonymously (a 401) and compiles cold, green.
+_TASK_BAZEL_CALL = re.compile(r"ocx exec bazel -- bazel(?:[ \t]+(\S+))?")
+#: Invocations found in the tracked taskfiles when this was written. A floor, not
+#: a census: a reader that stopped seeing taskfiles passes a negative silently.
+_TASK_BAZEL_CALL_FLOOR = 25
+
+
+def _tracked_taskfiles() -> list[Path]:
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", ":(glob)**/taskfile.yml", ":(glob)**/*.taskfile.yml"],
+        capture_output=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.split()
+    return [ROOT / name for name in listed]
+
+
+def test_every_task_bazel_call_passes_the_cache_rc_first() -> None:
+    seen = 0
+    missing: list[str] = []
+    for path in _tracked_taskfiles():
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            for call in _TASK_BAZEL_CALL.finditer(line):
+                seen += 1
+                if call.group(1) != "{{.CACHE_RC}}":
+                    missing.append(f"{path.relative_to(ROOT)}:{number}")
+    assert seen >= _TASK_BAZEL_CALL_FLOOR, (
+        f"found {seen} `ocx exec bazel -- bazel` calls in the taskfiles, floor {_TASK_BAZEL_CALL_FLOOR} — "
+        f"the reader stopped short, and a clean result over it proves nothing"
+    )
+    assert not missing, (
+        "these task calls to bazel do not pass `{{.CACHE_RC}}` as the first startup option, so on CI they "
+        "read the shared cache anonymously: " + ", ".join(missing)
+    )
+
+
+def test_cache_rc_is_defined_once_in_the_root_taskfile() -> None:
+    defined = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in _tracked_taskfiles()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if re.match(r"\s*CACHE_RC:", line)
+    ]
+    assert len(defined) == 1 and defined[0].startswith("taskfile.yml:"), (
+        f"`CACHE_RC:` must be defined exactly once, in the root taskfile.yml; found: {defined}"
+    )
+
+
+def test_bazel_test_accept_never_uploads_verdicts_whatever_rc_a_lane_passes() -> None:
+    """Acceptance verdicts stay on the local disk, per `adr_test_speed_tiers.md`.
+
+    A command-line flag outranks the CI rc's `--remote_upload_local_results=true`, so this holds on any lane.
+    """
+    tasks = yaml.safe_load((ROOT / "taskfiles" / "bazel.taskfile.yml").read_text(encoding="utf-8"))["tasks"]
+    bodies = [c.get("cmd", "") for c in tasks["test:accept"]["cmds"] if isinstance(c, dict)]
+    invocations = [
+        line
+        for body in bodies
+        for line in body.splitlines()
+        if not line.lstrip().startswith("#") and "bazel {{.CACHE_RC}} test " in line
+    ]
+    assert len(invocations) == 1, f"expected one `bazel test` line in `bazel:test:accept`, found {invocations}"
+    assert re.search(r"bazel \{\{\.CACHE_RC\}\} test\b.* --remote_upload_local_results=false\b", invocations[0]), (
+        f"`bazel:test:accept` must pass `--remote_upload_local_results=false` after `test`: {invocations[0].strip()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The repo-owned workflows behind the conventions template's `repo` jobs; a
+# missing file or job is a finding that names it.
+# ---------------------------------------------------------------------------
+
+BASIC_REPO = WORKFLOW_DIR / "basic-repo.yml"
+DEEP_REPO = WORKFLOW_DIR / "deep-repo.yml"
+ACCEPTANCE = WORKFLOW_DIR / "acceptance.yml"
+CROSS = WORKFLOW_DIR / "cross.yml"
+SHELL_ACTIVATION_DEEP = WORKFLOW_DIR / "shell-activation-deep.yml"
+REUSABLE_REPO_WORKFLOWS = (BASIC_REPO, DEEP_REPO, ACCEPTANCE, CROSS)
+
+#: Where the eight cross-build jobs run: "B" keeps them in the deep tier only, "A"
+#: adds them to every pull request. The slowest warm cross job's wall time decides.
+CROSS_VARIANT = "B"
+CROSS_TARGETS = frozenset(
+    {
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-gnullvm",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-gnullvm",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+    }
+)
+BASIC_REPO_JOBS = frozenset({"binaries", "acceptance", "smoke-acceptance", "conventional-commits", "scripts-tests"})
+DEEP_REPO_JOBS = frozenset(
+    {
+        "cross",
+        "unit-native",
+        "acceptance-native",
+        "satellite-verify",
+        "satellite-contract",
+        "index-conformance-drift",
+        "shell-activation-deep",
+    }
+)
+ACCEPTANCE_INPUTS = {
+    "os": {"type": "string"},
+    "shard-count": {"type": "number", "default": 4},
+    "binary": {"type": "string"},
+    "limits-dir": {"type": "string", "default": "test"},
+    "release-binary": {"type": "boolean", "default": False},
+    "no-docker": {"type": "boolean", "default": False},
+    "toolchain-group": {"type": "string", "default": ""},
+}
+CROSS_WORKFLOW_CALL = "./.github/workflows/cross.yml"
+
+
+def _repo_workflow(path: Path) -> dict:
+    assert path.exists(), f"{path.relative_to(ROOT)}: no such workflow"
+    return _load(path)
+
+
+def _repo_jobs(path: Path) -> dict[str, dict]:
+    return {name: job or {} for name, job in (_repo_workflow(path).get("jobs") or {}).items()}
+
+
+def _repo_job(path: Path, name: str) -> dict:
+    jobs = _repo_jobs(path)
+    assert name in jobs, f"{path.name}: no job `{name}`; its jobs are {sorted(jobs)}"
+    return jobs[name]
+
+
+def _workflow_call(path: Path) -> dict:
+    document = _repo_workflow(path)
+    triggers = document.get("on", document.get(True))
+    assert isinstance(triggers, dict) and "workflow_call" in triggers, (
+        f"{path.name}: not a reusable workflow, `on` is {triggers!r}"
+    )
+    return triggers["workflow_call"] or {}
+
+
+def _permission_overreach(document: dict) -> list[str]:
+    """Where a workflow or one of its jobs asks for more than `contents: read`.
+
+    The template's caller grants only that, and a called job asking for more fails the
+    whole run at startup. `none` asks for nothing, and an absent key asks for nothing.
+    """
+    scopes = [("workflow", document.get("permissions"))]
+    scopes += [(f"job `{name}`", (job or {}).get("permissions")) for name, job in (document.get("jobs") or {}).items()]
+    found = []
+    for where, granted in scopes:
+        if isinstance(granted, str):
+            found.append(f"{where}: `{granted}`")
+        else:
+            found += [
+                f"{where}: {scope}: {level}"
+                for scope, level in (granted or {}).items()
+                if level != "none" and (scope, level) != ("contents", "read")
+            ]
+    return found
+
+
+def _matrix_targets(document: dict) -> set[str]:
+    """Every `target` a job matrix of the workflow lists, in `target:` or in `include:`."""
+    targets: set[str] = set()
+    for job in (document.get("jobs") or {}).values():
+        matrix = ((job or {}).get("strategy") or {}).get("matrix") or {}
+        if isinstance(matrix.get("target"), list):
+            targets |= set(matrix["target"])
+        targets |= {entry["target"] for entry in matrix.get("include") or [] if isinstance(entry, dict) and "target" in entry}
+    return targets
+
+
+@pytest.mark.parametrize(
+    ("permissions", "overreach"),
+    [
+        pytest.param({}, False, id="nothing"),
+        pytest.param({"contents": "read"}, False, id="contents-read"),
+        pytest.param({"contents": "read", "checks": "none"}, False, id="none-is-nothing"),
+        pytest.param({"contents": "write"}, True, id="contents-write"),
+        pytest.param({"contents": "read", "checks": "write"}, True, id="checks-write"),
+        pytest.param("read-all", True, id="read-all"),
+    ],
+)
+def test_the_permission_reader_flags_more_than_contents_read(permissions: object, overreach: bool) -> None:
+    """The reader's red and green, on a workflow-level and on a job-level grant."""
+    assert bool(_permission_overreach({"permissions": permissions, "jobs": {}})) is overreach
+    assert bool(_permission_overreach({"jobs": {"j": {"permissions": permissions}}})) is overreach
+
+
+@pytest.mark.parametrize("workflow", REUSABLE_REPO_WORKFLOWS, ids=lambda path: path.name)
+def test_a_repo_reusable_workflow_declares_the_cache_secret_as_optional(workflow: Path) -> None:
+    """A fork pull request holds no secrets, so the secret is declared and not required."""
+    declared = _declared_secrets(_repo_workflow(workflow))
+    _workflow_call(workflow)
+    assert WRITE_SECRET in declared, (
+        f"{workflow.name}: `on.workflow_call.secrets` declares {sorted(declared)}, not {WRITE_SECRET}"
+    )
+    assert (declared[WRITE_SECRET] or {}).get("required") is False, (
+        f"{workflow.name}: {WRITE_SECRET} must be declared with `required: false`, got {declared[WRITE_SECRET]!r}"
+    )
+
+
+@pytest.mark.parametrize("workflow", (BASIC_REPO, DEEP_REPO), ids=lambda path: path.name)
+def test_a_tier_workflow_grants_nothing_at_the_top(workflow: Path) -> None:
+    document = _repo_workflow(workflow)
+    assert document.get("permissions") == {} and "permissions" in document, (
+        f"{workflow.name}: top-level `permissions` is {document.get('permissions')!r}, expected `permissions: {{}}`"
+    )
+
+
+@pytest.mark.parametrize(
+    "workflow", (*REUSABLE_REPO_WORKFLOWS, SHELL_ACTIVATION_DEEP), ids=lambda path: path.name
+)
+def test_no_job_called_through_the_template_asks_for_more_than_contents_read(workflow: Path) -> None:
+    findings = _permission_overreach(_repo_workflow(workflow))
+    assert not findings, (
+        f"{workflow.name} requests more than `contents: read`: {findings}. The template's `repo` job "
+        f"grants only that, and a nested job asking for more fails the whole run at startup"
+    )
+
+
+def test_basic_repo_has_the_jobs_the_basic_tier_needs() -> None:
+    jobs = set(_repo_jobs(BASIC_REPO))
+    assert BASIC_REPO_JOBS <= jobs, (
+        f"{BASIC_REPO.name}: no job {sorted(BASIC_REPO_JOBS - jobs)}; its jobs are {sorted(jobs)}"
+    )
+
+
+def test_basic_repo_runs_linux_acceptance_on_a_rebuilt_binary() -> None:
+    job = _repo_job(BASIC_REPO, "acceptance")
+    assert job.get("uses") == "./.github/workflows/acceptance.yml", (
+        f"{BASIC_REPO.name}: job `acceptance` uses {job.get('uses')!r}, expected the reusable acceptance.yml"
+    )
+    inputs = job.get("with") or {}
+    assert inputs.get("binary") == "build", (
+        f"{BASIC_REPO.name}: job `acceptance` passes binary={inputs.get('binary')!r}, expected 'build'"
+    )
+    assert str(inputs.get("os", "")).startswith("ubuntu"), (
+        f"{BASIC_REPO.name}: job `acceptance` passes os={inputs.get('os')!r}, expected an ubuntu runner label"
+    )
+
+
+def test_basic_repo_scripts_tests_job_cannot_be_skipped() -> None:
+    """A required job skipped by its own `if:` leaves the gate unknown, not green.
+
+    The job always runs and decides inside whether `scripts/**` changed.
+    """
+    job = _repo_job(BASIC_REPO, "scripts-tests")
+    assert "if" not in job, f"{BASIC_REPO.name}: job `scripts-tests` has `if: {job.get('if')}`"
+
+
+def test_deep_repo_has_the_jobs_the_deep_tier_needs() -> None:
+    jobs = set(_repo_jobs(DEEP_REPO))
+    assert DEEP_REPO_JOBS <= jobs, (
+        f"{DEEP_REPO.name}: no job {sorted(DEEP_REPO_JOBS - jobs)}; its jobs are {sorted(jobs)}"
+    )
+
+
+@pytest.mark.parametrize("name", ["unit-native", "acceptance-native"])
+def test_a_deep_native_leg_waits_for_the_cross_job(name: str) -> None:
+    """A macOS or Windows leg runs the outputs the cross job built in the same run."""
+    needs = _needs(_repo_job(DEEP_REPO, name))
+    assert "cross" in needs, f"{DEEP_REPO.name}: job `{name}` needs {needs}, not `cross`"
+
+
+def test_the_deep_native_acceptance_legs_run_the_full_suite_per_os_without_docker() -> None:
+    """macOS and Windows each run the whole suite in four shards against their own limits.
+
+    `no-docker` is the declaration `OCX_TEST_NO_DOCKER=1` hangs on; a leg without it would start
+    Docker services on a runner that has none, and the Linux basic tier never passes it.
+    """
+    job = _repo_job(DEEP_REPO, "acceptance-native")
+    assert job.get("uses") == "./.github/workflows/acceptance.yml", (
+        f"{DEEP_REPO.name}: job `acceptance-native` uses {job.get('uses')!r}, expected the reusable acceptance.yml"
+    )
+    inputs = job.get("with") or {}
+    assert inputs.get("no-docker") is True, f"{DEEP_REPO.name}: `acceptance-native` passes no-docker={inputs.get('no-docker')!r}"
+    assert inputs.get("shard-count") == 4, f"{DEEP_REPO.name}: `acceptance-native` passes shard-count={inputs.get('shard-count')!r}"
+    assert inputs.get("binary") == "artifact:test-bin-${{ matrix.job.target }}", (
+        f"{DEEP_REPO.name}: `acceptance-native` passes binary={inputs.get('binary')!r}, expected the artifact `cross` uploads"
+    )
+    assert inputs.get("limits-dir") == "${{ matrix.job.limits }}", f"{DEEP_REPO.name}: limits-dir is {inputs.get('limits-dir')!r}"
+    legs = job["strategy"]["matrix"]["job"]
+    assert {leg["os"]: leg["limits"] for leg in legs} == {
+        "macos-latest": "test/limits/macos",
+        "windows-latest": "test/limits/windows",
+    }, f"{DEEP_REPO.name}: `acceptance-native` legs are {legs}"
+    linux = (_repo_job(BASIC_REPO, "acceptance").get("with") or {})
+    assert not linux.get("no-docker"), f"{BASIC_REPO.name}: Linux stays strict, but `acceptance` passes {linux}"
+
+
+@pytest.mark.parametrize("platform", ["windows", "macos"])
+def test_the_native_limits_are_committed(platform: str) -> None:
+    """The three files `scripts/accept_floor.py --limits-dir` reads, per native leg."""
+    for name in ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING"):
+        path = ROOT / "test" / "limits" / platform / name
+        assert path.is_file(), f"{path.relative_to(ROOT)} is missing"
+        assert path.read_text(encoding="utf-8").strip().isdigit(), f"{path.relative_to(ROOT)} is not a plain integer"
+
+
+def test_the_acceptance_shard_starts_docker_only_when_the_caller_has_it() -> None:
+    """Every Docker step is gated on `no-docker`, and the suite's skip switch is bound to the same input."""
+    shard = _repo_jobs(ACCEPTANCE)["shard"]
+    assert shard["env"].get("OCX_TEST_NO_DOCKER") == "${{ inputs.no-docker && '1' || '' }}", (
+        f"{ACCEPTANCE.name}: `shard` binds OCX_TEST_NO_DOCKER to {shard['env'].get('OCX_TEST_NO_DOCKER')!r}"
+    )
+    docker_steps = [step for step in shard["steps"] if "docker compose" in str(step.get("run", ""))]
+    assert len(docker_steps) >= 3, f"read {len(docker_steps)} Docker steps; the reader stopped matching"
+    ungated = [step.get("name") for step in docker_steps if "!inputs.no-docker" not in str(step.get("if", ""))]
+    assert not ungated, f"{ACCEPTANCE.name}: Docker steps {ungated} run even when the caller declares no-docker"
+
+
+def test_the_acceptance_shard_binds_the_release_binary_switch_to_its_input() -> None:
+    """`release-binary` reaches the suite only through this env variable; a dropped or renamed one is silent."""
+    shard = _repo_jobs(ACCEPTANCE)["shard"]
+    expected = "${{ inputs.release-binary && '1' || '' }}"
+    actual = (shard.get("env") or {}).get("OCX_TEST_RELEASE_BINARY")
+    assert actual == expected, f"{ACCEPTANCE.name}: `shard` binds OCX_TEST_RELEASE_BINARY to {actual!r}, expected {expected!r}"
+
+
+def test_the_acceptance_shard_builds_nothing() -> None:
+    """The shard runs on macOS and Windows too: it downloads and executes, and only `binary` builds."""
+    offending = [
+        step.get("name", step.get("uses", step.get("run")))
+        for step in _repo_jobs(ACCEPTANCE)["shard"]["steps"]
+        if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
+    ]
+    assert not offending, f"{ACCEPTANCE.name}: `shard` has build steps {offending}"
+
+
+def test_deep_repo_runs_shell_activation_through_its_reusable_workflow() -> None:
+    job = _repo_job(DEEP_REPO, "shell-activation-deep")
+    assert job.get("uses") == "./.github/workflows/shell-activation-deep.yml", (
+        f"{DEEP_REPO.name}: job `shell-activation-deep` uses {job.get('uses')!r}"
+    )
+
+
+def test_the_cross_jobs_sit_where_the_recorded_variant_puts_them() -> None:
+    """The deep tier always cross-builds; the basic tier does only under variant A."""
+    assert CROSS_VARIANT in {"A", "B"}, f"CROSS_VARIANT is {CROSS_VARIANT!r}, expected 'A' or 'B'"
+    deep = _repo_job(DEEP_REPO, "cross")
+    assert deep.get("uses") == CROSS_WORKFLOW_CALL, (
+        f"{DEEP_REPO.name}: job `cross` uses {deep.get('uses')!r}, expected {CROSS_WORKFLOW_CALL}"
+    )
+    callers = sorted(name for name, job in _repo_jobs(BASIC_REPO).items() if job.get("uses") == CROSS_WORKFLOW_CALL)
+    if CROSS_VARIANT == "A":
+        assert callers, f"{BASIC_REPO.name}: variant A cross-builds on every pull request, but no job calls cross.yml"
+    else:
+        assert not callers, f"{BASIC_REPO.name}: variant B keeps cross in the deep tier, but {callers} call cross.yml"
+
+
+def test_the_cross_workflow_builds_exactly_the_supported_targets() -> None:
+    _workflow_call(CROSS)
+    found = _matrix_targets(_repo_workflow(CROSS))
+    assert found == CROSS_TARGETS, (
+        f"{CROSS.name}: matrix targets differ from the eight supported triples; "
+        f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
+    )
+
+
+#: `platform_triples = [ ... ]` in MODULE.bazel; the list holds only quoted triples, so the first `]` closes it.
+_PLATFORM_TRIPLES = re.compile(r"platform_triples\s*=\s*\[([^\]]*)\]")
+#: Enough that a reader which stopped matching cannot pass on a smaller-than-real list.
+PLATFORM_TRIPLES_FLOOR = 8
+
+
+def test_module_bazel_platform_triples_equal_the_cross_targets() -> None:
+    """`taskfiles/cross.taskfile.yml` and `subsystem-taskfiles.md` promise the two lists stay equal."""
+    block = _PLATFORM_TRIPLES.search((ROOT / "MODULE.bazel").read_text(encoding="utf-8"))
+    assert block, "MODULE.bazel: no `platform_triples = [...]` literal; the reader stopped matching"
+    triples = re.findall(r'"([^"]+)"', block.group(1))
+    assert len(triples) >= PLATFORM_TRIPLES_FLOOR, (
+        f"read {len(triples)} platform_triples, expected at least {PLATFORM_TRIPLES_FLOOR}"
+    )
+    assert len(set(triples)) == len(triples), f"MODULE.bazel: platform_triples repeats an entry: {triples}"
+    found = set(triples)
+    assert found == CROSS_TARGETS, (
+        f"MODULE.bazel platform_triples differ from the cross targets; "
+        f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
+    )
+
+
+def test_shell_activation_deep_is_called_and_never_scheduled() -> None:
+    """The weekly run is the deep tier's job now, so a cron here runs it a second time."""
+    triggers = _on(SHELL_ACTIVATION_DEEP)
+    assert isinstance(triggers, dict) and "workflow_call" in triggers, (
+        f"{SHELL_ACTIVATION_DEEP.name}: `on` is {triggers!r}, expected a `workflow_call` trigger"
+    )
+    assert "schedule" not in triggers, (
+        f"{SHELL_ACTIVATION_DEEP.name}: `on` still has a `schedule` trigger ({sorted(triggers)})"
+    )
+
+
+def test_the_acceptance_workflow_takes_the_documented_inputs() -> None:
+    inputs = _workflow_call(ACCEPTANCE).get("inputs") or {}
+    findings = []
+    for name, want in ACCEPTANCE_INPUTS.items():
+        if name not in inputs:
+            findings.append(f"no input `{name}`")
+            continue
+        got = inputs[name] or {}
+        if got.get("type") != want["type"]:
+            findings.append(f"`{name}` has type {got.get('type')!r}, expected {want['type']!r}")
+        if "default" in want and (got.get("default") != want["default"] or type(got.get("default")) is not type(want["default"])):
+            findings.append(f"`{name}` defaults to {got.get('default')!r}, expected {want['default']!r}")
+    description = str((inputs.get("binary") or {}).get("description", ""))
+    if "build" not in description or "artifact:" not in description:
+        findings.append("`binary` does not document its values `build` and `artifact:<name>`")
+    assert not findings, f"{ACCEPTANCE.name} `on.workflow_call.inputs`: {findings}"
+
+
+def _shard_count_source(document: dict, job: dict, step: dict) -> str | None:
+    """What `EXPECT_SHARDS=` is given in a floor step: the input's expression, or `None`.
+
+    The value reaches the task inline (`${{ inputs.shard-count }}`) or through an `env:`
+    binding of the step, job or workflow (`$SHARD_COUNT`); a literal is neither.
+    """
+    found = re.search(r"EXPECT_SHARDS=(\"?\$\{\{[^}]*\}\}\"?|\S+)", str(step.get("run", "")))
+    if not found:
+        return None
+    value = found.group(1).strip("\"'")
+    variable = re.fullmatch(r"\$\{?(\w+)\}?", value)
+    if variable:
+        for env in (step.get("env"), job.get("env"), document.get("env")):
+            if env and variable.group(1) in env:
+                return str(env[variable.group(1)])
+    return value
+
+
+def test_the_acceptance_workflow_merges_shards_on_the_input_shard_count() -> None:
+    document = _repo_workflow(ACCEPTANCE)
+    jobs = _repo_jobs(ACCEPTANCE)
+    shard_jobs = {name for name, job in jobs.items() if (job.get("strategy") or {}).get("matrix")}
+    floor_steps = {
+        name: [step for step in job.get("steps") or [] if "accept:floor" in str(step.get("run", ""))]
+        for name, job in jobs.items()
+    }
+    merge_jobs = sorted(name for name, steps in floor_steps.items() if steps)
+    assert shard_jobs, f"{ACCEPTANCE.name}: no job has a `strategy.matrix`, so there are no shards"
+    assert len(merge_jobs) == 1, f"{ACCEPTANCE.name}: jobs running the suite floor are {merge_jobs}, expected exactly one"
+    merge = merge_jobs[0]
+    assert set(_needs(jobs[merge])) & shard_jobs, (
+        f"{ACCEPTANCE.name}: merge job `{merge}` needs {_needs(jobs[merge])}, none of the shard jobs {sorted(shard_jobs)}"
+    )
+    sources = [_shard_count_source(document, jobs[merge], step) for step in floor_steps[merge]]
+    assert sources and all(source and "inputs.shard-count" in source for source in sources), (
+        f"{ACCEPTANCE.name}: the floor step in `{merge}` takes EXPECT_SHARDS from {sources}, "
+        f"expected `inputs.shard-count`, never a literal"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The workflows around the tiers: Discord, the readiness gate, the write-capable responder
+# ---------------------------------------------------------------------------
+
+NOTIFY_DISCORD = WORKFLOW_DIR / "notify-discord.yml"
+CLAUDE_TEMPLATE = WORKFLOW_DIR / "claude.yml"
+CLAUDE_WRITE = WORKFLOW_DIR / "claude-write.yml"
+RELEASE_READINESS = WORKFLOW_DIR / "release-readiness.yml"
+_LEVELS = {"none": 0, "read": 1, "write": 2}
+def test_every_workflow_the_discord_notifier_watches_is_some_workflows_name() -> None:
+    """`workflow_run.workflows` matches the `name:` of the workflow that ran, exactly. A name
+    that no file carries is a notification that never fires, with no error anywhere — which is
+    how `Basic Verification` and `Verify Deep` outlived the rename to `verify-basic` and
+    `verify-deep`."""
+    names = {str(_load(workflow).get("name")) for workflow in WORKFLOWS}
+    watched = _on(NOTIFY_DISCORD)["workflow_run"]["workflows"]
+    # The floor: an empty list is a notifier that watches nothing, and sweeps clean.
+    assert {"verify-basic", "verify-deep"} <= set(watched), f"notify-discord.yml watches {watched}"
+    missing = sorted(set(watched) - names)
+    assert not missing, (
+        f"notify-discord.yml watches {missing}, which no workflow's `name:` is; the names are {sorted(names)}"
+    )
+
+
+def _scope_levels(document: dict, job: dict) -> dict[str, int]:
+    """The permission each scope of a job is granted: its own `permissions:`, else the workflow's.
+
+    `read-all` / `write-all` are the scope `*`.
+    """
+    granted = job.get("permissions", document.get("permissions") or {})
+    if isinstance(granted, str):
+        return {"*": _LEVELS[granted.split("-")[0]]}
+    return {scope: _LEVELS[level] for scope, level in (granted or {}).items()}
+
+
+def _callers_granting_too_little(documents: list[tuple[str, dict]]) -> list[tuple[str, str, str]]:
+    """`(caller job, scope, message)` where a job calling a repo workflow grants less than a job of that workflow asks for.
+
+    GitHub checks this when the run starts, statically — a job an `if:` would skip counts — and
+    a violation fails the whole run, not the one job. Each edge is checked against the callee's
+    own jobs; a callee job that itself calls a workflow is bounded by its own grant, checked at
+    that edge.
+    """
+    by_name = dict(documents)
+    findings = []
+    for where, document, job in _jobs(documents):
+        callee = _local_callee(job)
+        if callee is None or callee not in by_name:
+            continue
+        grant = _scope_levels(document, job)
+        for name, called in (by_name[callee].get("jobs") or {}).items():
+            for scope, level in _scope_levels(by_name[callee], called or {}).items():
+                if level > max(grant.get(scope, 0), grant.get("*", 0)):
+                    findings.append((where, scope, f"{where} grants {scope} level {grant.get(scope, 0)} to {callee}, whose job `{name}` asks {level}"))
+    return findings
+
+
+def _permission_edge(grant: dict, asks: dict) -> list[tuple[str, dict]]:
+    callee = {"on": {"workflow_call": {}}, "jobs": {"j": {"permissions": asks, "runs-on": "ubuntu-latest"}}}
+    caller = {"jobs": {"c": {"uses": "./.github/workflows/callee.yml", "permissions": grant}}}
+    return [("caller.yml", caller), ("callee.yml", callee)]
+
+
+@pytest.mark.parametrize(
+    ("grant", "asks", "findings"),
+    [
+        pytest.param({"contents": "read"}, {"contents": "read"}, False, id="equal"),
+        pytest.param({"contents": "read", "issues": "write"}, {"issues": "write"}, False, id="the-union-is-granted"),
+        pytest.param({"contents": "read"}, {"issues": "write"}, True, id="a-scope-the-caller-lacks"),
+        pytest.param({"issues": "read"}, {"issues": "write"}, True, id="a-lower-level"),
+        pytest.param({}, {"contents": "read"}, True, id="nothing-granted"),
+    ],
+)
+def test_the_permission_edge_reader_reds_a_caller_that_grants_too_little(
+    grant: dict, asks: dict, findings: bool
+) -> None:
+    assert bool(_callers_granting_too_little(_permission_edge(grant, asks))) is findings
+
+
+def test_every_caller_grants_the_union_of_what_the_workflow_it_calls_asks_for() -> None:
+    """The release readiness gate calls `acceptance.yml`, `scan-binaries.yml` and
+    `shell-activation-deep.yml`, each asking `contents: read`; cargo-dist's `release.yml` grants
+    `custom-docker-publish` what `docker-publish.yml`'s `build` job asks for, `artifact-metadata`
+    included (once a known gap: the next tag would have failed at startup)."""
+    documents = _documents()
+    edges = _call_edges(documents)
+    for callee in ("acceptance.yml", "scan-binaries.yml", "shell-activation-deep.yml"):
+        assert ("release-readiness.yml", callee) in edges, (
+            f"release-readiness.yml no longer calls {callee} — the edge this test exists for is gone"
+        )
+    assert ("release.yml", "docker-publish.yml") in edges, "release.yml no longer calls docker-publish.yml"
+    findings = [message for _where, _scope, message in _callers_granting_too_little(documents)]
+    assert not findings, (
+        f"{findings}. A called workflow's jobs may not ask for more than the job that calls it grants; "
+        f"the run fails at startup, before any job, and no job's `if:` helps"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Release readiness: the gate a tag needs, on the bytes cargo-dist would publish
+# ---------------------------------------------------------------------------
+
+READINESS_GATE = WORKFLOW_DIR / "readiness-gate.yml"
+RELEASE_WORKFLOW = WORKFLOW_DIR / "release.yml"
+DIST_INSTALLER = re.compile(r"cargo-dist/releases/download/v([0-9.]+)/cargo-dist-installer")
+
+
+def _dist_config() -> dict:
+    import tomllib
+
+    return tomllib.loads((ROOT / "dist-workspace.toml").read_text(encoding="utf-8"))["dist"]
+
+
+def _readiness_matrix(job: str) -> list[dict]:
+    return _load(RELEASE_READINESS)["jobs"][job]["strategy"]["matrix"]["include"]
+
+
+def test_release_readiness_is_dispatch_only_and_names_a_bypass_in_its_run_name() -> None:
+    document = _load(RELEASE_READINESS)
+    on = _on(RELEASE_READINESS)
+    assert set(on) == {"workflow_dispatch"}, f"release-readiness.yml `on` is {sorted(on)}: only a dispatch may start the gate"
+    inputs = on["workflow_dispatch"]["inputs"]
+    assert inputs["bypass"]["type"] == "boolean" and inputs["bypass"]["default"] is False, inputs["bypass"]
+    assert inputs["reason"]["type"] == "string", inputs["reason"]
+    run_name = document["run-name"]
+    assert run_name.startswith("readiness ${{ github.sha }}"), run_name
+    assert "BYPASS: {0}" in run_name and "inputs.reason" in run_name and "inputs.bypass" in run_name, (
+        f"run-name {run_name!r} does not carry ' BYPASS: <reason>' when bypass is set; "
+        f"scripts/release_readiness_gate.py names a bypass from it"
+    )
+
+
+def _uploads_without_overwrite(documents: list[tuple[str, dict]]) -> list[str]:
+    """`upload-artifact` steps that keep the action's default of refusing a name the run holds.
+
+    A rerun of a job (or of the whole run) uploads its names again; the default turns that into
+    a red upload after green tests.
+    """
+    return [
+        f"{where}[{index}] uploads {(step.get('with') or {}).get('name')!r} without `overwrite: true`"
+        for where, _, job in _jobs(documents)
+        for index, step in enumerate(job.get("steps") or [])
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@") and not _truthy_input(step, "overwrite")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overwrite", "findings"),
+    [
+        pytest.param("", True, id="the-default-refuses-a-held-name"),
+        pytest.param("          overwrite: false\n", True, id="false"),
+        pytest.param("          overwrite: true\n", False, id="true"),
+    ],
+)
+def test_the_upload_reader_reds_a_name_a_rerun_cannot_replace(overwrite: str, findings: bool) -> None:
+    upload = f"      - uses: actions/upload-artifact@v7\n        with:\n          name: x\n{overwrite}"
+    assert bool(_uploads_without_overwrite(_corpus(upload))) is findings
+
+
+def _template_owned(path: Path) -> bool:
+    return path.read_text(encoding="utf-8").startswith("# ocx-baseline: template-owned file")
+
+
+def test_every_upload_replaces_its_own_earlier_copy() -> None:
+    """A failed job is rerun in place and a rerun-all repeats every upload; either one fails on the
+    second copy of a name unless the upload replaces the first. Exempt: a file whose first line is the
+    conventions template's banner (changed upstream, not here) and `release.yml` (cargo-dist writes it
+    and `dist generate --check` fails a hand edit)."""
+    swept = _documents([path for path in WORKFLOWS if path.name not in GENERATED_WORKFLOWS and not _template_owned(path)])
+    for action in sorted((ROOT / ".github" / "actions").glob("*/action.yml")):
+        if not _template_owned(action):
+            steps = _load(action)["runs"].get("steps") or []
+            swept.append((f"actions/{action.parent.name}", {"jobs": {"composite": {"steps": steps}}}))
+    uploads = [
+        step for _, _, job in _jobs(swept) for step in job.get("steps") or [] if "upload-artifact" in str(step.get("uses", ""))
+    ]
+    assert len(uploads) >= 18, f"read {len(uploads)} uploads from {len(swept)} files; the repo has more"
+    findings = _uploads_without_overwrite(swept)
+    assert not findings, f"{findings}. Set `overwrite: true`; a rerun otherwise fails the upload of a name the run already holds"
+
+
+def test_release_readiness_publishes_nothing() -> None:
+    """The dry run must stay a dry run: read-only tokens, no `host`-style step, no secret inherit."""
+    document = _load(RELEASE_READINESS)
+    assert document.get("permissions") == {}, document.get("permissions")
+    text = RELEASE_READINESS.read_text(encoding="utf-8")
+    for needle in ("gh release", "git push", "git tag", "docker push", "ocx package push", "secrets: inherit", "dist host"):
+        assert needle not in text, f"release-readiness.yml contains `{needle}` - the gate publishes nothing"
+    for name, job in document["jobs"].items():
+        assert "write" not in str(job.get("permissions") or {}), f"`{name}` asks a write permission"
+        for step in job.get("steps") or []:
+            uses = str(step.get("uses", ""))
+            assert "action-gh-release" not in uses and "login-action" not in uses, f"`{name}` uses {uses}"
+
+
+def test_release_readiness_builds_every_dist_target_and_tests_six_platforms() -> None:
+    targets = _dist_config()["targets"]
+    built = sorted(entry["target"] for entry in _readiness_matrix("build"))
+    assert built == sorted(targets), f"release-readiness.yml builds {built}, dist-workspace.toml builds {sorted(targets)}"
+    expected = {
+        "x86_64-unknown-linux-gnu": ("ubuntu-latest", "linux"),
+        "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "linux"),
+        "aarch64-apple-darwin": ("macos-latest", "macos"),
+        "x86_64-apple-darwin": ("macos-15-intel", "macos"),
+        "x86_64-pc-windows-msvc": ("windows-latest", "windows"),
+        "aarch64-pc-windows-msvc": ("windows-11-arm", "windows"),
+    }
+    jobs = _load(RELEASE_READINESS)["jobs"]
+    acceptance = _readiness_matrix("acceptance")
+    assert {entry["target"]: (entry["os"], entry["limits"]) for entry in acceptance} == {
+        target: (os_label, f"test/limits/{kind}-release") for target, (os_label, kind) in expected.items()
+    }, acceptance
+    assert {entry["target"]: entry["os"] for entry in _readiness_matrix("stage")} == {t: v[0] for t, v in expected.items()}
+    for entry in acceptance:
+        assert entry["no-docker"] is (not entry["os"].startswith("ubuntu")), entry
+    call = jobs["acceptance"]
+    assert call["uses"] == "./.github/workflows/acceptance.yml", call.get("uses")
+    assert call["with"]["release-binary"] is True, "the shards must run with OCX_TEST_RELEASE_BINARY=1"
+    assert call["with"]["binary"] == "artifact:readiness-bin-${{ matrix.target }}", call["with"]["binary"]
+    assert call["with"]["limits-dir"] == "${{ matrix.limits }}", call["with"]["limits-dir"]
+    assert set(_needs(call)) == {"stage", "scan"}, _needs(call)
+    assert jobs["scan"]["uses"] == SCAN_WORKFLOW_USES and "build" in _needs(jobs["scan"])
+
+
+# The `[[tool]]` rows of ocx.lock are the leaves a platform can install; a target maps onto
+# the lock's `os/arch` platform keys (`linux/amd64+libc.glibc` is a leaf of `linux/amd64`).
+_LOCK_OS = {"apple-darwin": "darwin", "unknown-linux-gnu": "linux", "pc-windows-msvc": "windows"}
+_LOCK_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+
+
+def _lock_platform(target: str) -> str:
+    arch, _, rest = target.partition("-")
+    return f"{_LOCK_OS[rest]}/{_LOCK_ARCH[arch]}"
+
+
+def _lock_tools() -> list[dict]:
+    import tomllib
+
+    return tomllib.loads((ROOT / "ocx.lock").read_text(encoding="utf-8"))["tool"]
+
+
+def _lock_tools_without_leaf(platform: str) -> dict[str, list[str]]:
+    """Group -> tools whose `ocx.lock` row has no leaf for `platform`."""
+    missing: dict[str, list[str]] = {}
+    for tool in _lock_tools():
+        if not any(key.split("+")[0] == platform for key in tool["platforms"]):
+            missing.setdefault(tool["group"], []).append(tool["name"])
+    return missing
+
+
+def test_a_readiness_leg_without_every_default_leaf_loads_only_a_group_that_has_them() -> None:
+    """Loading the whole project on a platform missing a default tool's leaf exits 78 in setup-ocx."""
+    legs = _readiness_matrix("acceptance")
+    gaps = {_lock_platform(leg["target"]): _lock_tools_without_leaf(_lock_platform(leg["target"])) for leg in legs}
+    assert any(gap.get("default") for gap in gaps.values()), (
+        "ocx.lock has a leaf for every default tool on every readiness platform; `toolchain-group` has no reason to exist"
+    )
+    findings = []
+    for leg in legs:
+        gap = gaps[_lock_platform(leg["target"])]
+        group = leg.get("toolchain-group", "")
+        if not gap.get("default"):
+            if group:
+                findings.append(f"{leg['name']}: every default leaf exists, yet `toolchain-group` is {group!r}")
+        elif not group:
+            findings.append(f"{leg['name']}: no default leaf for {gap['default']} but `toolchain-group` is empty")
+        elif group not in {t["group"] for t in _lock_tools()}:
+            findings.append(f"{leg['name']}: `toolchain-group` {group!r} holds no tool in ocx.lock")
+        elif gap.get(group):
+            findings.append(f"{leg['name']}: group {group!r} has no leaf for {gap[group]} either")
+    assert not findings, findings
+    with_ = _load(RELEASE_READINESS)["jobs"]["acceptance"]["with"]
+    assert with_.get("toolchain-group") == "${{ matrix.toolchain-group }}", with_.get("toolchain-group")
+
+
+def test_the_acceptance_shard_loads_the_whole_project_unless_given_a_toolchain_group() -> None:
+    """Empty `toolchain-group` keeps the action's own project load; a value swaps it for `pull -g` and `env -g`."""
+    steps = _repo_job(ACCEPTANCE, "shard")["steps"]
+    setup = next(s for s in steps if str(s.get("uses", "")).startswith("ocx-sh/setup-ocx@"))
+    assert setup["with"]["project"] == "${{ inputs.toolchain-group == '' && 'ocx.toml' || '' }}", setup["with"]
+    group_step = next(s for s in steps if "ocx --project ocx.toml pull" in str(s.get("run", "")))
+    assert group_step["if"] == "${{ inputs.toolchain-group != '' }}", group_step.get("if")
+    run = group_step["run"]
+    assert 'pull -g "$GROUP"' in run and 'env -g "$GROUP" --ci=github' in run, run
+    assert group_step["env"] == {"GROUP": "${{ inputs.toolchain-group }}"}, group_step.get("env")
+    assert steps.index(setup) < steps.index(group_step) < next(
+        i for i, s in enumerate(steps) if s.get("name") == "Run Acceptance Tests"
+    )
+
+
+def test_the_release_gate_installs_the_dist_version_the_config_pins() -> None:
+    version = _dist_config()["cargo-dist-version"]
+    for workflow in (RELEASE_WORKFLOW, WORKFLOW_DIR / "verify-release-ci.yml", RELEASE_READINESS):
+        found = set(DIST_INSTALLER.findall(workflow.read_text(encoding="utf-8")))
+        assert found == {version}, f"{workflow.name} installs dist {sorted(found)}, dist-workspace.toml pins {version}"
+
+
+# The verdict step's script, run for real: each case is a set of `needs` results the gate could meet.
+_GO = dict.fromkeys(("PLAN", "BUILD", "SCAN", "STAGE", "ACCEPTANCE", "SHELL_ACTIVATION"), "success")
+
+
+def _verdict(tmp_path: Path, **overrides: str) -> tuple[int, str]:
+    verdict = _load(RELEASE_READINESS)["jobs"]["verdict"]
+    (step,) = verdict["steps"]
+    summary = tmp_path / "summary.md"
+    summary.write_text("", encoding="utf-8")
+    env = {**os.environ, "BYPASS": "false", "REASON": "", "ACTOR": "dispatcher", "SHA": "a" * 40, **_GO}
+    env.update(overrides)
+    env["GITHUB_STEP_SUMMARY"] = str(summary)
+    done = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True, encoding="utf-8", check=False)
+    return done.returncode, summary.read_text(encoding="utf-8") + done.stdout + done.stderr
+
+
+def test_the_verdict_job_always_runs_and_waits_for_every_other_job() -> None:
+    jobs = _load(RELEASE_READINESS)["jobs"]
+    verdict = jobs["verdict"]
+    assert "always()" in str(verdict["if"]), verdict["if"]
+    assert set(_needs(verdict)) == set(jobs) - {"verdict"}, f"verdict needs {_needs(verdict)}"
+    env = verdict["steps"][0]["env"]
+    for need in _needs(verdict):
+        assert f"needs.{need}.result" in " ".join(map(str, env.values())), f"the verdict never reads `{need}`'s result"
+
+
+def test_the_verdict_is_green_only_when_every_job_succeeded(tmp_path: Path) -> None:
+    code, out = _verdict(tmp_path)
+    assert code == 0 and "Verdict: GO" in out, out
+
+
+@pytest.mark.parametrize("job", sorted(_GO))
+@pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
+def test_the_verdict_goes_red_when_any_job_did_not_succeed(tmp_path: Path, job: str, result: str) -> None:
+    """The forced-red proof: one failed, cancelled or skipped job is NO-GO, naming it."""
+    code, out = _verdict(tmp_path, **{job: result})
+    assert code == 1, out
+    assert "NO-GO" in out and f"{result}" in out, out
+
+
+def test_a_bypass_with_a_reason_is_green_and_writes_the_reason_down(tmp_path: Path) -> None:
+    skipped = dict.fromkeys(_GO, "skipped")
+    code, out = _verdict(tmp_path, BYPASS="true", REASON="runner outage, hotfix", **skipped)
+    assert code == 0, out
+    assert "BYPASS" in out and "runner outage, hotfix" in out and "dispatcher" in out, out
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\n"])
+def test_a_bypass_without_a_reason_is_red(tmp_path: Path, reason: str) -> None:
+    code, out = _verdict(tmp_path, BYPASS="true", REASON=reason, **dict.fromkeys(_GO, "skipped"))
+    assert code == 1 and "needs a reason" in out, out
+
+
+def test_every_test_job_of_the_gate_skips_under_bypass() -> None:
+    jobs = _load(RELEASE_READINESS)["jobs"]
+    for name in ("plan", "build", "stage", "acceptance", "shell-activation-deep"):
+        assert "!inputs.bypass" in str(jobs[name].get("if")), f"`{name}` still runs under bypass: {jobs[name].get('if')}"
+    assert "if" not in jobs["scan"], "scan skips through `needs: build`; an `if:` of its own is a second switch"
+
+
+def test_the_readiness_gate_workflow_runs_the_script_on_the_tagged_commit() -> None:
+    document = _load(READINESS_GATE)
+    on = _on(READINESS_GATE)
+    assert set(on) == {"workflow_call", "workflow_dispatch"}, sorted(on)
+    assert "plan" in on["workflow_call"]["inputs"], "cargo-dist passes `plan` to every custom job"
+    assert on["workflow_dispatch"]["inputs"]["sha"]["type"] == "string"
+    assert document["permissions"] == {"contents": "read", "actions": "read"}, document["permissions"]
+    (job,) = document["jobs"].values()
+    run = " ".join(step.get("run", "") for step in job["steps"])
+    assert 'scripts/release_readiness_gate.py --sha "$SHA"' in run, run
+    assert job["steps"][-1]["env"]["SHA"] == "${{ inputs.sha || github.sha }}", job["steps"][-1]["env"]
+    for step in job["steps"]:
+        assert "continue-on-error" not in step and "|| true" not in step.get("run", ""), f"step {step.get('name')} can pass a red gate"
+    assert "if" not in job, "a skipped gate reads as a pass to `host`"
+
+
+def test_release_host_needs_the_readiness_gate() -> None:
+    """Red readiness-gate -> `host` never runs -> nothing is released."""
+    config = _dist_config()
+    assert config["local-artifacts-jobs"] == ["./verify-version", "./readiness-gate"], config.get("local-artifacts-jobs")
+    assert "plan-jobs" not in config, (
+        f"`plan-jobs` is {config.get('plan-jobs')}: dist makes every job wait on a plan job, and `host` reads their skip as a pass"
+    )
+    assert config["github-custom-job-permissions"]["readiness-gate"] == {"contents": "read", "actions": "read"}
+    jobs = _load(RELEASE_WORKFLOW)["jobs"]
+    gate = "custom-readiness-gate"
+    assert jobs[gate]["uses"] == "./.github/workflows/readiness-gate.yml", jobs[gate]
+    assert jobs[gate]["permissions"] == {"contents": "read", "actions": "read"}, jobs[gate]["permissions"]
+    assert gate in _needs(jobs["host"]), f"release.yml `host` needs {_needs(jobs['host'])}, not `{gate}`"
+    clause = f"(needs.{gate}.result == 'skipped' || needs.{gate}.result == 'success')"
+    assert clause in str(jobs["host"].get("if", "")), f"`host.if` does not read `{gate}`'s result: {jobs['host'].get('if')}"
+    assert gate in _needs(jobs["custom-scan-binaries"]), "the scan must not run after a red readiness gate"
+    assert _needs(jobs[gate]) == ["plan"], f"`{gate}` needs {_needs(jobs[gate])}: a failed prerequisite would skip it, and `host` accepts a skip"
+
+
+#: The `if:` dist renders on a `local-artifacts-jobs` entry: it runs for a publishing tag (or an
+#: upload-mode pull request) and is skipped otherwise. Any other `if:` on a release gate, `false`
+#: included, skips it on the tag it exists to check, and `host` reads that skip as a pass.
+PUBLISH_PREDICATE = (
+    "${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}"
+)
+RELEASE_GATES = ("custom-verify-version", "custom-readiness-gate")
+
+
+def _host_clause(need: str) -> str:
+    if need == "plan":
+        return "needs.plan.result == 'success'"
+    return f"(needs.{need}.result == 'skipped' || needs.{need}.result == 'success')"
+
+
+def _host_condition_findings(jobs: dict) -> list[str]:
+    """Needs of `host` whose result `host.if` ignores, and release gates not running on the publish predicate."""
+    condition = str(jobs["host"].get("if", ""))
+    findings = [
+        f"`host.if` does not read `{need}`: {_host_clause(need)!r} is missing"
+        for need in _needs(jobs["host"])
+        if _host_clause(need) not in condition
+    ]
+    return findings + [
+        f"`{gate}` has `if: {jobs[gate].get('if')!r}`, not the publish predicate"
+        for gate in RELEASE_GATES
+        if jobs[gate].get("if") != PUBLISH_PREDICATE
+    ]
+
+
+def _drop_verify_version_from_host_if(jobs: dict) -> None:
+    clause = f" && {_host_clause('custom-verify-version')}"
+    assert clause in jobs["host"]["if"], "the clause to plant the defect by removing is not in host.if"
+    jobs["host"]["if"] = jobs["host"]["if"].replace(clause, "")
+
+
+def _verify_version_never_runs(jobs: dict) -> None:
+    assert jobs["custom-verify-version"]["if"] == PUBLISH_PREDICATE
+    jobs["custom-verify-version"]["if"] = False  # YAML `if: false` loads as a bool
+
+
+@pytest.mark.parametrize("mutate", [_drop_verify_version_from_host_if, _verify_version_never_runs], ids=lambda f: f.__name__)
+def test_the_release_condition_reader_reds_a_gate_host_no_longer_reads(mutate) -> None:
+    jobs = copy.deepcopy(_load(RELEASE_WORKFLOW)["jobs"])
+    assert not _host_condition_findings(jobs), "the unmutated copy must be clean for the red below to mean anything"
+    mutate(jobs)
+    findings = _host_condition_findings(jobs)
+    assert findings and all("custom-verify-version" in finding for finding in findings), findings
+
+
+def test_no_job_upstream_of_host_can_fail_into_a_skip() -> None:
+    """`host.if` reads a `skipped` need as a pass, and GitHub skips a job whose own need failed.
+    So a job `host` waits on only through another job (a `plan-jobs` entry, which dist makes every
+    job wait on) turns its own red into a skipped chain and `host` publishes. Every job upstream of
+    `host` must be one `host` reads itself, apart from `plan`, which `host` requires to succeed."""
+    jobs = _load(RELEASE_WORKFLOW)["jobs"]
+    direct = set(_needs(jobs["host"]))
+    assert set(RELEASE_GATES) <= direct, sorted(direct)
+    findings = _host_condition_findings(jobs)
+    assert not findings, f"{findings}: `host` publishes past a red need, or a gate never runs on the tag it checks"
+    upstream: set[str] = set()
+    pending = list(direct)
+    while pending:
+        for need in _needs(jobs[pending.pop()]):
+            if need not in upstream:
+                upstream.add(need)
+                pending.append(need)
+    assert "plan" in upstream, f"walked {sorted(upstream)} and never reached `plan`: the reader stopped early"
+    hidden = sorted(upstream - direct - {"plan"})
+    assert not hidden, (
+        f"release.yml jobs {hidden} sit upstream of `host` without being in its `needs`: when one fails, "
+        f"its dependents are skipped, `host` accepts a skip, and publishes"
+    )
+
+
+def test_every_input_release_yml_passes_is_declared_by_the_workflow_it_calls() -> None:
+    """cargo-dist hands `plan` to every `local-artifacts-jobs` caller; a callee that does not declare
+    the input fails the run at startup, before any job, so no tag would build."""
+    documents = dict(_documents())
+    callers = 0
+    for name, job in documents["release.yml"]["jobs"].items():
+        callee = _local_callee(job)
+        if callee is None:
+            continue
+        callers += 1
+        triggers = documents[callee].get("on", documents[callee].get(True))
+        declared = set((triggers["workflow_call"] or {}).get("inputs") or {})
+        undeclared = sorted(set(job.get("with") or {}) - declared)
+        assert not undeclared, f"release.yml `{name}` passes {undeclared} to {callee}, which declares {sorted(declared)}"
+    assert callers >= 6, f"release.yml has {callers} callers of a repo workflow; the reader lost some"
+
+
+def test_the_docker_publish_grant_covers_what_the_called_workflow_asks() -> None:
+    asked = _load(WORKFLOW_DIR / "docker-publish.yml")["jobs"]["build"]["permissions"]
+    granted = _load(RELEASE_WORKFLOW)["jobs"]["custom-docker-publish"]["permissions"]
+    assert {scope for scope, level in asked.items() if level == "write"} <= {s for s, v in granted.items() if v == "write"}, (
+        asked,
+        granted,
+    )
+
+
+def test_claude_write_answers_only_what_the_template_responder_does_not() -> None:
+    """The template's `claude.yml` is read-only (`contents: read`) and answers every `@claude`
+    comment and every pull request. `claude-write.yml` keeps the old write-capable responder, so it
+    must not answer the same event twice: its comment trigger is a different phrase that excludes
+    `@claude`, and its `issues` events are ones the template does not subscribe to."""
+    template_on = _on(CLAUDE_TEMPLATE)
+    template_ifs = " ".join(str(job.get("if", "")) for job in _load(CLAUDE_TEMPLATE)["jobs"].values())
+    write = _load(CLAUDE_WRITE)
+    condition = str(write["jobs"]["claude"]["if"])
+    assert "issues" not in template_on, "the template responder now takes `issues` events; claude-write.yml overlaps it"
+    assert "'@claude'" in template_ifs, "the template responder no longer keys on `@claude`; re-derive the disjointness"
+    assert "'/claude-write'" in condition and "!contains(github.event.comment.body, '@claude')" in condition, (
+        "claude-write.yml answers a comment that holds `@claude`, which the template responder answers too"
+    )
+    permissions = write["jobs"]["claude"]["permissions"]
+    assert permissions["contents"] == "write", f"claude-write.yml permissions are {permissions}"
+    assert all(
+        "write" not in str(job.get("permissions", {}).get("contents", ""))
+        for job in _load(CLAUDE_TEMPLATE)["jobs"].values()
+    ), "the template responder gained `contents: write`; the two are no longer the read and the write responder"
+    checkout = next(s for s in write["jobs"]["claude"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False, (
+        "claude-write.yml's checkout keeps its token; the action replaces it before pushing, so keep none"
+    )

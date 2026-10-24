@@ -26,10 +26,10 @@ tasks:
     desc: Download CaskaydiaCove Nerd Font if not present
     internal: true
     status:
-      - test -d {{.FONTS_DIR}}/CascadiaCode
+      - test -d "{{.FONTS_DIR}}/CascadiaCode"
     cmds:
-      - mkdir -p {{.FONTS_DIR}}/CascadiaCode
-      - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C {{.FONTS_DIR}}/CascadiaCode
+      - mkdir -p "{{.FONTS_DIR}}/CascadiaCode"
+      - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C "{{.FONTS_DIR}}/CascadiaCode"
 
   build:
     desc: Generate all .cast recordings
@@ -82,13 +82,13 @@ tasks:
     # never to a target named on the command line. Measured, exit 0.
     dir: "{{.ROOT_DIR}}"
     cmds:
-      - ocx exec bazel -- bazel build //test/doc_scripts:casts
-      - mkdir -p {{.CASTS_DIR}}
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build //test/doc_scripts:casts
+      - mkdir -p "{{.CASTS_DIR}}"
       # `-L` dereferences (bazel-bin is a symlink farm) and `-f` unlinks the
       # destination first — bazel writes its outputs read-only, so a plain
       # overwrite of a previously copied cast fails with EACCES.
-      - cp -RLf {{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/. {{.CASTS_DIR}}/
-      - chmod -R u+w {{.CASTS_DIR}}
+      - cp -RLf "{{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/." "{{.CASTS_DIR}}/"
+      - chmod -R u+w "{{.CASTS_DIR}}"
 
   gifs:
     desc: Render every cast to a GIF and run the Bazel render proof (requires agg)
@@ -132,7 +132,7 @@ tasks:
       # "binding 'bazel' not found in selected groups". `bazel:build:` above
       # avoids it by being rooted; this task cannot be, because `uv run` below
       # needs `test/`.
-      - cd {{.ROOT_DIR}} && ocx exec bazel -- bazel test //test/doc_scripts:gifs //test/doc_scripts:gif_check
+      - cd {{.ROOT_DIR}} && ocx exec bazel -- bazel {{.CACHE_RC}} test //test/doc_scripts:gifs //test/doc_scripts:gif_check
       - uv run python recordings/cast_to_gif.py --font-dir "{{.FONTS_DIR}}/CascadiaCode" "{{.CASTS_DIR}}" "{{.GIFS_DIR}}"
 
   default:

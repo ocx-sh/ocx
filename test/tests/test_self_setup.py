@@ -45,13 +45,17 @@ from pathlib import Path
 
 import pytest
 
+from src.helpers import rglob_no_links
 from src.runner import OcxRunner, PackageInfo
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="self setup fence/shim tests assume POSIX sh semantics.",
-)
-pytestmark = [pytestmark, pytest.mark.command("self_group/setup", "index_update")]
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="self setup fence/shim tests assume POSIX sh semantics.",
+    ),
+    pytest.mark.command("self_group/setup", "index_update"),
+    pytest.mark.requires_testing_build,
+]
 
 # The install-layout path the bootstrap candidate lives at, relative to OCX_HOME.
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"
@@ -1837,7 +1841,7 @@ def _home_tree(ocx: OcxRunner) -> dict[str, str]:
     stamp) on every invocation regardless of what the command then does."""
     home = Path(ocx.env["OCX_HOME"])
     tree: dict[str, str] = {}
-    for path in home.rglob("*"):
+    for path in rglob_no_links(home, "*"):
         if not path.is_file():
             continue
         relative = path.relative_to(home)

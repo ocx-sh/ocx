@@ -40,6 +40,8 @@ pytestmark = pytest.mark.skipif(
     reason="mock credential helper uses POSIX shell scripts",
 )
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 
 # ---------------------------------------------------------------------------
 # Helpers

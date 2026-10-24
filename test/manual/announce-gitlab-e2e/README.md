@@ -28,7 +28,7 @@ client's live behaviour is unproven, and the ADR records that gap.
 |---|---|
 | `glab` authenticated (`glab auth status` clean) | creates, seeds and deletes the throwaway index project |
 | An `ocx` binary with `package announce` | the thing under test — set `OCX_BIN`, else `test/bin/ocx` |
-| Docker, with the acceptance registry up (`task test:registry` or `docker compose -f test/docker-compose.yml up -d`) | announce observes tags on a **real** OCI registry; the local one keeps the run self-contained |
+| A local registry up (`cd test && uv run python -m src.zot`, needs `zot` on `PATH` or `OCX_TEST_ZOT`) | announce observes tags on a **real** OCI registry; the local one keeps the run self-contained |
 | `jq` | reads the JSON report |
 
 The announce target is a **local** registry (`localhost:5000`), which announce

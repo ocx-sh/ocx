@@ -25,7 +25,12 @@ from pathlib import Path
 import pytest
 
 from src import static_index
-from src.helpers import make_package, resolved_metadata_path, resolved_receipt_path
+from src.helpers import (
+    make_package,
+    resolved_metadata_path,
+    resolved_receipt_path,
+    rglob_no_links,
+)
 from src.registry import (
     fetch_manifest_from_registry,
     fetch_platform_manifest_digest,
@@ -659,7 +664,7 @@ def test_end_to_end_create_push_install(ocx: OcxRunner, unique_repo: str, tmp_pa
     ocx.json("package", "install", "--select", f"{app_repo}:1.0.0")
 
     packages_root = Path(ocx.ocx_home) / "packages"
-    content_dirs = [p for p in packages_root.rglob("content") if p.is_dir()]
+    content_dirs = [p for p in rglob_no_links(packages_root, "content") if p.is_dir()]
     assert len(content_dirs) == 2, "app + dep must both be materialized"
 
 
@@ -698,5 +703,5 @@ def test_install_still_resolves_legacy_index_pinned_package(
     ocx.json("package", "install", "--select", f"{app_repo}:1.0.0")
 
     packages_root = Path(ocx.ocx_home) / "packages"
-    content_dirs = [p for p in packages_root.rglob("content") if p.is_dir()]
+    content_dirs = [p for p in rglob_no_links(packages_root, "content") if p.is_dir()]
     assert len(content_dirs) == 2, "legacy index-pinned dep must still resolve"

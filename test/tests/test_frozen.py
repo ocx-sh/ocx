@@ -20,7 +20,7 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.registry import fetch_manifest_digest, push_raw_config_package
 from src.runner import PackageInfo, registry_dir
 
@@ -584,7 +584,7 @@ def _assert_no_index_footprint(ocx: OcxRunner, registry: str, repo: str, why: st
     """
     package_dir = _index_root(ocx) / registry_dir(registry) / "p" / repo
     root_document = package_dir.with_name(f"{package_dir.name}.json")
-    leftovers = sorted(str(p.relative_to(ocx.ocx_home)) for p in package_dir.rglob("*") if p.is_file())
+    leftovers = sorted(str(p.relative_to(ocx.ocx_home)) for p in rglob_no_links(package_dir, "*") if p.is_file())
     assert not root_document.exists() and not leftovers, (
         f"{why}: {repo} must own nothing under the local index; found "
         f"{'the root document ' if root_document.exists() else ''}{leftovers}"

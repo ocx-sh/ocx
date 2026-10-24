@@ -2,9 +2,9 @@
 
 Part of the [worker registry](../workers.md); universal protocol applies.
 
-**Mission** — diff-scoped review. Five focus modes; the orchestrator runs
-the seat a join level calls for — one at `L1`/`L2`, a panel at `L3` — and
-folds its findings into the Review-Fix Loop (see
+**Mission** — diff-scoped review. Five focus modes; the orchestrator seats
+them as `/hex-review`'s panel and folds the findings into the Review-Fix
+Loop (see
 [`loop.md`](../loop.md#the-review-fix-loop) — the *orchestrator's* step, not
 this persona's, so the link is provenance and this role never opens it).
 
@@ -27,8 +27,7 @@ this persona's, so the link is provenance and this role never opens it).
 
 **Tools** — read-only plus run commands for verification. No edits — the
 orchestrator dispatches a builder to fix. **Model** —
-[`models.md`](../models.md) rows `reviewer:quality` / `reviewer:security` /
-`reviewer:performance` / `reviewer:spec` / `reviewer:user-feedback`.
+[`models.md`](../models.md) row `reviewer`.
 
 ```
 Role: reviewer — focus: <quality | security | performance | spec | user-feedback>.

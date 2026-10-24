@@ -1,10 +1,7 @@
 """Write the CI-only Bazel cache rc file and the credential helper it names.
 
-Run by `.github/actions/bazel-cache-rc`, never by hand. **Two credentials, and
-they are not symmetric.** The read credential is a plain `--remote_header` line
-— a value Bazel sends, never one it runs. The write credential cannot be,
-because of BZL-CACHE-04 below, and reaches Bazel through a helper program
-instead.
+Run by `.github/actions/bazel-cache-rc`, never by hand. The rc file is two
+lines: the helper registered for the cache host, and the upload grant.
 
 * **BZL-CACHE-04** — Bazel resolves and spawns a `--credential_helper` with the
   full client environment, before the sandbox, with no check on where the flag
@@ -12,21 +9,13 @@ instead.
   execute it (bazel#30439, closed by the vendor as intended). The helper
   therefore lives under `$RUNNER_TEMP`, named by an rc file that never ships
   with the repository and is never `%workspace%`-relative.
-* **BZL-CACHE-01** — every lane an untrusted contributor can trigger runs the
-  cache read-only with the write credential *absent*, not merely unused. An
-  empty `WRITE_AUTH` is that state, and it emits no `--credential_helper` line
-  at all, which is a stronger statement than an rc file holding an empty
-  credential. With *both* variables empty — the fork-PR lane, which GitHub
-  gives no secrets — no rc file is written at all, and the lane reads the cache
-  anonymously over `--disk_cache`. That is the documented fallback, not a
-  failure: a step that fails loudly on a fork is the defect.
-* **DX-81, one credential source per lane** — Bazel `add`s an `Authorization`
-  header per configured source rather than replacing it, and sends all of them:
-  measured against a local sink with both routes live, one cache `PUT` carried
-  three. Which one an origin honours is that origin's business, and a design
-  that needs to know is the defect. So a lane presents exactly one credential,
-  and `main()` below refuses rather than write a second — both variables set at
-  once, or a credential already configured in an rc file Bazel will read.
+* **The grant rides with the credential** — the workspace `.bazelrc` sets
+  `--remote_upload_local_results=false` and `--bazelrc` loads after it, so the
+  `=true` here wins. No credential, no file, no grant: an empty `WRITE_AUTH` (a
+  fork PR, to which GitHub gives no secrets) writes nothing at all.
+* **One credential source** — an rc Bazel already reads that configures a cache
+  credential is refused, because Bazel sends an `Authorization` header per source
+  rather than the last one and the origin would pick between them.
 
 The credential arrives in the environment and is never passed as an argument:
 `/proc/<pid>/cmdline` is readable by any process of that user, and `set -x`
@@ -37,7 +26,6 @@ import json
 import os
 import pathlib
 import re
-import shlex
 import sys
 from collections.abc import Iterator
 
@@ -60,7 +48,7 @@ DELIMITER = "OCX_BAZEL_CACHE_CREDENTIAL"
 #: A `--remote_header` carrying an `Authorization`. The header name is matched
 #: case-insensitively because HTTP header names are — Bazel passes the name through
 #: verbatim, so `Authorization=` and `authorization=` arrive as one and the same
-#: header. The optional quote is the rc tokenizer's, which `header_line` below emits.
+#: header. The optional quote is the rc tokenizer's.
 AUTHORIZATION_HEADER = re.compile(r"--remote_header=[\"']?authorization=", re.IGNORECASE)
 
 #: A credential helper, however spelled. The host half is deliberately not parsed: a
@@ -168,7 +156,7 @@ def helper_program(response: str) -> str:
     )
 
 
-def split_credential(auth: str, variable: str) -> tuple[str, str]:
+def split_credential(auth: str) -> tuple[str, str]:
     """`<header>=<value>`, or exit with a diagnostic that is not the leak.
 
     `partition` splits on the FIRST `=`. The value is `Basic <base64>` and
@@ -179,75 +167,22 @@ def split_credential(auth: str, variable: str) -> tuple[str, str]:
     if not separator or not header.strip() or not value.strip():
         # The length, never the value: a diagnostic must not become the leak.
         sys.exit(
-            f"bazel cache: {variable} is not `<header>=<value>` "
+            f"bazel cache: the write credential is not `<header>=<value>` "
             f"({len(auth)} characters); expected "
             f"`authorization=Basic <base64 of user:password>`"
         )
     return header.strip(), value.strip()
 
 
-def header_line(auth: str, variable: str) -> str:
-    """`build --remote_header=<auth>`, quoted for Bazel's rc tokenizer.
-
-    **The quoting is not cosmetic.** Measured on the pinned 9.2.0: an rc line
-    `build --remote_header=authorization=Basic <b64>` is split on whitespace,
-    so `<b64>` arrives as a *positional argument* — `bazel info` answers
-    `ERROR: unknown key(s): '<b64>'` and exits 2, and a command taking targets
-    answers `no such target`. Quoted, the same value arrives whole: verified
-    with `--announce_rc`, which echoed `--remote_header=authorization=Basic
-    <b64>` back.
-
-    `shlex.quote` does the quoting rather than an f-string with two `"`
-    characters in it, because escaping external input by hand is where the bugs
-    live (quality-core.md § Don't Own Non-Domain Code). One divergence from
-    POSIX was measured and is refused rather than papered over: Bazel's rc
-    tokenizer honours a backslash escape *inside* single quotes, where a POSIX
-    shell does not, so `A\\$B` round-trips as `A$B`. A `Basic <base64>`
-    credential is drawn from `A-Za-z0-9+/=` and can never contain one; a value
-    that does would be silently re-decoded into something that authenticates
-    nothing, which is exactly the shape of failure that reads as a cache miss.
-    """
-    if set(auth) & set("\\\n\r"):
-        sys.exit(
-            f"bazel cache: {variable} contains a backslash or a line break "
-            f"({len(auth)} characters). An rc file is line-oriented and its "
-            f"tokenizer unescapes a backslash even inside single quotes, so "
-            f"such a value would reach Bazel altered. Expected "
-            f"`authorization=Basic <base64 of user:password>`"
-        )
-    split_credential(auth, variable)
-    return f"build --remote_header={shlex.quote(auth)}\n"
-
-
 def main() -> None:
-    read_auth = os.environ.get("READ_AUTH", "")
     write_auth = os.environ.get("WRITE_AUTH", "")
-    if not read_auth and not write_auth:
-        # The fork-PR lane: GitHub withholds secrets from a fork-triggered run,
-        # so both bindings are the empty string and this writes nothing. The
-        # calling workflow binds `write-auth` to exactly `''` off the `main`
-        # push for the same reason. Only that exact empty string reaches here:
-        # anything else that is not a well-formed credential fails loudly below
-        # rather than degrading into this branch, because a silently
-        # credential-less write lane is a lane that is green forever at full
-        # cost.
-        print(f"bazel cache: no cache credential on this lane, no {RC_NAME} written")
+    if not write_auth:
+        # The fork-PR lane, to which GitHub gives no secrets. Only the exact empty
+        # string reaches here: anything else that is not a well-formed credential
+        # fails loudly in `split_credential`, because a silently credential-less
+        # lane is green forever at full cost.
+        print(f"bazel cache: no write credential on this lane, no {RC_NAME} written")
         return
-
-    if read_auth and write_auth:
-        # DX-81's by-construction half, refused where the two bindings meet. The
-        # caller gates them on one trusted event with one of the two negated, so
-        # arriving here means that gate was loosened — and the result would be two
-        # `Authorization` headers on every request, resolved by whichever one the
-        # origin happens to keep.
-        sys.exit(
-            "bazel cache: two credential sources on one lane — the read credential and "
-            "the write credential are both set. Bazel sends an Authorization header "
-            "per source rather than the last one, so which credential authenticates a "
-            "request would be the origin's choice. The `main` push presents the write "
-            "credential alone (its user reads and writes); every other trigger "
-            "presents the read credential alone."
-        )
 
     runner_temp = os.environ.get("RUNNER_TEMP", "")
     if not runner_temp:
@@ -255,10 +190,9 @@ def main() -> None:
 
     configured = other_credential_sources()
     if configured:
-        # DX-81's runtime half, over the sources the calling workflow cannot see: a
-        # runner's `~/.bazelrc`, a system rc, an `import`ed `.bazelrc.user`. Bazel
-        # applies all of them to the same invocation, so writing a credential beside
-        # one of these is the two-header state again, reached from the other side.
+        # Sources the calling workflow cannot see: a runner's `~/.bazelrc`, a system
+        # rc, an `import`ed `.bazelrc.user`. Bazel applies all of them to the same
+        # invocation, so writing a credential beside one adds a second source.
         sys.exit(
             f"bazel cache: two credential sources on one lane — a Bazel cache "
             f"credential is already configured at {', '.join(configured)}, and this "
@@ -267,28 +201,22 @@ def main() -> None:
             f"(The line's value is deliberately not repeated here.)"
         )
 
+    header, value = split_credential(write_auth)
     temp = pathlib.Path(runner_temp)
     helper = temp / HELPER_NAME
     rc = temp / RC_NAME
-    lines = []
-    wrote = []
-
-    if read_auth:
-        lines.append(header_line(read_auth, "the read credential"))
-        wrote.append("a --remote_header")
-
-    if write_auth:
-        header, value = split_credential(write_auth, "the write credential")
-        # `json.dumps`, never a hand-assembled string: the credential is
-        # external input, and a hand-rolled emitter is where escaping bugs hide
-        # past every local fixture (quality-core.md § Don't Own Non-Domain Code).
-        response = json.dumps({"headers": {header: [value]}})
-        create(helper, helper_program(response), 0o700)
-        lines.append(f"build --credential_helper={CACHE_HOST}={helper}\n")
-        wrote.append(f"{helper} (700)")
-
-    create(rc, "".join(lines), 0o600)
-    print(f"bazel cache: wrote {rc} (600) holding {', '.join(wrote)}")
+    # `json.dumps`, never a hand-assembled string: the credential is external
+    # input, and a hand-rolled emitter is where escaping bugs hide past every
+    # local fixture (quality-core.md § Don't Own Non-Domain Code).
+    response = json.dumps({"headers": {header: [value]}})
+    create(helper, helper_program(response), 0o700)
+    create(
+        rc,
+        f"build --credential_helper={CACHE_HOST}={helper}\n"
+        "build --remote_upload_local_results=true\n",
+        0o600,
+    )
+    print(f"bazel cache: wrote {rc} (600) and {helper} (700)")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.1.1-16-g7d067fa
+_src_path: https://github.com/ocx-sh/conventions.git
+bazel: true
+bazel_cache_write: trusted
+deep_os:
+- ubuntu-latest
+languages:
+- bazel
+- python
+- rust
+- shell
+- typescript
+profile: full
+repo_name: ocx
+repo_owner: ocx-sh
+repo_workflows:
+    secrets:
+    - BAZEL_CACHE_WRITE_AUTH
+site:
+    deploy: false
+    dir: website
+    dist: website/dist
+    path: ''
+theme_bundle: false
+zizmor_ignore:
+- .github/workflows/release.yml

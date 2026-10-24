@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# C-009 — one row per Bazel test target under `//crates/...` (`rust_test`,
-# the `sh_test` seam twin, and one `rust_doc_test` per library crate), with the
-# testcase count `bazel test` last executed for it. `bazel:build:drift` holds
-# the row count to the number of those targets the graph has.
+# One row per Bazel test target under `//crates/...` (`rust_test` and the
+# `sh_test` seam twin), with the testcase count `bazel test` last executed for
+# it. `bazel:build:drift` holds the row count to the number of those
+# targets the graph has.
 #
 # **Rows are hand-derived; no writer exists.** `scripts/bazel_test_floor.py`
 # only reads this file (`--bep`/`--junit`). A row is copied from the target's
@@ -17,17 +17,14 @@
 # past the name it was written for, and both are findings — say which in the
 # commit body or the ratchet is doing nothing.
 #
-# A `rust_doc_test` row's `ignored` is its `ignore` fences. They are
-# documentation rather than skipped tests, so the skip ceiling
-# (`crates/NEXTEST_SKIP_CEILING`) leaves those targets out (C-034). Which
-# doctests are ignored was pinned once, by C-031's name diff against
-# `cargo test --doc --workspace -- --list` in the commit that added the rows;
-# no gate repeats that diff. Afterwards a running doctest turned `ignore`
-# lowers its row's executed count, and the floor reds on that.
+# `rust_doc_test` targets have no row: a passing one writes an empty `test.log`
+# (rules_rust's `--discard-stdout-on-success`), so there is no count to read.
+# They are gated by exit code alone, and `bazel_test_floor.py` reds on a
+# doctest target that failed or is missing from the run.
 #
 # `cases` is *executed* testcases (passed + failed), so it excludes the
 # `--skip`ped ones; `skipped` records how many a target's `args` filter out and
-# is the testcase-level half of C-008's exclusion set. The suite-level half is
+# is the testcase-level half of the exclusion set. The suite-level half is
 # the `[[excluded_suite]]` rows at the bottom: suites `cargo nextest list`
 # reports that stage 1 builds no target for at all.
 #
@@ -40,8 +37,6 @@
 #   bazel   : 35 `rust_test` targets, 8246 executed + 40 skipped + 8 ignored.
 #   8295 = 8246 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
 #
-# The 20 `rust_doc_test` rows stand outside it too: nextest runs no doctest.
-#
 # One target stands outside both sums: `//crates/ocx_cli:ocx_cli_seam_test`,
 # an `sh_test` that re-runs `ocx_cli_test`'s own binary with its `seam::` cases
 # selected under a poisoned environment (ADR C-SEAM). It has no nextest suite of
@@ -53,11 +48,6 @@
 # `ocx::linux_self_contained` is `kind = "test"` and has none, which the rule
 # could not see — it reported 3 suites / 110 testcases against a true 2 / 1.
 # The set below is the measured one and the script now names the same two.
-
-[[target]]
-label = "//crates/ocx_announce:ocx_announce_doc_test"
-crate = "ocx_announce"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_announce:ocx_announce_test"
@@ -80,12 +70,6 @@ crate = "ocx_cli"
 cases = 1
 
 [[target]]
-label = "//crates/ocx_cli:ocx_cli_doc_test"
-crate = "ocx_cli"
-cases = 4
-ignored = 3
-
-[[target]]
 label = "//crates/ocx_cli:ocx_cli_seam_test"
 crate = "ocx_cli"
 cases = 48
@@ -97,31 +81,14 @@ cases = 1600
 skipped = 8
 
 [[target]]
-label = "//crates/ocx_config:ocx_config_doc_test"
-crate = "ocx_config"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_config:ocx_config_test"
 crate = "ocx_config"
 cases = 657
 
 [[target]]
-label = "//crates/ocx_console:ocx_console_doc_test"
-crate = "ocx_console"
-cases = 0
-ignored = 2
-
-[[target]]
 label = "//crates/ocx_console:ocx_console_test"
 crate = "ocx_console"
 cases = 49
-
-[[target]]
-label = "//crates/ocx_env:ocx_env_doc_test"
-crate = "ocx_env"
-cases = 6
-ignored = 1
 
 [[target]]
 label = "//crates/ocx_env:ocx_env_test"
@@ -137,11 +104,6 @@ cases = 1
 label = "//crates/ocx_exit:derive_test"
 crate = "ocx_exit"
 cases = 22
-
-[[target]]
-label = "//crates/ocx_exit:ocx_exit_doc_test"
-crate = "ocx_exit"
-cases = 16
 
 [[target]]
 label = "//crates/ocx_exit:ocx_exit_test"
@@ -164,21 +126,10 @@ crate = "ocx_index"
 cases = 3
 
 [[target]]
-label = "//crates/ocx_index:ocx_index_doc_test"
-crate = "ocx_index"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_index:ocx_index_test"
 crate = "ocx_index"
 cases = 487
 skipped = 1
-
-[[target]]
-label = "//crates/ocx_oci:ocx_oci_doc_test"
-crate = "ocx_oci"
-cases = 9
-ignored = 3
 
 [[target]]
 label = "//crates/ocx_oci:ocx_oci_test"
@@ -193,25 +144,14 @@ crate = "ocx_package"
 cases = 1
 
 [[target]]
-label = "//crates/ocx_package:ocx_package_doc_test"
-crate = "ocx_package"
-cases = 0
-ignored = 1
-
-[[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 1028
+cases = 1053
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"
 crate = "ocx_package"
 cases = 5
-
-[[target]]
-label = "//crates/ocx_package_manager:ocx_package_manager_doc_test"
-crate = "ocx_package_manager"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_test"
@@ -221,22 +161,11 @@ skipped = 3
 ignored = 1
 
 [[target]]
-label = "//crates/ocx_project:ocx_project_doc_test"
-crate = "ocx_project"
-cases = 1
-ignored = 1
-
-[[target]]
 label = "//crates/ocx_project:ocx_project_test"
 crate = "ocx_project"
 cases = 485
 skipped = 1
 ignored = 2
-
-[[target]]
-label = "//crates/ocx_python:ocx_python_doc_test"
-crate = "ocx_python"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_python:ocx_python_test"
@@ -259,11 +188,6 @@ crate = "ocx_schema"
 cases = 10
 
 [[target]]
-label = "//crates/ocx_schema:ocx_schema_doc_test"
-crate = "ocx_schema"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_schema:ocx_schema_test"
 crate = "ocx_schema"
 cases = 63
@@ -272,11 +196,6 @@ cases = 63
 label = "//crates/ocx_schema:schema_outputs"
 crate = "ocx_schema"
 cases = 17
-
-[[target]]
-label = "//crates/ocx_script:ocx_script_doc_test"
-crate = "ocx_script"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_script:ocx_script_test"
@@ -300,11 +219,6 @@ crate = "ocx_sdkgen"
 cases = 24
 
 [[target]]
-label = "//crates/ocx_sdkgen:ocx_sdkgen_doc_test"
-crate = "ocx_sdkgen"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_sdkgen:ocx_sdkgen_test"
 crate = "ocx_sdkgen"
 cases = 48
@@ -315,19 +229,9 @@ crate = "ocx_sdkgen"
 cases = 35
 
 [[target]]
-label = "//crates/ocx_setup:ocx_setup_doc_test"
-crate = "ocx_setup"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_setup:ocx_setup_test"
 crate = "ocx_setup"
 cases = 247
-
-[[target]]
-label = "//crates/ocx_shell:ocx_shell_doc_test"
-crate = "ocx_shell"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_shell:ocx_shell_test"
@@ -340,19 +244,9 @@ crate = "ocx_shim"
 cases = 109
 
 [[target]]
-label = "//crates/ocx_sign:ocx_sign_doc_test"
-crate = "ocx_sign"
-cases = 1
-
-[[target]]
 label = "//crates/ocx_sign:ocx_sign_test"
 crate = "ocx_sign"
 cases = 477
-
-[[target]]
-label = "//crates/ocx_store:ocx_store_doc_test"
-crate = "ocx_store"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_store:ocx_store_test"
@@ -363,11 +257,6 @@ cases = 356
 label = "//crates/ocx_test_support:boundary"
 crate = "ocx_test_support"
 cases = 56
-
-[[target]]
-label = "//crates/ocx_test_support:ocx_test_support_doc_test"
-crate = "ocx_test_support"
-cases = 0
 
 [[target]]
 label = "//crates/ocx_test_support:ocx_test_support_test"
@@ -381,28 +270,17 @@ cases = 20
 skipped = 29
 
 [[target]]
-label = "//crates/ocx_trust:ocx_trust_doc_test"
-crate = "ocx_trust"
-cases = 0
-
-[[target]]
 label = "//crates/ocx_trust:ocx_trust_test"
 crate = "ocx_trust"
 cases = 96
 
 [[target]]
-label = "//crates/ocx_util:ocx_util_doc_test"
-crate = "ocx_util"
-cases = 2
-ignored = 2
-
-[[target]]
 label = "//crates/ocx_util:ocx_util_test"
 crate = "ocx_util"
-cases = 285
+cases = 290
 
 # ---------------------------------------------------------------------------
-# C-008's suite-level exclusion set: what `cargo nextest list` reports and no
+# The suite-level exclusion set: what `cargo nextest list` reports and no
 # stage-1/2 Bazel target executes. `rust:test:floor` still counts these, which
 # is why they are enumerated rather than left to a count comparison.
 # ---------------------------------------------------------------------------

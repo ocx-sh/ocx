@@ -32,10 +32,13 @@ W7: direnv byte-stability (kept, written Phase 2)
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
-from src.helpers import make_package
+import pytest
+
+from src.helpers import bash_executable, make_package
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
 
@@ -107,8 +110,11 @@ def _published_tool(
 
 def _bash_syntax_ok(script: str) -> tuple[bool, str]:
     """Return ``(ok, stderr)`` after running ``bash -n -c <script>``."""
+    bash = bash_executable()
+    if bash is None:
+        pytest.skip("bash required")
     proc = subprocess.run(
-        ["bash", "-n", "-c", script],
+        [bash, "-n", "-c", script],
         capture_output=True,
         text=True, check=False,
     )
@@ -589,6 +595,10 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="windows: ocx emits native C:\\ paths into the sourced bash PATH, which MSYS bash splits at the drive colon",
+)
 def test_global_env_sh_activation_replaces_departed_hook(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

@@ -637,6 +637,8 @@ unparseable file as *not verified* (fail-closed, so no compatibility shim is
 needed for a stale bare-integer file); `/hex-finalize` requires a full mark. Red
 state: write a scoped mark, run `/hex-finalize`, see it deny.
 
+**`workspace_structure` stays Linux-only.** Its five cargo-shelling cases (`NEEDS_CARGO` in `scripts/test_bundle.py`) read the workspace through `cargo metadata` and `cargo tree`, which the deep tier's macOS and Windows runners cannot run (they execute the cross-built unit bundle, with no toolchain and no submodules), so they run on Linux alone, in `rust:test:bazel-skipped`.
+
 ### AI-config layout
 
 - **A `README.md` per crate is the primary artifact** — name, responsibility,

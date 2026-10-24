@@ -13,7 +13,7 @@ readings WP-13 left for WP-15 to own — a `bazel query --output=build` and a
 unchanged. Nothing here re-spells the comparison.
 
 **Why `bazel query --output=build` and never the BUILD file's text.** WP-12's
-BUILD files get their third-party edges from crate_universe's
+BUILD files get their third-party edges from rules_rs's
 `all_crate_deps()` / `aliases()`, so the literal file text does not contain a
 dep list at all: `crates/ocx_util/BUILD.bazel` says `deps = all_crate_deps(normal
 = True)` and nothing else. A text parse would read every package as having zero
@@ -27,7 +27,7 @@ quietly wrong:
 
 * A Cargo **rename** hides the package name. `crates/ocx_util/Cargo.toml` says
   `pki-types = { package = "rustls-pki-types" }`, and the Bazel label is
-  `@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1`. The resolve graph
+  `@crates//:rustls-pki-types-1.15.1`. The resolve graph
   reports the real name and the rename separately, so the two halves meet on
   the name that is actually in both. Four such renames exist here
   (`rustls-pki-types` three times, `sha2 -> sha2_oid` once).
@@ -57,9 +57,9 @@ is exactly the package's own is dropped, so a real edge to a sibling crate is
 never swallowed.
 
 **The label map is the thing that makes a version bump loud.** A resolved
-third-party label is `@crates//<name>-<version>:<name>-<version>` and the
+third-party label is `@crates//:<name>-<version>` and the
 version is not separable from the name by inspection: `toml` resolves to
-`@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0`, where a `rsplit("-", 1)`
+`@crates//:toml-1.1.4+spec-1.1.0`, where a `rsplit("-", 1)`
 answers `toml-1.1.4+spec`. So no version stripping happens anywhere in this
 file — every label is declared in `scripts/bazel_label_map.toml` or it is its
 own exit 1 (C-010). `--update` regenerates that table from the same two
@@ -167,7 +167,7 @@ UPDATE_UNDERIVABLE_MSG = (
 #   3. Labels are plain double-quoted strings containing no escape.
 #
 # A `select()`'s KEYS are string literals too (`"//conditions:default"`,
-# `"@rules_rust//rust/platform:..."`). Neither matches the two dep-label
+# `"@rules_rs//rs/platforms/config:..."`). Neither matches the two dep-label
 # prefixes, which is why extracting every string on the line is safe here and
 # would not be if the prefixes were widened.
 # ---------------------------------------------------------------------------
@@ -185,14 +185,13 @@ DEP_LABEL_PREFIX = ("@crates//", "//crates/")
 # `ocx_cli:ocx_cli_seam_test`: it runs `ocx_cli_test`'s own binary under a
 # poisoned environment rather than compiling the crate a second time, and it
 # still carries a row (and a floored case count) of its own. `rust_doc_test` is
-# the one `<crate>_doc_test` per library crate (plan_bazel_cargo_port.md C-030):
-# `bazel:test:unit` runs and floors it like any other test target, so it needs a
-# row, and a doctest target added without one reds `drift-map-parity`.
-TEST_RULE_KINDS = frozenset({"rust_test", "sh_test", "rust_doc_test"})
+# not a row: a passing one writes an empty `test.log`, so `bazel_test_floor.py`
+# judges it by exit status and has no count to floor.
+TEST_RULE_KINDS = frozenset({"rust_test", "sh_test"})
 
-#: The map rows `sample_tree()`'s universe needs: every `rust_test` plus one
-#: `rust_doc_test` per lib. No `sh_test` twin — the fixture has none.
-SAMPLE_TEST_ROWS = CRATES_TEST_TARGETS + CRATES_DOC_TEST_TARGETS
+#: The map rows `sample_tree()`'s universe needs: every `rust_test`. No `sh_test`
+#: twin — the fixture has none — and no row for its `rust_doc_test` targets.
+SAMPLE_TEST_ROWS = CRATES_TEST_TARGETS
 
 
 @dataclasses.dataclass
@@ -287,7 +286,7 @@ def read_cargo_metadata(document: dict) -> tuple[dict[str, set[str]], dict[str, 
 
     Read off `resolve.nodes`, not off `packages[].dependencies`: the resolve
     graph is feature-resolved and rename-resolved, and it is the same lock
-    crate_universe generated the `@crates//` labels from.
+    rules_rs generated the `@crates//` labels from.
     """
     by_id = {package["id"]: package for package in document["packages"]}
     nodes = {node["id"]: node for node in document["resolve"]["nodes"]}
@@ -569,7 +568,7 @@ MAP_PREAMBLE = """\
 #
 # Two derivations, both mechanical:
 #
-#   `@crates//<name>-<version>:<name>-<version>` -> the workspace-resolved
+#   `@crates//:<name>-<version>` -> the workspace-resolved
 #       package whose `<name>-<version>` is exactly that stem. Never a
 #       `rsplit("-", 1)`: `toml` resolves to `toml-1.1.4+spec-1.1.0`, whose
 #       version contains a `-`, so the split answers `toml-1.1.4+spec`. The
@@ -585,7 +584,7 @@ MAP_PREAMBLE = """\
 #
 # The Cargo-rename trap the plan recorded does NOT appear here. This workspace
 # renames `rustls-pki-types` to `pki-types` and `sha2` to `sha2_oid`, and
-# neither spelling occurs in any label: crate_universe keys on the package
+# neither spelling occurs in any label: rules_rs keys on the package
 # name. `sha2` is in this table twice, at 0.10.9 and 0.11.0, which is the case
 # a single `@crates//:sha2` alias could not have expressed.
 
@@ -605,11 +604,11 @@ def derive_label_map(
     findings: list[Finding] = []
     for label in sorted({label for labels in read.deps.values() for label in labels}):
         if label.startswith("@crates//"):
-            stem = label[len("@crates//") :].split(":", 1)[0]
+            stem = label.split(":", 1)[1]
             if stem in by_stem:
                 derived[label] = by_stem[stem]
             elif label in existing:
-                # Kept, not dropped: a hand-added row for a label crate_universe
+                # Kept, not dropped: a hand-added row for a label rules_rs
                 # spells some other way must survive a regeneration.
                 derived[label] = existing[label]
             else:
@@ -657,13 +656,13 @@ def run_update(*, bazel_bin: str, query_output: Path | None, metadata_path: Path
 #: version so the fixture exercises the stem a `rsplit("-", 1)` would maul,
 #: and `sha2` appears at two versions so the many-labels-one-name shape is in
 #: the GREEN half rather than only asserted about in a comment.
-TOKIO = "@crates//tokio-1.53.1:tokio-1.53.1"
-SERDE = "@crates//serde-1.0.229:serde-1.0.229"
-TOML = "@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0"
-ASYNC_TRAIT = "@crates//async-trait-0.1.91:async-trait-0.1.91"
-SHA2_OLD = "@crates//sha2-0.10.9:sha2-0.10.9"
-SHA2_NEW = "@crates//sha2-0.11.0:sha2-0.11.0"
-PKI_TYPES = "@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1"
+TOKIO = "@crates//:tokio-1.53.1"
+SERDE = "@crates//:serde-1.0.229"
+TOML = "@crates//:toml-1.1.4+spec-1.1.0"
+ASYNC_TRAIT = "@crates//:async-trait-0.1.91"
+SHA2_OLD = "@crates//:sha2-0.10.9"
+SHA2_NEW = "@crates//:sha2-0.11.0"
+PKI_TYPES = "@crates//:rustls-pki-types-1.15.1"
 OCX_CLI_LABEL = "//crates/ocx_cli:ocx_cli"
 
 FIXTURE_MAP = {
@@ -715,7 +714,8 @@ def _rule(
 def sample_tree() -> tuple[str, dict]:
     """A synthetic tree with this repository's real shape: `CRATE_PACKAGES`
     packages, `DRIFT_TARGET_FLOOR` rule targets, `CRATES_TEST_TARGETS` of them
-    `rust_test` and `CRATES_DOC_TEST_TARGETS` `rust_doc_test` (one per lib), and
+    `rust_test` and `CRATES_DOC_TEST_TARGETS` `rust_doc_test` (one per lib, no
+    map row), and
     a Cargo side that agrees with all of it.
 
     The shape is copied because two of its irregularities are the ones a
@@ -920,7 +920,7 @@ def prove_readers(text: str, metadata: dict) -> int:
     expect(read.orphan_rules == 0, "a well-formed fixture must produce no orphan rules")
     print(
         f"reader GREEN: {len(read.packages)} packages, {read.targets} rule targets, "
-        f"{read.rust_tests} test-kind (rust_test + rust_doc_test), 0 orphan rules"
+        f"{read.rust_tests} map-row test targets (rust_test; rust_doc_test has no row), 0 orphan rules"
     )
     checks += 1
 
@@ -935,7 +935,7 @@ def prove_readers(text: str, metadata: dict) -> int:
     # A `select()` on a deps line yields its labels and none of its keys.
     selected = (
         '# /abs/path/crates/ocx_shim/BUILD.bazel:9:13\nrust_library(\n  name = "ocx_shim",\n'
-        '  deps = [] + select({"@rules_rust//rust/platform:x86_64-pc-windows-msvc": '
+        '  deps = [] + select({"@rules_rs//rs/platforms/config:x86_64-pc-windows-gnullvm": '
         f'["{TOKIO}"], "//conditions:default": []}}),\n)\n'
     )
     picked = read_build_output(selected).deps["crates/ocx_shim"]
@@ -970,7 +970,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
     )
     print(
         f"C-010 GREEN: {DRIFT_PACKAGE_FLOOR} packages / {DRIFT_TARGET_FLOOR} targets agree, "
-        "first-party and @crates//<name>-<version> edges both compared"
+        "first-party and @crates//:<name>-<version> edges both compared"
     )
     checks += 1
 
@@ -1059,7 +1059,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
     #     Spelled as a VERSION bump, the way a row actually goes missing: the
     #     version is in both halves of the label, so every `cargo update` that
     #     moves a pin retires a row.
-    bumped = "@crates//tokio-1.54.0:tokio-1.54.0"
+    bumped = "@crates//:tokio-1.54.0"
     mutated = text.replace(TOKIO, bumped)
     expect(bumped in read_build_output(mutated).deps[victim], "the version bump did not land")
     expect(bumped not in FIXTURE_MAP, "the bumped label must have no row")
@@ -1203,9 +1203,10 @@ def prove_floors(text: str, metadata: dict) -> int:
     print(f"C-010 RED  : {parity[0].message}")
     checks += 1
 
-    # C-033: a `rust_doc_test` is a map row like any test target. Drop one from
-    # the graph and the unchanged row count no longer matches — the reader
-    # counted it, so a doctest target added without a row reds the same way.
+    # A `rust_doc_test` is no map row: it is gated by exit status, with no count to
+    # floor. Dropping one from the graph moves the rule-target tally and the
+    # library walk, and leaves the test-row tally and the row parity alone — a
+    # reader still counting doctests as rows would red `drift-map-parity` here.
     victim = f"crates/{LEAF}"
     head, blocks = _records(text)
     doc_block = next(
@@ -1214,18 +1215,26 @@ def prove_floors(text: str, metadata: dict) -> int:
         if block.startswith(f"{victim}/") and f'name = "{LEAF}_doc_test"' in block
     )
     no_doc = head + "".join("# /abs/path/" + block for block in blocks if block is not doc_block)
+    dropped_read = read_build_output(no_doc)
     expect(
-        read_build_output(no_doc).rust_tests == SAMPLE_TEST_ROWS - 1,
+        f"//{victim}:{LEAF}_doc_test" not in dropped_read.doc_tests,
         "the doctest drop did not land in the text the reader reads",
     )
+    expect(
+        dropped_read.rust_tests == SAMPLE_TEST_ROWS,
+        f"a doctest target was counted as a map row: {dropped_read.rust_tests} test rows",
+    )
     doc_parity = check_drift(build_text=no_doc, metadata=metadata, **baseline)
-    expect("drift-map-parity" in codes(doc_parity), f"got {codes(doc_parity)}")
-    print(f"C-033 RED  : {next(f for f in doc_parity if f.code == 'drift-map-parity').message}")
+    expect("drift-map-parity" not in codes(doc_parity), f"got {codes(doc_parity)}")
+    print(
+        f"C-033 GREEN: dropping a rust_doc_test leaves {dropped_read.rust_tests} map-row test "
+        f"targets and no drift-map-parity; the graph walks name it instead ({codes(doc_parity)})"
+    )
     checks += 1
 
     # A library with no doctest target at all. The doctest rule is re-kinded
-    # rather than dropped, and its map row dropped too, so the target floor and
-    # row parity both hold: only the library walk can see what is missing.
+    # rather than dropped, so the target floor and row parity both hold: only
+    # the library walk can see what is missing.
     expect(not doctest_missing(read_build_output(text)), "every fixture lib must have a doctest")
     rekinded = head + "".join(
         "# /abs/path/" + (block.replace("rust_doc_test(", "filegroup(") if block is doc_block else block)
@@ -1235,12 +1244,7 @@ def prove_floors(text: str, metadata: dict) -> int:
         f"//{victim}:{LEAF}_doc_test" not in read_build_output(rekinded).doc_tests,
         "the re-kinded doctest did not land in the text the reader reads",
     )
-    missing = check_drift(
-        build_text=rekinded,
-        metadata=metadata,
-        label_map=FIXTURE_MAP,
-        test_map_rows=SAMPLE_TEST_ROWS - 1,
-    )
+    missing = check_drift(build_text=rekinded, metadata=metadata, **baseline)
     expect(codes(missing) == ["drift-doctest-missing"], f"got {codes(missing)}")
     expect(f"//{victim}:{LEAF} " in missing[0].message, f"names the wrong lib: {missing[0].message}")
     print(f"C-030 RED  : {missing[0].message[:160]}")
@@ -1289,7 +1293,7 @@ def prove_map_reader(scratch: Path) -> int:
     """The label map's own reader floor, on real files under `.tmp/`."""
     checks = 0
     path = scratch / "bazel_label_map.toml"
-    good = '[label]\n"@crates//tokio-1.53.1:tokio-1.53.1" = "tokio"\n'
+    good = '[label]\n"@crates//:tokio-1.53.1" = "tokio"\n'
     path.write_text(good, encoding="utf-8")
     mapping, finding = read_label_map(path)
     expect(finding is None and mapping == {TOKIO: "tokio"}, f"a good map must read cleanly, got {mapping}")

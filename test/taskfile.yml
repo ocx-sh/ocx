@@ -3,7 +3,7 @@
 version: '3'
 
 vars:
-  BIN_DIR: "{{.ROOT_DIR}}/test/bin"
+  BIN_DIR: "{{toSlash .ROOT_DIR}}/test/bin"
   OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
   # The Windows native launcher shim. test_windows_shim.py is skipif
   # non-Windows, so on Linux/macOS legs this is a harmless check-only
@@ -19,11 +19,6 @@ vars:
   SCHEMA_BIN_DIR: "{{.BIN_DIR}}/schema"
   OCX_SCHEMA_BINARY: "{{.SCHEMA_BIN_DIR}}/ocx_schema{{exeExt}}"
   SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
-  # Host port the `registry` service in docker-compose.yml binds to. Same knob
-  # compose and test/conftest.py read, so exporting it once moves all three off
-  # a port another project already holds. Default 5000 keeps CI unchanged.
-  REGISTRY_PORT:
-    sh: printf '%s' "${OCX_TEST_REGISTRY_PORT:-5000}"
   # Where pytest puts its per-test arenas. Every installing test materializes a
   # full three-tier CAS (blobs + layers + packages) under `tmp_path`, and the
   # default TMPDIR is /tmp, a tmpfs whose declared size (64G) is larger than
@@ -33,7 +28,8 @@ vars:
   # (the reaper deletes a live basetemp mid-run). Override with TEST_TMPDIR=…
   # for a run that needs to land elsewhere.
   TEST_TMPDIR:
-    sh: mkdir -p "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}" && printf '%s' "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}"
+    sh: >-
+      dir="${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}"; mkdir -p "$dir"; printf '%s' "${dir//\\//}"
   # Where pytest puts `tmp_path` itself, decided by this file rather than by an
   # environment variable.
   #
@@ -70,8 +66,8 @@ vars:
   # Override with TEST_BASETEMP=… .
   TEST_BASETEMP:
     sh: >-
-      dir="${TEST_BASETEMP:-$HOME/.cache/ocx-pytest/$(basename "$(dirname "{{.TASKFILE_DIR}}")")}";
-      mkdir -p "$dir"; printf '%s' "$dir"
+      dir="${TEST_BASETEMP:-$HOME/.cache/ocx-pytest/$(basename "$(dirname "{{toSlash .TASKFILE_DIR}}")")}";
+      mkdir -p "$dir"; printf '%s' "${dir//\\//}"
   # Where `default` tees the run's terminal output so `.suite-ceilings` can
   # read the summary line afterwards. A sibling of the basetemp, never inside
   # it: pytest deletes the basetemp's contents at startup, and `tee` writing
@@ -86,42 +82,13 @@ vars:
   # of that dashboard would be empty. Absolute, because these tasks run from
   # the `test:` include's directory and the telemetry task from the root.
   # `results/` is gitignored; pytest creates the directory itself.
-  JUNIT_XML: '{{.TASKFILE_DIR}}/results/junit.xml'
-  SMOKE_JUNIT_XML: '{{.TASKFILE_DIR}}/results/junit-smoke.xml'
+  JUNIT_XML: '{{toSlash .TASKFILE_DIR}}/results/junit.xml'
+  SMOKE_JUNIT_XML: '{{toSlash .TASKFILE_DIR}}/results/junit-smoke.xml'
   # The smoke tier's wall-clock budget (C-012 / S-004). The local target is
   # 60 s; 90 s is the ceiling at which a slow test that was marked `smoke`
   # reds the tier instead of quietly stretching it. A literal, deliberately:
   # a budget read from the environment could be raised by the run it gates.
   SMOKE_BUDGET_SECONDS: 90
-  # The one acceptance-suite lock on this host, and the reason it is a file
-  # rather than a convention: the four fixed worktrees and every agent worktree
-  # drive the SAME docker-compose stack on the same ports, so two suites at
-  # once push into one registry and read each other's state. It was a sentence
-  # in a session prompt until now, which is to say it was enforced by whoever
-  # remembered it.
-  #
-  # This step takes it EXCLUSIVE; `test/bazel.bzl`'s runner computes the same
-  # path and takes it SHARED, so bazel acceptance targets overlap each other
-  # and never an xdist run here (`test/bazel.bzl` § Concurrency).
-  #
-  # NOT under the repository, deliberately. `{{.TASKFILE_DIR}}/../.agents/…`
-  # resolves to a different file in each checkout and in every agent worktree,
-  # which is to say it would serialise nothing between exactly the trees that
-  # share the registry. The key is `REGISTRY_PORT` because the port identifies
-  # the contended stack: a checkout that moved its registry off 5000 is not a
-  # competitor and must not queue behind one that did not.
-  ACCEPTANCE_LOCK:
-    sh: >-
-      dir="$HOME/.cache/ocx"; mkdir -p "$dir";
-      printf '%s/acceptance-suite-%s.lock' "$dir" "${OCX_TEST_REGISTRY_PORT:-5000}"
-  # Held by the pytest step below for its whole run, and passed through by
-  # every bazel target before it takes the suite lock shared: flock(2) is not
-  # fair, so without it this step could wait out an unbroken chain of
-  # overlapping shared holders (`test/bazel.bzl` § Concurrency).
-  ACCEPTANCE_TURNSTILE:
-    sh: >-
-      dir="$HOME/.cache/ocx"; mkdir -p "$dir";
-      printf '%s/acceptance-turnstile-%s.lock' "$dir" "${OCX_TEST_REGISTRY_PORT:-5000}"
 
 # Applies to every task in this file, so no pytest leg can miss it.
 env:
@@ -133,7 +100,7 @@ tasks:
   # the next one red for reasons outside the tree.
   .evict-stale-run:
     internal: true
-    cmd: python3 {{.TASKFILE_DIR}}/scripts/evict_stale_run.py {{.OCX_BINARY}}
+    cmd: python3 {{toSlash .TASKFILE_DIR}}/scripts/evict_stale_run.py {{.OCX_BINARY}}
 
   build:
     internal: true
@@ -170,13 +137,7 @@ tasks:
     internal: true
     # The repository root, not `test/`: `ocx exec` resolves `bazel` from the
     # nearest `ocx.toml`, and `test/ocx.toml` binds no `bazel`.
-    dir: '{{.ROOT_DIR}}'
-    vars:
-      # The CI cache credential, derived exactly as `bazel:test:unit` derives
-      # it (`taskfiles/bazel.taskfile.yml` says why the file's existence and
-      # not a lane decides): a startup option, so it precedes the command word.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    dir: '{{toSlash .ROOT_DIR}}'
     cmds:
       # The very outputs the Bazel acceptance targets run (`test/bazel.bzl`),
       # so the pytest entry points and `bazel:test:accept` test one binary.
@@ -188,9 +149,8 @@ tasks:
       # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The seams
       # are loopback-only-asserted at runtime and compile-gated; release
       # builds come from cargo-dist and never include them.
-      - task: :bazel:bootstrap
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/ocx_cli:ocx //crates/ocx_shim:ocx_shim //crates/ocx_schema:ocx_schema_bin
-      - mkdir -p {{.BIN_DIR}} {{.SCHEMA_BIN_DIR}}
+      - mkdir -p "{{.BIN_DIR}}" "{{.SCHEMA_BIN_DIR}}"
       # Each output's path from `cquery --output=files`, never a spelled
       # `bazel-bin/...` path: that symlink follows whichever configuration
       # built last. Copy beside, then rename: `cp` straight onto a binary
@@ -221,35 +181,13 @@ tasks:
       - task: .suite-floor
       # `set -o pipefail` so pytest's own exit status survives the `tee`; the
       # tee is what lets `.suite-ceilings` read the summary line of the run
-      # that just happened rather than of some earlier one.
-      #
-      # `flock <file> <command>` and never the fd form. Measured: go-task runs
-      # a `cmds:` entry under mvdan/sh, whose `exec 9>file` opens the fd inside
-      # the interpreter and does NOT pass it to a child process — so `flock 9`
-      # exits 1 without ever waiting, and the step fails before pytest starts.
-      # `-o` closes the lock's fd in pytest, so a process the run leaves behind
-      # cannot go on holding it and block every bazel target after it.
-      # The `tee` stays outside the lock on purpose: it is not contended, and
-      # `set -o pipefail` in this shell is what keeps pytest's status from
-      # being replaced by the tee's.
-      #
-      # `flock -n … true` first, only to say out loud that this run is queued
-      # behind another one. A suite that sits silent for twenty minutes is
-      # indistinguishable from a hung one, and that is exactly the diagnosis
-      # subsystem-tests.md's "Observing a Running Suite" exists to make.
+      # that just happened rather than of some earlier one. Each run starts its
+      # own zot registries (`test/conftest.py`), so no host lock is taken.
       - >-
-        if command -v flock >/dev/null 2>&1; then
-          flock -n '{{.ACCEPTANCE_LOCK}}' true ||
-            echo "acceptance: another suite holds {{.ACCEPTANCE_LOCK}} — waiting for it" >&2;
-          LOCKED="flock -o {{.ACCEPTANCE_TURNSTILE}} flock -o {{.ACCEPTANCE_LOCK}}";
-        else
-          echo "acceptance: no flock(1) on this host — running unserialised, {{.ACCEPTANCE_LOCK}} untaken" >&2;
-          LOCKED="";
-        fi;
         set -o pipefail;
-        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" $LOCKED uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp="{{.TEST_BASETEMP}}" --junit-xml={{.JUNIT_XML}}
         {{.CLI_ARGS | default "-v"}}
-        2>&1 | tee {{.TEST_RUN_LOG}}
+        2>&1 | tee "{{.TEST_RUN_LOG}}"
       - task: .suite-ceilings
       - task: .conformance-floor
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
@@ -277,13 +215,6 @@ tasks:
       # With `PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH"` on the pytest line itself —
       # go-task lets no task `env:` override a variable the OS already set.
       OCX_SCHEMA_BINARY: "{{.OCX_SCHEMA_BINARY}}"
-      # Mirror tests that call subprocess.run with {**os.environ, ...} need
-      # OCX_INSECURE_REGISTRIES to reach the plain-HTTP test registry.
-      # MirrorRunner sets it per-process; this env propagates it to tests that
-      # use subprocess directly (test_mirror_os_features.py). The port follows
-      # OCX_TEST_REGISTRY_PORT so it cannot drift from what compose bound; CI
-      # inherits the REGISTRY env var if set.
-      OCX_INSECURE_REGISTRIES: "localhost:{{.REGISTRY_PORT}}"
 
   # The acceptance suite never shrinks or goes quiet (C-069). Both checks are
   # `cmds:` entries, never `preconditions:` — `task --force` skips
@@ -294,7 +225,7 @@ tasks:
     desc: >-
       Fail when the whole suite collects fewer tests than test/SUITE_FLOOR.
       The floor only ever rises, in the commit that adds the tests.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     cmds:
       # Collection only, never a run, and over the whole suite regardless of
       # the subset a caller passed as CLI_ARGS: the floor is a property of
@@ -327,7 +258,7 @@ tasks:
       added to dodge a red is caught here, not by the collected count.
       `lint:structure` passes its own pair, test/LINT_SKIP_CEILING and
       test/LINT_XFAIL_CEILING.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     vars:
       SKIP_CEILING_FILE: '{{.SKIP_CEILING_FILE | default "SKIP_CEILING"}}'
       XFAIL_CEILING_FILE: '{{.XFAIL_CEILING_FILE | default "XFAIL_CEILING"}}'
@@ -335,7 +266,7 @@ tasks:
     # scripts/suite_ceilings.py; scripts/tests/test_suite_ceilings.py is its
     # red/green proof.
     cmd: >-
-      python3 {{.TASKFILE_DIR}}/../scripts/suite_ceilings.py --log {{.TEST_RUN_LOG}}
+      python3 {{toSlash .TASKFILE_DIR}}/../scripts/suite_ceilings.py --log "{{.TEST_RUN_LOG}}"
       --skip-ceiling-file {{.SKIP_CEILING_FILE}} --xfail-ceiling-file {{.XFAIL_CEILING_FILE}}
 
   .conformance-floor:
@@ -344,9 +275,85 @@ tasks:
       roots than test/CONFORMANCE_FLOOR, read off the run's JUnit report, and
       print the conformance hook's findings. A subset run is reported as not
       floored.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     # scripts/tests/test_conformance_floor.py is the checker's red/green proof.
-    cmd: python3 {{.TASKFILE_DIR}}/../scripts/conformance_floor.py --junit {{.JUNIT_XML}}
+    cmd: python3 {{toSlash .TASKFILE_DIR}}/../scripts/conformance_floor.py --junit {{.JUNIT_XML}}
+
+  accept:native:
+    desc: >-
+      Acceptance suite (or one shard) against the prebuilt test/bin/ binaries, no
+      Bazel call: `task test:accept:native SHARD_COUNT=40 SHARD_INDEX=3`. One JUnit
+      file per run under target/accept/junit/.
+    summary: |
+      For CI runners that only download the binaries (SKIP_BUILD semantics), where
+      pytest starts its own zot (`zot` on PATH) and a job with no Docker
+      declares `OCX_TEST_NO_DOCKER=1`, which skips the registry:2 mirror and
+      Sigstore fixtures. Modules come from `scripts/accept_shard.py`, the
+      selector `bazel:test:accept SHARD_COUNT= SHARD_INDEX=` uses, so both paths
+      run the same slice (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one
+      variable without the other is refused). With neither, pytest selects as it
+      does anywhere: every module, or only the ones named after `--`. xdist with
+      `--dist loadgroup`, like `parallel`. Floors are not evaluated here (a shard
+      is a subset): run `task test:accept:floor` over the merged
+      `target/accept/junit/`.
+    vars:
+      SHARD_MODULES:
+        # No pipe: a failing selector must fail the task, not run pytest over the default testpath.
+        # Without a shard variable nothing is listed, so pytest's own selection applies: the
+        # `testpaths`, or the modules named after `--`.
+        sh: |-
+          {{if or .SHARD_COUNT .SHARD_INDEX}}m=$(python3 {{toSlash .ROOT_DIR}}/scripts/accept_shard.py --format paths {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}} {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}) || exit 1
+          [ -n "$m" ] || { echo "accept:native: empty module selection" >&2; exit 1; }
+          echo $m{{else}}true{{end}}
+      JUNIT_NAME: '{{if .SHARD_COUNT}}shard-{{.SHARD_INDEX}}-of-{{.SHARD_COUNT}}{{else}}all{{end}}'
+      JUNIT_DIR: '{{toSlash .ROOT_DIR}}/target/accept/junit'
+    cmds:
+      # Stale shard files would be merged by `accept:floor`; KEEP_JUNIT=1 keeps them to collect several local shards.
+      - '{{if not .KEEP_JUNIT}}rm -rf -- "{{.JUNIT_DIR}}"{{end}}'
+      - mkdir -p "{{.JUNIT_DIR}}"
+      - >-
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH"
+        uv run pytest -n auto --dist loadgroup --basetemp="{{.TEST_BASETEMP}}-{{.JUNIT_NAME}}"
+        --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
+        {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
+    env: *pytest-env
+
+  accept:floor:
+    desc: >-
+      SUITE_FLOOR / SKIP_CEILING / XFAIL_CEILING / conformance floor over a
+      directory of acceptance JUnit reports: `task test:accept:floor JUNIT_DIR=<dir>`
+    requires:
+      vars: [JUNIT_DIR]
+    cmds:
+      # EXPECT_SHARDS=N also requires shard-0-of-N.xml … shard-<N-1>-of-N.xml.
+      # LIMITS_DIR=<dir> reads the three limit files there, else from test/.
+      - python3 {{toSlash .ROOT_DIR}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}{{if .LIMITS_DIR}} --limits-dir {{.LIMITS_DIR}}{{end}}
+      - python3 {{toSlash .ROOT_DIR}}/scripts/conformance_floor.py --junit {{.JUNIT_DIR}}
+
+  windows-local:
+    desc: >-
+      Run the acceptance suite (MODE=accept) or the Rust unit-test bundle
+      (MODE=unit) on the Windows host from WSL: `task -x test:windows-local
+      MODE=accept -- -k patch`
+    summary: |
+      `scripts/windows_local.sh`: cross-builds the gnullvm `ocx.exe` (`cross:test:bin`;
+      the unit bundle for MODE=unit) unless `EXE=<path>` names one, stages the git working
+      tree (`git ls-files -co --exclude-standard`, minus `external/` and `.agents/`) into
+      `%USERPROFILE%\ocx-wintest\<checkout-name>\` on C:, and runs `test:accept:native`
+      through `cmd.exe` under `ocx exec zot`; pytest starts its own zot registries there.
+      `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the shard's JUnit report comes back to
+      `target/windows-local/junit/`. After `--`: pytest arguments (accept) or one
+      substring selecting the bundle's targets by label (unit).
+
+      The exit status is the child's, but only under `task -x`: without it task reports
+      201 for any failed command. 69 means this is not WSL with a Windows cmd.exe, 2 a
+      shard request the selector refuses, 64 a malformed call.
+    cmds:
+      - >-
+        bash {{toSlash .ROOT_DIR}}/scripts/windows_local.sh --mode '{{.MODE}}'
+        {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}}
+        {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}
+        {{if .EXE}}--exe '{{.EXE}}'{{end}} -- {{.CLI_ARGS}}
 
   smoke:
     desc: >-
@@ -367,13 +374,13 @@ tasks:
       # test, none touches the signing surface) is not `smoke`-marked, so the
       # `-m smoke` selection below never collects it: it runs on its own,
       # outside the clock and without a registry — it reads source only.
-      - OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp={{.TEST_BASETEMP}} lint/test_smoke_coverage.py
+      - OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp="{{.TEST_BASETEMP}}" lint/test_smoke_coverage.py
       # `--dist loadgroup` for the same reason `parallel` passes it: a marked
       # test that carries an `xdist_group` keeps its group. The clock wraps
       # the pytest invocation only — the build above is not the tier's cost.
       - >-
         start=$(date +%s);
-        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.SMOKE_JUNIT_XML}}
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp="{{.TEST_BASETEMP}}" --junit-xml={{.SMOKE_JUNIT_XML}}
         -m smoke -n auto --dist loadgroup
         {{.CLI_ARGS | default "-v"}};
         elapsed=$(( $(date +%s) - start ));
@@ -454,7 +461,7 @@ tasks:
     # No `sources:`: it reads the whole test tree, the command tree, the table
     # and hex.md, and a fingerprint over less is a cached green over files the
     # check never read. It is sub-second.
-    cmd: python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --check-coverage
+    cmd: python3 {{toSlash .ROOT_DIR}}/scripts/scoped_gate.py --check-coverage
 
   bazel:tags:
     desc: >-
@@ -465,7 +472,7 @@ tasks:
       it rather than restated from `test/bazel.bzl`:
 
         * every `//test:*` target carries `no-sandbox` and NOT `exclusive`
-          (they run concurrently behind the runner's host locks, `test/bazel.bzl`
+          (they run concurrently on registries of their own, `test/bazel.bzl`
           § Concurrency; the job count is on the task and never a global `--local_test_jobs`) and
           carries NONE of the
           cache-suppressing tags —
@@ -489,7 +496,7 @@ tasks:
       that matches nothing exits 0 — so an exit code here would certify an
       empty table, and every assertion taken from that table would be
       vacuously true.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     vars:
       BAZEL_TAGS_JSON: '{{.BAZEL_TAGS_JSON | default (printf "%s/results/bazel-acceptance-tags.json" .TASKFILE_DIR)}}'
     cmds:
@@ -499,8 +506,8 @@ tasks:
         raw='{{.BAZEL_TAGS_JSON}}.jsonproto'
         # `ocx exec bazel --`, like every other bazel call in this repository:
         # a plain shell has no `bazel` on PATH, and a hand-run query is not an
-        # exception to that (CLAUDE.md § Bazel, DX-42).
-        ocx exec bazel -- bazel query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
+        # exception to that (AGENTS.md § Bazel).
+        ocx exec bazel -- bazel {{.CACHE_RC}} query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
         python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
         import json
         import pathlib
@@ -601,8 +608,9 @@ tasks:
       uncached with no binary, no registry and no task runner
       (test/lint/conftest.py refuses each). Fails below test/LINT_FLOOR
       collected, above test/LINT_SKIP_CEILING skipped or
-      test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget.
-    dir: '{{.TASKFILE_DIR}}'
+      test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget (90 s on GitHub Actions).
+      The `deep` marker is deselected: `lint:deep` runs those.
+    dir: '{{toSlash .TASKFILE_DIR}}'
     # No `sources:`, by design (ADR C-LINT): a sweep's input is the whole tree,
     # so a fingerprint over anything less is a cached green over files the run
     # never read — the stale verdict this tier left the Bazel graph to avoid.
@@ -613,11 +621,11 @@ tasks:
       # for the reason `.suite-floor` gives.
       - >-
         floor=$(cat LINT_FLOOR);
-        summary=$(uv run pytest lint/ --collect-only -q --color=no 2>&1 | tail -n 1);
+        summary=$(uv run pytest lint/ -m "not deep" --collect-only -q --color=no 2>&1 | tail -n 1);
         case "$summary" in *error*)
           echo "lint floor: collection failed: $summary" >&2; exit 1;;
         esac;
-        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+) tests? collected.*/\1/p');
+        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+)(\/[0-9]+)? tests? collected.*/\1/p');
         [ -n "$count" ] || { echo "lint floor: no collected count in: $summary" >&2; exit 1; };
         [ "$count" -ge "$floor" ] || {
           echo "lint floor: $count tests collected, floor is $floor (test/LINT_FLOOR) — the lint tier shrank" >&2; exit 1; };
@@ -627,16 +635,19 @@ tasks:
       # test_lint_tier_guards.py shows that red and green. Pinned inline rather
       # than in `env:`, which loses to an inherited variable: a budget the
       # calling environment could raise would not gate the run it measures.
+      # 30 s is the dev host's; a 4-vCPU hosted runner shares phase 1 with
+      # cold rustup and Bazel setup and measured 35 s, so GitHub Actions gets 90.
       #
       # Teed, with `set -o pipefail` so pytest's status survives the tee, for
       # the skip/xfail ceilings below — the acceptance tier's pattern.
       - >-
         start=$(date +%s);
         set -o pipefail;
-        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ -n auto --basetemp={{.TEST_BASETEMP}}-lint
-        {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint.log;
+        budget=30; [ "${GITHUB_ACTIONS:-}" = true ] && budget=90;
+        OCX_LINT_BUDGET_SECONDS=$budget uv run pytest lint/ -m "not deep" -n auto --basetemp="{{.TEST_BASETEMP}}-lint"
+        {{.CLI_ARGS | default "-q"}} 2>&1 | tee "{{.TEST_BASETEMP}}-lint.log";
         status=$?;
-        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget 30 s)";
+        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget $budget s)";
         exit $status
       # A skip added to dodge a red is not caught by the collected floor.
       - task: .suite-ceilings
@@ -647,6 +658,41 @@ tasks:
     env:
       # Belt to the conftest's braces: the root conftest's `pytest_sessionstart`
       # starts the registry unless this is set, and no lint test may reach one.
+      OCX_TESTS_NO_REGISTRY: "1"
+
+  lint:deep:
+    desc: >-
+      The deep lint tier (`-m deep` over test/lint/): the lint tests that read
+      repository history, which `lint:structure` deselects. Run by `ci:deep`.
+      Fails below test/LINT_DEEP_FLOOR collected, and on any skip or xfail
+      (the lint tier's ceilings, both 0).
+    dir: '{{toSlash .TASKFILE_DIR}}'
+    # Same admission as `lint:structure` (the lint conftest), its own floor:
+    # moving a test between the two tiers lowers one floor and raises the other
+    # in the same commit, so neither shrinks unseen. No budget of its own: the
+    # tier is two git reads and the conftest's 30 s default still applies.
+    cmds:
+      - >-
+        floor=$(cat LINT_DEEP_FLOOR);
+        summary=$(uv run pytest lint/ -m deep --collect-only -q --color=no 2>&1 | tail -n 1);
+        case "$summary" in *error*)
+          echo "deep lint floor: collection failed: $summary" >&2; exit 1;;
+        esac;
+        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+)(\/[0-9]+)? tests? collected.*/\1/p');
+        [ -n "$count" ] || { echo "deep lint floor: no collected count in: $summary" >&2; exit 1; };
+        [ "$count" -ge "$floor" ] || {
+          echo "deep lint floor: $count tests collected, floor is $floor (test/LINT_DEEP_FLOOR) — the deep lint tier shrank" >&2; exit 1; };
+        echo "deep lint floor: $count tests collected (floor $floor)"
+      - >-
+        set -o pipefail;
+        uv run pytest lint/ -m deep --basetemp="{{.TEST_BASETEMP}}-lint-deep"
+        {{.CLI_ARGS | default "-q"}} 2>&1 | tee "{{.TEST_BASETEMP}}-lint-deep.log"
+      - task: .suite-ceilings
+        vars:
+          TEST_RUN_LOG: '{{.TEST_BASETEMP}}-lint-deep.log'
+          SKIP_CEILING_FILE: LINT_SKIP_CEILING
+          XFAIL_CEILING_FILE: LINT_XFAIL_CEILING
+    env:
       OCX_TESTS_NO_REGISTRY: "1"
 
   shells:
@@ -682,13 +728,13 @@ tasks:
         missing='';
         for f in tests/test_shell_activation.py tests/test_shell_reconcile.py
         tests/test_shell_reconcile_edge_cases.py src/shell_matrix.py; do
-        [ -f "{{.TASKFILE_DIR}}/$f" ] || missing="$missing $f";
+        [ -f "{{toSlash .TASKFILE_DIR}}/$f" ] || missing="$missing $f";
         done;
         [ -z "$missing" ] || { echo "missing shell-zoo mount source(s):$missing" >&2; exit 1; }
       - task: .build-binaries
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - docker build -f {{.TASKFILE_DIR}}/{{.SHELLS_DOCKERFILE}} -t {{.SHELLS_IMAGE}} {{.TASKFILE_DIR}}/docker
+      - docker build -f {{toSlash .TASKFILE_DIR}}/{{.SHELLS_DOCKERFILE}} -t {{.SHELLS_IMAGE}} {{toSlash .TASKFILE_DIR}}/docker
       # `__OCX_TESTING_REQUIRE_LIVE_SHELLS` turns "interpreter absent → skip"
       # into a failure, because a skip and a pass carry the same evidence. It is
       # set once for the whole run and honoured by all three modules — the two
@@ -707,10 +753,10 @@ tasks:
       - >-
         docker run --rm
         -v "{{.SHELLS_OCX_BINARY}}:/work/ocx:ro"
-        -v "{{.TASKFILE_DIR}}/tests/test_shell_activation.py:/work/test_shell_activation.py:ro"
-        -v "{{.TASKFILE_DIR}}/tests/test_shell_reconcile.py:/work/test_shell_reconcile.py:ro"
-        -v "{{.TASKFILE_DIR}}/tests/test_shell_reconcile_edge_cases.py:/work/test_shell_reconcile_edge_cases.py:ro"
-        -v "{{.TASKFILE_DIR}}/src/shell_matrix.py:/work/shell_matrix.py:ro"
+        -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_activation.py:/work/test_shell_activation.py:ro"
+        -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_reconcile.py:/work/test_shell_reconcile.py:ro"
+        -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_reconcile_edge_cases.py:/work/test_shell_reconcile_edge_cases.py:ro"
+        -v "{{toSlash .TASKFILE_DIR}}/src/shell_matrix.py:/work/shell_matrix.py:ro"
         -e OCX_ACTIVATION_BINARY=/work/ocx
         -e __OCX_TESTING_REQUIRE_LIVE_SHELLS={{.SHELLS_REQUIRE_LIVE}}
         {{.SHELLS_IMAGE}}
@@ -738,7 +784,7 @@ tasks:
       bench/results/shell-latency.json. The fault-injected red state runs in the
       SAME invocation, so a green here cannot be produced by the gate not
       running.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     vars:
       LATENCY_OCX_BINARY: '{{.LATENCY_OCX_BINARY | default .OCX_BINARY}}'
       LATENCY_RESULTS_DIR: '{{.LATENCY_RESULTS_DIR | default "bench/results"}}'
@@ -858,17 +904,18 @@ tasks:
 
   bench:setup:
     desc: >-
-      Start the bench Docker-compose profile (toxiproxy + registry). Required
-      before running any bench:* target. Fails with a clear message when Docker
-      is unavailable.
-    dir: '{{.TASKFILE_DIR}}'
+      Start the bench Docker-compose profile (the toxiproxy container). Required
+      before running any bench:* target; the registry behind it is a zot the
+      harness starts itself. Fails with a clear message when Docker is
+      unavailable.
+    dir: '{{toSlash .TASKFILE_DIR}}'
     preconditions:
       - sh: docker info > /dev/null 2>&1
         msg: >-
           Docker is not running or not accessible.
           Start Docker and re-run `task bench:setup`.
     cmds:
-      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench up -d
+      - docker compose -f {{toSlash .TASKFILE_DIR}}/docker-compose.yml --profile bench up -d
       # Wait for toxiproxy API to become reachable (up to 15 s).
       - >-
         for i in $(seq 1 30); do
@@ -877,63 +924,55 @@ tasks:
           fi;
           sleep 0.5;
         done
-      # Wait for registry to become reachable (already running from prior `task test`,
-      # but in case bench:setup is called standalone).
-      - >-
-        for i in $(seq 1 30); do
-          if curl -sf http://localhost:{{.REGISTRY_PORT}}/v2/ > /dev/null 2>&1; then
-            echo "registry ready."; break;
-          fi;
-          sleep 0.5;
-        done
 
   bench:teardown:
     desc: >-
-      Stop the bench-proxy container only — leaves registry + mirror-registry running
-      so `task test` is unaffected. Use `docker compose down` manually to stop everything.
-    dir: '{{.TASKFILE_DIR}}'
+      Stop and remove the bench-proxy (toxiproxy) container only — other compose
+      services are untouched, and the bench registry is the harness's own zot,
+      which exits with it. Use `docker compose down` manually to stop everything.
+    dir: '{{toSlash .TASKFILE_DIR}}'
     cmds:
-      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench stop bench-proxy
-      - docker compose -f {{.TASKFILE_DIR}}/docker-compose.yml --profile bench rm -f bench-proxy
+      - docker compose -f {{toSlash .TASKFILE_DIR}}/docker-compose.yml --profile bench stop bench-proxy
+      - docker compose -f {{toSlash .TASKFILE_DIR}}/docker-compose.yml --profile bench rm -f bench-proxy
 
   bench:baseline:
     desc: >-
       Run the full benchmark matrix against the CURRENT (pre-optimization) binary
       and save results as test/bench/baseline.json. Run this BEFORE any
       optimization lands. Requires bench:setup and hyperfine.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
       - uv run python bench/harness.py --save-baseline
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+      BENCH_RESULTS_DIR: "{{toSlash .TASKFILE_DIR}}/bench/results"
 
   bench:
     desc: >-
       Run the medium suite (regression gate, <4 min) and compare against baseline.json.
       Exits 1 if any scenario regresses beyond the 0.85x threshold.
       Requires bench:setup and hyperfine.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
       - uv run python bench/harness.py --suite medium --compare
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+      BENCH_RESULTS_DIR: "{{toSlash .TASKFILE_DIR}}/bench/results"
 
   bench:quick:
     desc: >-
       Fast subset benchmark (<1 min): small suite (unthrottled + 100 Mbps + parallel_2_processes).
       Fixture push skipped when registry already has the packages (deterministic repo names).
       Compares against baseline where entries exist. Requires bench:setup and hyperfine.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
       - uv run python bench/harness.py --suite small --compare
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+      BENCH_RESULTS_DIR: "{{toSlash .TASKFILE_DIR}}/bench/results"
 
   bench:large:
     desc: >-
@@ -941,45 +980,45 @@ tasks:
       and larger payloads (50 MB, 25 MB layer rows) for tighter σ.
       Run before landing optimizations where statistical confidence matters.
       Requires bench:setup and hyperfine.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
       - uv run python bench/harness.py --suite large --compare
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+      BENCH_RESULTS_DIR: "{{toSlash .TASKFILE_DIR}}/bench/results"
 
   bench:scenario:
     desc: >-
       Run one or more named scenarios: task test:bench:scenario -- <name> [<name>...]
       Uses 3 runs, no warmup. Requires bench:setup and hyperfine.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     deps: [build, bench:setup, .bench:acquire-hyperfine]
     cmds:
       - uv run python bench/harness.py --scenarios {{.CLI_ARGS}} --runs 3 --warmup 0
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
-      BENCH_RESULTS_DIR: "{{.TASKFILE_DIR}}/bench/results"
+      BENCH_RESULTS_DIR: "{{toSlash .TASKFILE_DIR}}/bench/results"
 
   bench:report:
     desc: >-
       Generate the static HTML dashboard from the latest bench results.
       Writes test/bench/results/index.html (self-contained; no Docker required).
       Open the printed path in a browser to view the dashboard.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     cmds:
       - uv run python bench/report.py
 
   .bench:acquire-hyperfine:
     desc: Download hyperfine 1.20.0 into test/bin/ if not already on PATH or in test/bin/.
     internal: true
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     # status: exit 0 = up-to-date; hyperfine already on PATH or already in test/bin/.
     # `which hyperfine` succeeds if on PATH; `test -x` checks test/bin/ fallback.
     status:
-      - which hyperfine || test -x {{.TASKFILE_DIR}}/bin/hyperfine
+      - which hyperfine || test -x "{{toSlash .TASKFILE_DIR}}/bin/hyperfine"
     cmds:
-      - mkdir -p {{.TASKFILE_DIR}}/bin
+      - mkdir -p "{{toSlash .TASKFILE_DIR}}/bin"
       # Tag is positional, not a flag. Asset name verified against sharkdp/hyperfine
       # v1.20.0 release: hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz
       # The tarball extracts to hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine.
@@ -991,12 +1030,12 @@ tasks:
         -D /tmp/hyperfine-dl
         --clobber
       - tar -xzf /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/hyperfine-dl
-      - install -m755 /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine {{.TASKFILE_DIR}}/bin/hyperfine
+      - install -m755 /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine "{{toSlash .TASKFILE_DIR}}/bin/hyperfine"
       - rm -rf /tmp/hyperfine-dl
 
   doc-scripts:list:
     desc: Print the doc-script discovery export as JSON (PT6 seam for website publish task)
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     cmd: uv run python scripts/doc_scripts_list.py
     env:
       OCX_DOC_SCRIPTS_ROOT: '{{.OCX_DOC_SCRIPTS_ROOT | default ""}}'
@@ -1010,7 +1049,7 @@ tasks:
       exists to keep the test suite offline. Runs on verify-deep.yml's weekly
       schedule, which bounds the drift window to 7 days without adding a network
       dependency to every PR.
-    dir: '{{.TASKFILE_DIR}}'
+    dir: '{{toSlash .TASKFILE_DIR}}'
     cmd: ./scripts/sync_index_conformance.sh --check
 
   doc-scripts:drift:
@@ -1026,7 +1065,7 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - >-
-        uv run pytest -n auto --basetemp={{.TEST_BASETEMP}}
+        uv run pytest -n auto --basetemp="{{.TEST_BASETEMP}}"
         tests/test_doc_scripts.py
         tests/test_doc_scripts_publish.py
         tests/test_doc_scripts_executor.py
@@ -1037,7 +1076,7 @@ tasks:
       # modules; their own session, so the lint conftest's admission and budget
       # judge them and nothing else.
       - >-
-        OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp={{.TEST_BASETEMP}}-lint
+        OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp="{{.TEST_BASETEMP}}-lint"
         lint/test_doc_binding.py
         lint/test_doc_scripts_parser.py
         lint/test_doc_scripts_publish_structure.py

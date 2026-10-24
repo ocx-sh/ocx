@@ -1,12 +1,13 @@
 # Acceptance Tests
 
 Pytest-based acceptance tests for the `ocx` CLI.
-Tests run against a local OCI registry provided by Docker Compose.
+Each pytest session starts its own zot registries on free local ports.
 
 ## Prerequisites
 
 - Rust toolchain (for building `ocx`)
-- Docker (for the registry container)
+- `zot` on `PATH` from the project toolchain, or `OCX_TEST_ZOT` naming the binary
+- Docker, only for the `registry:2` mirror and the Sigstore stack
 - Python 3.10+ with [uv](https://docs.astral.sh/uv/)
 
 ## Quick Start
@@ -16,7 +17,7 @@ cd test
 uv run pytest -v
 ```
 
-The registry container is started automatically. The binary is **not** built
+The zot registries start automatically and stop with the session. Docker services start on first use. The binary is **not** built
 by pytest — tests run the prebuilt `test/bin/ocx` (or `$OCX_COMMAND`). After
 Rust changes, refresh it via `task test` (a `bazel build` of
 `//crates/ocx_cli:ocx`, the `__testing` build, copied into `test/bin/`).
@@ -31,7 +32,7 @@ uv run pytest -n auto -v
 
 ```
 test/
-  docker-compose.yml         Registry service definition
+  docker-compose.yml         registry:2 mirror and Sigstore service definitions
   pyproject.toml             Python project / pytest config
   README.md
   src/                       Test support code
@@ -72,7 +73,7 @@ Session-scoped fixtures live in `conftest.py`, function-scoped ones in
 | Fixture       | Description |
 |---------------|-------------|
 | `ocx_binary`  | Resolves the `ocx` binary (`$OCX_COMMAND`, else `test/bin/ocx`) |
-| `registry`    | Registry address (default `localhost:5000`); auto-starts docker-compose |
+| `registry`    | Address of the session's own zot (`localhost:<free port>`, started by `pytest_configure`) |
 
 ### Function-scoped (fresh per test)
 
@@ -92,12 +93,12 @@ Each test is fully self-contained:
 2. **Unique repository name** — UUID prefix prevents registry collisions
 3. **Clean environment** — `OcxRunner` passes only OCX-related variables
 
-This design allows tests to run in parallel (`-n auto`) on a shared registry.
+This design allows tests to run in parallel (`-n auto`) on the session's registry.
 
 ## Configuration
 
 | Environment Variable | Default          | Description |
 |---------------------|------------------|-------------|
 | `OCX_COMMAND`       | `test/bin/ocx`   | Path to the ocx binary |
-| `REGISTRY`          | `localhost:5000` | Registry address |
+| `OCX_TEST_REGISTRY_PORT` | set by the session | Port of the session's own zot registry |
 | `MIRROR_REGISTRY`   | `localhost:5001` | Mirror registry address |

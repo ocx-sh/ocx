@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.registry import fetch_platform_manifest_digest
 from tests.test_assembly import _make_two_packages_sharing_layer
 
@@ -41,7 +41,7 @@ def _count_object_dirs(ocx: OcxRunner) -> int:
     objects_root = _objects_dir(ocx)
     if not objects_root.exists():
         return 0
-    return sum(1 for p in objects_root.rglob("content") if p.is_dir())
+    return sum(1 for p in rglob_no_links(objects_root, "content") if p.is_dir())
 
 
 # ---------------------------------------------------------------------------

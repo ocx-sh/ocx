@@ -1,0 +1,12 @@
+{
+  "name": "toolx",
+  "asset": "{name}-{target}.tar.gz",
+  "prefix": "{name}-{target}/",
+  "digest": "embedded",
+  "installed": ".cargo/bin/toolx",
+  "targets": ["x86_64-unknown-linux-musl"],
+  "http_env": [],
+  "env": {"FAKE_LDD": "musl", "TOOLX_NO_MODIFY_PATH": "1"},
+  "no_modify_flag": null,
+  "platform": []
+}

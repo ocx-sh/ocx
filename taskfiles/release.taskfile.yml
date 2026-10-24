@@ -11,27 +11,29 @@ tasks:
     status:
       - cargo set-version --version
 
-  # Guard: the website embeds CHANGELOG.md via an `<!--@include:-->` directive, so
-  # the file is rendered as page Markdown. A raw `<tag>` from a commit subject (e.g.
-  # "ocx-<name>") is emitted as an HTML element and swallows the text after it.
-  # cliff.toml HTML-escapes angle brackets; this fails loudly if that escaping
-  # ever regresses.
+  # Guard: the website embeds CHANGELOG.md, so the file is rendered as page Markdown. A raw
+  # `<tag>` from a commit subject (e.g. "ocx-<name>") is emitted as an HTML element and
+  # swallows the text after it. The template cliff.toml HTML-escapes angle brackets; this
+  # fails loudly if that escaping ever regresses. FILE defaults to CHANGELOG.md; a scratch
+  # `git-cliff --unreleased` output can be checked the same way.
   changelog:validate:
     internal: true
+    vars:
+      FILE: '{{.FILE | default "CHANGELOG.md"}}'
     cmds:
       - |
-        if grep -nE '<[A-Za-z/]' CHANGELOG.md; then
-          echo "ERROR: CHANGELOG.md contains raw HTML tags (lines above)." >&2
+        if grep -nE '<[A-Za-z/]' '{{.FILE}}'; then
+          echo "ERROR: {{.FILE}} contains raw HTML tags (lines above)." >&2
           echo "git-cliff escaping regressed; the website build will fail." >&2
           exit 1
         fi
-      # Same @include, second failure mode: a repo-root-relative doc link resolves
-      # against the changelog page and dies as a dead link. cliff.toml rewrites
-      # these to absolute ocx.sh URLs; this fails loudly if that rewrite regresses.
+      # Same embed, second failure mode: a repo-root-relative doc link resolves against the
+      # changelog page and dies as a dead link. The template cliff.toml renders a commit's
+      # subject only and carries no link rewrite, so a subject must not cite a doc path.
       - |
-        if grep -nE 'website/src/(content/)?docs/' CHANGELOG.md; then
-          echo "ERROR: CHANGELOG.md contains repo-root-relative doc links (lines above)." >&2
-          echo "git-cliff link rewriting regressed; the website build will fail." >&2
+        if grep -nE 'website/src/(content/)?docs/' '{{.FILE}}'; then
+          echo "ERROR: {{.FILE}} contains repo-root-relative doc paths (lines above)." >&2
+          echo "A commit subject cites a website doc path; reword it without the path (the subject is the changelog line)." >&2
           exit 1
         fi
 
@@ -203,63 +205,65 @@ tasks:
       - task: sdkgen:check
       - task: sdkgen:package
 
-  # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
-  # After this task succeeds, the human reviews and commits.
-  #
-  # Version selection:
-  #   task release:prepare                 # interactive menu: auto | patch | minor | major
-  #   task release:prepare BUMP=minor      # skip the menu, force a bump level
-  #   task release:prepare BUMP=auto VERSION=1.4.0   # pin an exact version (v prefix optional)
-  #
-  # BUMP is a required enum: with interactive mode on (.taskrc.yml) and a TTY it
-  # renders a selection menu; on CI / no TTY it must be passed on the CLI.
-  prepare:
-    desc: 'Prepare a release (interactive: pick auto|patch|minor|major; or BUMP=<level> / VERSION=x.y.z)'
+  # The hooks the conventions baseline's `release:prepare` calls (`task release:prepare BUMP=...`, flattened
+  # from taskfiles/baseline.taskfile.yml): gate -> bump-files -> git-cliff -> validate -> verify. It never
+  # tags or pushes (workflow-release.md).
+  gate:
+    desc: 'Release gate: a fresh full verify mark (commit_gate.py --require-full-mark) and the release provenance proof'
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # The predicate the commit gate applies to a `release:` subject, run from the same module so the two
+      # cannot drift. `task verify:mark` writes a scoped mark and does not satisfy it; `task verify` does.
+      - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
+      # Before any file is touched: a release whose build would carry test provenance stops here, not
+      # after the version bump.
+      - task: provenance:proof
+
+  bump-files:
+    desc: 'Set the release version in the workspace manifests (cargo set-version); VERSION=x.y.z'
     deps:
       - install:cargo-edit
     requires:
-      vars:
-        - name: BUMP
-          enum: [auto, patch, minor, major]
-    vars:
-      # git-cliff computes the next version from git history. `auto` lets it pick
-      # the bump from conventional commits; otherwise BUMP forces the level.
-      # VERSION pins an exact value and wins over BUMP.
-      NEXT_VERSION:
-        sh: |
-          if [ -n "{{.VERSION}}" ]; then
-            printf 'v%s' "{{.VERSION | default "" | trimPrefix "v"}}"
-          elif [ "{{.BUMP}}" = "auto" ]; then
-            git-cliff --bumped-version
-          else
-            git-cliff --bumped-version --bump "{{.BUMP}}"
-          fi
+      vars: [VERSION]
     cmds:
-      # Refuse without a fresh *full* verify mark — the predicate the commit
-      # gate applies to a `release:` subject, run from the same module so the
-      # two cannot drift. `task verify:mark` writes a scoped mark and does not
-      # satisfy it; `task verify` does.
-      - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
-      # Before any file is touched: a release whose build would carry test
-      # provenance stops here, not after the version bump.
-      - task: provenance:proof
-      - echo "Next version:{{.NEXT_VERSION}}"
-      - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
-      # The bump changes every workspace crate's version, so crate_universe's
-      # (gitignored) Cargo.bazel.lock.json digest goes stale and every
-      # `bazel query` in the verify below exits 7 until it is repinned. The
-      # splice temp goes outside $HOME: cargo-bazel refuses a workspace with a
-      # Cargo config in a parent dir, and ~/.cargo/config.toml is one.
-      - mkdir -p /var/tmp/ocx-splice && CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice
-      - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
+      - cargo set-version "{{.VERSION | trimPrefix "v"}}"
+
+  validate:
+    desc: 'Validate what the release rewrote (changelog:validate)'
+    cmds:
       - task: changelog:validate
-      # NOCACHE=1 reaches `bazel:test:accept` (CLI vars are global), which runs
-      # every acceptance module with `--nocache_test_results`: a release
-      # re-executes the suite instead of trusting cached verdicts.
-      - task verify NOCACHE=1
+
+  verify:
+    desc: 'The release verification gate: task verify NOCACHE=1'
+    cmds:
+      # A fresh process, not `task: :verify`: NOCACHE reaches `bazel:test:accept` as a CLI var (CLI vars are
+      # global; a `vars:` on a task call is not), and a release re-executes every acceptance module
+      # instead of trusting cached verdicts.
+      - '{{.TASK_EXE}} verify NOCACHE=1'
+
+  # Step 3 of the release flow (workflow-release.md): the tag exists only after readiness is green on
+  # this exact commit. `release:prepare` cannot ask - the bump commit it prepares does not exist
+  # while it runs - so the refusal sits on the step that creates the tag. `readiness-gate.yml`
+  # asks again on the tagged commit before `host` can publish.
+  tag:
+    desc: 'Tag HEAD (the `release: vX` commit) and push it with main atomically, once a green readiness run exists for it'
+    dir: '{{.ROOT_DIR}}'
+    cmds:
       - |
-        echo ""
-        echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"
-        echo "  git add -A && git commit -m 'release: {{.NEXT_VERSION}}'"
-        echo "  git tag {{.NEXT_VERSION}}"
-        echo "  git push --atomic origin main {{.NEXT_VERSION}}"
+        set -euo pipefail
+        version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+        subject=$(git log -1 --format=%s)
+        if [ "$subject" != "release: v$version" ]; then
+          echo "release:tag: HEAD is '$subject', expected 'release: v$version' - tag the commit release:prepare prepared" >&2
+          exit 1
+        fi
+        # Every non-zero refuses: 1 no run for this SHA, 69 gh missing or unauthenticated, 74 gh failed.
+        python3 scripts/release_readiness_gate.py --sha "$(git rev-parse HEAD)"
+        git tag "v$version"
+        # A rejected push must not leave the tag behind: the next run's `git tag` would refuse it.
+        git push --atomic origin HEAD:main "v$version" || {
+          status=$?
+          git tag -d "v$version" >&2
+          echo "release:tag: push failed ($status); local tag v$version deleted" >&2
+          exit "$status"
+        }

@@ -141,10 +141,23 @@ propose adopting what exists via pointer before proposing anything new:
   a user-typed pin is never overwritten)? Reads installed frontmatter only;
   executes nothing. See
   [`references/audit.md`](references/audit.md#cross-model-adversary-skill-installed).
-- Has the resource profile been measured on this host — peak RSS, wall
-  time, `light`/`heavy` class, and the derived heavy-command ceiling,
-  cached in `hex.md › Pointers`? See
-  [`references/audit.md`](references/audit.md#resource-profile-measured).
+- Is the project's single-build job count recorded — one build's parallel
+  jobs, the budget live pipelines share? See
+  [`references/audit.md`](references/audit.md#single-build-job-count-recorded).
+- Does any project lesson or script make a worker wait on a build lock,
+  semaphore, or exclusive tool? See
+  [`references/audit.md`](references/audit.md#no-worker-side-build-locks).
+- Does every always-on "verify before commit" line carry a hex-run
+  carve-out? See
+  [`references/audit.md`](references/audit.md#verify-before-commit-lines-carry-a-hex-run-carve-out).
+- Does any scoped or selective test command silently escalate to the full
+  suite? See
+  [`references/audit.md`](references/audit.md#scoped-commands-that-escalate-to-full).
+- Is the hub / generated file list documented — lockfiles, baselines,
+  goldens that pipelines must never commit? See
+  [`references/audit.md`](references/audit.md#hub--generated-file-list-documented).
+- Is the release gate's no-cache switch documented? See
+  [`references/audit.md`](references/audit.md#release-gate-no-cache-switch-documented).
 - Are agent worktrees (`.agents/worktrees/` by default) excluded from
   IDE file watchers and search indexers, not just from version control?
   See
@@ -256,14 +269,18 @@ This step only asks and records the answer, never restates them.
 item](references/audit.md#selective-test-command-documented) is proposed
 for adoption via pointer, with the matching block from
 [`references/audit.md`](references/audit.md#best-practice-blocks); that
-block pins the grammar of the two `hex.md › Pointers` rows this run
-records — where the selective test command is documented, and where the
-project's security-sensitive / hot-path convention is documented. Both are
-wizard questions inside the existing sequence, written under the same
-apply consent as the discussions row above. The second row is asked
-whether or not a selective command was found — its trigger is Step 1's
-rules question — and it names **where the convention is documented**,
-never a path list and never a judgment.
+block pins the grammar of the `hex.md › Pointers` row this run records —
+where the selective test command is documented. It is a wizard question
+inside the existing sequence, written under the same apply consent as the
+discussions row above.
+
+**Run-cost items.** What the single-build, hub-file and fresh-gate items
+find is proposed for adoption via pointer; their rows (`Build jobs:`,
+`Hub files:`, `Fresh gate:`) and the best-practice blocks are in
+[`references/audit.md`](references/audit.md#best-practice-blocks). A lock
+to remove or a carve-out line to add is project text: propose the exact
+edit as a diff, write it only with consent, never rewrite a project lesson
+unasked.
 
 **Commit and landing requirements.** A requirement found by the
 [commit-and-landing
@@ -315,35 +332,43 @@ This is a fallback, not a default push. A project with its own RST/Sphinx
 templates keeps them and just documents where they live — hex never
 forces its own formats onto a project that already has one.
 
-### 4. Instantiate the model matrix
+### 4. Instantiate the model classes
 
-Present the shipped capability-class matrix
+Present the four shipped capability classes
 ([`../hex-core/references/models.md`](../hex-core/references/models.md)):
-two classes, `fast-balanced` and `deep-reasoning`, recommended per worker
-role × tier. Detect the harness in use (from the client running this
-skill, or ask if ambiguous) and propose literal model names per class —
-for example, on a Claude harness: `fast-balanced` → Sonnet,
-`deep-reasoning` → Opus. Let the user adjust per row or per cell (e.g. pin
-`builder:implement` to the deep-reasoning model at every tier). Review
-seats are the exception: they are configured **per join level** through
-`review.<level>.class`, which supersedes a `models.overrides`
-`reviewer[:focus]` entry
-([`config.md`](../hex-core/references/config.md#key-vocabulary), C-985) —
-offer that key here, never a reviewer override.
+`light`, `standard`, `standard-high`, `deep`. Detect the harness in use
+(from the client running this skill, or ask if ambiguous) and propose a
+literal `model` and an `effort` per class; `models.md` carries the example
+mapping for a Claude harness, not restated here. Each class becomes one
+**agent definition** in the client's agent directory (Claude Code:
+`.claude/agents/hex-<class>.md`) — the Agent tool takes no per-spawn
+effort, so the definition is what binds model and effort together.
+Orchestrators spawn by that name:
 
-Skipping this step is fine — the shipped class defaults apply and every
-orchestrator still runs unmodified. Nothing from this step is written
-until Step 4½.
+```markdown
+---
+name: hex-<class>
+description: hex worker, class <class>.
+model: <literal model for the class>
+effort: <effort for the class>
+---
+You are a hex worker. The spawn prompt carries your task; do that only.
+```
+
+An existing definition is updated only in `model` and `effort`, after the
+diff; a user's other edits stay. A per-role override is the
+`models.overrides` key ([`config.md`](../hex-core/references/config.md#key-vocabulary)),
+not a separate definition. Skipping this step is fine — spawns then
+run the harness default and class escalation has no effect. Nothing from
+this step is written until Step 4½'s apply consent.
 
 ### 4½. Assemble the `Preferences` block, with consent
 
-Gather every swarm-only choice from this run — the model matrix and
-overrides from Step 4, plus (if raised) an adversary skill, `limits`,
-`perspectives`, `research-axes`, and the per-join-level `review` settings
-(`review.<level>.{seats, class, rounds, budget-minutes, delta-only,
-checklist}`, plus any candidate a prior run recorded in `hex.md › Memory`
-under the [upkeep step](../hex-core/references/protocol.md#upkeep-step)) —
-into the single fenced `yaml` block
+Gather every swarm-only choice from this run — an adversary skill, `limits`,
+`perspectives`, `research-axes`, and the `review` settings (plus any
+candidate a prior run recorded in `hex.md › Memory` under the
+[upkeep step](../hex-core/references/protocol.md#upkeep-step)) — into the
+single fenced `yaml` block
 that carries `hex.md › Preferences`. Key set, types, defaults, and effects
 are defined once, in
 [`../hex-core/references/config.md`](../hex-core/references/config.md#key-vocabulary);
@@ -360,8 +385,9 @@ and `adversary` may be a list (v4, `adr_0017` C-997).
 
 Present the assembled block as one diff against the file's current state
 (one line per changed key, old → new), gated by the
-[wizard](#the-wizard)'s separate apply consent. On
-consent, write the block; on decline, leave `hex.md › Preferences` as-is
+[wizard](#the-wizard)'s separate apply consent, with the Step 4 agent
+definitions listed in the same diff. On consent, write the block and the
+definitions; on decline, leave `hex.md › Preferences` as-is
 and note it still-missing in the Step 7 summary. An unconfigured project
 writes nothing here — empty is normal, shipped defaults apply.
 
@@ -374,15 +400,12 @@ the other two sections:
 
 - **`hex.md › Pointers`** — a cache seeded from Step 1's findings: where
   verification is documented, where the selective test command is
-  documented, where the project's security-sensitive / hot-path convention
-  is documented, where spec/plan/ADR conventions live, the doc and
+  documented, where spec/plan/ADR conventions live, the doc and
   product-knowledge homes provisioned in Step 2, the discussions home when
   one was resolved, the goals home when one was resolved, key
-  architectural rules, any worktree-location
-  deviation, and the constitution location (optional). The sensitive-path
-  row is the named source the high-risk merge trigger reads; the
-  key-architectural-rules pointer beside it keeps its own job — naming the
-  rule files — and neither replaces the other.
+  architectural rules, any worktree-location deviation, the constitution
+  location (optional), and the run-cost rows `Build jobs:`, `Hub files:`
+  and `Fresh gate:` when found.
   Pointers only, never copies — the product-knowledge pointer is how
   researchers and reviewers reach the product facts that live in project
   context.
@@ -425,8 +448,8 @@ grammar, the seven validation checks) is defined once in
 this flow only creates and tracks the files, and asks through the
 [wizard](#the-wizard):
 
-1. **List** the forkable skill × tier pairs (the four orchestrators ×
-   `low`/`medium`/`high`/`xhigh`/`max`), each with its shipped phase list and a
+1. **List** the forkable skill × tier pairs (the orchestrators that ship
+   tier files × `low`/`medium`/`high`/`xhigh`/`max`), each with its shipped phase list and a
    `[forked]` marker where `workflows.<skill>.<tier>` already points at a
    file.
 2. **Fork.** On selection, copy the shipped `hex-<skill>/tier-<tier>.md`

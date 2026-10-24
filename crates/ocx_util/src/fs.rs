@@ -7,6 +7,7 @@ mod drop_file;
 mod empty_or_absent;
 mod file_lock;
 mod locked_file;
+mod long_path;
 pub mod path;
 mod same_dir;
 mod same_filesystem;
@@ -124,14 +125,14 @@ where
 ///
 /// An already-present `target` is not success: a mutable destination may hold stale content.
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, |tmp| tmp.persist(target).map(|_| ()))
+    persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Existing))
 }
 
 /// [`persist_temp_file`], except an existing `target` is left alone and reported as `AlreadyExists`. Blocking.
 ///
 /// For a destination whose file identity matters: a replacing racer orphans what hardlinks the winner's file.
 pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
-    persist_with_retry(tmp, |tmp| tmp.persist_noclobber(target).map(|_| ()))
+    persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Never))
 }
 
 /// Outcome of a no-clobber publish attempt — see [`persist_temp_file_noclobber`].
@@ -159,8 +160,8 @@ fn attempt_noclobber(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
 ) -> Result<PersistOutcome, tempfile::PersistError> {
-    match tmp.persist_noclobber(target) {
-        Ok(_) => Ok(PersistOutcome::Published),
+    match persist_at(tmp, target, Replace::Never) {
+        Ok(()) => Ok(PersistOutcome::Published),
         Err(persist_err) if persist_err.error.kind() == std::io::ErrorKind::AlreadyExists => {
             if published_at(target, &persist_err.file) {
                 // Our link landed and only the NFS reply was lost; no `keep()`, or a `.tmp*` is stranded.
@@ -191,6 +192,37 @@ fn published_at(target: &std::path::Path, tmp: &tempfile::NamedTempFile) -> bool
 #[cfg(not(unix))]
 fn published_at(_target: &std::path::Path, _tmp: &tempfile::NamedTempFile) -> bool {
     false
+}
+
+/// Whether a publish may replace what already sits at the target.
+#[derive(Clone, Copy)]
+enum Replace {
+    Existing,
+    Never,
+}
+
+/// One publish attempt of `tmp` at `target`, by the Windows `\\?\` route when either path is 260 units or more.
+///
+/// Every publish goes through here: `tempfile` passes its paths to `MoveFileExW` unprefixed, so a long
+/// one fails with `ERROR_PATH_NOT_FOUND`.
+fn persist_at(
+    tmp: tempfile::NamedTempFile,
+    target: &std::path::Path,
+    replace: Replace,
+) -> Result<(), tempfile::PersistError> {
+    #[cfg(windows)]
+    {
+        if let Some(paths) = long_path::api_pair(tmp.path(), target) {
+            let mut tmp = tmp;
+            return long_path::persist(&mut tmp, paths, replace)
+                .map_err(|error| tempfile::PersistError { error, file: tmp });
+        }
+    }
+    match replace {
+        Replace::Existing => tmp.persist(target),
+        Replace::Never => tmp.persist_noclobber(target),
+    }
+    .map(|_| ())
 }
 
 /// The shared publish loop with the Windows retry schedule, generic so a caller can get its temp file back.
@@ -335,6 +367,150 @@ mod tests {
 
         handle.join().unwrap().unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-content");
+    }
+
+    /// UTF-16 length of `path`: the unit Windows counts against `MAX_PATH`.
+    #[cfg(windows)]
+    fn utf16_len(path: &std::path::Path) -> usize {
+        use std::os::windows::ffi::OsStrExt as _;
+        path.as_os_str().encode_wide().count()
+    }
+
+    /// Creates nested directories under `root` until the path is at least `units` long and returns it.
+    ///
+    /// `create_dir_all` goes through std, which spells a long path verbatim itself, so the setup works
+    /// where `tempfile`'s raw `MoveFileExW` call did not.
+    #[cfg(windows)]
+    fn directory_of_at_least(root: &std::path::Path, units: usize) -> std::path::PathBuf {
+        let mut directory = root.to_path_buf();
+        while utf16_len(&directory) < units {
+            directory.push("d".repeat(50));
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// Windows regression: `tempfile` hands both paths to `MoveFileExW` unprefixed, so a
+    /// target of 260 UTF-16 units or more failed with `ERROR_PATH_NOT_FOUND` (os error 3).
+    /// Here only the target is long: the temp file sits in a short directory, so the fix must
+    /// prefix the target alone.
+    #[cfg(windows)]
+    #[test]
+    fn persist_temp_file_publishes_to_a_target_of_260_units_or_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("n".repeat(250));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        assert!(
+            utf16_len(&target) >= 260,
+            "the target must be long: {}",
+            utf16_len(&target)
+        );
+        assert!(
+            utf16_len(tmp.path()) < 260,
+            "only the target may be long: {}",
+            utf16_len(tmp.path())
+        );
+
+        persist_temp_file(tmp, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
+    }
+
+    /// Windows regression, the other regime: the directory is long, so the temp file's own path is
+    /// 260 units or more too and its `SetFileAttributesW` call fails the same way. The second round
+    /// replaces the first, so the replacing flag survives the long form.
+    #[cfg(windows)]
+    #[test]
+    fn persist_temp_file_publishes_when_the_temp_file_path_is_also_260_units_or_more() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = directory_of_at_least(root.path(), 260);
+        let target = parent.join("out.json");
+
+        for payload in [&b"first"[..], &b"second"[..]] {
+            let mut tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+            assert!(
+                utf16_len(tmp.path()) >= 260,
+                "the temp file path must be long: {}",
+                utf16_len(tmp.path())
+            );
+            tmp.write_all(payload).unwrap();
+
+            persist_temp_file(tmp, &target).unwrap();
+
+            assert_eq!(std::fs::read(&target).unwrap(), payload);
+        }
+    }
+
+    /// Windows regression: the no-clobber publish keeps its contract through the long form, an
+    /// occupied target is left byte-for-byte alone and its content handed back.
+    #[cfg(windows)]
+    #[test]
+    fn persist_noclobber_leaves_an_occupied_target_of_260_units_or_more_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = directory_of_at_least(root.path(), 260);
+        let target = parent.join("record.json");
+
+        let mut first = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        first.write_all(b"first-record").unwrap();
+        match persist_temp_file_noclobber(first, &target).unwrap() {
+            PersistOutcome::Published => {}
+            PersistOutcome::Occupied(_) => panic!("an absent target must accept the publish"),
+        }
+
+        let mut second = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        second.write_all(b"second-record").unwrap();
+        match persist_temp_file_noclobber(second, &target).unwrap() {
+            PersistOutcome::Occupied(_) => {}
+            PersistOutcome::Published => panic!("an occupied target must never be replaced"),
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"first-record");
+    }
+
+    /// The directory a publish lands in: 260 UTF-16 units or more on Windows, where the `\\?\` route
+    /// publishes there, and the plain temp root elsewhere.
+    fn publish_directory(root: &std::path::Path) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            directory_of_at_least(root, 260)
+        }
+        #[cfg(not(windows))]
+        {
+            root.to_path_buf()
+        }
+    }
+
+    /// A publish into a missing directory fails with the bare OS error, so the `\\?\` spelling only
+    /// the Windows helper knows cannot reach a caller's message; an error rebuilt from text has no
+    /// OS code. `NotFound` alone pins nothing, since an unprefixed 260-unit path fails with the same
+    /// code, so the same target must publish once its directory exists.
+    #[test]
+    fn persist_temp_file_into_a_missing_directory_fails_with_the_bare_os_error() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = publish_directory(root.path());
+        let missing = parent.join("missing");
+        let target = missing.join("out.json");
+        let tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        #[cfg(windows)]
+        assert!(
+            utf16_len(tmp.path()) >= 260,
+            "the temp file path must be long: {}",
+            utf16_len(tmp.path())
+        );
+
+        let err = persist_temp_file(tmp, &target).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "unexpected: {err}");
+        assert!(
+            err.raw_os_error().is_some(),
+            "the OS error was rebuilt from text: {err}"
+        );
+
+        std::fs::create_dir(&missing).unwrap();
+        let mut tmp = tempfile::NamedTempFile::new_in(&parent).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        persist_temp_file(tmp, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"payload");
     }
 
     /// Baseline (all platforms): a populated directory tree lands at an absent

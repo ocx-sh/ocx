@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from src import registry as reg
+from src.runner import current_platform
 
 SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"
 
@@ -34,13 +35,15 @@ SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"
 FULCIO_CLIENT_ID = "ocx-test"
 
 
-def subject_of(registry: str, repo: str, tag: str, platform: str = "linux/amd64") -> tuple[str, int]:
+def subject_of(registry: str, repo: str, tag: str, platform: str | None = None) -> tuple[str, int]:
     """The (digest, size) of the platform manifest a signature is attached to.
+
+    ``platform`` defaults to the host's, the platform the package fixtures publish for.
 
     Size comes from the bytes the registry served, not a re-encoding — the
     referrer's ``subject`` descriptor must match what the registry stored.
     """
-    digest = reg.fetch_platform_manifest_digest(registry, repo, tag, platform=platform)
+    digest = reg.fetch_platform_manifest_digest(registry, repo, tag, platform=platform or current_platform())
     raw, _ = reg.fetch_manifest_raw(registry, repo, digest)
     return digest, len(raw)
 

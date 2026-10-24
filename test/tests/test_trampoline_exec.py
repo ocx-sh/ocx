@@ -68,7 +68,12 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package, make_package_with_entrypoints, write_ocx_toml
+from src.helpers import (
+    make_package,
+    make_package_with_entrypoints,
+    rglob_no_links,
+    write_ocx_toml,
+)
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
     DEFAULT_GROUP,
@@ -79,6 +84,8 @@ from src.toolchain_fixtures import (
     run_in,
     sha256_of,
     shell_bin,
+    trampoline_files,
+    trampoline_name,
 )
 
 EXIT_SUCCESS = 0
@@ -138,7 +145,17 @@ def composed_path(ocx: OcxRunner, project: Path, **kwargs: object) -> list[str]:
     the directory is on the child's ``PATH`` at all. Without that, the negative
     passes just as well against a drifted spelling.
     """
-    result = run_in(ocx, project, "exec", "--", "sh", "-c", "printenv PATH", **kwargs)  # type: ignore[arg-type]
+    # The interpreter, not `sh -c printenv`: a Windows `sh` reports PATH in its own `/c/...` spelling.
+    result = run_in(
+        ocx,
+        project,
+        "exec",
+        "--",
+        sys.executable,
+        "-c",
+        "import os; print(os.environ['PATH'])",
+        **kwargs,  # type: ignore[arg-type]
+    )
     assert result.returncode == EXIT_SUCCESS, (
         f"composing the child PATH must succeed; rc={result.returncode}\n{result.stderr}"
     )
@@ -170,9 +187,17 @@ def stale_trampoline(project: ToolchainProject, name: str) -> Path:
     ``ocx.toml`` without a re-render — the state D-V1's two-home loop needs,
     and the one thing the composition itself will not provide.
     """
-    target = shell_bin(project.home) / name
+    target = shell_bin(project.home) / trampoline_name(name)
     shutil.copy(project.default_trampoline, target)
+    if sys.platform == "win32":
+        # The Windows trampoline is the `.exe` plus its `.exec` sidecar, which is what `is_ocx_trampoline` reads.
+        shutil.copy(project.default_trampoline.with_suffix(".exec"), target.with_suffix(".exec"))
     return target
+
+
+def debug_spelling(path: Path) -> str:
+    """``path`` as the refusal prints it: Rust ``{:?}`` doubles every Windows backslash."""
+    return str(path).replace("\\", "\\\\")
 
 
 def assert_names_one_guard(stderr: str, expected: str, other: str) -> None:
@@ -333,7 +358,7 @@ def test_item22_a_foreign_home_trampoline_on_path_is_refused_by_identity(
         f"{result.stderr}"
     )
     assert_names_one_guard(result.stderr, TRAMPOLINE_WORDING, NOT_FOUND_WORDING)
-    assert str(foreign) in result.stderr, (
+    assert debug_spelling(foreign) in result.stderr, (
         f"the refusal must name the foreign trampoline it resolved to; got {result.stderr!r}"
     )
 
@@ -386,35 +411,41 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     )
 
     home = directory / ".ocx" / "toolchain"
-    resolved = entry_link(home, DEFAULT_GROUP, key).resolve() / "content" / "bin" / name
-    prefix = resolved.read_bytes()[:TRAMPOLINE_PROBE_BYTES]
-    assert TRAMPOLINE_MARKER.encode() in prefix, (
-        "precondition: the marker must sit inside the probe window, or the "
-        "loosened predicate answers `false` here for the wrong reason"
-    )
-    assert prefix.split(b"\n")[1] != TRAMPOLINE_MARKER.encode(), (
-        "precondition: the marker must NOT be line two, or the anchored "
-        "predicate would refuse this file too"
-    )
+    # The marker probe is a POSIX body property: the Windows predicate is a sidecar check,
+    # and `make_package` ignores `bin_scripts` there, so the tool is a plain `.bat`.
+    posix = sys.platform != "win32"
+    if posix:
+        resolved = entry_link(home, DEFAULT_GROUP, key).resolve() / "content" / "bin" / name
+        prefix = resolved.read_bytes()[:TRAMPOLINE_PROBE_BYTES]
+        assert TRAMPOLINE_MARKER.encode() in prefix, (
+            "precondition: the marker must sit inside the probe window, or the "
+            "loosened predicate answers `false` here for the wrong reason"
+        )
+        assert prefix.split(b"\n")[1] != TRAMPOLINE_MARKER.encode(), (
+            "precondition: the marker must NOT be line two, or the anchored "
+            "predicate would refuse this file too"
+        )
+    ran_output = f"ran-{label}" if posix else package.marker
 
     result = run_in(ocx, directory, "exec", "--", name)
     assert result.returncode == EXIT_SUCCESS, (
         f"a tool merely containing the marker below line two must resolve; "
         f"rc={result.returncode}\n{result.stderr}"
     )
-    assert f"ran-{label}" in result.stdout, result.stdout
+    assert ran_output in result.stdout, result.stdout
 
-    trampoline = shell_bin(home) / name
-    body = trampoline.read_text()
-    assert f"'{directory}'" in body, (
-        f"the marker-spelling root is baked inside single quotes; got {body!r}"
-    )
+    trampoline = shell_bin(home) / trampoline_name(name)
+    if posix:
+        body = trampoline.read_text()
+        assert f"'{directory}'" in body, (
+            f"the marker-spelling root is baked inside single quotes; got {body!r}"
+        )
     invoked = run_file(trampoline, cwd=tmp_path, env=dict(ocx.env))
     assert invoked.returncode == EXIT_SUCCESS, (
         f"the trampoline for a marker-spelling root must run; rc={invoked.returncode}\n"
         f"{invoked.stderr}"
     )
-    assert f"ran-{label}" in invoked.stdout, invoked.stdout
+    assert ran_output in invoked.stdout, invoked.stdout
 
 
 def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoline(
@@ -448,7 +479,7 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
     package = make_package_with_entrypoints(ocx, f"t_{label}_launcher", tmp_path, [f"ep{label}"])
     installed = run_in(ocx, tmp_path, "package", "install", package.fq)
     assert installed.returncode == EXIT_SUCCESS, installed.stderr
-    roots = sorted((Path(ocx.env["OCX_HOME"]) / "packages").rglob("metadata.json"))
+    roots = sorted(rglob_no_links(Path(ocx.env["OCX_HOME"]) / "packages", "metadata.json"))
     assert len(roots) == 1, f"exactly one package root is expected; got {roots}"
     package_root = roots[0].parent
 
@@ -471,7 +502,7 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
         f"rc={result.returncode}\n{result.stderr}"
     )
     assert_names_one_guard(result.stderr, TRAMPOLINE_WORDING, NOT_FOUND_WORDING)
-    assert str(trampoline) in result.stderr, result.stderr
+    assert debug_spelling(trampoline) in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +510,10 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the `${0##*/}` stem is a POSIX trampoline body; the Windows trampoline is a PE shim dispatched through its `.exec` sidecar",
+)
 def test_item1_a_trampoline_invoked_through_a_symlink_elsewhere_uses_the_baked_home(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -687,12 +722,12 @@ def test_item16_a_package_claiming_the_name_ocx_renders_a_trampoline_and_runs(
     )
 
     home = directory / ".ocx" / "toolchain"
-    assert bin_entries(home) == ["ocx"], bin_entries(home)
+    assert bin_entries(home) == sorted(trampoline_files("ocx")), bin_entries(home)
 
     # `bin` mode: the trampoline directory is PATH-front when this runs, which
     # is what makes the re-entry's own lookup for the name `ocx` a live question.
     ran = run_file(
-        shell_bin(home) / "ocx",
+        shell_bin(home) / trampoline_name("ocx"),
         cwd=tmp_path,
         env={**ocx.env, "PATH": f"{shell_bin(home)}{os.pathsep}{ocx.env['PATH']}"},
     )
@@ -736,11 +771,11 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
     )
 
     home = directory / ".ocx" / "toolchain"
-    assert bin_entries(home) == [shared], (
+    assert bin_entries(home) == sorted(trampoline_files(shared)), (
         f"two claims on one name render exactly one trampoline; got {bin_entries(home)}"
     )
 
-    ran = run_file(shell_bin(home) / shared, cwd=tmp_path, env=dict(ocx.env))
+    ran = run_file(shell_bin(home) / trampoline_name(shared), cwd=tmp_path, env=dict(ocx.env))
     assert ran.returncode == EXIT_SUCCESS, ran.stderr
     assert second.marker in ran.stdout, (
         f"the last-walked claim owns the name; got {ran.stdout!r}"

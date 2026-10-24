@@ -127,10 +127,12 @@ class OcxRunner:
         # which is what a CI runner already provides and what makes a local run
         # behave the same way.
         streams: dict[str, Any] = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
+        # ocx writes UTF-8 on every platform; `text=True` alone decodes with the locale's
+        # codepage, which on Windows turns tree glyphs and other non-ASCII output into mojibake.
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             env=env,
             check=False,
             **streams,

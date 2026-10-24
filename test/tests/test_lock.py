@@ -34,10 +34,12 @@ from uuid import uuid4
 import pytest
 
 from src.assertions import assert_not_exists
-from src.helpers import make_package
-from src.runner import OcxRunner, registry_dir
+from src.helpers import make_package, rglob_no_links
+from src.runner import OcxRunner, current_platform, registry_dir
 
 pytestmark = pytest.mark.command("lock")
+
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
 
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs
@@ -1161,7 +1163,7 @@ def _packages_present_count(ocx: OcxRunner) -> int:
     base = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry)
     if not base.exists():
         return 0
-    return sum(1 for p in base.rglob("content") if p.is_dir())
+    return sum(1 for p in rglob_no_links(base, "content") if p.is_dir())
 
 
 def _single_tool_project(
@@ -1609,12 +1611,14 @@ tool = "{ocx.registry}/{repo}:{tag}"
     )
 
     # Push a SECOND, distinct platform under the same repo:tag.  We use
-    # ``linux/arm64`` as a portable non-host alternative; the push merges
+    # a platform other than the host's; the push merges
     # into the existing index rather than starting fresh.
     # A distinct ``tmp_path`` subdirectory is required so that make_package
     # does not try to re-create ``pkg-{repo}-{tag}/bin/`` which already
     # exists from the first call.
-    second_platform = "linux/arm64"
+    second_platform = next(
+        p for p in ("linux/arm64", "linux/amd64") if p != current_platform()
+    )
     make_package(
         ocx, repo, tag, tmp_path / "second",
         cascade=False,

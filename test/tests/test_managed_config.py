@@ -55,12 +55,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest  # noqa: F401 -- unused since the xdist group left; DEC-10 keeps the line
+import pytest
 
-from src.helpers import make_package, push_managed_config
+from src.helpers import copy_tree_keeping_links, make_package, push_managed_config
 from src.registry import push_raw_config_package
 from src.runner import OcxRunner
 from src.terminal import requires_pty, run_on_a_terminal
+
+pytestmark = pytest.mark.requires_testing_build
 
 # The managed-config fence's own label (ADR "Seed write mechanism" example:
 # `# >>> ocx managed v1 <hash> >>>` ... `# <<< ocx managed <<<`) — distinct
@@ -747,7 +749,7 @@ def test_zip_and_move_warm_home_offline_identical(
     assert setup.returncode == 0, f"digest-pinned onboard must succeed: {setup.stderr}"
 
     moved_home = tmp_path / "moved-ocx-home"
-    shutil.copytree(ocx.env["OCX_HOME"], moved_home, symlinks=True)
+    copy_tree_keeping_links(Path(ocx.env["OCX_HOME"]), moved_home)
 
     moved_env = {**ocx.env, "OCX_HOME": str(moved_home)}
     moved_env.pop("OCX_DEFAULT_REGISTRY", None)

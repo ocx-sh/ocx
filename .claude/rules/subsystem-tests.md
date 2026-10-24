@@ -5,18 +5,18 @@ paths:
 
 # Test Subsystem
 
-Pytest acceptance tests with Docker Compose registry at `test/`.
+Pytest acceptance tests at `test/`, each session against its own ephemeral zot registries.
 
 ## Design Rationale
 
-Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Session-scoped registry (started once in `pytest_sessionstart`) enables fast parallel runs with pytest-xdist. UUID-prefixed repo names provide isolation on shared registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
+Pytest (not Rust integration tests) because acceptance tests exercise real compiled binary against real OCI registry — catch issues mocked unit tests miss. Every pytest session starts its own **zot** registries (`pytest_configure` in the xdist controller, `test/src/zot.py`) on kernel-chosen ports, so concurrent sessions and Bazel targets share no registry state; pytest-xdist workers inherit the exported ports. UUID-prefixed repo names provide isolation inside the session's registry, no per-test cleanup. See `arch-principles.md` for full pattern catalog.
 
 ## Structure
 
 | Path | Purpose |
 |------|---------|
 | `test/tests/conftest.py` | Function-scoped fixtures (ocx, published_package, etc.) |
-| `test/conftest.py` | Session-scoped fixtures (registry, ocx_binary) + `pytest_sessionstart` |
+| `test/conftest.py` | Session-scoped fixtures (registry, ocx_binary) + `pytest_configure` / `pytest_unconfigure` (the zot stack) |
 | `test/src/runner.py` | `OcxRunner`: subprocess wrapper with test isolation |
 | `test/src/assertions.py` | Cross-platform assertion helpers |
 | `test/src/helpers.py` | `make_package()`: build + push test packages |
@@ -28,9 +28,9 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 
 | Fixture | Scope | Purpose |
 |---------|-------|---------|
-| `registry` | session | localhost:5000 **zot** (referrers-capable primary; auto-started via docker-compose; port override `OCX_TEST_REGISTRY_PORT`) |
-| `mirror_registry` | session | localhost:5001 registry:2 (mirror-test target; port override `OCX_TEST_MIRROR_PORT`; skips if absent) |
-| `legacy_registry` | session | localhost:5001 registry:2 — referrers-**negative** fixture (no Referrers API) for `test_referrers_capability.py` (#106); same service as `mirror_registry` |
+| `registry` | session | **zot** on a free port the session started (referrers-capable primary; `OCX_TEST_REGISTRY_PORT` is exported by `pytest_configure`, never read as an override) |
+| `mirror_registry` | session | localhost:5001 registry:2 (mirror-test target; port override `OCX_TEST_MIRROR_PORT`; skips with a `no docker:` reason only on a job that declares `OCX_TEST_NO_DOCKER=1`, else a missing `docker` CLI or a dead service fails) |
+| `legacy_registry` | session | localhost:5001 registry:2 — referrers-**negative** fixture (no Referrers API) for `test_referrers_capability.py` (#106); same service, same skip rule as `mirror_registry` |
 | `ocx_binary` | session | Path to compiled `ocx` binary |
 | `ocx_home` | function | Isolated temp dir for `OCX_HOME` |
 | `ocx` | function | `OcxRunner` instance with test isolation |
@@ -38,13 +38,19 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 | `published_package` | function | Pre-built + pre-pushed test package (v1.0.0) → `PackageInfo` |
 | `published_two_versions` | function | Two versions (v1.0.0, v2.0.0) → `tuple[PackageInfo, PackageInfo]` |
 
-**Registry topology (#195):** the primary `registry` (5000) is **zot** because it
+**Registry topology (#195):** the primary `registry` is **zot** because it
 serves the OCI 1.1 Referrers API natively — distribution's `registry:2`/`registry:3`
 do NOT (they omit `OCI-Subject` on push and 404 the `/v2/<name>/referrers/<digest>`
 route), and OCX is referrers-only with no tag-schema fallback (#106). The single
 `registry:2` instance (`mirror-registry`, 5001) doubles as the mirror-test target and
 the permanent referrers-unsupported negative fixture. `test_referrers_smoke.py` proves
 the round-trip. Referrers push/list helpers live in `src/registry.py`.
+
+**Ephemeral zot.** `pytest_configure` (`test/conftest.py`, `test/src/zot.py`) starts the `registry`, `target` and `prod` zot instances from the project toolchain (`zot` on `PATH`, or `OCX_TEST_ZOT`; under Bazel `@tools//:zot` is a `data` input of every target), each with `http.port: "0"`; the port is parsed from zot's info-level log line and the instance counts as up when `GET /v2/` answers 200 within 60 s, else `pytest.UsageError` names the log. It exports `OCX_TEST_{REGISTRY,TARGET,PROD}_PORT` and `OCX_INSECURE_REGISTRIES`. It is skipped in xdist workers, for `--collect-only`, with `OCX_TESTS_NO_REGISTRY=1` and for the lint tier (`test/lint/`). A killed pytest leaves no zot: on POSIX a watchdog child holds a pipe and kills the process groups on EOF (no `preexec_fn`), on Windows zot runs in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Only the `registry:2` mirror and the Sigstore stack still use Docker: `mirror_registry` / `legacy_registry` start the compose `mirror-registry` service on first use, and `sigstore_stack` starts the `sigstore` profile. **`OCX_TEST_NO_DOCKER=1`** is the one switch that skips them: it is read in `skip_without_docker` (`test/src/helpers.py`), before any reachability probe, and the reason starts `no docker:`. It is declared by a job (the deep tier's macOS and Windows legs via `acceptance.yml`'s `no-docker` input, `scripts/windows_local.sh` for the local Windows host), never inferred: with it unset, a missing `docker` CLI, a dead daemon or a service that never answers is a red, so Linux stays strict. CI therefore needs `zot` on `PATH` (`setup-ocx`) and nothing else on a runner with no Docker.
+
+**Sharding and the merged floor.** `scripts/accept_shard.py` splits `test/tests/test_*.py` (sorted by stem, shard `I` of `N` takes `modules[I::N]`, `I` 0-based); `task bazel:test:accept SHARD_COUNT=N SHARD_INDEX=I` and `task test:accept:native SHARD_COUNT=N SHARD_INDEX=I` both use it, so a module lands in the same shard on either path. The selector reads the flags first, then Bazel's `TEST_TOTAL_SHARDS` / `TEST_SHARD_INDEX` (touching `TEST_SHARD_STATUS_FILE` when set); exit 2 is a bad request (count below 1, index outside `0..N-1`, one half of a pair), exit 1 an empty selection. A shard is a subset, so floors are never evaluated per shard: each writes its own JUnit file under `target/accept/junit/`, and `task test:accept:floor JUNIT_DIR=<dir>` (`scripts/accept_floor.py`, plus `conformance_floor.py`) applies `SUITE_FLOOR`, the ceilings and the conformance floor over the merged directory. Reports are named `shard-<I>-of-<N>.xml` and `EXPECT_SHARDS=N` requires indices `0..N-1`. An empty directory is red, as is a shard index past the module count.
+
+**Windows from WSL.** `task -x test:windows-local MODE=accept [SHARD_COUNT=N SHARD_INDEX=I] [EXE=<ocx.exe>] -- <pytest args>` (`scripts/windows_local.sh`) runs the suite on the Windows host without a CI round-trip: it cross-builds the gnullvm `ocx.exe` (`cross:test:bin`) unless `EXE` is given, stages the git working tree to `%USERPROFILE%\ocx-wintest\<checkout>\` (the venv and `test/bin` survive between runs), runs `test:accept:native` under `cmd.exe` through the staged `ocx.exe exec zot`; pytest starts its own zot there. The mirror port is `15001`, not 5001: WSL forwards its own compose stack on 5000..5004 to Windows `localhost`, so the default could reach the wrong registry. `-x` is what makes the exit status the child's (pytest's 1, 4 or 5): without it `task` reports 201 for any failed command. Exit 69 is "not WSL with a `cmd.exe`", 2 a shard request the selector refuses, 64 a malformed call. `MODE=unit` runs the `cross:test:bundle` bundle instead, with one optional substring after `--`. Reports come back to `target/windows-local/junit/`. `-n auto` through WSL localhost forwarding flakes now and then (WinError 10054): rerun the failed tests once before investigating.
 
 ## OcxRunner API
 
@@ -66,7 +72,7 @@ Returned by `published_package` / `published_two_versions`:
 | `repo` | `"cmake"` |
 | `tag` | `"1.0.0"` |
 | `short` | `"cmake:1.0.0"` |
-| `fq` | `"localhost:5000/cmake:1.0.0"` |
+| `fq` | `"localhost:<port>/cmake:1.0.0"` |
 | `marker` | UUID-based unique string |
 
 ## make_package()
@@ -122,7 +128,7 @@ Four tiers (ADR `adr_test_speed_tiers.md` § C-TIER; plan `plan_test_speed_tiers
 | **T0 lint** | `task test:lint:structure` (pytest over `test/lint/`, uncached) + `scripts/scoped_gate.py --check-coverage` (`task test:rows:check`) | verify phase 1; every `verify:scoped`, regardless of decision (an escalate reaches it through `verify`) | ≤ 30 s wall (`OCX_LINT_BUDGET_SECONDS`), floored on `test/LINT_FLOOR`, ceilinged on `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` |
 | **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents — its `rust_doc_test` targets are the doctests) + `cargo clippy -p <crate>` per changed crate + the workspace `rust:doc:ratchet` + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
 | **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
-| **T3 deep** | `verify-deep.yml` | push to `main`, merge queue, `workflow_dispatch` | CI, cold disk |
+| **T3 deep** | `verify-deep.yml` (its `repo` job calls `deep-repo.yml`) | nightly cron, `workflow_dispatch`, the `run-deep` pull request label | CI, cold disk |
 
 ### Lint tier admission (`test/lint/`)
 
@@ -140,7 +146,7 @@ The coverage guard (`scripts/scoped_gate.py --check-coverage`, wired as `task te
 
 `test/bazel.bzl`'s `UNCACHED_MODULES` lists acceptance modules whose declared input closure `scripts/bazel_tag_guard.py` cannot yet certify complete; each carries `external`, the only tag that stops a cached verdict being reused, so it re-executes on every `bazel:test:accept` run. The list shrinks only by declaring the input, never by deleting a line. It holds **one named residual**: `tests/test_windows_shim.py` — its `_find_shim_binary` fallback reads `target/{release,debug}/` on two adjacent lines, and `scripts/test_diff_guard.py`'s one-line-for-one-line `--allow` admits only a one-line-for-one-line hunk, so dropping both lines at once is refused by design and the only 1:1 rewrite would hide the read from the tag guard instead of fixing it. The module is `skipif(sys.platform != "win32")` as a whole, so on the Linux lane that runs this suite `external` costs one collection and hides no verdict.
 
-`bazel:test:accept` runs its targets **concurrently** against the one compose stack (no `exclusive` tag), at parity with `test:parallel`'s xdist run — `test/bazel.bzl` § Concurrency. Two obligations follow for a module author: every `xdist_group` a module names — shared with another module or not, because every target is its own process and runs from sibling checkouts overlap — is listed for that module in `test/BUILD.bazel` `module_slots` (the runner's per-group host lock replaces xdist's one-worker placement), spelled in the module itself as a string literal or a module-level dict of literals; and a file only some modules read (anything outside `conftest.py`, `src/`, the `tests/` helpers and the stack config) is declared in those modules' `module_data`, not in `:suite_inputs` — importing a helper counts as reading it. `scripts/bazel_tag_guard.py` reds a missing or extra slot, a group spelled outside a `tests/test_*.py` module, and a read its AST derivation can see; a read it cannot see (a `task` recipe, the lock beside a manifest) is declared in the guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`, and a module that launches `task` or names by string a path under a `test/` directory holding no `:suite_inputs` member reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry (empty when the review finds no read).
+`bazel:test:accept` runs its targets **concurrently**, each on zot registries of its own (no `exclusive` tag, no host locks but the per-target arena) — `test/bazel.bzl` § Concurrency. One obligation follows for a module author: a file only some modules read (anything outside `conftest.py`, `src/`, the `tests/` helpers and the compose file) is declared in those modules' `module_data`, not in `:suite_inputs` — importing a helper counts as reading it. `scripts/bazel_tag_guard.py` reds a read its AST derivation can see; a read it cannot see (a `task` recipe, the lock beside a manifest) is declared in the guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`, and a module that launches `task` or names by string a path under a `test/` directory holding no `:suite_inputs` member reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry (empty when the review finds no read).
 
 ### `--tiered-shapes`
 
@@ -162,18 +168,22 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   and `command` markers — moved off `test/taskfile.yml`'s old `SCOPED_ROWS`, C-012); every
   glob must collect at least one test, or the run fails.
 - **Floor files.** `test/SUITE_FLOOR` (collected count, only ever rises — in the commit that
-  adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. `task test` (and `test:quick` /
+  adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. A platform with its own counts keeps the three
+  in `test/limits/<os>/` (`macos`, `windows` and the `*-release` sets the readiness gate judges), which each `acceptance.yml` merge job reads through `LIMITS_DIR`;
+  `scripts/accept_floor.py` with no such file prints the counted cases, skips and xfails and reds, so a
+  new platform's first run reports the numbers its limits are committed from. `task test` (and `test:quick` /
   `test:parallel`, which route through it) refuses below the floor before the run and above a
   ceiling after it, both as `cmds:` (`--force` skips `preconditions:`). `test/CONFORMANCE_FLOOR`
   is the minimum count of distinct `--format json` schema roots a full run validated; the
   conformance hook records them per case and `scripts/conformance_floor.py` reads the JUnit
   report (the `test` taskfile's conformance-floor step and `bazel:test:accept`; a subset run is reported as not floored).
-- **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
-  per-WP range and `merge-base(origin/main)..HEAD`, with `--tiered-shapes` on ranges that
-  legitimately move or add a `test/lint/` module, add a `command` marker, edit
-  `test/scoped_rows.toml`/a floor file, or delete a ported original under C-007(e) — see
-  "Verification tiers" § `--tiered-shapes` above; every other range runs without the flag)
-  refuses any diff under `test/` except:
+- **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` judges crate-split ranges only
+  (`task scripts:test-diff-guard`: `merge-base(origin/main)..HEAD`, plus the series' own range when
+  given). It is not part of `task verify`. A range outside the split, such as the rules_rs
+  migration, edits `test/` on purpose. Pass `--tiered-shapes` only on ranges that move or port
+  tests; "Verification tiers" § `--tiered-shapes` above lists the shapes. Every other range runs
+  without the flag.
+  On a crate-split range it refuses any diff under `test/` except:
   an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); an added
   `@pytest.mark.xdist_group("<name>")` line — scheduling, the one mark that cannot change
   what a test asserts, and the only way to serialise writers of a registry-wide singleton
@@ -209,28 +219,29 @@ Every Rust unit test must run in **under 1.000 s**. `task rust:test:duration`
 (`scripts/unit_test_duration_gate.py`) asserts it over the run log
 `rust:test:unit` tee'd to `target/nextest/run.log`, inside the same
 `rust:test:floor` → `rust:test:unit` → `rust:test:ceiling` bracket: the floor
-step deletes the log, so a duration read there can only be that run's. It runs
-on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
+step deletes the log, so a duration read there can only be that run's. No lane
+runs the live gate (its log left with the nextest bracket); its proof runs under
+`task scripts:self-test`.
 
-- **What a green claims, exactly.** *Every unit test that runs in the Linux
-  unit suite is under 1 second.* Not "every unit test on every platform" —
+- **What a green claims, exactly.** *Every unit test in the nextest run whose
+  log the gate read is under 1 second.* Not "every unit test on every platform" —
   `platforms: [linux]`, the guard the sibling floor/ceiling tasks carry because
   cfg-gated tests make counts platform-dependent. The uncovered legs, named
-  rather than papered over: `verify-deep.yml`'s `Build & Unit Test` matrix runs
-  **raw** `cargo nextest run --workspace --target=…`, not through `task`, on
-  Linux, macOS and Windows; `build-windows-shims.yml` runs three crates the
-  same way. Deep is moving to manual dispatch, so a copy of this gate there
-  would be a green nobody could tell from one that never ran — the hole stays
-  named.
+  rather than papered over: Linux unit tests run as Bazel `rust_test` targets in
+  `ci:test`, which print no per-test timing. The macOS and Windows legs
+  (`deep-repo.yml`'s `unit-native`) run the cross-compiled test bundle through
+  `task cross:test:run`. `build-windows-shims.yml` runs three crates through raw
+  `cargo nextest`. A copy of this gate on any of them would be a green nobody
+  could tell from one that never ran — the hole stays named.
 - **Hard on CI, advisory elsewhere.** With `CI` set (GitHub Actions always sets
   it) an over-budget unlisted test fails the run; without it the same findings
   print and the run exits 0. Wall clock on a shared machine measures a test's
   neighbours: four tests at 6-190 ms quiet and 12-160 ms on CI were measured at
   1.0-1.2 s on a 32-core box under load 27, and allowlisting those would file a
-  false reason for tests that are fast everywhere it matters. **Not an
-  off-switch** — *advisory here; the gate is the Linux CI leg of
-  `verify-basic.yml`, which runs on every pull request.* Both modes print which
-  one they ran in, on every run, green or red. Only the budget verdict is
+  false reason for tests that are fast everywhere it matters. No lane runs the
+  live gate, so nothing in CI decides this budget and the hard mode is reached
+  only by a `CI=1` run by hand; the advisory message says so. Both modes print
+  which one they ran in, on every run, green or red. Only the budget verdict is
   advisory: the reader floor and the unbounded-pattern refusal fail in both
   modes, being wiring faults rather than slow tests. A load-average check is
   deliberately **not** used — a nextest run saturates the box by design, so
@@ -245,9 +256,9 @@ on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
   a CI run can be investigated by hand.
 - **Headroom.** 1.0 s is wall clock on the run's own log. ubuntu-latest
   measures roughly 2x this project's dev box for scan-heavy tests and worse for
-  process-spawning ones, and CI is where the gate gates — a test above ~0.7 s
-  there is a latent red, not a pass. After the current debt rows land fast the
-  slowest unlisted test on CI is about 0.8 s. **The budget is never raised
+  process-spawning ones, and a `CI=1` run is the verdict that counts — a test
+  above ~0.7 s there is a latent red, not a pass. After the current debt rows
+  land fast the slowest unlisted test on CI is about 0.8 s. **The budget is never raised
   above 1.0 s to buy headroom; 1.0 s is the contract.**
 - **Reader floor.** The gate refuses a log holding fewer timed lines than
   `crates/NEXTEST_FLOOR`, naming both numbers. A subset run, a truncated log or
@@ -295,7 +306,7 @@ on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
 
 An acceptance run that has gone quiet is either **slow** or **hung**, and the two
 need opposite actions. Never guess — poll four fields and let the discriminator
-decide. Contention with another checkout's gate over the shared registry is the
+decide. Contention with another checkout's gate over CPU and disk is the
 usual cause of slow, and it is indistinguishable from hung until measured.
 
 Three checks lie here. Each has produced a wrong verdict in this repo:
@@ -316,7 +327,7 @@ Three checks lie here. Each has produced a wrong verdict in this repo:
 | Leaf process | `pgrep -a -P <pytest-pid>` | the `ocx` subprocess actually working. Legitimately absent *between* tests |
 | Leaf age | `ps -o etime,time -p <leaf-pid>` | a package push older than ~5 min is wedged, not slow |
 | Progress | `ls -1 <basetemp>/pytest-of-*/pytest-0/ \| wc -l` | test directories created; monotonic while progressing |
-| Contention | `pgrep -c -f 'pytest tests/'` | `>1` means another checkout's gate is sharing the registry on `:5000` |
+| Contention | `pgrep -c -f 'pytest tests/'` | `>1` means other sessions run on this host; each has its own zot, so the contention is CPU and disk, not the registry |
 
 Verdict, across two polls 60-120s apart:
 
@@ -366,7 +377,7 @@ Two complementary harnesses with different platform reach:
 
 | Harness | Platforms | Use for |
 |---------|-----------|---------|
-| Pytest (`test/tests/test_*.py`) | **Linux only in CI.** The `acceptance-tests` job in `.github/workflows/verify-deep.yml` matrices a single `ubuntu-latest` leg — macOS runners lack the nested virtualization Docker/Colima needs, and the embedded `registry:2` image is unreliable on `windows-latest` (Linux container under Hyper-V routing issues); see the job's inline comment. Windows/macOS-only assertions in this suite (junction resolution, `.exe` shim behaviour, etc.) are real `skipif`-gated tests that currently run on **no** CI leg — treat them as unverified, not as coverage. | JSON-output assertions, structured fixtures, anything where Python expressivity beats shell |
+| Pytest (`test/tests/test_*.py`) | **Linux on every PR, macOS arm64 and Windows x64 on the deep tier.** Linux runs the whole suite, Docker-backed fixtures included (`basic-repo.yml` → `acceptance.yml`). The deep tier's `acceptance-native` job runs the same suite, four shards and a merge per OS, against the binaries `cross.yml` cross-built and the limits in `test/limits/<os>/`; neither runner has Docker (macOS runners lack the nested virtualization Docker/Colima needs, and the `registry:2` image is unreliable on `windows-latest`), so the job declares `OCX_TEST_NO_DOCKER=1` and the `registry:2` mirror and Sigstore tests skip with a `no docker:` reason. Those tests run on Linux alone. Windows/macOS-only assertions (junction resolution, `.exe` shim behaviour, etc.) are `skipif`-gated and run on the deep tier only — nightly, on dispatch or with the `run-deep` label, never on an unlabelled pull request. | JSON-output assertions, structured fixtures, anything where Python expressivity beats shell |
 | Shell scenarios (`test/scenarios/*.sh`) | Linux + macOS only (Windows skipped via `pytestmark` in `test_scenarios_smoke.py`) | Exec output, marker grep, file/dir existence, exit-code branches — bash is the natural language |
 
 When extending shell scenarios, reuse the harness in `test/src/scenarios/__init__.py` (`Scenario` base class, `# scenario: <Name>` header, registered subclasses for pre-publish state). Do not duplicate setup logic — extend the existing `Scenario` API.
@@ -436,6 +447,8 @@ When an acceptance test must force internal state that production code derives a
 4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_TESTING_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
 
 The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_TESTING_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
+
+**Release bytes.** Release builds lack `__testing`, so a test driving a seam cannot pass on them. A `test/tests/test_*.py` module that names a `__OCX_TESTING_[A-Z_]+` variable, or imports a `tests/` or `src/` file that does, carries `pytestmark = pytest.mark.requires_testing_build` (merged into an existing `pytestmark`). A module that names a seam only inside some tests may decorate just those tests, so the rest still run on release bytes and keep their conformance roots; an importer always takes the module-level mark. `test/lint/test_testing_marker.py` derives that set and reds an unmarked module. `OCX_TEST_RELEASE_BINARY=1` makes `test/conftest.py` skip every marked test with a reason starting `release bytes:`, and `scripts/windows_local.sh` forwards the variable to the Windows side. The readiness run reads `test/limits/<os>-release/`: floor and xfail as the non-release limits. Each `SKIP_CEILING` is the skip count the merge jobs of readiness run 40098724914 observed, plus 6 of bootstrap slack. Observed 1506 linux, 1766 macos, 2198 windows; committed 1512, 1772, 2204. The arm64 legs read the same x64 `*-release` limits (the `limits` matrix field of `release-readiness.yml`).
 
 ## Unfalsifiable Greens
 

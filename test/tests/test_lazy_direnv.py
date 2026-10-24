@@ -291,8 +291,9 @@ def test_direnv_export_pull_retry_keeps_every_root_in_request_order(
         assert str(shim_bin) in partial.stdout, (
             f"the deferred tool's shim `bin/` {shim_bin} must survive the retry; got:\n{partial.stdout}"
         )
-    content_bin = os.path.join("content", "bin")
-    assert content_bin in partial.stdout, (
+    # The package's `${installPath}/bin` entry keeps its forward slash on Windows.
+    content_bin = "content/bin"
+    assert content_bin in partial.stdout.replace("\\", "/"), (
         f"the pulled eager tool must contribute its real `bin/` ({content_bin}); "
         f"got:\n{partial.stdout}"
     )

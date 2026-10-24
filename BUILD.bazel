@@ -15,8 +15,8 @@ _NOT_OURS = [
     "./.git/*",
     "./.ocx/*",
     "./bazel-*/*",
-    # crate_universe output, written into each patched submodule by every
-    # repin and tracked by nobody. Not ours to format and not ours to lint:
+    # Legacy crate_universe output that older checkouts may still hold in each
+    # patched submodule, tracked by nobody. Not ours to format and not ours to lint:
     # it is unformatted AND trips `load: Loaded symbol "selects" is unused`,
     # so without this line the gate is red on a clean tree.
     "./external/*/BUILD.bazel",

@@ -39,6 +39,7 @@ Deferred codes (no reliable acceptance-test trigger available):
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -166,6 +167,13 @@ class TestExitCodes:
 # unconfigured registry would exit non-1 whatever the product does with the path.
 
 _ALLOWED_CODES = frozenset({74, 78, 79})
+
+# Windows refuses `--identity-token-file` outright (exit 77, no ACL check to stand in for the
+# 0600/owner gates) before opening it, so these rows cannot reach the read they pin.
+_TOKEN_FILE_UNREACHABLE_ON_WINDOWS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="windows: --identity-token-file is refused (exit 77) before the file is read",
+)
 
 # A builder gets the runner, a unique repo name and a scratch directory, and
 # returns the argv to run plus the substring stderr must carry to prove the
@@ -322,12 +330,11 @@ def _create_output(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str]
     (content / "bin").mkdir(parents=True)
     (content / "bin" / "hello").write_text("#!/bin/sh\necho hi\n")
     path = _unwritable(tmp_path, "bundle.tar.zst")
-    # "Not a directory" survives a fix: `file_error` wraps the same io::Error,
-    # so the needle matches both the current bare message and a typed one.
-    return (
-        ["package", "create", "--output", str(path), str(content)],
-        "Not a directory",
-    )
+    # The OS's own refusal survives a fix: `file_error` wraps the same io::Error, so the needle
+    # matches both the current bare message and a typed one. Windows words it by locale, so the
+    # needle there is its error code (ERROR_ALREADY_EXISTS, the code a path through a file gets).
+    needle = "(os error 183)" if sys.platform == "win32" else "Not a directory"
+    return (["package", "create", "--output", str(path), str(content)], needle)
 
 
 def _info_save_readme(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str], str]:
@@ -563,7 +570,9 @@ def _announce_tags_file_oversized(
 @pytest.mark.parametrize(
     ("build", "expected"),
     [
-        pytest.param(_sign_identity_token_file, 74, id="sign--identity-token-file"),
+        pytest.param(
+            _sign_identity_token_file, 74, id="sign--identity-token-file", marks=_TOKEN_FILE_UNREACHABLE_ON_WINDOWS
+        ),
         pytest.param(_sign_tags_file, 74, id="sign--tags-file"),
         pytest.param(_attest_tags_file, 74, id="attest--tags-file"),
         pytest.param(_push_tags_file, 74, id="push--tags-file"),
@@ -583,7 +592,9 @@ def _announce_tags_file_oversized(
         pytest.param(_verify_key_file, 74, id="verify--key-file"),
         pytest.param(_verify_trusted_root_missing, 74, id="verify--trusted-root"),
         pytest.param(_verify_trusted_root_oversized, 74, id="verify--trusted-root-big"),
-        pytest.param(_sign_token_file_oversized, 74, id="sign--identity-token-file-big"),
+        pytest.param(
+            _sign_token_file_oversized, 74, id="sign--identity-token-file-big", marks=_TOKEN_FILE_UNREACHABLE_ON_WINDOWS
+        ),
         pytest.param(_announce_tags_file_oversized, 74, id="announce--tags-file-big"),
         pytest.param(_push_tags_file_oversized, 74, id="push--tags-file-big"),
     ],

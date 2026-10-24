@@ -28,6 +28,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from src.helpers import rglob_no_links
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.sigstore_stack import SigstoreStack
 from tests.test_attest import attest, cyclonedx_predicate
@@ -71,7 +72,7 @@ def _run(ocx: OcxRunner, verb: str, *packages: str, flags: tuple[str, ...] = (),
 def _assert_no_partial_state(ocx: OcxRunner, pkg: PackageInfo) -> None:
     """A fail-closed abort must leave no assembled package and no candidate symlink."""
     packages_dir = ocx.ocx_home / "packages"
-    assert not packages_dir.exists() or not list(packages_dir.rglob("metadata.json")), (
+    assert not packages_dir.exists() or not list(rglob_no_links(packages_dir, "metadata.json")), (
         "fail-closed install must not assemble a package (aborts before download)"
     )
     which = _run(ocx, "which", pkg.short, flags=("--candidate",))
@@ -228,7 +229,7 @@ def test_pull_is_policy_gated(
         f"pull must be policy-gated and abort with exit 77, got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
     packages_dir = ocx.ocx_home / "packages"
-    assert not packages_dir.exists() or not list(packages_dir.rglob("metadata.json")), (
+    assert not packages_dir.exists() or not list(rglob_no_links(packages_dir, "metadata.json")), (
         "fail-closed pull must not materialise the package"
     )
 

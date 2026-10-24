@@ -83,7 +83,7 @@ researcher seats, default 3, bounded above by the effective concurrency cap
 N above the cap batches per that section, announced. Council seats count
 toward the expansion's hard cap of 12 researchers; a request above it
 truncates to the cap, announced once — the same rule as every other lane.
-Every seat runs at the researcher row's pinned `fast-balanced` class — no
+Every seat runs at the researcher row's pinned `standard` class — no
 escalation, this stays a breadth lane, not a depth one.
 
 Each seat gets a distinct perspective from this file's own list — a

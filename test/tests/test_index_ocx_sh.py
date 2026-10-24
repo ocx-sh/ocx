@@ -14,7 +14,7 @@ in `crates/ocx_index/src/ocx_index.rs`). The dispatch object a root's
 
 The `[registries."ocx.sh"] index = "<url>"` config-writing mechanism mirrors
 `test_oci_registry_mirror.py::write_home_config`; the fixture server's
-readiness wait mirrors `test/conftest.py::start_registry`.
+readiness wait mirrors `test/conftest.py::_wait_for_reachable`.
 
 Commands route through `ocx index update` (never `ocx package install`) for
 every namespace-scoped assertion: `IndexUpdate::execute` dispatches an

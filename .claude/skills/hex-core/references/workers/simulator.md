@@ -1,7 +1,7 @@
 # simulator
 
 Part of the [worker registry](../workers.md); universal protocol applies.
-Spawned at tier `max` only (`adr_0017` C-996).
+Spawned at tier `max` only.
 
 **Mission** — usage simulation: act as **one** user pattern against the
 built artifact or the drafted design, and report what that user would trip
@@ -16,8 +16,7 @@ over. Not a reviewer of the diff — a user of the result. Never edits.
   reports every inconsistency and every regression of a habit.
 - `adversarial` — feeds malformed, hostile and boundary input; concurrent
   and repeated invocation; reports every crash, hang, unsafe default or
-  silent wrong answer. Deep-reasoning class
-  ([`models.md`](../models.md)).
+  silent wrong answer.
 - `automation` — drives the surface from a script or CI: non-interactive
   flags, exit codes, machine-readable output, idempotency; reports every
   prompt that blocks, every exit code that lies, every output that is not

@@ -55,6 +55,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("index_list", "index_update")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # The reserved forms the rule has to cover, spelled out rather than generated:
 # `__ocx.desc` (a real internal tag), `__ocx` (the bare namespace, no
 # separator), `__ocxfoo` (no separator, arbitrary suffix), `__OCX.desc`

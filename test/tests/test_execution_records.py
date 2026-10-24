@@ -104,6 +104,7 @@ from src.helpers import (
     assert_shim_dir_exists,
     make_package,
     make_package_with_entrypoints,
+    require_symlink_privilege,
     resolved_metadata_path,
     write_ocx_toml,
 )
@@ -111,6 +112,8 @@ from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 
 pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*", "install")
+
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
 
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -2161,6 +2164,7 @@ def test_a_symlinked_system_config_refuses_the_launch(
     Reached through ``__OCX_TESTING_SYSTEM_CONFIG``, the test seam that redirects
     the SYSTEM path — pytest cannot write ``/etc``.
     """
+    require_symlink_privilege()
     ocx.plain("package", "install", "--select", published_package.short)
     fleet = tmp_path / "fleet-config.toml"
     fleet.write_text(f"[records]\ndir = {_toml_path(_sink(tmp_path, 'fleet'))}\n")

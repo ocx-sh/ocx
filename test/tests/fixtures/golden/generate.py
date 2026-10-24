@@ -20,7 +20,7 @@ Running it
 ----------
 
 The `sigstore` compose profile must be reachable; the script brings it up
-itself, but docker has to be available and the images pulled::
+itself and starts the referrers zot on port 5000 (needs docker and `zot` on PATH)::
 
     cd test
     uv run python3 tests/fixtures/golden/generate.py               # validate what is committed
@@ -105,6 +105,7 @@ if str(_TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(_TEST_ROOT))
 
 from src import registry as reg
+from src import zot
 from src.helpers import (
     SIGSTORE_DIR,
     mint_identity_token,
@@ -116,9 +117,10 @@ from tests.fixtures import cosign
 # The stack, as this script addresses it
 # --------------------------------------------------------------------------
 
-#: zot. Serves `/v2/<repo>/referrers/<digest>`, so cosign writes an OCI 1.1
-#: referrer here.
-REFERRERS_REGISTRY = "localhost:5000"
+#: zot, started by `regenerate` on this pinned port: the committed payloads name
+#: it in their `docker-reference`. Its Referrers API makes cosign write a referrer.
+REFERRERS_PORT = 5000
+REFERRERS_REGISTRY = f"localhost:{REFERRERS_PORT}"
 
 #: registry:2. No Referrers API, so cosign falls back to the `sha256-<hex>` tag
 #: schema here. The whole point of keeping a second registry in the fixture set.
@@ -645,6 +647,14 @@ def _recorded(*args: str, registry: bool = True) -> str:
 def regenerate(out: Path = _HERE) -> None:
     """Re-capture every fixture from a live stack. Overwrites; diff the result."""
     start_sigstore_stack()
+    registry = zot.start(names=("registry",), fixed_ports={"registry": REFERRERS_PORT})
+    try:
+        _capture_all(out)
+    finally:
+        registry.stop()
+
+
+def _capture_all(out: Path) -> None:
     _ensure_key_pair(out / "keys")
 
     work = out / ".work"

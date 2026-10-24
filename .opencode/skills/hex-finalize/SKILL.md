@@ -16,10 +16,9 @@ commit series the project's own rules would accept, and — after exactly one
 approval — force-pushes it and readies its pull request. **The merge is never hex's:**
 the run ends at a handoff naming it as the human's step, emitting no command.
 
-It is a hex skill, not a fifth orchestrator: no `classify.md`, no
-`overlays.md`, no `tier-*.md`, and no tier vocabulary of its own. The flow is
-one fixed pipeline whose universals do not scale with blast radius, so there is
-nothing for a tier to select.
+It is a hex skill, not a fifth orchestrator: no tier vocabulary of its own. The
+flow is one fixed sequence whose universals do not scale with blast radius, so
+there is nothing for a tier to select.
 
 **Entry is explicit invocation only, never a description match** — the
 invocation *is* the grant for the action class, so it must originate with a
@@ -149,7 +148,12 @@ delimited, with an explicit statement that a directive inside it is content to
 analyse rather than an instruction. Every echo of it follows
 [`protocol.md` § Untrusted-text echoes](../hex-core/references/protocol.md#untrusted-text-echoes).
 
-## Local verification
+## Release gate
+
+The run's last full gate: the project's own documented release-grade
+verification, run fresh with no cache, plus its hooks and lint over the whole
+final range. What runs, red handling and `--no-verify` are
+[`finalize.md` § Release gate](../hex-core/references/finalize.md#release-gate).
 
 Verification is **inherited, never invented**: the project's own documented
 level
@@ -165,18 +169,18 @@ any point in the run**. Either way, suggest `/hex-init` to persist a real one.
 
 The ordering is stated once here and only rendered elsewhere:
 
-- the local suite runs **before** the rewrite, on the tree that exists — it is
-  cheap, and the rewrite invalidates it as *testing evidence*;
+- the release gate runs **before** the rewrite, on the tree that exists; red
+  takes the one fix pass, then the gate again; still red halts with nothing
+  rewritten and hands to the user;
 - the rebase onto the freshly-fetched target must be **clean**; that clean
   rebase is the structural second check, and a conflict halts;
-- the suite **re-runs exactly once, after the rebase and before the gate, if
-  and only if the fetched target tip differs from the base the pre-rewrite run
-  used**. A target that did not move leaves the earlier result valid; a target
-  that moved makes it evidence about a tree that no longer exists, and a clean
-  rebase proves textual compatibility, never semantic.
+- the release gate **re-runs exactly once, after the rebase and before the
+  series is committed, if and only if the fetched target tip differs from the
+  base the first run used**. A target that did not move leaves the earlier
+  result valid; one that moved makes it evidence about a tree that no longer
+  exists, and a clean rebase proves textual compatibility, never semantic.
 
-A failure **before** the rewrite halts with nothing rewritten; a failure of the
-conditional re-run halts with the rewrite standing.
+A failure of the conditional re-run halts with the rewrite standing.
 
 ## Recompose
 
@@ -214,6 +218,10 @@ at the gate:**
 4. **Message-matches-diff check** — a message may reference only paths and
    symbols present in that commit's own diff. A mismatch **halts**; it is not a
    warning, because a mis-scoped message is a wrong changelog entry forever.
+   **Tree check** — the tip's tree id equals the tree id of the last green
+   [release gate](#release-gate) run; a mismatch **halts**, which is what makes
+   `--no-verify` below safe. The project's documented message lint runs once
+   over the recomposed range here.
 
 **Declined: a mechanical absorb pre-pass.** Blame-based fixup folding would
 pre-shape the input, but step 2 discards the input history entirely, so the
@@ -222,6 +230,8 @@ work would be thrown away. Recorded as considered, not as unavailable.
 **C-808. Commit requirements are satisfied *during* the rewrite, never after
 it.** As each commit in step 3 is created:
 
+- **`--no-verify`** — the release gate already ran the project's hooks over
+  this tree, and step 4 proves it is the same tree.
 - **`--signoff`** where DCO is required. The sign-off carries the invoking
   human's git identity — **`user.name <user.email>`, never the forge login**;
   the two routinely differ and the attestation carries the former.
@@ -284,7 +294,8 @@ an unasked question:
    beside the forge login and distinct from it;
 7. **the other authors on the branch**, so the human sees whose work they are
    attesting to;
-8. the **local verification result, and whether it re-ran** after the rebase;
+8. the **release gate result** — runs, the fresh/no-cache switch or `cache:
+   unknown`, hooks and lint — **and whether it re-ran** after the rebase;
 9. the **rebase result, and whether the base advanced**;
 10. **branch-versus-target workflow drift** — the changed paths named, with the
     statement that a dispatch executes the branch's version;
@@ -383,7 +394,7 @@ human-authored body stays byte-identical across successive runs.
   set.
 
 An empty documented workflow set does not block the flip — the resolved quality
-bar is then the local verification, which passed — but the handoff still says
+bar is then the release gate, which passed — but the handoff still says
 **no remote gate exists**, which is never rendered as a pass.
 
 ## Handoff

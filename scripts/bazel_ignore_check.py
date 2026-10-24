@@ -94,9 +94,7 @@ IGNORE_VIOLATION_MSG = (
 )
 IGNORE_QUERY_MSG = (
     "bazel ignore check: `bazel query 'buildfiles(//...)'` exited {rc} — nothing was read, so "
-    "the sweep below is vacuous. On a fresh checkout or a linked worktree the cause is "
-    "crate_universe's gitignored Cargo.bazel.lock.json; `task bazel:bootstrap` repins it. "
-    "stderr: {detail}"
+    "the sweep below is vacuous. stderr: {detail}"
 )
 IGNORE_READER_MSG = (
     "bazel ignore check read {read} of an expected >= {minimum} buildfiles in //... — the "

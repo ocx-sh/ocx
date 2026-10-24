@@ -43,6 +43,7 @@ Per shell the test:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -600,6 +601,8 @@ def test_powershell_wrapper_keeps_the_double_dash_separator(tmp_path: Path) -> N
 # Markers the elvish prompt-hook session prints. Distinctive so they survive the
 # terminal-init escapes an interactive pty emits around them.
 _ELVISH_FIRE_PROBE = "OCX_ELVISH_FIRES:"
+# The output line is `<probe> <A|B|C> <padding> <count>` (BSD `wc -c` pads), alone on its line.
+_ELVISH_FIRE_LINE = re.compile(rf"{_ELVISH_FIRE_PROBE} [ABC]\s+(\d+)\s*$")
 
 # The counting shim the elvish hook session puts at the resolved binary path.
 # Counting by file append rather than by inspecting a process list is
@@ -684,14 +687,15 @@ def _elvish_probe_counts(output: str) -> list[str]:
     """The three fire counts the session printed, in order.
 
     The pty interleaves terminal escapes and the echoed input line with the
-    output line, so the marker is searched for on a line that is NOT the echo:
-    the echoed one still carries the unexpanded `(wc -c ...)` call.
+    output line. The line editor also repaints the half-typed echo, right prompt
+    attached (`user@host`), so a line that merely contains the marker is no
+    count: only `<marker> <A|B|C> <padding> <digits>` at the end of a line is.
     """
     counts = []
     for line in output.splitlines():
-        if _ELVISH_FIRE_PROBE not in line or "wc -c" in line:
-            continue
-        counts.append(line.rsplit(" ", 1)[-1].strip())
+        found = _ELVISH_FIRE_LINE.search(line.strip())
+        if found:
+            counts.append(found.group(1))
     return counts
 
 
