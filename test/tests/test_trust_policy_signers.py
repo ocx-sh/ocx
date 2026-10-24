@@ -25,6 +25,7 @@ Sigstore-stack fixtures the policy-compilation tests here reuse.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -49,7 +50,7 @@ _NO_PROJECT: dict[str, str] = {"OCX_NO_PROJECT": "1"}
 
 def _key_signer_policy(scope: str, *, key: str | None = None, key_pem: str | None = None) -> str:
     """Render a `[[trust.policy]]` whose single signer is a key, by reference or inline."""
-    entry = 'kind = "key", ' + (f'key = "{key}"' if key is not None else f'key_pem = """\n{key_pem}"""')
+    entry = 'kind = "key", ' + (f'key = {json.dumps(key)}' if key is not None else f'key_pem = """\n{key_pem}"""')
     return f'[[trust.policy]]\nscope = "{scope}"\nsigners = [{{ {entry} }}]\n'
 
 

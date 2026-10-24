@@ -176,7 +176,8 @@ def test_config_push_inlines_extra_ca_certs_path(
     back through the real product path (`config update` persists the payload
     verbatim) and parsed — a text grep would pass on a file no parser accepts.
     """
-    (tmp_path / "corp-ca.pem").write_text(_CA_PEM)
+    # newline="": the published bytes are compared with the source PEM, so Windows must not translate "\n".
+    (tmp_path / "corp-ca.pem").write_text(_CA_PEM, newline="")
     pushed_digest = push_managed_config(ocx, unique_repo, "user", 'extra_ca_certs = "corp-ca.pem"\n', tmp_path)
 
     ref = f"{registry}/{unique_repo}:user"
