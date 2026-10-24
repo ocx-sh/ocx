@@ -26,6 +26,7 @@ uv = "ocx.sh/astral-sh/uv:0.12.5"
 actionlint = "ocx.sh/actionlint/actionlint:1.7.12"
 
 [group.test.tools]
+zot = "ocx.sh/project-zot/zot:2.1.21"
 
 [group.build.tools]
 

@@ -2721,6 +2721,7 @@ ACCEPTANCE_INPUTS = {
     "limits-dir": {"type": "string", "default": "test"},
     "release-binary": {"type": "boolean", "default": False},
     "no-docker": {"type": "boolean", "default": False},
+    "toolchain-group": {"type": "string", "default": ""},
 }
 CROSS_WORKFLOW_CALL = "./.github/workflows/cross.yml"
 
@@ -3203,6 +3204,72 @@ def test_release_readiness_builds_every_dist_target_and_tests_six_platforms() ->
     assert call["with"]["limits-dir"] == "${{ matrix.limits }}", call["with"]["limits-dir"]
     assert set(_needs(call)) == {"stage", "scan"}, _needs(call)
     assert jobs["scan"]["uses"] == SCAN_WORKFLOW_USES and "build" in _needs(jobs["scan"])
+
+
+# The `[[tool]]` rows of ocx.lock are the leaves a platform can install; a target maps onto
+# the lock's `os/arch` platform keys (`linux/amd64+libc.glibc` is a leaf of `linux/amd64`).
+_LOCK_OS = {"apple-darwin": "darwin", "unknown-linux-gnu": "linux", "pc-windows-msvc": "windows"}
+_LOCK_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+
+
+def _lock_platform(target: str) -> str:
+    arch, _, rest = target.partition("-")
+    return f"{_LOCK_OS[rest]}/{_LOCK_ARCH[arch]}"
+
+
+def _lock_tools() -> list[dict]:
+    import tomllib
+
+    return tomllib.loads((ROOT / "ocx.lock").read_text(encoding="utf-8"))["tool"]
+
+
+def _lock_tools_without_leaf(platform: str) -> dict[str, list[str]]:
+    """Group -> tools whose `ocx.lock` row has no leaf for `platform`."""
+    missing: dict[str, list[str]] = {}
+    for tool in _lock_tools():
+        if not any(key.split("+")[0] == platform for key in tool["platforms"]):
+            missing.setdefault(tool["group"], []).append(tool["name"])
+    return missing
+
+
+def test_a_readiness_leg_without_every_default_leaf_loads_only_a_group_that_has_them() -> None:
+    """Loading the whole project on a platform missing a default tool's leaf exits 78 in setup-ocx."""
+    legs = _readiness_matrix("acceptance")
+    gaps = {_lock_platform(leg["target"]): _lock_tools_without_leaf(_lock_platform(leg["target"])) for leg in legs}
+    assert any(gap.get("default") for gap in gaps.values()), (
+        "ocx.lock has a leaf for every default tool on every readiness platform; `toolchain-group` has no reason to exist"
+    )
+    findings = []
+    for leg in legs:
+        gap = gaps[_lock_platform(leg["target"])]
+        group = leg.get("toolchain-group", "")
+        if not gap.get("default"):
+            if group:
+                findings.append(f"{leg['name']}: every default leaf exists, yet `toolchain-group` is {group!r}")
+        elif not group:
+            findings.append(f"{leg['name']}: no default leaf for {gap['default']} but `toolchain-group` is empty")
+        elif group not in {t["group"] for t in _lock_tools()}:
+            findings.append(f"{leg['name']}: `toolchain-group` {group!r} holds no tool in ocx.lock")
+        elif gap.get(group):
+            findings.append(f"{leg['name']}: group {group!r} has no leaf for {gap[group]} either")
+    assert not findings, findings
+    with_ = _load(RELEASE_READINESS)["jobs"]["acceptance"]["with"]
+    assert with_.get("toolchain-group") == "${{ matrix.toolchain-group }}", with_.get("toolchain-group")
+
+
+def test_the_acceptance_shard_loads_the_whole_project_unless_given_a_toolchain_group() -> None:
+    """Empty `toolchain-group` keeps the action's own project load; a value swaps it for `pull -g` and `env -g`."""
+    steps = _repo_job(ACCEPTANCE, "shard")["steps"]
+    setup = next(s for s in steps if str(s.get("uses", "")).startswith("ocx-sh/setup-ocx@"))
+    assert setup["with"]["project"] == "${{ inputs.toolchain-group == '' && 'ocx.toml' || '' }}", setup["with"]
+    group_step = next(s for s in steps if "ocx --project ocx.toml pull" in str(s.get("run", "")))
+    assert group_step["if"] == "${{ inputs.toolchain-group != '' }}", group_step.get("if")
+    run = group_step["run"]
+    assert 'pull -g "$GROUP"' in run and 'env -g "$GROUP" --ci=github' in run, run
+    assert group_step["env"] == {"GROUP": "${{ inputs.toolchain-group }}"}, group_step.get("env")
+    assert steps.index(setup) < steps.index(group_step) < next(
+        i for i, s in enumerate(steps) if s.get("name") == "Run Acceptance Tests"
+    )
 
 
 def test_the_release_gate_installs_the_dist_version_the_config_pins() -> None:
