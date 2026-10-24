@@ -163,9 +163,11 @@ if [ "$mode" = accept ]; then
 fi
 
 # 3. The environment every Windows command below runs under, as one file (CRLF).
+# Git's usr\bin goes ahead of %PATH%, as acceptance.yml's $GITHUB_PATH line puts it: appended,
+# a bare `bash` resolves to System32's WSL launcher instead of Git's, unlike on the CI runner.
 {
     printf '%s\r\n' '@echo off'
-    printf '%s\r\n' "set \"PATH=$own_win\\py\\Scripts;%PATH%;$GIT_USR_BIN\""
+    printf '%s\r\n' "set \"PATH=$own_win\\py\\Scripts;$GIT_USR_BIN;%PATH%\""
     printf '%s\r\n' 'if not defined HOME set "HOME=%USERPROFILE%"'
     printf '%s\r\n' 'set "PYTHONIOENCODING=utf-8"'
     # A host-global commit.gpgsign would break the fixtures' commits.
