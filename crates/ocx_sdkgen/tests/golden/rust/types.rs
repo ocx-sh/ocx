@@ -215,10 +215,8 @@ pub type AliasTag = String;
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
     pub package: String,
-    /// `unchanged` when the rebuilt root was byte-identical to the committed one, so nothing was
-    /// committed; `updated` otherwise. An unchanged `--fork` run still ensures a pull request when
-    /// its announce branch is ahead of the index base, and still reports one when the branch has
-    /// diverged from the index base but its open pull request can still merge.
+    /// `unchanged` when the rebuilt root was byte-identical to the committed one and the base
+    /// already carries every object it references, so nothing was committed; `updated` otherwise.
     pub status: WriteStatus,
     /// `updated` when the package's `__ocx.desc` artifact moved, so the root's `desc` object was
     /// rebuilt and its readme (and logo) written as new content-addressed objects; `unchanged` when

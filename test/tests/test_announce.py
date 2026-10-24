@@ -35,6 +35,8 @@ from announce_helpers import (
     branch_name,
     committed_root,
     configure_trusted_hosts,
+    entry_files,
+    output_entry_files,
     registry_host,
     seed_empty_root,
 )
@@ -218,8 +220,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
 
     # Seed the canonical bytes as the index-main root, so the next run rebuilds
     # something byte-identical to what is already committed.
-    root_bytes = (first_dir / "p" / f"{package}.json").read_bytes()
-    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+    fake_forge.seed_files("ocx-sh", "index", output_entry_files(first_dir))
 
     second_dir = tmp_path / "second"
     second = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(second_dir), package)
@@ -382,8 +383,7 @@ def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
     # form is byte-identical to what a fork run would regenerate.
     out_dir = tmp_path / "out"
     announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(out_dir), package)
-    root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
-    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+    fake_forge.seed_files("ocx-sh", "index", output_entry_files(out_dir))
 
     report = announce_json(
         ocx, fake_forge, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL, package
@@ -415,8 +415,7 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
     # only matches the canonical form).
     out_dir = tmp_path / "out"
     announce_json(ocx, fake_forge, "--tags", "1.0.0", "--output", str(out_dir), package)
-    root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
-    fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
+    fake_forge.seed_files("ocx-sh", "index", output_entry_files(out_dir))
     # ...then park the announce branch exactly ON that base: it exists, and it
     # is not ahead.
     fake_forge.seed_branch_at(
@@ -961,8 +960,14 @@ def test_announce_refuses_an_unchanged_run_whose_open_pull_request_conflicts(
         "owners": [{"login": "acme", "id": 1}],
         "tags": branch_root["tags"],
     }
+    # The objects too: a base that already carries the branch's tag carries what its root references.
     fake_forge.seed_files(
-        INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode()}
+        INDEX_OWNER,
+        INDEX_REPO,
+        {
+            **entry_files(fake_forge, package, owner="forkuser", repo="index", branch=branch),
+            f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode(),
+        },
     )
 
     result = announce(ocx, fake_forge, *args, "--refresh", package, check=False)
@@ -1041,9 +1046,9 @@ def test_announce_unchanged_stale_branch_with_a_mergeable_pull_request_reports_i
     branch = branch_name(package)
     head_before = fake_forge.branch_head("forkuser", "index", branch)
 
-    committed_bytes = fake_forge.read_file("forkuser", "index", f"p/{package}.json", branch=branch)
-    assert committed_bytes is not None
-    fake_forge.seed_files(INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": committed_bytes})
+    fake_forge.seed_files(
+        INDEX_OWNER, INDEX_REPO, entry_files(fake_forge, package, owner="forkuser", repo="index", branch=branch)
+    )
 
     second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 

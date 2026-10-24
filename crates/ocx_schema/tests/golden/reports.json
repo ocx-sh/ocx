@@ -379,7 +379,7 @@
         },
         "status": {
           "$ref": "#/$defs/WriteStatus",
-          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none, so nothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
+          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none and the base already carries every object it references, so\nnothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
         },
         "desc_status": {
           "$ref": "#/$defs/WriteStatus",
@@ -7148,7 +7148,7 @@
         },
         "status": {
           "$ref": "#/$defs/WriteStatus",
-          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none, so nothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
+          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none and the base already carries every object it references, so\nnothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
         },
         "desc_status": {
           "$ref": "#/$defs/WriteStatus",
