@@ -55,7 +55,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest  # noqa: F401 -- unused since the xdist group left; DEC-10 keeps the line
+import pytest
 
 from src.helpers import copy_tree_keeping_links, make_package, push_managed_config
 from src.registry import push_raw_config_package

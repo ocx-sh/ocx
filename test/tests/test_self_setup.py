@@ -48,13 +48,14 @@ import pytest
 from src.helpers import rglob_no_links
 from src.runner import OcxRunner, PackageInfo
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="self setup fence/shim tests assume POSIX sh semantics.",
-)
-pytestmark = [pytestmark, pytest.mark.command("self_group/setup", "index_update")]
-
-pytestmark = [*pytestmark, pytest.mark.requires_testing_build]
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="self setup fence/shim tests assume POSIX sh semantics.",
+    ),
+    pytest.mark.command("self_group/setup", "index_update"),
+    pytest.mark.requires_testing_build,
+]
 
 # The install-layout path the bootstrap candidate lives at, relative to OCX_HOME.
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"
