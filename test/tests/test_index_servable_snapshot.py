@@ -95,8 +95,6 @@ pytestmark = pytest.mark.command(
     "index_catalog",
 )
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 NAMESPACE = "ocx.sh"
 
 # The shared refresh loop fans out over at most `INDEX_REFRESH_CONCURRENCY`
@@ -1989,6 +1987,7 @@ def test_a_transient_unavailable_is_absorbed_without_an_operator_warning(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ) -> None:

@@ -5,6 +5,8 @@ modules by name (`test/conftest.py`) and the readiness run counts those skips ag
 ceiling (`test/limits/<os>-release/`). A module the marker misses would instead fail on release
 bytes, or hide inside a green. The set is derived, never listed: a `tests/` or `src/` file whose
 text names a `__OCX_TESTING_[A-Z_]+` variable is a seam user, and so is every file importing one.
+A module that names a seam only inside tests marked one by one may mark just those, so its other
+tests still run on release bytes; an importer always carries the module-level marker.
 """
 
 from __future__ import annotations
@@ -53,6 +55,18 @@ def _carries_marker(tree: ast.Module) -> bool:
     )
 
 
+def _marks_every_use(tree: ast.Module, text: str) -> bool:
+    """Every line naming a seam sits inside a top-level test or class decorated with the marker."""
+    spans = [
+        (min(d.lineno for d in node.decorator_list), node.end_lineno or node.lineno)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(MARKER in ast.unparse(d) for d in node.decorator_list)
+    ]
+    lines = [n for n, line in enumerate(text.splitlines(), 1) if SEAM.search(line)]
+    return bool(lines) and all(any(lo <= n <= hi for lo, hi in spans) for n in lines)
+
+
 def seam_modules(root: Path) -> tuple[dict[Path, bool], int]:
     """Every `test_*.py` under `root/tests` that uses a seam, directly or through an import: path -> carries the marker.
 
@@ -71,7 +85,7 @@ def seam_modules(root: Path) -> tuple[dict[Path, bool], int]:
                 users.add(p)
                 grew = True
     return {
-        p: _carries_marker(trees[p])
+        p: _carries_marker(trees[p]) or (not imports[p] & users and _marks_every_use(trees[p], sources[p]))
         for p in sorted(users)
         if p.name.startswith("test_") and p.parent == root / "tests"
     }, len(sources)
@@ -119,6 +133,30 @@ def test_marker_merged_into_a_list_is_green(tmp_path: Path):
         "import pytest\nfrom seam_helper import SEAM\npytestmark = [pytest.mark.smoke, pytest.mark.requires_testing_build]\n",
     )
     assert unmarked(root) == []
+
+
+def test_seam_inside_a_marked_test_is_green(tmp_path: Path):
+    root = _tree(
+        tmp_path,
+        'import pytest\n@pytest.mark.requires_testing_build\ndef test_a():\n    env = "__OCX_TESTING_FAULT"\n\ndef test_b():\n    pass\n',
+    )
+    assert unmarked(root) == []
+
+
+def test_seam_outside_the_marked_test_is_red(tmp_path: Path):
+    root = _tree(
+        tmp_path,
+        'import pytest\nENV = "__OCX_TESTING_FAULT"\n@pytest.mark.requires_testing_build\ndef test_a():\n    pass\n',
+    )
+    assert unmarked(root) == ["tests/test_x.py"]
+
+
+def test_marked_test_does_not_cover_an_importer(tmp_path: Path):
+    root = _tree(
+        tmp_path,
+        "import pytest\nfrom seam_helper import SEAM\n@pytest.mark.requires_testing_build\ndef test_a():\n    assert SEAM\n",
+    )
+    assert unmarked(root) == ["tests/test_x.py"]
 
 
 def test_module_with_no_seam_needs_no_marker(tmp_path: Path):
