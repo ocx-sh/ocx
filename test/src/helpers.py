@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -527,6 +529,30 @@ def rglob_no_links(root: Path, pattern: str) -> Iterator[Path]:
             yield path
         if entry.is_dir(follow_symlinks=False) and not entry.is_junction():
             yield from rglob_no_links(path, pattern)
+
+
+@functools.cache
+def _symlink_privilege_error() -> str | None:
+    """The reason this host cannot create symlinks, or None when it can.
+
+    Only Windows withholds the right (WinError 1314, no developer mode or elevation);
+    any other failure is a real error and propagates.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        try:
+            os.symlink(Path(scratch) / "target", Path(scratch) / "link")
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                return str(error)
+            raise
+    return None
+
+
+def require_symlink_privilege() -> None:
+    """Skip the calling test when the host lacks the privilege to create symlinks."""
+    reason = _symlink_privilege_error()
+    if reason is not None:
+        pytest.skip(f"symlink privilege not held: {reason}")
 
 
 def shim_bin_dirs(ocx: OcxRunner, repo: str) -> list[Path]:

@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from src import OcxRunner, assert_dir_exists, assert_not_exists, current_platform
-from src.helpers import rglob_no_links
+from src.helpers import require_symlink_privilege, rglob_no_links
 
 _INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
@@ -259,6 +259,7 @@ def test_a_prefix_resolving_through_an_earlier_layers_symlink_collides_first(
     hit the symlink walk, the code becomes 64, and this assertion reds — which
     is the moment `SymlinkWalk` needs a case of its own.
     """
+    require_symlink_privilege()
     layer_a = _make_layer_content(tmp_path, "symlinked", {"keep/marker": "planted"})
     (layer_a / "d").symlink_to("keep", target_is_directory=True)
     layer_b = _make_layer_content(tmp_path, "through", {"tool": "#!/bin/sh\necho hi\n"})
