@@ -3,7 +3,7 @@
 # One Linux host cross-builds `//crates/ocx_cli:ocx` for every target through
 # Bazel (rules_rs + the hermetic `@llvm` toolchain). `TARGETS` is the single
 # list of supported triples — keep it equal to `platform_triples` in
-# `MODULE.bazel` (minus the host-only entries it also carries).
+# `MODULE.bazel`.
 #
 # `-c opt`: the fastbuild (opt-level 0) Windows binary overflows the 1 MiB main
 # thread stack at startup; the optimised one runs.

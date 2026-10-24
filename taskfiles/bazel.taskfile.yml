@@ -307,9 +307,9 @@ tasks:
       **The same read writes the report the lanes publish.** `--junit` turns
       those logs into a per-case JUnit at `target/bazel/junit.xml` — one
       `testcase` per `#[test]`, named after the libtest path rather than the
-      target. That is what `verify-basic.yml`'s `smoke` job hands
-      `publish-unit-test-result-action` and `test-telemetry`, and what
-      `verify-deep.yml`'s Linux leg uploads for its `test-results` job.
+      target. That is what `ci:test` copies to `target/reports/junit/unit.xml`
+      for `verify-basic.yml`'s `test` job: its JUnit check report and the
+      test telemetry.
       Publishing `bazel-testlogs/**/test.xml` instead would name 34 targets and
       not one test: Bazel's synthesised file carries one `testcase` per target
       and puts the failing test's name only in the testsuite-level
@@ -335,8 +335,8 @@ tasks:
       `platforms: [linux]`, matching `rust:test:floor` and `rust:test:ceiling`
       exactly and for their reason: `cfg`-gated tests make the per-target
       counts platform-dependent, and `crates/TEST_TARGET_MAP.toml` records the
-      Linux ones. `verify-deep.yml`'s macOS and Windows legs stay on
-      `cargo nextest run` for the same reason.
+      Linux ones. `deep-repo.yml`'s macOS and Windows legs run the
+      Linux-built bundle (`cross:test:run`) instead, for the same reason.
 
       The exit code is bazel's unless the floor has its own finding — both are
       reported, because a red suite and a shrunken one are different facts and
@@ -347,13 +347,11 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-test-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/test-bep.json'
-      # Inside the checkout, where the BEP deliberately is not: this one is the
-      # report two CI steps read AFTER this task returns, and the stream it is
-      # derived from dies with the task. It is `junit.xml` rather than a name of
-      # its own because `verify-deep.yml`'s `test-results` job publishes
-      # `artifacts/**/junit.xml`, and a second spelling there is a second thing
-      # to keep in step. It carries no secret — `bazel_test_floor.py` writes
-      # test names, outcomes and panic text, never the client environment.
+      # Inside the checkout, where the BEP deliberately is not: `ci:test` copies
+      # this report to `target/reports/junit/unit.xml` AFTER this task returns,
+      # and the stream it is derived from dies with the task. It carries no
+      # secret — `bazel_test_floor.py` writes test names, outcomes and panic
+      # text, never the client environment.
       JUNIT: '{{.ROOT_DIR}}/target/bazel/junit.xml'
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'

@@ -477,7 +477,7 @@ tasks:
       it rather than restated from `test/bazel.bzl`:
 
         * every `//test:*` target carries `no-sandbox` and NOT `exclusive`
-          (they run concurrently behind the runner's host locks, `test/bazel.bzl`
+          (they run concurrently on registries of their own, `test/bazel.bzl`
           § Concurrency; the job count is on the task and never a global `--local_test_jobs`) and
           carries NONE of the
           cache-suppressing tags —
