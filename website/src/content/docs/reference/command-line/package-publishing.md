@@ -353,9 +353,9 @@ The scan only fills the sidecar written next to the output, never the authored `
 
 Anything else needs a hand-authored `binaries`.
 
-A scan needs a host that can evaluate the target's executable convention. A Windows host targeting anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan, unless the metadata names no `${installPath}`-rooted `PATH` variable with interface visibility, which leaves nothing to scan.
+A scan needs a host that can evaluate the target's executable convention. A Windows host targeting anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan.
 
-Hand-author `binaries` or pass `--no-bin-scan`.
+The exception is metadata with no `${installPath}`-rooted `PATH` variable of interface visibility, which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.
 
 An unreadable content directory exits 74.
 
