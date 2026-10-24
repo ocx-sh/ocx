@@ -615,8 +615,9 @@ def test_an_unencodable_ocx_home_is_refused_before_the_store_is_written(
     )
     # The refusal names the first directory it reaches, so this follows
     # `_ocx_directories`' order rather than restating it — a re-ordering of the
-    # two must not read as a regression here.
-    assert _ocx_directories(hostile_home)[0] in result.stderr, result.stderr
+    # two must not read as a regression here. The error quotes the path with Rust's
+    # `{:?}`, which doubles a Windows path's backslashes.
+    assert _ocx_directories(hostile_home)[0].replace("\\", "\\\\") in result.stderr, result.stderr
     assert format_phrase in result.stderr, result.stderr
 
     # Refused *before* writing: the store this host owns must not exist.

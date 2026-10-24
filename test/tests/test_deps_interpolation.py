@@ -107,8 +107,8 @@ def test_dep_install_path_resolves_to_content_dir(
         f"(`<root>/content`); got {resolved!r}, expected {expected_leaf_content!r}"
     )
     # Canonical CAS shape: <packages_root>/<registry>/<algo>/<2hex>/<30hex>/content
-    assert resolved.endswith("/content"), (
-        f"resolved path must end with `/content` (CAS package content directory): {resolved!r}"
+    assert Path(resolved).name == "content", (
+        f"resolved path must end with `content` (CAS package content directory): {resolved!r}"
     )
 
 

@@ -354,7 +354,7 @@ def test_project_flag_canonicalized_for_registry(
         f"{[p.name for p in links]}"
     )
     link = links[0]
-    assert link.is_symlink(), (
+    assert link.is_symlink() or link.is_junction(), (
         f"ledger entry must be a symlink (flat symlink store, "
         f"adr_project_gc_symlink_ledger.md); {link} is not a symlink"
     )
