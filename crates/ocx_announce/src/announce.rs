@@ -17,6 +17,7 @@ pub use request::{AnnounceOutcome, AnnounceRequest, AnnounceStatus, AnnounceTarg
 
 use std::collections::BTreeMap;
 
+use futures::stream::{self, StreamExt};
 use serde_json::Value;
 
 use crate::forge::{
@@ -27,6 +28,9 @@ use ocx_package::publisher::Publisher;
 
 /// The main branch of the index repository.
 const INDEX_BASE_REF: &str = "main";
+
+/// How many object reads the no-op probe keeps in flight against the forge.
+const OBJECT_PROBE_CONCURRENCY: usize = 8;
 
 /// Announce one package.
 ///
@@ -174,7 +178,11 @@ pub async fn announce(
     .await?;
     let mut desc_status = AnnounceStatus::from_changed(desc_updated);
 
-    let unchanged = new_root_bytes == committed_bytes && pipeline::new_cas_count(&committed_root, &observed) == 0;
+    let mut unchanged = new_root_bytes == committed_bytes && pipeline::new_cas_count(&committed_root, &observed) == 0;
+    // Only a run about to report `unchanged` pays the probe: the root can match while the base lacks an object.
+    if unchanged && has_object_absent_at(forge, &root_read.repo, &root_read.base_sha, &root_path, &files).await? {
+        unchanged = false;
+    }
     let mut status = if unchanged {
         AnnounceStatus::Unchanged
     } else {
@@ -408,7 +416,14 @@ pub async fn announce(
                     desc_status = AnnounceStatus::from_changed(merged.desc_updated);
                     // Identical racing announces regenerate the same bytes; committing would push an empty-diff
                     // commit, a governance threat the index bot flags.
-                    if merged.root_bytes == head_bytes && pipeline::new_cas_count(&head_root, &merged.observed) == 0 {
+                    let mut merged_unchanged =
+                        merged.root_bytes == head_bytes && pipeline::new_cas_count(&head_root, &merged.observed) == 0;
+                    if merged_unchanged
+                        && has_object_absent_at(forge, retry_repo, &head_sha, &root_path, &merged.files).await?
+                    {
+                        merged_unchanged = false;
+                    }
+                    if merged_unchanged {
                         status = AnnounceStatus::Unchanged;
                         // Commits nothing, so a conflicting stale request would otherwise report a benign `unchanged`.
                         refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
@@ -673,6 +688,42 @@ async fn refuse_unwritten_refs(
         }
     }
     Ok(())
+}
+
+/// Whether `files` writes an object (any `Put` but the root) that `sha` does not hold.
+///
+/// Root bytes and the observed digests say nothing about the tree: a rerun over a base whose
+/// root names an object the tree lost regenerates identical bytes. Reads overlap up to
+/// [`OBJECT_PROBE_CONCURRENCY`]; the first absent object answers and drops the reads still pending.
+///
+/// # Errors
+///
+/// Any forge failure.
+async fn has_object_absent_at(
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    sha: &str,
+    root_path: &str,
+    files: &BTreeMap<String, FileChange>,
+) -> Result<bool, AnnounceError> {
+    let mut probes = stream::iter(
+        files
+            .iter()
+            .filter(|(path, change)| path.as_str() != root_path && matches!(change, FileChange::Put(_)))
+            .map(|(path, _)| async move {
+                forge
+                    .get_file_contents(repo, path, sha)
+                    .await
+                    .map(|held| held.is_none())
+            }),
+    )
+    .buffer_unordered(OBJECT_PROBE_CONCURRENCY);
+    while let Some(absent) = probes.next().await {
+        if absent? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Tripwire: refuse an outcome that moves nothing while its open pull request cannot merge.
@@ -1279,6 +1330,9 @@ mod tests {
         /// Every read of a non-root path fails — the transport fault the orphan
         /// probe must propagate rather than read as "no such object".
         failing_reads: bool,
+        /// Every read of a non-root path yields once while counted in flight, so concurrent
+        /// probes overlap and [`FakeForge::max_reads_in_flight`] can see them.
+        yielding_reads: bool,
         comparison: BranchComparison,
         open_request: Option<PullRequest>,
         mergeability: Mergeability,
@@ -1306,6 +1360,10 @@ mod tests {
         messages: Vec<String>,
         /// The body of each `open_or_update_pull_request` call, in call order.
         request_bodies: Vec<String>,
+        /// Every non-root path [`Forge::get_file_contents`] was asked for, in call order.
+        object_reads: Vec<String>,
+        reads_in_flight: usize,
+        max_reads_in_flight: usize,
     }
 
     impl FakeForge {
@@ -1316,6 +1374,7 @@ mod tests {
                 roots: HashMap::new(),
                 files: HashMap::new(),
                 failing_reads: false,
+                yielding_reads: false,
                 comparison: BranchComparison::Ahead,
                 open_request: None,
                 mergeability: Mergeability::Mergeable,
@@ -1348,10 +1407,30 @@ mod tests {
             self
         }
 
+        /// The CAS object for `digest` exists at commit `sha`, where the committed root names it.
+        fn with_cas_object(self, sha: &str, digest: &str) -> Self {
+            let hex = digest.strip_prefix("sha256:").expect("a sha256 digest");
+            self.with_file(sha, &format!("p/acme/widget/o/sha256/{hex}.json"), b"{}")
+        }
+
         /// Every object read fails with a server error.
         fn failing_reads(mut self) -> Self {
             self.failing_reads = true;
             self
+        }
+
+        /// Object reads yield once mid-flight, so overlapping probes are observable.
+        fn yielding_reads(mut self) -> Self {
+            self.yielding_reads = true;
+            self
+        }
+
+        /// The most object reads that were in flight at once.
+        fn max_reads_in_flight(&self) -> usize {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .max_reads_in_flight
         }
 
         /// A diverged branch under an open request — [`BranchState::Stale`].
@@ -1416,6 +1495,14 @@ mod tests {
                 .clone()
         }
 
+        fn object_reads(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .object_reads
+                .clone()
+        }
+
         fn push_access_probes(&self) -> usize {
             self.state
                 .lock()
@@ -1462,12 +1549,29 @@ mod tests {
             if path == ROOT_PATH {
                 return Ok(self.roots.get(r#ref).cloned());
             }
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .object_reads
+                .push(path.to_string());
             if self.failing_reads {
                 return Err(ForgeError::Status {
                     url: path.to_string(),
                     status: 500,
                     detail: "the fixture refuses every object read".to_string(),
                 });
+            }
+            if self.yielding_reads {
+                {
+                    let mut state = self.state.lock().expect("the fixture lock is uncontended");
+                    state.reads_in_flight += 1;
+                    state.max_reads_in_flight = state.max_reads_in_flight.max(state.reads_in_flight);
+                }
+                tokio::task::yield_now().await;
+                self.state
+                    .lock()
+                    .expect("the fixture lock is uncontended")
+                    .reads_in_flight -= 1;
             }
             Ok(self.files.get(&(r#ref.to_string(), path.to_string())).cloned())
         }
@@ -1869,7 +1973,8 @@ mod tests {
         let (registry, digest) = seed_tags(&["1.0.0"]);
         let forge = FakeForge::new()
             .with_ref(MAIN_REF, &[Some("base")])
-            .with_root("base", &unchanged_root("1.0.0", &digest));
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest);
         let outcome = run_announce(
             &forge,
             TagSelection::Refresh,
@@ -1894,7 +1999,9 @@ mod tests {
             .with_ref(BRANCH_REF, &[Some("branch")])
             .with_ref(MAIN_REF, &[Some("base")])
             .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest)
             .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest)
             .stale_with(pull_request(3));
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
@@ -1909,7 +2016,8 @@ mod tests {
         let forge = FakeForge::new()
             .with_ref(BRANCH_REF, &[Some("branch")])
             .with_ref(MAIN_REF, &[Some("base")])
-            .with_root("branch", &unchanged_root("1.0.0", &digest));
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest);
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
             .expect("an unchanged live branch ensures its request");
@@ -1920,7 +2028,8 @@ mod tests {
         let (registry, digest) = seed_tags(&["1.0.0"]);
         let forge = FakeForge::new()
             .with_ref(MAIN_REF, &[Some("base")])
-            .with_root("base", &unchanged_root("1.0.0", &digest));
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest);
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
             .expect("a pure no-op still reports");
@@ -2225,6 +2334,7 @@ mod tests {
             .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
             .with_root("base", &root_with_a_moved_tag())
             .with_root("moved", &unchanged_root("0.9.0", &digest))
+            .with_cas_object("moved", &digest)
             .failing_opens(vec![Some(ForgeError::NonFastForward {
                 branch: BRANCH.to_string(),
             })]);
@@ -2261,6 +2371,7 @@ mod tests {
             .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
             .with_root("base", &root_with_a_moved_tag())
             .with_root("moved", &unchanged_root("0.9.0", &digest))
+            .with_cas_object("moved", &digest)
             .with_root("branch", &committed_root(serde_json::json!({})))
             .stale_with(pull_request(5))
             .with_mergeability(Mergeability::Conflicting)
@@ -2595,7 +2706,8 @@ mod tests {
         let forge = FakeForge::new()
             .with_ref(BRANCH_REF, &[Some("branch")])
             .with_ref(MAIN_REF, &[Some("base")])
-            .with_root("branch", &unchanged_root("1.0.0", &digest));
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest);
 
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
@@ -2608,6 +2720,159 @@ mod tests {
         );
         assert_eq!(forge.opens(), 1, "exactly one open call");
         assert!(forge.commits().is_empty(), "an unchanged run commits nothing");
+    }
+
+    /// A root that already names the observed object while the base tree lacks it: the regenerated
+    /// bytes match, so only the tree can say the object is missing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rerun_over_a_missing_object_commits_it_instead_of_reporting_unchanged() {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest));
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the rerun lands");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 1, "the missing object is committed");
+        assert!(
+            put_at(&commits[0], &object(&digest, "json")).is_some(),
+            "the object the base lacked is written"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rerun_over_a_missing_object_reports_updated_under_output() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest));
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Refresh,
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            registry,
+        )
+        .await
+        .expect("--output writes on every run");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        assert!(
+            outcome.written_paths.contains(&object(&digest, "json")),
+            "the object path the base lacked is listed: {:?}",
+            outcome.written_paths
+        );
+    }
+
+    /// The control for the two above: the same rerun with the object present stays a no-op, and
+    /// the probe that proved it was issued.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rerun_over_a_present_object_stays_unchanged_after_probing_it() {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest);
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the rerun reports");
+
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert!(forge.commits().is_empty());
+        assert_eq!(forge.object_reads(), vec![object(&digest, "json")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_changed_run_probes_no_object() {
+        let (registry, _) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &root_with_a_moved_tag());
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the changed run lands");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        assert!(
+            forge.object_reads().is_empty(),
+            "a run that changes the root pays no probe: {:?}",
+            forge.object_reads()
+        );
+    }
+
+    /// `count` object writes at distinct digests, and the same paths served at `sha` when `present`.
+    fn object_writes(count: usize, sha: &str, present: bool) -> (BTreeMap<String, FileChange>, FakeForge) {
+        let mut files = BTreeMap::from([(ROOT_PATH.to_string(), FileChange::Put(b"{}".to_vec()))]);
+        let mut forge = FakeForge::new().yielding_reads();
+        for index in 0..count {
+            let path = object(&format!("sha256:{index:064x}"), "json");
+            if present {
+                forge = forge.with_file(sha, &path, b"{}");
+            }
+            files.insert(path, FileChange::Put(b"{}".to_vec()));
+        }
+        (files, forge)
+    }
+
+    /// A rerun touching many objects must not pay one round trip per object in turn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_object_probe_overlaps_its_reads_within_a_bound() {
+        let (files, forge) = object_writes(20, BASE_SHA, true);
+
+        let absent = has_object_absent_at(&forge, &index_repo(), BASE_SHA, ROOT_PATH, &files)
+            .await
+            .expect("the probe reads");
+
+        assert!(!absent, "every object is present");
+        let in_flight = forge.max_reads_in_flight();
+        assert!(in_flight > 1, "the reads overlap, got {in_flight} in flight");
+        assert!(in_flight <= 8, "the overlap is bounded, got {in_flight} in flight");
+    }
+
+    /// The first absent object answers the probe; the remaining objects are not read to completion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_object_probe_stops_at_the_first_absent_object() {
+        let (files, forge) = object_writes(20, BASE_SHA, false);
+
+        let absent = has_object_absent_at(&forge, &index_repo(), BASE_SHA, ROOT_PATH, &files)
+            .await
+            .expect("the probe reads");
+
+        assert!(absent);
+        let reads = forge.object_reads().len();
+        assert!(
+            reads <= 8,
+            "no read starts past the concurrency bound, got {reads} of 20"
+        );
+    }
+
+    /// The retry's no-op check asks the tree it rebuilt on, not only the winner's root bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_byte_identical_retry_over_a_missing_object_commits_it() {
+        let (registry, digest) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &root_with_a_moved_tag())
+            .with_root("moved", &unchanged_root("0.9.0", &digest))
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the retry lands");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 2, "the retry commits the object the winner lacks");
+        assert!(put_at(&commits[1], &object(&digest, "json")).is_some());
     }
 
     // ── S-005: the unclaimed-namespace signal ────────────────────────────────
@@ -2649,7 +2914,8 @@ mod tests {
         let (registry, digest) = seed_tags(&["1.0.0"]);
         let forge = FakeForge::new()
             .with_ref(MAIN_REF, &[Some("base")])
-            .with_root("base", &unchanged_root("1.0.0", &digest));
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest);
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
             .await
             .expect("a root whose name agrees announces");
@@ -3267,13 +3533,16 @@ mod tests {
         let data = StubTransportData::new();
         let served = seed_index(&data, "1.0.0");
         probes_answer_manifest_unknown(&data, 1);
-        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]).with_root(
-            "base",
-            &committed_root(serde_json::json!({
-                "1.0.0": durable_row(&served),
-                "2.0.0": durable_row(&digest('b')),
-            })),
-        );
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root(
+                "base",
+                &committed_root(serde_json::json!({
+                    "1.0.0": durable_row(&served),
+                    "2.0.0": durable_row(&digest('b')),
+                })),
+            )
+            .with_cas_object("base", &served);
 
         let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, data)
             .await

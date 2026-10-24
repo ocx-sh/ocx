@@ -143,6 +143,23 @@ def committed_root(fake_forge: FakeForge, package: str, *, owner: str = "forkuse
     return json.loads(raw)
 
 
+def entry_files(fake_forge: FakeForge, package: str, *, owner: str, repo: str, branch: str) -> dict[str, bytes]:
+    """The root and every CAS object of `package` as `branch` holds them.
+
+    An index base that reports `unchanged` already carries every object its root
+    references; seeding the root alone fabricates a base the tool rightly treats
+    as missing an object.
+    """
+    tree = fake_forge.read_tree(owner, repo, branch=branch)
+    root = f"p/{package}.json"
+    return {path: data for path, data in tree.items() if path == root or path.startswith(f"p/{package}/")}
+
+
+def output_entry_files(out_dir: Path) -> dict[str, bytes]:
+    """The root and every CAS object an `--output` run wrote, keyed by index path."""
+    return {path.relative_to(out_dir).as_posix(): path.read_bytes() for path in out_dir.rglob("*") if path.is_file()}
+
+
 def index_root_bytes(package: str, physical_repository: str, tags: dict[str, Any] | None = None) -> bytes:
     """The committed index root `seed_empty_root` writes, as bytes.
 
