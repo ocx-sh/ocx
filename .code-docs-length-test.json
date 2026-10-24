@@ -1,7 +1,7 @@
 {
   ".claude/tests/test_ai_config.py": 250,
   ".claude/tests/test_hooks.py": 46,
-  ".claude/tests/test_workflows.py": 262,
+  ".claude/tests/test_workflows.py": 256,
   "crates/ocx_announce/src/announce.rs": 40,
   "crates/ocx_announce/src/announce/pipeline.rs": 41,
   "crates/ocx_announce/src/claim.rs": 181,
@@ -310,7 +310,7 @@
   "test/tests/fixtures/attestations.py": 124,
   "test/tests/fixtures/cosign.py": 110,
   "test/tests/fixtures/cosign_artifacts.py": 44,
-  "test/tests/fixtures/cosign_matrix.py": 412,
+  "test/tests/fixtures/cosign_matrix.py": 394,
   "test/tests/fixtures/golden/generate.py": 161,
   "test/tests/fixtures/sigstore_stack.py": 12,
   "test/tests/fixtures/tcp_relay.py": 12,
