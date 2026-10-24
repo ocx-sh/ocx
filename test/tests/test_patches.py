@@ -41,6 +41,7 @@ from src import static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import (
     assert_shim_dir_exists,
+    copy_tree_keeping_links,
     make_package,
     make_package_with_entrypoints,
     push_managed_config,
@@ -3569,7 +3570,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
     #    while the fixture home stays intact for teardown. ──
     warm_home = Path(ocx.env["OCX_HOME"])
     original_home = tmp_path / "warm_home_original"
-    shutil.copytree(warm_home, original_home, symlinks=True)
+    copy_tree_keeping_links(warm_home, original_home)
 
     # Re-home the throwaway copy's absolute forward-refs onto its own path, so the
     # subsequent relocation dangles against the throwaway (not the fixture home).
@@ -3585,7 +3586,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
     )
 
     relocated_home = tmp_path / "relocated_ocx_home"
-    shutil.copytree(original_home, relocated_home, symlinks=True)
+    copy_tree_keeping_links(original_home, relocated_home)
     shutil.rmtree(original_home)
 
     # ── Resolve the same base env OFFLINE against the RELOCATED home. ──
