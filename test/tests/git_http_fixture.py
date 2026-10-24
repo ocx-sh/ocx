@@ -440,7 +440,7 @@ class BranchSeedState(enum.StrEnum):
 
 
 class RefusalShape(enum.StrEnum):
-    """The six server-side refusals whose verbatim client stderr WP-12's phrase
+    """The seven server-side refusals whose verbatim client stderr WP-12's phrase
     table is written against.
 
     Named as a closed set so the producer test cannot silently lose a row: its
@@ -450,12 +450,17 @@ class RefusalShape(enum.StrEnum):
     The two 403 shapes are separate members because they are answered on
     different requests and produce *different* client-side stderr, a
     distinction C-044's phrase table does not draw.
+
+    `FETCH_FIRST` and `NON_FAST_FORWARD` are one verdict worded two ways: git says
+    `(fetch first)` while the remote tip is absent from the client's object store
+    and `(non-fast-forward)` once it is present and not an ancestor of the push.
     """
 
     PRE_RECEIVE_DECLINED = "pre-receive-declined"
     NOT_ALLOWED_TO_PUSH = "not-allowed-to-push"
     FORBIDDEN_INFO_REFS = "forbidden-info-refs"
     FORBIDDEN_RECEIVE_PACK = "forbidden-receive-pack"
+    FETCH_FIRST = "fetch-first"
     NON_FAST_FORWARD = "non-fast-forward"
     STALE_LEASE = "stale-lease"
 
@@ -480,15 +485,18 @@ class RefusalShape(enum.StrEnum):
 #: Where each phrase comes from (C-044 requires this annotation, because it
 #: decides how much a matching test proves):
 #:
-#: * `(fetch first)` and `(stale info)` are emitted by the LOCAL git client,
-#:   decided against the ref advertisement, so a fixture exercises real
-#:   evidence. Both need the racing writer to land BEFORE the receive-pack
-#:   advertisement; landing it before the POST instead yields `incorrect old
-#:   value provided`, which is a different refusal.
+#: * `(fetch first)`, `(non-fast-forward)` and `(stale info)` are emitted by the
+#:   LOCAL git client, decided against the ref advertisement, so a fixture
+#:   exercises real evidence. `(fetch first)` and `(stale info)` need the racing
+#:   writer to land BEFORE the receive-pack advertisement; landing it before the
+#:   POST instead yields `incorrect old value provided`, which is a different
+#:   refusal. `(non-fast-forward)` needs the client to have FETCHED the moved tip
+#:   first, else git says `(fetch first)`; git 2.40 says it from a `blob:none`
+#:   partial clone with no fetch at all.
 #: * `(pre-receive hook declined)` is git's own wording for a hook exiting
 #:   non-zero, but the line above it is whatever the FIXTURE's hook wrote.
 #: * `You are not allowed to push code to this project.` proves the LEAST of
-#:   the six, and is annotated because nothing else says so. It is the string
+#:   the seven, and is annotated because nothing else says so. It is the string
 #:   the test itself writes into the hook config and then reads back out of the
 #:   client's stderr — input and output share a path — so all it establishes is
 #:   the round trip: that a hook line reaches the client verbatim and without a
@@ -502,7 +510,8 @@ OBSERVED_REFUSAL_STDERR: Mapping[RefusalShape, str] = {
     RefusalShape.NOT_ALLOWED_TO_PUSH: "You are not allowed to push code to this project.",
     RefusalShape.FORBIDDEN_INFO_REFS: "The requested URL returned error: 403",
     RefusalShape.FORBIDDEN_RECEIVE_PACK: "RPC failed; HTTP 403",
-    RefusalShape.NON_FAST_FORWARD: "(fetch first)",
+    RefusalShape.FETCH_FIRST: "(fetch first)",
+    RefusalShape.NON_FAST_FORWARD: "(non-fast-forward)",
     RefusalShape.STALE_LEASE: "(stale info)",
 }
 
@@ -1381,13 +1390,13 @@ class GitHttpRoutes:
         #:
         #: Fires ONCE, like every other scripted failure in this fixture family
         #: (`tree_fail_once`, `pull_fail_once`, `redirect_next_contents`).
-        #: `::test_server_side_rejection_texts_are_recorded` drives all six
+        #: `::test_server_side_rejection_texts_are_recorded` drives all seven
         #: refusal shapes against ONE server and resets nothing between them, so
         #: a knob that stayed armed would answer 403 to the `receive-pack` arm
         #: that follows it and every later shape would measure this one instead.
         #: A test that needs a persistently unpushable project re-arms it per
         #: push rather than relying on a latch nothing clears — there is no
-        #: sticky mode and adding one would break the six-shape producer.
+        #: sticky mode and adding one would break the seven-shape producer.
         self.git_http_forbid_info_refs: bool = False
         #: 403 on the next `POST /git-receive-pack` **that carries a pack**,
         #: then cleared — same one-shot rule and same re-arm-per-push
