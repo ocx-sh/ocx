@@ -240,3 +240,24 @@ tasks:
       # global; a `vars:` on a task call is not), and a release re-executes every acceptance module
       # instead of trusting cached verdicts.
       - '{{.TASK_EXE}} verify NOCACHE=1'
+
+  # Step 3 of the release flow (workflow-release.md): the tag exists only after readiness is green on
+  # this exact commit. `release:prepare` cannot ask - the bump commit it prepares does not exist
+  # while it runs - so the refusal sits on the step that creates the tag. `readiness-gate.yml`
+  # asks again on the tagged commit before `host` can publish.
+  tag:
+    desc: 'Tag HEAD (the `release: vX` commit) and push it with main atomically, once a green readiness run exists for it'
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - |
+        set -euo pipefail
+        version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+        subject=$(git log -1 --format=%s)
+        if [ "$subject" != "release: v$version" ]; then
+          echo "release:tag: HEAD is '$subject', expected 'release: v$version' - tag the commit release:prepare prepared" >&2
+          exit 1
+        fi
+        # Every non-zero refuses: 1 no run for this SHA, 69 gh missing or unauthenticated, 74 gh failed.
+        python3 scripts/release_readiness_gate.py --sha "$(git rev-parse HEAD)"
+        git tag "v$version"
+        git push --atomic origin HEAD:main "v$version"

@@ -29,6 +29,7 @@ To modify release workflow:
 
 Key config fields in `dist-workspace.toml`:
 - `plan-jobs` — reusable workflows for plan phase (e.g., `["./verify-version"]`)
+- `local-artifacts-jobs = ["./readiness-gate"]` — renders `readiness-gate.yml` as `custom-readiness-gate`, required by `build-global-artifacts`, `custom-scan-binaries` and `host`; its permissions (`contents`, `actions`: read) come from `github-custom-job-permissions`. Like every entry there, the grant REPLACES the defaults: a called workflow's job that asks a scope the entry omits fails the run at startup (`docker-publish` carries `artifact-metadata: write` for that reason).
 - `post-announce-jobs` — reusable workflows after release announcement (e.g., `["./post-release-oci-publish"]`)
 - `global-artifacts-jobs = ["./scan-binaries"]` — renders `scan-binaries.yml` (`adr_test_speed_tiers.md` C-PROV) as the `custom-scan-binaries` job, run after `build-local-artifacts` and required by `host` (GitHub Release, then OCI publish) via `needs:`; a test build's placeholder provenance markers red the scan before either happens. No job-level `if:` or `continue-on-error` — cargo-dist reads a `skipped` result as a pass, so this job cannot be allowed to skip itself.
 
@@ -102,15 +103,25 @@ Release creation during normal ceremony driven by cargo-dist in CI — do not in
 
 ## Workflow: Release Ceremony
 
-Release ceremony = human-driven process with tooling support:
+Release ceremony = human-driven process with tooling support, in four steps. Each step refuses when the one before it was skipped:
 
 ```bash
+# 1. Prepare. Never tags or pushes.
 task release:prepare BUMP=auto   # or BUMP=patch|minor|major, or VERSION=x.y.z
 # Human reviews the changes
+# 2. Commit, push to release/vX, dispatch readiness on that exact commit.
 git add -A && git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
-# Human decides when to push (never auto-push)
+git push origin HEAD:release/vX.Y.Z      # human decides when to push (never auto-push)
+gh workflow run release-readiness.yml --ref release/vX.Y.Z
+# 3. Tag. Refuses without a green readiness run for HEAD.
+task release:tag
+# 4. CI takes over. readiness-gate asks again on the tagged commit; red means `host` never runs.
 ```
+
+1. **`task release:prepare`** — the conventions template's task; gate, bump, changelog, validate, verify (below). The bump commit does not exist while it runs, so it cannot ask for readiness on it.
+2. **Commit, push, dispatch.** `release-readiness.yml` runs the full gate on the bytes cargo-dist would publish: `dist build` of all eight targets, `scan-binaries.yml`, then `acceptance.yml` on six platforms (linux and Windows x64/arm64, macOS x64/arm64) with `OCX_TEST_RELEASE_BINARY=1` against `test/limits/<os>-release`, plus `shell-activation-deep.yml`. It publishes nothing. The run-name is `readiness <sha>`. A dispatch with `bypass=true` and a `reason` skips every test job, goes green, and renames the run `readiness <sha> BYPASS: <reason>`; use it for an outage of the gate itself, never for a red result.
+3. **`task release:tag`** (`taskfiles/release.taskfile.yml`) — checks HEAD is `release: v<Cargo.toml version>`, runs `scripts/release_readiness_gate.py --sha HEAD`, and only on exit 0 runs `git tag vX.Y.Z` and `git push --atomic origin HEAD:main vX.Y.Z`. Every non-zero refuses: 1 no successful readiness run for that SHA, 69 `gh` missing or unauthenticated, 74 `gh` failed. A bypass run counts, and the script prints its run-name so the reason shows in the releaser's log.
+4. **`readiness-gate.yml`** — `local-artifacts-jobs = ["./readiness-gate"]` in `dist-workspace.toml` renders `custom-readiness-gate` in `release.yml`; `host` (GitHub Release, then every post-announce publish) needs it and reads its result, so a tag pushed around step 3 publishes nothing. `gh workflow run readiness-gate.yml --ref <ref> -f sha=<sha>` shows the gate red or green for any commit without cutting a tag.
 
 `release:prepare` is the conventions template's task (`taskfiles/baseline.taskfile.yml`, template-owned, flattened into the root taskfile). It never tags or pushes, and it calls five optional hooks that `taskfiles/release.taskfile.yml` defines, in this order:
 
@@ -124,7 +135,7 @@ git tag vX.Y.Z
 
 The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify without `NOCACHE=1` and a gate without its full-mark or provenance step each turn it red.
 
-After tag pushed, CI takes over: build → test → GitHub Release → publish to registry → deploy website.
+After the tag is pushed, CI takes over: readiness gate → build → provenance scan → GitHub Release → publish to registry → deploy website.
 
 ### Version Between Releases
 
