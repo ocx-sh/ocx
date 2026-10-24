@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
-# Configure the manual-testing shell to publish + consume against the local
-# zot registry that `cd test && uv run python -m src.zot` serves. Source this file:
-#
-#   source test/manual/scripts/env.sh
-#
-# Start the registry first, in its own terminal: `cd test && uv run python -m src.zot`
-# (needs `zot` on PATH or OCX_TEST_ZOT; Ctrl-C stops it and drops its data).
-#
-# This script is sourced into the user's interactive shell, so it does NOT
-# enable `set -euo pipefail` — `set -u` in particular leaks into the parent
-# shell and breaks prompts that reference unset variables (e.g. VSCode's
-# `RPROMPT` integration).
+# Point the shell at the local zot registry; start it first, in its own terminal:
+# `cd test && uv run python -m src.zot` (needs `zot` on PATH or OCX_TEST_ZOT; Ctrl-C stops
+# it and drops its data). Use it as `source test/manual/scripts/env.sh`.
+# Sourced into the interactive shell, so no `set -euo pipefail`: `set -u` would leak into it
+# and break prompts that read unset variables (VSCode's `RPROMPT` integration).
 
 # Port follows the same knob `src.zot` binds with (`OCX_TEST_REGISTRY_PORT`, or its
 # first argument), so a shell configured for a registry moved off 5000 talks to the

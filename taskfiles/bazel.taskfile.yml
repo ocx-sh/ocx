@@ -181,10 +181,10 @@ tasks:
       # hides but does not fix — and the file outlives that directory the
       # moment anything copies it out with its mode.
       - cmd: >-
-          test -s {{.BEP}} || {
+          test -s '{{.BEP}}' || {
           echo 'bazel: --build_event_json_file wrote nothing to {{.BEP}}, so scripts/bep_to_otlp.py has no subject and WP-27 dashboard would empty silently. Restore the flag on the build above.' >&2;
           exit 1; };
-          chmod 600 {{.BEP}}
+          chmod 600 '{{.BEP}}'
       # C-006's declared red state, which this step is measurably NOT: dropping
       # `test/manual/.ocx-home` from `.bazelignore` produces forty ERROR lines
       # on every `//...` command and they are non-fatal, so the line above stays
@@ -300,7 +300,8 @@ tasks:
       preferred.** The ADR's design was a `rust_test` wired to
       `$XML_OUTPUT_FILE`; no `crates/*/BUILD.bazel` carries that wiring, so
       Bazel writes its *synthesised* `test.xml` — `tests="1"`, one `testcase`
-      per target. Summing those elements reports 34 against a floor of 8174.
+      per target. Summing those elements reports the target count, tens against
+      a floor in the thousands.
       Both files are `testActionOutput` entries of the same `TestResult`, and
       a cache hit replays both, so the log is the reachable per-case count.
 
@@ -310,7 +311,7 @@ tasks:
       target. That is what `ci:test` copies to `target/reports/junit/unit.xml`
       for `verify-basic.yml`'s `test` job: its JUnit check report and the
       test telemetry.
-      Publishing `bazel-testlogs/**/test.xml` instead would name 34 targets and
+      Publishing `bazel-testlogs/**/test.xml` instead would name targets and
       not one test: Bazel's synthesised file carries one `testcase` per target
       and puts the failing test's name only in the testsuite-level
       `system-out`, which no consumer here reads. Not a second parse of the same

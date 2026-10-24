@@ -26,10 +26,10 @@ tasks:
     desc: Download CaskaydiaCove Nerd Font if not present
     internal: true
     status:
-      - test -d {{.FONTS_DIR}}/CascadiaCode
+      - test -d "{{.FONTS_DIR}}/CascadiaCode"
     cmds:
       - mkdir -p "{{.FONTS_DIR}}/CascadiaCode"
-      - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C {{.FONTS_DIR}}/CascadiaCode
+      - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C "{{.FONTS_DIR}}/CascadiaCode"
 
   build:
     desc: Generate all .cast recordings
@@ -88,7 +88,7 @@ tasks:
       # destination first — bazel writes its outputs read-only, so a plain
       # overwrite of a previously copied cast fails with EACCES.
       - cp -RLf "{{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/." "{{.CASTS_DIR}}/"
-      - chmod -R u+w {{.CASTS_DIR}}
+      - chmod -R u+w "{{.CASTS_DIR}}"
 
   gifs:
     desc: Render every cast to a GIF and run the Bazel render proof (requires agg)

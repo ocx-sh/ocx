@@ -190,6 +190,7 @@ jobs:
           path: ${{ steps.paths.outputs.built }}
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
       # Provenance / inputs gate (NOT byte-equality). cargo-zigbuild's
       # gnullvm PE link is not byte-reproducible run-to-run even with a
@@ -257,6 +258,7 @@ jobs:
           path: ${{ steps.paths.outputs.committed }}
           compression-level: 0
           retention-days: 7
+          overwrite: true
 
       # The three provenance controls above (SLSA attestation, the SHIM_SHA256
       # canary, this job's path filter) all answer "have the committed bytes

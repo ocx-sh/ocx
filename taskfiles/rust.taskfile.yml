@@ -396,7 +396,7 @@ tasks:
       - >-
         set -o pipefail;
         cargo nextest run --workspace --release --locked -E 'not test(real_binary::)' {{.CLI_ARGS}}
-        2>&1 | tee {{.NEXTEST_RUN_LOG}}
+        2>&1 | tee "{{.NEXTEST_RUN_LOG}}"
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
       # configured for it (taskfiles/telemetry.taskfile.yml). The default
       # profile's path, so a run passing `-- --profile ci` pushes nothing —
@@ -444,8 +444,8 @@ tasks:
         floor=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import bazel_gate_proofs; print(bazel_gate_proofs.CRATES_TEST_TARGETS)' '{{.ROOT_DIR}}/scripts');
         [ -n "$floor" ] || { echo "bazel unit: could not read CRATES_TEST_TARGETS from scripts/bazel_gate_proofs.py — the floor has no value, and a comparison against an empty one is not a floor" >&2; exit 1; };
         status=0;
-        bazel test //crates/... {{.CLI_ARGS}} 2>&1 | tee {{.BAZEL_RUN_LOG}} || status=$?;
-        selected=$(sed -E 's/\x1b\[[0-9;]*m//g' {{.BAZEL_RUN_LOG}} | sed -nE 's/^Executed [0-9]+ out of ([0-9]+) tests?:.*/\1/p' | tail -n 1);
+        bazel test //crates/... {{.CLI_ARGS}} 2>&1 | tee "{{.BAZEL_RUN_LOG}}" || status=$?;
+        selected=$(sed -E 's/\x1b\[[0-9;]*m//g' "{{.BAZEL_RUN_LOG}}" | sed -nE 's/^Executed [0-9]+ out of ([0-9]+) tests?:.*/\1/p' | tail -n 1);
         selected=${selected:-0};
         [ "$selected" -ge "$floor" ] || {
           echo "bazel unit: the run selected $selected test target(s) under //crates/..., floor is $floor (CRATES_TEST_TARGETS in scripts/bazel_gate_proofs.py) — an empty or partial Rust test graph is not a pass; bazel exited $status" >&2; exit 1; };
@@ -859,14 +859,19 @@ tasks:
       be this run's. Run `task rust:test:floor` then `task rust:test:unit`
       first.
 
-      **What a green here claims, exactly: every unit test that runs in the
-      Linux unit suite is under 1 second.** Not "every unit test on every
+      **No workflow runs this task.** The nextest bracket that wrote its log
+      left CI with the Bazel lane swap, so nothing in CI decides this budget:
+      it runs by hand, and from `rust:verify`, on the cargo engine.
+
+      **What a green here claims, exactly: every unit test in the nextest run
+      whose log it read is under 1 second.** Not "every unit test on every
       platform" — `platforms: [linux]`, the guard `test:floor` and
       `test:ceiling` already carry because cfg-gated tests make the counts
       platform-dependent. The gap is real and named rather than papered over:
-      deep-repo.yml's `Unit Test` legs run the cross-built bundle on macOS and
-      Windows through `task cross:test:run`, so this gate never judges them;
-      `build-windows-shims.yml` runs three crates through raw
+      the Linux unit suite in CI is `bazel:test:unit`, which prints no per-test
+      timing; deep-repo.yml's `Unit Test` legs run the cross-built bundle on
+      macOS and Windows through `task cross:test:run`, so this gate never
+      judges them; `build-windows-shims.yml` runs three crates through raw
       `cargo nextest`. Extending the gate there would be worse than the gap:
       deep runs nightly and on dispatch, not on every change, so a copy of this
       step living on it would be a green nobody can tell from one that never ran.
@@ -888,14 +893,13 @@ tasks:
       and a gate that reds on a busy laptop for code nobody touched is a gate
       someone turns off.
 
-      It is not an off-switch, and the mode line says so on every run:
-      `verify-basic.yml`'s smoke job runs on **every pull request** with `CI`
-      set, so the hard mode runs on every change, and `.claude/tests/` asserts
-      that step's presence. Both modes name themselves on every run, green or
-      red — a reader must never have to infer whether the run in front of them
-      could have failed. Only the *budget verdict* is advisory: a log this
-      reader cannot judge and an unbounded allowlist pattern fail in both
-      modes, being wiring faults rather than slow tests.
+      With no workflow running it, the hard mode is reached only by running
+      this with `CI=1`; the advisory mode line says so. Both modes name
+      themselves on every run, green or red — a reader must never have to infer
+      whether the run in front of them could have failed. Only the *budget
+      verdict* is advisory: a log this reader cannot judge and an unbounded
+      allowlist pattern fail in both modes, being wiring faults rather than slow
+      tests.
 
       A load-average check was the alternative and is the wrong instrument: a
       nextest run saturates the box by design, so load at gate time describes
@@ -905,10 +909,10 @@ tasks:
 
       **Headroom.** The budget is 1.0 s of wall clock as observed on the run's
       own log. ubuntu-latest measures roughly 2x this project's dev box for the
-      scan-heavy tests and worse for process-spawning ones, and CI is where the
-      gate gates — so a test sitting above ~0.7 s on CI is a latent red, not a
-      pass. Once the allowlist's debt rows land fast, the slowest unlisted test
-      on CI is about 0.8 s, which is thin on purpose. The budget does NOT get
+      scan-heavy tests and worse for process-spawning ones, and a `CI=1` run is
+      the verdict that counts — so a test sitting above ~0.7 s on CI is a latent
+      red, not a pass. Once the allowlist's debt rows land fast, the slowest
+      unlisted test on CI is about 0.8 s, which is thin on purpose. The budget does NOT get
       raised above 1.0 s to buy headroom; 1.0 s is the contract.
 
       `crates/NEXTEST_SLOW_ALLOWLIST` is the tolerated set, one line per entry

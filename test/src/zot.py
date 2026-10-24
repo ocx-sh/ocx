@@ -156,6 +156,11 @@ class _PosixGuard:
         os.close(self._write_end)
         self._watchdog.wait()
 
+    def abort(self) -> None:
+        """Disorderly end: EOF without "done" makes the watchdog kill every group it knows and remove the stores."""
+        os.close(self._write_end)
+        self._watchdog.wait()
+
 
 class _WindowsGuard:
     """Puts the controller itself in a KILL_ON_JOB_CLOSE job, so every child is born inside it.
@@ -244,6 +249,9 @@ class _WindowsGuard:
         if self._set_flags(0):
             self._k32.CloseHandle(self._job)
 
+    def abort(self) -> None:
+        """Disorderly end: the kill flag stays set, so the controller's exit takes any child `stop` never saw."""
+
 
 _Guard = _WindowsGuard if sys.platform == "win32" else _PosixGuard
 
@@ -268,7 +276,7 @@ class Stack:
         env["OCX_INSECURE_REGISTRIES"] = f"localhost:{self.ports['registry']}"
         return env
 
-    def stop(self, *, keep_root: bool = False) -> None:
+    def stop(self, *, keep_root: bool = False, orderly: bool = True) -> None:
         for proc in self._procs:
             if proc.poll() is None:
                 proc.terminate()
@@ -279,7 +287,10 @@ class Stack:
                 proc.kill()
                 proc.wait()
         if self._guard is not None:
-            self._guard.release()
+            if orderly:
+                self._guard.release()
+            else:
+                self._guard.abort()
             self._guard = None
         if not keep_root:
             shutil.rmtree(self.root, ignore_errors=True)
@@ -349,8 +360,10 @@ def start(
                 )
             if pending:
                 time.sleep(0.1)
-    except BaseException:
-        stack.stop(keep_root=bool(stack._procs))
+    except BaseException as failure:
+        # An interrupt can land after a spawn but before its adoption: that zot is not in
+        # `_procs`, and an orderly release would leave it running.
+        stack.stop(keep_root=bool(stack._procs), orderly=isinstance(failure, Exception))
         raise
     return stack
 

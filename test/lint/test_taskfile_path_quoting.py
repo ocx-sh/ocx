@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""A path interpolated into `rm`, `mkdir`, `cp` or `mv` is quoted in every taskfile.
+"""A path interpolated into a path-taking command is quoted in every taskfile.
 
-`rm -rf {{.JUNIT_DIR}}` under a checkout at `/home/u/ocx work` runs
-`rm -rf /home/u/ocx work/target/accept/junit` and deletes `/home/u/ocx`, a
-sibling checkout. Task's built-in shell (mvdan/sh) runs every command on every
-platform, where `'…'` and `"…"` both quote, so an unquoted `{{…}}` value in an
-argument position of one of these four commands is the defect. The shell text
-of each parsed command is scanned for quote state, so `rm` in a `desc:`
-paragraph or as a `docker compose rm` argument is not a command position.
+`rm -rf {{.JUNIT_DIR}}` under a checkout at `/home/u/ocx work` deletes `/home/u/ocx`;
+`--basetemp={{.X}}` makes pytest delete the shortened path. Task's shell (mvdan/sh)
+quotes with `'…'` and `"…"` on every platform, so an unquoted `{{…}}` argument of a
+`GUARDED` command or `GUARDED_ARGS` form is the defect. Quote state is scanned per
+parsed command, so `rm` in a `desc:` or as a `docker compose rm` argument is skipped.
 """
 
 from __future__ import annotations
@@ -23,20 +21,22 @@ import yaml  # a suite dependency (test/pyproject.toml)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-GUARDED = frozenset({"rm", "mkdir", "cp", "mv"})
+GUARDED = frozenset({"rm", "mkdir", "cp", "mv", "tee", "chmod", "tar", "install", "test"})
+# Argument forms guarded whatever command carries them.
+GUARDED_ARGS = ("--basetemp=",)
 # Template actions that print nothing themselves; the text between them is the command.
 CONTROL = re.compile(r"\{\{-?\s*(?:if|else|end|range|with|define)\b[^}]*\}\}")
 VALUE = re.compile(r"\{\{.*?\}\}")
 # After one of these the next word is a command again.
-KEYWORDS = frozenset({"then", "do", "else", "elif", "!", "{", "(", "time"})
+KEYWORDS = frozenset({"if", "while", "until", "then", "do", "else", "elif", "!", "{", "(", "time"})
 ENV_PREFIX = re.compile(r"^[A-Za-z_]\w*=")
 COMMAND_KEYS = frozenset({"cmd", "defer", "sh"})
 LIST_KEYS = frozenset({"cmds", "status"})
 
-# Live: 25 taskfiles, 321 command strings, 52 rm/mkdir/cp/mv invocations. A reader
+# Live: 25 taskfiles, 319 command strings, 88 invocations of a GUARDED word. A reader
 # that stopped matching (a renamed key, a changed loader) must red, not go clean.
-COMMAND_FLOOR = 250
-GUARDED_FLOOR = 40
+COMMAND_FLOOR = 319
+GUARDED_FLOOR = 88
 
 
 def _taskfiles() -> list[Path]:
@@ -81,7 +81,7 @@ def unquoted_in_guarded(command: str) -> tuple[list[str], int, bool]:
         nonlocal word, live, quoted, seen
         if word or quoted:
             if names[-1]:
-                if names[-1] in GUARDED and live:
+                if live and (names[-1] in GUARDED or word.startswith(GUARDED_ARGS)):
                     found.append(word.replace("\0", "{{…}}"))
             elif word not in KEYWORDS and not ENV_PREFIX.match(word):
                 names[-1] = word
@@ -156,8 +156,9 @@ def _scan() -> tuple[int, int, list[str]]:
 def test_guarded_commands_quote_every_interpolated_path():
     commands, guarded, problems = _scan()
     assert commands >= COMMAND_FLOOR, f"read {commands} taskfile commands, floor {COMMAND_FLOOR}"
-    assert guarded >= GUARDED_FLOOR, f"saw {guarded} rm/mkdir/cp/mv commands, floor {GUARDED_FLOOR}"
-    assert not problems, "template path unquoted as an rm/mkdir/cp/mv argument:\n" + "\n".join(problems)
+    words = ", ".join(sorted(GUARDED))
+    assert guarded >= GUARDED_FLOOR, f"saw {guarded} commands of ({words}), floor {GUARDED_FLOOR}"
+    assert not problems, "template path unquoted as a guarded-command or --basetemp= argument:\n" + "\n".join(problems)
 
 
 @pytest.mark.parametrize(
@@ -171,6 +172,19 @@ def test_guarded_commands_quote_every_interpolated_path():
         ("x=$(rm {{.X}})", 1),
         ("FOO=1 rm {{.X}}", 1),
         ("rm -f \\\n  {{.X}}", 1),
+        # The widened set: every command that takes a path, and the pytest basetemp argument.
+        ("uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml=x.xml", 1),
+        ("uv run pytest --basetemp={{.TEST_BASETEMP}}-lint", 1),
+        ("pytest 2>&1 | tee {{.TEST_BASETEMP}}-lint.log", 1),
+        ("chmod -R u+w {{.CASTS_DIR}}", 1),
+        ("tar -C {{.CASTS_DIR}} -xf a.tar", 1),
+        ("install -m 0755 scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push", 1),
+        ("test -d {{.FONTS_DIR}} || exit 1", 1),
+        # A command in an `if` condition is still in command position.
+        ("if rm -rf {{.X}}; then echo gone; fi", 1),
+        ("if ! rm -rf {{.X}}; then echo kept; fi", 1),
+        ("while rm -f {{.X}}; do :; done", 1),
+        ("until rm -f {{.X}}; do :; done", 1),
         # Quoted, or not a guarded command position.
         ('{{if not .KEEP_JUNIT}}rm -rf -- "{{.JUNIT_DIR}}"{{end}}', 0),
         ("rm -rf '{{.BEP_DIR}}'", 0),
@@ -181,6 +195,14 @@ def test_guarded_commands_quote_every_interpolated_path():
         ("echo rm {{.X}}", 0),
         ("# don't rm {{.X}}\nmkdir -p '{{.Y}}'", 0),
         ("uv run pytest --junit-xml={{.JUNIT_DIR}}/a.xml", 0),
+        ('uv run pytest --basetemp="{{.TEST_BASETEMP}}"-lint --junit-xml=x.xml', 0),
+        ('pytest 2>&1 | tee "{{.TEST_BASETEMP}}-lint.log"', 0),
+        ('chmod -R u+w "{{.CASTS_DIR}}"', 0),
+        ("tar -C '{{.CASTS_DIR}}' -xf a.tar", 0),
+        ('install -m 0755 scripts/pre-push.sh "{{.HOOKS}}/hooks/pre-push"', 0),
+        ('test -d "{{.FONTS_DIR}}" || exit 1', 0),
+        ('if rm -rf "{{.X}}"; then echo gone; fi', 0),
+        ("cargo install --path {{.X}}", 0),  # install as an argument is not a command position
     ],
 )
 def test_scanner_is_red_on_an_unquoted_value_and_green_on_a_quoted_one(command: str, unquoted: int):

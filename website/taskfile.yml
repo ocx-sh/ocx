@@ -142,7 +142,7 @@ tasks:
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //website:site
       - rm -rf dist
       - mkdir -p dist
-      - tar -xf {{.ROOT_DIR}}/bazel-bin/website/site.tar -C dist
+      - tar -xf "{{.ROOT_DIR}}/bazel-bin/website/site.tar" -C dist
       - chmod -R u+w dist
 
   # Site deploys ride CI: deploy-docs.yml builds `task website:build` and

@@ -27,7 +27,7 @@ unit:   ARGS is at most one substring that selects the bundle's targets by label
 
 Exit: the child's status; 64 usage; 66 --exe, or ocx-shim.exe / schema/ocx_schema.exe beside it, missing;
 69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-wintest;
-2 a shard request accept_shard.py refuses.
+2 a shard request accept_shard.py refuses; 74 a passing run whose reports could not be copied back.
 EOF
 }
 
@@ -232,6 +232,13 @@ fi
 
 # 5. The run. zot comes from ocx.lock through the staged ocx.exe; pytest starts it itself.
 rc=0
+# A report that cannot leave the stage is said so and ends the run in 74, unless the run already failed: its status stays.
+bring_back() {
+    cp -f "$@" || {
+        printf 'windows_local: could not copy the reports out of the stage (cp exit %s)\n' "$?" >&2
+        [ "$rc" -ne 0 ] || rc=74
+    }
+}
 if [ "$mode" = accept ]; then
     shard_vars=''
     [ -z "$shard_count" ] || shard_vars="$shard_vars SHARD_COUNT=$shard_count"
@@ -240,7 +247,7 @@ if [ "$mode" = accept ]; then
     # The reports leave with the run: the merge job's limits are counted off them.
     mkdir -p "$ROOT/target/windows-local/junit"
     if [ -d "$stage_wsl/target/accept/junit" ]; then
-        cp -f "$stage_wsl"/target/accept/junit/*.xml "$ROOT/target/windows-local/junit/" || true
+        bring_back "$stage_wsl"/target/accept/junit/*.xml "$ROOT/target/windows-local/junit/"
     fi
 else
     bundle_win="$own_win\\$NAME-unit-tests.tar.gz"
@@ -254,7 +261,7 @@ else
     win "task -x cross:test:run BUNDLE=\"$bundle_win\" JUNIT=\"$junit_win\"$filter" || rc=$?
     if [ -f "$stage_wsl/target/windows-local/unit-junit.xml" ]; then
         mkdir -p "$ROOT/target/windows-local"
-        cp -f "$stage_wsl/target/windows-local/unit-junit.xml" "$ROOT/target/windows-local/"
+        bring_back "$stage_wsl/target/windows-local/unit-junit.xml" "$ROOT/target/windows-local/"
     fi
 fi
 exit "$rc"

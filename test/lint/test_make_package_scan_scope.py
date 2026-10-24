@@ -18,6 +18,8 @@ def _path(value: str, visibility: str = "public", key: str = "PATH", kind: str =
     [
         [_path("${installPath}/bin")],
         [_path("${installPath}/bin", visibility="interface")],
+        [_path("${self.installPath}/bin")],
+        [_path("${self.installPath}/bin", visibility="interface")],
         [_path("${installPath}/")],
         [{"key": "A", "type": "constant", "value": "x"}, _path("${installPath}/tools/bin")],
     ],
@@ -36,8 +38,12 @@ def test_an_interface_path_rooted_at_install_path_is_scanned(env: list[dict]):
         [_path("${installPath}/bin", kind="constant")],
         [_path("${installPath}/bin", key="Path")],
         [_path("${installPath}")],
+        [_path("${self.installPath}")],
         [_path("${installPath}/../etc")],
+        [_path("${self.installPath}/../etc")],
         [_path("${installPath}/bin:${deps.dep.installPath}/bin")],
+        [_path("${self.installPath}/bin:${deps.dep.installPath}/bin")],
+        [_path("${self.installPath}/bin", visibility="private")],
         [_path("/usr/bin")],
     ],
 )

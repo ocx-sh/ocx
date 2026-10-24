@@ -10,7 +10,7 @@
 - **Active phase:** G6 — release-readiness dry run on #637 HEAD; closing /hex-review (97ef924b1) findings fixed
 - **Step:** /hex-execute → review-fix loop (I8, last cycle) done: Block, High 1-3, Warn 1-15 (incl. the full report's sub-items) and the cheap Suggests; awaiting push + readiness/deep re-dispatch
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after 8cabf0c64: test: the Windows zot guard test runs its controller on the base interpreter, so only the guard's job can end the zots)
+- **Last update:** 2026-10-24 (convergence round on 7155a8b80, on top of e16fb3eb6)
 - **Next:** G6 (meta): push, dispatch release-readiness and deep on the new tip; the integration `task verify` is review-637's gate rerun
 
 ---
@@ -852,3 +852,55 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
   `--remote_upload_local_results=true`). Switching would still move each repo-owned job onto the conventions setup
   action, which calls setup-ocx with its default `cache: true` and has no input to turn it off. A restored object store
   is runner-executable content, and those jobs hold the write credential, so I1 keeps `bazel-cache-rc` and its callers.
+- 2026-10-24 — **Convergence round on a31494b7e..7155a8b80 (inner review-fix), from e16fb3eb6**, four sonnet
+  workers, file-disjoint worktrees, patches applied three-way.
+  - **High (basetemp quoting):** every `--basetemp=` and `tee` path in `test/taskfile.yml` quoted; the quoting lint
+    guards `tee`, `chmod`, `tar`, `install`, `test` and the `--basetemp=` argument form, and reads `if`/`while`/`until`
+    conditions (11 red cases); 22 hits fixed tree-wide (recordings, git hooks, bazel BEP, rust logs, website tar).
+    Floors at the live counts: 319 commands, 88 guarded.
+  - **Warn 1:** `cross.taskfile.yml` passes BUNDLE, SOURCE_ROOT, JUNIT, FILTER, TARGET and CACHE_RC through
+    `shellQuote`, no `env:` block; go-task tests in `.claude/tests/test_workflows.py` (the lint tier refuses a `task`
+    spawn) red on the old file (an exported `FILTER=exported` beat `FILTER=arg`) and on a quoted-injection plant.
+  - **W2:** `overwrite: true` on 11 more uploads; the test reads every repo-owned workflow and action (floor 18),
+    exempting template-owned files and the generated `release.yml`. `verify-deep.yml:46` (template-owned) is a
+    conventions follow-up.
+  - **W13:** basic-repo.yml, dist-workspace.toml (parsed TOML unchanged), docker-compose.yml and manual env.sh
+    blocks under the 5-line cap; the quoting lint's docstring under the 10-line cap.
+  - **Warn 2:** an interrupt out of zot `start()` takes `guard.abort()`: POSIX closes the watchdog pipe without
+    "done"; Windows leaves the kill flag set so the controller's exit ends the child. Red with `orderly=True`.
+  - **Warn 3:** the host-condition reader asserts each need's clause in `host.if` and the gate jobs' `if:` equals
+    the publish predicate; both surviving mutations red on an in-memory `release.yml`.
+  - **Warn 4:** `_scans_a_directory` accepts `${self.installPath}/`; 6 cases, 2 red without the alias.
+  - **Warn 6:** see the quoting lint above (`if rm …` caught).
+  - **Warn 7 decided — reword, not wire.** No plan or ADR row makes the duration gate gate a CI lane;
+    `plan_bazel_build_adoption.md` DX-91 moved it out of `.verify:build-test` and the smoke job, and no CI lane writes
+    a nextest run log since the Bazel swap. The script, `rust:test:duration` and the rules now say it runs in
+    `rust:verify` and by hand only, and that nothing in CI decides.
+  - **Suggests applied:** windows_local.sh reports a failed report copy (exit 74 only on a passing run; red with
+    `|| true`), the stale Bazel target count (now worded without a number; live 43), cross `TARGET` quoting.
+  - **H2:** pending readiness 40114190319 on 7155a8b80 (still running); the ceilings follow in their own commit.
+  - **Suggests declined:**
+    - S2 (readiness gate prints `displayTitle` raw, no `--repo`, no event check, shebang on a 0644 file): the title is
+      typed by a dispatcher who already holds write access, and `gh` resolves the repository from the job's checkout.
+    - S3 (test_bundle.py `extractall` fallback, two `--jobs=8`): pinned CPython 3.14 always has `data_filter`, so the
+      fallback cannot run; the constant has two uses in one file.
+    - S4 (job-level `OTEL_OTLP_AUTH` in deep-repo `unit-native`; cache write secret passed to a skipped `binary`
+      job): the same job-level pattern is in acceptance.yml and basic-repo.yml, and a class fix needs a non-secret
+      flag for the push step's `if:` plus a CI run proving the push still lands — follow-up; the pass-through
+      reaches no step on that path.
+    - S5 (`test:unit:bazel` arm without `CACHE_RC`): nothing calls the parked arm; uncached, never wrong.
+    - S7 (`_TARGET_TRIPLES` lacks musl): the select stamps only the testing binary's reported triple, and no musl leg
+      runs the acceptance suite; release bytes come from cargo-dist.
+    - S10 (accept_floor duplicate basenames, accept_shard status OSError, two-hop marker chain, bin_scan Windows
+      refusal): coverage additions with no observed defect, outside this round's finding set.
+    - S9 rest (`rglob_no_links` direct test and an `OCX_HOME.rglob` sweep; accept:native var-precedence desc): same.
+    - S11 rest (BZL-FLAG-11 proof record, `read_bazelversion` rename, AM-2 capital, the 4c6cfa68a body): records and
+      naming with no behaviour; the commit body is a `/hex-finalize` squash item.
+    - The push-rejected tag test (`release:tag` drops its local tag): needs a remote that refuses an atomic push; the
+      two-line trap was read in review.
+  - **Verify:** the CI lint job's five steps (`ci:lint`, `lock:check`, `baseline:check`, `secrets`,
+    `workflows:lint`) exit 0; `claude:tests` 519 passed / 21 skipped; `test:lint:structure` 581 passed (LINT_FLOOR
+    581); `scripts:self-test` 835 passed; Linux `test:parallel --force` on test_package_create_bin_scan +
+    test_patch_smoke 20 passed; windows-local accept on those two plus lint/test_zot.py and
+    lint/test_make_package_scan_scope.py 26 passed / 33 skipped. The new zot interrupt test is POSIX-only, so the
+    Windows `abort()` path is reasoned, not run.

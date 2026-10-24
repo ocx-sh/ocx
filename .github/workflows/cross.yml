@@ -94,6 +94,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
       - name: Upload unit-test bundle
         if: matrix.bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -103,6 +104,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
       - name: Upload acceptance binaries
         if: matrix.test-bin
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -112,3 +114,4 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true

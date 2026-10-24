@@ -223,8 +223,8 @@ step deletes the log, so a duration read there can only be that run's. No lane
 runs the live gate (its log left with the nextest bracket); its proof runs under
 `task scripts:self-test`.
 
-- **What a green claims, exactly.** *Every unit test that runs in the Linux
-  unit suite is under 1 second.* Not "every unit test on every platform" —
+- **What a green claims, exactly.** *Every unit test in the nextest run whose
+  log the gate read is under 1 second.* Not "every unit test on every platform" —
   `platforms: [linux]`, the guard the sibling floor/ceiling tasks carry because
   cfg-gated tests make counts platform-dependent. The uncovered legs, named
   rather than papered over: Linux unit tests run as Bazel `rust_test` targets in
@@ -238,11 +238,10 @@ runs the live gate (its log left with the nextest bracket); its proof runs under
   print and the run exits 0. Wall clock on a shared machine measures a test's
   neighbours: four tests at 6-190 ms quiet and 12-160 ms on CI were measured at
   1.0-1.2 s on a 32-core box under load 27, and allowlisting those would file a
-  false reason for tests that are fast everywhere it matters. **Not an
-  off-switch** — *advisory here; the gate is the Linux CI leg of
-  `verify-basic.yml`, which runs on every pull request.* That wording is the
-  script's own message, and no lane runs the live gate today. Both modes print which
-  one they ran in, on every run, green or red. Only the budget verdict is
+  false reason for tests that are fast everywhere it matters. No lane runs the
+  live gate, so nothing in CI decides this budget and the hard mode is reached
+  only by a `CI=1` run by hand; the advisory message says so. Both modes print
+  which one they ran in, on every run, green or red. Only the budget verdict is
   advisory: the reader floor and the unbounded-pattern refusal fail in both
   modes, being wiring faults rather than slow tests. A load-average check is
   deliberately **not** used — a nextest run saturates the box by design, so
@@ -257,9 +256,9 @@ runs the live gate (its log left with the nextest bracket); its proof runs under
   a CI run can be investigated by hand.
 - **Headroom.** 1.0 s is wall clock on the run's own log. ubuntu-latest
   measures roughly 2x this project's dev box for scan-heavy tests and worse for
-  process-spawning ones, and CI is where the gate gates — a test above ~0.7 s
-  there is a latent red, not a pass. After the current debt rows land fast the
-  slowest unlisted test on CI is about 0.8 s. **The budget is never raised
+  process-spawning ones, and a `CI=1` run is the verdict that counts — a test
+  above ~0.7 s there is a latent red, not a pass. After the current debt rows
+  land fast the slowest unlisted test on CI is about 0.8 s. **The budget is never raised
   above 1.0 s to buy headroom; 1.0 s is the contract.**
 - **Reader floor.** The gate refuses a log holding fewer timed lines than
   `crates/NEXTEST_FLOOR`, naming both numbers. A subset run, a truncated log or

@@ -91,7 +91,7 @@ def test_without_a_cmd_exe_it_exits_69_before_building_anything(tmp_path: Path) 
 TRIPLE = "x86_64-pc-windows-gnullvm"
 
 # Answers the %USERPROFILE% probe; any other call is a batch step, logged and run as the host would:
-# the reports a run leaves in the stage, a CRLF line of output, $STUB_EXIT as the status.
+# the reports a run leaves in the stage (none under $STUB_NO_REPORTS), a CRLF line of output, $STUB_EXIT as the status.
 CMD_EXE = r"""#!/usr/bin/env bash
 set -u
 if [ "$2" = 'echo %USERPROFILE%' ]; then
@@ -101,7 +101,7 @@ fi
 step=${2//\\//}
 { printf -- '--- step\n'; cat "$step"; } >>"$STUB_LOG/steps.log"
 case $(cat "$step") in
-    *test:accept:native*) mkdir -p target/accept/junit && echo '<testsuites/>' >target/accept/junit/shard-0.xml ;;
+    *test:accept:native*) mkdir -p target/accept/junit && { [ -n "${STUB_NO_REPORTS:-}" ] || echo '<testsuites/>' >target/accept/junit/shard-0.xml; } ;;
     *cross:test:run*) mkdir -p target/windows-local && echo '<testsuites/>' >target/windows-local/unit-junit.xml ;;
 esac
 printf 'child said hello\r\n'
@@ -252,6 +252,17 @@ def test_the_childs_status_is_the_scripts_and_the_reports_still_leave_the_stage(
 
     assert done.code == status, done.err
     assert report.is_file(), "a failing run's reports are the ones to read"
+
+
+@linux_only
+@pytest.mark.parametrize(("status", "expected"), [(7, 7), (0, 74)])
+def test_reports_that_cannot_leave_the_stage_are_reported_and_never_replace_a_failing_status(
+    rig: Rig, status: int, expected: int
+) -> None:
+    done = rig.accept(STUB_EXIT=str(status), STUB_NO_REPORTS="1")
+
+    assert done.code == expected, done.err
+    assert "could not copy the reports out of the stage" in done.err
 
 
 # Stands in for `grep` on PATH: fails with `status` when it is the stage filter (`-zv`), runs the real one otherwise.

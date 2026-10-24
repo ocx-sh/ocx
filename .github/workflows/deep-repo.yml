@@ -88,6 +88,7 @@ jobs:
         with:
           name: deep-unit-${{ matrix.job.name }}
           path: target/cross/unit-junit.xml
+          overwrite: true
       - name: Push unit test timings
         if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
         continue-on-error: true

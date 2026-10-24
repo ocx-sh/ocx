@@ -325,6 +325,39 @@ def test_a_controller_killed_between_spawn_and_adoption_leaves_no_zot_and_no_sto
 
 
 @needs_proc
+def test_an_interrupt_between_spawn_and_adoption_does_not_orphan_the_zot(
+    fake_zot: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interrupt lands once the zot runs but before `start` holds its handle, so `stop` cannot see it."""
+    spawned: list[tuple[int, Path]] = []
+    real_spawn = zot._Guard.spawn
+
+    def spawn_then_interrupt(self, argv, log):
+        proc = real_spawn(self, argv, log)
+        config = Path(argv[2])
+        spawned.append((proc.pid, config.parents[1]))
+        # The fake writes `pid` once it has read its config; before that, deleting the stores kills it.
+        assert wait_until(lambda: (config.parent / "pid").exists())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(zot._Guard, "spawn", spawn_then_interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            zot.start(fake_zot, names=("registry",), timeout=20)
+        ((pid, root),) = spawned
+        assert wait_until(lambda: not alive(pid)), (
+            "an unadopted zot outlived the interrupt"
+        )
+        assert wait_until(lambda: not root.exists()), (
+            "the stores outlived the interrupt"
+        )
+    finally:
+        for pid, _ in spawned:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+@needs_proc
 def test_the_readiness_probe_ignores_an_ambient_proxy(fake_zot: str) -> None:
     stack = zot.start(fake_zot, names=("registry",))
     try:

@@ -135,6 +135,7 @@ jobs:
           path: test/bin/ocx
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
   # The unit run with every hook shell reachable. The template's `test` job runs `ci:test` with no
   # interpreter on PATH beyond the runner's, so the nine-shell parity matrix skips its elvish, nushell and
@@ -165,16 +166,11 @@ jobs:
       - name: Put the elvish, nushell and fish parity arms on PATH
         run: |
           set -euo pipefail
-          # Namespaced, not the flat `nushell`/`elvish`: index.ocx.sh is
-          # authoritative for every name in the `ocx.sh` registry, and only
-          # `nushell/nushell`, `elvish/elvish` and `fish-shell/fish` are announced
-          # there -- the flat spellings resolve to nothing and the pull exits 1.
-          #
-          # Each is pinned to its tag and the digest of its multi-platform index: these
-          # binaries run under the Bazel cache credential the step below writes, so a
-          # moved tag must not be able to swap them. To bump one, re-resolve with
-          # `ocx --remote --format json package inspect --resolve <name>:<tag>` and
-          # take the `index` entry of `resolution.chain`.
+          # Namespaced: index.ocx.sh announces only `nushell/nushell`, `elvish/elvish` and
+          # `fish-shell/fish`; a flat name resolves to nothing and the pull exits 1.
+          # Pinned to tag and multi-platform index digest: these run under the Bazel cache credential
+          # the step below writes, so a moved tag must not swap them. To bump, take the `index` entry
+          # of `resolution.chain` from `ocx --remote --format json package inspect --resolve <name>:<tag>`.
           eval "$(ocx --remote package env \
             nushell/nushell:0.116.1_20261004@sha256:fd74946d5c2a7014e62dc8c558a485373c156a5d18da5e241874addb10698ab2 \
             elvish/elvish:0.21.0@sha256:a8b7c3ac357d276f883782b76be7aef9e643295b05aebbc52be2a19e15a7a80b \

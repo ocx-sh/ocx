@@ -185,9 +185,9 @@ tasks:
       # own zot registries (`test/conftest.py`), so no host lock is taken.
       - >-
         set -o pipefail;
-        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp="{{.TEST_BASETEMP}}" --junit-xml={{.JUNIT_XML}}
         {{.CLI_ARGS | default "-v"}}
-        2>&1 | tee {{.TEST_RUN_LOG}}
+        2>&1 | tee "{{.TEST_RUN_LOG}}"
       - task: .suite-ceilings
       - task: .conformance-floor
       # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
@@ -266,7 +266,7 @@ tasks:
     # scripts/suite_ceilings.py; scripts/tests/test_suite_ceilings.py is its
     # red/green proof.
     cmd: >-
-      python3 {{toSlash .TASKFILE_DIR}}/../scripts/suite_ceilings.py --log {{.TEST_RUN_LOG}}
+      python3 {{toSlash .TASKFILE_DIR}}/../scripts/suite_ceilings.py --log "{{.TEST_RUN_LOG}}"
       --skip-ceiling-file {{.SKIP_CEILING_FILE}} --xfail-ceiling-file {{.XFAIL_CEILING_FILE}}
 
   .conformance-floor:
@@ -313,7 +313,7 @@ tasks:
       - mkdir -p "{{.JUNIT_DIR}}"
       - >-
         PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH"
-        uv run pytest -n auto --dist loadgroup --basetemp={{.TEST_BASETEMP}}-{{.JUNIT_NAME}}
+        uv run pytest -n auto --dist loadgroup --basetemp="{{.TEST_BASETEMP}}-{{.JUNIT_NAME}}"
         --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
         {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
     env: *pytest-env
@@ -374,13 +374,13 @@ tasks:
       # test, none touches the signing surface) is not `smoke`-marked, so the
       # `-m smoke` selection below never collects it: it runs on its own,
       # outside the clock and without a registry — it reads source only.
-      - OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp={{.TEST_BASETEMP}} lint/test_smoke_coverage.py
+      - OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp="{{.TEST_BASETEMP}}" lint/test_smoke_coverage.py
       # `--dist loadgroup` for the same reason `parallel` passes it: a marked
       # test that carries an `xdist_group` keeps its group. The clock wraps
       # the pytest invocation only — the build above is not the tier's cost.
       - >-
         start=$(date +%s);
-        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.SMOKE_JUNIT_XML}}
+        PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH" uv run pytest --basetemp="{{.TEST_BASETEMP}}" --junit-xml={{.SMOKE_JUNIT_XML}}
         -m smoke -n auto --dist loadgroup
         {{.CLI_ARGS | default "-v"}};
         elapsed=$(( $(date +%s) - start ));
@@ -644,8 +644,8 @@ tasks:
         start=$(date +%s);
         set -o pipefail;
         budget=30; [ "${GITHUB_ACTIONS:-}" = true ] && budget=90;
-        OCX_LINT_BUDGET_SECONDS=$budget uv run pytest lint/ -m "not deep" -n auto --basetemp={{.TEST_BASETEMP}}-lint
-        {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint.log;
+        OCX_LINT_BUDGET_SECONDS=$budget uv run pytest lint/ -m "not deep" -n auto --basetemp="{{.TEST_BASETEMP}}-lint"
+        {{.CLI_ARGS | default "-q"}} 2>&1 | tee "{{.TEST_BASETEMP}}-lint.log";
         status=$?;
         echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget $budget s)";
         exit $status
@@ -685,8 +685,8 @@ tasks:
         echo "deep lint floor: $count tests collected (floor $floor)"
       - >-
         set -o pipefail;
-        uv run pytest lint/ -m deep --basetemp={{.TEST_BASETEMP}}-lint-deep
-        {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint-deep.log
+        uv run pytest lint/ -m deep --basetemp="{{.TEST_BASETEMP}}-lint-deep"
+        {{.CLI_ARGS | default "-q"}} 2>&1 | tee "{{.TEST_BASETEMP}}-lint-deep.log"
       - task: .suite-ceilings
         vars:
           TEST_RUN_LOG: '{{.TEST_BASETEMP}}-lint-deep.log'
@@ -1016,7 +1016,7 @@ tasks:
     # status: exit 0 = up-to-date; hyperfine already on PATH or already in test/bin/.
     # `which hyperfine` succeeds if on PATH; `test -x` checks test/bin/ fallback.
     status:
-      - which hyperfine || test -x {{toSlash .TASKFILE_DIR}}/bin/hyperfine
+      - which hyperfine || test -x "{{toSlash .TASKFILE_DIR}}/bin/hyperfine"
     cmds:
       - mkdir -p "{{toSlash .TASKFILE_DIR}}/bin"
       # Tag is positional, not a flag. Asset name verified against sharkdp/hyperfine
@@ -1030,7 +1030,7 @@ tasks:
         -D /tmp/hyperfine-dl
         --clobber
       - tar -xzf /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz -C /tmp/hyperfine-dl
-      - install -m755 /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine {{toSlash .TASKFILE_DIR}}/bin/hyperfine
+      - install -m755 /tmp/hyperfine-dl/hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine "{{toSlash .TASKFILE_DIR}}/bin/hyperfine"
       - rm -rf /tmp/hyperfine-dl
 
   doc-scripts:list:
@@ -1065,7 +1065,7 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - >-
-        uv run pytest -n auto --basetemp={{.TEST_BASETEMP}}
+        uv run pytest -n auto --basetemp="{{.TEST_BASETEMP}}"
         tests/test_doc_scripts.py
         tests/test_doc_scripts_publish.py
         tests/test_doc_scripts_executor.py
@@ -1076,7 +1076,7 @@ tasks:
       # modules; their own session, so the lint conftest's admission and budget
       # judge them and nothing else.
       - >-
-        OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp={{.TEST_BASETEMP}}-lint
+        OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp="{{.TEST_BASETEMP}}-lint"
         lint/test_doc_binding.py
         lint/test_doc_scripts_parser.py
         lint/test_doc_scripts_publish_structure.py

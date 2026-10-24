@@ -66,16 +66,16 @@ tasks:
     status:
       # The token, not merely `prek`: a shim armed without it reads as armed
       # while blocking every commit on a branch that lacks the config.
-      - grep -q skip-on-missing-config {{.HOOKS}}/hooks/commit-msg
-      - grep -q skip-on-missing-config {{.HOOKS}}/hooks/pre-commit
-      - grep -q 'git lfs' {{.HOOKS}}/hooks/post-checkout
-      - cmp -s scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
+      - grep -q skip-on-missing-config "{{.HOOKS}}/hooks/commit-msg"
+      - grep -q skip-on-missing-config "{{.HOOKS}}/hooks/pre-commit"
+      - grep -q 'git lfs' "{{.HOOKS}}/hooks/post-checkout"
+      - cmp -s scripts/pre-push.sh "{{.HOOKS}}/hooks/pre-push"
     cmds:
       - git config --local --unset-all core.hooksPath || true
       - git lfs install --local --force
       - task: :hooks:install
       - prek install --allow-missing-config --hook-type pre-commit --hook-type commit-msg
-      - install -m 0755 scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
+      - install -m 0755 scripts/pre-push.sh "{{.HOOKS}}/hooks/pre-push"
 
   # The three `[patch.crates-io]` forks under `external/`. The conventions template's checkout step
   # fetches no submodules, and an empty `external/` breaks everything that resolves the patched

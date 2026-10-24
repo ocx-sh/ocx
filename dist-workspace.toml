@@ -22,20 +22,17 @@ windows-archive = ".zip"
 pr-run-mode = "skip"
 # Generate and dist a source tarball
 source-tarball = false
-# Refuse a binary carrying test provenance before anything is published
-# (scan-binaries.yml). `global`, not `local`: rendered both ways with dist
-# 0.31.0, a `local-artifacts-jobs` entry needs only `plan`, so it runs beside
-# the build and sees no binary; a `global-artifacts-jobs` entry needs
-# `build-local-artifacts`, and `host` — the GitHub Release, and through
-# `announce` every post-announce publish — needs it.
+# Refuse a binary carrying test provenance before anything is published (scan-binaries.yml).
+# `global`, not `local`: a `local-artifacts-jobs` entry needs only `plan`, so it runs beside the
+# build and sees no binary; a `global-artifacts-jobs` entry needs `build-local-artifacts`, and
+# `host` (the GitHub Release, and through `announce` every post-announce publish) needs it.
 # .claude/tests/test_workflows.py pins both edges.
 global-artifacts-jobs = ["./scan-binaries"]
-# Refuse to publish a tag that fails the version check or whose exact commit has
-# no green release-readiness run (verify-version.yml, readiness-gate.yml,
-# scripts/release_readiness_gate.py). Both are `local`, not `plan-jobs`: dist
-# makes every other job wait on a plan job, and `host` reads their skip as a
-# pass, so a red plan job would still publish. A `local` job needs only `plan`,
-# so `host` sees its failure itself.
+# Refuse a tag that fails the version check or whose commit has no green release-readiness
+# run (verify-version.yml, readiness-gate.yml, scripts/release_readiness_gate.py). Both `local`,
+# not `plan-jobs`: dist makes every other job wait on a plan job and `host` reads their skip
+# as a pass, so a red plan job would still publish. A `local` job needs only `plan`, so
+# `host` sees its failure itself.
 local-artifacts-jobs = ["./verify-version", "./readiness-gate"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./post-release-oci-publish", "./docker-publish", "./sdkgen-publish"]

@@ -27,10 +27,10 @@ in `crates/*/BUILD.bazel` carries that wiring, so Bazel writes its **synthesised
 not a path, which is why it is spelled with placeholders here: a literal one
 reads as a file claim to `scripts/dead_path_sweep.py`)
 
-One `testcase` per *target*. A reader summing those elements reports **34**
-against a floor of 8174 and passes nothing while looking like a count. So this
-takes the ADR's declared fallback: the `test.log` named in the same
-`TestResult` event, and libtest's own summary line,
+One `testcase` per *target*. A reader summing those elements reports the target
+count, tens against a floor in the thousands, and passes nothing while looking
+like a count. So this takes the ADR's declared fallback: the `test.log` named in
+the same `TestResult` event, and libtest's own summary line,
 
     test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
@@ -68,7 +68,7 @@ failing `#[test]` fn's name appears **only** inside the testsuite-level
 message>`, which reads `exited with error code 101`. EnricoMi (v2.23.0) takes a
 case's text from its own `failure`/`error` element and its stdout from the
 *testcase-level* `<system-out>` Bazel does not emit, so publishing
-`bazel-testlogs/**/test.xml` names 34 targets and cannot name one Rust test. So
+`bazel-testlogs/**/test.xml` names targets and cannot name one Rust test. So
 this writes the report instead, off libtest's own per-case lines in the very
 `test.log` the floor already opens:
 

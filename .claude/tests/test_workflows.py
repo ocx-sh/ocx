@@ -53,10 +53,12 @@ Run:
 
 from __future__ import annotations
 
+import copy
 import functools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
@@ -917,6 +919,99 @@ def test_the_cache_rc_is_read_once_whichever_way_it_arrives(
         f"`.bazelrc.user` already importing the file loads the credential twice; dropping it with no "
         f"import leaves every request an anonymous 401"
     )
+
+
+# ---------------------------------------------------------------------------
+# `cross:*` tasks take their values from the task call, as one literal word each
+# ---------------------------------------------------------------------------
+
+CROSS_TASKFILE = ROOT / "taskfiles" / "cross.taskfile.yml"
+# Stands in for `python3 scripts/test_bundle.py`: it prints the argv it was handed.
+_ARGV_STUB = "import json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+
+
+def _run_cross(tmp_path: Path, task_name: str, args: list[str], exported: dict[str, str]):
+    """`task <task_name> <args>` on the real cross taskfile, `PY` swapped for the argv stub."""
+    stub = tmp_path / "argv_stub.py"
+    stub.write_text(_ARGV_STUB, encoding="utf-8")
+    interpreter = f"{shlex.quote(sys.executable)} {shlex.quote(str(stub))}"
+    return subprocess.run(
+        ["task", "--taskfile", str(CROSS_TASKFILE), task_name, *args, f"PY={interpreter}", "CACHE_RC="],
+        capture_output=True,
+        encoding="utf-8",
+        cwd=tmp_path,
+        env={**os.environ, **exported},
+        check=False,
+    )
+
+
+def _argv(done: subprocess.CompletedProcess[str]) -> list[str]:
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_cross_test_run_takes_its_arguments_over_exported_variables_of_the_same_name(tmp_path: Path) -> None:
+    """An exported `FILTER` (or `BUNDLE`, `SOURCE_ROOT`, `JUNIT`) must not replace the task argument.
+
+    Run through go-task's own shell on the real `test:run`. A task `env:` block that mirrors the
+    arguments lets the caller's shell value win, so a stale `export FILTER=...` silently runs the
+    wrong subset and the summary still reads green.
+    """
+    exported = {name: f"exported-{name}" for name in ("BUNDLE", "SOURCE_ROOT", "JUNIT", "FILTER")}
+    args = ["BUNDLE=b.tar", "SOURCE_ROOT=src", "JUNIT=j.xml", "FILTER=arg"]
+    assert _argv(_run_cross(tmp_path, "test:run", args, exported)) == [
+        "scripts/test_bundle.py",
+        "run",
+        "--bundle",
+        "b.tar",
+        "--source-root",
+        "src",
+        "--junit",
+        "j.xml",
+        "--filter",
+        "arg",
+    ]
+
+
+def test_cross_test_run_passes_shell_metacharacters_as_one_literal_word(tmp_path: Path) -> None:
+    """A `"`, `$(`, backtick or `'` in a value never runs and never splits.
+
+    Both command-substitution spellings create the canary, so a value that reaches the shell line
+    unquoted or in the wrong quote style shows as a file, not only as a changed argv.
+    """
+    canary = tmp_path / "canary"
+    hostile = f"a\"$(touch {canary})`touch {canary}`'q r"
+    root = f"{tmp_path}/with space"
+    done = _run_cross(tmp_path, "test:run", ["BUNDLE=b.tar", f"SOURCE_ROOT={root}", f"FILTER={hostile}"], {})
+    assert _argv(done) == [
+        "scripts/test_bundle.py",
+        "run",
+        "--bundle",
+        "b.tar",
+        "--source-root",
+        root,
+        "--filter",
+        hostile,
+    ]
+    assert not canary.exists(), "a value executed as shell text"
+
+
+@pytest.mark.parametrize("task_name", ["build", "test:bundle", "test:bin"])
+@pytest.mark.parametrize("breaker", ["x';touch {canary};'", 'x"$(touch {canary})"'], ids=["single-quote", "subshell"])
+def test_cross_target_with_shell_metacharacters_is_refused_not_run(
+    tmp_path: Path, task_name: str, breaker: str
+) -> None:
+    """`TARGET` is checked against the supported list as one literal word, before anything runs.
+
+    A `'` in the value ends a single-quoted `'{{.TARGET}}'`; a `"` ends the double-quoted refusal
+    message and lets `$(…)` run. The refusal line is matched whole: go-task echoes each command
+    before running it, so a substring match would also pass on the echo of the unexpanded text.
+    """
+    canary = tmp_path / "canary"
+    hostile = breaker.format(canary=canary)
+    done = _run_cross(tmp_path, task_name, [f"TARGET={hostile}"], {})
+    assert not canary.exists(), "a TARGET value executed as shell text"
+    assert f"unsupported TARGET '{hostile}'; see: task cross:targets" in done.stderr.splitlines(), done.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -3275,16 +3370,6 @@ def _uploads_without_overwrite(documents: list[tuple[str, dict]]) -> list[str]:
     ]
 
 
-def _reached_from(workflow: str, edges: set[tuple[str, str]]) -> set[str]:
-    reached: set[str] = set()
-    pending = [workflow]
-    while pending:
-        if (name := pending.pop()) not in reached:
-            reached.add(name)
-            pending += [callee for caller, callee in edges if caller == name]
-    return reached
-
-
 @pytest.mark.parametrize(
     ("overwrite", "findings"),
     [
@@ -3298,29 +3383,24 @@ def test_the_upload_reader_reds_a_name_a_rerun_cannot_replace(overwrite: str, fi
     assert bool(_uploads_without_overwrite(_corpus(upload))) is findings
 
 
-def test_every_upload_the_readiness_run_reaches_replaces_its_own_earlier_copy() -> None:
-    """A failed shard is rerun in place, and a rerun-all repeats every upload; either one fails on
-    the second `accept-junit-*` or `readiness-bin-*` unless the upload replaces the first."""
-    documents = _documents()
-    reached = _reached_from(RELEASE_READINESS.name, _call_edges(documents))
-    assert {"acceptance.yml", "shell-activation-deep.yml", "scan-binaries.yml"} <= reached, sorted(reached)
-    swept = [(name, document) for name, document in documents if name in reached]
-    actions = sorted(
-        {
-            str(step["uses"]).rsplit("/", 1)[1]
-            for _, document in swept
-            for job in (document.get("jobs") or {}).values()
-            for step in job.get("steps") or []
-            if str(step.get("uses", "")).startswith("./.github/actions/")
-        }
-    )
-    for action in actions:
-        steps = _load(ROOT / ".github" / "actions" / action / "action.yml")["runs"].get("steps") or []
-        swept.append((f"actions/{action}", {"jobs": {"composite": {"steps": steps}}}))
+def _template_owned(path: Path) -> bool:
+    return path.read_text(encoding="utf-8").startswith("# ocx-baseline: template-owned file")
+
+
+def test_every_upload_replaces_its_own_earlier_copy() -> None:
+    """A failed job is rerun in place and a rerun-all repeats every upload; either one fails on the
+    second copy of a name unless the upload replaces the first. Exempt: a file whose first line is the
+    conventions template's banner (changed upstream, not here) and `release.yml` (cargo-dist writes it
+    and `dist generate --check` fails a hand edit)."""
+    swept = _documents([path for path in WORKFLOWS if path.name not in GENERATED_WORKFLOWS and not _template_owned(path)])
+    for action in sorted((ROOT / ".github" / "actions").glob("*/action.yml")):
+        if not _template_owned(action):
+            steps = _load(action)["runs"].get("steps") or []
+            swept.append((f"actions/{action.parent.name}", {"jobs": {"composite": {"steps": steps}}}))
     uploads = [
         step for _, _, job in _jobs(swept) for step in job.get("steps") or [] if "upload-artifact" in str(step.get("uses", ""))
     ]
-    assert len(uploads) >= 7, f"read {len(uploads)} uploads from {sorted(reached)} and {actions}; the readiness run has more"
+    assert len(uploads) >= 18, f"read {len(uploads)} uploads from {len(swept)} files; the repo has more"
     findings = _uploads_without_overwrite(swept)
     assert not findings, f"{findings}. Set `overwrite: true`; a rerun otherwise fails the upload of a name the run already holds"
 
@@ -3536,6 +3616,56 @@ def test_release_host_needs_the_readiness_gate() -> None:
     assert _needs(jobs[gate]) == ["plan"], f"`{gate}` needs {_needs(jobs[gate])}: a failed prerequisite would skip it, and `host` accepts a skip"
 
 
+#: The `if:` dist renders on a `local-artifacts-jobs` entry: it runs for a publishing tag (or an
+#: upload-mode pull request) and is skipped otherwise. Any other `if:` on a release gate, `false`
+#: included, skips it on the tag it exists to check, and `host` reads that skip as a pass.
+PUBLISH_PREDICATE = (
+    "${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}"
+)
+RELEASE_GATES = ("custom-verify-version", "custom-readiness-gate")
+
+
+def _host_clause(need: str) -> str:
+    if need == "plan":
+        return "needs.plan.result == 'success'"
+    return f"(needs.{need}.result == 'skipped' || needs.{need}.result == 'success')"
+
+
+def _host_condition_findings(jobs: dict) -> list[str]:
+    """Needs of `host` whose result `host.if` ignores, and release gates not running on the publish predicate."""
+    condition = str(jobs["host"].get("if", ""))
+    findings = [
+        f"`host.if` does not read `{need}`: {_host_clause(need)!r} is missing"
+        for need in _needs(jobs["host"])
+        if _host_clause(need) not in condition
+    ]
+    return findings + [
+        f"`{gate}` has `if: {jobs[gate].get('if')!r}`, not the publish predicate"
+        for gate in RELEASE_GATES
+        if jobs[gate].get("if") != PUBLISH_PREDICATE
+    ]
+
+
+def _drop_verify_version_from_host_if(jobs: dict) -> None:
+    clause = f" && {_host_clause('custom-verify-version')}"
+    assert clause in jobs["host"]["if"], "the clause to plant the defect by removing is not in host.if"
+    jobs["host"]["if"] = jobs["host"]["if"].replace(clause, "")
+
+
+def _verify_version_never_runs(jobs: dict) -> None:
+    assert jobs["custom-verify-version"]["if"] == PUBLISH_PREDICATE
+    jobs["custom-verify-version"]["if"] = False  # YAML `if: false` loads as a bool
+
+
+@pytest.mark.parametrize("mutate", [_drop_verify_version_from_host_if, _verify_version_never_runs], ids=lambda f: f.__name__)
+def test_the_release_condition_reader_reds_a_gate_host_no_longer_reads(mutate) -> None:
+    jobs = copy.deepcopy(_load(RELEASE_WORKFLOW)["jobs"])
+    assert not _host_condition_findings(jobs), "the unmutated copy must be clean for the red below to mean anything"
+    mutate(jobs)
+    findings = _host_condition_findings(jobs)
+    assert findings and all("custom-verify-version" in finding for finding in findings), findings
+
+
 def test_no_job_upstream_of_host_can_fail_into_a_skip() -> None:
     """`host.if` reads a `skipped` need as a pass, and GitHub skips a job whose own need failed.
     So a job `host` waits on only through another job (a `plan-jobs` entry, which dist makes every
@@ -3543,7 +3673,9 @@ def test_no_job_upstream_of_host_can_fail_into_a_skip() -> None:
     `host` must be one `host` reads itself, apart from `plan`, which `host` requires to succeed."""
     jobs = _load(RELEASE_WORKFLOW)["jobs"]
     direct = set(_needs(jobs["host"]))
-    assert "custom-readiness-gate" in direct, sorted(direct)
+    assert set(RELEASE_GATES) <= direct, sorted(direct)
+    findings = _host_condition_findings(jobs)
+    assert not findings, f"{findings}: `host` publishes past a red need, or a gate never runs on the tag it checks"
     upstream: set[str] = set()
     pending = list(direct)
     while pending:
