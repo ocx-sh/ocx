@@ -1,32 +1,8 @@
 #!/usr/bin/env bash
-#
-# Red/green proof for `.github/actions/bazel-cache-rc`.
-#
-# Run it directly: `bash .github/actions/bazel-cache-rc/selftest.sh`. It touches
-# no network and no real credential — the shared cache realm is deliberately not
-# reachable from a check (plan C-029), so every property below is established
-# against a scratch `$RUNNER_TEMP` and a fake credential this script invents.
-#
-# Seven properties, each shown **both** red and green, because a green whose red
-# was never reachable is indistinguishable from a check that never ran
-# (quality-core.md § Unchecked Green):
-#
-#   1. a non-empty write credential writes the golden rc and the helper,
-#      owner-only
-#   2. an empty credential writes nothing at all
-#   3. the cleanup step removes both, and is green when there was nothing to
-#      remove — the state a job that failed before the write leaves behind
-#   4. the credential reaches no command line, so `set -x` cannot log it
-#   5. nothing already at those paths is ever written through
-#   6. a credential already configured in an rc Bazel reads is refused, and the
-#      refusal is not the leak
-#   7. a run with no `RUNNER_TEMP`, or a credential that is not
-#      `<header>=<value>`, is refused before anything is written
-#
-# The step bodies are read out of `action.yml` with a YAML parser rather than
-# copied here, so this script cannot drift into proving something the action no
-# longer does. Every mutation is checked to have landed before its red is
-# believed: the harness is not exempt.
+# Red/green proof for `.github/actions/bazel-cache-rc`: `bash .github/actions/bazel-cache-rc/selftest.sh`.
+# No network and no real credential: every property runs against a scratch `$RUNNER_TEMP` and an
+# invented credential, and is shown both red and green. Step bodies are read out of `action.yml`
+# with a YAML parser, so the proof cannot drift from what the action does.
 
 set -euo pipefail
 
@@ -44,20 +20,10 @@ SECRET_VALUE='b2N4LWNpOnMzY3IzdC1wNHNzdzByZA=='
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Every run below is hermetic in the two places `write_rc.py`'s existing-credential
-# guard reads: the rc chain is `$GITHUB_WORKSPACE/.bazelrc`, `$HOME/.bazelrc` and
-# whatever they import. Without these, a developer whose own `~/.bazelrc` carries
-# the read credential — the spelling `.bazelrc` documents for a workstation —
-# would red properties 1 through 5 on a tree with nothing wrong with it, and the
-# script would be measuring their machine rather than the action. The empty
-# workspace also keeps this repository's own `.bazelrc` out of the walk.
-#
-# The scrub is for the SUBJECT, not for this harness's own tooling. `python3`
-# resolves pyyaml out of a user site keyed to `$HOME` on a normal workstation
-# (`~/.local/lib/python3.*/site-packages`), so reading `action.yml` after the
-# scrub dies with ModuleNotFoundError on exactly the machines where the rest of
-# this script is most worth running - and passes on a runner with a system-wide
-# pyyaml, which is the worst of both. Keep the real one for the parser.
+# `write_rc.py`'s existing-credential guard reads `$GITHUB_WORKSPACE/.bazelrc` and `$HOME/.bazelrc`; both point at
+# empty scratch dirs, or a developer's own `~/.bazelrc` credential would red properties 1-5 on a clean tree.
+# Only the subject is scrubbed: `python3` finds pyyaml in a user site keyed to the real `$HOME`, so the
+# parser keeps `REAL_HOME` or `action.yml` cannot be read on a workstation.
 REAL_HOME="$HOME"
 mkdir -p "$WORK/home" "$WORK/workspace"
 export HOME="$WORK/home" GITHUB_WORKSPACE="$WORK/workspace"
@@ -335,12 +301,9 @@ green 'no `run:` body interpolates; WRITE_AUTH is bound in `env:`'
 # ---------------------------------------------------------------------------
 printf '\n[5] nothing already at those paths is ever written through\n'
 # ---------------------------------------------------------------------------
-# Beyond C-015, and the reason `write_rc.py` unlinks before `O_EXCL` rather than
-# calling `write_text`: `$RUNNER_TEMP` is not private by construction, so an
-# entry already sitting at the helper's path — a leftover, or on a reused
-# self-hosted runner something an earlier job planted — must be replaced, never
-# followed. A credential written through a symlink lands somewhere the cleanup
-# step does not delete.
+# `$RUNNER_TEMP` is not private by construction: an entry already at the helper's path (a leftover, or planted by an
+# earlier job on a reused self-hosted runner) must be replaced, never followed. A credential written through a
+# symlink lands where the cleanup step does not delete it, hence `write_rc.py` unlinks before `O_EXCL`.
 plant() {
     local dir="$1"
     : >"$WORK/victim-$2"
@@ -371,12 +334,9 @@ fi
 # ---------------------------------------------------------------------------
 printf '\n[6] a credential already configured in an rc Bazel reads is refused\n'
 # ---------------------------------------------------------------------------
-# Bazel `add`s an `Authorization` header per configured source rather than
-# replacing it and sends every one of them on the same request — measured
-# against a local sink, one cache `PUT` carried three. Which one an origin honours
-# is that origin's business, so the action refuses to become a second source.
-# `$HOME` and `$GITHUB_WORKSPACE` are the scratch pair exported at the top of this
-# script, so each case builds exactly the rc chain it is about.
+# Bazel `add`s an `Authorization` header per configured source and sends every one on the same request
+# (measured against a local sink: one cache `PUT` carried three), so the action refuses to be a second source.
+# `$HOME` and `$GITHUB_WORKSPACE` are the scratch pair exported at the top, so each case builds exactly its rc chain.
 
 # `$1`=action dir, `$2`=$RUNNER_TEMP, `$3`=WRITE_AUTH. stderr folded into stdout,
 # because the refusal is a `sys.exit` message.
@@ -454,6 +414,30 @@ run_guarded "$SUBJECT" "$temp" "$SECRET" >/dev/null
 [ -f "$temp/bazel-cache.rc" ] || fail "a commented-out rc header was read as a live source"
 green "a commented-out header is not a source; the rc was written"
 rm -f "$GITHUB_WORKSPACE/.bazelrc"
+
+# Two rcs importing each other: the chain walk ends only because `seen` stops it. Both runs are bounded, so
+# the mutant's endless walk is a red (exit 124) rather than a hung job.
+printf 'import %%workspace%%/.bazelrc.user\n' >"$GITHUB_WORKSPACE/.bazelrc"
+printf 'import %%workspace%%/.bazelrc\n' >"$GITHUB_WORKSPACE/.bazelrc.user"
+run_bounded() {
+    local status=0
+    GITHUB_ACTION_PATH="$1" RUNNER_TEMP="$2" WRITE_AUTH="$SECRET" timeout 10 bash -c "$WRITE_BODY" >/dev/null 2>&1 || status=$?
+    printf '%s' "$status"
+}
+temp="$(scratch t6d)"
+status="$(run_bounded "$SUBJECT" "$temp")"
+[ "$status" = 0 ] || fail "an import cycle did not end cleanly (exit $status)"
+assert_shape "$temp" || fail "an import cycle with no credential in it did not produce the contracted pair"
+green "a two-file import cycle with no credential ends, and the rc was written"
+
+mutant="$(scratch m6d)"
+mutate 'if path in seen:' 'if False:  # MUTANT' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t6dr)"
+status="$(run_bounded "$mutant" "$temp")"
+[ "$status" = 124 ] || fail "the seen-less mutant did not hang (exit $status) - the cycle does not reach the guard"
+assert_nothing_written "$temp" || fail "the seen-less mutant wrote while it should have been looping"
+red "without \`seen\` the chain walk never ends: killed by the 10 s bound (exit 124)"
+rm -f "$GITHUB_WORKSPACE/.bazelrc" "$GITHUB_WORKSPACE/.bazelrc.user"
 
 # Red (c)-(e): the spellings of a configured credential that (a) and (b) do not
 # reach: a helper rather than a header, its space-separated flag, and a header

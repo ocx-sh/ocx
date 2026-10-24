@@ -4,21 +4,8 @@
 # Kind: TOOL
 # bash-floor: 3.2
 #
-# Run the acceptance suite, or the Rust unit-test bundle, on the Windows host
-# from WSL: `task test:windows-local MODE=accept|unit`.
-#
-#   windows_local.sh --mode accept|unit [--shard-count N --shard-index I] [--exe PATH] [-- ARGS...]
-#
-# accept: ARGS go to pytest through `task test:accept:native`; --exe replaces the
-#         cross-built ocx.exe (a release build, say) and its siblings
-#         ocx-shim.exe and schema/ocx_schema.exe are taken from beside it.
-# unit:   ARGS is at most one substring that selects the bundle's targets by label.
-#
-# Exit: the child's status; 64 usage; 66 --exe, or ocx-shim.exe / schema/ocx_schema.exe beside it, missing;
-# 69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-wintest;
-# 2 a shard request accept_shard.py refuses.
-# WINDOWS_LOCAL_CMD_EXE names a different cmd.exe (the proof that 69 is reachable); WINDOWS_LOCAL_DRIVE_ROOT the
-# directory it starts in (default /mnt/c). Both exist for scripts/tests/test_windows_local.py's stubs.
+# Runs the acceptance suite or the Rust unit-test bundle on the Windows host from WSL:
+# `task test:windows-local MODE=accept|unit`. `--help` prints the flags and the exit codes.
 
 set -euo pipefail
 
@@ -29,10 +16,26 @@ TRIPLE=x86_64-pc-windows-gnullvm
 PORT_MIRROR=15001
 GIT_USR_BIN='C:\Program Files\Git\usr\bin'
 
+usage() {
+    cat <<'EOF'
+windows_local.sh --mode accept|unit [--shard-count N --shard-index I] [--exe PATH] [-- ARGS...]
+
+accept: ARGS go to pytest through `task test:accept:native`; --exe replaces the
+        cross-built ocx.exe (a release build, say), and ocx-shim.exe and
+        schema/ocx_schema.exe are taken from beside it.
+unit:   ARGS is at most one substring that selects the bundle's targets by label.
+
+Exit: the child's status; 64 usage; 66 --exe, or ocx-shim.exe / schema/ocx_schema.exe beside it, missing;
+69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-wintest;
+2 a shard request accept_shard.py refuses.
+EOF
+}
+
 die() {
     local status=$1
     shift
     printf 'windows_local: %s\n' "$*" >&2
+    [ "$status" -ne 64 ] || usage >&2
     exit "$status"
 }
 
@@ -57,6 +60,10 @@ while [ $# -gt 0 ]; do
                 --exe) exe=$2 ;;
             esac
             shift 2
+            ;;
+        -h | --help)
+            usage
+            exit 0
             ;;
         --)
             shift
@@ -106,6 +113,8 @@ require_siblings() {
 [ -z "$exe" ] || [ -f "$exe" ] || die 66 "--exe '$exe' is not a file"
 [ -z "$exe" ] || require_siblings "$(dirname "$exe")"
 
+# WINDOWS_LOCAL_CMD_EXE names another cmd.exe (how a test reaches 69) and WINDOWS_LOCAL_DRIVE_ROOT the
+# directory it starts in (default /mnt/c); test_windows_local.py's stubs are their only users.
 CMD_EXE=${WINDOWS_LOCAL_CMD_EXE:-$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)}
 { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; } && [ -x "$CMD_EXE" ] ||
     die 69 "needs WSL with a Windows cmd.exe (looked for $CMD_EXE)"
@@ -175,7 +184,7 @@ trap 'rm -f "$list" "$have" "$gone"' EXIT
 # call is the head of its own pipeline: a failing git must stop the script, not empty $list and sweep the stage.
 (cd "$ROOT" && git ls-files -d -z) | sort -z >"$gone"
 (cd "$ROOT" && git ls-files -co --exclude-standard -z) | sort -zu | comm -z -23 - "$gone" |
-    { grep -zv -e '^external/' -e '^\.agents/' || true; } >"$list"
+    { grep -zv -e '^external/' -e '^\.agents/' || [ $? -eq 1 ]; } >"$list"
 if [ "$mode" = accept ] && [ -d "$ROOT/website/src/public/schemas" ]; then
     # Generated and gitignored, so git does not list it.
     (cd "$ROOT" && find website/src/public/schemas -type f -print0) >>"$list"
@@ -228,10 +237,10 @@ if [ "$mode" = accept ]; then
     [ -z "$shard_count" ] || shard_vars="$shard_vars SHARD_COUNT=$shard_count"
     [ -z "$shard_index" ] || shard_vars="$shard_vars SHARD_INDEX=$shard_index"
     win "test\\bin\\ocx.exe exec zot -- task -x test:accept:native$shard_vars -- $args" || rc=$?
-    # The reports leave with the run: F2's limits are counted off them.
+    # The reports leave with the run: the merge job's limits are counted off them.
     mkdir -p "$ROOT/target/windows-local/junit"
     if [ -d "$stage_wsl/target/accept/junit" ]; then
-        cp -f "$stage_wsl"/target/accept/junit/*.xml "$ROOT/target/windows-local/junit/" 2>/dev/null || true
+        cp -f "$stage_wsl"/target/accept/junit/*.xml "$ROOT/target/windows-local/junit/" || true
     fi
 else
     bundle_win="$own_win\\$NAME-unit-tests.tar.gz"
