@@ -33,7 +33,8 @@ const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_regis
     push access there. A run that changes nothing reports as unchanged and commits nothing; it \
     opens a request only to recover one an earlier run left unopened.\n\n\
     A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport \
-    git` inside a GitLab job. Writing to `--output` works without one.\n\n\
+    git` inside a GitLab job. Writing to `--output` works without one on a public index \
+    repository; a private one needs `OCX_ANNOUNCE_TOKEN` to read the base.\n\n\
     GitHub and GitLab are both supported, on public hosts and self-hosted instances; on GitLab \
     the change arrives as a merge request. A self-hosted host must name its forge with `--forge` \
     (exit 64 otherwise). A hostname gives no reliable signal, and a wrong guess would send \
@@ -623,9 +624,10 @@ mod tests {
     #[test]
     fn both_write_commands_render_the_credential_guidance() {
         let sentence = format!(
-            "needs a forge credential: `{}`, or the job token under `--transport git` inside a \
-             GitLab job. Writing to `--output` works without one.",
-            ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
+            "needs a forge credential: `{name}`, or the job token under `--transport git` inside a \
+             GitLab job. Writing to `--output` works without one on a public index repository; a \
+             private one needs `{name}` to read the base.",
+            name = ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name
         );
 
         for command in ["announce", "claim"] {
