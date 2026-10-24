@@ -2214,6 +2214,11 @@
           "exit_code": 65
         },
         {
+          "value": "root_references_unwritten_object",
+          "description": "The announce would commit a root that references an object it does not carry",
+          "exit_code": 65
+        },
+        {
           "value": "root_repository_mismatch",
           "description": "A derived index root points at another repository",
           "exit_code": 65

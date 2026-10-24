@@ -833,10 +833,12 @@ fn pull_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pul
             field: "html_url".to_string(),
         })?
         .to_string();
+    let author = value.pointer("/user/login").and_then(Value::as_str).map(str::to_string);
     Ok(PullRequest {
         number,
         html_url,
         updated,
+        author,
     })
 }
 
@@ -1544,6 +1546,17 @@ mod tests {
         assert_eq!(pull_request.number, 42);
         assert_eq!(pull_request.html_url, "https://example.test/pull/42");
         assert!(pull_request.updated);
+    }
+
+    #[test]
+    fn pull_request_from_body_reads_the_author_login() {
+        let value = json!({ "number": 42, "html_url": "https://example.test/pull/42", "user": { "login": "octocat" } });
+        let pull_request = pull_request_from_body("https://api", &value, true).expect("valid body");
+        assert_eq!(pull_request.author.as_deref(), Some("octocat"));
+
+        let value = json!({ "number": 42, "html_url": "https://example.test/pull/42" });
+        let pull_request = pull_request_from_body("https://api", &value, true).expect("valid body");
+        assert_eq!(pull_request.author, None, "a body without `user` names no author");
     }
 
     #[test]

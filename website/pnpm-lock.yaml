@@ -12,8 +12,8 @@ importers:
         specifier: 0.42.6
         version: 0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0)
       '@ocx-sh/theme':
-        specifier: github:ocx-sh/website#b851f512d031e1e548a1823000efb512ddd33c96&path:/packages/theme
-        version: https://codeload.github.com/ocx-sh/website/tar.gz/b851f512d031e1e548a1823000efb512ddd33c96#path:/packages/theme(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))
+        specifier: github:ocx-sh/website#77821c8d79e59d68e2593c895f9dcff630d71c9a&path:/packages/theme
+        version: https://codeload.github.com/ocx-sh/website/tar.gz/77821c8d79e59d68e2593c895f9dcff630d71c9a#path:/packages/theme(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))
       astro:
         specifier: 7.4.0
         version: 7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1)
@@ -635,9 +635,9 @@ packages:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
-  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/b851f512d031e1e548a1823000efb512ddd33c96#path:/packages/theme':
-    resolution: {gitHosted: true, integrity: sha512-HkvozwW6pcfGY8YMn2HMfwY6RKpvAT5RuzoJxetfdoQkkLt/Q4MQt+uxaJ+1ZlDGio1Yr2dwVkfHHCV823fd9g==, path: /packages/theme, tarball: https://codeload.github.com/ocx-sh/website/tar.gz/b851f512d031e1e548a1823000efb512ddd33c96}
-    version: 0.2.2
+  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/77821c8d79e59d68e2593c895f9dcff630d71c9a#path:/packages/theme':
+    resolution: {gitHosted: true, integrity: sha512-7r9ghWvUqCtAEVHa88vPetfsq21D08EpEM6vW8yvI4kuoWXOMkoIRZMBm6oUc1M8HKYpoCllIPO77PYMyKlXWA==, path: /packages/theme, tarball: https://codeload.github.com/ocx-sh/website/tar.gz/77821c8d79e59d68e2593c895f9dcff630d71c9a}
+    version: 0.2.3
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -4192,7 +4192,7 @@ snapshots:
       '@tybys/wasm-util': 0.10.4
     optional: true
 
-  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/b851f512d031e1e548a1823000efb512ddd33c96#path:/packages/theme(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))':
+  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/77821c8d79e59d68e2593c895f9dcff630d71c9a#path:/packages/theme(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))':
     dependencies:
       '@fontsource/ibm-plex-mono': 5.3.0
       '@fontsource/ibm-plex-sans': 5.3.0

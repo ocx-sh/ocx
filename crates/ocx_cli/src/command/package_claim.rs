@@ -26,7 +26,8 @@ use crate::options;
     credential. Name them explicitly with `--owner`, which replaces the detected list rather \
     than adding to it.\n\n\
     Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under \
-    `--transport git` inside a GitLab job. Writing to `--output` works without one.\n\n\
+    `--transport git` inside a GitLab job. Writing to `--output` works without one on a public \
+    index repository; a private one needs `OCX_ANNOUNCE_TOKEN` to read the base.\n\n\
     The claimed unit is the package, not the namespace prefix: the entry is \
     `p/<namespace>/<package>.json`, so a second package under a claimed namespace needs its \
     own `claim`. `claim` writes `owners`, `repository`, `name`, `upstream` and `desc`; \

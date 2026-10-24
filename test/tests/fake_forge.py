@@ -662,6 +662,16 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
                 return None
             return self.blobs[blob_sha]
 
+    def read_tree(self, owner: str, repo: str, *, branch: str = "main") -> dict[str, bytes]:
+        """Test-assertion helper: every committed file on `branch`, by path."""
+        full = f"{owner}/{repo}"
+        with self.lock:
+            commit_sha = self.refs.get(full, {}).get(branch)
+            if commit_sha is None:
+                return {}
+            tree = self.trees[self.commits[commit_sha]["tree"]]
+            return {path: self.blobs[blob_sha] for path, blob_sha in tree.items()}
+
     # ── test setup ────────────────────────────────────────────────────────
 
     def seed_root(self, owner: str, repo: str, path: str, root: dict[str, Any], *, branch: str = "main") -> None:

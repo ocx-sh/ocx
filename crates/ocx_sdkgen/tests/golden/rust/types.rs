@@ -215,10 +215,8 @@ pub type AliasTag = String;
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
     pub package: String,
-    /// `unchanged` when the rebuilt root was byte-identical to the committed one, so nothing was
-    /// committed; `updated` otherwise. An unchanged `--fork` run still ensures a pull request when
-    /// its announce branch is ahead of the index base, and still reports one when the branch has
-    /// diverged from the index base but its open pull request can still merge.
+    /// `unchanged` when the rebuilt root was byte-identical to the committed one and the base
+    /// already carries every object it references, so nothing was committed; `updated` otherwise.
     pub status: WriteStatus,
     /// `updated` when the package's `__ocx.desc` artifact moved, so the root's `desc` object was
     /// rebuilt and its readme (and logo) written as new content-addressed objects; `unchanged` when
@@ -251,6 +249,23 @@ pub struct AnnounceReport {
     /// the run made no pull request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<String>,
+    /// The announce branch's state when the run began; absent under `--output`, which has no
+    /// branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_state: Option<BranchState>,
+    /// The index commit the run read the committed root at, and the base of its commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    /// How the run moved the announce branch; absent when it committed nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_update: Option<BranchRefUpdate>,
+    /// Tags carried onto the rebuilt root from a `stale` branch, sorted; absent when none were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried: Option<Vec<String>>,
+    /// The login of the pull request's author; absent when the run made no pull request or the
+    /// forge did not name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_author: Option<String>,
     /// The relative paths written under the `--output` directory; empty outside `--output`.
     pub written_paths: Vec<String>,
     /// Every preflight row, including the ones that did not apply.
@@ -279,6 +294,11 @@ impl Unknowns for AnnounceReport {
         field(pointer, out, "pull_request_url", &self.pull_request_url);
         field(pointer, out, "pull_request_number", &self.pull_request_number);
         field(pointer, out, "fork", &self.fork);
+        field(pointer, out, "branch_state", &self.branch_state);
+        field(pointer, out, "base_sha", &self.base_sha);
+        field(pointer, out, "ref_update", &self.ref_update);
+        field(pointer, out, "carried", &self.carried);
+        field(pointer, out, "pull_request_author", &self.pull_request_author);
         field(pointer, out, "written_paths", &self.written_paths);
         field(pointer, out, "capability_checks", &self.capability_checks);
         field(pointer, out, "reserved_tags_dropped", &self.reserved_tags_dropped);
@@ -732,6 +752,135 @@ impl<'de> Deserialize<'de> for BootstrapStatus {
 }
 
 impl Unknowns for BootstrapStatus {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// How the run moved the announce branch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BranchRefUpdate {
+    /// The commit sits on the branch head; a branch that moved meanwhile is refused.
+    FastForward,
+    /// The commit tolerates a branch head the run did not read.
+    Accumulate,
+    /// The branch was repointed at a commit on the index base, replacing its head.
+    Reset,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl BranchRefUpdate {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::FastForward => "fast_forward",
+            Self::Accumulate => "accumulate",
+            Self::Reset => "reset",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "fast_forward" => Self::FastForward,
+            "accumulate" => Self::Accumulate,
+            "reset" => Self::Reset,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for BranchRefUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for BranchRefUpdate {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchRefUpdate {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for BranchRefUpdate {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// What the announce branch was worth when the run began.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum BranchState {
+    /// No announce branch yet: the first announce for the package.
+    Absent,
+    /// Unmerged commits that fast-forward onto the index base; the run adds to them.
+    Live,
+    /// Nothing the index base needs (merged, or closed unmerged); the run rebuilds from the base.
+    Spent,
+    /// Unmerged commits the index base moved away from, with a pull request still open; the run
+    /// rebuilds on the base and carries the branch's tags.
+    Stale,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl BranchState {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Absent => "absent",
+            Self::Live => "live",
+            Self::Spent => "spent",
+            Self::Stale => "stale",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "absent" => Self::Absent,
+            "live" => Self::Live,
+            "spent" => Self::Spent,
+            "stale" => Self::Stale,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for BranchState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for BranchState {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchState {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for BranchState {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
@@ -3307,6 +3456,8 @@ pub enum ErrorDetail {
     RetiredEnv,
     /// The committed index root names a different package
     RootNameMismatch,
+    /// The announce would commit a root that references an object it does not carry
+    RootReferencesUnwrittenObject,
     /// A derived index root points at another repository
     RootRepositoryMismatch,
     /// Probing whether two paths share a filesystem failed
@@ -3952,6 +4103,7 @@ impl ErrorDetail {
             Self::ResolveTimeout => "resolve_timeout",
             Self::RetiredEnv => "retired_env",
             Self::RootNameMismatch => "root_name_mismatch",
+            Self::RootReferencesUnwrittenObject => "root_references_unwritten_object",
             Self::RootRepositoryMismatch => "root_repository_mismatch",
             Self::SameFilesystemCheckFailed => "same_filesystem_check_failed",
             Self::SbomMediaTypeUnsupported => "sbom_media_type_unsupported",
@@ -4476,6 +4628,7 @@ impl ErrorDetail {
             "resolve_timeout" => Self::ResolveTimeout,
             "retired_env" => Self::RetiredEnv,
             "root_name_mismatch" => Self::RootNameMismatch,
+            "root_references_unwritten_object" => Self::RootReferencesUnwrittenObject,
             "root_repository_mismatch" => Self::RootRepositoryMismatch,
             "same_filesystem_check_failed" => Self::SameFilesystemCheckFailed,
             "sbom_media_type_unsupported" => Self::SbomMediaTypeUnsupported,

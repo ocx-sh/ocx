@@ -46,7 +46,8 @@ unmerged but the base moved — must not read the branch as truth*. One classifi
 ## Decision Drivers
 
 - No tag announced into an open pull request may be lost, in any of the four tag modes.
-- `--tags-file` and `--refresh` start from the *committed* tags, so the obvious fix deletes.
+- `--refresh` starts from the *committed* tags, so the obvious fix deletes; `--tags-file` re-observes
+  only its listed tags, so a carried row's object is not rewritten and must be copied from the branch head.
 - The freeze is self-reinforcing and reports as a benign `unchanged` — it must become loud.
 - No new ref primitive, no new dependency, no polling.
 
@@ -95,7 +96,10 @@ benign: no polling, the next run re-checks.
 
 ### The invariant, restated
 
-**No tag announced into an open pull request is ever lost.** That is what #228 protected.
+**No tag announced into an open pull request is ever lost, and no committed row lacks its object.**
+The first half is what #228 protected; the second is what a rebuild owes the rows it carries: each
+carried row's object is copied from the stale branch head and checked against the row's digest, or
+the tag is re-observed (and dropped if the registry no longer serves it).
 The wording it acquired in code — *the branch's commit chain is never rewritten* — was a
 proxy for it, and #399 is the case where proxy and invariant point in opposite directions.
 

@@ -154,7 +154,7 @@ pub async fn claim(
     )
     .await?;
     // `&[]`: claim never writes tags; its only CAS objects are the description's payload blobs.
-    let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &observed.blobs, &orphans);
+    let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &[], &observed.blobs, &orphans);
 
     // Always `Updated` (no branch to compare against). Push access is `skipped_all()`, never asked of
     // the forge: GitHub answers an unreadable `permissions` with exit 80.
@@ -754,6 +754,7 @@ pub(crate) mod tests {
                 number: 42,
                 html_url: "https://example.test/pull/42".to_string(),
                 updated: self.open_request.is_some(),
+                author: None,
             })
         }
     }
@@ -1566,6 +1567,7 @@ pub(crate) mod tests {
             number: 42,
             html_url: "https://example.test/pull/42".to_string(),
             updated: true,
+            author: None,
         };
 
         // (branch exists, comparison, root on branch is byte-identical, open
@@ -1749,6 +1751,7 @@ pub(crate) mod tests {
                     number: 42,
                     html_url: "https://example.test/pull/42".to_string(),
                     updated: true,
+                    author: None,
                 });
 
                 block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
@@ -1802,6 +1805,7 @@ pub(crate) mod tests {
             number: 42,
             html_url: "https://example.test/pull/42".to_string(),
             updated: true,
+            author: None,
         });
         forge
             .files

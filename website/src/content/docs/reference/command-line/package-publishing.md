@@ -19,7 +19,7 @@ Reads the committed index entry, re-observes the given tags, and writes the rebu
 
 The request comes from a fork with `--fork`, else from a branch on the index repository itself, which needs push access there. A run that changes nothing reports as unchanged and commits nothing; it opens a request only to recover one an earlier run left unopened.
 
-A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport git` inside a GitLab job. Writing to `--output` works without one.
+A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport git` inside a GitLab job. Writing to `--output` works without one on a public index repository; a private one needs `OCX_ANNOUNCE_TOKEN` to read the base.
 
 GitHub and GitLab are both supported, on public hosts and self-hosted instances; on GitLab the change arrives as a merge request. A self-hosted host must name its forge with `--forge` (exit 64 otherwise).
 
@@ -226,7 +226,7 @@ The entry carries the package description the registry serves at `__ocx.desc`, r
 
 Owners default to the CI environment's user variables, else to the identity behind the credential. Name them explicitly with `--owner`, which replaces the detected list rather than adding to it.
 
-Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport git` inside a GitLab job. Writing to `--output` works without one.
+Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport git` inside a GitLab job. Writing to `--output` works without one on a public index repository; a private one needs `OCX_ANNOUNCE_TOKEN` to read the base.
 
 The claimed unit is the package, not the namespace prefix: the entry is `p/<namespace>/<package>.json`, so a second package under a claimed namespace needs its own `claim`. `claim` writes `owners`, `repository`, `name`, `upstream` and `desc`; `announce` publishes `tags` into an entry that already exists, and neither writes the other's fields.
 

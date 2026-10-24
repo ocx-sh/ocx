@@ -278,6 +278,20 @@ pub(super) mod tests {
         }
     }
 
+    /// A root that would index a hole is data the caller must fix, never a transient: a rerun
+    /// rebuilds the same root.
+    #[test]
+    fn root_references_unwritten_object_classifies_as_data_error() {
+        let error = AnnounceError::RootReferencesUnwrittenObject {
+            path: "p/acme/widget/o/sha256/aa.json".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        assert!(
+            error.to_string().contains("p/acme/widget/o/sha256/aa.json"),
+            "the message must name the missing object: {error}"
+        );
+    }
+
     /// #477 — a root that names another package is a disagreement between two
     /// statements of the same fact, not a malformed command line.
     ///

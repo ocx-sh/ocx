@@ -1443,10 +1443,15 @@ fn merge_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pu
             field: "web_url".to_string(),
         })?
         .to_string();
+    let author = value
+        .pointer("/author/username")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Ok(PullRequest {
         number,
         html_url,
         updated,
+        author,
     })
 }
 
@@ -1582,6 +1587,17 @@ mod tests {
         assert_eq!(request.number, 7, "iid is the number a human sees, not the global id");
         assert_eq!(request.html_url, "https://gitlab.com/acme/index/-/merge_requests/7");
         assert!(!request.updated);
+    }
+
+    #[test]
+    fn merge_requests_report_the_author_username() {
+        let body = json!({ "iid": 7, "web_url": "https://gitlab.com/acme/index/-/merge_requests/7", "author": { "username": "tanuki" } });
+        let request = merge_request_from_body("u", &body, true).expect("well-formed merge request");
+        assert_eq!(request.author.as_deref(), Some("tanuki"));
+
+        let body = json!({ "iid": 7, "web_url": "https://gitlab.com/acme/index/-/merge_requests/7" });
+        let request = merge_request_from_body("u", &body, true).expect("well-formed merge request");
+        assert_eq!(request.author, None, "a body without `author` names none");
     }
 
     #[test]

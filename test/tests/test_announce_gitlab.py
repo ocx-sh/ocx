@@ -31,6 +31,7 @@ from announce_helpers import (
     announce_json,
     branch_name,
     configure_trusted_hosts,
+    entry_files,
     registry_host,
     seed_empty_root,
 )
@@ -272,8 +273,14 @@ def test_announce_refuses_an_unchanged_run_whose_open_merge_request_conflicts(
         "owners": [{"login": "acme", "id": 1}],
         "tags": branch_root["tags"],
     }
+    # The objects too: a base that already carries the branch's tag carries what its root references.
     fake_forge.seed_files(
-        INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode()}
+        INDEX_OWNER,
+        INDEX_REPO,
+        {
+            **entry_files(fake_forge, package, owner=FORK_NAMESPACE, repo=INDEX_REPO, branch=branch),
+            f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode(),
+        },
     )
 
     result = announce(

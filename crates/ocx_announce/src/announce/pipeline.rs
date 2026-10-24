@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use super::error::AnnounceError;
 use super::request::TagSelection;
-use crate::forge::{FileChange, Forge, RepoCoordinate};
+use crate::forge::{FileChange, Forge, RefUpdate, RepoCoordinate};
 use ocx_oci::annotations;
 use ocx_oci::client::{ManifestPresence, NotFoundCode, ReadAddressing};
 use ocx_oci::tag::InternalTag;
@@ -436,6 +436,28 @@ pub(crate) fn change_body(package: &str, committed: &Value, plan: &TagPlan, drop
     body
 }
 
+/// The body lines naming what a rebuild did beyond the tag delta: the branch-only tags it
+/// carried, and that it replaced the branch head with a commit on the base.
+///
+/// Names pass the tag grammar like the other labels: the body is a push option with no markdown.
+pub(crate) fn rebuild_notes(carried: &[String], base_sha: &str, ref_update: RefUpdate) -> String {
+    let mut carried: Vec<&str> = carried
+        .iter()
+        .map(String::as_str)
+        .filter(|tag| ocx_oci::client::is_valid_oci_tag(tag))
+        .collect();
+    carried.sort_unstable();
+    let mut notes = String::new();
+    if !carried.is_empty() {
+        notes.push_str(&format!("\nCarried: {}\n", carried.join(", ")));
+    }
+    if ref_update == RefUpdate::Reset {
+        let short: String = base_sha.chars().take(12).collect();
+        notes.push_str(&format!("\nRebuilt on {short}, replacing the branch head\n"));
+    }
+    notes
+}
+
 /// Observe the `__ocx.desc` artifact, comparing its tag digest with the
 /// committed `desc.digest`.
 ///
@@ -596,7 +618,8 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
 }
 
 /// Append every `branch_tags` key the base root lacks, in branch order, after
-/// the base's tags (`adr_announce_diverged_branch_rebuild.md`).
+/// the base's tags (`adr_announce_diverged_branch_rebuild.md`), and return those
+/// keys: the rows whose objects only the stale branch holds.
 ///
 /// Tag order is byte-visible ([`serialize_root`](ocx_index::serialize_root)
 /// never sorts), so base order first is a wire contract.
@@ -604,19 +627,106 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
 // replace while the branch still carried it is re-proposed. Upgrade: a 3-way
 // against the compare API's merge base (`merge_base_commit` on GitHub,
 // `/repository/merge_base` on GitLab), once someone hits the re-proposal.
-pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) {
+pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) -> Vec<String> {
     let Some(branch_tags) = branch_tags.as_object() else {
-        return;
+        return Vec::new();
     };
     let Some(root) = base.as_object_mut() else {
-        return;
+        return Vec::new();
     };
     let mut merged = root.get("tags").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut carried = Vec::new();
     // The base entry wins, or an unreviewed branch reverts the base's merged yank.
     for (tag, entry) in branch_tags {
-        merged.entry(tag.clone()).or_insert_with(|| entry.clone());
+        if !merged.contains_key(tag) {
+            merged.insert(tag.clone(), entry.clone());
+            carried.push(tag.clone());
+        }
     }
     root.insert("tags".to_string(), Value::Object(merged));
+    carried
+}
+
+/// The stale branch's CAS objects for carried rows, split by whether the head could supply them.
+#[derive(Default)]
+pub(crate) struct CarriedObjects {
+    /// Each object's digest and bytes, verified against that digest.
+    pub found: Vec<(ocx_oci::Digest, Vec<u8>)>,
+    /// Carried tags whose object the head lacks, holds under other bytes, or whose digest is unparseable.
+    pub missing: Vec<String>,
+}
+
+/// The `carried` tags whose row in `root` names a digest no row of `held` records.
+///
+/// `held` is the root as the index holds it: a digest it already names has its object in the
+/// base tree, so copying it from the stale head would be a read for nothing, and a head that
+/// lacks it would wrongly send the row to re-observation.
+pub(crate) fn carried_without_held_object(carried: &[String], root: &Value, held: &Value) -> Vec<String> {
+    let digest_of = |row: &Value| row.get("content").and_then(Value::as_str).map(str::to_string);
+    let held_digests: Vec<String> = held
+        .get("tags")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|tags| tags.values().filter_map(digest_of))
+        .collect();
+    let tags = root.get("tags").and_then(Value::as_object);
+    carried
+        .iter()
+        .filter(|tag| {
+            let digest = tags.and_then(|tags| tags.get(*tag)).and_then(digest_of);
+            digest.is_none_or(|digest| !held_digests.contains(&digest))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Copy the object of every `carried` row still in `root` and not re-observed this run from the
+/// stale branch head at `sha`.
+///
+/// Only the head holds these objects: committing the row alone leaves an index
+/// root naming an object that exists nowhere. Bytes not hashing to the row's digest are never
+/// committed.
+///
+/// # Errors
+///
+/// [`AnnounceError::Forge`] when the head read fails.
+pub(crate) async fn fetch_carried_objects(
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    sha: &str,
+    package_repo: &str,
+    root: &Value,
+    carried: &[String],
+    observed: &[Observed],
+) -> Result<CarriedObjects, AnnounceError> {
+    let tags = root.get("tags").and_then(Value::as_object);
+    let mut objects = CarriedObjects::default();
+    for tag in carried {
+        let Some(row) = tags.and_then(|tags| tags.get(tag)) else {
+            continue;
+        };
+        // A row with no readable digest has no object to copy: re-observe it rather than carry it bare.
+        let Some(content) = row.get("content").and_then(Value::as_str) else {
+            objects.missing.push(tag.clone());
+            continue;
+        };
+        let Ok(digest) = ocx_oci::Digest::try_from(content) else {
+            objects.missing.push(tag.clone());
+            continue;
+        };
+        if observed.iter().any(|entry| entry.content == digest) || objects.found.iter().any(|(held, _)| *held == digest)
+        {
+            continue;
+        }
+        let bytes = forge
+            .get_file_contents(repo, &object_path(package_repo, &digest, "json"), sha)
+            .await?;
+        match bytes {
+            Some(bytes) if digest.algorithm().hash(&bytes) == digest => objects.found.push((digest, bytes)),
+            _ => objects.missing.push(tag.clone()),
+        }
+    }
+    Ok(objects)
 }
 
 /// Rebuild the root's `tags` map from `plan`.
@@ -783,30 +893,79 @@ fn object_path(package_repo: &str, digest: &ocx_oci::Digest, extension: &str) ->
     format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}")
 }
 
-/// Every CAS object a root references, with its path extension (`None` for the
-/// logo, whose extension the root does not record).
+/// Every CAS reference a root records, as written, with its path extension
+/// (`None` for the logo, whose extension the root does not record).
+fn referenced_raw(root: &Value) -> Vec<(&str, Option<&'static str>)> {
+    let description = root.get("desc");
+    let tags = root.get("tags").and_then(Value::as_object);
+    let contents = tags
+        .into_iter()
+        .flat_map(|tags| tags.values())
+        .map(|entry| (entry.get("content"), Some("json")));
+    let readme = (description.and_then(|desc| desc.get("readme")), Some("md"));
+    let logo = (description.and_then(|desc| desc.get("logo")), None);
+    contents
+        .chain([readme, logo])
+        .filter_map(|(raw, extension)| Some((raw?.as_str()?, extension)))
+        .collect()
+}
+
+/// Every CAS object a root references, with its path extension.
 ///
 /// Malformed digests are dropped: the output builds paths from remote data.
 fn referenced_objects(root: &Value) -> Vec<(ocx_oci::Digest, Option<&'static str>)> {
-    let mut objects = Vec::new();
-    let mut push = |raw: Option<&Value>, extension: Option<&'static str>| {
-        let Some(raw) = raw.and_then(Value::as_str) else {
-            return;
-        };
-        match ocx_oci::Digest::try_from(raw) {
-            Ok(digest) => objects.push((digest, extension)),
-            Err(_) => tracing::debug!(reference = %raw, "index root references a malformed digest; skipped"),
+    referenced_raw(root)
+        .into_iter()
+        .filter_map(|(raw, extension)| match ocx_oci::Digest::try_from(raw) {
+            Ok(digest) => Some((digest, extension)),
+            Err(_) => {
+                tracing::debug!(reference = %raw, "index root references a malformed digest; skipped");
+                None
+            }
+        })
+        .collect()
+}
+
+/// The object paths `new_root` references that `base_root` does not and `files`
+/// does not write, one entry per reference: a logo lists its `.png` and `.svg`
+/// path, either of which satisfies it.
+///
+/// A reference the base already records is inherited and never checked, so a
+/// hole the index already carries cannot block an unrelated announce.
+///
+/// # Errors
+///
+/// [`AnnounceError::RootReferencesUnwrittenObject`] when a reference the base
+/// does not record is not a parseable digest.
+pub(crate) fn unput_introduced_refs(
+    new_root: &Value,
+    base_root: &Value,
+    package_repo: &str,
+    files: &BTreeMap<String, FileChange>,
+) -> Result<Vec<Vec<String>>, AnnounceError> {
+    let inherited: HashSet<(&str, Option<&str>)> = referenced_raw(base_root).into_iter().collect();
+    let mut suspects: Vec<Vec<String>> = Vec::new();
+    for (raw, extension) in referenced_raw(new_root) {
+        if inherited.contains(&(raw, extension)) {
+            continue;
         }
-    };
-    if let Some(tags) = root.get("tags").and_then(Value::as_object) {
-        for entry in tags.values() {
-            push(entry.get("content"), Some("json"));
+        let digest = ocx_oci::Digest::try_from(raw)
+            .map_err(|_| AnnounceError::RootReferencesUnwrittenObject { path: raw.to_string() })?;
+        let candidates: Vec<String> = match extension {
+            Some(extension) => vec![object_path(package_repo, &digest, extension)],
+            None => ["png", "svg"]
+                .iter()
+                .map(|extension| object_path(package_repo, &digest, extension))
+                .collect(),
+        };
+        let written = candidates
+            .iter()
+            .any(|path| matches!(files.get(path), Some(FileChange::Put(_))));
+        if !written && !suspects.contains(&candidates) {
+            suspects.push(candidates);
         }
     }
-    let description = root.get("desc");
-    push(description.and_then(|desc| desc.get("readme")), Some("md"));
-    push(description.and_then(|desc| desc.get("logo")), None);
-    objects
+    Ok(suspects)
 }
 
 /// The object paths `previous_root` referenced that `new_root` does not.
@@ -852,13 +1011,15 @@ pub(crate) async fn orphan_paths(
     Ok(paths)
 }
 
-/// Assemble the announce's atomic file set: root, CAS objects, description
-/// blobs and orphan removals. A path both written and orphaned keeps its `Put`.
+/// Assemble the announce's atomic file set: root, CAS objects (observed, then
+/// `carried` from a stale branch), description blobs and orphan removals. A path
+/// both written and orphaned keeps its `Put`.
 pub fn build_files(
     root_path: &str,
     root_bytes: &[u8],
     package_repo: &str,
     observed: &[Observed],
+    carried: &[(ocx_oci::Digest, Vec<u8>)],
     desc_blobs: &[DescBlob],
     orphans: &[String],
 ) -> BTreeMap<String, FileChange> {
@@ -868,6 +1029,12 @@ pub fn build_files(
         files.insert(
             object_path(package_repo, &entry.content, "json"),
             FileChange::Put(entry.bytes.clone()),
+        );
+    }
+    for (digest, bytes) in carried {
+        files.insert(
+            object_path(package_repo, digest, "json"),
+            FileChange::Put(bytes.clone()),
         );
     }
     for blob in desc_blobs {
@@ -1293,7 +1460,7 @@ mod tests {
 
         assert_eq!(observed.bytes, served_bytes, "the CAS payload must be the served bytes");
         assert_eq!(observed.content, served_digest, "the pointer must be the served digest");
-        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[], &[]);
+        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[], &[], &[]);
         let (algorithm, hex) = served_digest.parts();
         assert_eq!(
             written(&files, &format!("p/x/o/{algorithm}/{hex}.json")),
@@ -1455,7 +1622,15 @@ mod tests {
             "field order and values must match the index bot's Desc wire shape"
         );
 
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
+        let files = build_files(
+            "p/acme/widget.json",
+            b"root",
+            "acme/widget",
+            &[],
+            &[],
+            &observed.blobs,
+            &[],
+        );
         assert_eq!(
             written(&files, &format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex())),
             Some(readme),
@@ -1473,10 +1648,9 @@ mod tests {
     /// description never changes keeps the C6 short-circuit intact.
     ///
     /// Its CAS blobs still ride along. The `--output` contract materializes the
-    /// whole entry every run (`announce --output dir && publish dir`), and the
-    /// curated tags' CAS objects are already re-written unconditionally — a
-    /// `desc.readme` the run alone omitted is a dangling reference the index
-    /// refuses.
+    /// whole entry every run (`announce --output dir && publish dir`), and only
+    /// the observed tags' objects are re-written — a `desc.readme` the run alone
+    /// omitted is a dangling reference the index refuses.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unmoved_description_rewrites_no_desc_but_still_carries_its_blobs() {
         let data = StubTransportData::new();
@@ -1494,7 +1668,15 @@ mod tests {
             observed.desc.is_none(),
             "an unmoved description is not rewritten into the root"
         );
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
+        let files = build_files(
+            "p/acme/widget.json",
+            b"root",
+            "acme/widget",
+            &[],
+            &[],
+            &observed.blobs,
+            &[],
+        );
         let readme_path = format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex());
         assert_eq!(
             written(&files, &readme_path),
@@ -2000,9 +2182,124 @@ mod tests {
             std::slice::from_ref(&entry),
             &[],
             &[],
+            &[],
         );
         assert_eq!(written(&files, "p/acme/widget.json"), Some(b"root-bytes".as_slice()));
         assert!(files.contains_key(&format!("p/acme/widget/o/sha256/{hex}.json")));
+    }
+
+    // ── unput_introduced_refs ────────────────────────────────────────────────
+
+    fn root_referencing(content: &[String], logo: Option<&str>) -> Value {
+        let tags: Map<String, Value> = content
+            .iter()
+            .enumerate()
+            .map(|(index, digest)| (format!("{index}.0.0"), json!({ "content": digest })))
+            .collect();
+        json!({ "tags": Value::Object(tags), "desc": { "logo": logo } })
+    }
+
+    fn put(path: &str) -> (String, FileChange) {
+        (path.to_string(), FileChange::Put(Vec::new()))
+    }
+
+    #[test]
+    fn an_introduced_reference_without_a_put_is_reported() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let suspects =
+            unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(
+            suspects,
+            vec![vec![format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64))]]
+        );
+    }
+
+    #[test]
+    fn an_introduced_reference_with_a_put_is_satisfied() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let files = BTreeMap::from([put(&format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64)))]);
+        let suspects = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &files).unwrap();
+        assert!(suspects.is_empty(), "{suspects:?}");
+    }
+
+    #[test]
+    fn a_delete_does_not_satisfy_an_introduced_reference() {
+        let digest = digest_string('b');
+        let new_root = root_referencing(std::slice::from_ref(&digest), None);
+        let files = BTreeMap::from([(
+            format!("p/acme/widget/o/sha256/{}.json", "b".repeat(64)),
+            FileChange::Delete,
+        )]);
+        let suspects = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &files).unwrap();
+        assert_eq!(suspects.len(), 1);
+    }
+
+    #[test]
+    fn an_inherited_reference_is_never_checked_even_when_malformed() {
+        let digests = [digest_string('b'), "not-a-digest".to_string()];
+        let base = root_referencing(&digests, None);
+        let suspects = unput_introduced_refs(&base, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert!(suspects.is_empty(), "{suspects:?}");
+    }
+
+    #[test]
+    fn a_logo_is_satisfied_by_its_png_or_its_svg_put() {
+        let logo = digest_string('c');
+        let new_root = root_referencing(&[], Some(&logo));
+        let base = root_referencing(&[], None);
+        let unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(
+            unwritten,
+            vec![vec![
+                format!("p/acme/widget/o/sha256/{}.png", "c".repeat(64)),
+                format!("p/acme/widget/o/sha256/{}.svg", "c".repeat(64)),
+            ]]
+        );
+        for extension in ["png", "svg"] {
+            let files = BTreeMap::from([put(&format!("p/acme/widget/o/sha256/{}.{extension}", "c".repeat(64)))]);
+            let suspects = unput_introduced_refs(&new_root, &base, "acme/widget", &files).unwrap();
+            assert!(suspects.is_empty(), "{extension}: {suspects:?}");
+        }
+    }
+
+    #[test]
+    fn a_readme_is_satisfied_only_by_its_markdown_put_and_inherited_when_the_base_names_it() {
+        let readme = digest_string('d');
+        let new_root = json!({ "tags": {}, "desc": { "readme": readme } });
+        let base = root_referencing(&[], None);
+        let path = format!("p/acme/widget/o/sha256/{}.md", "d".repeat(64));
+
+        let unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &BTreeMap::new()).unwrap();
+        assert_eq!(unwritten, vec![vec![path.clone()]]);
+
+        let wrong_kind = BTreeMap::from([put(&path.replace(".md", ".json"))]);
+        let still_unwritten = unput_introduced_refs(&new_root, &base, "acme/widget", &wrong_kind).unwrap();
+        assert_eq!(still_unwritten.len(), 1, "a .json put does not cover the readme");
+
+        let files = BTreeMap::from([put(&path)]);
+        assert!(
+            unput_introduced_refs(&new_root, &base, "acme/widget", &files)
+                .unwrap()
+                .is_empty()
+        );
+
+        let inherited = unput_introduced_refs(&new_root, &new_root, "acme/widget", &BTreeMap::new()).unwrap();
+        assert!(
+            inherited.is_empty(),
+            "a readme the base names is inherited: {inherited:?}"
+        );
+    }
+
+    #[test]
+    fn an_introduced_unparseable_digest_is_an_error() {
+        let new_root = root_referencing(&["sha256:short".to_string()], None);
+        let result = unput_introduced_refs(&new_root, &root_referencing(&[], None), "acme/widget", &BTreeMap::new());
+        assert!(
+            matches!(result, Err(AnnounceError::RootReferencesUnwrittenObject { ref path }) if path == "sha256:short"),
+            "{result:?}"
+        );
     }
 
     // ── write_out ────────────────────────────────────────────────────────────
@@ -2983,6 +3280,35 @@ mod tests {
             "no link or mention: {body}"
         );
         assert!(body.contains("1.0.0"), "a valid name is still listed: {body}");
+    }
+
+    // ── rebuild_notes ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rebuild_notes_name_the_sorted_carried_tags_and_the_short_base() {
+        let carried = vec!["2.0.0".to_string(), "1.1.0".to_string()];
+
+        let notes = rebuild_notes(&carried, "0123456789abcdef0123456789abcdef01234567", RefUpdate::Reset);
+
+        assert_eq!(
+            notes,
+            "\nCarried: 1.1.0, 2.0.0\n\nRebuilt on 0123456789ab, replacing the branch head\n"
+        );
+    }
+
+    #[test]
+    fn rebuild_notes_are_empty_without_a_carry_or_a_reset() {
+        assert_eq!(rebuild_notes(&[], "0123456789abcdef", RefUpdate::FastForward), "");
+        assert_eq!(rebuild_notes(&[], "0123456789abcdef", RefUpdate::Accumulate), "");
+    }
+
+    #[test]
+    fn rebuild_notes_leave_out_a_name_outside_the_tag_grammar() {
+        let carried = vec!["1.1.0".to_string(), "__ocx](http://x) @u".to_string()];
+
+        let notes = rebuild_notes(&carried, "0123456789abcdef", RefUpdate::FastForward);
+
+        assert_eq!(notes, "\nCarried: 1.1.0\n");
     }
 
     // ── Shared clock (C-007) ─────────────────────────────────────────────────

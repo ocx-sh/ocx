@@ -379,7 +379,7 @@
         },
         "status": {
           "$ref": "#/$defs/WriteStatus",
-          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none, so nothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
+          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none and the base already carries every object it references, so\nnothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
         },
         "desc_status": {
           "$ref": "#/$defs/WriteStatus",
@@ -418,6 +418,29 @@
         "fork": {
           "type": "string",
           "description": "The verified fork, as `owner/repo`; absent for `--output`, and in `--fork`\nmode only when the run made no pull request."
+        },
+        "branch_state": {
+          "description": "The announce branch's state when the run began; absent under `--output`, which has no\nbranch.",
+          "$ref": "#/$defs/BranchState"
+        },
+        "base_sha": {
+          "type": "string",
+          "description": "The index commit the run read the committed root at, and the base of its commit.\n\nThe announce branch head while the branch is `live`, the index `main` otherwise; absent\nwhen the run read no root."
+        },
+        "ref_update": {
+          "description": "How the run moved the announce branch; absent when it committed nothing.",
+          "$ref": "#/$defs/BranchRefUpdate"
+        },
+        "carried": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags carried onto the rebuilt root from a `stale` branch, sorted; absent when none were."
+        },
+        "pull_request_author": {
+          "type": "string",
+          "description": "The login of the pull request's author; absent when the run made no pull request or the\nforge did not name one."
         },
         "written_paths": {
           "type": "array",
@@ -545,6 +568,46 @@
         {
           "value": "git_helper",
           "description": "Nothing was injected; git's own credential helpers are in charge."
+        }
+      ]
+    },
+    "BranchState": {
+      "description": "What the announce branch was worth when the run began.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "absent",
+          "description": "No announce branch yet: the first announce for the package."
+        },
+        {
+          "value": "live",
+          "description": "Unmerged commits that fast-forward onto the index base; the run adds to them."
+        },
+        {
+          "value": "spent",
+          "description": "Nothing the index base needs (merged, or closed unmerged); the run rebuilds from the base."
+        },
+        {
+          "value": "stale",
+          "description": "Unmerged commits the index base moved away from, with a pull request still open; the run\nrebuilds on the base and carries the branch's tags."
+        }
+      ]
+    },
+    "BranchRefUpdate": {
+      "description": "How the run moved the announce branch.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "fast_forward",
+          "description": "The commit sits on the branch head; a branch that moved meanwhile is refused."
+        },
+        {
+          "value": "accumulate",
+          "description": "The commit tolerates a branch head the run did not read."
+        },
+        {
+          "value": "reset",
+          "description": "The branch was repointed at a commit on the index base, replacing its head."
         }
       ]
     },
@@ -7148,7 +7211,7 @@
         },
         "status": {
           "$ref": "#/$defs/WriteStatus",
-          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none, so nothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
+          "description": "`unchanged` when the rebuilt root was byte-identical to the committed\none and the base already carries every object it references, so\nnothing was committed; `updated` otherwise. An unchanged\n`--fork` run still ensures a pull request when its announce branch is\nahead of the index base, and still reports one when the branch has\ndiverged from the index base but its open pull request can still\nmerge."
         },
         "desc_status": {
           "$ref": "#/$defs/WriteStatus",
@@ -7187,6 +7250,29 @@
         "fork": {
           "type": "string",
           "description": "The verified fork, as `owner/repo`; absent for `--output`, and in `--fork`\nmode only when the run made no pull request."
+        },
+        "branch_state": {
+          "description": "The announce branch's state when the run began; absent under `--output`, which has no\nbranch.",
+          "$ref": "#/$defs/BranchState"
+        },
+        "base_sha": {
+          "type": "string",
+          "description": "The index commit the run read the committed root at, and the base of its commit.\n\nThe announce branch head while the branch is `live`, the index `main` otherwise; absent\nwhen the run read no root."
+        },
+        "ref_update": {
+          "description": "How the run moved the announce branch; absent when it committed nothing.",
+          "$ref": "#/$defs/BranchRefUpdate"
+        },
+        "carried": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags carried onto the rebuilt root from a `stale` branch, sorted; absent when none were."
+        },
+        "pull_request_author": {
+          "type": "string",
+          "description": "The login of the pull request's author; absent when the run made no pull request or the\nforge did not name one."
         },
         "written_paths": {
           "type": "array",
