@@ -12,7 +12,7 @@
 # accept: ARGS go to pytest through `task test:accept:native`; --exe replaces the
 #         cross-built ocx.exe (a release build, say) and its siblings
 #         ocx-shim.exe and schema/ocx_schema.exe are taken from beside it.
-# unit:   ARGS is at most one substring that filters the bundle's testcases.
+# unit:   ARGS is at most one substring that selects the bundle's targets by label.
 #
 # Exit: the child's status; 64 usage; 66 --exe, or ocx-shim.exe / schema/ocx_schema.exe beside it, missing;
 # 69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-wintest;
@@ -80,7 +80,7 @@ esac
 if [ "$mode" = unit ]; then
     [ -z "$exe" ] || die 64 "--exe applies to --mode accept only"
     [ $# -le 1 ] || die 64 "--mode unit takes at most one filter substring"
-    # Past cmd.exe the Taskfile puts the filter inside double quotes in a shell command, where these still act.
+    # A test name holds none of these, and refusing them keeps shell syntax out of every layer the filter crosses.
     case ${1:-} in
         *'$'* | *'`'* | *\\*) die 64 "the filter '$1' holds a \$, a backtick or a backslash; use a plain substring of the test name" ;;
     esac

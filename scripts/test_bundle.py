@@ -118,7 +118,8 @@ def rust_test_labels(query_out: str) -> list[str]:
     A query that stopped matching would otherwise bundle a smaller set and still
     agree with its own `candidates` count.
     """
-    from bazel_gate_proofs import CRATES_TEST_TARGETS  # lazily: `run` must stay stdlib-only
+    # Imported here, not at the top: `run` must stay stdlib-only.
+    from bazel_gate_proofs import CRATES_TEST_TARGETS
 
     labels = query_out.split()
     if len(labels) < CRATES_TEST_TARGETS:

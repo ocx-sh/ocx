@@ -343,7 +343,7 @@ tasks:
       through `cmd.exe` under `ocx exec zot`; pytest starts its own zot registries there.
       `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the shard's JUnit report comes back to
       `target/windows-local/junit/`. After `--`: pytest arguments (accept) or one
-      substring filtering the bundle's testcases (unit).
+      substring selecting the bundle's targets by label (unit).
 
       The exit status is the child's, but only under `task -x`: without it task reports
       201 for any failed command. 69 means this is not WSL with a Windows cmd.exe, 2 a
