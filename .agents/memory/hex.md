@@ -36,8 +36,10 @@ not copies. Team-shared — commit it.
   - `mirror-asciinema` → `/home/mherwig/dev/mirror-asciinema` (trunk `main`; no
     remote yet — the repository is owner-gated, see `.agents/owner-actions.md`)
   - `server-hetzner1` → `/home/mherwig/dev/server-hetzner1` (trunk `main`)
+  - `indexbot` → `/home/mherwig/dev/ocx-indexbot` (trunk `main`; remote ocx-sh/indexbot)
+  - `catalog` → `/home/mherwig/dev/ocx-catalog` (trunk `main`; remote ocx-sh/catalog)
   - **Satellite worktree deviation.** Neither satellite creates a
-    `.agents/worktrees/<wp>` tree: each is a single-writer checkout already on
+    `.agents/worktrees/<wp>` tree (applies to `mirror-asciinema` and `server-hetzner1` only; `indexbot` and `catalog` use normal satellite worktrees): each is a single-writer checkout already on
     the branch its work belongs to, and the owner reviews those branches
     directly. Satellite WPs commit in place on that branch. Consequently the
     C-303 pre-flight's clause (vi) (`.agents/worktrees/` must be ignored) does
@@ -117,6 +119,9 @@ research-axes:
 
 ## Memory
 
+- **Active plan (hex-plan high, 2026-10-24, plan-approved): `.claude/artifacts/plan_issue_639_index_closure.md`** —
+  federated ocx#639 closure: P1 ocx 7 steps, P2 indexbot 12, P3 catalog 8, P4 cross-repo gate; one serial pipeline
+  per repo, repos parallel; critical path P2 → P4; landing catalog → ocx → indexbot.
 - **Active plan (hex-plan xhigh, 2026-10-11, plan-approved): `.claude/artifacts/plan_docs_next_level.md`** —
   from the ratified `docs-next-level` discussion; contract wave P0 + 18 pipelines / 7 waves, critical path
   P0 → P2 → P5 → P9 → P12 → P13b → P14. Theme pinned to npm `@ocx-sh/theme@0.1.1` (on website main); theme gaps
