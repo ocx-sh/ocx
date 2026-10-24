@@ -32,8 +32,11 @@ W7: direnv byte-stability (kept, written Phase 2)
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from src.helpers import make_package
 from src.runner import OcxRunner
@@ -589,6 +592,10 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="windows: ocx emits native C:\\ paths into the sourced bash PATH, which MSYS bash splits at the drive colon",
+)
 def test_global_env_sh_activation_replaces_departed_hook(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

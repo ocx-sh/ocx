@@ -57,6 +57,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -90,6 +91,13 @@ pytestmark = pytest.mark.command("toolchain_env")
 # is the reconciler's answer, and running it through nine interpreters would
 # multiply the runtime by nine to re-observe one PATH string.
 SHELL = "bash"
+
+# ocx emits `C:\` paths joined with ':' into bash code, and a bash PATH is an MSYS colon
+# list that splits at the drive colon, so no session below can read a PATH back on Windows.
+_WINDOWS_NO_BASH = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="windows: ocx emits native C:\\ paths into the bash PATH, which MSYS bash splits at the drive colon",
+)
 
 # Every shell session is bounded (RUL-110). The regression this guards is a
 # trampoline re-entry loop, whose symptom is a process that never returns.
@@ -316,6 +324,7 @@ def _clone(project: Path, destination: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@_WINDOWS_NO_BASH
 def test_bin_mode_path_leads_project_then_global_then_install(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -353,6 +362,7 @@ def test_bin_mode_path_leads_project_then_global_then_install(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -411,6 +421,7 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """The owner-reported case: pin ``ocx`` globally and a bare ``ocx`` finds it.
 
@@ -462,6 +473,7 @@ def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Ar
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -504,6 +516,7 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -538,6 +551,7 @@ def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
         )
 
 
+@_WINDOWS_NO_BASH
 @pytest.mark.parametrize("mode", ["env", "bin", "none"])
 def test_a_fresh_shell_gains_both_session_directories_in_every_mode(
     ocx: OcxRunner, arena: Arena, tmp_path: Path, mode: str
@@ -597,6 +611,7 @@ _TRANSITIONS = [
 ]
 
 
+@_WINDOWS_NO_BASH
 @pytest.mark.parametrize(("first", "second"), _TRANSITIONS, ids=lambda value: value)
 def test_every_ordered_activate_transition_keeps_both_session_directories(
     ocx: OcxRunner, arena: Arena, tmp_path: Path, first: str, second: str
@@ -684,6 +699,7 @@ def _poison_trampoline(home: Path, name: str) -> bytes:
     return poisoned
 
 
+@_WINDOWS_NO_BASH
 def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -722,6 +738,7 @@ def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull
     )
 
 
+@_WINDOWS_NO_BASH
 def test_the_prompt_path_never_prunes_the_stale_trampolines(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -752,6 +769,7 @@ def test_the_prompt_path_never_prunes_the_stale_trampolines(
     assert snapshot_tree(home) == before, "the prompt path must not write anywhere under the home"
 
 
+@_WINDOWS_NO_BASH
 def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """C-061's positive half: ``ocx pull`` re-renders, re-stamps, and the hint stops."""
     project = locked_project(ocx, tmp_path, label="c3")
@@ -781,6 +799,7 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
 # ---------------------------------------------------------------------------
 
 
+@_WINDOWS_NO_BASH
 @pytest.mark.parametrize("mode", ["env", "bin", "none"])
 @pytest.mark.parametrize("pinned", [False, True])
 def test_the_activate_pinned_matrix_emits_the_contracted_set(
@@ -849,6 +868,7 @@ def test_the_activate_pinned_matrix_emits_the_contracted_set(
             )
 
 
+@_WINDOWS_NO_BASH
 def test_activate_in_ocx_toml_beats_the_environment_variable(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -878,6 +898,7 @@ def test_activate_in_ocx_toml_beats_the_environment_variable(
         assert _real(directory) not in segments, f"`none` composes nothing either: {segments}"
 
 
+@_WINDOWS_NO_BASH
 def test_the_environment_tier_speaks_when_the_file_tier_is_absent(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -972,6 +993,7 @@ def test_pinned_cli_beats_the_file_which_beats_the_environment(ocx: OcxRunner, t
     assert lane("--pinned", env={"OCX_TOOLCHAIN_PINNED": "0"}) == "pinned", "the command line beats both"
 
 
+@_WINDOWS_NO_BASH
 def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1015,6 +1037,7 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1050,6 +1073,7 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     assert _real(shell_bin(home)) in segments, f"a rendered, stamped tree reaches PATH: {segments}"
 
 
+@_WINDOWS_NO_BASH
 def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1113,6 +1137,7 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """C-028: the widening is strictly after consent, not merely usually after it.
 
@@ -1146,6 +1171,7 @@ def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena,
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_symlinked_project_home_is_refused_from_the_owned_set(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1191,6 +1217,7 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1243,6 +1270,7 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     )
 
 
+@_WINDOWS_NO_BASH
 def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:

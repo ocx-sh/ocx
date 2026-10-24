@@ -20,8 +20,11 @@ three affected test files share the same implementation.
 """
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+from src.shell_matrix import shell_which
 
 
 def run_after_sourcing(
@@ -74,8 +77,12 @@ def run_after_sourcing(
     # Using POSIX dot-operator (.) instead of ``eval`` avoids ALL quoting
     # issues: the export lines are interpreted as-is by the shell parser,
     # so paths with spaces, $, ", !, and \ are all handled correctly.
-    script = f'. "{env_file}"\n{body}\n'
+    # Forward slashes: a slash-free name makes `.` search PATH before the file itself.
+    sourced = Path(env_file).as_posix() if sys.platform == "win32" else env_file
+    script = f'. "{sourced}"\n{body}\n'
     flags = shell_flags.split() if shell_flags else []
+    if sys.platform == "win32" and not Path(shell).is_absolute():
+        shell = shell_which(shell, env.get("PATH")) or shell
     try:
         return subprocess.run(
             [shell, *flags, "-c", script],
