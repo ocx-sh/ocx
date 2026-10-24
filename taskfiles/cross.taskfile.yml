@@ -68,8 +68,15 @@ tasks:
       it those testcases run nowhere and the summary says so.
     requires:
       vars: [BUNDLE]
+    # The values reach the command as environment, never as template text inside the shell line:
+    # a `"`, `$(` or backtick in one would otherwise end the quote and run.
+    env:
+      BUNDLE: '{{.BUNDLE}}'
+      SOURCE_ROOT: '{{.SOURCE_ROOT}}'
+      JUNIT: '{{.JUNIT}}'
+      FILTER: '{{.FILTER}}'
     cmds:
-      - '{{.PY}} scripts/test_bundle.py run --bundle "{{.BUNDLE}}" {{if .SOURCE_ROOT}}--source-root "{{.SOURCE_ROOT}}" {{end}}{{if .JUNIT}}--junit "{{.JUNIT}}" {{end}}{{if .FILTER}}--filter "{{.FILTER}}"{{end}}'
+      - '{{.PY}} scripts/test_bundle.py run --bundle "$BUNDLE" {{if .SOURCE_ROOT}}--source-root "$SOURCE_ROOT" {{end}}{{if .JUNIT}}--junit "$JUNIT" {{end}}{{if .FILTER}}--filter "$FILTER"{{end}}'
 
   test:bin:
     desc: 'Stage the acceptance suite test/bin layout for TARGET=<triple> into target/cross/<triple>/test-bin/'

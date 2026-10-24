@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# C-009 — one row per Bazel test target under `//crates/...` (`rust_test` and
-# the `sh_test` seam twin), with the testcase count `bazel test` last executed
-# for it. `bazel:build:drift` holds the row count to the number of those
+# One row per Bazel test target under `//crates/...` (`rust_test` and the
+# `sh_test` seam twin), with the testcase count `bazel test` last executed for
+# it. `bazel:build:drift` holds the row count to the number of those
 # targets the graph has.
 #
 # **Rows are hand-derived; no writer exists.** `scripts/bazel_test_floor.py`
@@ -24,7 +24,7 @@
 #
 # `cases` is *executed* testcases (passed + failed), so it excludes the
 # `--skip`ped ones; `skipped` records how many a target's `args` filter out and
-# is the testcase-level half of C-008's exclusion set. The suite-level half is
+# is the testcase-level half of the exclusion set. The suite-level half is
 # the `[[excluded_suite]]` rows at the bottom: suites `cargo nextest list`
 # reports that stage 1 builds no target for at all.
 #
@@ -280,7 +280,7 @@ crate = "ocx_util"
 cases = 290
 
 # ---------------------------------------------------------------------------
-# C-008's suite-level exclusion set: what `cargo nextest list` reports and no
+# The suite-level exclusion set: what `cargo nextest list` reports and no
 # stage-1/2 Bazel target executes. `rust:test:floor` still counts these, which
 # is why they are enumerated rather than left to a count comparison.
 # ---------------------------------------------------------------------------

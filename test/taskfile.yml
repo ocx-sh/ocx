@@ -19,11 +19,6 @@ vars:
   SCHEMA_BIN_DIR: "{{.BIN_DIR}}/schema"
   OCX_SCHEMA_BINARY: "{{.SCHEMA_BIN_DIR}}/ocx_schema{{exeExt}}"
   SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
-  # The registry the bench harness dials (`bench:setup` waits on it). The suite no
-  # longer starts one on a fixed port: every pytest session runs its own zot
-  # (`test/src/zot.py`).
-  REGISTRY_PORT:
-    sh: printf '%s' "${OCX_TEST_REGISTRY_PORT:-5000}"
   # Where pytest puts its per-test arenas. Every installing test materializes a
   # full three-tier CAS (blobs + layers + packages) under `tmp_path`, and the
   # default TMPDIR is /tmp, a tmpfs whose declared size (64G) is larger than
@@ -511,7 +506,7 @@ tasks:
         raw='{{.BAZEL_TAGS_JSON}}.jsonproto'
         # `ocx exec bazel --`, like every other bazel call in this repository:
         # a plain shell has no `bazel` on PATH, and a hand-run query is not an
-        # exception to that (AGENTS.md § Bazel, DX-42).
+        # exception to that (AGENTS.md § Bazel).
         ocx exec bazel -- bazel {{.CACHE_RC}} query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
         python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
         import json
@@ -909,9 +904,10 @@ tasks:
 
   bench:setup:
     desc: >-
-      Start the bench Docker-compose profile (toxiproxy + registry). Required
-      before running any bench:* target. Fails with a clear message when Docker
-      is unavailable.
+      Start the bench Docker-compose profile (the toxiproxy container). Required
+      before running any bench:* target; the registry behind it is a zot the
+      harness starts itself. Fails with a clear message when Docker is
+      unavailable.
     dir: '{{toSlash .TASKFILE_DIR}}'
     preconditions:
       - sh: docker info > /dev/null 2>&1
@@ -928,20 +924,12 @@ tasks:
           fi;
           sleep 0.5;
         done
-      # Wait for registry to become reachable (already running from prior `task test`,
-      # but in case bench:setup is called standalone).
-      - >-
-        for i in $(seq 1 30); do
-          if curl -sf http://localhost:{{.REGISTRY_PORT}}/v2/ > /dev/null 2>&1; then
-            echo "registry ready."; break;
-          fi;
-          sleep 0.5;
-        done
 
   bench:teardown:
     desc: >-
-      Stop the bench-proxy container only — leaves registry + mirror-registry running
-      so `task test` is unaffected. Use `docker compose down` manually to stop everything.
+      Stop and remove the bench-proxy (toxiproxy) container only — other compose
+      services are untouched, and the bench registry is the harness's own zot,
+      which exits with it. Use `docker compose down` manually to stop everything.
     dir: '{{toSlash .TASKFILE_DIR}}'
     cmds:
       - docker compose -f {{toSlash .TASKFILE_DIR}}/docker-compose.yml --profile bench stop bench-proxy

@@ -1,4 +1,4 @@
-"""Structural tests for `.github/workflows/*.yml` (plan_crate_split_workspace.md C-016, C-023).
+"""Structural tests for `.github/workflows/*.yml`.
 
 Two shapes the crate split can break without any workflow going red:
 
@@ -15,13 +15,13 @@ Two shapes the crate split can break without any workflow going red:
   job omits `submodules:` on purpose, so a task it runs must not reach
   `:website:schema:default` and through it a cargo build of a workspace whose
   `external/` patch sources are not on disk.
-- the tier partition (D5): `verify-basic.yml` and `basic-repo.yml` are what a pull
+- the tier partition: `verify-basic.yml` and `basic-repo.yml` are what a pull
   request pays for, so they run on Linux only, and the Windows and macOS unit legs
   are `deep-repo.yml`'s `unit-native` matrix. A leg re-added to basic is a cost every
   push pays twice; a leg dropped from deep's matrix is a `cfg(windows)` /
   `cfg(target_os = "macos")` arm nothing compiles anywhere.
 
-- the Bazel remote-cache lane policy (plan_pr637_round2.md C-003). Every same-repo
+- the Bazel remote-cache lane policy. Every same-repo
   lane holding the secret reads and writes the shared cache: each `bazel-cache-rc`
   step passes `BAZEL_CACHE_WRITE_AUTH` by name with no event predicate, every Bazel
   lane has such a step before its first lane step and an `if: always()` cleanup
@@ -35,7 +35,7 @@ Two shapes the crate split can break without any workflow going red:
   needs, the `workflow_call` inputs and secrets, and the permission ceiling the
   template's caller imposes.
 
-- S-016's evidence predicate: which `TestResult` counts as a **remote** cache hit.
+- The evidence predicate: which `TestResult` counts as a **remote** cache hit.
   Measured, the two BEP fields named for that question answer it wrongly — a
   `--disk_cache` hit reports `cachedRemotely: true` with no remote cache configured
   at all — so the predicate keys on `executionInfo.strategy`, and its red and green
@@ -155,7 +155,7 @@ def test_path_filters_match_tracked_files(workflow: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C-016: the deep tier is opt-in, and the basic tier survives the merge queue
+# The deep tier is opt-in, and the basic tier survives the merge queue
 # ---------------------------------------------------------------------------
 
 
@@ -268,12 +268,10 @@ def _disarmed(job: dict, step: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# What a `task <name>` step runs
+# What a `task <name>` step runs: the template's jobs run `task ci:lint|test|build|docs|deep`,
+# and the tasks each tier holds are listed in `taskfiles/ci.taskfile.yml`, so a test asking
+# "does CI run X" reads the task graph, not the workflow text.
 # ---------------------------------------------------------------------------
-#
-# The template's jobs run `task ci:lint`, `task ci:test`, `task ci:build`, `task ci:docs` and
-# `task ci:deep`; the tasks each tier holds are listed in `taskfiles/ci.taskfile.yml`. A test
-# that asks "does CI run X" therefore reads the task graph, not the workflow text.
 
 
 @functools.cache
@@ -363,7 +361,7 @@ def test_the_toolchain_installs_before_a_parallel_phase_runs_cargo(caller: str, 
 def test_the_claude_structural_tests_run_in_ci() -> None:
     """This file included. `claude:tests` is a member of `ci:lint`, which the template's
     `lint` job runs — and a workflow that ran neither would leave every shape asserted here,
-    the D5 partition below among them, true on a developer's machine and nowhere else: a leg
+    the tier-partition tests below among them, true on a developer's machine and nowhere else: a leg
     deleted from deep's matrix was green in CI.
 
     Presence is half of it: a step whose failure is tolerated or skipped is
@@ -425,7 +423,7 @@ _JOB_CLAIM = re.compile(r"`([a-z0-9-]+\.yml)`(?:'s)?\s+`([A-Za-z0-9_-]+)`\s+(?:j
 _STALE_JOB_CLAIMS = frozenset(
     {
         ".claude/artifacts/plan_crate_split_workspace.md: verify-basic.yml smoke-windows",
-        # The adoption of the conventions template (plan_pr637_round2.md) retired the repo-written
+        # The adoption of the conventions template retired the repo-written
         # `verify-basic.yml` `smoke` / `workflow-lint` jobs and `verify-deep.yml` `build` /
         # `satellite-verify` jobs: the template owns those two files now and the repo-owned jobs
         # moved to `basic-repo.yml` and `deep-repo.yml`. The records below are dated and quote what
@@ -514,7 +512,7 @@ def test_no_claude_document_claims_a_job_its_workflow_lacks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D5: basic runs on Linux only; deep's native jobs own macOS and Windows
+# Basic runs on Linux only; deep's native jobs own macOS and Windows
 # ---------------------------------------------------------------------------
 
 
@@ -996,9 +994,8 @@ def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
     `ci:build` and `ci:docs`, so a phase step is covered when `verify-basic.yml` runs a tier
     that reaches it. The since-deleted `rust:test:doc` was added to the phase and not to the
     workflow: it appeared in none of them, in no spelling, so CI ran zero doctests while every
-    local `task verify` ran them. That is DX-5/C-008's pattern — a gate outside the full gate is
-    a gate nobody runs — and a hand-kept second list is how it recurs, so the two are held
-    together here instead.
+    local `task verify` ran them. A gate outside the full gate is a gate nobody runs, and a
+    hand-kept second list is how that recurs, so the two are held together here instead.
     """
     if task in _BUILD_TEST_ELSEWHERE:
         workflow, command = _BUILD_TEST_ELSEWHERE[task]
@@ -1191,7 +1188,7 @@ def test_the_shell_zoo_runs_no_task_its_checkout_cannot_build() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bazel remote-cache lane policy (plan_pr637_round2.md C-003)
+# Bazel remote-cache lane policy
 #
 # Every same-repo lane that holds the secret reads *and writes* the shared cache:
 # each cache step passes the write secret by name, with no event predicate, and the
@@ -1531,7 +1528,7 @@ def _call_edges(documents: list[tuple[str, dict]]) -> set[tuple[str, str]]:
 
 
 def _write_credential_findings(documents: list[tuple[str, dict]]) -> list[str]:
-    """C-003(a): every cache step passes the write secret exactly, and nothing reads a read one.
+    """Every cache step passes the write secret exactly, and nothing reads a read one.
 
     "Exactly" means no event predicate, no fallback and no step-level `if:`: a gate would
     withhold the cache from lanes that should share it, and an `|| ''` is the shape a gate
@@ -1555,7 +1552,7 @@ def _write_credential_findings(documents: list[tuple[str, dict]]) -> list[str]:
 
 
 def _upload_flag_findings(documents: list[tuple[str, dict]]) -> list[str]:
-    """C-003(b): no step passes `--remote_upload_local_results`, with any value.
+    """No step passes `--remote_upload_local_results`, with any value.
 
     The rc file the action writes carries the grant, so a workflow that spells the flag
     either duplicates it or overrides it on one lane.
@@ -1571,7 +1568,7 @@ def _upload_flag_findings(documents: list[tuple[str, dict]]) -> list[str]:
 def _lanes_without_cache_step(
     documents: list[tuple[str, dict]], excluded: Iterable[str] = ()
 ) -> list[str]:
-    """C-003(c): every Bazel lane writes the cache before its first lane step and cleans up after.
+    """Every Bazel lane writes the cache before its first lane step and cleans up after.
 
     The cleanup half is the caller's duty for `bazel-cache-rc` only; the template's setup action
     in `trusted` mode has no cleanup to add (see `TEMPLATE_SETUP`).
@@ -1630,7 +1627,7 @@ def _callers_without_the_secret(documents: list[tuple[str, dict]]) -> list[str]:
 
 
 def _rc_writers_without_cleanup(documents: list[tuple[str, dict]]) -> list[str]:
-    """C-015's caller half: a job that writes the rc through the action also deletes it."""
+    """The caller's half of the credential cleanup: a job that writes the rc through the action also deletes it."""
     return [
         f"{where}: {gap}"
         for where, _, job in _jobs(documents)
@@ -1642,7 +1639,7 @@ def _rc_writers_without_cleanup(documents: list[tuple[str, dict]]) -> list[str]:
 def _lanes_with_an_outage_policy_flag(
     documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
 ) -> list[str]:
-    """S-008 / BZL-CACHE-26: no lane may make a cache outage fatal, or pretend to."""
+    """BZL-CACHE-26: no lane may make a cache outage fatal, or pretend to."""
     rc_texts = list(rc_texts)
     return [
         f"{where}: `{flag}`"
@@ -1655,7 +1652,7 @@ def _lanes_with_an_outage_policy_flag(
 def _lanes_without_remote_cache_reach(
     documents: list[tuple[str, dict]], rc_texts: Iterable[str] = ()
 ) -> list[str]:
-    """S-016's structural half: a lane must actually point at the shared cache.
+    """The structural half of the remote-hit check: a lane must actually point at the shared cache.
 
     A lane with no `--remote_cache` is green with no cache reach at all, silently. The
     host is pinned too, and an explicit `https://` is required, because both remote
@@ -2037,7 +2034,7 @@ def test_a_named_exclusion_skips_its_lane() -> None:
 
 
 def test_every_cache_step_passes_the_write_secret_and_nothing_else() -> None:
-    """C-003(a). Floored on its reader: a tree with no cache step is not a clean one."""
+    """Floored on its reader: a tree with no cache step is not a clean one."""
     documents = _documents()
     assert any(
         _cache_writer_auth(step) is not None
@@ -2054,7 +2051,7 @@ def test_every_cache_step_passes_the_write_secret_and_nothing_else() -> None:
 
 
 def test_no_step_passes_the_upload_flag() -> None:
-    """C-003(b). The rc the action writes carries `--remote_upload_local_results=true`."""
+    """The rc the action writes carries `--remote_upload_local_results=true`."""
     findings = _upload_flag_findings(_documents())
     assert not findings, (
         f"steps passing the upload flag: {findings}. Each task passes the action's rc with "
@@ -2095,7 +2092,7 @@ def test_every_lane_exclusion_names_a_lane() -> None:
 
 
 def test_every_bazel_lane_has_the_cache_step() -> None:
-    """C-003(c). Without the step a lane compiles cold and the cache never gains an entry."""
+    """Without the step a lane compiles cold and the cache never gains an entry."""
     findings = _lanes_without_cache_step(_documents(), LANE_EXCLUSIONS)
     assert not findings, (
         f"Bazel lanes without a cache write step before their first lane step, or without "
@@ -2163,7 +2160,7 @@ def test_a_template_owned_callee_is_exempt_from_the_declare_half_only() -> None:
 
 
 def test_every_write_credential_caller_deletes_it_in_an_always_step() -> None:
-    """C-015's caller half: `using: composite` has no `post:` hook, so the deletion is a
+    """The caller's half of the credential cleanup: `using: composite` has no `post:` hook, so the deletion is a
     second `uses:` of the action under `if: always()`, after the last step needing the rc."""
     findings = _rc_writers_without_cleanup(_documents())
     assert not findings, (
@@ -2175,7 +2172,7 @@ def test_every_write_credential_caller_deletes_it_in_an_always_step() -> None:
 
 
 def test_no_bazel_lane_makes_a_cache_outage_fatal() -> None:
-    """S-008 — an unreachable cache host is a warning and exit 0, by construction.
+    """An unreachable cache host is a warning and exit 0, by construction.
 
     With no `--remote_executor` an outage is already non-fatal on every Bazel version
     measured. What can go wrong is a lane citing a fallback flag as though it governed
@@ -2190,7 +2187,7 @@ def test_no_bazel_lane_makes_a_cache_outage_fatal() -> None:
 
 
 def test_a_bazel_lane_reaches_the_remote_cache() -> None:
-    """S-016's structural half — a lane pointing nowhere is the silent zero-hit lane.
+    """The structural half of the remote-hit check — a lane pointing nowhere is the silent zero-hit lane.
 
     The **hit count** is not derivable from configuration; what counts as a hit is
     `remote_cache_hits`, and `test_s016_is_not_satisfiable_by_a_disk_cache_hit` is its
@@ -2675,9 +2672,8 @@ def test_the_retired_pages_deploy_workflows_are_gone() -> None:
 # One `CACHE_RC`, and every Bazel call a task makes carries it
 # ---------------------------------------------------------------------------
 
-#: `--bazelrc` is a startup option, so it must sit immediately after the second
-#: `bazel`. A call without it reads the shared cache anonymously (a 401) and
-#: compiles cold, green — the shape that left `cross:build` uncached.
+#: `--bazelrc` is a startup option, so it must sit immediately after the second `bazel`;
+#: a call without it reads the shared cache anonymously (a 401) and compiles cold, green.
 _TASK_BAZEL_CALL = re.compile(r"ocx exec bazel -- bazel(?:[ \t]+(\S+))?")
 #: Invocations found in the tracked taskfiles when this was written. A floor, not
 #: a census: a reader that stopped seeing taskfiles passes a negative silently.
@@ -2728,7 +2724,7 @@ def test_cache_rc_is_defined_once_in_the_root_taskfile() -> None:
 
 
 def test_bazel_test_accept_never_uploads_verdicts_whatever_rc_a_lane_passes() -> None:
-    """`adr_test_speed_tiers.md` D6: acceptance verdicts stay on the local disk.
+    """Acceptance verdicts stay on the local disk, per `adr_test_speed_tiers.md`.
 
     A command-line flag outranks the CI rc's `--remote_upload_local_results=true`, so this holds on any lane.
     """
@@ -2759,8 +2755,7 @@ SHELL_ACTIVATION_DEEP = WORKFLOW_DIR / "shell-activation-deep.yml"
 REUSABLE_REPO_WORKFLOWS = (BASIC_REPO, DEEP_REPO, ACCEPTANCE, CROSS)
 
 #: Where the eight cross-build jobs run: "B" keeps them in the deep tier only, "A"
-#: adds them to every pull request. The slowest warm cross job's wall time decides,
-#: and the measurement is recorded in .claude/artifacts/plan_pr637_round2.md#schedule-log.
+#: adds them to every pull request. The slowest warm cross job's wall time decides.
 CROSS_VARIANT = "B"
 CROSS_TARGETS = frozenset(
     {

@@ -126,16 +126,17 @@ itself once the pin crosses 9.3.0. Do not "fix" it.
 ## Step 5 — maintainer path (`maintainer-secrets`) — opt-in only
 
 Only when the doctor reports org admin on `ocx-sh`. Never automatic: rotating an
-org secret is a decision. `AskUserQuestion` — "Set the org cache secrets now?" /
-Set both · Read only · Skip. Per secret, free text for the password, then:
+org secret is a decision. `AskUserQuestion` — "Set the org cache write secret
+now?" / Set it · Skip. Free text for the writer identity's password, then:
 
 ```sh
-printf '%s' "Basic $(printf '%s' 'dev-read:<pw>' | base64 -w0)" |
-  gh secret set BAZEL_CACHE_READ_AUTH --org ocx-sh --visibility selected --repos ocx,rules_ocx
+printf '%s' "Basic $(printf '%s' '<writer>:<pw>' | base64 -w0)" |
+  gh secret set BAZEL_CACHE_WRITE_AUTH --org ocx-sh --visibility selected --repos ocx,rules_ocx
 ```
 
-and `BAZEL_CACHE_WRITE_AUTH` the same way with the writer identity. Never echo
-either value and never write either into a local file.
+CI lanes use the write secret only; the org read secret is retired, and the
+`dev-read` credential in `~/.bazelrc` (Step 3) is a separate, live thing. Never
+echo the value and never write it into a local file.
 
 ## Step 6 — one warm-cache smoke
 

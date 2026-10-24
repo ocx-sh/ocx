@@ -9,9 +9,8 @@ name: Basic (repo)
 # for more fails the whole run at startup. Test results therefore publish as annotations and a job
 # summary, never as a check run or a pull request comment.
 #
-# Cross-builds sit in `deep-repo.yml` (variant B of plan_pr637_round2.md D13). Flipping to variant A is
-# the `CROSS_VARIANT` constant in `.claude/tests/test_workflows.py` plus one job here that calls
-# `cross.yml`.
+# Cross-builds sit in `deep-repo.yml` (variant B). Flipping to variant A is the `CROSS_VARIANT` constant
+# in `.claude/tests/test_workflows.py` plus one job here that calls `cross.yml`.
 
 on:
   workflow_call:
@@ -45,7 +44,7 @@ jobs:
 
   # The scripts under `scripts/` are the gates themselves, and their tests ran only on a developer's
   # machine until they had a job. The job always runs, so its required check is never left unknown by a
-  # skip; a step inside it decides whether `scripts/**` or its toolchain changed (plan_pr637_round2.md D19).
+  # skip; a step inside it decides whether `scripts/**` or its toolchain changed.
   scripts-tests:
     name: Script self-tests
     runs-on: ubuntu-latest
@@ -121,8 +120,8 @@ jobs:
           write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
       - name: Build
         run: task rust:build
-      # C-015's caller half, which a composite action cannot carry itself: it has no `post:` hook, so the
-      # deletion is an obligation on this file. `always()` and not `success()` — a cancelled or failed job
+      # The caller's half of the credential cleanup, which a composite action cannot carry itself: it has
+      # no `post:` hook, so the deletion is an obligation on this file. `always()` and not `success()` — a cancelled or failed job
       # is exactly the one that would otherwise leave the credential on the runner.
       - name: Remove the Bazel cache credential
         if: always()
@@ -204,7 +203,7 @@ jobs:
         with:
           cleanup: 'true'
 
-  # The full suite on Linux, with the Sigstore stack, on a binary rebuilt from the warm cache (D20).
+  # The full suite on Linux, with the Sigstore stack, on a binary rebuilt from the warm cache.
   acceptance:
     name: Acceptance (Linux)
     permissions:
@@ -219,10 +218,9 @@ jobs:
 
   smoke-acceptance:
     name: Smoke Acceptance
-    # The per-verb smoke tier (`task test:smoke`, plan_crate_split_workspace.md
-    # C-012 – C-015): one marked happy path per visible top-level verb, run in
-    # parallel against the acceptance registry only, inside a 90 s wall-clock
-    # budget. The same setup as the full acceptance suite minus everything the
+    # The per-verb smoke tier (`task test:smoke`): one marked happy path per
+    # visible top-level verb, run in parallel against the acceptance registry
+    # only, inside a 90 s wall-clock budget. The same setup as the full acceptance suite minus everything the
     # Sigstore stack needs — no `--profile sigstore`, no readiness gate, no stack
     # logs — because `test/lint/test_smoke_coverage.py` asserts that no marked
     # test takes the `sigstore_stack` / `identity_token` fixtures. The schema

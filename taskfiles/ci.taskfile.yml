@@ -24,7 +24,7 @@ tasks:
       SHELLCHECK_OPTS: '--severity=warning'
     cmd: actionlint
 
-  # The tier aliases the conventions baseline's workflows call (C-013). Membership is the contract:
+  # The tier aliases the conventions baseline's workflows call. Membership is the contract:
   # `task --dry ci:<tier>` lists exactly these tasks. `task verify` keeps its own list; the aliases are
   # what the template's jobs run, so a tier can be re-run alone. Actionlint is the template's
   # `workflows:lint`, not repeated here.

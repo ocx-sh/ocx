@@ -49,9 +49,10 @@ a developer is in after `bazel shutdown`. A lane tagged `local` would report
 
 **`no-sandbox` buys the property the runner actually needs** without the cache
 half: the test runs in the execroot rather than in a sandbox, which is a hard
-requirement here (the suite drives `docker compose` and a uv-managed virtualenv
-from the source tree, neither of which survives a sandboxed working directory).
-Measured above: it caches exactly like an untagged sibling in both warm states.
+requirement here (the suite drives a uv-managed virtualenv from the source tree and,
+for the Sigstore and mirror stacks only, `docker compose`; neither survives a
+sandboxed working directory). Its registries are zot processes it starts itself
+(`test/src/zot.py`), not Docker. Measured above: it caches exactly like an untagged sibling in both warm states.
 
 And measured again on **this** workspace, where the probe's rc does not apply:
 after a run that rebuilt the binary under test and re-executed every acceptance

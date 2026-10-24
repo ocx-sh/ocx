@@ -6,20 +6,10 @@
     python3 scripts/accept_floor.py --junit target/bazel/accept     # bazel:test:accept (unsharded)
     python3 scripts/accept_floor.py --junit target/accept/junit     # test:accept:floor, merged shards
 
-Reads every `*.xml` under `--junit` recursively, sums testcases, skips and
-xfails, and fails on any failure or error, on fewer cases than
-`test/SUITE_FLOOR`, and on more skips / xfails than `test/SKIP_CEILING` /
-`test/XFAIL_CEILING`. A directory with no report is red: a reader that read
-nothing is not a clean suite.
-The conformance root floor (`conformance_floor.py --junit`) is a separate call
-the tasks make over the same directory.
-
-A limits directory missing one of those files is red too, but it prints the
-counted cases, skips and xfails first: a platform's first run reports the numbers
-its limits are then committed from.
-
-A shard holds a subset, so the floor is evaluated over the merged directory,
-never per shard. `scripts/tests/test_accept_floor.py` shows it red and green.
+Sums testcases, skips and xfails over every `*.xml` under `--junit`; fails on a failure or error, on
+fewer cases than `test/SUITE_FLOOR`, and on more skips / xfails than `test/SKIP_CEILING` /
+`test/XFAIL_CEILING`. No report is red: reading nothing is not a clean suite. A shard holds a subset,
+so the floor is judged over the merged directory. `conformance_floor.py --junit` is a separate call.
 """
 
 from __future__ import annotations
@@ -62,6 +52,8 @@ def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
                 else:
                     skipped += 1
 
+    # A missing limit file is red too, but the counts print first: a platform's first run has no
+    # limit files and commits them from these numbers.
     absent = [limits_dir / name for name in LIMIT_FILES if not (limits_dir / name).is_file()]
     if absent:
         print(

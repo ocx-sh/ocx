@@ -2011,22 +2011,15 @@ class TestPlanStatusBlock:
 
 
 class TestVerifyDeepBuildMatrix:
-    """Structural invariant: `deep-repo.yml::unit-native` matrix must keep an
-    enabled (non-commented-out) `macos-latest` entry on `main`.
+    """Structural invariant: `deep-repo.yml::unit-native` keeps an enabled
+    (non-commented-out) `macos-latest` entry on `main`.
 
-    Background: ADR `adr_file_lock_unification.md` §CI Integration permits an
-    iteration tactic of temporarily commenting out the `macos-latest` matrix
-    entry to save ≈ $0.50/run while debugging the new Windows leg. The tactic
-    is correct during iteration but produces a permanent macOS coverage gap
-    if the restore is forgotten. The architect review (P7) flagged the
-    human-checklist safeguard as historically failure-prone and asked for a
-    structural test that physically blocks merge to `main` when macOS is
-    missing.
-
-    This test reads `deep-repo.yml` as text and asserts a non-comment line
-    matching `os: macos-latest` appears in the `unit-native` job's matrix block.
-    Pure structural — does not validate the rest of the matrix, just that the
-    macOS leg is enabled when the branch lands.
+    ADR `adr_file_lock_unification.md` §CI Integration permits commenting that
+    entry out while debugging the Windows leg; a forgotten restore leaves a
+    permanent macOS coverage gap that a human checklist did not catch, so this
+    test blocks the merge. It reads `deep-repo.yml` as text and asserts one
+    non-comment `os: macos-latest` line in the `unit-native` matrix block,
+    nothing more of the matrix.
     """
 
     _WORKFLOW = ROOT / ".github" / "workflows" / "deep-repo.yml"

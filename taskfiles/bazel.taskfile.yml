@@ -509,7 +509,7 @@ tasks:
           # the one selector, shared with `test:accept:native`); unset = all.
           stems=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format stems {{.SHARD_FLAGS}}) || exit $?
           targets=$(python3 '{{.ROOT_DIR}}/scripts/accept_shard.py' --format labels {{.SHARD_FLAGS}}) || exit $?
-          # adr_test_speed_tiers D6: verdicts stay on the local disk; a flag outranks the CI rc.
+          # Acceptance verdicts stay on the local disk (adr_test_speed_tiers.md); a flag outranks the CI rc.
           ocx exec bazel -- bazel {{.CACHE_RC}} test {{if .SHARD_COUNT}}$targets{{else}}//test:all{{end}} --remote_upload_local_results=false \
             --local_test_jobs={{.ACCEPT_JOBS}} {{if .NOCACHE}}--nocache_test_results{{end}} {{.CLI_ARGS}} || status=$?
           reader=0

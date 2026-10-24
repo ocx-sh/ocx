@@ -498,10 +498,8 @@ mod tests {
     /// The cell that matters is `(fetch first)` under `unknown`: a classifier
     /// that read the status before matching the phrase would turn every
     /// retryable race on an older GitLab into a terminal 82 and kill the retry
-    /// convergence. `(pre-receive hook declined)` alone stays 77 under
-    /// `unknown` for the same reason — the promotion is gated on the promotable
-    /// set, not on "any refusal".
-    ///
+    /// convergence. `(pre-receive hook declined)` alone stays 77 under `unknown`
+    /// because promotion is gated on the promotable set, not on "any refusal".
     /// Reds on: hoisting the status check above the phrase match, or promoting
     /// on any refusal under `unknown`.
     #[test]
