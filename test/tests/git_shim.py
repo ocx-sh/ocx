@@ -486,10 +486,13 @@ def _windows_trampoline() -> Path:
     scratch = Path(tempfile.mkdtemp(dir=cache))
     try:
         (scratch / "trampoline.rs").write_text(_TRAMPOLINE_RS, encoding="utf-8")
+        # cwd outside the checkout: under it, rustup obeys rust-toolchain.toml and installs the
+        # pinned toolchain from inside each xdist worker at once, and concurrent installs collide.
         subprocess.run(
             [rustc, "--edition", "2021", "-o", str(scratch / "git.exe"), str(scratch / "trampoline.rs")],
             check=True,
             capture_output=True,
+            cwd=scratch,
         )
         try:
             os.replace(scratch / "git.exe", built)

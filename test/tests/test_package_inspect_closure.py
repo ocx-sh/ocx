@@ -18,7 +18,6 @@ Exit codes per quality-rust-exit_codes.md:
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -263,16 +262,11 @@ def test_inspect_closure_diamond_lists_shared_dep_once(
     leaf_nodes = [n for n in deps if f"/{unique_repo}_leaf:" in n["identifier"]]
     assert len(leaf_nodes) == 1
 
-    # Decoded as UTF-8 here: the runner decodes with the locale's codepage, which on Windows turns
-    # the tree connector this count anchors on into mojibake.
-    plain = subprocess.run(
-        [str(ocx.binary), "package", "inspect", "--closure", app.short],
-        capture_output=True, encoding="utf-8", env=ocx.env, stdin=subprocess.DEVNULL, check=True,
-    ).stdout
-    assert "(*)" not in plain, plain
+    plain = ocx.plain("package", "inspect", "--closure", app.short)
+    assert "(*)" not in plain.stdout, plain.stdout
     leaf_short_name = f"{unique_repo}_leaf"
-    assert _tree_node_line_count(plain, leaf_short_name) == 1, (
-        f"the shared leaf must render exactly once in the flat deps section:\n{plain}"
+    assert _tree_node_line_count(plain.stdout, leaf_short_name) == 1, (
+        f"the shared leaf must render exactly once in the flat deps section:\n{plain.stdout}"
     )
 
 
