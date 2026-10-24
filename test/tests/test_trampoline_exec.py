@@ -68,7 +68,12 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package, make_package_with_entrypoints, write_ocx_toml
+from src.helpers import (
+    make_package,
+    make_package_with_entrypoints,
+    rglob_no_links,
+    write_ocx_toml,
+)
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
     DEFAULT_GROUP,
@@ -448,7 +453,7 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
     package = make_package_with_entrypoints(ocx, f"t_{label}_launcher", tmp_path, [f"ep{label}"])
     installed = run_in(ocx, tmp_path, "package", "install", package.fq)
     assert installed.returncode == EXIT_SUCCESS, installed.stderr
-    roots = sorted((Path(ocx.env["OCX_HOME"]) / "packages").rglob("metadata.json"))
+    roots = sorted(rglob_no_links(Path(ocx.env["OCX_HOME"]) / "packages", "metadata.json"))
     assert len(roots) == 1, f"exactly one package root is expected; got {roots}"
     package_root = roots[0].parent
 

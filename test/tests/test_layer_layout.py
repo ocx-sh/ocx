@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from src import OcxRunner, assert_dir_exists, assert_not_exists, current_platform
+from src.helpers import rglob_no_links
 
 _INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
@@ -229,7 +230,7 @@ def test_pull_rejects_escaping_prefix_annotation(ocx: OcxRunner, unique_repo: st
     )
     # Defence-in-depth: no directory named `evil` may be written anywhere under
     # OCX_HOME (a botched implementation would create the escaped path).
-    escaped = list(Path(ocx.ocx_home).rglob("evil"))
+    escaped = list(rglob_no_links(Path(ocx.ocx_home), "evil"))
     assert not escaped, f"escaping prefix wrote outside the package tree: {escaped}"
 
 

@@ -45,6 +45,7 @@ from pathlib import Path
 
 import pytest
 
+from src.helpers import rglob_no_links
 from src.runner import OcxRunner, PackageInfo
 
 pytestmark = pytest.mark.skipif(
@@ -1837,7 +1838,7 @@ def _home_tree(ocx: OcxRunner) -> dict[str, str]:
     stamp) on every invocation regardless of what the command then does."""
     home = Path(ocx.env["OCX_HOME"])
     tree: dict[str, str] = {}
-    for path in home.rglob("*"):
+    for path in rglob_no_links(home, "*"):
         if not path.is_file():
             continue
         relative = path.relative_to(home)

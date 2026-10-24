@@ -31,7 +31,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from src import current_platform
-from src.helpers import build_archive, make_package, resolved_metadata_path
+from src.helpers import (
+    build_archive,
+    make_package,
+    resolved_metadata_path,
+    rglob_no_links,
+)
 from src.runner import OcxRunner
 
 EXIT_DATA_ERR = 65  # archive::Error::{EntryEscape, SymlinkEscape}
@@ -158,7 +163,7 @@ def _no_marker_outside(ocx: OcxRunner) -> None:
     """
     home = ocx.ocx_home
     for root in (home, home.parent):
-        hits = sorted(str(p) for p in root.rglob(PWNED))
+        hits = sorted(str(p) for p in rglob_no_links(root, PWNED))
         assert not hits, f"a hostile layer entry escaped the extraction root: wrote {hits}"
 
 
@@ -287,7 +292,7 @@ def test_reverse_order_ladder_is_refused_on_the_registry_stream_route(
     # The finished layer must not exist: a finalized tree carrying the link is
     # the defect, whatever the exit code said.
     layers = ocx.ocx_home / "layers"
-    hits = sorted(str(p) for p in layers.rglob("e1")) if layers.exists() else []
+    hits = sorted(str(p) for p in rglob_no_links(layers, "e1")) if layers.exists() else []
     assert not hits, f"a layer carrying an escaping link was finalized: {hits}"
 
 
@@ -295,7 +300,7 @@ def _no_pwned_under(root: Path) -> None:
     """Nothing named PWNED anywhere at or above the extraction root — the actual
     security property. Swept against `tmp_path`, which contains both the scratch
     root and its siblings, so a link that climbs out lands somewhere this sees."""
-    hits = sorted(str(p) for p in root.rglob("PWNED"))
+    hits = sorted(str(p) for p in rglob_no_links(root, "PWNED"))
     assert not hits, f"a traversal escaped the extraction root: wrote {hits}"
 
 

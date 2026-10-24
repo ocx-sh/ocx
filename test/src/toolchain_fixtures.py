@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from src.helpers import make_package, write_ocx_toml
+from src.helpers import make_package, rglob_no_links, write_ocx_toml
 from src.runner import OcxRunner, PackageInfo
 
 __all__ = [
@@ -445,7 +445,7 @@ def back_reference_entries(ocx: OcxRunner) -> list[str]:
         return []
     return sorted(
         str(entry.relative_to(packages))
-        for refs in packages.rglob("refs/symlinks")
+        for refs in rglob_no_links(packages, "refs/symlinks")
         if refs.is_dir()
         for entry in refs.iterdir()
     )

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from src.helpers import inspect_entry, inspect_names, make_package
+from src.helpers import inspect_entry, inspect_names, make_package, rglob_no_links
 from src.runner import OcxRunner, current_platform
 
 pytestmark = pytest.mark.command("inspect")
@@ -329,7 +329,7 @@ def test_inspect_closure_reports_surface_without_installing(
 
     home = Path(ocx.env["OCX_HOME"])
     symlinks = home / "symlinks"
-    assert not symlinks.exists() or not any(symlinks.rglob(f"*{unique_repo}*")), (
+    assert not symlinks.exists() or not any(rglob_no_links(symlinks, f"*{unique_repo}*")), (
         "inspect must not create install symlinks"
     )
 

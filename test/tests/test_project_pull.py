@@ -44,7 +44,7 @@ from uuid import uuid4
 import pytest
 
 from src import registry_dir
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("pull")
@@ -168,7 +168,7 @@ def _packages_present_count(ocx_home: Path, registry: str) -> int:
     base = _content_path(ocx_home, registry)
     if not base.exists():
         return 0
-    return sum(1 for _ in base.rglob("content") if _.is_dir())
+    return sum(1 for _ in rglob_no_links(base, "content") if _.is_dir())
 
 
 def _symlinks_root(ocx_home: Path) -> Path:
@@ -725,7 +725,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         repo_symlink_dir = symlinks_root / registry_dir(ocx.registry) / repo
         offenders: list[Path] = []
         if repo_symlink_dir.exists():
-            offenders = [p for p in repo_symlink_dir.rglob("*")]
+            offenders = [p for p in rglob_no_links(repo_symlink_dir, "*")]
         assert not offenders, (
             f"ocx pull must not create symlinks for {repo}; found "
             f"{len(offenders)} entry/entries under {repo_symlink_dir}: "

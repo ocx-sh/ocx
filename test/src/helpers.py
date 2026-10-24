@@ -511,6 +511,21 @@ def copy_tree_keeping_links(src: Path, dst: Path) -> None:
             shutil.copy2(entry.path, target)
 
 
+def rglob_no_links(root: Path, pattern: str) -> Iterator[Path]:
+    """``root.rglob(pattern)`` that yields links but never descends one, NTFS junctions included.
+
+    Every store link OCX writes on Windows is a junction, and ``rglob`` follows junctions
+    (``is_symlink()`` is false for one); the ``refs/`` and ``symlinks/`` junctions point back
+    into the store, so a plain ``rglob`` over ``$OCX_HOME`` spins forever instead of failing.
+    """
+    for entry in os.scandir(root):
+        path = Path(entry.path)
+        if path.match(pattern):
+            yield path
+        if entry.is_dir(follow_symlinks=False) and not entry.is_junction():
+            yield from rglob_no_links(path, pattern)
+
+
 def shim_bin_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
     """Every published shim launcher directory belonging to ``repo``.
 

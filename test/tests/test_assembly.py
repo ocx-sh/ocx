@@ -51,7 +51,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import resolved_metadata_path
+from src.helpers import resolved_metadata_path, rglob_no_links
 from src.runner import OcxRunner, current_platform
 
 # ---------------------------------------------------------------------------
@@ -599,7 +599,7 @@ def _layer_content_dirs(ocx: OcxRunner) -> list[Path]:
     layers_root = Path(ocx.ocx_home) / "layers"
     if not layers_root.exists():
         return []
-    return [p for p in layers_root.rglob("content") if p.is_dir()]
+    return [p for p in rglob_no_links(layers_root, "content") if p.is_dir()]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix shell scripts + shared-layer inode semantics")

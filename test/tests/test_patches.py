@@ -46,6 +46,7 @@ from src.helpers import (
     make_package_with_entrypoints,
     push_managed_config,
     resolved_metadata_path,
+    rglob_no_links,
     write_ocx_toml,
 )
 from src.registry import (
@@ -1244,7 +1245,7 @@ def assert_no_index_footprint(ocx: OcxRunner, registry: str, repo: str, why: str
     """
     package_dir = ocx.ocx_home / "index" / registry_dir(registry) / "p" / repo
     root_document = package_dir.with_name(f"{package_dir.name}.json")
-    leftovers = sorted(str(p.relative_to(ocx.ocx_home)) for p in package_dir.rglob("*") if p.is_file())
+    leftovers = sorted(str(p.relative_to(ocx.ocx_home)) for p in rglob_no_links(package_dir, "*") if p.is_file())
     assert not root_document.exists() and not leftovers, (
         f"{why}: {repo} must own nothing under the local index; found "
         f"{'the root document ' if root_document.exists() else ''}{leftovers}"
