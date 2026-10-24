@@ -518,6 +518,9 @@ def rglob_no_links(root: Path, pattern: str) -> Iterator[Path]:
     (``is_symlink()`` is false for one); the ``refs/`` and ``symlinks/`` junctions point back
     into the store, so a plain ``rglob`` over ``$OCX_HOME`` spins forever instead of failing.
     """
+    # A missing root yields nothing, as rglob does; several callers walk a dir a test may have removed.
+    if not root.is_dir():
+        return
     for entry in os.scandir(root):
         path = Path(entry.path)
         if path.match(pattern):
