@@ -28,6 +28,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_prune*")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 BUILD_1 = "0.5.0-canary_20260101000000"
 BUILD_2 = "0.5.0-canary_20260102000000"
 BUILD_3 = "0.5.0-canary_20260103000000"

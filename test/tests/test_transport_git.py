@@ -82,6 +82,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_claim", "package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ── shared constants ──────────────────────────────────────────────────────
 
 #: The API credential every row exports unless it is exercising its absence.

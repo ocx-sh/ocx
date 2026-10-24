@@ -37,6 +37,9 @@ markers = [
     # Sigstore stack. `lint/test_smoke_coverage.py` enforces both.
     "smoke: the per-verb smoke tier — cheap, registry-only, no Sigstore stack (see task test:smoke)",
     "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
+    # A module or helper naming a `__OCX_TESTING_*` seam: release bytes lack the `__testing`
+    # feature, so `OCX_TEST_RELEASE_BINARY=1` skips these (`conftest.py`); `lint/test_testing_marker.py` holds the set.
+    "requires_testing_build: drives a `__OCX_TESTING_*` seam the release binary lacks; skipped when OCX_TEST_RELEASE_BINARY=1",
     # The cosign interop matrix (WP6) contains two kinds of passing test, and a
     # green count that cannot tell them apart is quotable as parity for a
     # behaviour that is actually an open finding. A parity cell asserts the two

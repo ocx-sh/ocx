@@ -60,6 +60,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_claim")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 #: The namespace/package every scenario claims. `acme/widget` is the ADR's own
 #: worked example, so the branch name, the root path and the request title in
 #: these rows read the same as the contract that specifies them.

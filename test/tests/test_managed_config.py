@@ -62,6 +62,8 @@ from src.registry import push_raw_config_package
 from src.runner import OcxRunner
 from src.terminal import requires_pty, run_on_a_terminal
 
+pytestmark = pytest.mark.requires_testing_build
+
 # The managed-config fence's own label (ADR "Seed write mechanism" example:
 # `# >>> ocx managed v1 <hash> >>>` ... `# <<< ocx managed <<<`) — distinct
 # from the shell-activation fence's `ocx` label.

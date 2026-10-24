@@ -87,6 +87,8 @@ from src.toolchain_fixtures import (
 
 pytestmark = pytest.mark.command("toolchain_env")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # One arm. The nine-shell matrix is WP-12e's subject; what is under test here
 # is the reconciler's answer, and running it through nine interpreters would
 # multiply the runtime by nine to re-observe one PATH string.

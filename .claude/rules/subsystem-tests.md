@@ -447,6 +447,8 @@ When an acceptance test must force internal state that production code derives a
 
 The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_TESTING_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
+**Release bytes.** Release builds lack `__testing`, so a test driving a seam cannot pass on them. A `test/tests/test_*.py` module that names a `__OCX_TESTING_[A-Z_]+` variable, or imports a `tests/` or `src/` file that does, carries `pytestmark = pytest.mark.requires_testing_build` (merged into an existing `pytestmark`); `test/lint/test_testing_marker.py` derives that set and reds an unmarked module. `OCX_TEST_RELEASE_BINARY=1` makes `test/conftest.py` skip every marked test with a reason starting `release bytes:`, and `scripts/windows_local.sh` forwards the variable to the Windows side. The readiness run reads `test/limits/<os>-release/` (floor and xfail as the non-release limits, skip ceiling = that platform's ceiling plus the marked case count, an upper bound).
+
 ## Unfalsifiable Greens
 
 Shapes that pass without proving anything. See "Unchecked Green" in

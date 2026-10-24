@@ -38,6 +38,8 @@ from src.toolchain_fixtures import locked_project, resolved_toolchain_home, run_
 
 pytestmark = pytest.mark.command("toolchain_env")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

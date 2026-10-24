@@ -40,6 +40,8 @@ import pytest
 from src.helpers import make_package
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.requires_testing_build
+
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

@@ -118,6 +118,16 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         stack.stop()
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skips every `requires_testing_build` test by name when the binary under test is release bytes."""
+    if os.environ.get("OCX_TEST_RELEASE_BINARY") != "1":
+        return
+    skip = pytest.mark.skip(reason="release bytes: the release binary lacks the `__testing` seams this test drives")
+    for item in items:
+        if item.get_closest_marker("requires_testing_build"):
+            item.add_marker(skip)
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> object:
     """A test still running after ``OCX_TEST_DEADLINE_SECONDS`` (default 600) dumps every

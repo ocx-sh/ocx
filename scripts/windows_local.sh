@@ -176,6 +176,8 @@ fi
     # The Windows host has no Docker the suite can reach, as on the deep tier's Windows leg.
     printf '%s\r\n' 'set "SKIP_BUILD=true"' 'set "OCX_TEST_NO_DOCKER=1"' "set \"OCX_TEST_MIRROR_PORT=$PORT_MIRROR\""
     printf '%s\r\n' "set \"TEST_BASETEMP=$own_win\\p-$NAME\"" "set \"TEST_TMPDIR=$own_win\\t-$NAME\""
+    # An EXE= that is release bytes lacks the __testing seams: the switch skips the marked tests.
+    [ "${OCX_TEST_RELEASE_BINARY:-}" != 1 ] || printf '%s\r\n' 'set "OCX_TEST_RELEASE_BINARY=1"'
 } >"$own_wsl/$NAME-env.cmd"
 
 # 4. python3, date, tr, dirname and basename: what test/taskfile.yml shells out to and a

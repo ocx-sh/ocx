@@ -42,6 +42,8 @@ from src.helpers import bash_executable, make_package
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
 
+pytestmark = pytest.mark.requires_testing_build
+
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

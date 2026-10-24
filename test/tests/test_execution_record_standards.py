@@ -114,6 +114,8 @@ from tests.test_execution_records import (
 
 pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ---------------------------------------------------------------------------
 # Reference-implementation bindings
 # ---------------------------------------------------------------------------

@@ -39,6 +39,8 @@ pytestmark = pytest.mark.skipif(
 )
 pytestmark = [pytestmark, pytest.mark.command("self_group/activate")]
 
+pytestmark = [*pytestmark, pytest.mark.requires_testing_build]
+
 
 # The global-env eval invokes the RESOLVED absolute ocx binary, never a bare
 # `ocx`. A bare name resolves through the shell's function table, and the
