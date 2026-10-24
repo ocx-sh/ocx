@@ -44,6 +44,7 @@ ocx's default trust root is the public-good Sigstore root embedded in the
 | `dex-config.yaml` | The OIDC issuer, with one static password user so tests can mint a token non-interactively |
 | `fulcio-config.json` | Tells Fulcio to accept tokens from that issuer |
 | `get-token.py` | Mints an OIDC token via the resource-owner password grant |
+| `trillian-storage.sql` | Trillian's MySQL schema (Apache-2.0, vendored from google/trillian `v1.7.2`), loaded by the stock `mysql` image so the stack runs on arm64 as well as amd64 |
 
 ## Self-hosting
 

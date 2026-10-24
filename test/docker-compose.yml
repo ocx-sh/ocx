@@ -166,15 +166,20 @@ services:
     profiles:
       - sigstore
 
-  # Trillian's storage. Same image the Trillian project uses in its own CI, so
-  # the schema arrives already migrated.
+  # Trillian's storage: the stock multi-arch `mysql` image with Trillian's own
+  # schema (`sigstore/trillian-storage.sql`, vendored from the v1.7.2 tag the
+  # log server and signer run) loaded by the image's initdb hook. The
+  # `trillian-opensource-ci/db_server` image that used to carry this is a
+  # single-platform amd64 manifest and cannot start on an arm64 runner.
   sigstore-mysql:
-    image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
+    image: mysql:8.4@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
     environment:
       MYSQL_ROOT_PASSWORD: zaphod
       MYSQL_DATABASE: test
       MYSQL_USER: test
       MYSQL_PASSWORD: zaphod
+    volumes:
+      - ./sigstore/trillian-storage.sql:/docker-entrypoint-initdb.d/trillian-storage.sql:ro
     # `mysqladmin ping` answers during this image's *temporary* server phase,
     # while the Trillian schema in docker-entrypoint-initdb.d is still loading —
     # a green there is indistinguishable from a database Trillian cannot use.
@@ -194,7 +199,7 @@ services:
     # Self-heal a lost start race: without this a single failed dial at
     # boot leaves the container dead until the readiness gate times out.
     restart: on-failure
-    image: gcr.io/trillian-opensource-ci/log_server:v1.7.2
+    image: ghcr.io/sigstore/scaffolding/trillian_log_server:v0.7.24@sha256:2c677cab8e4fd9d5d71dc55db574caed93a3896ee8229e50a95c8d09625866db
     command:
       - --storage_system=mysql
       - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test
@@ -215,7 +220,7 @@ services:
     # Self-heal a lost start race: without this a single failed dial at
     # boot leaves the container dead until the readiness gate times out.
     restart: on-failure
-    image: gcr.io/trillian-opensource-ci/log_signer:v1.7.2
+    image: ghcr.io/sigstore/scaffolding/trillian_log_signer:v0.7.24@sha256:65ed1871a11d4bf2c1d0b7c1f8b5fbc90f842788edc577b90adb024dec03dbe2
     command:
       - --storage_system=mysql
       - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test
