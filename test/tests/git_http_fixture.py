@@ -1761,10 +1761,6 @@ class GitHttpRoutes:
             body=body,
             framing=framing,
         )
-        if service == "git-receive-pack":
-            # DX-5: whatever the push landed is imported under its REAL sha, so
-            # the REST surfaces answer what the bare repository actually holds.
-            self._git_http_import_all_refs(project)
         return True
 
     # ── bridge internals ──────────────────────────────────────────────────
@@ -2066,6 +2062,10 @@ class GitHttpRoutes:
             check=False,
         )
         status, response_headers, out = split_cgi_response(completed.stdout)
+        if service == "git-receive-pack":
+            # Imported under the REAL sha before the reply: imported after it, the client's next
+            # REST read can beat the import, see no branch and push again.
+            self._git_http_import_all_refs(project)
         self._git_http_reply(
             handler,
             project=project,

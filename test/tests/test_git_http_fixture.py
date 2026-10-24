@@ -702,6 +702,31 @@ def test_post_receive_hook_invocation_counter_is_nonzero(
     )
 
 
+def test_pushed_ref_is_visible_over_rest_when_the_push_returns(
+    fake_forge: FakeForge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch a push landed is on the REST surface by the time `git push` exits.
+
+    Imported after the reply, the next ocx run's REST branch read could beat the
+    import and see no branch, then push again (macOS CI, test_transport_git's
+    unchanged-with-open-request row). The slowed import makes that window certain.
+    """
+    home, work = _claim_push_ready(fake_forge, tmp_path, PROJECT)
+    original = fake_forge._git_http_import_all_refs
+
+    def slow_import(project_path: str) -> None:
+        time.sleep(1.5)
+        original(project_path)
+
+    monkeypatch.setattr(fake_forge, "_git_http_import_all_refs", slow_import)
+
+    _push(fake_forge, PROJECT, work, home, f"HEAD:refs/heads/{CLAIM_BRANCH}")
+    owner, _, repo = PROJECT.partition("/")
+    assert fake_forge.branch_head(owner, repo, CLAIM_BRANCH) is not None, (
+        "the push returned before its ref reached the REST surface"
+    )
+
+
 def test_push_option_count_is_zero_when_no_options_sent(
     fake_forge: FakeForge, tmp_path: Path
 ) -> None:
