@@ -170,7 +170,17 @@ jobs:
           # authoritative for every name in the `ocx.sh` registry, and only
           # `nushell/nushell`, `elvish/elvish` and `fish-shell/fish` are announced
           # there -- the flat spellings resolve to nothing and the pull exits 1.
-          eval "$(ocx --remote package env nushell/nushell elvish/elvish fish-shell/fish --shell=bash)"
+          #
+          # Each is pinned to its tag and the digest of its multi-platform index: these
+          # binaries run under the Bazel cache credential the step below writes, so a
+          # moved tag must not be able to swap them. To bump one, re-resolve with
+          # `ocx --remote --format json package inspect --resolve <name>:<tag>` and
+          # take the `index` entry of `resolution.chain`.
+          eval "$(ocx --remote package env \
+            nushell/nushell:0.116.1_20261004@sha256:fd74946d5c2a7014e62dc8c558a485373c156a5d18da5e241874addb10698ab2 \
+            elvish/elvish:0.21.0@sha256:a8b7c3ac357d276f883782b76be7aef9e643295b05aebbc52be2a19e15a7a80b \
+            fish-shell/fish:4.9.3_20260908@sha256:75fb4aa0761f09f6fc4ee10fcad46e5707c4b318e95401d6d0b802672ef04bc8 \
+            --shell=bash)"
           for interpreter in nu elvish fish; do
             # Assigned first, so `set -e` sees the lookup's exit status: a
             # failed `command -v` inside an argument would otherwise append

@@ -110,6 +110,8 @@ Test results > lint results. Pattern: `continue-on-error: true` on linters + fin
 
 Build binary **once** in smoke job, upload with `compression-level: 0` and `retention-days: 1`. Downstream jobs `download-artifact` not rebuild.
 
+A rerun repeats its job's uploads, and `upload-artifact` refuses a name the run already holds: every upload reachable from `release-readiness.yml` sets `overwrite: true` (`test_every_upload_the_readiness_run_reaches_replaces_its_own_earlier_copy`).
+
 ### 5. Security
 
 - **SHA-pin every action** — `uses: owner/action@<full-sha>  # vX.Y.Z`. Includes first-party actions (`ocx-sh/setup-ocx`): no floating-major carve-out. Exception: `release.yml` is cargo-dist-generated and floats by design (ignored by the bumper).
@@ -143,7 +145,7 @@ Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (pr
 Decision: [`adr_bazel_build_adoption.md`](../artifacts/adr_bazel_build_adoption.md) § Cache staging rulings 5, 5a, 5b (amended 2026-10-22, [#638](https://github.com/ocx-sh/ocx/issues/638)).
 
 - **Every lane that holds the secret `BAZEL_CACHE_WRITE_AUTH` writes** — same-repo PRs, merge queue, `main`, dispatch, schedule. A fork PR gets no secrets: it holds none, writes no rc file, and builds with `--disk_cache` only.
-- **`.github/actions/bazel-cache-rc` has one mode.** With `write-auth` it writes `$RUNNER_TEMP/bazel-cache.rc` (0600: `--credential_helper` to the 0700 helper, plus `--remote_upload_local_results=true`); empty input writes no file. Callers pass `write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}` unconditionally — no event predicate. Cleanup stays under `if: always()`.
+- **`.github/actions/bazel-cache-rc` has one mode.** With `write-auth` it writes `$RUNNER_TEMP/bazel-cache.rc` (0600: `--credential_helper` to the 0700 helper, plus `--remote_upload_local_results=true`); empty input writes no file. Callers pass `write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}` unconditionally — no event predicate and no step-level `if:` on the writer. Cleanup stays under `if: always()`. A job holding the credential fetches every `ocx package env|pull|install|exec` package as `<tag>@sha256:<index digest>`: what it fetches runs beside the rc.
 - **The upload grant lives in that rc, never on a step.** `--bazelrc` loads after `.bazelrc`, whose `=false` stays the default. Root `taskfile.yml` holds the one `CACHE_RC` var and every `ocx exec bazel -- bazel` line passes it.
 - **No CI read credential** (`BAZEL_CACHE_READ_AUTH` and `read-auth` are retired). Reads are still 401 without a credential, so the developer-side read credential (`~/.bazelrc`, `task bazel:doctor`) stays.
 - **A reusable workflow that holds a cache step declares the secret `required: false` and its caller passes it by name** (`basic-repo.yml`, `deep-repo.yml`, `acceptance.yml`, `cross.yml`), never `secrets: inherit` (`release.yml` is generated and exempt). The template's `bazel-cache: trusted` setup step is the same writer under the name `cache-write-auth`, and owns its credential's lifetime itself; the repo action's cleanup duty applies to `bazel-cache-rc` only. `.claude/tests/test_workflows.py` holds all of this.

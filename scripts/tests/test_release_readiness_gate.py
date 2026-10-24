@@ -160,14 +160,15 @@ def release_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, P
     return {"work": work, "origin": origin, "bin": bin_dir}
 
 
-def _stub_gh(bin_dir: Path, stdout: str, code: int = 0) -> None:
+def _stub_gh(bin_dir: Path, stdout: str, code: int = 0, stderr: str = "") -> None:
     stub = bin_dir / "gh"
-    stub.write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {code}\n", encoding="utf-8")
+    stub.write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\ncat >&2 <<'EOF'\n{stderr}\nEOF\nexit {code}\n", encoding="utf-8")
     stub.chmod(0o755)
 
 
 def _release_tag(work: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["task", "release:tag"], cwd=work, capture_output=True, text=True, encoding="utf-8", check=False)
+    # `-x` hands back the exit code of the script's failing command (1, 69, 74), not go-task's own 201.
+    return subprocess.run(["task", "-x", "release:tag"], cwd=work, capture_output=True, text=True, encoding="utf-8", check=False)
 
 
 def test_release_tag_tags_and_pushes_atomically_once_the_gate_is_green(release_repo) -> None:
@@ -181,18 +182,20 @@ def test_release_tag_tags_and_pushes_atomically_once_the_gate_is_green(release_r
 
 
 @pytest.mark.parametrize(
-    ("stdout", "code", "why"),
+    ("stdout", "stderr", "code", "exit_code", "why"),
     [
-        pytest.param("[]", 0, "no run", id="exit-1-no-run"),
-        pytest.param("", 4, "gh auth login", id="exit-69-unauthenticated"),
-        pytest.param("not json", 0, "unexpected", id="exit-74-garbage"),
+        pytest.param("[]", "", 0, 1, "no successful release-readiness.yml run", id="exit-1-no-run"),
+        pytest.param("", "To get started, please run:  gh auth login", 4, 69, "gh run list failed (4)", id="exit-69-unauthenticated"),
+        pytest.param("", "HTTP 502: Bad Gateway", 1, 74, "HTTP 502: Bad Gateway", id="exit-74-gh-failed"),
+        pytest.param("not json", "", 0, 74, "unexpected `gh run list` output", id="exit-74-garbage"),
     ],
 )
-def test_release_tag_refuses_on_every_non_zero_and_leaves_no_tag(release_repo, stdout, code, why) -> None:
+def test_release_tag_refuses_on_every_non_zero_and_leaves_no_tag(release_repo, stdout, stderr, code, exit_code, why) -> None:
     work, origin = release_repo["work"], release_repo["origin"]
-    _stub_gh(release_repo["bin"], stdout, code)
+    _stub_gh(release_repo["bin"], stdout, code, stderr)
     done = _release_tag(work)
-    assert done.returncode != 0
+    assert done.returncode == exit_code, (done.returncode, done.stderr)
+    assert why in done.stderr, done.stderr
     assert _git(work, "tag", "--list") == ""
     assert _git(origin, "tag", "--list") == ""
     assert _git(origin, "branch", "--list") == ""
