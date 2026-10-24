@@ -1256,7 +1256,8 @@ _LANE_NEEDLES = (
     "test_bundle.py",
 )
 #: Lane jobs the reader found (exclusions included). A lower count means the reader
-#: stopped matching, which a clean tree cannot be told from.
+#: stopped matching, which a clean tree cannot be told from. The floor tracks the live
+#: lane count: a new lane raises it, so a later reader failure cannot hide behind the slack.
 BAZEL_LANE_FLOOR = 15
 #: Detected lanes that get no cache credential (least privilege), with the reason each
 #: reaches no Bazel. A row whose job is no longer a detected lane is a finding.
@@ -2989,6 +2990,14 @@ def test_the_acceptance_shard_starts_docker_only_when_the_caller_has_it() -> Non
     assert not ungated, f"{ACCEPTANCE.name}: Docker steps {ungated} run even when the caller declares no-docker"
 
 
+def test_the_acceptance_shard_binds_the_release_binary_switch_to_its_input() -> None:
+    """`release-binary` reaches the suite only through this env variable; a dropped or renamed one is silent."""
+    shard = _repo_jobs(ACCEPTANCE)["shard"]
+    expected = "${{ inputs.release-binary && '1' || '' }}"
+    actual = (shard.get("env") or {}).get("OCX_TEST_RELEASE_BINARY")
+    assert actual == expected, f"{ACCEPTANCE.name}: `shard` binds OCX_TEST_RELEASE_BINARY to {actual!r}, expected {expected!r}"
+
+
 def test_the_acceptance_shard_builds_nothing() -> None:
     """The shard runs on macOS and Windows too: it downloads and executes, and only `binary` builds."""
     offending = [
@@ -3025,6 +3034,28 @@ def test_the_cross_workflow_builds_exactly_the_supported_targets() -> None:
     found = _matrix_targets(_repo_workflow(CROSS))
     assert found == CROSS_TARGETS, (
         f"{CROSS.name}: matrix targets differ from the eight supported triples; "
+        f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
+    )
+
+
+#: `platform_triples = [ ... ]` in MODULE.bazel; the list holds only quoted triples, so the first `]` closes it.
+_PLATFORM_TRIPLES = re.compile(r"platform_triples\s*=\s*\[([^\]]*)\]")
+#: Enough that a reader which stopped matching cannot pass on a smaller-than-real list.
+PLATFORM_TRIPLES_FLOOR = 8
+
+
+def test_module_bazel_platform_triples_equal_the_cross_targets() -> None:
+    """`taskfiles/cross.taskfile.yml` and `subsystem-taskfiles.md` promise the two lists stay equal."""
+    block = _PLATFORM_TRIPLES.search((ROOT / "MODULE.bazel").read_text(encoding="utf-8"))
+    assert block, "MODULE.bazel: no `platform_triples = [...]` literal; the reader stopped matching"
+    triples = re.findall(r'"([^"]+)"', block.group(1))
+    assert len(triples) >= PLATFORM_TRIPLES_FLOOR, (
+        f"read {len(triples)} platform_triples, expected at least {PLATFORM_TRIPLES_FLOOR}"
+    )
+    assert len(set(triples)) == len(triples), f"MODULE.bazel: platform_triples repeats an entry: {triples}"
+    found = set(triples)
+    assert found == CROSS_TARGETS, (
+        f"MODULE.bazel platform_triples differ from the cross targets; "
         f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
     )
 
