@@ -68,14 +68,14 @@ tasks:
       chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 — the Build Event Protocol stream carries every --client_env entry and every --remote_header value, so a directory other accounts can traverse is a credential leak. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
 
   doctor:
-    desc: Check this HOST for the preconditions a first Bazel build needs — toolchain pin, ~/.bazelrc host block, the cache reader credential, caches, fonts
+    desc: Check this HOST for the preconditions a first Bazel build needs — toolchain pin, ~/.bazelrc host block, the developer cache read credential, caches, fonts
     summary: |
       Not a gate, and deliberately not in `verify`. Every other task in this
       file reads the *repository*, which is committed and therefore the same
       everywhere; this one reads the *machine*, which is not committed, is
       different on every host, and is what a first build actually gets wrong —
-      the output root, the RAM envelope, the remote
-      cache reader credential. None of that is visible to any gate here.
+      the output root, the RAM envelope, the developer's remote
+      cache read credential. None of that is visible to any gate here.
 
       It makes one authenticated HTTPS request per run (a 401-or-not probe of
       the reader realm), which is why it is a command a developer chooses
