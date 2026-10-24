@@ -1050,3 +1050,25 @@ def make_package_with_entrypoints(
         marker=marker,
         platform=plat,
     )
+
+
+def bash_executable() -> str | None:
+    """The bash to spawn, or ``None``; on Windows Git for Windows' bash, never the WSL launcher.
+
+    A bare ``"bash"`` reaches ``CreateProcess``, which searches System32 before ``PATH`` and finds
+    ``C:\\Windows\\System32\\bash.exe``; on a distro-less runner that exits 1 with empty stderr
+    and never runs its argument.
+    """
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    return None

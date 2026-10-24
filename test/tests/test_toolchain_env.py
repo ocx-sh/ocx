@@ -30,7 +30,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package
+from src.helpers import bash_executable, make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
@@ -249,8 +249,11 @@ def test_env_shell_bash_emits_export_lines(ocx: OcxRunner, tmp_path: Path) -> No
         f"--shell=bash must emit export lines; got:\n{stdout!r}"
     )
     # Must be valid bash syntax.
+    bash = bash_executable()
+    if bash is None:
+        pytest.skip("bash required")
     bash_check = subprocess.run(
-        ["bash", "-n", "-c", stdout],
+        [bash, "-n", "-c", stdout],
         capture_output=True,
         text=True, check=False,
     )

@@ -17,6 +17,7 @@ matrix.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,8 @@ class ShellRecipe:
     argv: tuple[str, ...]
     seed: Callable[[str], str]
     readback: str
+    # pwsh and nu join `PATH` with the native separator, `;` on Windows; the POSIX shells use `:`.
+    sep: str = ":"
 
     def script(self, exports: str, seed_path: str, *, twice: bool) -> str:
         body = exports + ("\n" + exports if twice else "")
@@ -50,10 +53,10 @@ class ShellRecipe:
 SEP = ":"  # The separator the POSIX shells use, on Windows (Git bash) too.
 
 
-def _split_path(value: str) -> list[str]:
-    """Split a ``:``-joined ``PATH`` without cutting a Windows ``C:\\...`` entry in two."""
-    parts = value.split(SEP)
-    if sys.platform != "win32":
+def _split_path(value: str, sep: str = SEP) -> list[str]:
+    """Split a ``sep``-joined ``PATH`` without cutting a Windows ``C:\\...`` entry in two."""
+    parts = value.split(sep)
+    if sys.platform != "win32" or sep != ":":
         return parts
     out: list[str] = []
     while parts:
@@ -92,6 +95,7 @@ RECIPES: dict[str, ShellRecipe] = {
         argv=("pwsh", "-NoProfile", "-Command"),
         seed=lambda p: f"$env:PATH='{p}'",
         readback="$env:PATH",
+        sep=os.pathsep,
     ),
     "nu": ShellRecipe(
         ocx_shell="nu",
@@ -99,6 +103,7 @@ RECIPES: dict[str, ShellRecipe] = {
         argv=("nu", "-c"),
         seed=lambda p: f'$env.PATH = "{p}"',
         readback="$env.PATH | str join (char esep)",
+        sep=os.pathsep,
     ),
     "elvish": ShellRecipe(
         ocx_shell="elvish",
@@ -166,9 +171,9 @@ def test_shell_emit_is_idempotent(
     bin_dir = _bin_dir(ocx, pkg)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
-    seed = f"/a/bin{SEP}/b/bin"  # bin dir absent initially
+    seed = f"/a/bin{recipe.sep}/b/bin"  # bin dir absent initially
     final = _run(recipe, recipe.script(exports, seed, twice=True))
-    segments = _split_path(final)
+    segments = _split_path(final, recipe.sep)
     assert segments.count(bin_dir) == 1, (
         f"{shell}: bin dir {bin_dir!r} must appear exactly once after a double "
         f"source; got PATH={final!r}"
@@ -190,9 +195,9 @@ def test_shell_emit_moves_present_dir_to_front(
     bin_dir = _bin_dir(ocx, pkg)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
-    seed = f"/a/bin{SEP}{bin_dir}{SEP}/b/bin"  # dir present in the middle
+    seed = f"/a/bin{recipe.sep}{bin_dir}{recipe.sep}/b/bin"  # dir present in the middle
     final = _run(recipe, recipe.script(exports, seed, twice=False))
-    segments = _split_path(final)
+    segments = _split_path(final, recipe.sep)
     assert segments.count(bin_dir) == 1, (
         f"{shell}: re-adding a present dir must not duplicate it; got {final!r}"
     )

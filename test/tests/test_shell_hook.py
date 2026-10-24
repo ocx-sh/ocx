@@ -38,7 +38,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package
+from src.helpers import bash_executable, make_package
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
 
@@ -110,8 +110,11 @@ def _published_tool(
 
 def _bash_syntax_ok(script: str) -> tuple[bool, str]:
     """Return ``(ok, stderr)`` after running ``bash -n -c <script>``."""
+    bash = bash_executable()
+    if bash is None:
+        pytest.skip("bash required")
     proc = subprocess.run(
-        ["bash", "-n", "-c", script],
+        [bash, "-n", "-c", script],
         capture_output=True,
         text=True, check=False,
     )

@@ -44,6 +44,8 @@ from pathlib import Path
 
 import pytest
 
+from src.helpers import bash_executable
+
 # Parse on Linux, run only on Windows: a module-level skip keeps collection
 # clean on the Linux leg (system_design §8 — registry fixture is Linux-only,
 # so these must never depend on it and never execute off Windows).
@@ -176,30 +178,6 @@ def shim_entrypoint(tmp_path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _git_bash() -> str | None:
-    """Resolve the *Git for Windows* bash, never the WSL launcher.
-
-    A bare `bash` on a Windows runner resolves to
-    `C:\\Windows\\System32\\bash.exe` (the WSL launcher), which on a
-    distro-less machine exits rc=1 with a "no installed distributions"
-    message and never execs its argument — it is NOT git-bash. Probe the
-    known Git install locations explicitly; fall back to a PATH lookup only
-    if it is not the System32 WSL shim.
-    """
-    candidates = [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ]
-    for c in candidates:
-        if os.path.isfile(c):
-            return c
-    found = shutil.which("bash")
-    if found and "system32" not in found.lower():
-        return found
-    return None
-
-
 @pytest.mark.parametrize(
     "shell",
     [
@@ -208,7 +186,7 @@ def _git_bash() -> str | None:
         # A native Windows .exe must be invocable from git-bash/MSYS too —
         # heterogeneous-environment support is a core OCX goal. The bash
         # binary is resolved to Git-for-Windows bash in the body (a bare
-        # "bash" is the WSL launcher on the runner — see _git_bash).
+        # "bash" is the WSL launcher on the runner — see bash_executable).
         pytest.param(["bash", "-c"], id="git-bash"),
     ],
 )
@@ -220,7 +198,7 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
     """
     cmd = list(shell)
     if cmd[0] == "bash":
-        gb = _git_bash()
+        gb = bash_executable()
         if gb is None:
             pytest.skip("Git-for-Windows bash not found (bare bash = WSL launcher)")
         cmd[0] = gb
