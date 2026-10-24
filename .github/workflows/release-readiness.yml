@@ -215,16 +215,18 @@ jobs:
     needs: [stage, scan]
     permissions:
       contents: read
+    # `toolchain-group: test` on the legs whose `ocx.lock` lacks a leaf for a default tool: the suite takes only
+    # `zot` from the project, and loading the whole project there exits 78 (test_workflows.py derives the set).
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux x64, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, limits: test/limits/linux-release, no-docker: false }
-          - { name: Linux arm64, target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, limits: test/limits/linux-release, no-docker: false }
-          - { name: macOS arm64, target: aarch64-apple-darwin, os: macos-latest, limits: test/limits/macos-release, no-docker: true }
-          - { name: macOS x64, target: x86_64-apple-darwin, os: macos-15-intel, limits: test/limits/macos-release, no-docker: true }
-          - { name: Windows x64, target: x86_64-pc-windows-msvc, os: windows-latest, limits: test/limits/windows-release, no-docker: true }
-          - { name: Windows arm64, target: aarch64-pc-windows-msvc, os: windows-11-arm, limits: test/limits/windows-release, no-docker: true }
+          - { name: Linux x64, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, limits: test/limits/linux-release, no-docker: false, toolchain-group: '' }
+          - { name: Linux arm64, target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, limits: test/limits/linux-release, no-docker: false, toolchain-group: '' }
+          - { name: macOS arm64, target: aarch64-apple-darwin, os: macos-latest, limits: test/limits/macos-release, no-docker: true, toolchain-group: '' }
+          - { name: macOS x64, target: x86_64-apple-darwin, os: macos-15-intel, limits: test/limits/macos-release, no-docker: true, toolchain-group: 'test' }
+          - { name: Windows x64, target: x86_64-pc-windows-msvc, os: windows-latest, limits: test/limits/windows-release, no-docker: true, toolchain-group: '' }
+          - { name: Windows arm64, target: aarch64-pc-windows-msvc, os: windows-11-arm, limits: test/limits/windows-release, no-docker: true, toolchain-group: 'test' }
     uses: ./.github/workflows/acceptance.yml
     with:
       os: ${{ matrix.os }}
@@ -233,6 +235,7 @@ jobs:
       limits-dir: ${{ matrix.limits }}
       release-binary: true
       no-docker: ${{ matrix.no-docker }}
+      toolchain-group: ${{ matrix.toolchain-group }}
     secrets:
       # Owed by the secret sweep; only the callee's `binary` job reads it, and `artifact:` skips that job.
       BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}

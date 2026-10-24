@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:e08d91cf1c0cf8647008592f122f34cf0d2c30604c50199c71d67ddc8879d761"
+declaration_hash = "sha256:5ce396ff3dae763831960e0f81bdf158d57229f247858550de852e5f26dc2a29"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-22T01:02:18Z"
+generated_at = "2026-10-24T13:21:53Z"
 
 [[tool]]
 name = "actionlint"
@@ -276,3 +276,16 @@ repository = "ocx.sh/git-cliff/git-cliff"
 "linux/arm64" = "sha256:65eec3eda7db0168296dc1bd0d450d899d3e5570fa97a3122dce0ccca800e6f6"
 "windows/amd64" = "sha256:e94d7e09c040a25786a792971bf8284c8f8f8886bd78ab794688eaa719f76b26"
 "windows/arm64" = "sha256:638241beeb14fea7ccf60a8878a2b37b4a2774b609bbefa2b5ad0053e2693a69"
+
+[[tool]]
+name = "zot"
+group = "test"
+repository = "ocx.sh/project-zot/zot"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:af8435fae824ef08bc812e25d27775c022b53e66acecd29ccfdd7837965db717"
+"darwin/arm64" = "sha256:5a5e183734909119949498851f4e9374889fc56f679a11acf98b74c3a2d68c74"
+"linux/amd64+libc.glibc" = "sha256:799d8323f4988a3b92eb73710592d6676fc3cbd7a53a327110636ce31a279863"
+"linux/arm64+libc.glibc" = "sha256:db47881c85243120e19b9a863c6bed82a6b4e593bfb2ef65bf524bac123a42de"
+"windows/amd64" = "sha256:3e765d65aff26b48219bf707d95bc870c75223fddc3f39a639f71cb1abbdff90"
+"windows/arm64" = "sha256:73493ecb40e3dc7cf368686a14bf545f804dd2cd540247248548e69c92738684"
