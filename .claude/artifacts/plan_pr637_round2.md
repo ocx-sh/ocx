@@ -8,10 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-24
 - **Active phase:** 3–5 — test tooling, platform, cleanups: W5–W9 (T1, T2, F1, F2, K), scope stops at G3–G5
-- **Step:** W5–W9 landed, awaiting G3–G5
+- **Step:** W5–W9 landed, Windows residue cleared locally, awaiting G3–G5
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after 37b23ddf4: chore(hex): merge F2 (#633 full suite on macOS and Windows, declared no-docker skips) into the feature branch)
-- **Next:** G3–G5 (meta): push #637, dispatch deep; G4 is blocked on the Windows full-suite residue (§ Schedule log, W5–W9)
+- **Last update:** 2026-10-24 (after 87ea8bb07: test(windows): the Windows acceptance limits come from a measured four-shard run)
+- **Next:** G3–G5 (meta): push #637, dispatch deep; macOS fixes are proven only by that deep run
 
 ---
 
@@ -707,3 +707,22 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     28dc10b17 (the test commit, before fix 0d0eea897) 240 passed / 3 failed — `fs::tests::persist_temp_file_publishes_to_a_target_of_260_units_or_more`,
     `…_when_the_temp_file_path_is_also_260_units_or_more`, `persist_noclobber_leaves_an_occupied_target_of_260_units_or_more_untouched`,
     each `Os { code: 3, kind: NotFound }` ("The system cannot find the path specified"); green after 0d0eea897.
+  - **Windows hang RCA** → on Windows store links are NTFS junctions; `Path.is_symlink()` is false for them and
+    `rglob` follows them, and `refs/`/`symlinks/` point back into the store, so a walk over `$OCX_HOME` loops
+    forever. Fix: `helpers.rglob_no_links` (skips junctions), 30 sites converted; a `pytest_runtest_protocol`
+    deadline (`OCX_TEST_DEADLINE_SECONDS`, default 600) dumps every stack and kills a stuck worker so xdist names
+    the test. Repro modules went from hanging to 9:39. Windows-local runs take `flock -o` (an inherited lock fd
+    held by a Bazel server blocked the acceptance lock once).
+  - **macOS residue (10, test bugs, CI is the proof)** → exit 79 from hard-coded linux/amd64 packages on a
+    darwin/arm64 host (test_project_pull's "non-host" literal was the host); BSD `uuidgen` prints uppercase (rc 64
+    in single-layer-new.sh); no `flock(1)` on macOS (test_project_concurrency holds the lock from Python);
+    `__CF_USER_TEXT_ENCODING` injected into the child env. Merged 5e3878376.
+  - **Windows residue** → five workers (toolchain render, trampolines, junction-aware forward refs, POSIX-only
+    helpers, unit fixtures; skip on observed WinError 1314 only) merged; one product bug: `resolve_command_windows`
+    looped PATHEXT outermost, so a later-PATH `tool.exe` shadowed an earlier-PATH `tool.bat` → fixed 75b4ade0b
+    (PATH directories outermost, regression test).
+  - **Windows-local on 75b4ade0b** (fresh cross-build, `task test:windows-local`): shard 0 501 passed / 272 skipped
+    / 1 xfailed; shard 1 660 / 212 / 0; shard 2 642 / 488 / 1; shard 3 348 / 565 / 0; 0 failed in every shard.
+    Unit: 43/43 targets, 8886 passed, 0 failed, 6 ignored. `test/limits/windows/` committed from these counts
+    (87ea8bb07: floor 3690, skip ceiling 1537, xfail ceiling 2), replacing the Linux placeholder.
+  - Deferred: `test/limits/macos/` still absent (TODO(G4) at the leg) — committed from the first deep run's counts.
