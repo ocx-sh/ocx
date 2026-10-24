@@ -7,11 +7,11 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-10-24
-- **Active phase:** 3–5 — test tooling, platform, cleanups: W5–W9 (T1, T2, F1, F2, K), scope stops at G3–G5
-- **Step:** W5–W9 landed, Windows residue cleared locally, awaiting G3–G5
+- **Active phase:** G6 — release-readiness dry run on #637 HEAD (deep and basic green on a65416882)
+- **Step:** readiness 40094740730 (b16518983) red on three causes; two fixed in 55850ad8d and aa06ec568, one already in a65416882; awaiting push + readiness re-dispatch
 - **Feature branch:** `hex/humble-meandering-fox` ([ocx-sh/ocx#637](https://github.com/ocx-sh/ocx/pull/637))
-- **Last update:** 2026-10-24 (after 87ea8bb07: test(windows): the Windows acceptance limits come from a measured four-shard run)
-- **Next:** G3–G5 (meta): push #637, dispatch deep; macOS fixes are proven only by that deep run
+- **Last update:** 2026-10-24 (after aa06ec568: ci: Windows arm64 acceptance runs on an emulated x64 Python, since cryptography ships no win_arm64 wheel)
+- **Next:** G6 (meta): push, dispatch release-readiness on the new tip; then the integration `task verify` + one /hex-review
 
 ---
 
@@ -726,3 +726,28 @@ None. Every doubt is a row in § Decisions; D-CROSS is decided by G1's measureme
     Unit: 43/43 targets, 8886 passed, 0 failed, 6 ignored. `test/limits/windows/` committed from these counts
     (87ea8bb07: floor 3690, skip ceiling 1537, xfail ceiling 2), replacing the Linux placeholder.
   - Deferred: `test/limits/macos/` still absent (TODO(G4) at the leg) — committed from the first deep run's counts.
+- 2026-10-24 — **G6 readiness reds fixed** (feature tip after aa06ec568). Deep
+  [40098959951](https://github.com/ocx-sh/ocx/actions/runs/40098959951) and basic
+  [40098963479](https://github.com/ocx-sh/ocx/actions/runs/40098963479) green on a65416882; readiness
+  [40094740730](https://github.com/ocx-sh/ocx/actions/runs/40094740730) on b16518983 red on three causes:
+  - **Windows arm64, all 4 shards** → `uv sync` built cryptography 46.0.7 from source (openssl-sys finds no OpenSSL).
+    PyPI: win_arm64 wheels exist only for 46.0.0–46.0.3; upstream "dropped support for win_arm64 wheels" in 46.0.4,
+    none through 50.0.2. Options weighed: pin ≤ 46.0.3 on that marker (an unsupported release), source build (an arm64
+    OpenSSL on the runner), conditional dependency (TLS and extra-CA tests skip on the release bytes). Decision:
+    acceptance.yml gives Windows ARM64 the x64 interpreter (setup-python `architecture`) and `UV_PYTHON_ARCH=x86_64`
+    (uv's documented switch; uv ≥ 0.12.23 installs win_amd64 wheels for an emulated interpreter, CI has 0.13.5).
+    ocx.exe stays the native arm64 build; `platform.machine()` reads WMI, so `current_platform()` stays
+    windows/arm64. aa06ec568. Proven only by the next readiness run (this host is x64).
+  - **Linux arm64, shards 0/2/3, 15 tests** (test_sign 2, test_cosign_interop 5, test_sigstore_stack_smoke 3,
+    test_verify 5) → every frame runs through `adversarial.subject_of`, whose default platform was `linux/amd64`
+    while the package fixtures publish for `current_platform()`. Default is now the host platform. 55850ad8d. Sweep:
+    the other `linux/amd64` literals pin the platform at publish too, and the arm64 run passed them.
+  - **Conformance floor 30 < 32** on the x64 legs → already fixed in a65416882.
+  - Verify on aa06ec568: `ocx exec -- task -x test:parallel --force` over the 10 modules importing `adversarial`
+    186 passed / 1 xfailed / 0 failed (x64: no regression, not the arm64 proof); `task test:windows-local MODE=accept`
+    on the same modules 31 passed / 156 skipped / 0 failed; `test:lint:structure` green, `scripts:self-test` 803
+    passed, `scripts:suite-census` as pinned, `scoped_gate.py --check-coverage` OK, ruff clean,
+    `workflows:lint` (actionlint + zizmor) no findings, `claude:tests` 494 passed.
+  - Pitfall (retro entry): conftest's "run under `ocx exec zot -- ...`" resolves `uv` to the global trampoline,
+    which leaks `OCX_GLOBAL=1` into pytest; the cosign fixture's `ocx --project … status` then exits 64.
+    `ocx exec -- task …` is the working invocation.
