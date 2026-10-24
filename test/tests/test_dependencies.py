@@ -931,9 +931,9 @@ def test_clean_dry_run_transitive_chain(
     # entries across all three CAS tiers. Split by path-prefix and assert
     # per-tier counts so the test stays robust to changes in the per-package
     # blob shape (single-platform vs image-index).
-    pkg_paths = [e for e in result if "/packages/" in e["path"]]
-    layer_paths = [e for e in result if "/layers/" in e["path"]]
-    blob_paths = [e for e in result if "/blobs/" in e["path"]]
+    pkg_paths = [e for e in result if "packages" in Path(e["path"]).parts]
+    layer_paths = [e for e in result if "layers" in Path(e["path"]).parts]
+    blob_paths = [e for e in result if "blobs" in Path(e["path"]).parts]
     assert len(pkg_paths) == 3, f"expected 3 collectible package entries; got {len(pkg_paths)}"
     assert len(layer_paths) == 3, f"expected 3 collectible layer entries; got {len(layer_paths)}"
     assert len(blob_paths) >= 3, (
