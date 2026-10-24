@@ -49,11 +49,16 @@ services:
   # Ports:
   #   5002 — proxied registry endpoint (bench packages install via this port)
   #   8474 — toxiproxy REST API (bench/harness.py controls toxics here)
+  #
+  # The harness points the proxy at `host.docker.internal:<port>` (the zot it starts
+  # on the host); native Linux Docker resolves that name only with the mapping below.
   bench-proxy:
     image: ghcr.io/shopify/toxiproxy:2.12.0
     ports:
       - "5002:5002"
       - "8474:8474"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     profiles:
       - bench
 
