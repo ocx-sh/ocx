@@ -596,7 +596,8 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
 }
 
 /// Append every `branch_tags` key the base root lacks, in branch order, after
-/// the base's tags (`adr_announce_diverged_branch_rebuild.md`).
+/// the base's tags (`adr_announce_diverged_branch_rebuild.md`), and return those
+/// keys: the rows whose objects only the stale branch holds.
 ///
 /// Tag order is byte-visible ([`serialize_root`](ocx_index::serialize_root)
 /// never sorts), so base order first is a wire contract.
@@ -604,19 +605,81 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
 // replace while the branch still carried it is re-proposed. Upgrade: a 3-way
 // against the compare API's merge base (`merge_base_commit` on GitHub,
 // `/repository/merge_base` on GitLab), once someone hits the re-proposal.
-pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) {
+pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) -> Vec<String> {
     let Some(branch_tags) = branch_tags.as_object() else {
-        return;
+        return Vec::new();
     };
     let Some(root) = base.as_object_mut() else {
-        return;
+        return Vec::new();
     };
     let mut merged = root.get("tags").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut carried = Vec::new();
     // The base entry wins, or an unreviewed branch reverts the base's merged yank.
     for (tag, entry) in branch_tags {
-        merged.entry(tag.clone()).or_insert_with(|| entry.clone());
+        if !merged.contains_key(tag) {
+            merged.insert(tag.clone(), entry.clone());
+            carried.push(tag.clone());
+        }
     }
     root.insert("tags".to_string(), Value::Object(merged));
+    carried
+}
+
+/// The stale branch's CAS objects for carried rows, split by whether the head could supply them.
+#[derive(Default)]
+pub(crate) struct CarriedObjects {
+    /// Each object's digest and bytes, verified against that digest.
+    pub found: Vec<(ocx_oci::Digest, Vec<u8>)>,
+    /// Carried tags whose object the head lacks, holds under other bytes, or whose digest is unparseable.
+    pub missing: Vec<String>,
+}
+
+/// Copy the object of every `carried` row still in `root` and not re-observed this run from the
+/// stale branch head at `sha`.
+///
+/// Only the head holds these objects: committing the row alone leaves an index
+/// root naming an object that exists nowhere. Bytes not hashing to the row's digest are never
+/// committed.
+///
+/// # Errors
+///
+/// [`AnnounceError::Forge`] when the head read fails.
+pub(crate) async fn fetch_carried_objects(
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    sha: &str,
+    package_repo: &str,
+    root: &Value,
+    carried: &[String],
+    observed: &[Observed],
+) -> Result<CarriedObjects, AnnounceError> {
+    let tags = root.get("tags").and_then(Value::as_object);
+    let mut objects = CarriedObjects::default();
+    for tag in carried {
+        let Some(content) = tags
+            .and_then(|tags| tags.get(tag))
+            .and_then(|row| row.get("content"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(digest) = ocx_oci::Digest::try_from(content) else {
+            objects.missing.push(tag.clone());
+            continue;
+        };
+        if observed.iter().any(|entry| entry.content == digest) || objects.found.iter().any(|(held, _)| *held == digest)
+        {
+            continue;
+        }
+        let bytes = forge
+            .get_file_contents(repo, &object_path(package_repo, &digest, "json"), sha)
+            .await?;
+        match bytes {
+            Some(bytes) if digest.algorithm().hash(&bytes) == digest => objects.found.push((digest, bytes)),
+            _ => objects.missing.push(tag.clone()),
+        }
+    }
+    Ok(objects)
 }
 
 /// Rebuild the root's `tags` map from `plan`.
@@ -852,13 +915,15 @@ pub(crate) async fn orphan_paths(
     Ok(paths)
 }
 
-/// Assemble the announce's atomic file set: root, CAS objects, description
-/// blobs and orphan removals. A path both written and orphaned keeps its `Put`.
+/// Assemble the announce's atomic file set: root, CAS objects (observed, then
+/// `carried` from a stale branch), description blobs and orphan removals. A path
+/// both written and orphaned keeps its `Put`.
 pub fn build_files(
     root_path: &str,
     root_bytes: &[u8],
     package_repo: &str,
     observed: &[Observed],
+    carried: &[(ocx_oci::Digest, Vec<u8>)],
     desc_blobs: &[DescBlob],
     orphans: &[String],
 ) -> BTreeMap<String, FileChange> {
@@ -868,6 +933,12 @@ pub fn build_files(
         files.insert(
             object_path(package_repo, &entry.content, "json"),
             FileChange::Put(entry.bytes.clone()),
+        );
+    }
+    for (digest, bytes) in carried {
+        files.insert(
+            object_path(package_repo, digest, "json"),
+            FileChange::Put(bytes.clone()),
         );
     }
     for blob in desc_blobs {
@@ -1293,7 +1364,7 @@ mod tests {
 
         assert_eq!(observed.bytes, served_bytes, "the CAS payload must be the served bytes");
         assert_eq!(observed.content, served_digest, "the pointer must be the served digest");
-        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[], &[]);
+        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[], &[], &[]);
         let (algorithm, hex) = served_digest.parts();
         assert_eq!(
             written(&files, &format!("p/x/o/{algorithm}/{hex}.json")),
@@ -1455,7 +1526,15 @@ mod tests {
             "field order and values must match the index bot's Desc wire shape"
         );
 
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
+        let files = build_files(
+            "p/acme/widget.json",
+            b"root",
+            "acme/widget",
+            &[],
+            &[],
+            &observed.blobs,
+            &[],
+        );
         assert_eq!(
             written(&files, &format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex())),
             Some(readme),
@@ -1473,10 +1552,9 @@ mod tests {
     /// description never changes keeps the C6 short-circuit intact.
     ///
     /// Its CAS blobs still ride along. The `--output` contract materializes the
-    /// whole entry every run (`announce --output dir && publish dir`), and the
-    /// curated tags' CAS objects are already re-written unconditionally — a
-    /// `desc.readme` the run alone omitted is a dangling reference the index
-    /// refuses.
+    /// whole entry every run (`announce --output dir && publish dir`), and only
+    /// the observed tags' objects are re-written — a `desc.readme` the run alone
+    /// omitted is a dangling reference the index refuses.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unmoved_description_rewrites_no_desc_but_still_carries_its_blobs() {
         let data = StubTransportData::new();
@@ -1494,7 +1572,15 @@ mod tests {
             observed.desc.is_none(),
             "an unmoved description is not rewritten into the root"
         );
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
+        let files = build_files(
+            "p/acme/widget.json",
+            b"root",
+            "acme/widget",
+            &[],
+            &[],
+            &observed.blobs,
+            &[],
+        );
         let readme_path = format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex());
         assert_eq!(
             written(&files, &readme_path),
@@ -1998,6 +2084,7 @@ mod tests {
             b"root-bytes",
             "acme/widget",
             std::slice::from_ref(&entry),
+            &[],
             &[],
             &[],
         );
