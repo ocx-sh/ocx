@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Idempotently build + push every manual-testing package to the local
-# `registry:2` from `test/docker-compose.yml`. Source `scripts/env.sh`
+# Idempotently build + push every manual-testing package to the local zot
+# registry (`cd test && uv run python -m src.zot`). Source `scripts/env.sh`
 # before running so `$OCX_DEFAULT_REGISTRY`, `$OCX_INSECURE_REGISTRIES`
 # and `$OCX_HOME` are pointed at the local rig.
 #
