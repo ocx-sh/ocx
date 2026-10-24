@@ -77,6 +77,9 @@ def test_a_bypass_run_is_accepted_and_its_reason_is_printed(tmp_path, monkeypatc
         pytest.param([], id="no-run-at-all"),
         pytest.param([_green(sha=OTHER)], id="a-run-for-another-commit"),
         pytest.param([{**_green(), "conclusion": "failure"}], id="a-red-run-that-a-flag-let-through"),
+        pytest.param([{**_green(), "conclusion": "cancelled"}], id="a-cancelled-run-that-a-flag-let-through"),
+        pytest.param([{**_green(), "conclusion": "skipped"}], id="a-skipped-run-that-a-flag-let-through"),
+        pytest.param([{**_green(), "conclusion": ""}], id="an-unfinished-run-that-a-flag-let-through"),
     ],
 )
 def test_no_successful_run_for_the_sha_exits_1(runs, tmp_path, monkeypatch, capsys) -> None:

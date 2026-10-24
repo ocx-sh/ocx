@@ -48,6 +48,18 @@ def test_a_malformed_call_exits_64(args: list[str]) -> None:
     assert "windows_local:" in done.stderr
 
 
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_help_prints_the_usage_and_exit_codes_and_a_usage_error_repeats_them(flag: str) -> None:
+    helped = _run(flag)
+    assert helped.returncode == 0, helped.stderr
+    assert "--mode accept|unit" in helped.stdout
+    assert "77 a staging directory" in helped.stdout
+
+    refused = _run("--nope")
+    assert refused.returncode == 64
+    assert helped.stdout in refused.stderr
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -240,6 +252,37 @@ def test_the_childs_status_is_the_scripts_and_the_reports_still_leave_the_stage(
 
     assert done.code == status, done.err
     assert report.is_file(), "a failing run's reports are the ones to read"
+
+
+# Stands in for `grep` on PATH: fails with `status` when it is the stage filter (`-zv`), runs the real one otherwise.
+def _stage_filter_grep(rig: Rig, status: int) -> None:
+    stub = rig.stubs / "grep"
+    stub.write_text(
+        f'#!/usr/bin/env bash\n[ "$1" = -zv ] && exit {status}\nexec /usr/bin/grep "$@"\n', encoding="utf-8"
+    )
+    stub.chmod(0o755)
+
+
+@linux_only
+def test_a_stage_filter_that_fails_for_a_reason_other_than_no_match_stops_before_cmd_runs(rig: Rig) -> None:
+    _stage_filter_grep(rig, 2)
+
+    done = rig.accept()
+
+    assert done.code != 0, "grep exit 2 must not be read as 'nothing left to stage'"
+    assert rig.steps() == ""
+
+
+@linux_only
+def test_a_tree_the_stage_filter_empties_is_not_a_failure(rig: Rig) -> None:
+    (rig.repo / ".git" / "info" / "exclude").write_text("scripts/\n", encoding="utf-8")
+    (rig.repo / "external").mkdir()
+    rig.track(**{"external/sub.txt": "s"})
+
+    done = rig.accept()
+
+    assert done.code == 0, done.err
+    assert not (rig.stage / "external").exists()
 
 
 @linux_only
