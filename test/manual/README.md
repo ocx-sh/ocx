@@ -2,7 +2,7 @@
 
 A curated personal scratch space for exercising the new `ocx package test`
 command and the multi-layer / entrypoints / dependencies surface end-to-end
-against the local `registry:2` from `test/docker-compose.yml`. Everything
+against the local zot registry from `test/src/zot.py`. Everything
 here is committed and reproducible — `scripts/bootstrap.sh` rebuilds the
 registry state from scratch.
 
@@ -54,7 +54,7 @@ pull requests behind — read its README before running anything in it.
    ```
 2. Start the local test registry once:
    ```sh
-   cd test && docker compose up -d        # starts registry:2 on 5000
+   cd test && uv run python -m src.zot    # zot on 5000, in its own terminal; Ctrl-C drops its data
    ```
 
 ## Configure the shell

@@ -4,13 +4,13 @@ Run as standalone script:
     uv run python bench/harness.py [--capture-baseline] [--runs N] [--warmup N]
 
 Lifecycle (this module owns the session):
-  1. Assert toxiproxy API (:8474) and registry (:5000) are reachable.
-  2. Create toxiproxy proxy (0.0.0.0:5002 → registry:5000) idempotently.
+  1. Assert the toxiproxy API (:8474) is reachable.
+  2. Start a zot on the host (OCX_TEST_REGISTRY_PORT, default 5000); proxy :5002 to it.
   3. Push benchmark packages via make_package (size_mb per scenario).
   4. For each scenario: BenchRunner.run_scenario / parallel_install_wall_clock.
-  5. Save results to BENCH_RESULTS_DIR/latest.json (hyperfine-compatible).
-  6. If --capture-baseline: copy latest.json to bench/baseline.json.
-  7. Tear down toxiproxy proxy.
+  5. Save results to BENCH_RESULTS_DIR/latest.json (hyperfine-compatible); with
+     --capture-baseline also copy them to bench/baseline.json.
+  6. Tear down the proxy and stop the registry, which drops its data.
 
 BenchRunner owns per-scenario toxic setup/removal (bandwidth + latency toxics).
 """
@@ -49,6 +49,7 @@ from bench.scenarios import (
     SUITE_ORDER,
     Scenario,
 )
+from src import zot
 from src.helpers import make_package
 from src.runner import OcxRunner
 
@@ -57,10 +58,14 @@ from src.runner import OcxRunner
 # ---------------------------------------------------------------------------
 
 TOXIPROXY_API_URL = os.environ.get("TOXIPROXY_API_URL", "http://localhost:8474")
-REGISTRY_URL = os.environ.get("REGISTRY_URL", "localhost:5000")
+# The one port the bench needs to be stable: the toxiproxy upstream names it.
+REGISTRY_PORT = int(os.environ.get("OCX_TEST_REGISTRY_PORT", "5000"))
+REGISTRY_URL = f"localhost:{REGISTRY_PORT}"
 PROXY_HOST = os.environ.get("PROXY_HOST", "localhost:5002")
-# Inside the Docker network, toxiproxy reaches the registry service by name.
-REGISTRY_UPSTREAM = os.environ.get("REGISTRY_UPSTREAM", "registry:5000")
+# toxiproxy runs in Docker and dials the registry on the host.
+REGISTRY_UPSTREAM = os.environ.get(
+    "REGISTRY_UPSTREAM", f"host.docker.internal:{REGISTRY_PORT}"
+)
 PROXY_NAME = "bench-registry"
 
 BENCH_RESULTS_DIR = Path(
@@ -796,7 +801,7 @@ def _find_ocx_binary() -> Path:
 def _create_proxy_idempotent(toxi: ToxiproxyClient) -> None:
     """Create the bench proxy if it doesn't exist.
 
-    Proxy: listen on 0.0.0.0:5002 → upstream registry:5000 (Docker network).
+    Proxy: listen on 0.0.0.0:5002 → upstream REGISTRY_UPSTREAM (the host's zot).
     """
     toxi.create_proxy(
         name=PROXY_NAME,
@@ -1014,11 +1019,18 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     capture_baseline = args.capture_baseline or args.save_baseline
 
-    # 1. Verify services are up.
-    _assert_reachable(f"http://{REGISTRY_URL}/v2/", "Registry (localhost:5000)")
+    # 1. Verify toxiproxy is up.
     _assert_reachable(f"{TOXIPROXY_API_URL}/version", "toxiproxy API (localhost:8474)")
 
-    # 2. Create proxy idempotently.
+    # 2. Start the registry, then create the proxy idempotently.
+    try:
+        registry = zot.start(
+            names=("registry",),
+            fixed_ports={"registry": REGISTRY_PORT},
+            address="0.0.0.0",
+        )
+    except zot.ZotError as error:
+        sys.exit(f"ERROR: cannot start the bench registry on {REGISTRY_URL}: {error}")
     toxi = ToxiproxyClient(TOXIPROXY_API_URL)
     _create_proxy_idempotent(toxi)
 
@@ -1140,11 +1152,12 @@ def main(argv: list[str] | None = None) -> int:
                     td.cleanup()
                 except OSError:
                     pass
-            # 8. Teardown proxy.
+            # 8. Teardown proxy and registry.
             try:
                 toxi.delete_proxy(PROXY_NAME)
             except RuntimeError:
                 pass  # Best-effort teardown.
+            registry.stop()
 
     finally:
         # 9. Wipe scratch root entirely — frees all per-session disk usage.

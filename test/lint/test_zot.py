@@ -8,12 +8,16 @@ No real zot: a fake that prints zot's own "kernel chosen port" line and serves
 
 from __future__ import annotations
 
+import http.server
 import json
+import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -236,3 +240,128 @@ def test_a_pinned_port_is_configured_and_served(fake_zot: str) -> None:
         assert zot._serves_v2(free)
     finally:
         stack.stop()
+
+
+def test_a_controller_killed_between_spawn_and_adoption_leaves_no_zot_and_no_store(
+    fake_zot: str, tmp_path: Path
+) -> None:
+    """The pid line the watchdog is sent after the spawn is where the controller dies."""
+    controller = (
+        "import glob, json, os, signal\n"
+        "from src import zot\n"
+        "real = os.write\n"
+        "def die(fd, data):\n"
+        "    if not data.strip().isdigit():\n"
+        "        return real(fd, data)\n"
+        "    root = glob.glob(os.path.join(os.environ['TMPDIR'], 'ocx-zot-*'))[0]\n"
+        "    print(json.dumps({'pid': int(data), 'root': root}), flush=True)\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "os.write = die\n"
+        f"zot.start({fake_zot!r}, names=('registry',), timeout=20)\n"
+    )
+    env = dict(os.environ)
+    env["TMPDIR"] = str(tmp_path)
+    done = subprocess.run(
+        [sys.executable, "-c", controller],
+        cwd=TEST_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert done.returncode == -signal.SIGKILL, done.stderr
+    announced = json.loads(done.stdout.splitlines()[0])
+    pid, root = announced["pid"], Path(announced["root"])
+    assert wait_until(lambda: not alive(pid)), (
+        "the spawned process outlived its killed controller"
+    )
+    assert wait_until(lambda: not _zots_under(root)), "zot started without a guard"
+    assert wait_until(lambda: not root.exists()), "the stores outlived the controller"
+
+
+def test_the_readiness_probe_ignores_an_ambient_proxy(fake_zot: str) -> None:
+    stack = zot.start(fake_zot, names=("registry",))
+    try:
+        env = dict(os.environ)
+        for name in ("NO_PROXY", "no_proxy"):
+            env.pop(name, None)
+        env["HTTP_PROXY"] = env["http_proxy"] = "http://127.0.0.1:9"
+        # A subprocess: urllib builds its default opener, proxies included, once per process.
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"from src import zot; print(zot._serves_v2({stack.ports['registry']}))",
+            ],
+            cwd=TEST_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert probe.stdout.strip() == "True", probe.stderr
+    finally:
+        stack.stop()
+
+
+def test_a_pinned_port_that_already_answers_is_refused(fake_zot: str) -> None:
+    class Registry(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry) as foreign:
+        threading.Thread(target=foreign.serve_forever, daemon=True).start()
+        try:
+            with pytest.raises(zot.ZotError, match="already answers"):
+                zot.start(
+                    fake_zot,
+                    names=("registry",),
+                    fixed_ports={"registry": foreign.server_port},
+                )
+        finally:
+            foreign.shutdown()
+
+
+def test_the_listen_address_is_loopback_unless_widened() -> None:
+    assert zot.zot_config(Path("/s"))["http"]["address"] == "127.0.0.1"
+    assert zot.zot_config(Path("/s"), address="0.0.0.0")["http"]["address"] == "0.0.0.0"
+
+
+def test_the_module_serves_one_registry_on_a_given_port_until_killed(
+    fake_zot: str, tmp_path: Path
+) -> None:
+    """`python -m src.zot PORT`, the registry the manual rigs talk to."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    env = dict(os.environ)
+    env[zot.ZOT_ENV] = fake_zot
+    env["TMPDIR"] = str(tmp_path)
+    server = subprocess.Popen(
+        [sys.executable, "-m", "src.zot", str(free)],
+        cwd=TEST_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert f"localhost:{free}" in server.stdout.readline()
+        assert (
+            urllib.request.urlopen(f"http://127.0.0.1:{free}/v2/", timeout=5).status
+            == 200
+        )
+        root = next(tmp_path.glob("ocx-zot-*"))
+        server.kill()  # SIGKILL: the guard, not the module's own cleanup, must leave nothing
+        server.wait()
+        assert wait_until(lambda: not _zots_under(root)), "zot outlived the module"
+        assert wait_until(lambda: not root.exists())
+    finally:
+        server.kill()
+        server.wait()
+        server.stdout.close()

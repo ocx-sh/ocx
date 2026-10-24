@@ -14,7 +14,7 @@
 #
 # Prerequisites:
 #   source test/manual/scripts/env.sh      (sets OCX_DEFAULT_REGISTRY, OCX_HOME, etc.)
-#   cd test && docker compose up -d        (registry at localhost:5000)
+#   cd test && uv run python -m src.zot    (registry at localhost:5000, own terminal)
 #   cargo build --release                  (binary at ./target/release/ocx)
 #
 # Idempotent: safe to re-run; each step overwrites previous artifacts.
