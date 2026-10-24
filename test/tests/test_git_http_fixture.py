@@ -60,6 +60,7 @@ from git_http_fixture import (
     RefusalShape,
     build_fixture_home,
     git_environment,
+    git_program,
     read_chunked_body,
     run_git,
     split_cgi_response,
@@ -67,7 +68,7 @@ from git_http_fixture import (
 from git_shim import (
     DENIED_SHIM_ROOTS,
     RECORD_NAME,
-    SHIM_NAME,
+    SHIM_FILENAME,
     VERSION_OVERRIDES,
     GitShimVariant,
     ShimPlacementError,
@@ -867,12 +868,12 @@ def test_credential_helper_records_an_invocation(
 
     host, port = _host_port(fake_forge)
     description = f"protocol=http\nhost={host}:{port}\npath={PROJECT}.git\n\n"
+    # Bytes: text mode would send CRLF on Windows, which git reads as part of a value.
     subprocess.run(
         ["git", "credential", "fill"],
-        input=description,
+        input=description.encode(),
         env=git_environment(home.path),
         capture_output=True,
-        text=True,
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
     )
@@ -2300,7 +2301,7 @@ def test_shim_records_argv_and_env_then_delegates(
     shim = install_git_shim(tmp_path)
 
     assert shim.executable is not None
-    assert shim.executable.name == SHIM_NAME
+    assert shim.executable.name == SHIM_FILENAME
     assert shim.record_path.name == RECORD_NAME
     assert shim.variant is GitShimVariant.DELEGATE
     assert shim.executable.resolve().is_relative_to(tmp_path.resolve())
@@ -2313,14 +2314,16 @@ def test_shim_records_argv_and_env_then_delegates(
         record_path=shim.record_path, real_git=shim.real_git, version_override=None
     )
     assert source.splitlines()[0] == f"#!{sys.executable}"
-    assert str(shim.record_path) in source
-    assert str(shim.real_git) in source
+    # As the literal they are baked in as: `repr` doubles a Windows backslash.
+    assert repr(str(shim.record_path)) in source
+    assert repr(str(shim.real_git)) in source
 
     work = tmp_path / "delegated"
+    shim_env = _shim_env(shim, home, OCX_SHIM_MARKER="sentinel")
     result = subprocess.run(
-        ["git", "init", str(work)],
+        [git_program(shim_env), "init", str(work)],
         cwd=str(tmp_path.resolve()),
-        env=_shim_env(shim, home, OCX_SHIM_MARKER="sentinel"),
+        env=shim_env,
         capture_output=True,
         text=True,
         timeout=HTTP_TIMEOUT_SECONDS,
@@ -2377,9 +2380,10 @@ def test_shim_records_the_tempdir_mode_before_it_is_removed(
     work.mkdir(mode=0o700)
 
     def run_status() -> None:
+        env = _shim_env(shim, home)
         subprocess.run(
-            ["git", "-C", str(work), "init"],
-            env=_shim_env(shim, home),
+            [git_program(env), "-C", str(work), "init"],
+            env=env,
             capture_output=True,
             text=True,
             timeout=HTTP_TIMEOUT_SECONDS,
@@ -2397,11 +2401,12 @@ def test_shim_records_the_tempdir_mode_before_it_is_removed(
     assert [inv.dash_c_dir for inv in invocations] == [str(work), str(work)]
     assert invocations[0].dir_mode is not None
     assert invocations[1].dir_mode is not None
-    assert stat.S_IMODE(invocations[0].dir_mode) == 0o700
-    assert stat.S_IMODE(invocations[1].dir_mode) == 0o750, (
-        "both invocations reported the same mode: the shim is not reading it per "
-        "invocation, so C-033's 0700 assertion would hold against a constant"
-    )
+    if sys.platform != "win32":  # Windows has no permission bits to compare.
+        assert stat.S_IMODE(invocations[0].dir_mode) == 0o700
+        assert stat.S_IMODE(invocations[1].dir_mode) == 0o750, (
+            "both invocations reported the same mode: the shim is not reading it per "
+            "invocation, so C-033's 0700 assertion would hold against a constant"
+        )
     assert invocations[1].git_dir == str(work / ".git"), (
         "the shim did not resolve the worktree's git directory; a snapshot taken "
         "elsewhere is empty for a reason no assertion would mention"
@@ -2446,9 +2451,10 @@ def test_shim_preserves_exit_code_and_stderr_bytes(
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
     )
+    shim_env = _shim_env(shim, home)
     through = subprocess.run(
-        ["git", *argv],
-        env=_shim_env(shim, home),
+        [git_program(shim_env), *argv],
+        env=shim_env,
         capture_output=True,
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
@@ -2483,9 +2489,10 @@ def test_shim_does_not_recurse_into_itself(fake_forge: FakeForge, tmp_path: Path
     assert shim.executable is not None
     assert shim.real_git.resolve() != shim.executable.resolve()
 
+    shim_env = _shim_env(shim, home)
     result = subprocess.run(
-        ["git", "--version"],
-        env=_shim_env(shim, home),
+        [git_program(shim_env), "--version"],
+        env=shim_env,
         capture_output=True,
         text=True,
         timeout=HTTP_TIMEOUT_SECONDS,
