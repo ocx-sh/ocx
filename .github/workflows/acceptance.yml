@@ -177,11 +177,15 @@ jobs:
       # runner has none of them on the PATH task's shell sees: Git's `usr\bin` carries the coreutils, and
       # setup-python provides only `python`, so `python3.exe` is a copy of it in the same directory (a copy
       # elsewhere would lose the DLLs it loads beside itself). Linux images ship `python3`.
+      # Windows arm64 takes the x64 interpreter, emulated: cryptography stopped shipping win_arm64 wheels in
+      # 46.0.4 and its source build needs an arm64 OpenSSL. ocx stays the native build, and
+      # `platform.machine()` reads WMI, so the suite still sees windows/arm64.
       - name: Setup Python
         if: runner.os != 'Linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
+          architecture: ${{ runner.os == 'Windows' && runner.arch == 'ARM64' && 'x64' || '' }}
       - name: Provide POSIX tools and python3 (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -189,6 +193,8 @@ jobs:
           printf '%s\n' 'C:\Program Files\Git\usr\bin' >> "$GITHUB_PATH"
           py_dir="$(dirname "$(command -v python)")"
           [ -e "$py_dir/python3.exe" ] || cp "$py_dir/python.exe" "$py_dir/python3.exe"
+          # Holds uv to that x64 interpreter: `UV_PYTHON_ARCH` is uv's documented switch to an emulated Python.
+          if [ "$RUNNER_ARCH" = ARM64 ]; then echo "UV_PYTHON_ARCH=x86_64" >> "$GITHUB_ENV"; fi
       # Puts `zot` (and the rest of the project toolchain) on PATH: every pytest
       # session starts its own zot registries from it (`test/conftest.py`); only
       # the registry:2 mirror and the Sigstore stack need Docker.
