@@ -297,15 +297,17 @@ def test_reverse_order_ladder_is_refused_on_the_registry_stream_route(
     if sys.platform == "win32":
         # The stream route extracts both links as in-root junctions and the
         # install then stops at the layer-link refusal. What must hold is that
-        # no link of the finalized layer resolves outside the layers tree.
+        # no link of the finalized layer resolves outside `$OCX_HOME` (a junction
+        # substitute name is absolute, so it names the staging dir it was
+        # extracted in).
         assert result.returncode == EXIT_IOERR, result.stdout + result.stderr
         assert WINDOWS_LAYER_LINKS in result.stderr, result.stderr
-        layers_root = os.path.realpath(layers)
+        home = os.path.realpath(ocx.ocx_home)
         for link in rglob_no_links(layers, "*"):
             if link.is_junction() or link.is_symlink():
                 resolved = os.path.realpath(link)
-                assert os.path.commonpath([layers_root, resolved]) == layers_root, (
-                    f"a finalized layer link resolves outside the layers tree: {link} -> {resolved}"
+                assert os.path.commonpath([home, resolved]) == home, (
+                    f"a finalized layer link resolves outside $OCX_HOME: {link} -> {resolved}"
                 )
         return
     assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
