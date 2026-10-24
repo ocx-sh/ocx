@@ -127,7 +127,7 @@ tasks:
     # The Bazel path, ALONGSIDE `build` above, which stays the rollback. This
     # task is the render stage only: `pnpm install` + `astro build`, and the
     # tar it unpacks already holds `docs/` and `schemas/`. The
-    # generators above it need `cargo`, `uv`, a compose registry and a network
+    # generators above it need `cargo`, `uv`, a zot registry and a network
     # fetch of `agg`, so they stay on Taskfile.
     #
     # `scripts:publish` is a hard prerequisite, not a convenience: the rule

@@ -782,7 +782,7 @@ def check_caches(
 # ---------------------------------------------------------------------------
 
 ORG = "ocx-sh"
-ORG_SECRETS = ("BAZEL_CACHE_READ_AUTH", "BAZEL_CACHE_WRITE_AUTH")
+ORG_SECRETS = ("BAZEL_CACHE_WRITE_AUTH",)
 ORG_REPOS = ("ocx", "rules_ocx")
 
 
@@ -826,7 +826,7 @@ def check_maintainer(role: str | None, secret_names: frozenset[str] | None) -> l
             "maintainer",
             f"{ORG} org secrets",
             OK,
-            f"org admin on {ORG}; {' and '.join(ORG_SECRETS)} are set",
+            f"org admin on {ORG}; {', '.join(ORG_SECRETS)} set",
         )
     ]
 
@@ -1429,8 +1429,12 @@ def prove_pure_checks() -> int:
         "an admin with no org secrets did not warn",
     )
     expect(
-        not codes(check_maintainer("admin", frozenset(ORG_SECRETS)), WARN),
-        "an admin with both secrets set must be green",
+        not codes(check_maintainer("admin", frozenset({"BAZEL_CACHE_WRITE_AUTH"})), WARN),
+        "an admin with the write secret set must be green",
+    )
+    expect(
+        codes(check_maintainer("admin", frozenset({"BAZEL_CACHE_READ_AUTH"})), WARN) == ["maintainer-secrets"],
+        "the retired read secret stood in for the write secret",
     )
 
     expect(find_fc_list(which=lambda _: None, exists=lambda p: p == "/usr/sbin/fc-list")
@@ -1440,7 +1444,7 @@ def prove_pure_checks() -> int:
     expect(codes(check_fonts("/usr/sbin/fc-list", []), WARN) == ["fonts-absent"], "no families")
     expect(not codes(check_fonts("/usr/sbin/fc-list", ["Adwaita Mono"]), WARN), "families green")
     print("  pure checks: toolchain, caches, maintainer and fonts each shown red and green")
-    return 29
+    return 30
 
 
 def prove_bep_modes(scratch: Path) -> int:

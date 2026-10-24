@@ -392,7 +392,7 @@ tasks:
     # just happened rather than of some earlier one (same shape as
     # test/taskfile.yml's `.suite-ceilings`).
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/nextest
+      - mkdir -p "{{.ROOT_DIR}}/target/nextest"
       - >-
         set -o pipefail;
         cargo nextest run --workspace --release --locked -E 'not test(real_binary::)' {{.CLI_ARGS}}
@@ -438,7 +438,7 @@ tasks:
       inherits — restating it here would be a second source of truth for a
       host RAM cap.
     cmds:
-      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      - mkdir -p "{{.ROOT_DIR}}/target/bazel"
       - >-
         set -o pipefail;
         floor=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import bazel_gate_proofs; print(bazel_gate_proofs.CRATES_TEST_TARGETS)' '{{.ROOT_DIR}}/scripts');
@@ -701,11 +701,12 @@ tasks:
   test:bazel-skipped:
     desc: Every testcase a `rust_test` target `--skip`s, run under cargo nextest
     summary: |
-      `bazel:test:unit` is the only unit-test run in `task verify`, and its
-      `rust_test` targets `--skip` testcases that walk `crates/*/src` of
+      `bazel:test:unit` is the only whole-suite unit-test run in `task verify`,
+      and its `rust_test` targets `--skip` testcases that walk `crates/*/src` of
       crates they do not depend on or need a process of their own. Without this
-      step those ran nowhere: the macOS and Windows legs only execute the
-      Linux-built bundle (adr_bazel_rules_rs_migration.md, Consequences).
+      step those ran nowhere on Linux. The macOS and Windows legs run them from
+      the Linux-built bundle (`cross:test:run SOURCE_ROOT=`), minus the few that
+      shell out to `cargo`.
 
       scripts/bazel_skipped_tests.py derives the list from the `--skip=` args
       of every crates/*/BUILD.bazel and maps each to its cargo package and test
@@ -757,7 +758,7 @@ tasks:
     deps:
       - install:nextest
     cmds:
-      - rm -f {{.NEXTEST_RUN_LOG}}
+      - rm -f -- "{{.NEXTEST_RUN_LOG}}"
       - >-
         set -o pipefail;
         floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);

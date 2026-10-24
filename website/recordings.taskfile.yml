@@ -28,7 +28,7 @@ tasks:
     status:
       - test -d {{.FONTS_DIR}}/CascadiaCode
     cmds:
-      - mkdir -p {{.FONTS_DIR}}/CascadiaCode
+      - mkdir -p "{{.FONTS_DIR}}/CascadiaCode"
       - curl -fsSL "{{.FONT_URL}}" | tar -xJf - -C {{.FONTS_DIR}}/CascadiaCode
 
   build:
@@ -83,11 +83,11 @@ tasks:
     dir: "{{.ROOT_DIR}}"
     cmds:
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //test/doc_scripts:casts
-      - mkdir -p {{.CASTS_DIR}}
+      - mkdir -p "{{.CASTS_DIR}}"
       # `-L` dereferences (bazel-bin is a symlink farm) and `-f` unlinks the
       # destination first — bazel writes its outputs read-only, so a plain
       # overwrite of a previously copied cast fails with EACCES.
-      - cp -RLf {{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/. {{.CASTS_DIR}}/
+      - cp -RLf "{{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/." "{{.CASTS_DIR}}/"
       - chmod -R u+w {{.CASTS_DIR}}
 
   gifs:

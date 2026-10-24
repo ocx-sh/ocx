@@ -608,7 +608,7 @@ tasks:
       # (adr_bazel_build_adoption.md § Stage 4, amended): an unchanged tree
       # executes only `UNCACHED_MODULES`, an edited module re-runs itself and
       # its importers, and an edit to `//test:suite_inputs` re-runs every
-      # target. The targets run concurrently behind the runner's host locks
+      # target. The targets run concurrently, each on zot registries of its own
       # (`test/bazel.bzl` § Concurrency), so a cold run is not the serial one
       # it used to be.
       #

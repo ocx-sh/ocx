@@ -155,7 +155,7 @@ tasks:
       # are loopback-only-asserted at runtime and compile-gated; release
       # builds come from cargo-dist and never include them.
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/ocx_cli:ocx //crates/ocx_shim:ocx_shim //crates/ocx_schema:ocx_schema_bin
-      - mkdir -p {{.BIN_DIR}} {{.SCHEMA_BIN_DIR}}
+      - mkdir -p "{{.BIN_DIR}}" "{{.SCHEMA_BIN_DIR}}"
       # Each output's path from `cquery --output=files`, never a spelled
       # `bazel-bin/...` path: that symlink follows whichever configuration
       # built last. Copy beside, then rename: `cp` straight onto a binary
@@ -314,12 +314,12 @@ tasks:
       JUNIT_DIR: '{{toSlash .ROOT_DIR}}/target/accept/junit'
     cmds:
       # Stale shard files would be merged by `accept:floor`; KEEP_JUNIT=1 keeps them to collect several local shards.
-      - '{{if not .KEEP_JUNIT}}rm -rf {{.JUNIT_DIR}}{{end}}'
-      - mkdir -p {{.JUNIT_DIR}}
+      - '{{if not .KEEP_JUNIT}}rm -rf -- "{{.JUNIT_DIR}}"{{end}}'
+      - mkdir -p "{{.JUNIT_DIR}}"
       - >-
         PATH="{{.SCHEMA_BIN_DIR}}{{if eq OS "windows"}};{{else}}:{{end}}$PATH"
         uv run pytest -n auto --dist loadgroup --basetemp={{.TEST_BASETEMP}}-{{.JUNIT_NAME}}
-        --junit-xml={{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml
+        --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
         {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
     env: *pytest-env
 
@@ -477,7 +477,7 @@ tasks:
       it rather than restated from `test/bazel.bzl`:
 
         * every `//test:*` target carries `no-sandbox` and NOT `exclusive`
-          (they run concurrently behind the runner's host locks, `test/bazel.bzl`
+          (they run concurrently on registries of their own, `test/bazel.bzl`
           § Concurrency; the job count is on the task and never a global `--local_test_jobs`) and
           carries NONE of the
           cache-suppressing tags —
@@ -1030,7 +1030,7 @@ tasks:
     status:
       - which hyperfine || test -x {{toSlash .TASKFILE_DIR}}/bin/hyperfine
     cmds:
-      - mkdir -p {{toSlash .TASKFILE_DIR}}/bin
+      - mkdir -p "{{toSlash .TASKFILE_DIR}}/bin"
       # Tag is positional, not a flag. Asset name verified against sharkdp/hyperfine
       # v1.20.0 release: hyperfine-v1.20.0-x86_64-unknown-linux-musl.tar.gz
       # The tarball extracts to hyperfine-v1.20.0-x86_64-unknown-linux-musl/hyperfine.
