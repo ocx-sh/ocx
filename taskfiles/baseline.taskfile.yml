@@ -7,7 +7,7 @@
 version: "3"
 
 vars:
-  # Pinned here (not in ocx.toml): neither tool is in the ocx index. Renovate bumps both.
+  # Pinned here (not in ocx.toml): neither tool is in the ocx index (D-01). Renovate bumps both.
   COPIER_VERSION: "9.18.2"
   ZIZMOR_VERSION: "1.30.1"
 
@@ -34,7 +34,7 @@ tasks:
       - ocx exec -g lint -- prek install --hook-type pre-commit --hook-type commit-msg
 
   # Hook bodies live here, not in .pre-commit-config.yaml: Task embeds a POSIX shell interpreter, so
-  # they run unchanged on Windows where a hook entry cannot assume `sh`. Builtins only.
+  # they run unchanged on Windows where a hook entry cannot assume `sh` (C-007). Builtins only.
   hooks:commit-msg:
     desc: "Fail unless the commit subject is a conventional commit (arg: the message file, as prek passes it)"
     silent: true
