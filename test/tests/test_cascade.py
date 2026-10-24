@@ -22,8 +22,6 @@ from src.registry import (
 
 pytestmark = pytest.mark.command("package_cascade*")
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 
 def test_cascade_preserves_platforms(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path

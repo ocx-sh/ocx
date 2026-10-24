@@ -77,8 +77,6 @@ from git_shim import (
     resolve_real_git,
 )
 
-pytestmark = pytest.mark.requires_testing_build
-
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fake_forge import FakeForge
     from git_http_fixture import FixtureHome, GitRequest
