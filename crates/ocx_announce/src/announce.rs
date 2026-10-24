@@ -147,6 +147,7 @@ pub async fn announce(
         desc_updated,
         mut removed,
         mut durable_missing,
+        mut dropped_carried,
         body,
     } = observe_and_rebuild(
         publisher,
@@ -158,6 +159,7 @@ pub async fn announce(
             carried: root_read.carried.as_ref().map(|head| CarriedRows {
                 head,
                 tags: &carried_names,
+                held: &base_root,
             }),
             ref_update: branch_state.ref_update(),
         },
@@ -189,6 +191,10 @@ pub async fn announce(
     } else {
         AnnounceStatus::Updated
     };
+    // Reported once, from the pass that stands: a race retry rebuilds and may drop the same tag again.
+    if unchanged || matches!(request.target, AnnounceTarget::Out(_)) {
+        warn_dropped_carried(&dropped_carried);
+    }
     let title = format!("announce: curate {package}");
     // The commit alone carries the run URL: the request body is also a push option, which admits no link.
     let run = request
@@ -222,6 +228,7 @@ pub async fn announce(
                 // A prior run may have committed without opening its pull request, stranding the update.
                 if let BranchState::Stale(pull_request) = &branch_state {
                     refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
+                    warn_if_foreign_author(forge, pull_request).await;
                     return Ok(AnnounceOutcome {
                         package,
                         status,
@@ -243,6 +250,7 @@ pub async fn announce(
                     let pull_request = forge
                         .open_or_update_pull_request(&request.index_repo, repo, &branch, INDEX_BASE_REF, &title, &body)
                         .await?;
+                    warn_if_foreign_author(forge, &pull_request).await;
                     return Ok(AnnounceOutcome {
                         package,
                         status,
@@ -392,6 +400,7 @@ pub async fn announce(
                             carried: root_read.carried.as_ref().map(|head| CarriedRows {
                                 head,
                                 tags: &carried_names,
+                                held: &head_base_root,
                             }),
                             ref_update: branch_state.ref_update(),
                         },
@@ -415,6 +424,7 @@ pub async fn announce(
                     reserved_dropped = merged.reserved_dropped;
                     removed = merged.removed;
                     durable_missing = merged.durable_missing;
+                    dropped_carried = merged.dropped_carried;
                     desc_status = AnnounceStatus::from_changed(merged.desc_updated);
                     // Identical racing announces regenerate the same bytes; committing would push an empty-diff
                     // commit, a governance threat the index bot flags.
@@ -471,6 +481,8 @@ pub async fn announce(
                 // Widening the retry to `Err(_)` re-pushes after `MergeRequestUnconfirmed`, whose push already landed.
                 Err(other) => return Err(other.into()),
             };
+            warn_dropped_carried(&dropped_carried);
+            warn_if_foreign_author(forge, &pull_request).await;
             Ok(AnnounceOutcome {
                 package,
                 status,
@@ -510,6 +522,8 @@ struct CarriedRows<'a> {
     head: &'a BranchHead,
     /// The tags the base root lacked: a shared tag keeps the base row and its object.
     tags: &'a [String],
+    /// The base root as the index holds it, before the carry.
+    held: &'a Value,
 }
 
 /// A stale branch's head: its `tags` object, and where its objects can be read.
@@ -531,6 +545,8 @@ struct Rebuilt {
     desc_updated: bool,
     removed: Vec<String>,
     durable_missing: Vec<String>,
+    /// Carried tags whose object the stale head lacked and the registry no longer serves.
+    dropped_carried: Vec<String>,
     /// The commit and request body describing this pass's changes.
     body: String,
 }
@@ -580,15 +596,17 @@ async fn observe_and_rebuild(
     let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
     let mut root = pipeline::regenerate(base_root, &plan, &request.curated, request.ephemeral, now);
     let mut carried_objects = Vec::new();
+    let mut dropped_carried = Vec::new();
     if let Some(carried) = base.carried {
         let head = carried.head;
+        let needing_object = pipeline::carried_without_held_object(carried.tags, &root, carried.held);
         let fetched = pipeline::fetch_carried_objects(
             forge,
             &head.repo,
             &head.sha,
             package,
             &root,
-            carried.tags,
+            &needing_object,
             &plan.observed,
         )
         .await?;
@@ -603,9 +621,7 @@ async fn observe_and_rebuild(
                 &TagSelection::Replace(fetched.missing),
                 &physical.display,
             )?;
-            for tag in &replan.removed {
-                tracing::warn!(tag = %tag, "dropped a carried tag: its object is not on the stale branch and the registry no longer serves it");
-            }
+            dropped_carried = replan.removed.clone();
             plan.durable_missing.retain(|tag| !replan.removed.contains(tag));
             plan.observed.extend(replan.observed);
             plan.removed.extend(replan.removed);
@@ -669,6 +685,7 @@ async fn observe_and_rebuild(
         desc_updated: desc.desc.is_some(),
         removed: plan.removed,
         durable_missing: plan.durable_missing,
+        dropped_carried,
         body,
     })
 }
@@ -741,6 +758,37 @@ async fn has_object_absent_at(
         }
     }
     Ok(false)
+}
+
+fn warn_dropped_carried(tags: &[String]) {
+    for tag in tags {
+        tracing::warn!(tag = %tag, "dropped a carried tag: its object is not on the stale branch and the registry no longer serves it");
+    }
+}
+
+/// Warns when announce reuses an open request that another account opened, since the branch it
+/// pushes to is that account's request. An unknown identity (job token, App token, failed lookup)
+/// stays silent: warning there would fire on every CI run.
+async fn warn_if_foreign_author(forge: &dyn Forge, pull_request: &PullRequest) {
+    let Some(author) = pull_request.author.as_deref().filter(|_| pull_request.updated) else {
+        return;
+    };
+    let identity = match forge.authenticated_identity().await {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::debug!(%error, "could not read the authenticated identity to compare with the request's author");
+            return;
+        }
+    };
+    if !identity.login.eq_ignore_ascii_case(author) {
+        tracing::warn!(
+            number = pull_request.number,
+            %author,
+            identity = %identity.login,
+            "joining a pull request opened by another account"
+        );
+    }
 }
 
 /// Tripwire: refuse an outcome that moves nothing while its open pull request cannot merge.
@@ -950,7 +998,7 @@ async fn branch_head_tags(
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::forge::{CapabilityName, CheckStatus, ForgeError, ForgeIdentity, ForkIdentity};
@@ -1355,6 +1403,12 @@ mod tests {
         open_request: Option<PullRequest>,
         mergeability: Mergeability,
         fork: Option<ForkIdentity>,
+        /// What [`Forge::authenticated_identity`] answers; `None` is a credential with no account.
+        identity: Option<ForgeIdentity>,
+        /// [`Forge::authenticated_identity`] fails instead of answering.
+        failing_identity: bool,
+        /// The account [`Forge::open_or_update_pull_request`] reports as the request's author, on a reused request.
+        request_author: Option<String>,
         state: Mutex<FakeState>,
     }
 
@@ -1397,6 +1451,9 @@ mod tests {
                 open_request: None,
                 mergeability: Mergeability::Mergeable,
                 fork: None,
+                identity: None,
+                failing_identity: false,
+                request_author: None,
                 state: Mutex::new(FakeState::default()),
             }
         }
@@ -1460,6 +1517,26 @@ mod tests {
 
         fn with_mergeability(mut self, mergeability: Mergeability) -> Self {
             self.mergeability = mergeability;
+            self
+        }
+
+        fn with_identity(mut self, login: &str) -> Self {
+            self.identity = Some(ForgeIdentity {
+                login: login.to_string(),
+                id: 1,
+                bot: false,
+            });
+            self
+        }
+
+        fn failing_identity(mut self) -> Self {
+            self.failing_identity = true;
+            self
+        }
+
+        /// Opening the request reuses one that `login` opened.
+        fn with_request_author(mut self, login: &str) -> Self {
+            self.request_author = Some(login.to_string());
             self
         }
 
@@ -1551,7 +1628,14 @@ mod tests {
     #[async_trait::async_trait]
     impl Forge for FakeForge {
         async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
-            unreachable!("announce resolves no identity — that is the claim command's ladder")
+            if self.failing_identity {
+                return Err(ForgeError::Status {
+                    url: "user".to_string(),
+                    status: 500,
+                    detail: "the fixture refuses the identity read".to_string(),
+                });
+            }
+            Ok(self.identity.clone())
         }
 
         async fn resolve_user(&self, _login: &str) -> Result<Option<ForgeIdentity>, ForgeError> {
@@ -1707,7 +1791,8 @@ mod tests {
             Ok(PullRequest {
                 number: 7,
                 html_url: "https://example.invalid/pull/7".to_string(),
-                updated: false,
+                updated: self.request_author.is_some(),
+                author: self.request_author.clone(),
             })
         }
     }
@@ -1948,11 +2033,215 @@ mod tests {
         }))
     }
 
+    fn pull_request_by(number: u64, author: &str) -> PullRequest {
+        PullRequest {
+            author: Some(author.to_string()),
+            ..pull_request(number)
+        }
+    }
+
+    /// Collects the level and message of every WARN and DEBUG event emitted while it is the default subscriber.
+    #[derive(Clone, Default)]
+    struct EventRecorder(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    impl EventRecorder {
+        fn messages_at(&self, level: tracing::Level) -> Vec<String> {
+            self.0
+                .lock()
+                .expect("the recorder lock is uncontended")
+                .iter()
+                .filter(|(seen, _)| *seen == level)
+                .map(|(_, message)| message.clone())
+                .collect()
+        }
+    }
+
+    struct MessageVisitor(String);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for EventRecorder {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let level = *event.metadata().level();
+            if level == tracing::Level::WARN || level == tracing::Level::DEBUG {
+                let mut message = MessageVisitor(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .expect("the recorder lock is uncontended")
+                    .push((level, message.0));
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Drives a direct announce of `curated` against `forge` with a recorder installed, returning what it recorded.
+    async fn recorded(forge: &FakeForge, curated: TagSelection, registry: StubTransportData) -> EventRecorder {
+        let recorder = EventRecorder::default();
+        let _default = tracing::subscriber::set_default(recorder.clone());
+        run_announce(forge, curated, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the announce reports");
+        recorder
+    }
+
+    /// Announces an unchanged tag onto a stale branch whose open request `pull_request` describes,
+    /// returning every WARN emitted on the way.
+    async fn warnings_reusing(pull_request: PullRequest, identity: Option<&str>) -> Vec<String> {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let mut forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest)
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest)
+            .stale_with(pull_request);
+        if let Some(login) = identity {
+            forge = forge.with_identity(login);
+        }
+        recorded(&forge, TagSelection::Refresh, registry)
+            .await
+            .messages_at(tracing::Level::WARN)
+    }
+
+    #[tokio::test]
+    async fn reusing_a_request_opened_by_another_account_warns() {
+        let warnings = warnings_reusing(pull_request_by(3, "alice"), Some("indexbot")).await;
+        assert_eq!(warnings.len(), 1, "one warning for the foreign author: {warnings:?}");
+        assert!(warnings[0].contains("another account"), "{warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn reusing_a_request_opened_by_the_same_account_is_silent() {
+        let warnings = warnings_reusing(pull_request_by(3, "indexbot"), Some("indexbot")).await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A GitLab job token has no readable account; warning there would fire on every CI run.
+    #[tokio::test]
+    async fn reusing_a_request_without_a_known_identity_is_silent() {
+        let warnings = warnings_reusing(pull_request_by(3, "alice"), None).await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// GitHub and GitLab spell a login with different case in different payloads.
+    #[tokio::test]
+    async fn reusing_a_request_opened_by_the_same_account_in_another_case_is_silent() {
+        let warnings = warnings_reusing(pull_request_by(3, "IndexBot"), Some("indexbot")).await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A failed identity lookup stays silent for the operator but leaves a trace at debug.
+    #[tokio::test]
+    async fn a_failed_identity_lookup_is_silent_and_traced_at_debug() {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("base", &digest)
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest)
+            .stale_with(pull_request_by(3, "alice"))
+            .failing_identity();
+
+        let recorder = recorded(&forge, TagSelection::Refresh, registry).await;
+
+        assert!(recorder.messages_at(tracing::Level::WARN).is_empty());
+        let traces = recorder.messages_at(tracing::Level::DEBUG);
+        assert_eq!(traces.len(), 1, "one debug line for the failed lookup: {traces:?}");
+        assert!(traces[0].contains("identity"), "{traces:?}");
+    }
+
+    /// The unchanged live branch ensures its request, which another account may have opened.
+    #[tokio::test]
+    async fn an_unchanged_live_branch_warns_when_the_request_is_another_accounts() {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .with_cas_object("branch", &digest)
+            .with_identity("indexbot")
+            .with_request_author("alice");
+
+        let warnings = recorded(&forge, TagSelection::Refresh, registry)
+            .await
+            .messages_at(tracing::Level::WARN);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("another account"), "{warnings:?}");
+    }
+
+    /// A run that commits reuses the request through the same open call.
+    #[tokio::test]
+    async fn a_committing_run_warns_when_the_request_is_another_accounts() {
+        let (registry, _) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &root_with_a_moved_tag())
+            .with_identity("indexbot")
+            .with_request_author("alice");
+
+        let warnings = recorded(&forge, TagSelection::Refresh, registry)
+            .await
+            .messages_at(tracing::Level::WARN);
+
+        assert_eq!(forge.commits().len(), 1, "the run committed");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("another account"), "{warnings:?}");
+    }
+
+    /// The race retry rebuilds the same stale branch, so a carried tag it drops again must not warn twice.
+    #[tokio::test]
+    async fn a_dropped_carried_tag_warns_once_across_a_race_retry() {
+        let (digest, _, _) = branch_only_object();
+        let (registry, _) = seed_tags(&["2.0.0"]);
+        probes_answer_manifest_unknown(&registry, 2);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({ "0.9.0": durable_row(&digest) })),
+            )
+            .stale_with(pull_request(5))
+            .failing_commits(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let recorder = recorded(&forge, TagSelection::UnionFile(strings(&["2.0.0"])), registry).await;
+
+        assert_eq!(forge.commits().len(), 2, "the run raced and retried");
+        let warnings = recorder.messages_at(tracing::Level::WARN);
+        assert_eq!(warnings.len(), 1, "one warning for the one dropped tag: {warnings:?}");
+        assert!(warnings[0].contains("dropped a carried tag"), "{warnings:?}");
+    }
+
     fn pull_request(number: u64) -> PullRequest {
         PullRequest {
             number,
             html_url: format!("https://example.invalid/pull/{number}"),
             updated: true,
+            author: None,
         }
     }
 

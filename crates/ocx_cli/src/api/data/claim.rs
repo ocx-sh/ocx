@@ -225,6 +225,7 @@ mod tests {
                 number: 42,
                 html_url: "https://github.com/ocx-sh/index/pull/42".to_string(),
                 updated: false,
+                author: None,
             }),
             written_paths: Vec::new(),
             ..out_outcome()

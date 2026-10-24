@@ -230,6 +230,8 @@ pub struct PullRequest {
     pub html_url: String,
     /// True when an existing open pull request was reused.
     pub updated: bool,
+    /// The login of the account that opened the request, when the forge's body names one.
+    pub author: Option<String>,
 }
 
 #[cfg(test)]

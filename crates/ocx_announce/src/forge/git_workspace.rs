@@ -777,6 +777,7 @@ mod tests {
             number,
             html_url: format!("https://gitlab.example/acme/index/-/merge_requests/{number}"),
             updated: false,
+            author: None,
         }
     }
 

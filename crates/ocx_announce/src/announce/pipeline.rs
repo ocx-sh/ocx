@@ -656,6 +656,30 @@ pub(crate) struct CarriedObjects {
     pub missing: Vec<String>,
 }
 
+/// The `carried` tags whose row in `root` names a digest no row of `held` records.
+///
+/// `held` is the root as the index holds it: a digest it already names has its object in the
+/// base tree, so copying it from the stale head would be a read for nothing, and a head that
+/// lacks it would wrongly send the row to re-observation.
+pub(crate) fn carried_without_held_object(carried: &[String], root: &Value, held: &Value) -> Vec<String> {
+    let digest_of = |row: &Value| row.get("content").and_then(Value::as_str).map(str::to_string);
+    let held_digests: Vec<String> = held
+        .get("tags")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|tags| tags.values().filter_map(digest_of))
+        .collect();
+    let tags = root.get("tags").and_then(Value::as_object);
+    carried
+        .iter()
+        .filter(|tag| {
+            let digest = tags.and_then(|tags| tags.get(*tag)).and_then(digest_of);
+            digest.is_none_or(|digest| !held_digests.contains(&digest))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Copy the object of every `carried` row still in `root` and not re-observed this run from the
 /// stale branch head at `sha`.
 ///
@@ -678,11 +702,12 @@ pub(crate) async fn fetch_carried_objects(
     let tags = root.get("tags").and_then(Value::as_object);
     let mut objects = CarriedObjects::default();
     for tag in carried {
-        let Some(content) = tags
-            .and_then(|tags| tags.get(tag))
-            .and_then(|row| row.get("content"))
-            .and_then(Value::as_str)
-        else {
+        let Some(row) = tags.and_then(|tags| tags.get(tag)) else {
+            continue;
+        };
+        // A row with no readable digest has no object to copy: re-observe it rather than carry it bare.
+        let Some(content) = row.get("content").and_then(Value::as_str) else {
+            objects.missing.push(tag.clone());
             continue;
         };
         let Ok(digest) = ocx_oci::Digest::try_from(content) else {
