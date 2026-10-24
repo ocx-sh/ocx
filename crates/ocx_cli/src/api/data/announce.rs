@@ -245,6 +245,7 @@ mod tests {
                 number: 42,
                 html_url: "https://github.com/ocx-sh/index/pull/42".to_string(),
                 updated: false,
+                author: None,
             }),
             fork: Some(ForkIdentity {
                 full_path: "forkuser/index".to_string(),
