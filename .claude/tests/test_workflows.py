@@ -2901,10 +2901,11 @@ def test_the_deep_native_acceptance_legs_run_the_full_suite_per_os_without_docke
     assert not linux.get("no-docker"), f"{BASIC_REPO.name}: Linux stays strict, but `acceptance` passes {linux}"
 
 
-def test_the_windows_limits_are_committed() -> None:
-    """The three files `scripts/accept_floor.py --limits-dir` reads. macOS has none until its first run reports counts."""
+@pytest.mark.parametrize("platform", ["windows", "macos"])
+def test_the_native_limits_are_committed(platform: str) -> None:
+    """The three files `scripts/accept_floor.py --limits-dir` reads, per native leg."""
     for name in ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING"):
-        path = ROOT / "test" / "limits" / "windows" / name
+        path = ROOT / "test" / "limits" / platform / name
         assert path.is_file(), f"{path.relative_to(ROOT)} is missing"
         assert path.read_text(encoding="utf-8").strip().isdigit(), f"{path.relative_to(ROOT)} is not a plain integer"
 

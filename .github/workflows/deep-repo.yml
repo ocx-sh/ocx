@@ -118,8 +118,6 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          # TODO(G4): commit test/limits/macos/ from the first deep run's merge-job counts. Until then
-          # the macOS merge job prints them and reds.
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin, limits: test/limits/macos }
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm, limits: test/limits/windows }
     uses: ./.github/workflows/acceptance.yml
