@@ -58,7 +58,7 @@ tasks:
       - cmd: |
           set -euo pipefail
           printf '%s\n' "{{.TARGETS}}" | grep -qx -- '{{.TARGET}}' || { echo "unsupported TARGET '{{.TARGET}}'; see: task cross:targets" >&2; exit 1; }
-          python3 scripts/test_bundle.py bundle --target '{{.TARGET}}'
+          python3 scripts/test_bundle.py bundle --target '{{.TARGET}}' --cache-rc='{{.CACHE_RC}}'
 
   test:run:
     desc: 'Run a unit-test bundle natively: BUNDLE=<path> [SOURCE_ROOT=<checkout>] [JUNIT=<path>] [FILTER=<substring>]; needs only Python'
@@ -79,4 +79,4 @@ tasks:
       - cmd: |
           set -euo pipefail
           printf '%s\n' "{{.TARGETS}}" | grep -qx -- '{{.TARGET}}' || { echo "unsupported TARGET '{{.TARGET}}'; see: task cross:targets" >&2; exit 1; }
-          python3 scripts/test_bundle.py bin --target '{{.TARGET}}'
+          python3 scripts/test_bundle.py bin --target '{{.TARGET}}' --cache-rc='{{.CACHE_RC}}'

@@ -6,10 +6,15 @@
 Linux builds (`bundle`, `bin`); Windows and macOS only unpack and execute (`run`).
 `run` is stdlib-only and works on any Python 3.8+.
 
-  test_bundle.py bundle --target <triple> [--out PATH]
+  test_bundle.py bundle --target <triple> [--out PATH] [--cache-rc ARG]
   test_bundle.py run    --bundle PATH [--source-root DIR] [--junit PATH] [--timeout SECS] [--filter SUBSTR]
-  test_bundle.py bin    --target <triple> [--out DIR]
+  test_bundle.py bin    --target <triple> [--out DIR] [--cache-rc ARG]
+
+`--cache-rc` is the root taskfile's `CACHE_RC`, passed in by the cross tasks: whether the
+CI cache credential applies is decided there, once.
 """
+
+from __future__ import annotations
 
 import argparse
 import io
@@ -24,6 +29,30 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any, TypedDict
+
+
+class Entry(TypedDict):
+    """One bundle entry, as `cmd_bundle` writes it to `manifest.json`."""
+
+    label: str
+    dir: str
+    exe: str
+    args: list[str]
+    env: dict[str, str]
+    skips: list[str]
+
+
+class Result(TypedDict, total=False):
+    label: str
+    cases: list[tuple[str, str]]
+    passed: int
+    failed: int
+    ignored: int
+    ok: bool
+    log: str
+    secs: float
+
 
 ROOT = Path(__file__).resolve().parent.parent
 BAZEL = ["ocx", "exec", "bazel", "--", "bazel"]
@@ -53,26 +82,8 @@ LIBTEST_RESULT = re.compile(
 )
 
 
-def cache_rc():
-    """The CI cache credential as Bazel's first startup option, only when the file exists.
-
-    The rule of the root taskfile's `CACHE_RC`: `--bazelrc` on a missing path is a hard
-    Bazel error, and fork PRs and developer shells have no such file. Also empty when
-    `.bazelrc.user` already names the file (the setup action's trusted mode imports it
-    there, and the flag would read it twice); the user rc's text decides, not whether it exists.
-    """
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    rc = f"{runner_temp}/bazel-cache.rc" if runner_temp else None
-    if not rc or not Path(rc).is_file():
-        return []
-    user_rc = ROOT / ".bazelrc.user"
-    if user_rc.is_file() and rc in user_rc.read_text(encoding="utf-8", errors="replace"):
-        return []
-    return [f"--bazelrc={rc}"]
-
-
-def bazel(*args, capture=False):
-    cmd = [*BAZEL, *cache_rc(), *args]
+def bazel(*args: str, rc: str = "", capture: bool = False) -> str:
+    cmd = [*BAZEL, *([rc] if rc else []), *args]
     res = subprocess.run(
         cmd, cwd=ROOT, capture_output=capture, text=True, encoding="utf-8", check=False
     )
@@ -83,7 +94,7 @@ def bazel(*args, capture=False):
     return res.stdout
 
 
-def flags(target):
+def flags(target: str) -> list[str]:
     return [
         "-c",
         "opt",
@@ -92,34 +103,47 @@ def flags(target):
     ]
 
 
-def exe_name(name, target):
+def exe_name(name: str, target: str) -> str:
     return name + (".exe" if "-windows-" in target else "")
 
 
-def cquery(expr, target, *output):
-    return bazel("cquery", expr, *flags(target), *output, capture=True)
+def cquery(expr: str, target: str, *output: str, rc: str = "") -> str:
+    return bazel("cquery", expr, *flags(target), *output, rc=rc, capture=True)
 
 
 # ---------------------------------------------------------------- bundle
 
 
-def cmd_bundle(a):
+def rust_test_labels(query_out: str) -> list[str]:
+    """The candidate labels, refused when fewer than the tree's `rust_test` count.
+
+    A query that stopped matching would otherwise bundle a smaller set and still
+    agree with its own `candidates` count.
+    """
+    from bazel_gate_proofs import CRATES_TEST_TARGETS  # lazily: `run` must stay stdlib-only
+
+    labels = query_out.split()
+    if len(labels) < CRATES_TEST_TARGETS:
+        sys.exit(f"query found {len(labels)} rust_test targets, the tree has at least {CRATES_TEST_TARGETS}")
+    return labels
+
+
+def cmd_bundle(a: argparse.Namespace) -> None:
     out = Path(a.out or ROOT / "target/cross" / a.target / "unit-tests.tar.gz")
+    rc = a.cache_rc
     # Plain `query`, not `cquery`: cquery analyses the whole `//crates/...`
     # universe, doctests included, and those cannot resolve a foreign target.
-    labels = bazel("query", 'kind("^rust_test", //crates/...)', capture=True).split()
-    if not labels:
-        sys.exit("no rust_test targets found")
+    labels = rust_test_labels(bazel("query", 'kind("^rust_test", //crates/...)', rc=rc, capture=True))
     expr = "set(" + " ".join(labels) + ")"
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as pf:
         pf.write("\n".join(labels))
     try:
-        bazel("build", "--jobs=8", *flags(a.target), f"--target_pattern_file={pf.name}")
+        bazel("build", "--jobs=8", *flags(a.target), f"--target_pattern_file={pf.name}", rc=rc)
     finally:
         os.unlink(pf.name)
     # Attributes (args/env) resolved for this configuration, plus the executable.
-    attrs = {}
-    for r in json.loads(cquery(expr, a.target, "--output=jsonproto"))["results"]:
+    attrs: dict[str, dict[str, Any]] = {}
+    for r in json.loads(cquery(expr, a.target, "--output=jsonproto", rc=rc))["results"]:
         rule = r["target"]["rule"]
         at = {x["name"]: x for x in rule["attribute"] if x.get("explicitlySpecified")}
         attrs[rule["name"]] = {
@@ -133,10 +157,10 @@ def cmd_bundle(a):
         'str(target.label)+"|"+(providers(target)["FilesToRunProvider"].executable.path'
         ' if "FilesToRunProvider" in providers(target) else "")'
     )
-    execroot = Path(bazel("info", "execution_root", capture=True).strip())
-    tests = []
+    execroot = Path(bazel("info", "execution_root", rc=rc, capture=True).strip())
+    tests: list[tuple[str, Path, Path, dict[str, Any]]] = []
     for line in cquery(
-        expr, a.target, "--output=starlark", f"--starlark:expr={star}"
+        expr, a.target, "--output=starlark", f"--starlark:expr={star}", rc=rc
     ).splitlines():
         label, _, exe = line.partition("|")
         label = label.lstrip("@")
@@ -153,7 +177,7 @@ def cmd_bundle(a):
         tests.append((label, short, runfiles, attrs[label]))
     if not tests:
         sys.exit("every rust_test is incompatible with " + a.target)
-    manifest = {"target": a.target, "candidates": len(labels), "tests": []}
+    manifest: dict[str, Any] = {"target": a.target, "candidates": len(labels), "tests": []}
     out.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(out, "w:gz", compresslevel=6, dereference=True) as tar:
         for label, short, runfiles, at in tests:
@@ -180,11 +204,18 @@ def cmd_bundle(a):
 # ---------------------------------------------------------------- run
 
 
-def run_one(t, root, timeout, args=None, cwd=None, label=None):
+def run_one(
+    t: Entry,
+    root: Path,
+    timeout: int,
+    args: list[str] | None = None,
+    cwd: Path | None = None,
+    label: str | None = None,
+) -> Result:
     base = root / t["dir"]
     main = base / "_main"
     exe = main / t["exe"]
-    res = {
+    res: Result = {
         "label": label or t["label"],
         "cases": [],
         "passed": 0,
@@ -244,7 +275,7 @@ def run_one(t, root, timeout, args=None, cwd=None, label=None):
     return res
 
 
-def run_skipped(t, root, timeout, source_root):
+def run_skipped(t: Entry, root: Path, timeout: int, source_root: Path) -> list[Result]:
     """Each `--skip`ped testcase on its own, as `rust:test:bazel-skipped` runs it under cargo.
 
     The cwd is the checkout, so the `crates/*/src` walks that `CARGO_MANIFEST_DIR`
@@ -270,7 +301,7 @@ def run_skipped(t, root, timeout, source_root):
     return out
 
 
-def write_junit(results, path):
+def write_junit(results: list[Result], path: Path) -> None:
     suites = ET.Element("testsuites")
     for r in results:
         s = ET.SubElement(
@@ -292,7 +323,7 @@ def write_junit(results, path):
     ET.ElementTree(suites).write(path, encoding="utf-8", xml_declaration=True)
 
 
-def report(r):
+def report(r: Result) -> None:
     print(
         f"{'PASS' if r['ok'] else 'FAIL'} {r['label']}  passed={r['passed']} failed={r['failed']} "
         f"ignored={r['ignored']}  {r.get('secs', 0):.1f}s",
@@ -302,11 +333,11 @@ def report(r):
         print("\n".join("    " + l for l in r["log"].splitlines()[-40:]))
 
 
-def totals(results):
+def totals(results: list[Result]) -> tuple[int, ...]:
     return tuple(sum(r[k] for r in results) for k in ("passed", "failed", "ignored"))
 
 
-def cmd_run(a):
+def cmd_run(a: argparse.Namespace) -> None:
     junit = Path(a.junit or ROOT / "target/cross/unit-junit.xml")
     source_root = Path(a.source_root).resolve() if a.source_root else None
     problems = []
@@ -363,7 +394,7 @@ def cmd_run(a):
 # ---------------------------------------------------------------- bin
 
 
-def cmd_bin(a):
+def cmd_bin(a: argparse.Namespace) -> None:
     out = Path(a.out or ROOT / "target/cross" / a.target / "test-bin")
     # Mirrors test/taskfile.yml `.build-binaries`: the acceptance suite's test/bin layout.
     wanted = [
@@ -375,9 +406,9 @@ def cmd_bin(a):
         ),
     ]
     f = flags(a.target)[:3]  # no test toolchain flag: these are not test rules
-    bazel("build", "--jobs=8", *f, *[w[0] for w in wanted])
+    bazel("build", "--jobs=8", *f, *[w[0] for w in wanted], rc=a.cache_rc)
     for label, rel in wanted:
-        src = cquery(label, a.target, "--output=files").strip().splitlines()[-1]
+        src = cquery(label, a.target, "--output=files", rc=a.cache_rc).strip().splitlines()[-1]
         dst = out / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / src if not Path(src).is_absolute() else src, dst)
@@ -385,7 +416,7 @@ def cmd_bin(a):
         print(dst)
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -393,6 +424,7 @@ def main():
     b = sub.add_parser("bundle")
     b.add_argument("--target", required=True)
     b.add_argument("--out")
+    b.add_argument("--cache-rc", default="", help="the task's CACHE_RC: Bazel's first startup option, or empty")
     r = sub.add_parser("run")
     r.add_argument("--bundle", required=True)
     r.add_argument("--source-root", help="checkout to run the --skip'd testcases in")
@@ -402,6 +434,7 @@ def main():
     n = sub.add_parser("bin")
     n.add_argument("--target", required=True)
     n.add_argument("--out")
+    n.add_argument("--cache-rc", default="", help="the task's CACHE_RC: Bazel's first startup option, or empty")
     a = p.parse_args()
     {"bundle": cmd_bundle, "run": cmd_run, "bin": cmd_bin}[a.cmd](a)
 
