@@ -44,6 +44,7 @@ import base64
 import json
 import stat
 import subprocess
+import sys
 import time
 import urllib.parse
 import uuid
@@ -202,6 +203,9 @@ EXPECTED_PASSTHROUGH = (
     "TEMP",
     "TMP",
 )
+
+#: What `git_command.rs`'s `WINDOWS_EXTRA` adds to `COMMON` on Windows.
+EXPECTED_WINDOWS_PASSTHROUGH = ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT")
 
 #: `git_command.rs`'s `INJECTED` triple, present only on an invocation carrying
 #: an ocx credential.
@@ -891,6 +895,7 @@ def test_every_invocation_carries_no_redirects(
         )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="windows: no POSIX permission bits to read")
 def test_tempdir_mode_0700_unix_only(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
@@ -2316,10 +2321,10 @@ def test_no_helper_invoked_on_injecting_run(
     # `git_http_credential` is set, so git is never challenged and never asks.
     subprocess.run(
         ["git", "credential", "fill"],
-        input=f"protocol=http\nhost=127.0.0.1\npath={INDEX_FULL}.git\n\n",
+        # Bytes: text mode would send CRLF on Windows, which git reads as part of a value.
+        input=f"protocol=http\nhost=127.0.0.1\npath={INDEX_FULL}.git\n\n".encode(),
         env=git_environment(home.path),
         capture_output=True,
-        text=True,
         timeout=30,
         check=False,
     )
@@ -2437,6 +2442,8 @@ def test_child_env_matches_the_allowlist(
 
     push = one_invocation(shim, "push")
     allowed = set(EXPECTED_PASSTHROUGH) | set(EXPECTED_SET_ENV) | set(INJECTED_ENV) | SHIM_LOCALE_ARTEFACT
+    if sys.platform == "win32":
+        allowed |= set(EXPECTED_WINDOWS_PASSTHROUGH)
     assert set(push.env) <= allowed, (
         "C-035's tables are the whole child environment; these names are outside "
         f"them: {sorted(set(push.env) - allowed)}"
@@ -2498,8 +2505,11 @@ def test_ambient_http_proxy_passed_through(
     report(announce_over_git(ocx, fake_forge, package, shim, home, extra_env=proxy))
 
     push = one_invocation(shim, "push")
+    # Windows folds environment names (Python reports `HTTP_PROXY`), so fold both sides there.
+    fold = str.lower if sys.platform == "win32" else str
+    seen = {fold(key): value for key, value in push.env.items()}
     for name, value in proxy.items():
-        assert push.env.get(name) == value, f"{name} must reach the child verbatim: {push.env.get(name)!r}"
+        assert seen.get(fold(name)) == value, f"{name} must reach the child verbatim: {seen.get(fold(name))!r}"
 
 
 def test_ambient_uppercase_https_proxy_passed_through(
