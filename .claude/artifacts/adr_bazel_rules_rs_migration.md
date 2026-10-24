@@ -28,7 +28,7 @@ Release stays on cargo-dist (MSVC zips, auditable, CycloneDX, `scan-binaries`). 
 
 - Delete the repin / lockfile / BUILD-hiding machinery.
 - A hermetic C toolchain, so a host's `gcc` and `libstdc++` stop being inputs.
-- One Linux job builds every target; native runners only execute.
+- Linux builds every target; native runners only execute.
 - Hold every existing gate: clippy and rustdoc ratchets, doctests by exit status, `SUITE_FLOOR`.
 
 ## Industry Context & Research
@@ -99,7 +99,7 @@ Eight triples build green from one Linux host: `{x86_64,aarch64}-unknown-linux-{
 
 ### CI shape
 
-Superseded by the Amendment 2026-10-24 below. The list records the shape as decided on 2026-10-21.
+Superseded by AM-1 to AM-3 of the Amendment 2026-10-24 below. The list records the shape as decided on 2026-10-21.
 
 - **One Linux `build` job** runs the Bazel unit tests (skipped on a push to `main`, where `verify-basic.yml` just ran them), then cross-builds every triple and packs the macOS/Windows unit-test bundles and the acceptance `test-bin` layouts.
 - **macOS and Windows download and execute only**: no Bazel, cargo or Rust toolchain on the runner. Unit tests run from the bundle (`task cross:test:run`, `scripts/test_bundle.py`); acceptance runs the smoke tier on native `zot` (`OCX_TEST_NATIVE_SERVICES=1`).
@@ -110,19 +110,21 @@ Superseded by the Amendment 2026-10-24 below. The list records the shape as deci
 
 **Positive:**
 - `bazel:bootstrap`, `Cargo.bazel.lock.json`, `CARGO_BAZEL_REPIN`, the BUILD-hiding step and the doctor's libstdc++ check are gone.
-- One cross-compiling Linux job replaces three native build legs.
+- Eight parallel `cross.yml` legs build every triple from Linux runners and replace three native build legs.
 - Acceptance shards and the merged floor cut wall-clock time without weakening the floor.
 
 **Negative:**
 - **gnullvm is the CI-tested Windows target while release ships MSVC.** No gate executes the shipped artifact's linker output or CRT. Recorded gap; moving the release to the Bazel cross-build is a separate decision.
-- `rust:test:bazel-skipped` testcases (those `--skip`ped in `rust_test` targets) no longer run on macOS or Windows; the native legs execute only the Linux-built bundle, so that step is their one run, on Linux.
+- Of the 49 testcases `--skip`ped in `rust_test` targets, 44 run on macOS and Windows from the Linux-built bundle (`run_skipped` in `scripts/test_bundle.py`). The 5 `workspace_structure` cases that shell out to `cargo` (`NEEDS_CARGO`) run on Linux only (`rust:test:bazel-skipped`).
 - Doctests stay Linux-only (build actions).
-- macOS and Windows run the smoke tier on native zot, not the full acceptance suite (the `registry:2` mirror has no native build). Full-suite parity there is a follow-up.
+- macOS and Windows run the full acceptance suite in four shards on native zot. The `registry:2` and Sigstore cases skip with a `no docker:` reason, and each OS's `SKIP_CEILING` counts them.
 
 **Risks:**
 - rules_rs is pre-1.0 with roughly weekly releases. Exact pins; Renovate bumps `rules_rs` and `llvm` together; `build:drift` guards feature drift.
 
 ## Question -> research -> decision: "acceptance runs twice"
+
+Superseded by AM-2 and AM-3 below. The text records the decision as made on 2026-10-21.
 
 **Question.** The goal reported that acceptance tests appear to run twice across `verify-deep.yml` and `verify-basic.yml`.
 
@@ -143,10 +145,11 @@ The decision stands: rules_rs, hermetic llvm and a Linux cross-build. Only the C
 | AM-5 | Every Bazel lane writes the remote cache with `BAZEL_CACHE_WRITE_AUTH`. The separate CI read credential is retired. A developer's read header in `~/.bazelrc` stays. |
 | AM-6 | `release-readiness.yml` (dispatch only) builds the cargo-dist bytes at the exact SHA and runs the full suite on them per platform against `test/limits/<os>-release`. `task release:tag` refuses without a green run. Release still ships MSVC zips, so the gnullvm gap stands. |
 | AM-7 | The rules_rust doctest-stdout patch is deleted. The doctest floor rests on the exit code alone. |
+| AM-8 | `run_skipped` in `scripts/test_bundle.py` runs 44 of the 49 `--skip`ped testcases on macOS and Windows from the Linux-built bundle. The 5 `NEEDS_CARGO` cases, all in `workspace_structure`, stay Linux-only. |
 
 ## Validation
 
-- `task verify` and `verify-deep.yml` (build, unit-native, sharded acceptance with merged floor, acceptance-native) green on the migration branch.
+- `task verify`, `basic-repo.yml` (sharded Linux acceptance with merged floor) and `verify-deep.yml` through `deep-repo.yml` (`cross`, `unit-native`, `acceptance-native`) green on the migration branch.
 - Each rewritten gate (`bazel_build_drift.py`, `bazel_pin_check.py`, `bazel_tag_guard.py`, `bazel_gate_proofs.py`, `bazel_doctor.py`) is shown red and green in `scripts/bazel_gate_proofs.py`.
 - `scripts/tests/test_accept_shard.py` and `test_accept_floor.py` show the shard selector and merged floor red and green.
 

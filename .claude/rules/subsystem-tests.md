@@ -177,12 +177,13 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   is the minimum count of distinct `--format json` schema roots a full run validated; the
   conformance hook records them per case and `scripts/conformance_floor.py` reads the JUnit
   report (the `test` taskfile's conformance-floor step and `bazel:test:accept`; a subset run is reported as not floored).
-- **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
-  per-WP range and `merge-base(origin/main)..HEAD`, with `--tiered-shapes` on ranges that
-  legitimately move or add a `test/lint/` module, add a `command` marker, edit
-  `test/scoped_rows.toml`/a floor file, or delete a ported original under C-007(e) — see
-  "Verification tiers" § `--tiered-shapes` above; every other range runs without the flag)
-  refuses any diff under `test/` except:
+- **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` judges crate-split ranges only
+  (`task scripts:test-diff-guard`: `merge-base(origin/main)..HEAD`, plus the series' own range when
+  given). It is not part of `task verify`. A range outside the split, such as the rules_rs
+  migration, edits `test/` on purpose. Pass `--tiered-shapes` only on ranges that move or port
+  tests; "Verification tiers" § `--tiered-shapes` above lists the shapes. Every other range runs
+  without the flag.
+  On a crate-split range it refuses any diff under `test/` except:
   an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); an added
   `@pytest.mark.xdist_group("<name>")` line — scheduling, the one mark that cannot change
   what a test asserts, and the only way to serialise writers of a registry-wide singleton
@@ -448,7 +449,7 @@ When an acceptance test must force internal state that production code derives a
 
 The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_TESTING_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
-**Release bytes.** Release builds lack `__testing`, so a test driving a seam cannot pass on them. A `test/tests/test_*.py` module that names a `__OCX_TESTING_[A-Z_]+` variable, or imports a `tests/` or `src/` file that does, carries `pytestmark = pytest.mark.requires_testing_build` (merged into an existing `pytestmark`). A module that names a seam only inside some tests may decorate just those tests, so the rest still run on release bytes and keep their conformance roots; an importer always takes the module-level mark. `test/lint/test_testing_marker.py` derives that set and reds an unmarked module. `OCX_TEST_RELEASE_BINARY=1` makes `test/conftest.py` skip every marked test with a reason starting `release bytes:`, and `scripts/windows_local.sh` forwards the variable to the Windows side. The readiness run reads `test/limits/<os>-release/` (floor and xfail as the non-release limits, skip ceiling = that platform's ceiling plus the marked case count, an upper bound).
+**Release bytes.** Release builds lack `__testing`, so a test driving a seam cannot pass on them. A `test/tests/test_*.py` module that names a `__OCX_TESTING_[A-Z_]+` variable, or imports a `tests/` or `src/` file that does, carries `pytestmark = pytest.mark.requires_testing_build` (merged into an existing `pytestmark`). A module that names a seam only inside some tests may decorate just those tests, so the rest still run on release bytes and keep their conformance roots; an importer always takes the module-level mark. `test/lint/test_testing_marker.py` derives that set and reds an unmarked module. `OCX_TEST_RELEASE_BINARY=1` makes `test/conftest.py` skip every marked test with a reason starting `release bytes:`, and `scripts/windows_local.sh` forwards the variable to the Windows side. The readiness run reads `test/limits/<os>-release/`: floor and xfail as the non-release limits. Each `SKIP_CEILING` is the skip count the merge jobs of readiness run 40098724914 observed, plus 6 of bootstrap slack. Observed 1506 linux, 1766 macos, 2198 windows; committed 1512, 1772, 2204. The arm64 legs read the same x64 `*-release` limits (the `limits` matrix field of `release-readiness.yml`).
 
 ## Unfalsifiable Greens
 
