@@ -341,7 +341,7 @@ def _repo(tmp_path: Path) -> Path:
         "    pub __OCX_TESTING_C: Bool, Plumbing;\n",
         encoding="utf-8",
     )
-    src = tmp_path / "crates" / "ocx_x" / "src"
+    src = tmp_path / "crates" / "seam_fixture" / "src"
     (src / "tests").mkdir(parents=True)
     (src / "lib.rs").write_text(
         "fn read() { ocx_env::__OCX_TESTING_A.get(); }\n#[cfg(test)]\nmod tests { fn f() { ocx_env::__OCX_TESTING_B.get(); } }\n",
