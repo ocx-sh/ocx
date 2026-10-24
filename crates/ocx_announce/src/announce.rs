@@ -124,9 +124,11 @@ pub async fn announce(
     }
     // `committed_bytes` stays the base's bytes: comparing against the carried root would report
     // `unchanged` on exactly the stale runs this rebuild must unfreeze.
-    if let Some(carried) = &root_read.carried_tags {
-        pipeline::carry_branch_tags(&mut committed_root, carried);
-    }
+    let carried_names = root_read
+        .carried
+        .as_ref()
+        .map(|head| pipeline::carry_branch_tags(&mut committed_root, &head.tags))
+        .unwrap_or_default();
 
     // One timestamp for the whole run, race retry included, so every written object agrees.
     let now = pipeline::current_timestamp();
@@ -146,6 +148,10 @@ pub async fn announce(
             root: &committed_root,
             repo: &root_read.repo,
             sha: &root_read.base_sha,
+            carried: root_read.carried.as_ref().map(|head| CarriedRows {
+                head,
+                tags: &carried_names,
+            }),
         },
         &request,
         &now,
@@ -348,9 +354,11 @@ pub async fn announce(
                             source,
                         })?;
                     // Skipping the carry would drop on the retry the stale tags the first attempt carried.
-                    if let Some(carried) = &root_read.carried_tags {
-                        pipeline::carry_branch_tags(&mut head_root, carried);
-                    }
+                    let carried_names = root_read
+                        .carried
+                        .as_ref()
+                        .map(|head| pipeline::carry_branch_tags(&mut head_root, &head.tags))
+                        .unwrap_or_default();
                     let merged = observe_and_rebuild(
                         publisher,
                         forge,
@@ -358,6 +366,10 @@ pub async fn announce(
                             root: &head_root,
                             repo: retry_repo,
                             sha: &head_sha,
+                            carried: root_read.carried.as_ref().map(|head| CarriedRows {
+                                head,
+                                tags: &carried_names,
+                            }),
                         },
                         &request,
                         &now,
@@ -445,6 +457,23 @@ struct RootBase<'a> {
     repo: &'a RepoCoordinate,
     /// The commit `root` was read at.
     sha: &'a str,
+    /// The rows carried onto `root` from a stale branch, whose objects only that branch holds.
+    carried: Option<CarriedRows<'a>>,
+}
+
+/// The stale branch's rows carried onto a base root, and the head holding their objects.
+#[derive(Clone, Copy)]
+struct CarriedRows<'a> {
+    head: &'a BranchHead,
+    /// The tags the base root lacked: a shared tag keeps the base row and its object.
+    tags: &'a [String],
+}
+
+/// A stale branch's head: its `tags` object, and where its objects can be read.
+struct BranchHead {
+    tags: Value,
+    repo: RepoCoordinate,
+    sha: String,
 }
 
 /// One regenerated announce payload.
@@ -503,9 +532,42 @@ async fn observe_and_rebuild(
         reserved_dropped,
     } = pipeline::resolve_curated_tags(&request.curated, &base_tags, &discovered)?;
     let observations = pipeline::observe_curated(publisher, &physical, &curated).await?;
-    let plan = pipeline::plan_tags(observations, base_root, &request.curated, &physical.display)?;
+    let mut plan = pipeline::plan_tags(observations, base_root, &request.curated, &physical.display)?;
     let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
     let mut root = pipeline::regenerate(base_root, &plan, &request.curated, request.ephemeral, now);
+    let mut carried_objects = Vec::new();
+    if let Some(carried) = base.carried {
+        let head = carried.head;
+        let fetched = pipeline::fetch_carried_objects(
+            forge,
+            &head.repo,
+            &head.sha,
+            package,
+            &root,
+            carried.tags,
+            &plan.observed,
+        )
+        .await?;
+        carried_objects = fetched.found;
+        if !fetched.missing.is_empty() {
+            // A row whose object the head cannot supply follows the registry instead: named, so a tag
+            // confirmed gone leaves rather than keeping a row nothing backs.
+            let observations = pipeline::observe_curated(publisher, &physical, &fetched.missing).await?;
+            let replan = pipeline::plan_tags(
+                observations,
+                base_root,
+                &TagSelection::Replace(fetched.missing),
+                &physical.display,
+            )?;
+            for tag in &replan.removed {
+                tracing::warn!(tag = %tag, "dropped a carried tag: its object is not on the stale branch and the registry no longer serves it");
+            }
+            plan.durable_missing.retain(|tag| !replan.removed.contains(tag));
+            plan.observed.extend(replan.observed);
+            plan.removed.extend(replan.removed);
+            root = pipeline::regenerate(base_root, &plan, &request.curated, request.ephemeral, now);
+        }
+    }
     // Only a confirmed-absent row may leave under an additive selection; any other loss is refused.
     if matches!(
         request.curated,
@@ -530,7 +592,15 @@ async fn observe_and_rebuild(
     // Diffed against the commit's own base, never a second read, or a concurrent writer's objects get swept.
     let orphans = pipeline::orphan_paths(Some(base_root), &root, package, forge, base.repo, base.sha).await?;
     let root_bytes = serialize_root(&root);
-    let files = pipeline::build_files(root_path, &root_bytes, package, &plan.observed, &desc.blobs, &orphans);
+    let files = pipeline::build_files(
+        root_path,
+        &root_bytes,
+        package,
+        &plan.observed,
+        &carried_objects,
+        &desc.blobs,
+        &orphans,
+    );
     let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &plan.removed);
     let body = pipeline::change_body(package, base_root, &plan, &dropped);
     Ok(Rebuilt {
@@ -588,7 +658,7 @@ struct RootRead {
     base_ref: String,
     /// The stale branch head's `tags`, merged onto the base root so no tag
     /// announced into the open pull request is lost; `None` unless [`BranchState::Stale`].
-    carried_tags: Option<Value>,
+    carried: Option<BranchHead>,
 }
 
 /// What the per-package announce branch is worth; its name outlives every pull
@@ -692,7 +762,7 @@ async fn read_committed_root(
             base_sha: branch_sha,
             repo: repo.clone(),
             base_ref: branch.to_string(),
-            carried_tags: None,
+            carried: None,
         });
     }
     let base_sha = forge
@@ -703,7 +773,7 @@ async fn read_committed_root(
         })?;
     let bytes = forge.get_file_contents(index_repo, root_path, &base_sha).await?;
     // Only `tags` from a stale branch; every other key of its root may be pre-migration.
-    let carried_tags = match (branch_repo, branch_state) {
+    let carried = match (branch_repo, branch_state) {
         (Some(repo), BranchState::Stale(_)) => branch_head_tags(forge, repo, root_path, branch).await?,
         _ => None,
     };
@@ -713,11 +783,11 @@ async fn read_committed_root(
         base_sha,
         repo: index_repo.clone(),
         base_ref: INDEX_BASE_REF.to_string(),
-        carried_tags,
+        carried,
     })
 }
 
-/// The `tags` object of the announce branch head's root.
+/// The announce branch head: its root's `tags` object and where its objects can be read.
 ///
 /// `None` when the ref, the file or the key is absent: failing instead would keep
 /// the package frozen.
@@ -731,7 +801,7 @@ async fn branch_head_tags(
     repo: &RepoCoordinate,
     root_path: &str,
     branch: &str,
-) -> Result<Option<Value>, AnnounceError> {
+) -> Result<Option<BranchHead>, AnnounceError> {
     let Some(branch_sha) = forge.get_ref_sha(repo, &format!("heads/{branch}")).await? else {
         return Ok(None);
     };
@@ -742,7 +812,11 @@ async fn branch_head_tags(
         path: root_path.to_string(),
         source,
     })?;
-    Ok(root.get("tags").filter(|tags| tags.is_object()).cloned())
+    Ok(root.get("tags").filter(|tags| tags.is_object()).map(|tags| BranchHead {
+        tags: tags.clone(),
+        repo: repo.clone(),
+        sha: branch_sha,
+    }))
 }
 
 #[cfg(test)]
@@ -890,6 +964,7 @@ mod tests {
                 root,
                 repo: &request.index_repo,
                 sha: BASE_SHA,
+                carried: None,
             },
             request,
             "2026-07-25T00:00:00Z",
@@ -2152,13 +2227,20 @@ mod tests {
     /// skipped — so the tag already announced into the open request disappears.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_retry_carries_the_stale_branch_tags_and_resets_the_ref() {
-        let (registry, _) = seed_tags(&["0.9.0"]);
+        // The registry no longer serves the carried tag, so its row and object ride through unobserved.
+        let (digest, path, bytes) = branch_only_object();
+        let registry = StubTransportData::new();
+        probes_answer_manifest_unknown(&registry, 2);
         let forge = FakeForge::new()
             .with_ref(BRANCH_REF, &[Some("branch")])
             .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
             .with_root("base", &committed_root(serde_json::json!({})))
             .with_root("moved", &committed_root(serde_json::json!({})))
-            .with_root("branch", &root_with_a_moved_tag())
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({ "0.9.0": durable_row(&digest) })),
+            )
+            .with_file("branch", &path, &bytes)
             .stale_with(pull_request(6))
             .failing_commits(vec![Some(ForgeError::NonFastForward {
                 branch: BRANCH.to_string(),
@@ -2176,9 +2258,203 @@ mod tests {
             committed_root_bytes(&commits[1])
         );
         assert_eq!(
+            put_at(&commits[1], &path),
+            Some(bytes.as_slice()),
+            "the carried row keeps its object through the retry"
+        );
+        assert_eq!(
             commits[1].1,
             RefUpdate::Reset,
             "a rebuilt branch is still repointed, not fast-forwarded"
+        );
+    }
+
+    /// A row only the stale branch carries, and the object it names as the branch holds it:
+    /// `(digest, object path, bytes)`. The digest is the real SHA-256 of the bytes.
+    fn branch_only_object() -> (String, String, Vec<u8>) {
+        let bytes =
+            br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#.to_vec();
+        let digest = ocx_oci::Algorithm::Sha256.hash(&bytes).to_string();
+        let path = object(&digest, "json");
+        (digest, path, bytes)
+    }
+
+    /// The bytes `commit` writes at `path`, or `None` when it writes none there.
+    fn put_at<'a>(commit: &'a (BTreeMap<String, FileChange>, RefUpdate), path: &str) -> Option<&'a [u8]> {
+        match commit.0.get(path) {
+            Some(FileChange::Put(bytes)) => Some(bytes.as_slice()),
+            Some(FileChange::Delete) | None => None,
+        }
+    }
+
+    /// A stale branch whose root carries one row the base lacks, with that row's object on the
+    /// branch head. Rebuilding on the base must commit the object beside the row, or the index
+    /// holds a root naming an object that exists nowhere.
+    fn stale_forge_carrying(digest: &str, object_path: &str, bytes: &[u8]) -> FakeForge {
+        FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({ "1.1.0": durable_row(digest) })),
+            )
+            .with_file("branch", object_path, bytes)
+            .stale_with(pull_request(5))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_tags_file_rebuild_commits_every_carried_object() {
+        let (digest, path, bytes) = branch_only_object();
+        let (registry, listed) = seed_tags(&["2.0.0"]);
+        let forge = stale_forge_carrying(&digest, &path, &bytes);
+
+        run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the stale rebuild lands");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 1);
+        assert!(
+            committed_root_bytes(&commits[0]).contains("1.1.0"),
+            "the carried row rides the rebuild"
+        );
+        assert_eq!(
+            put_at(&commits[0], &path),
+            Some(bytes.as_slice()),
+            "the carried row's object is committed with it"
+        );
+        assert!(
+            put_at(&commits[0], &object(&listed, "json")).is_some(),
+            "the listed tag's object is committed too"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_refresh_commits_the_object_of_a_carried_durable_row_whose_tag_is_gone() {
+        let (digest, path, bytes) = branch_only_object();
+        let registry = StubTransportData::new();
+        probes_answer_manifest_unknown(&registry, 1);
+        let forge = stale_forge_carrying(&digest, &path, &bytes);
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the stale rebuild lands");
+
+        assert_eq!(outcome.durable_missing, strings(&["1.1.0"]));
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            put_at(&commits[0], &path),
+            Some(bytes.as_slice()),
+            "the kept row keeps its object"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_race_retry_commits_every_carried_object() {
+        let (digest, path, bytes) = branch_only_object();
+        let (registry, _) = seed_tags(&["2.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .with_root(
+                "branch",
+                &committed_root(serde_json::json!({ "1.1.0": durable_row(&digest) })),
+            )
+            .with_file("branch", &path, &bytes)
+            .stale_with(pull_request(5))
+            .failing_commits(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the rebuild retries and lands");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(
+            put_at(&commits[1], &path),
+            Some(bytes.as_slice()),
+            "the retry carries the object too"
+        );
+    }
+
+    /// An object the branch head lacks, or holds under bytes that do not hash to the row's
+    /// digest, cannot be copied: the tag is re-observed and the row follows the registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_carried_object_the_head_cannot_supply_is_re_observed_from_the_registry() {
+        let (digest, path, _) = branch_only_object();
+        for head_bytes in [None, Some(b"not the object".as_slice())] {
+            let (registry, served) = seed_tags(&["2.0.0", "1.1.0"]);
+            let mut forge = stale_forge_carrying(&digest, &path, b"");
+            forge.files.clear();
+            if let Some(bytes) = head_bytes {
+                forge = forge.with_file("branch", &path, bytes);
+            }
+
+            run_announce(
+                &forge,
+                TagSelection::UnionFile(strings(&["2.0.0"])),
+                AnnounceTarget::Direct,
+                registry,
+            )
+            .await
+            .expect("the stale rebuild lands");
+
+            let commit = &forge.commits()[0];
+            assert!(
+                put_at(commit, &object(&served, "json")).is_some(),
+                "the re-observed tag's object is committed ({head_bytes:?})"
+            );
+            assert_eq!(
+                tag_row(committed_root_bytes(commit).as_bytes(), "1.1.0")["content"],
+                served,
+                "the row now names what the registry serves ({head_bytes:?})"
+            );
+            assert!(
+                put_at(commit, &path).is_none(),
+                "the unverifiable bytes are never committed"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_carried_row_with_no_object_and_no_tag_is_dropped() {
+        let (digest, path, _) = branch_only_object();
+        let (registry, _) = seed_tags(&["2.0.0"]);
+        probes_answer_manifest_unknown(&registry, 1);
+        let mut forge = stale_forge_carrying(&digest, &path, b"");
+        forge.files.clear();
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::UnionFile(strings(&["2.0.0"])),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("a row nothing backs is dropped, not refused");
+
+        assert_eq!(outcome.removed, strings(&["1.1.0"]));
+        let commit = &forge.commits()[0];
+        assert_eq!(
+            tag_keys(committed_root_bytes(commit).as_bytes()),
+            strings(&["2.0.0"]),
+            "no row survives without its object"
         );
     }
 
@@ -2987,14 +3263,16 @@ mod tests {
     async fn a_row_a_stale_rebuild_re_proposes_is_removed_by_the_next_naming_announce() {
         let base = committed_root(serde_json::json!({}));
         let (registry, _) = seed_tags(&["1.0.0"]);
+        let (carried_digest, carried_path, carried_bytes) = branch_only_object();
         let branch_root = committed_root(serde_json::json!({
-            "9.0.0": ephemeral_row(&digest('9')),
+            "9.0.0": ephemeral_row(&carried_digest),
         }));
         let stale = FakeForge::new()
             .with_ref(BRANCH_REF, &[Some("branch")])
             .with_ref(MAIN_REF, &[Some("base")])
             .with_root("base", &base)
             .with_root("branch", &branch_root)
+            .with_file("branch", &carried_path, &carried_bytes)
             .stale_with(pull_request(5));
 
         run_announce(
@@ -3011,6 +3289,11 @@ mod tests {
         assert!(
             re_proposed.contains("9.0.0"),
             "the branch's row rides the rebuild: {re_proposed}"
+        );
+        assert_eq!(
+            put_at(&proposed[0], &carried_path),
+            Some(carried_bytes.as_slice()),
+            "the re-proposed row rides with its object"
         );
 
         let (registry, _) = seed_tags(&["1.0.0"]);

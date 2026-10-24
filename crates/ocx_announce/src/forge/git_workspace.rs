@@ -3078,8 +3078,8 @@ mod tests {
     /// `base.json` is the seed commit's own file, so the first removal is real:
     /// the `read-tree` brings the entry in and the `--force-remove` has to take
     /// it back out. `never-committed.json` is in the same commit because that is
-    /// the state the orphan diff routinely produces — a root may reference an
-    /// object some earlier run never wrote — and a driver that refused there
+    /// the state the orphan diff routinely produces — it names every object the
+    /// previous root referenced, written or not — and a driver that refused there
     /// would fail an ordinary announce.
     ///
     /// The tree is the assertion rather than the argv: a build that produced the

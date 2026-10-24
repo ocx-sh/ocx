@@ -154,7 +154,7 @@ pub async fn claim(
     )
     .await?;
     // `&[]`: claim never writes tags; its only CAS objects are the description's payload blobs.
-    let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &observed.blobs, &orphans);
+    let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &[], &observed.blobs, &orphans);
 
     // Always `Updated` (no branch to compare against). Push access is `skipped_all()`, never asked of
     // the forge: GitHub answers an unreadable `permissions` with exit 80.
