@@ -61,6 +61,21 @@ tasks:
           printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
           python3 scripts/test_bundle.py bundle --target "$t" --cache-rc={{shellQuote .CACHE_RC}}
 
+  # `build`, `test:bundle` and `test:bin` for one target in a single Bazel invocation. Run one after
+  # the other they are two serial crate chains (the binary's, then the tests'); in one `bazel build`
+  # the two overlap. The same flags as the separate tasks, so the cache is shared, and the same files
+  # land at the same paths: target/cross/<triple>/ocx[.exe], unit-tests.tar.gz and test-bin/.
+  build:bundle:
+    desc: 'Cross-build ocx, the unit-test bundle and the acceptance test-bin for TARGET=<triple> in one Bazel invocation'
+    requires:
+      vars: [TARGET]
+    cmds:
+      - cmd: |
+          set -euo pipefail
+          t={{shellQuote .TARGET}}
+          printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
+          python3 scripts/test_bundle.py bundle --target "$t" --with-ocx --with-test-bin --cache-rc={{shellQuote .CACHE_RC}}
+
   test:run:
     desc: 'Run a unit-test bundle natively: BUNDLE=<path> [SOURCE_ROOT=<checkout>] [JUNIT=<path>] [FILTER=<substring>]; needs only Python'
     summary: |

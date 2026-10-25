@@ -66,17 +66,21 @@ jobs:
       # compile just to scan it is the cost this restructure removes. The scan
       # still runs over the real release bytes in `scan-binaries.yml`
       # (called by `release.yml` and `deploy-dev.yml`) before anything ships.
-      - name: Cross-build ocx
-        env:
-          TARGET: ${{ matrix.target }}
-        run: task cross:build TARGET="$TARGET"
-      - name: Bundle unit tests
+      # A leg with a bundle builds the binary, the unit tests and the acceptance binaries in one Bazel
+      # invocation (`cross:build:bundle`): the binary's crate chain and the tests' overlap there, where
+      # separate steps ran them one after the other. The files land where the separate tasks put them.
+      - name: Cross-build ocx, unit tests and acceptance binaries
         if: matrix.bundle
         env:
           TARGET: ${{ matrix.target }}
-        run: task cross:test:bundle TARGET="$TARGET"
+        run: task cross:build:bundle TARGET="$TARGET"
+      - name: Cross-build ocx
+        if: ${{ !matrix.bundle }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: task cross:build TARGET="$TARGET"
       - name: Stage acceptance binaries
-        if: matrix.test-bin
+        if: ${{ matrix.test-bin && !matrix.bundle }}
         env:
           TARGET: ${{ matrix.target }}
         run: task cross:test:bin TARGET="$TARGET"
