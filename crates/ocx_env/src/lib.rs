@@ -82,7 +82,7 @@ pub enum Child {
     Inherit,
     /// Removed from a plugin-dispatched child and from every env `apply_ocx_config` writes; [`credential_keys`] lists them.
     Scrub,
-    /// Passed on explicitly to a child that starts from a clean environment.
+    /// Written or cleared explicitly for a child: it gets the value this process resolved, never the inherited one.
     Forward,
 }
 

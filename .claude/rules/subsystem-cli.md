@@ -328,7 +328,7 @@ Strict isolation rules:
 - `check_global_project_exclusivity` (in `app/context.rs`, called from `Context::try_init`) closes env-sourced gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
 - `ocx exec` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
 - `ocx --global exec -- cmd` composes global toolchain env for child process only; never mutates parent shell.
-- `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
+- `OCX_GLOBAL` is the env-var equivalent. Never forwarded: `apply_ocx_config` always clears it, so a child ocx selects its own tier and a nested `--project` cannot hit the exclusivity check.
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
 - `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on any `ocx package` subcommand.
 

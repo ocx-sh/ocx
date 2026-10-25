@@ -114,7 +114,8 @@ crate::env_vars! {
     /// otherwise. Setting it together with `OCX_PROJECT` is a usage error (exit 64).
     ///
     /// The global toolchain never composes into project-tier resolution, and `ocx exec` never sees
-    /// global packages.
+    /// global packages. A child ocx, a launcher re-entry included, does not inherit it and can take
+    /// `--project`.
     pub OCX_GLOBAL: Bool, Public, child = Forward;
     /// Path to the local index directory. Mirrors `--index`.
     ///

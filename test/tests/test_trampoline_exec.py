@@ -601,6 +601,67 @@ def test_item38_an_exported_ocx_project_does_not_override_the_baked_selector(
     assert other.default_package.marker not in result.stdout, result.stdout
 
 
+def test_item38_a_tool_under_global_exec_sees_no_ocx_global_and_may_name_its_own_project(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The outer ``--global`` never reaches the tool: its own ``--project`` is not a conflict.
+
+    A forwarded ``OCX_GLOBAL=1`` makes a nested ``ocx --project <file> status`` exit 64 for
+    a flag nobody typed. One interpreter reads its own environment and spawns the nested
+    ocx, so both observations come from the block ``ocx exec`` built; ``OCX_BINARY_PIN``,
+    forwarded in the same pass, is asserted present so the absence is not vacuous.
+
+    RED: forward ``cfg.global.then_some("1")`` for ``OCX_GLOBAL`` in ``apply_ocx_config``.
+    """
+    label = uuid4().hex[:8]
+    package = make_package(
+        ocx,
+        f"t_{label}_glob",
+        "1.0.0",
+        tmp_path,
+        cascade=False,
+        bins=[f"globin{label}"],
+    )
+    added = run_in(ocx, tmp_path, "--global", "add", package.fq)
+    assert added.returncode == EXIT_SUCCESS, (
+        f"seeding the global tier; rc={added.returncode}\n{added.stderr}"
+    )
+    nested = tmp_path / f"nested-{label}"
+    nested.mkdir()
+    nested_toml = write_ocx_toml(nested, "[tools]\n")
+
+    probe = (
+        "import os, subprocess, sys\n"
+        "print('pin=' + str('OCX_BINARY_PIN' in os.environ))\n"
+        "print('global=' + str('OCX_GLOBAL' in os.environ))\n"
+        "run = subprocess.run([sys.argv[1], '--project', sys.argv[2], 'status'], capture_output=True, text=True)\n"
+        "sys.stderr.write(run.stderr)\n"
+        "sys.exit(run.returncode)\n"
+    )
+    result = run_in(
+        ocx,
+        tmp_path,
+        "--global",
+        "exec",
+        "--",
+        sys.executable,
+        "-c",
+        probe,
+        str(ocx.binary),
+        str(nested_toml),
+    )
+
+    assert "pin=True" in result.stdout, (
+        f"the forwarding pass must have run; got {result.stdout!r}"
+    )
+    assert "global=False" in result.stdout, (
+        f"OCX_GLOBAL must not reach the tool; got {result.stdout!r}"
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"a nested --project must not conflict with the outer --global; rc={result.returncode}\n{result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Item 36 — a trampoline whose baked home went bad
 # ---------------------------------------------------------------------------
