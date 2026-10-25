@@ -831,6 +831,8 @@ Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` 
 `--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
 launcher loses the outer composition's names.
 
+The per-prompt `ocx:` summary line never lists it, nor any other `__OCX_*` key.
+
 - Visibility: plumbing
 - Value: `json`
 - See: [Execution records](../explanation/execution-records.md)

@@ -501,6 +501,8 @@ crate::env_vars! {
     /// Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
     /// `--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
     /// launcher loses the outer composition's names.
+    ///
+    /// The per-prompt `ocx:` summary line never lists it, nor any other `__OCX_*` key.
     pub __OCX_LAUNCH_IDENTITIES: Json, Plumbing;
     /// Set by ocx on every credential helper it starts; an ocx running under it never downloads.
     ///
