@@ -690,7 +690,7 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
     ),
     ("OCX_KEY_PASSWORD", "Sign a release", "../publishing/sign-a-release.md"),
     (
-        "OCX_LAUNCH_IDENTITIES",
+        "__OCX_LAUNCH_IDENTITIES",
         "Execution records",
         "../explanation/execution-records.md",
     ),

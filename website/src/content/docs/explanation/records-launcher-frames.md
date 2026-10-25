@@ -8,7 +8,7 @@ This page explains the extra frames that appear in execution records when an ent
 
 ## Forwarded names and degraded frames {#frames-identity}
 
-The inner frame can name its package only when the parent forwarded the name in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. A launcher finds its package by directory. Every name that resolves to the same digest shares that directory, so only the parent knows which name it used.
+The inner frame can name its package only when the parent forwarded the name in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. A launcher finds its package by directory. Every name that resolves to the same digest shares that directory, so only the parent knows which name it used.
 
 OCX sets the variable, never you, and only while a [`[patches]`][config-patches] tier is in effect. The value is a JSON object mapping each content digest a composition resolved to the `registry/repository[:tag]` names it was resolved under. `no_patches` marks a package the project opted out.
 

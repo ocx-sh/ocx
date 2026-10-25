@@ -436,7 +436,7 @@ async fn project_entries(
 fn fold_global_launch_identities(global: &[Entry], project: &mut [Entry]) {
     use ocx_package::launch::LaunchIdentities;
 
-    let key = ocx_env::OCX_LAUNCH_IDENTITIES.name;
+    let key = ocx_env::__OCX_LAUNCH_IDENTITIES.name;
     let Some(global_value) = global.iter().rev().find(|entry| entry.key == key) else {
         return;
     };
@@ -1723,7 +1723,7 @@ mod session_path_tests {
 
     fn identities_entry(value: String) -> Entry {
         Entry {
-            key: ocx_env::OCX_LAUNCH_IDENTITIES.name.to_owned(),
+            key: ocx_env::__OCX_LAUNCH_IDENTITIES.name.to_owned(),
             value,
             kind: ModifierKind::Constant,
             separator: None,
@@ -1760,7 +1760,7 @@ mod session_path_tests {
     fn leaving_the_project_retires_its_launch_identities() {
         let global_value = format!(r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}}}}"#);
         let project_value = format!(r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#);
-        let key = ocx_env::OCX_LAUNCH_IDENTITIES.name.to_owned();
+        let key = ocx_env::__OCX_LAUNCH_IDENTITIES.name.to_owned();
 
         for global in [Vec::new(), vec![identities_entry(global_value.clone())]] {
             let mut before = Env::clean();

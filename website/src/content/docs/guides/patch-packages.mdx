@@ -103,7 +103,7 @@ A system-required tier always applies, whatever `no-patches` says. Enforcement w
 
 The opt-out is read from the project's `ocx.toml`, so it applies only where that file is in scope: [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and [`ocx direnv export`][cmd-direnv-export]. Each of them composes the environment itself after reading the project config.
 
-A binary launched by `ocx exec` can still honor the opt-out one hop further. If it re-enters ocx through its own generated launcher, `ocx exec` forwards the opt-out over [`OCX_PATCHES`][env-ocx-patches]. `ocx env`, `ocx direnv export` and the shell hook mark the opted-out package in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], so a launcher run from the exported `PATH` honors it too.
+A binary launched by `ocx exec` can still honor the opt-out one hop further. If it re-enters ocx through its own generated launcher, `ocx exec` forwards the opt-out over [`OCX_PATCHES`][env-ocx-patches]. `ocx env`, `ocx direnv export` and the shell hook mark the opted-out package in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities], so a launcher run from the exported `PATH` honors it too.
 
 Any other launcher invocation has no opt-out to decode. That covers a launcher run by absolute path and one run through [`ocx package exec`][cmd-package-exec]. It composes the companion overlay as if `no-patches` were never set. The [environment composition reference][env-composition-patch-opt-out] lists each case.
 
@@ -186,7 +186,7 @@ OCX serialises the resolved tier into [`OCX_PATCHES`][env-ocx-patches], a JSON o
 export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_template":"{registry}/{repository}","required":true,"system_required":false,"no_patches":[]}'
 ```
 
-`no_patches` carries the project's [per-package opt-out](#patches-no-patches) as `registry/repository` keys. A launcher matches those keys against the names in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. An empty or absent array is byte-identical to no opt-out being forwarded.
+`no_patches` carries the project's [per-package opt-out](#patches-no-patches) as `registry/repository` keys. A launcher matches those keys against the names in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. An empty or absent array is byte-identical to no opt-out being forwarded.
 
 A malformed value aborts startup. That means a value that is not valid JSON or lacks the `registry` field. OCX refuses to run silently without the operator-mandated overlay, the same fail-closed posture as a malformed [`OCX_MIRRORS`][env-mirrors].
 

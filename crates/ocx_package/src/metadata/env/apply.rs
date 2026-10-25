@@ -79,8 +79,8 @@ impl EnvEntriesExt for Env {
             && let Some(identities) = env.identities
         {
             match identities.encode() {
-                Some(json) => self.set(ocx_env::OCX_LAUNCH_IDENTITIES.name, json),
-                None => self.remove(ocx_env::OCX_LAUNCH_IDENTITIES.name),
+                Some(json) => self.set(ocx_env::__OCX_LAUNCH_IDENTITIES.name, json),
+                None => self.remove(ocx_env::__OCX_LAUNCH_IDENTITIES.name),
             }
         }
     }
@@ -769,13 +769,13 @@ mod tests {
 
     fn identities() -> crate::launch::LaunchIdentities {
         let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, IDENTITIES);
+        guard.set(&ocx_env::__OCX_LAUNCH_IDENTITIES, IDENTITIES);
         crate::launch::LaunchIdentities::from_env().unwrap().unwrap()
     }
 
     fn child_env_with(identities: Option<&crate::launch::LaunchIdentities>, view: &OcxConfigView) -> Env {
         let mut child = Env::clean();
-        child.set(ocx_env::OCX_LAUNCH_IDENTITIES.name, "inherited");
+        child.set(ocx_env::__OCX_LAUNCH_IDENTITIES.name, "inherited");
         child.apply_child_env(
             ChildEnv {
                 composed: &[],
@@ -794,7 +794,7 @@ mod tests {
         let child = child_env_with(Some(&identities), &patched_view());
         assert_eq!(
             child
-                .get(ocx_env::OCX_LAUNCH_IDENTITIES.name)
+                .get(ocx_env::__OCX_LAUNCH_IDENTITIES.name)
                 .and_then(|value| value.to_str()),
             Some(IDENTITIES)
         );
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn apply_child_env_clears_inherited_identities_for_an_empty_map() {
         let child = child_env_with(Some(&crate::launch::LaunchIdentities::default()), &patched_view());
-        assert!(child.get(ocx_env::OCX_LAUNCH_IDENTITIES.name).is_none());
+        assert!(child.get(ocx_env::__OCX_LAUNCH_IDENTITIES.name).is_none());
     }
 
     /// No `[patches]` tier means no change, and `None` keeps a nested launch's inherited map.
@@ -817,7 +817,7 @@ mod tests {
         ] {
             assert_eq!(
                 child
-                    .get(ocx_env::OCX_LAUNCH_IDENTITIES.name)
+                    .get(ocx_env::__OCX_LAUNCH_IDENTITIES.name)
                     .and_then(|value| value.to_str()),
                 Some("inherited")
             );

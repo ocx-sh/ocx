@@ -481,7 +481,7 @@ Configuration is invalid or incomplete.
 | `invalid_managed_config_source` | The managed-config source is not a valid OCI identifier |
 | `invalid_toolchain_name_charset` | A group or binding name carries a character toolchain paths refuse |
 | `invalid_trust_policy` | The payload declares an unusable trust-policy entry |
-| `launch_identities_invalid` | The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed |
+| `launch_identities_invalid` | The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed |
 | `lock_missing` | ocx.lock does not exist |
 | `lock_repository_not_bare` | ocx.lock records a repository carrying a tag or digest |
 | `managed_config_contains_managed_section` | The managed-config payload contains a [managed] section |
