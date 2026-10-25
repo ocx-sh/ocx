@@ -29,8 +29,6 @@ from src.assertions import assert_symlink_exists
 
 pytestmark = pytest.mark.command("install", "about", "version")
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 
 def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
     """Read the marker from the installed ``bin/hello`` binary.
@@ -75,6 +73,7 @@ requires_real_host = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -145,6 +144,7 @@ def test_install_selects_libc_glibc_on_glibc_host(
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -216,6 +216,7 @@ def test_install_selects_libc_musl_on_alpine_gcompat_host(
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -290,6 +291,7 @@ def test_install_falls_back_when_libc_undetectable(
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -334,6 +336,7 @@ def test_install_errors_when_no_compatible_entry(
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -394,6 +397,7 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.parametrize(
     ("seam", "features"),
     [("glibc", ["libc.glibc"]), ("glibc,musl", ["libc.glibc", "libc.musl"])],
@@ -412,6 +416,7 @@ def test_about_json_reports_host_platform_with_features(
     assert about["platforms"][0]["os.features"] == features, about["platforms"]
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -439,6 +444,7 @@ def test_about_plain_does_not_double_render_libc(ocx: OcxRunner) -> None:
     )
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     sys.platform != "linux",
     reason="libc differentiation only applies to linux/amd64 hosts",
@@ -570,6 +576,7 @@ def test_install_discriminates_glibc_vs_musl_by_explicit_platform(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_real_host
 def test_detect_reports_glibc_on_nixos_store_interp(ocx: OcxRunner) -> None:
     """NixOS without nix-ld: the loader lives under ``/nix/store``, not an FHS
@@ -585,6 +592,7 @@ def test_detect_reports_glibc_on_nixos_store_interp(ocx: OcxRunner) -> None:
     )
 
 
+@pytest.mark.requires_testing_build
 @requires_real_host
 def test_detect_reports_libc_on_gentoo_prefix(ocx: OcxRunner) -> None:
     """Gentoo Prefix: the loader lives under the prefix root, not an FHS path.

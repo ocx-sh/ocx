@@ -28,8 +28,6 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_prune*")
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 BUILD_1 = "0.5.0-canary_20260101000000"
 BUILD_2 = "0.5.0-canary_20260102000000"
 BUILD_3 = "0.5.0-canary_20260103000000"
@@ -593,6 +591,7 @@ def _seed_change_request_track(
     return _seed_root(ocx, server, fake_forge, repository, rows), rows
 
 
+@pytest.mark.requires_testing_build
 def test_canary_recipe_replaces_old_builds_in_the_registry_and_the_written_root(
     ocx: OcxRunner,
     unique_repo: str,
@@ -646,6 +645,7 @@ def test_canary_recipe_replaces_old_builds_in_the_registry_and_the_written_root(
     assert rows[ROLLING].get("ephemeral") is True, "the rolling row keeps the marker it had"
 
 
+@pytest.mark.requires_testing_build
 def test_teardown_recipe_removes_the_track_and_leaves_the_release_tags(
     ocx: OcxRunner,
     unique_repo: str,
@@ -671,6 +671,7 @@ def test_teardown_recipe_removes_the_track_and_leaves_the_release_tags(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_a_rerun_teardown_selects_nothing_and_a_refresh_then_removes_the_rows(
     ocx: OcxRunner,
     unique_repo: str,

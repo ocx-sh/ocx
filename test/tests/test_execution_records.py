@@ -113,8 +113,6 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 
 pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*", "install")
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------
@@ -1184,6 +1182,7 @@ def test_record_pid_is_the_process_that_runs_the_tool(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_record_written_when_every_best_effort_probe_fails(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ) -> None:
@@ -2149,6 +2148,7 @@ def test_required_true_with_no_sink_is_a_configuration_error(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_a_symlinked_system_config_refuses_the_launch(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ) -> None:

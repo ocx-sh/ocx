@@ -54,7 +54,6 @@ pytestmark = [
         reason="self setup fence/shim tests assume POSIX sh semantics.",
     ),
     pytest.mark.command("self_group/setup", "index_update"),
-    pytest.mark.requires_testing_build,
 ]
 
 # The install-layout path the bootstrap candidate lives at, relative to OCX_HOME.
@@ -873,6 +872,7 @@ def test_setup_forward_version_fence_collapses_to_v1(ocx: OcxRunner, tmp_path: P
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_setup_bootstrap_failure_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
     """When the bootstrap fails, setup writes zero shims and zero profile edits.
 
@@ -957,6 +957,7 @@ def test_setup_offline_with_no_install_exits_81(ocx: OcxRunner, tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_setup_bootstrap_pulls_latest_published(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1099,6 +1100,7 @@ def _setup_pinned(
 # ── UX row: pinned tag install ───────────────────────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_pinned_tag_install_reports_version_and_digest(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1157,6 +1159,7 @@ def test_pinned_tag_install_reports_version_and_digest(
 # ── UX row: re-run same pin → AlreadyPresent with non-null digest ────────────
 
 
+@pytest.mark.requires_testing_build
 def test_rerun_same_pin_is_already_present_with_digest(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1196,6 +1199,7 @@ def test_rerun_same_pin_is_already_present_with_digest(
 # ── UX row: same pin but `current` re-pointed elsewhere → re-select ──────────
 
 
+@pytest.mark.requires_testing_build
 def test_pin_reselects_when_current_moved_elsewhere(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1243,6 +1247,7 @@ def test_pin_reselects_when_current_moved_elsewhere(
 # ── UX row: downgrade warning on stderr ──────────────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_downgrade_warns_on_stderr(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1293,6 +1298,7 @@ def test_downgrade_warns_on_stderr(
 # ── UX row: no downgrade warning when upgrading ──────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_upgrade_does_not_warn_downgrade(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1334,6 +1340,7 @@ def test_upgrade_does_not_warn_downgrade(
 # ── UX row: `tag@digest` mismatch → exit 65 ──────────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_tag_digest_mismatch_exits_65(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1379,6 +1386,7 @@ def test_tag_digest_mismatch_exits_65(
 # ── UX row: `tag@digest` happy path → exit 0, JSON digest matches ────────────
 
 
+@pytest.mark.requires_testing_build
 def test_tag_digest_pin_happy_path(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1434,6 +1442,7 @@ def test_tag_digest_pin_happy_path(
 # ── UX row: bad VERSION syntax → exit 64 ─────────────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.parametrize("bad_spec", [
     "1.2.3@",        # trailing @ (no digest after @)
     "@",             # bare @
@@ -1466,6 +1475,7 @@ def test_bad_version_syntax_exits_64(
 # ── UX row: --dry-run with pin → WouldPull + resolved digest ─────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_dry_run_pinned_reports_would_pull_with_digest(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1514,6 +1524,7 @@ def test_dry_run_pinned_reports_would_pull_with_digest(
 # ── UX row: --dry-run with satisfied pin → AlreadyPresent, not WouldPull ─────
 
 
+@pytest.mark.requires_testing_build
 def test_dry_run_pinned_already_present_when_satisfied(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1580,6 +1591,7 @@ def test_dry_run_pinned_already_present_when_satisfied(
 # ── UX row: --frozen with digest pin (cached) works ─────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_frozen_digest_pin_works_when_cached(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1634,6 +1646,7 @@ def test_frozen_digest_pin_works_when_cached(
 # ── UX row: --frozen tag pin uncached → exit 81 ──────────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_frozen_tag_pin_uncached_exits_81(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1664,6 +1677,7 @@ def test_frozen_tag_pin_uncached_exits_81(
 # ── UX row: literal `latest` → ordinary tag lookup ───────────────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_literal_latest_is_ordinary_tag_lookup(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1689,6 +1703,7 @@ def test_literal_latest_is_ordinary_tag_lookup(
 # ── UX row: digest-only install → version omitted, digest set ────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_digest_only_install_omits_version_field(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -1739,6 +1754,7 @@ def test_digest_only_install_omits_version_field(
 # ── UX row: digest-only pin never emits a downgrade warning ──────────────────
 
 
+@pytest.mark.requires_testing_build
 def test_digest_only_pin_no_downgrade_warning(
     ocx: OcxRunner,
     tmp_path: Path,
@@ -2255,6 +2271,7 @@ def test_setup_extra_ca_certs_plain_report_row(ocx: OcxRunner, tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_setup_concurrent_shell_flag_and_extra_ca_edits_both_land(ocx: OcxRunner, tmp_path: Path) -> None:
     """ocx#468: two ``ocx self setup`` invocations editing ``$OCX_HOME/config.toml``
     at the same time — one persisting ``[shell] hook`` (before its bootstrap),
@@ -2317,6 +2334,7 @@ def test_setup_concurrent_shell_flag_and_extra_ca_edits_both_land(ocx: OcxRunner
     )
 
 
+@pytest.mark.requires_testing_build
 def test_setup_extra_ca_certs_under_the_system_lock_is_reported_and_not_persisted(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

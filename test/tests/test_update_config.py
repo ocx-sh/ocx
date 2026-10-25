@@ -35,8 +35,6 @@ pytestmark = pytest.mark.skipif(
     reason="State-file path assertions and the child-env probes use POSIX paths and `sh`.",
 )
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 EXIT_DATA = 65
 EXIT_CONFIG = 78
 
@@ -144,6 +142,7 @@ def _snapshot_digest(ocx: OcxRunner) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_config_interval_sets_the_self_check_window(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     """`[update] interval = "6h"`: a 5 h old probe is throttled, a 7 h old one fires.
@@ -164,6 +163,7 @@ def test_config_interval_sets_the_self_check_window(ocx: OcxRunner, unique_repo:
     )
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 @pytest.mark.parametrize(
     ("value", "inside", "beyond"),
@@ -185,6 +185,7 @@ def test_env_interval_sets_the_self_check_window(
     assert _fires_after(ocx, tmp_path, env, state, beyond), f"{value!r}: past the window, probes"
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_zero_env_interval_probes_on_every_command(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     """`OCX_UPDATE_CHECK_INTERVAL=0` probes even when the state file is a minute old.
@@ -205,6 +206,7 @@ def test_zero_env_interval_probes_on_every_command(ocx: OcxRunner, unique_repo: 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_self_manual_in_config_never_probes_and_touches_no_state(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
@@ -222,6 +224,7 @@ def test_self_manual_in_config_never_probes_and_touches_no_state(
     _seed(ocx, tmp_path, env)  # asserts the probe now runs and leaves its file
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_env_self_policy_beats_config(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     """Config `self = "manual"` plus `OCX_SELF_UPDATE=notify`: the probe runs.
@@ -278,6 +281,7 @@ def test_update_section_in_ocx_toml_is_refused_by_name(ocx: OcxRunner, unique_re
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_toolchain_apply_warns_once_in_config_and_stays_quiet_from_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
@@ -301,6 +305,7 @@ def test_toolchain_apply_warns_once_in_config_and_stays_quiet_from_env(
     assert len(_update_warnings(terminal, "toolchain")) == 1, f"exactly one warning expected:\n{terminal}"
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_invalid_update_values_warn_and_fall_back_to_the_defaults(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
@@ -326,6 +331,7 @@ def test_invalid_update_values_warn_and_fall_back_to_the_defaults(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_managed_payload_cannot_carry_update(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
@@ -519,6 +525,7 @@ def test_ocx_toml_env_cannot_declare_an_update_key(ocx: OcxRunner, unique_repo: 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_kill_switch_stops_every_background_probe(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     """`OCX_NO_UPDATE_CHECK=1`: no self probe and no toolchain probe, no state files at all.
@@ -538,6 +545,7 @@ def test_kill_switch_stops_every_background_probe(ocx: OcxRunner, unique_repo: s
     _seed(ocx, tmp_path, env)
 
 
+@pytest.mark.requires_testing_build
 @requires_pty
 def test_config_refresh_kill_switch_does_not_stop_the_self_check(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path

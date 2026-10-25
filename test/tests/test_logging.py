@@ -18,8 +18,6 @@ import pytest
 
 from src.helpers import SIGSTORE_DIR
 
-pytestmark = pytest.mark.requires_testing_build
-
 LEVELS = ("trace", "debug", "info", "warn", "error")
 # With debug or trace enabled, the compact format (no ANSI on a pipe):
 # `<timestamp> <LEVEL> <spans and message>`.
@@ -175,6 +173,7 @@ def test_debug_level_reaches_library_events(ocx):
     assert not quiet, f"--log-level info rendered DEBUG lines: {quiet!r}"
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.parametrize(
     ("target", "level", "extra_env", "argv"), LIBRARY_TARGETS, ids=[t for t, _, _, _ in LIBRARY_TARGETS]
 )

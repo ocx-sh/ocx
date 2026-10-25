@@ -10,6 +10,11 @@ name: Scan Binaries
 #                           three placeholder markers, floored on the number
 #                           of binaries read, so a download that fetched
 #                           nothing cannot pass;
+#   --link --min-files <n>  the Linux binaries of the cargo-dist archives
+#                           (`extract: true`; deploy-dev ships static musl and is
+#                           not link-checked) — no `GLIBC_` version above the
+#                           script's `GLIBC_FLOOR`, no `NEEDED` library off its
+#                           allow-list, floored on the Linux binaries read;
 #   --exec                  the one binary native to this runner — its
 #                           `version` report must carry release provenance.
 #
@@ -47,6 +52,11 @@ on:
         required: false
         type: number
         default: 8
+      link-min-files:
+        description: Reader floor of the link check — the number of Linux binaries it must read (one per Linux target). Applies to cargo-dist archives only.
+        required: false
+        type: number
+        default: 4
       extract:
         description: true = the artifacts are cargo-dist archives (`.tar.gz` / `.zip`) holding `ocx` / `ocx.exe`; false = they are the raw binaries.
         required: false
@@ -74,18 +84,20 @@ jobs:
           path: ${{ runner.temp }}/scan-download
           merge-multiple: true
 
-      - name: Scan every binary, exec the native one
+      - name: Scan every binary, link-check the Linux ones, exec the native one
         shell: bash
         env:
           DOWNLOAD: ${{ runner.temp }}/scan-download
           STAGE: ${{ runner.temp }}/scan-stage
           MIN_FILES: ${{ inputs.min-files }}
+          LINK_MIN_FILES: ${{ inputs.link-min-files }}
           EXTRACT: ${{ inputs.extract }}
           NATIVE_TARGET: x86_64-unknown-linux-musl
         run: |
           set -euo pipefail
           mkdir -p "$DOWNLOAD" "$STAGE"
           native=""
+          linux_binaries=()
           if [[ "$EXTRACT" == "true" ]]; then
             shopt -s nullglob
             for archive in "$DOWNLOAD"/ocx-*.tar.gz "$DOWNLOAD"/ocx-*.zip; do
@@ -100,6 +112,7 @@ jobs:
             done
             shopt -u nullglob
             mapfile -t binaries < <(find "$STAGE" -type f \( -name ocx -o -name ocx.exe \) | sort)
+            mapfile -t linux_binaries < <(find "$STAGE" -type f -name ocx -path '*-unknown-linux-*' | sort)
             native="$(find "$STAGE/ocx-$NATIVE_TARGET" -type f -name ocx 2>/dev/null | head -1 || true)"
           else
             mapfile -t binaries < <(find "$DOWNLOAD" -type f | sort)
@@ -112,6 +125,9 @@ jobs:
             exit 1
           fi
           python3 scripts/release_provenance_check.py --scan "${binaries[@]}" --min-files "$MIN_FILES"
+          if [[ "$EXTRACT" == "true" ]]; then
+            python3 scripts/release_provenance_check.py --link "${linux_binaries[@]}" --min-files "$LINK_MIN_FILES"
+          fi
           if [[ -z "$native" ]]; then
             echo "::error::no $NATIVE_TARGET binary among the downloads; --exec has nothing native to run"
             exit 1

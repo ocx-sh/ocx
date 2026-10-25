@@ -40,8 +40,6 @@ pytestmark = pytest.mark.skipif(
     reason="mock credential helper uses POSIX shell scripts",
 )
 
-pytestmark = [pytestmark, pytest.mark.requires_testing_build]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -612,6 +610,7 @@ def test_login_json_format_emits_minimal_payload(
 HELPER_TIMEOUT_SEAM = {"__OCX_TESTING_HELPER_TIMEOUT_MS": "500"}
 
 
+@pytest.mark.requires_testing_build
 def test_login_helper_timeout_exits_75(ocx: OcxRunner, tmp_path: Path) -> None:
     """Edge — a helper that hangs past the budget ⇒ exit 75 (TempFail).
 
