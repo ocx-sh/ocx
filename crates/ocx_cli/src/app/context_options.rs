@@ -34,7 +34,7 @@ pub struct ContextOptions {
     /// Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project
     /// file in effect, instead of discovering a project by CWD walk.
     ///
-    /// Mutually exclusive with `--project`. Resolution-affecting: forwarded to child ocx processes via `OCX_GLOBAL`.
+    /// Mutually exclusive with `--project`. Applies to this invocation only: a child ocx process selects its own tier.
     ///
     /// Equivalent env var: `OCX_GLOBAL`. The global toolchain never composes into project
     /// resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.

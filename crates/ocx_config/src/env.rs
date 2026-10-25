@@ -21,8 +21,7 @@ pub struct OcxConfigView {
     pub frozen: bool,
     pub config: Option<PathBuf>,
     pub project: Option<PathBuf>,
-    /// The global toolchain is the in-effect project file. Forwarded as [`ocx_env::OCX_GLOBAL`];
-    /// only `apply_ocx_config_sets_ocx_global_when_set` observes it, no acceptance test can.
+    /// The global toolchain is the in-effect project file. Never forwarded: `apply_ocx_config` clears `OCX_GLOBAL`.
     pub global: bool,
     /// This invocation's `--no-consent`, forwarded as [`ocx_env::OCX_NO_CONSENT`].
     ///
@@ -220,7 +219,8 @@ impl Env {
         forward!(self, ocx_env::OCX_OFFLINE, cfg.offline.then_some("1"));
         forward!(self, ocx_env::OCX_REMOTE, cfg.remote.then_some("1"));
         forward!(self, ocx_env::OCX_FROZEN, cfg.frozen.then_some("1"));
-        forward!(self, ocx_env::OCX_GLOBAL, cfg.global.then_some("1"));
+        // Always cleared: a child's own `--project` would conflict with an inherited `OCX_GLOBAL`.
+        forward!(self, ocx_env::OCX_GLOBAL, None::<&str>);
         forward!(
             self,
             ocx_env::OCX_CONFIG,
@@ -1251,34 +1251,29 @@ mod tests {
     }
 
     #[test]
-    fn apply_ocx_config_sets_ocx_global_when_set() {
-        // `--global` (item 2, `adr_global_toolchain_tier.md` § Decisions (binding)) is
-        // resolution-affecting, so `apply_ocx_config` MUST forward it to a
-        // child ocx as `OCX_GLOBAL=1` when set, and remove any inherited
-        // value when unset (so a stale parent-shell export cannot beat the
-        // outer ocx's parsed state). This plumbing is REAL (not a stub) — the
-        // guard PASSES now, pinning the contract against future regression.
+    fn apply_ocx_config_never_forwards_ocx_global() {
+        // A child's own `--project` would collide with an inherited `OCX_GLOBAL` at the
+        // tier-exclusivity check, so the tier selector must not cross a spawn: not when
+        // `--global` selected it, and not when the parent shell exported it.
         let mut cfg = view("/abs/ocx");
         cfg.global = true;
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
-        assert_eq!(
-            env.get(ocx_env::OCX_GLOBAL.name).unwrap(),
-            "1",
-            "cfg.global=true must forward OCX_GLOBAL=1 to the child env"
+        // Positive control: the forwarding path ran, so the absence below is not vacuous.
+        assert_eq!(env.get(ocx_env::OCX_BINARY_PIN.name).unwrap(), "/abs/ocx");
+        assert!(
+            env.get(ocx_env::OCX_GLOBAL.name).is_none(),
+            "cfg.global=true must not forward OCX_GLOBAL to the child env"
         );
-        // OCX_GLOBAL travels with the resolution-affecting set, never the
-        // presentation set (which is never forwarded — it would leak into
-        // entrypoint child streams).
-        for presentation in ["OCX_LOG_LEVEL", "OCX_LOG_CONSOLE", "OCX_FORMAT", "OCX_COLOR"] {
-            assert!(
-                env.get(presentation).is_none(),
-                "presentation key `{presentation}` must never ride along with OCX_GLOBAL"
-            );
-        }
 
-        // Unset: a stale inherited OCX_GLOBAL must be cleared so the outer
-        // ocx's parsed state (global=false) wins.
+        let mut env = Env::clean();
+        env.set(ocx_env::OCX_GLOBAL.name, "1");
+        env.apply_ocx_config(&cfg);
+        assert!(
+            env.get(ocx_env::OCX_GLOBAL.name).is_none(),
+            "cfg.global=true must clear an inherited OCX_GLOBAL"
+        );
+
         let mut env = Env::clean();
         env.set(ocx_env::OCX_GLOBAL.name, "1");
         env.apply_ocx_config(&view("/abs/ocx"));
