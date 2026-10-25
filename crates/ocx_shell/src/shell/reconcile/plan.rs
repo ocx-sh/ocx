@@ -110,7 +110,8 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
         .iter()
         .map(|entry| entry.key.as_str())
         .chain(plan.removes.iter().map(|(key, ..)| key.as_str()))
-        .chain(plan.restores.iter().map(|(key, _)| key.as_str()));
+        .chain(plan.restores.iter().map(|(key, _)| key.as_str()))
+        .filter(|key| !is_private_ocx_key(key));
     for key in touched {
         let norm = key_norm(key);
         let mark = match (before.contains(&norm), after.contains(&norm)) {
@@ -132,6 +133,11 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
         Some(name) => Some(format!("{prefix} {tokens} {}", theme.aside(format!("({name})")))),
         None => Some(format!("{prefix} {tokens}")),
     }
+}
+
+/// `__OCX_*` keys are ocx's own bookkeeping, not part of the user's toolchain.
+fn is_private_ocx_key(key: &str) -> bool {
+    key.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("__OCX_"))
 }
 
 /// One `+KEY` / `~KEY` / `-KEY` token, inked by what its mark means.
@@ -2082,6 +2088,26 @@ mod summary_tests {
             Some("ocx: +PATH"),
             "seven contributions to one variable fold to one token"
         );
+    }
+
+    /// An ocx-private `__OCX_*` key is applied but never shown.
+    #[test]
+    fn a_private_ocx_key_is_applied_but_left_out_of_the_summary() {
+        let private = constant("__OCX_LAUNCH_IDENTITIES", "{}");
+        let desired = vec![private.clone(), constant("JAVA_HOME", "/opt/jdk")];
+        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
+        assert!(
+            planned.sets.iter().any(|entry| entry.key == private.key),
+            "the fixture must emit the private key, or leaving it out proves nothing"
+        );
+
+        assert_eq!(
+            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
+            Some("ocx: +JAVA_HOME")
+        );
+        let alone = vec![private];
+        let planned = plan(&alone, &Env::clean(), &Ledger::empty(), &owned());
+        assert_eq!(summary(&planned, &Ledger::empty(), &recording(&alone), &plain()), None);
     }
 
     /// `+` — a variable no previous ledger recorded.
