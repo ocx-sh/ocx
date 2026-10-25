@@ -36,7 +36,7 @@ A Python application normally needs an interpreter, pip or uv and a virtual envi
 ocx package exec dev.ocx.sh/ocx/black:26.5.1 -- black --version
 ```
 
-Nothing on the consumer's machine needs Python, and [`ocx package exec`][cmd-package-exec] runs it in a clean environment. The package declares the interpreter as a private [dependency][guide-dependencies], and each console script of the application becomes a [package entrypoint][publishing-entry-points].
+Nothing on the consumer's machine needs Python, and [`ocx package exec`][cmd-package-exec] runs it in a clean environment. The package declares the interpreter as a private [dependency][guide-dependencies], and each console script of the application becomes a [package entrypoint][publishing-entry-points]. The interpreter itself stays private: the package exposes `python` only when the mirror spec names it in the entrypoint selection.
 
 ### What the translation does {#python-translation}
 
