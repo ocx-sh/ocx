@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
           fetch-depth: 0 # `task secrets` (gitleaks git) scans the full history
-      - uses: ocx-sh/conventions/.github/actions/setup@9a68818180c78cedda0999ffbc384b5a9e75543a # v0.3.0
+      - uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
         with:
           groups: default,lint
           bazel-cache: trusted
@@ -53,7 +53,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ocx-sh/conventions/.github/actions/setup@9a68818180c78cedda0999ffbc384b5a9e75543a # v0.3.0
+      - uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
         with:
           groups: default,test
           bazel-cache: trusted
@@ -62,7 +62,7 @@ jobs:
       - run: task ci:test
       - name: Push JUnit telemetry
         if: always()
-        uses: ocx-sh/conventions/.github/actions/setup@9a68818180c78cedda0999ffbc384b5a9e75543a # v0.3.0
+        uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
         with:
           report: target/reports/junit/*.xml
           otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
@@ -89,7 +89,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ocx-sh/conventions/.github/actions/setup@9a68818180c78cedda0999ffbc384b5a9e75543a # v0.3.0
+      - uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
         with:
           groups: default,build
           # Org secret, presented on every event that carries it; fork PRs see empty secrets and run uncached.
@@ -112,7 +112,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ocx-sh/conventions/.github/actions/setup@9a68818180c78cedda0999ffbc384b5a9e75543a # v0.3.0
+      - uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
         with:
           groups: default,docs
           bazel-cache: trusted
