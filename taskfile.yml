@@ -4,6 +4,30 @@ version: '3'
 
 vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
+  # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string: the CI cache
+  # credential `.github/actions/bazel-cache-rc` writes. It is a startup option,
+  # so every `ocx exec bazel -- bazel` call passes it first (held by
+  # `.claude/tests/test_workflows.py`); a call without it reads the shared cache
+  # anonymously, a 401, and compiles cold, green.
+  #
+  # Derived from the file existing, never from a lane naming it: `--bazelrc` on
+  # a missing path is a hard error (9.2.0: exit 2), a fork PR gets no secrets so
+  # the action writes nothing, and a developer shell has no `$RUNNER_TEMP`. The
+  # last two read the cache anonymously, the documented fallback.
+  #
+  # `printf '%s' "<value>"`, never `printf -- '--bazelrc=%s'`: go-task's shell
+  # (mvdan/sh) takes `--` as the format and silently drops the credential.
+  # Also empty when `.bazelrc.user` already names the file: the setup action's
+  # trusted mode imports it from there, and passing `--bazelrc=` for the same
+  # file reads it twice. The check is on the user rc's text, never on whether
+  # that file exists, so a developer's own `.bazelrc.user` changes nothing.
+  #
+  # ponytail: unquoted at the call site; `$RUNNER_TEMP` has no space on a GitHub
+  # runner. A path with one needs the flag built inside the `cmd:` body.
+  CACHE_RC:
+    sh: |-
+      rc="${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc"
+      test -f "$rc" && { test ! -f '{{.ROOT_DIR}}/.bazelrc.user' || ! grep -qF "$rc" '{{.ROOT_DIR}}/.bazelrc.user'; } && printf '%s' "--bazelrc=$rc" || true
 
 includes:
   bazel: ./taskfiles/bazel.taskfile.yml
@@ -13,6 +37,7 @@ includes:
   rust: ./taskfiles/rust.taskfile.yml
   shell: ./taskfiles/shell.taskfile.yml
   ci: ./taskfiles/ci.taskfile.yml
+  cross: ./taskfiles/cross.taskfile.yml
   coverage: ./taskfiles/coverage.taskfile.yml
   duplo: ./taskfiles/duplo.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
@@ -34,6 +59,9 @@ includes:
   website:
     taskfile: ./website/taskfile.yml
     dir: ./website
+  baseline:
+    taskfile: ./taskfiles/baseline.taskfile.yml
+    flatten: true
 
 tasks:
   ocx:dirty-update:
@@ -62,6 +90,16 @@ tasks:
         cmd: git commit --allow-empty -m "Checkpoint"
       - cmd: git add .
       - cmd: git commit --amend --no-edit --allow-empty
+
+  # The commit-msg gate. The template's `hooks:commit-msg` delegates here when this task exists, instead of its
+  # own subject regex, which refuses the `Checkpoint` and `release:` subjects this repository commits.
+  # CLI_ARGS is the message file prek appends, already shell-quoted by Task: quoting it again breaks a path
+  # with a space. `hooks:pre-commit` stays undefined on purpose: lint and format live behind the verify mark.
+  hooks:repo-commit-msg:
+    desc: 'The commit-msg gate: conventional subject, the Checkpoint and release: carve-outs, a fresh verify mark'
+    silent: true
+    cmds:
+      - python3 scripts/commit_gate.py --check-message {{.CLI_ARGS}}
 
   check:
     # `--locked` makes a hand-merged Cargo.lock fail here, at the next run,
@@ -156,6 +194,7 @@ tasks:
       # against what `.verify:lint` / `.verify:build-test` run, and this is
       # neither — it is the one-line bootstrap that installs the git hooks.
       - task: git:hooks
+      - task: rust:toolchain
       - task: .verify:lint
       - task: .verify:build-test
       - task: .verify:mark
@@ -178,7 +217,7 @@ tasks:
                    (test:rows:check), on every routed and scoped run (an
                    escalate reaches both through `verify`), then only the
                    routed checks: ruff for `test/lint/**`, claude:tests for `.claude/**`,
-                   `.agents/**` and CLAUDE.md, actionlint (+ test_workflows.py)
+                   `.agents/**`, AGENTS.md and CLAUDE.md, actionlint (+ test_workflows.py)
                    for `.github/**`, test:parallel over the touched
                    `test/tests/test_*.py`, scripts:self-test for `scripts/**`,
                    `task --list-all` (a parse) for any taskfile,
@@ -213,7 +252,7 @@ tasks:
       skipped — `--force` re-runs everything.
     vars:
       PLAN:
-        sh: python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --plan
+        sh: python3 "{{.ROOT_DIR}}/scripts/scoped_gate.py" --plan
       DECISION: '{{(fromJson .PLAN).decision}}'
       # Empty unless the decision is `scoped`: an escalated run must not add
       # per-crate steps after the full verify it already ran.
@@ -411,7 +450,7 @@ tasks:
     vars:
       SCOPE: '{{.SCOPE | default "scoped"}}'
     cmds:
-      - python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --mark {{.SCOPE}} {{if .CRATES}}--crates {{.CRATES}}{{end}} {{if .LOG_RUN}}--log-run{{end}} {{if and .NOCACHE (not .CLI_ARGS)}}--nocache{{end}}
+      - python3 "{{.ROOT_DIR}}/scripts/scoped_gate.py" --mark {{.SCOPE}} {{if .CRATES}}--crates {{.CRATES}}{{end}} {{if .LOG_RUN}}--log-run{{end}} {{if and .NOCACHE (not .CLI_ARGS)}}--nocache{{end}}
 
   verify:mark:
     desc: |
@@ -569,7 +608,7 @@ tasks:
       # (adr_bazel_build_adoption.md § Stage 4, amended): an unchanged tree
       # executes only `UNCACHED_MODULES`, an edited module re-runs itself and
       # its importers, and an edit to `//test:suite_inputs` re-runs every
-      # target. The targets run concurrently behind the runner's host locks
+      # target. The targets run concurrently, each on zot registries of its own
       # (`test/bazel.bzl` § Concurrency), so a cold run is not the serial one
       # it used to be.
       #

@@ -3235,7 +3235,7 @@ mod toolchain_root_tests {
         // `reads_the_windows_system_locations_from_the_environment` sets exactly
         // those four. `OVERRIDES` is process-global, so under any thread-parallel
         // runner the two rows collide without this.
-        let _env = ocx_env::overrides::lock();
+        let env = ocx_env::overrides::lock();
 
         assert_eq!(
             C018_PREFIXES.len(),
@@ -3264,6 +3264,11 @@ mod toolchain_root_tests {
                 SYSTEM_LOCATIONS_MATCHED_EXACTLY.contains(&location),
                 "{location} is matched by identity in C-018 and not in the implementation"
             );
+        }
+        // The contract names the shipped fallbacks; a Windows host exports its own
+        // spelling (`C:\WINDOWS`), so compare with the four variables unset.
+        for (var, _) in C018_WINDOWS_LOCATIONS {
+            env.remove(var);
         }
         assert_eq!(
             C018_WINDOWS_LOCATIONS.map(|(_, path)| PathBuf::from(path)).to_vec(),

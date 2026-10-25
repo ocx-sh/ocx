@@ -36,6 +36,10 @@ from src.helpers import PROJECT_ROOT
 #: This repository's `ocx.toml`, whose `[tools] cosign` binding is the pin.
 _PROJECT = PROJECT_ROOT / "ocx.toml"
 
+#: The cosign the matrix constants and `analysis_cosign_interop_probes.md` were
+#: measured against. A pin bump must red at first use, not at import.
+MEASURED_COSIGN_VERSION = "v3.1.1"
+
 #: A start time old enough that any certificate the stack mints falls inside the
 #: service's validity window. cosign requires the key, and its value is
 #: irrelevant to what these tests assert.
@@ -289,6 +293,14 @@ def cosign_binary() -> Path:
     `docker run --rm --network host -v … cosign verify` is not a command
     anybody has. One resolver, both consumers — see `Path.parent`.
     """
+    # An explicit `raise`, not an `assert`: `python -O` strips asserts.
+    if pinned_cosign_version() != MEASURED_COSIGN_VERSION:
+        raise RuntimeError(
+            f"the cosign tests were measured against {MEASURED_COSIGN_VERSION}; ocx.toml now pins "
+            f"{pinned_cosign_version()}. Re-measure the probes in "
+            "`.claude/artifacts/analysis_cosign_interop_probes.md` and the stderr constants in "
+            "`cosign_matrix.py` before moving the pin."
+        )
     entries = [
         Path(entry["value"])
         for entry in _ocx_json("--project", str(_PROJECT), "env")["items"]

@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
@@ -667,7 +667,7 @@ def test_mirror_install_cas_paths_keyed_by_canonical_slug(
             canonical_dir,
             f"expected {sub}/{canonical_slug}/ to exist after a mirror-routed install",
         )
-        assert any(canonical_dir.rglob("*")), (
+        assert any(rglob_no_links(canonical_dir, "*")), (
             f"{canonical_dir} must contain content after install"
         )
         assert_not_exists(
@@ -678,7 +678,7 @@ def test_mirror_install_cas_paths_keyed_by_canonical_slug(
         )
 
     packages_root = home / "packages" / canonical_slug
-    manifest_paths = list(packages_root.rglob("manifest.json"))
+    manifest_paths = list(rglob_no_links(packages_root, "manifest.json"))
     assert manifest_paths, f"expected at least one manifest.json under {packages_root}"
 
 

@@ -31,7 +31,12 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner, current_platform
-from src.helpers import make_package, resolved_metadata_path
+from src.helpers import (
+    make_package,
+    require_symlink_privilege,
+    resolved_metadata_path,
+    rglob_no_links,
+)
 from src.runner import PackageInfo
 
 pytestmark = pytest.mark.command("package_test")
@@ -519,7 +524,7 @@ def test_auto_installs_deps(
     packages_root = _ocx_home(ocx) / "packages"
     assert packages_root.exists(), "packages store must exist after dep install"
     # At least one package directory must have been created.
-    assert any(packages_root.rglob("content")), (
+    assert any(rglob_no_links(packages_root, "content")), (
         "no package content found in object store — dep was not installed"
     )
 
@@ -1077,6 +1082,7 @@ def test_output_dir_rejects_symlink_target(
     symlink-traversal targets." A symlink along the output path could redirect
     writes to attacker-controlled locations.
     """
+    require_symlink_privilege()
     bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
 
     # Create a real directory and a symlink pointing at it.

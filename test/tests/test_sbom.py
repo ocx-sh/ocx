@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import subprocess
 from pathlib import Path
 
@@ -487,6 +486,8 @@ def test_sbom_output_dash_refuses_a_terminal(
     answers yes — a captured pipe would make this pass for the wrong reason, and
     the refusal is what the whole scenario is about.
     """
+    import pty  # POSIX-only: the module must still import on Windows
+
     controller, follower = pty.openpty()
     try:
         result = subprocess.run(

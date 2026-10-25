@@ -120,9 +120,7 @@ def forbidden_route(args, *, env=None, cwd=None, shell=False, executable=None) -
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    # The root conftest's own `pytest_sessionstart` would otherwise
-    # `docker compose up` a registry for a tier that may never reach one.
-    # Registered later, this hook runs first.
+    # A registry fixture resolved here would skip rather than start one.
     os.environ.setdefault("OCX_TESTS_NO_REGISTRY", "1")
     budget = float(os.environ.get(BUDGET_ENV, DEFAULT_BUDGET_SECONDS))
     session.config.stash[_CLOCK] = (time.monotonic(), budget)

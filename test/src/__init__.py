@@ -9,7 +9,6 @@ from src.helpers import (
     PROJECT_ROOT,
     make_package,
     registry_is_reachable,
-    start_registry,
 )
 from src.registry import fetch_manifest_from_registry
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
@@ -28,5 +27,4 @@ __all__ = [
     "make_package",
     "registry_dir",
     "registry_is_reachable",
-    "start_registry",
 ]

@@ -28,7 +28,8 @@ To modify release workflow:
 3. Commit both config change and regenerated workflow
 
 Key config fields in `dist-workspace.toml`:
-- `plan-jobs` — reusable workflows for plan phase (e.g., `["./verify-version"]`)
+- `plan-jobs` — unused on purpose: dist makes every other job wait on a plan job, and `host` reads a skipped job as a pass, so a red plan job would still publish. A check that must block a release is a `local-artifacts-jobs` entry.
+- `local-artifacts-jobs = ["./verify-version", "./readiness-gate"]` — renders `verify-version.yml` and `readiness-gate.yml` as `custom-verify-version` and `custom-readiness-gate`, each needing only `plan` and required by `build-global-artifacts`, `custom-scan-binaries` and `host`. Nothing upstream of them can skip them, so a red one reaches `host` as `failure`, not `skipped` (`test_no_job_upstream_of_host_can_fail_into_a_skip`); the cost is that a tag whose version mismatches builds before it is refused. Their permissions (`contents`, `actions`: read) come from `github-custom-job-permissions`. Like every entry there, the grant REPLACES the defaults: a called workflow's job that asks a scope the entry omits fails the run at startup (`docker-publish` carries `artifact-metadata: write` for that reason).
 - `post-announce-jobs` — reusable workflows after release announcement (e.g., `["./post-release-oci-publish"]`)
 - `global-artifacts-jobs = ["./scan-binaries"]` — renders `scan-binaries.yml` (`adr_test_speed_tiers.md` C-PROV) as the `custom-scan-binaries` job, run after `build-local-artifacts` and required by `host` (GitHub Release, then OCI publish) via `needs:`; a test build's placeholder provenance markers red the scan before either happens. No job-level `if:` or `continue-on-error` — cargo-dist reads a `skipped` result as a pass, so this job cannot be allowed to skip itself.
 
@@ -44,6 +45,8 @@ Reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-pub
 
 All commits must follow [Conventional Commits](https://www.conventionalcommits.org/). cocogitto validates in CI. git-cliff generates changelogs from these.
 
+The template's `cliff.toml` renders a commit's **subject only**, with `<` and `>` escaped and no link rewriting. So a subject names no website doc path and carries no `<tag>`: `release:validate` (`changelog:validate`) reds a rendered changelog that holds either, and a repo-relative link in a subject would resolve against no page.
+
 ## Implementation Constraints
 
 ### OCX Package Directory Structure
@@ -56,7 +59,7 @@ When publishing OCX to own registry (`ocx.sh/ocx/cli`), archive must contain `bi
 
 ### Dependency Update Config
 
-Dependency updates run via **Renovate** (`renovate.json`, replaced Dependabot). Groups: `actions`, `rust-deps`, `npm-deps`. `release.yml` is cargo-dist-generated and is excluded from action bumps (it floats by design).
+Dependency updates run via **Renovate** (replaced Dependabot). `renovate.json` is template-owned: it extends the `ocx-sh/conventions` preset (weekly, non-major groups, `chore(deps)` / `ci(deps)`, digest pinning) and then `local>ocx-sh/ocx//.github/renovate-local`. ocx's own rules live in `.github/renovate-local.json`: `release.yml` is cargo-dist-generated and excluded from action bumps (it floats by design), `rules_rs` and `llvm` move in one PR, Dockerfile base images form the `docker-base-images` group, and the website `npm` files are `/^website/`.
 
 ### New Environment Variables
 
@@ -65,7 +68,6 @@ Two new env vars introduced:
 - `OCX_NO_MODIFY_PATH` — disables shell profile modification during install (truthy: `1`, `true`, `yes`)
 
 Both must add to:
-- `CLAUDE.md` environment variable table
 - `ocx_env` doc blocks, then `task website:reference:generate` (never hand-edit `website/src/content/docs/reference/environment.md`)
 - Env var parsing use same truthy-value logic as `OCX_OFFLINE` and `OCX_REMOTE`
 
@@ -100,21 +102,40 @@ Release creation during normal ceremony driven by cargo-dist in CI — do not in
 
 ## Workflow: Release Ceremony
 
-Release ceremony = human-driven process with tooling support:
+Release ceremony = human-driven process with tooling support, in four steps. Each step refuses when the one before it was skipped:
 
 ```bash
-task release:prepare    # Refuse without a fresh full verify mark, prove provenance,
-                         # compute version, update CHANGELOG.md, run verify NOCACHE=1
+# 1. Prepare. Never tags or pushes.
+task release:prepare BUMP=auto   # or BUMP=patch|minor|major, or VERSION=x.y.z
 # Human reviews the changes
+# 2. Commit, push to release/vX, dispatch readiness on that exact commit.
 git add -A && git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
-# Human decides when to push (never auto-push)
+git push origin HEAD:release/vX.Y.Z      # human decides when to push (never auto-push)
+gh workflow run release-readiness.yml --ref release/vX.Y.Z
+# 3. Tag. Refuses without a green readiness run for HEAD.
+task release:tag
+# 4. CI takes over. readiness-gate asks again on the tagged commit; red means `host` never runs.
 ```
 
-`release:prepare` (`taskfiles/release.taskfile.yml`) requires a fresh **full** mark from `task verify` before it touches a file (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof` — the release provenance scan on real bytes: green on a `__testing`-free build, red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV) — before any version bump. It ends with `task verify NOCACHE=1`: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict — a release re-runs the suite, it never believes a key.
+1. **`task release:prepare`** — the conventions template's task; gate, bump, changelog, validate, verify (below). The bump commit does not exist while it runs, so it cannot ask for readiness on it.
+2. **Commit, push, dispatch.** `release-readiness.yml` runs the full gate on the bytes cargo-dist would publish: `dist build` of all eight targets, `scan-binaries.yml`, then `acceptance.yml` on six platforms (linux and Windows x64/arm64, macOS x64/arm64) with `OCX_TEST_RELEASE_BINARY=1` against `test/limits/<os>-release`, plus `shell-activation-deep.yml`. It publishes nothing. The run-name is `readiness <sha>`. A dispatch with `bypass=true` and a `reason` skips every test job, goes green, and renames the run `readiness <sha> BYPASS: <reason>`; use it for an outage of the gate itself, never for a red result.
+3. **`task release:tag`** (`taskfiles/release.taskfile.yml`) — checks HEAD is `release: v<Cargo.toml version>`, runs `scripts/release_readiness_gate.py --sha HEAD`, and only on exit 0 runs `git tag vX.Y.Z` and `git push --atomic origin HEAD:main vX.Y.Z`. Every non-zero refuses: 1 no successful readiness run for that SHA, 69 `gh` missing or unauthenticated, 74 `gh` failed. A bypass run counts, and the script prints its run-name so the reason shows in the releaser's log.
+4. **`readiness-gate.yml`** — a `local-artifacts-jobs` entry in `dist-workspace.toml` renders `custom-readiness-gate` in `release.yml`; `host` (GitHub Release, then every post-announce publish) needs it and reads its result, so a tag pushed around step 3 publishes nothing. `gh workflow run readiness-gate.yml --ref <ref> -f sha=<sha>` shows the gate red or green for any commit without cutting a tag.
 
-After tag pushed, CI takes over: build → test → GitHub Release → publish to registry → deploy website.
+`release:prepare` is the conventions template's task (`taskfiles/baseline.taskfile.yml`, template-owned, flattened into the root taskfile). It never tags or pushes, and it calls five optional hooks that `taskfiles/release.taskfile.yml` defines, in this order:
+
+| Step | Owner | What it does |
+|---|---|---|
+| `release:gate` | ocx | Refuses without a fresh **full** mark from `task verify` (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
+| `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, from the version the template computed with `git-cliff --bumped-version`. |
+| git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
+| `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
+| `release:verify` | ocx | `task verify NOCACHE=1` in a fresh process: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict. A release re-runs the suite, it never believes a key. |
+
+The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify without `NOCACHE=1` and a gate without its full-mark or provenance step each turn it red.
+
+After the tag is pushed, CI takes over: readiness gate → build → provenance scan → GitHub Release → publish to registry → deploy website.
 
 ### Version Between Releases
 
-Between releases, `Cargo.toml` retains version from last `release:prepare` run. `release:prepare` task computes correct next version from commit history via `git-cliff --bumped-version` at release time. No automated post-release version bump — `release:prepare` = single versioning mechanism.
+Between releases, `Cargo.toml` retains version from last `release:prepare` run. The task computes the correct next version from commit history via `git-cliff --bumped-version` at release time (or takes `VERSION=`). No automated post-release version bump — `release:prepare` = single versioning mechanism.

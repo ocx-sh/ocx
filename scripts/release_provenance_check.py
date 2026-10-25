@@ -28,8 +28,10 @@ to the runner — and requires release provenance: `channel` is not `test`, a
 Its proofs run as pytest, from `scripts/tests/test_release_provenance_check.py`,
 and show every red on synthetic fixtures; their greens exercise the parser only
 (ADR AM-2): the green on a real release build — the one proof that dependency
-bytes stay clear of the markers — is `task release:provenance:proof`, and the
-`cross-compile` job in `verify-deep.yml` repeats it on every push to `main`.
+bytes stay clear of the markers — is `task release:provenance:proof`, a step of
+`task release:gate`. `scan-binaries.yml` runs both checks over the binaries that
+`release.yml` and `deploy-dev.yml` are about to publish; no deep or pull-request
+job scans, because the Bazel-built `ocx` carries the placeholders by design.
 
 Exit codes: 0 clean, 1 finding, 2 usage (bad arguments, unreadable file).
 Stdlib only.

@@ -7,8 +7,8 @@
 # Numbers below are measured on CI — verify-basic.yml `Smoke (Linux)`,
 # ubuntu-latest 4-core — never on a dev box. That runner is roughly 2x slower
 # than this project's development machine for the scan-heavy tests and much
-# worse for process-spawning ones, and CI is where the gate actually gates. A
-# test sitting above ~0.7 s there is a latent red, not a pass; the budget does
+# worse for process-spawning ones, and a `CI=1` run is the verdict that counts.
+# A test sitting above ~0.7 s there is a latent red, not a pass; the budget does
 # NOT get raised above 1.0 s to buy it headroom. 1.0 s is the contract.
 #
 # An entry is a DEBT, not a licence. It says "this test is slow and we have not

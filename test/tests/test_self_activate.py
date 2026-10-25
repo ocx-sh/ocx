@@ -33,11 +33,13 @@ from src.runner import OcxRunner
 # `todo!()` panic / "unknown subcommand" error) against the current stubs.
 #
 # Skip on Windows: shell-activation output format tested here is POSIX sh/bash.
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="self activate output tests require POSIX shell semantics.",
-)
-pytestmark = [pytestmark, pytest.mark.command("self_group/activate")]
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="self activate output tests require POSIX shell semantics.",
+    ),
+    pytest.mark.command("self_group/activate"),
+]
 
 
 # The global-env eval invokes the RESOLVED absolute ocx binary, never a bare

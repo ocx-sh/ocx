@@ -1,3 +1,4 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
 # git-cliff ~ configuration file
 # https://git-cliff.org/docs/configuration
 #
@@ -50,18 +51,6 @@ footer = """
 {% endfor %}
 """
 trim = true
-# The website embeds CHANGELOG.md in the Starlight page `changelog.md` through an
-# `<!--@include:-->` directive, so a commit body's repo-root-relative doc link
-# (`website/src/content/docs/reference/x.md#anchor`) is resolved relative to that
-# page and fails the build as a dead link. Rewrite to the absolute site URL:
-# correct in all three renderings of this file (repo view on GitHub, the website
-# page, and GitHub Release notes), where a relative path can only ever be correct
-# in one. `.md` is dropped and a trailing slash added because the site is built
-# with `trailingSlash: 'always'`. The optional `content/` segment also rewrites
-# links written before the docs moved under `src/content/`.
-[[changelog.postprocessors]]
-pattern = 'website/src/(?:content/)?docs/(\S+?)\.md(#[A-Za-z0-9_-]+)?'
-replace = 'https://ocx.sh/docs/$1/$2'
 
 [git]
 conventional_commits = true

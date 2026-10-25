@@ -269,7 +269,7 @@ Consequently:
 5. **A federated plan folds lead-scoped.** Under a `Repo` column, resolution
    (C-404), containment (C-418) and the census (C-405, C-416) all run **in
    the lead repo**, against the lead's `hex.md › Pointers`; the one `Target:`
-   is a lead file. Every delta entry originating from a work package whose
+   is a lead file. Every delta entry originating from a pipeline whose
    `Repo` ≠ `.` is reported `not folded — delivered in <repo>; fold by hand
    into that repo's spec` and left in the plan; only entries delivered in the
    lead (`Repo` = `.`) fold.
@@ -386,7 +386,7 @@ command transcript belongs is a spec violation (C-411).
 and continue to Upkeep and the handoff.** A halted fold **never** fails the
 review, **never** re-opens the verdict, and **never** attempts a repair pass:
 **zero fix passes.** The precedent is the merge-conflict playbook
-([`worktree.md`](worktree.md#worktree-work-package-mechanics): judge
+([`worktree.md`](worktree.md#pipeline-worktree-mechanics): judge
 semantically, at most one fix pass, still failing → halt) — deliberately
 tightened to zero here, because there the fix edits code hex owns on a branch
 it owns, while here the target is human-authored truth in the working tree,
@@ -509,13 +509,11 @@ locks are a separate mechanism that persists past `landing` to `done` and are
 **not** this pointer.
 
 **One precondition on the terminal state:** a run that ends with a non-empty
-stranded-WP set never reaches its terminal review state — `done`, or
+stranded-pipeline set never reaches its terminal review state — `done`, or
 `landing` for a plan carrying a `Repo` column. The failure cascade
 ([`decompose.md`](decompose.md#parallel-by-default-decomposition)) owns that
 rule, and this phase stays its sole writer. No other precondition gates
-the state: the trunk review is `L3` of [Review by join
-level](loop.md#review-by-join-level), run only when invoked, and this
-skill writes the state because it is that level's sole writer.
+the state; this skill writes it as the review's sole writer.
 
 Moving the plan to a dated archive directory was considered and rejected: it
 breaks every link that points at the plan for the sake of directory

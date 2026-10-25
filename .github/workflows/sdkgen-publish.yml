@@ -117,6 +117,7 @@ jobs:
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
+          overwrite: true
 
   publish:
     name: Push packages

@@ -19,8 +19,8 @@ module whose import needs the registry cannot make this file's verdict depend
 on it.
 
 (c) the tier is the *whole* automatic pull-request gate, because the deep one
-    is opt-in: `verify-deep.yml` has no `pull_request` trigger, is reached by
-    `workflow_dispatch`, and still runs in the merge queue. That is a trigger
+    is opt-in: `verify-deep.yml` runs nightly, by `workflow_dispatch` and on a
+    pull request only once it carries the `run-deep` label. That is a trigger
     shape and so is checked here too — this tier's coverage obligation follows
     directly from it.
 """
@@ -57,7 +57,7 @@ def _subcommand_type_is_hidden(module: str, type_name: str) -> bool:
     `Launcher` is the case: `command.rs` carries only `#[command(subcommand)]`,
     the hiding attribute sits on `pub enum Launcher` in `command/launcher.rs`.
     """
-    source = (COMMAND_MODULES / f"{module}.rs").read_text()
+    source = (COMMAND_MODULES / f"{module}.rs").read_text(encoding="utf-8")
     attrs: list[str] = []
     for line in source.splitlines():
         stripped = line.strip()
@@ -76,7 +76,7 @@ def visible_verbs() -> set[str]:
     Excluded: `hide = true` (on the variant or on the group type it wraps),
     `Deprecated*` variants and the `external_subcommand` catch-all.
     """
-    source = COMMAND_RS.read_text()
+    source = COMMAND_RS.read_text(encoding="utf-8")
     body = re.search(r"^pub enum Command \{\n(.*?)^\}", source, re.DOTALL | re.MULTILINE)
     assert body, f"pub enum Command not found in {COMMAND_RS}"
     verbs: set[str] = set()
@@ -262,7 +262,7 @@ def _reachable_invocations(fn: ast.AST, helpers: dict[str, ast.AST]) -> tuple[tu
 def smoke_tests() -> list[SmokeTest]:
     found: list[SmokeTest] = []
     for path in sorted(TESTS_DIR.glob("test_*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         helpers = {
             n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
@@ -341,34 +341,56 @@ def test_smoke_selection_is_disjoint_from_signing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_deep_workflow_is_opt_in_and_runs_in_the_merge_queue() -> None:
-    """`verify-deep.yml` has no `pull_request` trigger, so this tier is the gate.
+def test_deep_workflow_is_opt_in_and_a_pull_request_runs_it_only_when_labelled() -> None:
+    """`verify-deep.yml` runs nightly, by hand and on the `run-deep` label, so the smoke tier is the gate.
 
-    A deep run is ≈113 runner-minutes against the basic tier's ≈18, so it is
-    opt-in per branch (`gh workflow run verify-deep.yml --ref <branch>`) —
-    which makes `workflow_dispatch` load-bearing rather than incidental. What
-    a pull request now gets automatically is the smoke tier asserted above and
-    nothing else, which is why (a)'s per-verb obligation is not negotiable.
-    `merge_group` is what runs the checks on the queued merge commit.
-    `.claude/tests/test_workflows.py` asserts the same shape plus the absence
-    of any per-job pull-request guard and the queue-safe cancellation.
+    The deep tier is the cross-builds plus the macOS and Windows legs, so it is opt-in per
+    branch (`gh workflow run verify-deep.yml --ref <branch>`) or per pull request (the
+    `run-deep` label). What a pull request gets automatically is the smoke tier asserted above
+    and nothing else, which is why (a)'s per-verb obligation is not negotiable. The template's
+    one pull-request trigger is `labeled`; a `synchronize` or `opened` type would run the deep
+    tier on every push. `.claude/tests/test_workflows.py` asserts the same shape plus the label
+    guard on every deep job.
     """
     import yaml  # a suite dependency (test/pyproject.toml); nothing above needs it
 
-    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "verify-deep.yml").read_text())
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "verify-deep.yml").read_text(encoding="utf-8"))
     # PyYAML reads the bare `on` key as the YAML 1.1 boolean `True`.
     triggers = workflow.get("on", workflow.get(True))
     assert isinstance(triggers, dict), f"verify-deep.yml has no `on:` mapping: {triggers!r}"
-    assert "pull_request" not in triggers, (
-        f"verify-deep.yml `on` is {sorted(triggers)}, including `pull_request` — the deep tier "
-        f"is opt-in, and this file's smoke-tier obligations are written on the premise that a "
-        f"pull request gets the basic tier and nothing more. Change both together"
+    assert (triggers.get("pull_request") or {}).get("types") == ["labeled"], (
+        f"verify-deep.yml `on.pull_request` is {triggers.get('pull_request')!r} — the deep tier is "
+        f"opt-in, and this file's smoke-tier obligations are written on the premise that a pull "
+        f"request gets the basic tier and nothing more unless it carries the label. Change both together"
     )
     assert "workflow_dispatch" in triggers, (
-        f"verify-deep.yml `on` is {sorted(triggers)} — no `workflow_dispatch`, so with no "
-        f"`pull_request` trigger either there is no way to run the deep tier on a branch at all"
+        f"verify-deep.yml `on` is {sorted(triggers)} — no `workflow_dispatch`, so there is no way "
+        f"to run the deep tier on a branch before its pull request carries the label"
     )
-    assert "merge_group" in triggers, (
-        f"verify-deep.yml `on` is {sorted(triggers)} — no `merge_group`, so nothing runs the "
-        f"deep tier on the queued merge commit"
+    assert "schedule" in triggers, (
+        f"verify-deep.yml `on` is {sorted(triggers)} — no `schedule`, so nothing deep runs unattended"
+    )
+
+
+def test_ci_runs_the_smoke_tier_through_basic_repo() -> None:
+    """`basic-repo.yml`'s `smoke-acceptance` job runs `task test:smoke`.
+
+    The tier is the automatic pull-request gate only while a job runs it. The
+    basic tier's repo-owned jobs live in `basic-repo.yml`, called by the template's
+    `repo` job; a tier no job selects with `-m smoke` is a gate nothing opens.
+    """
+    import yaml  # a suite dependency (test/pyproject.toml); nothing above needs it
+
+    workflow = REPO_ROOT / ".github" / "workflows" / "basic-repo.yml"
+    assert workflow.exists(), f"{workflow.relative_to(REPO_ROOT)}: no such workflow, so CI runs no smoke tier"
+    jobs = yaml.safe_load(workflow.read_text(encoding="utf-8")).get("jobs") or {}
+    assert "smoke-acceptance" in jobs, f"basic-repo.yml has no job `smoke-acceptance`; its jobs are {sorted(jobs)}"
+    commands = [
+        line
+        for step in jobs["smoke-acceptance"].get("steps") or []
+        for line in str(step.get("run", "")).splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert any(re.search(r"\btask test:smoke(?![\w:-])", line) for line in commands), (
+        f"basic-repo.yml job `smoke-acceptance` runs no `task test:smoke`; its commands are {commands}"
     )

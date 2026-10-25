@@ -1,0 +1,71 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+name: Issues
+
+# Pings the maintainer on Discord for issues filed by outsiders: the author is not an OWNER, MEMBER or COLLABORATOR and
+# not a bot. The webhook is the org secret OCX_ISSUES_HOOK; the job skips (green, not red) when it is empty. Dispatch
+# takes an issue number and bypasses the author filter, so the ping can be tested end to end. Event text reaches the
+# payload only through env vars and jq, never through `run:` interpolation.
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to ping for (skips the author filter)
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  ping:
+    name: Discord ping
+    if: >-
+      github.event_name == 'workflow_dispatch' || !endsWith(github.actor, '[bot]')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: read
+    steps:
+      - name: Notify
+        env:
+          HOOK: ${{ secrets.OCX_ISSUES_HOOK }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_ISSUE: ${{ inputs.issue }}
+          EVENT_NUMBER: ${{ github.event.issue.number }}
+          EVENT_TITLE: ${{ github.event.issue.title }}
+          EVENT_BODY: ${{ github.event.issue.body }}
+          EVENT_URL: ${{ github.event.issue.html_url }}
+          EVENT_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "OCX_ISSUES_HOOK is empty; skipping"
+            exit 0
+          fi
+          # author_association is unreliable here: the webhook payload and the job token both report the owner as
+          # CONTRIBUTOR. Repo permission is exact (404 = no access = outsider), so a write-level author is a maintainer.
+          gh api "repos/$REPO/issues/${INPUT_ISSUE:-$EVENT_NUMBER}" > issue.json
+          if [ -z "$INPUT_ISSUE" ]; then
+            perm=$(gh api "repos/$REPO/collaborators/$EVENT_AUTHOR/permission" --jq .permission 2>/dev/null || true)
+            case "$perm" in
+              admin|maintain|write) echo "maintainer-authored; skipping"; exit 0 ;;
+            esac
+          fi
+          if [ -n "$INPUT_ISSUE" ]; then
+            EVENT_NUMBER=$(jq -r .number issue.json)
+            EVENT_TITLE=$(jq -r .title issue.json)
+            EVENT_BODY=$(jq -r '.body // ""' issue.json)
+            EVENT_URL=$(jq -r .html_url issue.json)
+            EVENT_AUTHOR=$(jq -r .user.login issue.json)
+          fi
+          jq -n \
+            --arg repo "$REPO" --arg num "$EVENT_NUMBER" --arg title "$EVENT_TITLE" \
+            --arg url "$EVENT_URL" --arg author "$EVENT_AUTHOR" --arg body "$EVENT_BODY" '
+            "227748867204972545" as $id
+            | {content: "<@\($id)>",
+               embeds: [{title: "\($repo) #\($num) \($title)" | .[0:256], url: $url,
+                         description: ($body | .[0:300]), footer: {text: $author}}],
+               allowed_mentions: {parse: [], users: [$id]}}' > payload.json
+          curl --fail --silent --show-error --retry 3 -H 'Content-Type: application/json' -d @payload.json "$HOOK"

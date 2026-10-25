@@ -13,11 +13,10 @@ registry. All paths assume the repo root.
 
 1. Start the local registry:
    ```sh
-   cd test && docker compose up -d
+   cd test && uv run python -m src.zot    # its own terminal; Ctrl-C drops its data
    ```
-   (Port 5000 already taken? See "Acceptance tests" in
-   [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — export `OCX_TEST_REGISTRY_PORT`
-   and `env.sh` follows.)
+   (Port 5000 already taken? Pass another as `python -m src.zot PORT` and export
+   `OCX_TEST_REGISTRY_PORT` with the same value; `env.sh` follows.)
 2. Build the binary the rig will use:
    ```sh
    cargo build --release -p ocx
@@ -296,11 +295,9 @@ both ways:
 
 > **The patch rig writes to the registry's reserved global slot.** Its global
 > descriptor matches `*`, so it attaches a companion to *every* base in that
-> registry — including the ones `test/tests/test_patches.py` publishes. Running
-> the acceptance suite against the same registry afterwards fails the
-> `@patch_global_slot` tests with the manual rig's companion value. Recreate the
-> containers (`docker compose down && docker compose up -d`) before the next
-> `task test`; `teardown-patches.sh` does not clear the slot.
+> registry. The acceptance suite runs on registries of its own and never sees it;
+> restart the registry (Ctrl-C, then `uv run python -m src.zot`) to clear the slot,
+> which `teardown-patches.sh` does not.
 
 ```sh
 $OCX --format json package env --lazy-mode never  patches/base-tool:1.0.0

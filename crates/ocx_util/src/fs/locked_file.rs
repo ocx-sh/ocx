@@ -42,6 +42,37 @@ fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
     }
 }
 
+/// Opens `path` for locking, creating it.
+///
+/// Windows keeps a deleted name delete-pending until its last handle closes and refuses every open of it with
+/// `ERROR_ACCESS_DENIED`; failing there turns a peer's lock-file cleanup into an I/O error for the loser of the race.
+fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let open = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    };
+    #[cfg(windows)]
+    {
+        let mut opened = open();
+        for backoff in super::WINDOWS_TRANSIENT_BACKOFF {
+            if !matches!(&opened, Err(error) if super::is_transient_windows_error(error)) {
+                break;
+            }
+            std::thread::sleep(super::jittered_backoff(backoff));
+            opened = open();
+        }
+        opened
+    }
+    #[cfg(not(windows))]
+    {
+        open()
+    }
+}
+
 impl LockedFile {
     /// Acquire an exclusive lock on `path`, creating it and its parents, within [`DEFAULT_LOCK_TIMEOUT`].
     pub async fn open_exclusive(path: impl Into<PathBuf>) -> Result<Self, FileError> {
@@ -162,13 +193,7 @@ impl LockedFile {
         }
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|e| FileError::new(&path, e))?;
+            let file = open_lock_file(&path).map_err(|e| FileError::new(&path, e))?;
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let mut lock = FileLock::lock_exclusive_blocking_with_timeout(file, remaining)
                 .map_err(|e| FileError::new(&path, e))?;
@@ -199,13 +224,7 @@ impl LockedFile {
         }
         // Bounded: a mismatch reopens a fresh inode at once, and `None` on exhaustion reads as busy.
         for _ in 0..8 {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|e| FileError::new(&path, e))?;
+            let file = open_lock_file(&path).map_err(|e| FileError::new(&path, e))?;
             let Some(mut lock) = FileLock::try_exclusive(file).map_err(|e| FileError::new(&path, e))? else {
                 return Ok(None);
             };
@@ -488,6 +507,65 @@ mod tests {
             .expect("first holder");
         let second = LockedFile::try_exclusive_blocking(&path).unwrap();
         assert!(second.is_none(), "a contended try-lock must return None");
+    }
+
+    /// Leaves `path` delete-pending and returns the handle that keeps it so; every open of it then fails
+    /// with `ERROR_ACCESS_DENIED` until that handle drops. std's `remove_file` unlinks at once on current
+    /// NTFS, so it cannot plant this state.
+    #[cfg(windows)]
+    fn plant_delete_pending(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_DELETE_ON_CLOSE, FILE_GENERIC_READ};
+
+        let waiter = std::fs::File::create(path).unwrap();
+        let doomed = std::fs::OpenOptions::new()
+            .access_mode(DELETE | FILE_GENERIC_READ)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(path)
+            .unwrap();
+        drop(doomed);
+        let refused = std::fs::OpenOptions::new().read(true).open(path).unwrap_err();
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(5),
+            "the planted file must be delete-pending"
+        );
+        waiter
+    }
+
+    #[cfg(windows)]
+    fn release_after(waiter: std::fs::File, delay: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            drop(waiter);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_exclusive_waits_out_a_delete_pending_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-blocking.lock");
+        let releaser = release_after(plant_delete_pending(&path), Duration::from_millis(150));
+        let acquired = LockedFile::open_exclusive_blocking_with_timeout(&path, Duration::from_secs(10));
+        releaser.join().unwrap();
+        acquired.expect("a delete-pending lock file must be waited out, not reported as an I/O error");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn try_exclusive_waits_out_a_delete_pending_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-try.lock");
+        let releaser = release_after(plant_delete_pending(&path), Duration::from_millis(150));
+        let acquired = LockedFile::try_exclusive_blocking(&path);
+        releaser.join().unwrap();
+        assert!(
+            acquired
+                .expect("a delete-pending lock file must be waited out, not reported as an I/O error")
+                .is_some(),
+            "nobody holds the lock once the name clears, so the try-lock must succeed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -40,6 +40,12 @@ from pathlib import Path
 from src import OcxRunner, PackageInfo, make_package, registry_dir
 from src.registry import fetch_manifest_digest, fetch_manifest_from_registry
 
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or the NTFS junction a directory link is on Windows."""
+    return path.is_symlink() or path.is_junction()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
@@ -137,7 +143,7 @@ def test_install_creates_full_chain_refs(
     )
     # Every entry must be a symlink pointing into blobs/.
     for entry in entries:
-        assert entry.is_symlink(), f"AC1: {entry} must be a symlink"
+        assert _is_link(entry), f"AC1: {entry} must be a symlink"
         target = Path(os.readlink(entry))
         assert "blobs" in str(target), (
             f"AC1: ref {entry} must point into blobs/; target: {target}"
@@ -170,7 +176,7 @@ def test_find_via_different_tag_appends_refs(
 
     refs_blobs = _refs_blobs_dir(content)
     before = (
-        {e.name: os.readlink(e) for e in refs_blobs.iterdir() if e.is_symlink()}
+        {e.name: os.readlink(e) for e in refs_blobs.iterdir() if _is_link(e)}
         if refs_blobs.is_dir()
         else {}
     )
@@ -182,7 +188,7 @@ def test_find_via_different_tag_appends_refs(
     ocx.plain("package", "which", v1.short)
 
     after = (
-        {e.name: os.readlink(e) for e in refs_blobs.iterdir() if e.is_symlink()}
+        {e.name: os.readlink(e) for e in refs_blobs.iterdir() if _is_link(e)}
         if refs_blobs.is_dir()
         else {}
     )
@@ -226,7 +232,7 @@ def test_clean_retains_reachable_blobs(
     ref_links = list(refs_blobs.iterdir())
     assert ref_links, f"AC3 precondition: {refs_blobs} must carry ref links after install"
     for ref_link in ref_links:
-        if ref_link.is_symlink():
+        if _is_link(ref_link):
             target = Path(os.readlink(ref_link))
             # Resolve relative paths relative to the symlink directory.
             if not target.is_absolute():
@@ -643,7 +649,7 @@ def test_resolution_chain_tag_via_image_index(
         f"found {len(entries)}: {entries}"
     )
     for entry in entries:
-        assert entry.is_symlink(), f"{entry} must be a symlink"
+        assert _is_link(entry), f"{entry} must be a symlink"
         target = Path(os.readlink(entry))
         resolved = target if target.is_absolute() else (entry.parent / target).resolve()
         assert resolved.exists(), f"chain ref {entry} must point to an existing blob"
@@ -755,7 +761,7 @@ def test_resolution_chain_tag_via_flat_image_manifest(
         f"found {len(entries)}: {entries}"
     )
     for entry in entries:
-        assert entry.is_symlink(), f"{entry} must be a symlink"
+        assert _is_link(entry), f"{entry} must be a symlink"
 
 
 # ── Test 61 — AC6: clean collects real chain blobs after uninstall --purge ─
@@ -846,7 +852,7 @@ def test_different_package_versions_produce_disjoint_refs(
     # Each ref is a valid symlink into blobs/.
     for refs_dir in (refs_blobs_v1, refs_blobs_v2):
         for entry in refs_dir.iterdir():
-            assert entry.is_symlink(), f"AC2: {entry} must be a symlink"
+            assert _is_link(entry), f"AC2: {entry} must be a symlink"
             target = Path(os.readlink(entry))
             assert "blobs" in str(target), (
                 f"AC2: ref {entry} must point into blobs/; got: {target}"

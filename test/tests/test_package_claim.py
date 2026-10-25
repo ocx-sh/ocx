@@ -60,6 +60,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_claim")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 #: The namespace/package every scenario claims. `acme/widget` is the ADR's own
 #: worked example, so the branch name, the root path and the request title in
 #: these rows read the same as the contract that specifies them.
@@ -802,7 +804,7 @@ def test_claim_carries_the_description_the_registry_serves(
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     readme = tmp_path / "README.md"
-    readme.write_text("# widget\n\nDoes widget things.\n")
+    readme.write_text("# widget\n\nDoes widget things.\n", newline="\n")
     ocx.plain(
         "package", "description", "push", "--readme", str(readme),
         f"{ocx.registry}/{unique_repo}",
@@ -861,7 +863,7 @@ def test_a_reclaim_removes_the_readme_the_previous_root_named(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     readme = tmp_path / "README.md"
 
-    readme.write_text("# first\n")
+    readme.write_text("# first\n", newline="\n")
     ocx.plain(
         "package", "description", "push", "--readme", str(readme),
         f"{ocx.registry}/{unique_repo}",
@@ -890,7 +892,7 @@ def test_a_reclaim_removes_the_readme_the_previous_root_named(
         },
     )
 
-    readme.write_text("# second, rewritten\n")
+    readme.write_text("# second, rewritten\n", newline="\n")
     ocx.plain(
         "package", "description", "push", "--readme", str(readme),
         f"{ocx.registry}/{unique_repo}",

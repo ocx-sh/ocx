@@ -1214,12 +1214,17 @@ mod tests {
 
     // ── C-079/C-080: the `active` validity predicate ─────────────────────────
 
-    /// Plant `state` at `<root>/active` and answer the predicate.
+    /// Plant `state` at `<root>/active` and answer the predicate; `None` when the host refuses to plant it.
     ///
     /// Takes the raw target rather than a typed state so every row of the
-    /// truth table below reads as the on-disk value it describes; `None` means
-    /// "not a link", handled by the caller.
-    fn active_link_to(root: &Path, target: &str) -> bool {
+    /// truth table below reads as the on-disk value it describes.
+    ///
+    /// Windows plants an absolute target as the junction the renderer writes;
+    /// only a target a junction cannot hold (relative, drive-less) needs a
+    /// native symlink, and creating one is a privilege (`ERROR_PRIVILEGE_NOT_HELD`,
+    /// 1314) that an unelevated account lacks. That row answers `None` rather
+    /// than failing on the host's account.
+    fn active_link_to(root: &Path, target: &str) -> Option<bool> {
         std::fs::create_dir_all(root).unwrap();
         // The derived target must exist on disk, or every row of the table
         // below is decided by an I/O failure rather than by the predicate: a
@@ -1231,8 +1236,17 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, &link).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(target, &link).unwrap();
-        ToolchainHome::new(root).active_is_valid(DEFAULT_SHELL)
+        if Path::new(target).is_absolute() {
+            ocx_util::fs::symlink::create(target, &link).unwrap();
+        } else if let Err(error) = std::os::windows::fs::symlink_dir(target, &link) {
+            assert_eq!(
+                error.raw_os_error(),
+                Some(1314),
+                "only a missing privilege may stop a row"
+            );
+            return None;
+        }
+        Some(ToolchainHome::new(root).active_is_valid(DEFAULT_SHELL))
     }
 
     /// C-080 — the predicate is true for **exactly one** value, the derived
@@ -1282,7 +1296,7 @@ mod tests {
         let legal_root = tmp.path().join("v0");
         let legal = expected_active_target(&legal_root, DEFAULT_SHELL);
         assert!(
-            active_link_to(&legal_root, &legal.to_string_lossy()),
+            active_link_to(&legal_root, &legal.to_string_lossy()) == Some(true),
             "C-079 — the derived target is the one valid value"
         );
 
@@ -1307,8 +1321,10 @@ mod tests {
 
         let mut row = 0;
         let refuse = |root: PathBuf, target: String| {
-            assert!(
-                !active_link_to(&root, &target),
+            // `None`: a native symlink this account may not create; the row is unplantable here, not valid.
+            assert_ne!(
+                active_link_to(&root, &target),
+                Some(true),
                 "C-080 — `active -> {target:?}` is not the derived target and must be invalid"
             );
         };

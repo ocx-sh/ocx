@@ -11,21 +11,21 @@ produce two rows, and the consuming application adjudicates — where
 `devcontainer.json`'s closest analogue, `customizations`, merges.
 
 Every output block below was captured from a real run against the local
-`registry:2`. Paths and digests will differ on your machine; the shapes will
+registry. Paths and digests will differ on your machine; the shapes will
 not.
 
 ## Prerequisites
 
 From the repo root, in order:
 
-1. Start the local registry:
+1. Start the local registry, in its own terminal (needs `zot` on `PATH` or
+   `OCX_TEST_ZOT`):
    ```sh
-   cd test && docker compose up -d
+   cd test && uv run python -m src.zot
    ```
-   If port 5000 is already taken — another repo's `registry:2`, a leftover
-   container — this service exits with code 2 and `docker compose ps` shows it
-   `Exited`. The rig does not care *whose* registry answers on 5000, only that
-   one does; `docker ps` tells you which container holds the port.
+   If port 5000 is already taken, it refuses to start and says so. Pass another
+   port as the first argument and export `OCX_TEST_REGISTRY_PORT` with the same
+   value so `env.sh` follows. Ctrl-C stops the registry and drops its data.
 2. Build the binary the rig will use:
    ```sh
    cargo build --release -p ocx

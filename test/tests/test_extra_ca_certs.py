@@ -46,6 +46,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,6 +59,8 @@ from src.helpers import PackageInfo, make_package, push_managed_config
 from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner
 from src.tls_index import MintedPki, TlsStaticIndexServer, mint_ca_and_leaf, running_tls
+
+pytestmark = pytest.mark.requires_testing_build
 
 # The logical namespace the HTTPS index serves. Distinct from `ocx.sh` so the
 # compiled-in `index.ocx.sh` entry never enters the picture.
@@ -185,6 +188,12 @@ def _proxied_index_source_toml(ocx: OcxRunner, index_authority: str) -> str:
     route a loopback NAME is refused (78) without that entry."""
     registry_host = ocx.registry.split(":", 1)[0]
     return f'[registries."{_NAMESPACE}"]\nindex = "https://{index_authority}"\ntrusted_hosts = ["{registry_host}"]\n'
+
+
+def _path_toml(path: Path) -> str:
+    """A root-level `extra_ca_certs` key naming `path`. `json.dumps` quotes it as a
+    TOML basic string, so a Windows path's backslashes are escaped, not read as escapes."""
+    return f"extra_ca_certs = {json.dumps(str(path))}\n"
 
 
 def _pem_toml(pem: bytes) -> str:
@@ -415,7 +424,7 @@ def test_explicit_config_key_wins_over_home_config(
     _home_config(ocx).write_text(
         _pem_toml(wrong_pki.ca_cert_pem) + _index_source_toml(ocx, tls_index)
     )
-    explicit.write_text(f'extra_ca_certs = "{right_path}"\n')
+    explicit.write_text(_path_toml(right_path))
     _assert_resolved(
         _index_update(ocx, logical_id), "explicit (right) over home (wrong)"
     )
@@ -426,7 +435,7 @@ def test_explicit_config_key_wins_over_home_config(
     _home_config(ocx).write_text(
         _pem_toml(minted_pki.ca_cert_pem) + _index_source_toml(ocx, tls_index)
     )
-    explicit.write_text(f'extra_ca_certs = "{wrong_path}"\n')
+    explicit.write_text(_path_toml(wrong_path))
     _assert_unknown_issuer(
         _index_update(ocx, logical_id), "explicit (wrong) over home (right)"
     )
@@ -610,7 +619,7 @@ def test_nonexistent_path_exits_74_with_path_in_message(
     command that never dials anything."""
     absent = tmp_path / "absent-corp-ca.pem"
     assert not absent.exists()
-    line = f'extra_ca_certs = "{absent}"\n'
+    line = _path_toml(absent)
     if tier == "home":
         _home_config(ocx).write_text(line)
     else:
@@ -639,7 +648,7 @@ def test_nonexistent_path_exits_74_under_offline(
     roots than configured. The message names the key, not merely the bare
     path."""
     absent = tmp_path / "absent-corp-ca.pem"
-    _home_config(ocx).write_text(f'extra_ca_certs = "{absent}"\n')
+    _home_config(ocx).write_text(_path_toml(absent))
 
     result = ocx.plain("--offline", "index", "catalog", check=False)
     assert result.returncode == _EXIT_IO_ERROR, (
@@ -745,7 +754,7 @@ def test_config_path_to_private_key_file_exits_65(
     path, never the contents."""
     key_path = tmp_path / "not-a-ca.pem"
     key_path.write_bytes(minted_pki.leaf_key_pem)
-    _home_config(ocx).write_text(f'extra_ca_certs = "{key_path}"\n')
+    _home_config(ocx).write_text(_path_toml(key_path))
 
     result = ocx.plain("--offline", "index", "catalog", check=False)
     assert result.returncode == _EXIT_DATA_ERROR, (
@@ -898,8 +907,10 @@ def test_env_var_is_not_forwarded_across_exec_clean(
     project = ("--offline", "--project", str(tmp_path))
     ocx.plain(*project, "lock")
     env = {"OCX_EXTRA_CA_CERTS": minted_pki.ca_cert_pem.decode()}
-    # An absolute interpreter: `--clean` drops the inherited PATH.
-    probe = ("/bin/sh", "-c", 'printf "%s" "${OCX_EXTRA_CA_CERTS:-unset}"')
+    # An absolute interpreter: `--clean` drops the inherited PATH. Bytes out, so no platform
+    # rewrites the PEM's newlines.
+    reader = "import os, sys; sys.stdout.buffer.write(os.environ.get('OCX_EXTRA_CA_CERTS', 'unset').encode())"
+    probe = (sys.executable, "-c", reader)
 
     clean = ocx.plain(*project, "exec", "--clean", "--", *probe, env_overrides=env)
     assert clean.stdout == "unset", (

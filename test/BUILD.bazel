@@ -95,8 +95,9 @@ filegroup(
 #   * `sigstore/**` — read by that conftest-imported fixture, so by all 171
 #     (`scripts/bazel_tag_guard.py`'s derivation says so), and mounted into the
 #     Fulcio/Rekor/CT containers.
-#   * `docker-compose.yml`, `zot-config.json` — the stack every module runs
-#     against; the second is mounted into the primary registry.
+#   * `docker-compose.yml` — the Docker-hosted services (registry:2 mirror,
+#     Sigstore); the zot registries are started per session by the
+#     `@tools//:zot` each target carries.
 #   * `ocx.toml`, `ocx.lock` — `OcxRunner` exposes no `cwd=`, so every `ocx`
 #     it starts runs in `test/` and its project walk finds these. An implicit
 #     read the AST cannot see, so it stays on everyone.
@@ -136,7 +137,6 @@ filegroup(
         "ocx.toml",
         "pyproject.toml",
         "uv.lock",
-        "zot-config.json",
         # `src/conformance.py` validates every `--format json` stdout against these.
         "//crates/ocx_schema:golden",
     ] + glob(
@@ -308,24 +308,6 @@ acceptance_suite(
     module_env = {
         "tests/test_execution_records.py": _SCHEMA_BINARY_ENV,
         "tests/test_project_env.py": _SCHEMA_BINARY_ENV,
-    },
-    # Every xdist group a module names (`bazel.bzl` § Concurrency): the module
-    # holds the group's host lock for its whole run, because every target is
-    # its own process — and so is the same target run from a sibling
-    # checkout — where xdist would have put the group on one worker. A group
-    # only one module names (`test_doc_scripts`' two fixed-identifier slots)
-    # needs it as much as a shared one. `patch_global_slot` is the bare
-    # registry's one reserved `global` patch repository, which
-    # `test_patches.py` writes on purpose (`lint/test_patch_global_slot.py`
-    # keeps every other patch tier on a path of its own).
-    # `scripts/bazel_tag_guard.py` derives this map from source and reds a
-    # mismatch in either direction.
-    module_slots = {
-        "tests/test_doc_scripts.py": [
-            "managed_config_corp_slot",
-            "mytool_repo_slot",
-        ],
-        "tests/test_patches.py": ["patch_global_slot"],
     },
     modules = glob(
         ["tests/test_*.py"],

@@ -11,11 +11,11 @@ descriptors). All commands assume the current directory is the repo root
 
 Run these from the repo root, in order:
 
-1. Start a local registry on `localhost:5000`:
+1. Start a local registry on `localhost:5000`, in its own terminal (needs `zot` on
+   `PATH` or `OCX_TEST_ZOT`):
    ```sh
-   docker run -d -p 5000:5000 --name registry registry:2
+   cd test && uv run python -m src.zot
    ```
-   (or, from the repo: `cd test && docker compose up -d`)
 2. Build the binary the rig will use:
    ```sh
    cargo build --release -p ocx
@@ -51,16 +51,9 @@ so a fresh `setup-patches.sh` run starts from scratch.
 
 It does **not** clear the registry's reserved global patch slot, and this rig's
 global descriptor matches `*` — so it keeps attaching a companion to every base
-in that registry, including the ones `test/tests/test_patches.py` publishes. The
-acceptance suite's `@patch_global_slot` tests then fail on this rig's companion
-value. Before the next `task test`, recreate the containers:
-
-```sh
-cd test && docker compose down && docker compose up -d
-```
-
-Nothing is mounted, so that discards all registry state — which every suite
-republishes on its next run.
+in that registry. The acceptance suite starts registries of its own, so it never
+sees the slot; to reset the rig, stop the registry with Ctrl-C and start it again.
+Nothing is mounted, so that discards all registry state.
 
 ---
 
@@ -293,7 +286,7 @@ $OCX patch publish \
 `--global` publishes a descriptor that applies to every base instead of one
 named base. It lands at the reserved `global` repository in the patch registry
 (`<patch-registry>/global:__ocx.patch`), so it works on any OCI registry —
-including the local `registry:2`:
+including the local zot registry:
 
 ```sh
 $OCX patch publish \

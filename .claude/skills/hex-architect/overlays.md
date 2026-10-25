@@ -28,18 +28,22 @@ the axis **selection** is a gate interaction, not a flag default — see
 |---|---|
 | `skip` | No `researcher` launched. The orchestrator may still make a brief inline check against project context or a feature-detected docs tool. |
 | `1` | One `researcher` on the single axis picked at the gate from [`classify.md`](classify.md)'s ranked candidates (default: the top-ranked candidate on plain approval). |
-| `3` | Three `researcher` workers in parallel, one per axis picked at the gate (default: the top-3 candidates). |
+| `3` | Three `researcher` workers in parallel, one per axis picked at the gate (default: the top-3 candidates). Only when the user asks. |
 
 Per-tier defaults: `low` → `skip`, `medium` → `skip`, `high` → `1`,
-`xhigh` → `3` (mandatory), `max` → `5` (mandatory, one axis
-`competitive-research`; `adr_0017` C-995).
+`xhigh` → `1`, `max` → `5` (mandatory, one axis `competitive-research`;
+`adr_0017` C-995) — and `3` at `xhigh` when the user named that tier
+explicitly. Research is never repeated: an axis an unexpired research
+artifact in the artifact home already covers, or whose decision an accepted
+ADR already settles, counts as run and launches no `researcher` (`1` then
+resolves to zero).
 `--research=3` at `high` promotes research breadth alone — the rest of the
 tier (single architect worker, ADR-only artifact, bounded review) stays at
 `high`'s rules. `--axes=<a,b,c>` names axes explicitly, bypassing the
 interactive picker; it is still echoed at the gate for confirmation, and its
 length must match the resolved count (extra names beyond the count are
 dropped with a note, fewer names fall back to classifier candidates for the
-remainder). Researcher model class is `fast-balanced` at every tier
+remainder). Researcher model class is `standard` at every tier
 ([`models.md`](../hex-core/references/models.md)); literal model choices
 live in `hex.md › Preferences`, never in a flag.
 
@@ -63,7 +67,7 @@ is the `plan-artifact` scope; `/hex-execute` runs the same skill in
 | Value | Effect |
 |---|---|
 | `off` | No cross-model design review. |
-| `on` | Invoke the adversary skill once in `plan-artifact` scope on the ADR (and system-design doc, if produced), launched last in the Round 1 panel batch. One-shot, no loop. Triage its findings 4-way (actionable / deferred / stated-convention / trivia); actionable fixes are applied with the panel's and validated by the same single `reviewer` (focus `spec`) pass. |
+| `on` | Invoke the adversary skill once in `plan-artifact` scope on the ADR (and system-design doc, if produced), launched last in the Round 1 panel batch. One-shot, no loop. Triage its findings 4-way (actionable / deferred / stated-convention / trivia); actionable fixes are applied with the panel's; a fixed Block finding earns the one re-validation pass by `reviewer` (focus `spec`) ([`loop.md`](../hex-core/references/loop.md#the-review-fix-loop)). |
 
 Per-tier defaults:
 
@@ -71,7 +75,7 @@ Per-tier defaults:
 |---|---|
 | low | `off` (inline tier); explicit `--adversary` runs it alone |
 | medium | `off` (two-way door — cost outweighs value; no design panel either) |
-| high | `off`, auto-on when [`classify.md`](classify.md) fires `adversary=on` for one-way-door signals, and auto-on on dossier fast-path input ([`SKILL.md`](SKILL.md#a-discussion-dossier-as-decision)); explicit via `--adversary` |
+| high | `off`, auto-on when [`classify.md`](classify.md) fires `adversary=on` for one-way-door signals; explicit via `--adversary` |
 | xhigh | `on` (a default part of the flow; a skip is surfaced prominently) |
 | max | `on` — **every** entry of a list-valued `adversary` key, in the Round 1 batch; below `max` the first entry only (`adr_0017` C-995) |
 

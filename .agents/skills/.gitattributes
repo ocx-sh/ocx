@@ -1,0 +1,5 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+# grim client output, installed from grimoire.lock and committed so every agent sees it on a fresh clone.
+# Never edit here: change grimoire.toml (repo-owned skills and rules: agent-config/), run task setup, commit.
+# task grim:check fails when these files drift from the lock; GitHub collapses them in diffs.
+* linguist-generated=true

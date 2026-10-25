@@ -45,7 +45,7 @@ failure on a cache-only shape.** A lane that must fail on an unreachable cache
 needs a check outside Bazel — a reachability probe before the build. Saying "we
 will set a fallback flag" is not that check.
 
-The confirming grep: `grep -n 'WARNING: Remote Cache' <build log>`. A hit with a
+The confirming grep: `BUILD_LOG=path/to/build-log; grep -n -e 'WARNING: Remote Cache' -- "${BUILD_LOG}"`. A hit with a
 zero exit is the whole finding. EMPTY means the cache was reachable — the miss
 you are chasing is a key or eviction question, not connectivity.
 
@@ -66,7 +66,7 @@ Error texts to match, all observed:
 | `Unexpected lost inputs (pass --rewind_lost_inputs to enable recovery)` | 9.2.0, retries `0` |
 | `lost input too many times (#21) for the same action` | Rewind engaged and exhausted |
 
-`grep -nE 'lost inputs|Lost inputs no longer available remotely|Found transient remote cache error|Unexpected lost inputs' <build log>`
+`BUILD_LOG=path/to/build-log; grep -n -E -e 'lost inputs' -e 'Lost inputs no longer available remotely' -e 'Found transient remote cache error' -e 'Unexpected lost inputs' -- "${BUILD_LOG}"`
 EMPTY = not an eviction; look elsewhere. Any hit identifies it regardless of the
 exit code, which is the point (BZL-CACHE-12).
 

@@ -19,18 +19,14 @@ its self-check refuses a return that skipped one.
 
 ## Composition
 
-Which sections a brief carries is decided once, here, by join level
-([`loop.md` § Review by join level](loop.md#review-by-join-level)):
+Which sections a brief carries is decided once, here, by seat:
 
-| Level | Sections |
+| Seat | Sections |
 |---|---|
-| `L0` | none — the builder's own self-check ([`workers/builder.md`](workers/builder.md)) and the mechanical evidence-table grep; a mechanical gate takes no judgement list |
 | inline (a tier-`low` orchestrator reviewing its own edit) | `spec` + `quality`, answered by the orchestrator itself before it commits |
-| `L1` | `spec` + `quality` |
-| `L2` | per the run's `review` axis ([`hex-execute/overlays.md`](../../hex-execute/overlays.md#review-axis)): `minimal` → `spec` + `quality`; `full` → + `security` when the diff touches a security-sensitive path, + `performance` when it touches a hot path or async code, + `docs` when doc-drift triggers match; `adversarial` → + `architecture` + `pitfalls`. A `sec`, `hot` or `door` flag on any joined WP forces `security` + `performance` on at every value |
-| `L3` | each `/hex-review` panel seat carries the section of its own focus; `user-feedback` when that seat fires |
+| a `/hex-review` panel seat | the section of its own focus; `user-feedback` when that seat fires |
 
-Three rules sit on top of the table:
+Two rules sit on top of the table:
 
 - **The project's own rules are always a section.** Every composed brief
   also names the project's quality rules and the invariants of the areas
@@ -40,13 +36,8 @@ Three rules sit on top of the table:
   through `perspectives.always` ([`config.md`](config.md#perspectives)),
   is how a project extends the checklist; there is no separate project
   checklist file.
-- **`review.<level>.checklist: [<focus>…]`** in `hex.md › Preferences`
-  replaces the derived section set for that level's brief
-  ([`config.md`](config.md#key-vocabulary), C-990). It is the only breadth
-  knob `L1` has; at `L2` an explicit `--review` flag still wins under the
-  ordinary later-wins precedence.
-- **A `perspectives.always` rule adds its persona's checklist as one more
-  section at `L2`** and a seat at `L3`, unchanged from `adr_0015` C-985.
+- **A `perspectives.always` rule adds a seat** carrying its persona's
+  checklist as its section.
 
 ## spec
 
@@ -79,7 +70,7 @@ Three rules sit on top of the table:
 - Error handling is explicit where the diff can fail — no swallowed
   exception, no bare catch, no ignored return; verify each new call that
   can fail.
-- The diff stays inside the WP's declared file set — a file outside it is
+- The diff stays inside the pipeline's declared file set — a file outside it is
   a finding even when the change is right.
 
 ## security

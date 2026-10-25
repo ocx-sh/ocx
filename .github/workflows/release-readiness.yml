@@ -1,64 +1,314 @@
 name: Release Readiness
 
-# One pre-release GO/NO-GO gate. Dispatch this on the ref you intend to release
-# (e.g. `gh workflow run release-readiness.yml --ref main` before tagging vX.Y.Z).
-# It runs the full cross-platform deep coverage as reusable workflows and rolls
-# their results into a single verdict:
+# The GO/NO-GO gate for a release: the full acceptance suite, on the bytes cargo-dist would publish.
+# Dispatch it on the exact commit about to be tagged (the `release/vX` branch holding the
+# `release: vX` commit):
 #
-#   - Verify Deep            — build + unit test on Linux/macOS/Windows, plus
-#                              Windows ARM64 cross-compile and Linux acceptance.
-#   - Shell Activation Deep  — `ocx self setup` activation on macOS + Windows.
+#   gh workflow run release-readiness.yml --ref release/vX
 #
-# Linux per-PR gates (verify-basic.yml, shell-activation.yml) already cover the
-# Linux surface on every change; this gate adds the expensive macOS/Windows
-# coverage on demand so a green run means "safe to cut the release". It is NOT
-# wired into the cargo-dist release.yml — run it yourself before tagging.
+# `task release:tag` then refuses unless this workflow succeeded for that SHA, and `readiness-gate.yml`
+# asks again on the tagged commit before `host` can publish (scripts/release_readiness_gate.py).
+#
+#   plan -> build (dist build per target, as release.yml) -> scan (scan-binaries.yml, as release.yml)
+#        -> stage (extract `ocx`, add ocx-shim and ocx_schema, natively) -> acceptance (acceptance.yml
+#           per platform, 4 shards and a merge against test/limits/<os>-release) -> verdict
+#   shell-activation-deep (macOS and Windows activation) runs beside the acceptance legs.
+#
+# Nothing here publishes: no release, no tag, no registry push. Artifacts live one day in this run.
+# Linux x64 is tested on the glibc archive, the one a glibc host installs. aarch64-pc-windows-msvc is
+# built natively on its own runner here, where release.yml cross-compiles it with cargo-xwin.
+#
+# Inputs: `bypass` skips every test job and the verdict goes green; it needs a `reason`, which lands in
+# the run-name (so the gate script and `gh run list` name it) and in the step summary. Use it for an
+# outage of this workflow, never for a red result.
+#
+# Nesting: acceptance.yml, scan-binaries.yml and shell-activation-deep.yml are called one level
+# down; none of them calls a further workflow.
+
+run-name: "readiness ${{ github.sha }}${{ inputs.bypass && format(' BYPASS: {0}', inputs.reason) || '' }}"
 
 on:
   workflow_dispatch:
+    inputs:
+      bypass:
+        description: Skip every test job and report GO. Requires a reason; the run-name carries it.
+        type: boolean
+        default: false
+      reason:
+        description: Why the readiness gate is bypassed. Required with bypass.
+        type: string
+        default: ''
 
-permissions:
-  contents: read
-  checks: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  deep:
-    name: Verify Deep
-    uses: ./.github/workflows/verify-deep.yml
+  plan:
+    name: Dist plan
+    if: ${{ !inputs.bypass }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      # The same installer and version as release.yml and verify-release-ci.yml; test_workflows.py holds all three.
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      - name: Plan
+        run: dist plan
 
-  shells:
-    name: Shell Activation Deep
+  build:
+    name: Dist build (${{ matrix.target }})
+    if: ${{ !inputs.bypass }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Equal to `targets` in dist-workspace.toml; test_workflows.py holds it there.
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-22.04-arm, musl: true }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04 }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-22.04, musl: true }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2022 }
+          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm }
+    steps:
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install musl tools
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install musl-tools
+      - name: Install dist and cargo-auditable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/rust-secure-code/cargo-auditable/releases/latest/download/cargo-auditable-installer.sh | sh
+      - name: Install dist and cargo-auditable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
+          irm https://github.com/rust-secure-code/cargo-auditable/releases/latest/download/cargo-auditable-installer.ps1 | iex
+      - name: Build the release archive
+        id: dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist build --artifacts=local --target="$TARGET" --print=linkage --output-format=json > dist-manifest.json
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      # Same name as release.yml's: scan-binaries.yml reads `artifacts-build-local-*`.
+      - name: Upload the archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: ${{ steps.dist.outputs.paths }}
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
+  scan:
+    name: Scan for test provenance
+    needs: build
+    permissions:
+      contents: read
+    uses: ./.github/workflows/scan-binaries.yml
+
+  # The archive holds `ocx` alone; the suite also drives `ocx-shim` and `ocx_schema`, so each is built
+  # natively beside it and the three are laid out as `test/bin` (`ocx`, `ocx-shim`, `schema/ocx_schema`).
+  stage:
+    name: Stage test/bin (${{ matrix.target }})
+    if: ${{ !inputs.bypass }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Download the release archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: archive
+      - name: Extract (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: mkdir extract && tar -xzf "archive/ocx-$TARGET.tar.gz" -C extract
+      - name: Extract (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -Path "archive/ocx-$env:TARGET.zip" -DestinationPath extract
+      - name: Build ocx-shim and ocx_schema
+        shell: bash
+        run: cargo build --release --locked -p ocx_shim -p ocx_schema
+      - name: Lay out test/bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          [[ "$RUNNER_OS" == "Windows" ]] && ext=".exe"
+          ocx="$(find extract -type f -name "ocx$ext" | head -1)"
+          [[ -n "$ocx" ]] || { echo "::error::no ocx$ext in the release archive"; exit 1; }
+          mkdir -p stage/schema
+          cp "$ocx" "stage/ocx$ext"
+          cp "target/release/ocx-shim$ext" "stage/ocx-shim$ext"
+          cp "target/release/ocx_schema$ext" "stage/schema/ocx_schema$ext"
+          ls -lR stage
+      - name: Upload test/bin
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: readiness-bin-${{ matrix.target }}
+          path: stage/
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  acceptance:
+    name: Acceptance (${{ matrix.name }})
+    if: ${{ !inputs.bypass }}
+    needs: [stage, scan]
+    permissions:
+      contents: read
+    # `toolchain-group: test` on the legs whose `ocx.lock` lacks a leaf for a default tool: the suite takes only
+    # `zot` from the project, and loading the whole project there exits 78 (test_workflows.py derives the set).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux x64, target: x86_64-unknown-linux-gnu, os: ubuntu-latest, limits: test/limits/linux-release, no-docker: false, toolchain-group: '' }
+          - { name: Linux arm64, target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, limits: test/limits/linux-release, no-docker: false, toolchain-group: '' }
+          - { name: macOS arm64, target: aarch64-apple-darwin, os: macos-latest, limits: test/limits/macos-release, no-docker: true, toolchain-group: '' }
+          - { name: macOS x64, target: x86_64-apple-darwin, os: macos-15-intel, limits: test/limits/macos-release, no-docker: true, toolchain-group: 'test' }
+          - { name: Windows x64, target: x86_64-pc-windows-msvc, os: windows-latest, limits: test/limits/windows-release, no-docker: true, toolchain-group: '' }
+          - { name: Windows arm64, target: aarch64-pc-windows-msvc, os: windows-11-arm, limits: test/limits/windows-release, no-docker: true, toolchain-group: 'test' }
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      os: ${{ matrix.os }}
+      binary: artifact:readiness-bin-${{ matrix.target }}
+      shard-count: 4
+      limits-dir: ${{ matrix.limits }}
+      release-binary: true
+      no-docker: ${{ matrix.no-docker }}
+      toolchain-group: ${{ matrix.toolchain-group }}
+    secrets:
+      # Owed by the secret sweep; only the callee's `binary` job reads it, and `artifact:` skips that job.
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+
+  shell-activation-deep:
+    name: Shell activation (macOS, Windows)
+    if: ${{ !inputs.bypass }}
+    needs: scan
+    permissions:
+      contents: read
     uses: ./.github/workflows/shell-activation-deep.yml
 
-  gate:
+  verdict:
     name: Verdict
-    needs: [deep, shells]
+    needs: [plan, build, scan, stage, acceptance, shell-activation-deep]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Report GO/NO-GO
         env:
-          DEEP_RESULT: ${{ needs.deep.result }}
-          SHELLS_RESULT: ${{ needs.shells.result }}
+          BYPASS: ${{ inputs.bypass }}
+          REASON: ${{ inputs.reason }}
+          ACTOR: ${{ github.actor }}
+          SHA: ${{ github.sha }}
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+          SCAN: ${{ needs.scan.result }}
+          STAGE: ${{ needs.stage.result }}
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+          SHELL_ACTIVATION: ${{ needs.shell-activation-deep.result }}
         run: |
+          set -uo pipefail
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          if [[ "$BYPASS" == "true" ]]; then
+            if [[ -z "${REASON//[[:space:]]/}" ]]; then
+              echo "::error::bypass needs a reason"
+              echo "**Verdict: NO-GO - bypass was set without a reason.**" >> "$summary"
+              exit 1
+            fi
+            {
+              echo "## Release Readiness"
+              echo ""
+              echo "**Verdict: GO by BYPASS - no test ran.** Commit \`${SHA}\`, dispatched by ${ACTOR}."
+              echo ""
+              echo "Reason: ${REASON}"
+            } >> "$summary"
+            exit 0
+          fi
+          failed=()
           {
             echo "## Release Readiness"
             echo ""
             echo "| Check | Result |"
             echo "| --- | --- |"
-            echo "| Verify Deep (Linux/macOS/Windows unit + Linux acceptance) | \`${DEEP_RESULT}\` |"
-            echo "| Shell Activation Deep (macOS + Windows) | \`${SHELLS_RESULT}\` |"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "${DEEP_RESULT}" = "success" ] && [ "${SHELLS_RESULT}" = "success" ]; then
-            echo "**Verdict: GO - safe to release.**" >> "$GITHUB_STEP_SUMMARY"
+          } >> "$summary"
+          row() {
+            echo "| $1 | \`$2\` |" >> "$summary"
+            [[ "$2" == "success" ]] || failed+=("$1=$2")
+          }
+          row "dist plan" "$PLAN"
+          row "dist build, 8 targets" "$BUILD"
+          row "provenance scan" "$SCAN"
+          row "stage test/bin, 6 platforms" "$STAGE"
+          row "acceptance on the release bytes, 6 platforms" "$ACCEPTANCE"
+          row "shell activation (macOS, Windows)" "$SHELL_ACTIVATION"
+          echo "" >> "$summary"
+          if (( ${#failed[@]} == 0 )); then
+            echo "**Verdict: GO - safe to tag \`${SHA}\`.**" >> "$summary"
           else
-            echo "**Verdict: NO-GO - do not release.**" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Release readiness NO-GO (verify-deep=${DEEP_RESULT}, shell-activation-deep=${SHELLS_RESULT})"
+            echo "**Verdict: NO-GO - do not release.**" >> "$summary"
+            echo "::error::Release readiness NO-GO (${failed[*]})"
             exit 1
           fi

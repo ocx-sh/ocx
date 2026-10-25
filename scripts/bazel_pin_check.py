@@ -15,8 +15,8 @@ this gate never reads `ocx.lock` itself — only the two spellings a human or a
 `bazelisk` reaches for, `.bazelversion` and the resolved binary.
 
 **C-026.** The same shape, a different pair: `rust-toolchain.toml`'s
-`[toolchain].channel` against `MODULE.bazel`'s `rust.toolchain(versions =
-[...])`. This project ships binaries, so the two pins are policy-required to
+`[toolchain].channel` against `MODULE.bazel`'s `toolchains.toolchain(version =
+...)`. This project ships binaries, so the two pins are policy-required to
 name the same compiler; nothing upstream enforces that, so this is the gate
 that would catch it drifting. Two independent reader floors, one per file:
 absent, malformed, or missing the field all count as "could not read a
@@ -53,19 +53,19 @@ from bazel_gate_proofs import (
 
 TOOLCHAIN_DRIFT_MSG = (
     "rust toolchain drift: rust-toolchain.toml channel={channel!r}, MODULE.bazel "
-    "rust.toolchain(versions=[...]) has {versions} — this project ships binaries, "
+    "toolchains.toolchain(version=...) has {versions} — this project ships binaries, "
     "so both pins must name the same compiler"
 )
 TOOLCHAIN_FILE_MSG = "could not read a rust channel from rust-toolchain.toml: {reason}"
-TOOLCHAIN_MODULE_MSG = "could not read rust.toolchain(versions=[...]) from MODULE.bazel: {reason}"
+TOOLCHAIN_MODULE_MSG = "could not read toolchains.toolchain(version=...) from MODULE.bazel: {reason}"
 
-#: Not full Starlark parsing — a `rust.toolchain(...)` call is a keyword-only
+#: Not full Starlark parsing — a `toolchains.toolchain(...)` call is a keyword-only
 #: function call over a small, fixed vocabulary, and this file's only reader,
 #: so a regex extraction is proportionate (quality-core.md "Don't Own
 #: Non-Domain Code" rung 3: a few lines, no edge cases this repo's own
 #: MODULE.bazel exercises).
-RUST_TOOLCHAIN_CALL = re.compile(r"rust\.toolchain\((?P<body>.*?)\)", re.DOTALL)
-VERSIONS_LIST = re.compile(r"versions\s*=\s*\[(?P<items>[^\]]*)\]")
+RUST_TOOLCHAIN_CALL = re.compile(r"toolchains\.toolchain\((?P<body>.*?)\)", re.DOTALL)
+VERSIONS_LIST = re.compile(r"\bversion\s*=\s*(?P<items>\"[^\"]+\")")
 QUOTED = re.compile(r'"([^"]+)"')
 
 
@@ -86,24 +86,24 @@ def read_rust_channel(text: str | None) -> tuple[str | None, Finding | None]:
 
 
 def read_module_versions(text: str | None) -> tuple[list[str] | None, Finding | None]:
-    """`MODULE.bazel`'s `rust.toolchain(versions = [...])`, or a reader-floor Finding."""
+    """`MODULE.bazel`'s `toolchains.toolchain(version = ...)`, or a reader-floor Finding."""
     if text is None:
         return None, Finding("toolchain-module", TOOLCHAIN_MODULE_MSG.format(reason="<absent>"))
     call = RUST_TOOLCHAIN_CALL.search(text)
     if call is None:
         return None, Finding(
-            "toolchain-module", TOOLCHAIN_MODULE_MSG.format(reason="no rust.toolchain(...) call")
+            "toolchain-module", TOOLCHAIN_MODULE_MSG.format(reason="no toolchains.toolchain(...) call")
         )
     versions_match = VERSIONS_LIST.search(call.group("body"))
     if versions_match is None:
         return None, Finding(
-            "toolchain-module", TOOLCHAIN_MODULE_MSG.format(reason="no versions = [...] in the call")
+            "toolchain-module", TOOLCHAIN_MODULE_MSG.format(reason="no version string in the call")
         )
     versions = QUOTED.findall(versions_match.group("items"))
     if not versions:
         return None, Finding(
             "toolchain-module",
-            TOOLCHAIN_MODULE_MSG.format(reason="versions = [...] has no quoted entries"),
+            TOOLCHAIN_MODULE_MSG.format(reason="version has no quoted entry"),
         )
     return versions, None
 
@@ -129,6 +129,38 @@ def toolchain_drift(rust_toolchain_text: str | None, module_bazel_text: str | No
         findings.append(
             Finding("toolchain-drift", TOOLCHAIN_DRIFT_MSG.format(channel=channel, versions=versions))
         )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Exact pins on the two modules the Rust build stands on.
+# ---------------------------------------------------------------------------
+
+#: `rules_rs` supplies the crate graph and `llvm` the hermetic C/C++ toolchain; a
+#: range, a missing `version`, or a dropped dep would let either float.
+PINNED_BAZEL_DEPS = ("rules_rs", "llvm")
+EXACT_SEMVER = re.compile(r"\d+\.\d+\.\d+")
+DEP_PIN_MSG = (
+    "bazel_dep {name!r} in MODULE.bazel: {reason} — it must be pinned to an exact "
+    "MAJOR.MINOR.PATCH version"
+)
+
+
+def module_pin_drift(module_bazel_text: str | None) -> list[Finding]:
+    if module_bazel_text is None:
+        return [Finding("dep-pin", DEP_PIN_MSG.format(name="*", reason="MODULE.bazel is absent"))]
+    findings: list[Finding] = []
+    for name in PINNED_BAZEL_DEPS:
+        call = re.search(rf'bazel_dep\(\s*name\s*=\s*"{name}"(?P<body>[^)]*)\)', module_bazel_text)
+        if call is None:
+            findings.append(Finding("dep-pin", DEP_PIN_MSG.format(name=name, reason="no bazel_dep")))
+            continue
+        version = re.search(r'\bversion\s*=\s*"(?P<v>[^"]*)"', call.group("body"))
+        if version is None or not EXACT_SEMVER.fullmatch(version.group("v")):
+            found = version.group("v") if version else "<none>"
+            findings.append(
+                Finding("dep-pin", DEP_PIN_MSG.format(name=name, reason=f"version is {found!r}"))
+            )
     return findings
 
 
@@ -181,8 +213,10 @@ def run_check(
     rust_toolchain_path: Path,
     module_bazel_path: Path,
 ) -> list[Finding]:
-    return check_pin(bazelversion_path=bazelversion_path, bazel_bin=bazel_bin) + check_toolchain(
-        rust_toolchain_path=rust_toolchain_path, module_bazel_path=module_bazel_path
+    return (
+        check_pin(bazelversion_path=bazelversion_path, bazel_bin=bazel_bin)
+        + check_toolchain(rust_toolchain_path=rust_toolchain_path, module_bazel_path=module_bazel_path)
+        + module_pin_drift(read_bazelversion(module_bazel_path))
     )
 
 
@@ -289,7 +323,7 @@ def prove_toolchain_gate(scratch: Path) -> int:
     module_bazel = scratch / "MODULE.bazel"
 
     good_toolchain = '[toolchain]\nchannel = "1.95.0"\nprofile = "default"\n'
-    good_module = 'rust.toolchain(\n    edition = "2024",\n    versions = ["1.95.0"],\n)\n'
+    good_module = 'toolchains.toolchain(\n    edition = "2024",\n    version = "1.95.0",\n)\n'
     rust_toolchain.write_text(good_toolchain, encoding="utf-8")
     module_bazel.write_text(good_module, encoding="utf-8")
 
@@ -362,18 +396,18 @@ def prove_toolchain_gate(scratch: Path) -> int:
     checks += 1
     module_bazel.write_text(good_module, encoding="utf-8")
 
-    # --- MODULE.bazel present, but no rust.toolchain(...) call at all.
-    no_call_text = 'bazel_dep(name = "rules_rust", version = "0.74.0")\n'
+    # --- MODULE.bazel present, but no toolchains.toolchain(...) call at all.
+    no_call_text = 'bazel_dep(name = "rules_rs", version = "0.1.3")\n'
     module_bazel.write_text(no_call_text, encoding="utf-8")
     expect(module_bazel.read_text(encoding="utf-8") == no_call_text, "the call-removal edit did not land")
     no_call = check_toolchain(rust_toolchain_path=rust_toolchain, module_bazel_path=module_bazel)
     expect(codes(no_call) == ["toolchain-module"], f"got {codes(no_call)}")
-    print(f"C-026 RED  : {no_call[0].message} (no rust.toolchain(...) call)")
+    print(f"C-026 RED  : {no_call[0].message} (no toolchains.toolchain(...) call)")
     checks += 1
     module_bazel.write_text(good_module, encoding="utf-8")
 
     # --- MODULE.bazel has the call, but no versions = [...] inside it.
-    no_versions_text = 'rust.toolchain(\n    edition = "2024",\n)\n'
+    no_versions_text = 'toolchains.toolchain(\n    edition = "2024",\n)\n'
     module_bazel.write_text(no_versions_text, encoding="utf-8")
     expect("versions" not in module_bazel.read_text(encoding="utf-8"), "the versions-drop did not land")
     no_versions = check_toolchain(rust_toolchain_path=rust_toolchain, module_bazel_path=module_bazel)
@@ -402,6 +436,34 @@ def prove_toolchain_gate(scratch: Path) -> int:
     return checks
 
 
+def prove_dep_pins(scratch: Path) -> int:
+    """`rules_rs` / `llvm` exact pins: green on the shipped MODULE.bazel and a
+    well-formed scratch copy, red on a range, a dropped version and a dropped dep."""
+    checks = 0
+    good = 'bazel_dep(name = "rules_rs", version = "0.1.3")\nbazel_dep(name = "llvm", version = "0.8.25")\n'
+    expect(module_pin_drift(good) == [], "the exact pins must be silent")
+    real = (REPO_ROOT / "MODULE.bazel").read_text(encoding="utf-8")
+    expect(module_pin_drift(real) == [], f"the shipped MODULE.bazel must pass: {module_pin_drift(real)}")
+    print("dep-pin GREEN: rules_rs and llvm are exactly pinned in MODULE.bazel")
+    checks += 1
+
+    mutations = {
+        "range": good.replace('"0.8.25"', '">=0.8.25"'),
+        "short": good.replace('"0.1.3"', '"0.1"'),
+        "no version": good.replace(', version = "0.8.25"', ""),
+        "dropped dep": good.replace('bazel_dep(name = "llvm", version = "0.8.25")\n', ""),
+    }
+    for label, text in mutations.items():
+        scratch_module = scratch / "MODULE_pin.bazel"
+        scratch_module.write_text(text, encoding="utf-8")
+        expect(scratch_module.read_text(encoding="utf-8") != good, f"the {label} mutation did not land")
+        found = module_pin_drift(scratch_module.read_text(encoding="utf-8"))
+        expect(codes(found) == ["dep-pin"], f"{label}: got {codes(found)}")
+        print(f"dep-pin RED  : {found[0].message} ({label})")
+        checks += 1
+    return checks
+
+
 def prove_entry_point(scratch: Path) -> int:
     """The shipped `--check` path (`run_check` + `report`), not just the two
     comparators in isolation — a green run and a red run through the same
@@ -414,7 +476,11 @@ def prove_entry_point(scratch: Path) -> int:
 
     pin.write_text("9.2.0\n", encoding="utf-8")
     rust_toolchain.write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
-    module_bazel.write_text('rust.toolchain(\n    versions = ["1.95.0"],\n)\n', encoding="utf-8")
+    module_bazel.write_text(
+        'bazel_dep(name = "rules_rs", version = "0.1.3")\nbazel_dep(name = "llvm", version = "0.8.25")\n'
+        'toolchains.toolchain(\n    version = "1.95.0",\n)\n',
+        encoding="utf-8",
+    )
     clean = run_check(
         bazelversion_path=pin,
         bazel_bin=str(ok_bin),

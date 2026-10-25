@@ -24,23 +24,13 @@ the project's plan location. Read and mutated by /hex-plan, /hex-execute,
 - State:   plan-approved      <!-- planning → plan-approved → executing → review → done; federated plans only (`Repo` column present): review → landing → done -->
 - Tier:    [low | medium | high | xhigh | max]
 - Tier-grammar: 5   <!-- written by /hex-plan; the grammar `Tier:` was written in. Absent ⇒ pre-`adr_0017` grammar: `Tier:` is read one step higher (low→medium, medium→high, high→xhigh) and announced, never rewritten — hex-core references/protocol.md § Tier grammar (C-997). -->
-- Effective-tier: derived   <!-- optional — the generation marker.
-  Present ⇒ the `Tier:` line above is a ceiling and every WP derives its
-  own effective tier from cells the table already carries, never above
-  that ceiling. Absent ⇒ pre-`adr_0012` semantics, permanently —
-  never an error, never a prompt, never a rewrite. `derived` is the
-  only value understood; an unrecognized or empty value is a refusal,
-  not a default. Mechanics: hex-core references/decompose.md
-  § Parallel-by-default decomposition (C-953). -->
 - Updated: [YYYY-MM-DD]
 - Next:    /hex-execute [this plan's path]
-- Reviewed: <full 40-char SHA>   <!-- optional — the branch-scope last-reviewed anchor. Written by the reviewer, not the plan author: whoever completes a branch-scope pass over a diff headed at that SHA writes it, and a WP-scope round never does — delete this line until a review pass has run. It records that every commit reachable from that SHA saw at least one pass, not that the pass was clean. Absent line ⇒ never reviewed ⇒ full-branch review (C-907, C-915) — never an error, never a migration prompt. Mechanics: hex-core references/loop.md § The Review-Fix Loop. -->
-- Verify-default: full   <!-- optional — sets the default every empty `Verify` cell inherits, so full verification runs at both gates the cell reaches: each WP's merge gate and the Review-Fix Loop exit gate that immediately precedes it (C-924). Individual cells still override it. Absent line ⇒ `scoped` (C-905, C-915). It cannot reach the run's final gate, which is un-lowerable (C-926). Delete unless the plan needs it. -->
+- Reviewed: <full 40-char SHA>   <!-- optional — the last-reviewed anchor. Written by the reviewer, not the plan author: whoever completes a review pass over a diff headed at that SHA writes it. It records that every commit reachable from that SHA saw at least one pass, not that the pass was clean. Absent line ⇒ never reviewed ⇒ full-branch review — never an error, never a migration prompt. Mechanics: hex-core references/loop.md § The Review-Fix Loop. Delete this line until a review pass has run. -->
 - Repos:   <!-- optional — present only when the table carries a `Repo`
   column (C-324); written once at execution start, frozen, never
-  re-resolved (C-317). Mechanics: hex-core references/worktree.md
-  § Worktree work-package mechanics. Delete this line and its rows when
-  the plan is single-repo. -->
+  re-resolved (C-317). Mechanics: hex-core references/worktree.md.
+  Delete this line and its rows when the plan is single-repo. -->
   - `[key]` [/absolute/path/to/repo]  trunk `[branch]`  base `[full 40-char SHA]`  landed: [yes|no]
 
 ---
@@ -115,7 +105,7 @@ behavior and edge cases. Testable enough that a tester could write
 failing tests from this section alone, without reading any code.
 IDs C-001, C-002, ... are stable coverage join keys - carried from the
 spec when one exists, never renumbered. Every C-ID must appear in the
-Scope cell of at least one WP and in at least one test step
+Scope cell of at least one pipeline and in at least one test step
 (hex-core references/protocol.md § Traceability IDs).
 -->
 
@@ -126,7 +116,7 @@ Scope cell of at least one WP and in at least one test step
 
 <!-- One row per user-facing behavior; error cases are mandatory.
 S-IDs are coverage join keys like C-IDs - every S-ID needs a covering
-WP and test. -->
+pipeline and test. -->
 
 | ID | Action | Expected outcome | Error cases |
 |---|---|---|---|
@@ -135,209 +125,112 @@ WP and test. -->
 ## Parallelization
 
 <!--
-Decompose to MAXIMIZE parallel execution (structural boundaries, not
-feature slices; two tasks touching the same file = one sequential WP) —
-but never below the overhead floor: a WP whose whole scope is a single
-trivial concern (~≤50 expected lines) folds into its nearest sibling as
-sequential steps; keeping it isolated needs a one-line justification.
-Wave is computed, not asserted: WP is in wave N iff every dependency
-sits in an earlier wave and N is minimal — /hex-execute launches each WP
-the instant its dependencies merge (dependency-ready, waves are derived
-reporting), one ephemeral branch + worktree per leaf WP, merged
-serialized onto the plan's feature branch in a valid topological order.
-Size is the plan-time estimate of the WP's diff: `S` — ~≤50 expected
-lines AND ≤3 expected files; `M` — ~≤500 expected lines AND ≤15
-expected files; `L` — anything else. Both halves of a class must hold,
-and an absent, empty, unrecognized or ambiguous cell reads `L` (C-954).
-It is reporting vocabulary and, in a plan carrying the
-`- Effective-tier: derived` marker, a derivation input. Substance:
-hex-core references/decompose.md § Parallel-by-default decomposition
-(C-928).
-Review is an optional risk hint, not a budget: `risk` raises the WP's
-review one join level (L1 leaf → L2 aggregate), exactly as a
-security-sensitive, hot-path or `Verify: full` file set does; empty
-means no hint. Review depth is otherwise keyed on join level, never on
-this cell or the tier. Legacy values are read, never migrated: `panel`
-reads `risk`, `self` and `light` are inert. Substance: hex-core
-references/loop.md § Review by join level (adr_0015 C-983). A sub-WP
-inherits its parent's cell. Repo is the WP's repo: a Federation key from
-`hex.md › Pointers`, or `.` (also the
-empty-cell default) for the lead — absent the column, a plan is
-single-repo and every federation rule is inert (C-302); delete the `Repo`
-column entirely when the plan is single-repo — its presence is the
-federation signal. A plan using a
-`Repo` value other than `.` must carry a mandatory integration WP — see
-hex-core references/verify.md § Verification (C-311). Concurrently-running
-WPs must additionally own disjoint
-`(Repo, path)` pairs, not bare paths — substance in hex-core
-references/decompose.md § Parallel-by-default decomposition (C-316).
-Verify is one verification budget for one merge boundary: `scoped |
-full`, raise-only — there is deliberately no value below `scoped`. It
-sets the WP's merge gate and the Review-Fix Loop's exit gate that
-immediately precedes it, and nothing beyond those two (C-924); `full`
-runs the project's full documented verification at both, `scoped` is
-the default and is written only for readability.
-A missing column or cell means the plan's `Verify-default:` line, else
-`scoped` (C-905, C-915). Assign `full` only where author judgment sees
-risk the merge-time high-risk predicate cannot, and write the one-line
-justification on this section's `Verify justification:` line below, one
-entry per `full` cell. Substance:
-hex-core references/verify.md § Verification (C-901) and
-hex-core references/decompose.md § Parallel-by-default decomposition (C-924).
-Mechanics: hex-core references/decompose.md § Parallel-by-default
-decomposition and hex-core references/worktree.md § Worktree work-package mechanics. This table is the
-source of truth; the diagram is a visual index and may be dropped by
-renderers.
+A few pipelines cut along contracts: one worktree each, steps run serially
+inside, no gate or review between them; pipelines run in parallel and share
+only contracts. Splitting into steps is cheap (small contexts); splitting
+into pipelines pays only where a contract can be fixed up front. Expected
+files are disjoint across pipelines (with a Repo column: disjoint
+`(Repo, path)` pairs). Pipelines never edit contract-wave files and never
+commit hub/generated files (lockfiles, baselines, goldens) - those
+regenerate once at integration. Wave is computed, not asserted: a pipeline
+is in wave N iff every dependency sits in an earlier wave and N is minimal;
+/hex-execute launches each pipeline the instant its dependencies merge.
+Marks is empty, `hard` (the pipeline's steps start at standard-high; at
+most one pipeline in four) or `review` (the pipeline is reviewed on its own
+before it lands) - rare. Status is pending | active | merged | failed.
+Repo is the pipeline's repo: a Federation key from `hex.md › Pointers`, or
+`.` (also the empty-cell default) for the lead - absent the column, a plan
+is single-repo and every federation rule is inert (C-302); delete the
+`Repo` column entirely when the plan is single-repo, its presence is the
+federation signal. A plan using a `Repo` value other than `.` must carry a
+mandatory integration pipeline - see hex-core references/verify.md
+§ Verification (C-311). A one-pipeline plan has no contract wave.
+Substance: hex-core references/decompose.md § Parallel-by-default
+decomposition; mechanics: hex-core references/worktree.md § Pipeline
+worktree mechanics. This table is the source of truth; the diagram is a
+visual index and may be dropped by renderers.
 -->
 
-| WP | Repo | Scope | Expected Files | Size | Wave | Depends on | Review | Verify | Status |
-|----|------|-------|----------------|------|------|------------|--------|--------|--------|
-| [WP 1] | `.` | [Covers C-001, S-001] | `path/to/file` | [S/M/L] | 1 | — | [risk or empty] | [scoped/full] | pending |
-| [WP 2] | `.` | [Covers C-002] | `path/to/other` | [S/M/L] | 1 | — | [risk or empty] | [scoped/full] | pending |
-| [WP 3] | `.` | [Covers S-002] | `path/to/third` | [S/M/L] | 2* | WP 1, WP 2 | risk | — | pending *(rollup — computed)* |
-| [WP 3.1] | *(inherits)* | [Covers S-002] | `path/to/third_a` | [S/M/L] | 2 | *(inherits WP 3's)* | *(inherits)* | — | pending |
-| [WP 3.2] | *(inherits)* | [Covers S-002] | `path/to/third_b` | [S/M/L] | 3 | WP 3.1 | *(inherits)* | — | pending |
-
-<!--
-Dotted IDs (WP 3.1, WP 3.2, ...) are sub-WPs: same table, same columns,
-same 4 statuses — no new schema, just a richer ID space. Parent Status is
-a computed rollup, never set directly: failed if any child failed, merged
-iff all children merged and the join check passes, active once any child
-has started (is active or merged), else pending. Parent Wave is the min of its children's waves,
-marked with a trailing `*`; reporting only — a parent row is never itself
-launched. A sub-WP's Depends-on and Repo, if absent, inherit the parent's
-— a sub-WP never names a different repo than its parent, since only leaf
-rows are branch- and worktree-eligible, so a cross-repo split belongs at
-WP grain, not sub-WP grain (C-302). `Verify` is not inherited, and on a
-sub-WP row it budgets no merge gate — write `—`: sub-WP merges land in
-the coordinator's own shared worktree, never onto the feature branch, so
-they are not merge-gate sites at all (hex-core references/worktree.md
-§ Worktree work-package mechanics). Write `—` on a decomposing-coordinator-owned
-parent row too: that row's merge always pays the full documented
-verification under trigger (i), which supersedes the cell at the merge
-gate only (C-901, C-924). Neither `—` makes the cell inert. That WP's
-Review-Fix Loop exit gate is untouched by trigger (i) and still resolves
-a budget, and a literal `—` in any `Verify` cell, parent or sub-WP,
-reads there as an empty cell (same chain as above). Only leaf rows get a
-branch + worktree — a parent with children is never itself branched.
-Genuine join work is an ordinary sibling row (e.g. a WP 3.3 depending on WP 3.1 and
-WP 3.2), not a 5th status. IDs are never
-renumbered — the next sibling is the next integer. No schema-version
-marker: the presence of dotted IDs is the signal. A plan with zero
-sub-rows makes every rule above vacuous — byte-identical behavior.
--->
+| Pipeline | Repo | Scope | Expected Files | Wave | Depends on | Marks | Status |
+|----------|------|-------|----------------|------|------------|-------|--------|
+| [P1] | `.` | [Covers C-001, S-001] | `path/to/file` | 1 | — | [hard, review or empty] | pending |
+| [P2] | `.` | [Covers C-002] | `path/to/other` | 1 | — | | pending |
+| [P3] | `.` | [Covers S-002] | `path/to/third` | 2 | P1, P2 | | pending |
 
 ```mermaid
 graph TD
     subgraph W1["Wave 1 — parallel"]
-        WP1[WP 1]
-        WP2[WP 2]
+        P1[P1]
+        P2[P2]
     end
     subgraph W2["Wave 2"]
-        WP3[WP 3]
+        P3[P3]
     end
-    WP1 --> WP3
-    WP2 --> WP3
+    P1 --> P3
+    P2 --> P3
 ```
 
-**Critical path:** [WP 1 → WP 3] (bounds wall-clock time)
+**Critical path:** [P1 → P3] (bounds wall-clock time)
 
 **Shippable after wave:** [N — what already ships if work stops here.
-Delete at tier medium or below (single WP).]
+Delete when the plan is one pipeline.]
 
-**Merge order:** a valid topological order, serialized — [WP 1], [WP 2], [WP 3] — with
-the scoped check after each merge onto the feature branch, and full
-verification on the documented triggers and overrides — hex-core
-references/worktree.md § Worktree work-package mechanics (C-901).
-
-**Parallelization justification:** [only when fewer parallel WPs than
-file-disjointness allows, or a sub-overhead WP stays isolated — one line
-why. Delete otherwise.]
-
-**Verify justification:** [one line per WP whose `Verify` cell reads
-`full`, naming the risk the merge-time high-risk predicate cannot see.
-Delete when no cell reads `full`.]
+**Parallelization justification:** [only when fewer parallel pipelines than
+file-disjointness allows — one line why. Delete otherwise.]
 
 ## Implementation Steps
 
-> **Contract-first TDD:** every feature follows Stub → (optional
-> Architecture Review) → Specify → Implement → Review-Fix. Tests are
+> **Contract-first TDD:** the contract wave commits stubs and contract
+> tests; inside each step the work is Specify → Implement. Tests are
 > written from this plan's design record *before* implementation, and
-> validate the contract, not implementation details. See the Review-Fix
-> Loop covered by `/hex-execute` and `/hex-review`.
+> validate the contract, not implementation details. **Step feedback** is
+> the only inner check: a step that changes behaviour runs the tests it
+> wrote or touched once, with the narrowest command it picks, never the
+> project's gate wrapper; a step with no behavioural effect runs nothing.
+> The run's two full gates are the integration gate and the release gate
+> (`/hex-finalize`). See `/hex-execute` and `/hex-review`.
 
-### Phase 1: Stubs
+### Contract wave
+
+<!-- Delete this section for a one-pipeline plan. -->
 
 Public API surface only: type signatures, interface definitions, function
-shells. Bodies raise or return "not implemented" (e.g. `unimplemented!()`
-in Rust, `raise NotImplementedError` in Python, a `TODO` stub in Go). Goal:
-set the public shape, no business logic yet.
+shells with bodies that raise or return "not implemented" (e.g.
+`unimplemented!()` in Rust, `raise NotImplementedError` in Python), plus the
+contract tests written from the design record - NOT from the stubs - that
+encode expected behavior, edge cases, and the acceptance criteria above.
 
-- [ ] **Step 1.1:** [Stub description — types, interfaces, signatures]
+- [ ] **Stubs:** [types, interfaces, signatures]
   - Files: `path/to/file`
   - Public API: [Signatures + types introduced]
-
-- [ ] **Step 1.2:** [Stub description]
-  - Files: `path/to/file`
-  - Public API: [Signatures + types introduced]
-
-Gate: the project's compile/type check passes against the stubs.
-
-### Phase 2: Architecture Review
-
-Review the stubs against this plan's design record (`reviewer`, focus
-`spec`, phase `post-stub`). Verify: signatures match the documented
-contract, module boundaries align with the Architecture section above,
-error types cover the documented failure modes, no missing public surface
-versus the design.
-
-Gate: review passes before proceeding. *Optional for changes touching ≤3
-files.*
-
-### Phase 3: Specification Tests
-
-Write tests from the design record, NOT from the stubs. Tests encode
-expected behavior, edge cases, and the acceptance criteria above, and MUST
-fail against the stubs (bodies still "not implemented").
-
-- [ ] **Step 3.1:** Unit tests (from the design record's component
-      contracts)
+- [ ] **Contract tests:** [what they pin]
   - Files: `path/to/test`
-  - Cases: [Happy path, error cases, edge cases from the design]
-  - Covers: [C-001, C-002 — every C-ID needs at least one test]
+  - Covers: [C-001, C-002, S-001 - every C-/S-ID needs at least one test]
 
-- [ ] **Step 3.2:** Acceptance tests (from the design record's
-      user-facing behavior)
-  - Files: `path/to/test`
-  - Scenarios: [User-facing behaviors from the design]
-  - Covers: [S-001, S-002 — every S-ID needs at least one test]
+Check: the contract wave compiles/parses (the narrowest check that shows it).
 
-Gate: tests compile/parse and fail with "not implemented" against the
-stubs.
+### Pipeline steps
 
-### Phase 4: Implementation
+Each pipeline's steps run serially in its own worktree, in the order
+listed: specification tests for the step's slice of the contract, then the
+implementation that makes them pass. No new requirement is invented here -
+if one is needed, the design record is incomplete; update it instead.
 
-Fill stub bodies until every specification test passes. No new tests
-needed here — if one is, the design record is incomplete; update it
-instead of inventing a requirement.
-
-- [ ] **Step 4.1:** [Implementation description]
+- [ ] **Step P1.1:** [Step description]
   - Files: `path/to/file`
+  - Covers: [C-001]
   - Details: [Additional context]
-
-- [ ] **Step 4.2:** [Implementation description]
+- [ ] **Step P1.2:** [Step description]
   - Files: `path/to/file`
-  - Details: [Additional context]
+- [ ] **Step P2.1:** [Step description]
+  - Files: `path/to/other`
 
-Gate: the scoped check passes — hex-core references/verify.md
-§ Verification › Scoped check (C-925).
+### Integration and review
 
-### Phase 5: Review & Documentation
-
-- [ ] **Step 5.1:** Spec-compliance review (design record ↔ tests ↔
-      implementation)
-- [ ] **Step 5.2:** Code-quality review
-- [ ] **Step 5.3:** Documentation updates
+- [ ] All pipelines merged; hub/generated files regenerated once, minimally
+- [ ] Integration gate (concurrent with the review)
+- [ ] `/hex-review` over the landed range
+- [ ] Documentation updates
   - Update: [Files/sections]
 
 ## Dependencies
@@ -404,13 +297,9 @@ when empty.
 ### Before Merge
 
 - [ ] Code review approved
-- [ ] The merge gate's own check passes — the scoped check, or full
-      verification on a documented trigger — hex-core
-      references/worktree.md § Worktree work-package mechanics (C-901)
-- [ ] The run's final gate passes — the project's **full** documented
-      verification, once at the end of the run: mandatory and
-      un-lowerable, no `Verify` cell or `Verify-default:` line reaching
-      it (C-926) — merge-rule trigger (iii), same section
+- [ ] The integration gate passes
+- [ ] The release gate passes - `/hex-finalize`, fresh with no cache, plus the
+      project's hooks and lint over the final range
 - [ ] No merge conflicts
 
 ## Notes
@@ -422,8 +311,8 @@ when empty.
 ## Spec Deltas
 
 <!--
-OPTIONAL — absence is normal. Authored by /hex-execute at merge time, one or
-more entries per work package (never at plan time); folded into the project's
+OPTIONAL — absence is normal. Authored by /hex-execute when a pipeline lands, one or more
+entries per pipeline (never at plan time); folded into the project's
 documented spec home by /hex-review on an Approve + Converged terminal
 review. Exactly one block, naming exactly one `Target:` spec file — grammar,
 guards, halt semantics, and the fold receipt are defined once in
@@ -458,20 +347,11 @@ Folded: [YYYY-MM-DD] → path/to/spec file
 
 <!--
 Append-only, one bullet per merge onto the feature branch and one per
-completed work-package phase, never edited or reordered. Entries are appended on first merge; the section ships without
-a pre-seeded table, created on first write. An absent section is a
-pre-adr_0010 run, never an error (C-912, C-915). Two line kinds,
-discriminated by the first word after the first `·`. Grammar:
+completed step, never edited or reordered; created on first write. An absent
+section is never an error. Grammar and substance: hex-core
+references/decompose.md § Parallel-by-default decomposition. `<class>` is a
+capability class, never a literal model name.
 
-- <ISO-8601 UTC> · merged <WP> @ <post-merge SHA> · verify <scoped | full(<trigger>)> [<elapsed>] · ready: <ids | —> · blocked: <id (<blocker>), … | —>
-- <ISO-8601 UTC> · phase <WP>/<phase> · model <class> · work <elapsed> [· wait <elapsed>] [· rounds <n>]
-
-The post-merge SHA is mandatory; `<elapsed>` is wall-clock and optional.
-Existing consumers (the bisection walk, C-904) read only `merged` lines; a
-`phase` line carries no post-merge SHA and is never read by it. An absent
-`phase` line is a pre-adr_0013 run, never an error — presence-checked,
-never versioned. `<class>` is a capability class (e.g. `fast-balanced` /
-`deep-reasoning`), never a literal model name.
-Substance: hex-core references/decompose.md § Parallel-by-default
-decomposition (C-912, C-1224).
+- <ISO-8601 UTC> · merged <pipeline> @ <post-merge SHA> · ready: <ids | —> · blocked: <id (<blocker>), … | —>
+- <ISO-8601 UTC> · step <pipeline>/<n> · model <class> · work <elapsed> [· wait <elapsed>]
 -->

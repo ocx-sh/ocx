@@ -26,7 +26,7 @@ is not reached. So the failure is not non-hermeticity — it is a hermetic but
 and no warning (BZL-PY-01, BZL-PY-04).
 
 ```sh
-grep -n 'python.defaults(\|python.toolchain(' MODULE.bazel
+grep -n -E -e 'python.defaults\(' -e 'python.toolchain\(' -- MODULE.bazel
 ```
 
 **Empty output is the finding**: the repository is on a moving default. Pin with
@@ -56,7 +56,7 @@ test target's `srcs` at a pytest-style file without a pytest entrypoint — a
 wrapper's `main()` or a console-script-based macro (BZL-PY-21).
 
 ```sh
-git grep -ln '^def test_' -- '*_test.py' 'test_*.py'
+git grep -l -e '^def test_' -- '*_test.py' 'test_*.py'
 ```
 
 Every file listed needs a wrapper on its test target. **Empty output means no
@@ -176,7 +176,7 @@ Two checks before anything else:
 ```sh
 TARGET=//foo:bar
 bazel cquery "deps($TARGET)" > /tmp/cc.deps || { echo 'cquery FAILED — not a pass'; exit 1; }
-grep -c 'local_config_cc' /tmp/cc.deps
+grep -c -e 'local_config_cc' -- /tmp/cc.deps
 ```
 
 **Zero, on a successful cquery, = the graph does not reach the autodetected

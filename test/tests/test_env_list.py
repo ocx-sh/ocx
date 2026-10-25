@@ -426,7 +426,8 @@ def test_shell_bash_list_export_is_idempotent_after_double_eval(
     idempotence proof for `Shell::export_list`, mirroring
     `test_path_idempotency.py`'s PATH coverage for the move-to-front fold.
     """
-    if shutil.which("bash") is None:
+    bash = shutil.which("bash")
+    if bash is None:
         pytest.skip("bash not installed")
 
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, env=[_list_entry("GODEBUG", "gctrace=1", ",")])
@@ -441,7 +442,8 @@ def test_shell_bash_list_export_is_idempotent_after_double_eval(
 
     script = f'export GODEBUG="madvdontneed=1"\n{exports}\n{exports}\nprintf "%s" "$GODEBUG"'
     result = subprocess.run(
-        ["bash", "-c", script],
+        # Absolute: a bare name resolves to System32's WSL launcher on Windows.
+        [bash, "-c", script],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, result.stderr

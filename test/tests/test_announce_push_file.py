@@ -29,6 +29,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 
 def test_push_tags_file_feeds_announce_tags_file_union(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path

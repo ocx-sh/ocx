@@ -204,7 +204,7 @@ Repository: <name> · Decided: <ISO date> · Decided by: <owner>
 Check it before moving on:
 
 ```sh
-grep -nE '\|[[:space:]]*\|' <decision-file> | grep -v -- '---'
+DECISION_FILE=path/to/decision-file; grep -n -E -e '\|[[:space:]]*\|' -- "$DECISION_FILE" | grep -v -e '---'
 ```
 
 **Empty output = every signal row carries a measured value.** Any line printed is

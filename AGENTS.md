@@ -1,109 +1,198 @@
-# OCX — Agent Entry Point
+# OCX — Agent Instructions
 
-This is the cross-vendor entry point for AI agents that run **outside** the
-Claude Code harness (e.g., Codex CLI, other `AGENTS.md`-aware tools).
+Guide AI coding agents (Claude Code, Codex, OpenCode) in this repo.
 
-**If you are Claude Code, stop reading this file** — use `CLAUDE.md`
-instead. It is the authoritative project context and is auto-loaded by the
-harness. `AGENTS.md` is a thin pointer that exists only so non-Claude
-agents can find the same information without a second copy to maintain.
+## What is OCX
 
-## Where the real context lives
+OCX = Rust package manager. OCI registries (Docker Hub, GHCR, private) as storage for pre-built binaries. "Backend tool" for other tools (GitHub Actions, Bazel, Python scripts), not end users. Binary named `ocx`.
 
-Read these files in order. They are the **single source of truth** — do
-not rely on anything summarized in `AGENTS.md` alone.
+## Current State
 
-1. **`CLAUDE.md`** (repo root) — what OCX is, tech stack, architecture,
-   workflow, commit conventions, worktree layout, "never push to remote"
-   rule. Start here.
-2. **`.claude/rules/product-tech-strategy.md`** — golden-path technology choices.
-   Do not suggest deviations.
-3. **`.claude/rules/arch-principles.md`** — OCX-specific design
-   principles, glossary, ADR index.
-4. **`.claude/rules/quality-core.md`** — universal design principles
-   (SOLID, DRY, YAGNI), anti-pattern severity tiers
-   (Block / Warn / Suggest), refactoring discipline.
-5. **`.claude/rules/quality-security.md`** — OCX-specific security attack surfaces
-   and OWASP/STRIDE checklist. Consult before any security review.
+Early stage. Core lib + CLI implemented.
 
-## Path → subsystem rule map
+### Stability tiers
 
-When reviewing or editing code under a specific path, **read the matching
-subsystem rule first** — it contains invariants, gotchas, and design
-decisions that are not obvious from the code. Each rule's `paths:` glob moves
-with the code it governs, so the rule file, not the path here, is the anchor —
-`ocx_lib` finished dissolving into the 17 `ocx_*` crates at WP-37
-(`.claude/artifacts/adr_crate_split_workspace.md`):
+**Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. No `ocx_*` crate is a published library; the binary is the only consumer.
 
-| Path | Subsystem rule |
+**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_env`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `deep-repo.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
+
+**Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`, the `--format json` reports and error document, the `OCX_*` environment variables, and the `ocx-sdkgen` CLI with its output layout. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
+
+**Even interfaces break pre-1.0.** A break is announced in the changelog and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
+
+**Machine-facing break records.** Once the interface-contract baseline exists ([`adr_ocx_interface_contract.md`](./.claude/artifacts/adr_ocx_interface_contract.md)), a break to a gated machine document — a `--format json` report root, the error document, or a command in `cli.json` — also needs an entry in the contract ledger (`ledger.toml`, beside the waivers in `crates/ocx_schema/contract/`) and a bumped version on what broke; the compat gate fails without both. The entry and the number are for programs: SDKs and scripts detect the break from the version, before they run the command. People still learn about it from the changelog, through the commit subject, and nowhere else. The ledger is not release notes and adds no migration prose to user docs.
+
+**Batched-window carve-out.** A rename reaching dozens of files across docs, tests and downstream repos may ship one deprecation window instead of a hard break, on these terms: the old spelling stays as a *hidden* command — a clap alias is undetectable at parse time, so a warning needs its own hidden variant — it warns once on stderr and never on stdout, its removal release is named when the window opens, and every old spelling in flight lives in one `deprecated.rs` deleted whole, as a `RenamedCommand` or `RenamedFlag` const — published through `cli.json`'s `deprecated` field, which `test/lint/test_deprecated_spellings.py` reads to sweep the repo for stale invocations, so a spelling that is not a row there is one nothing enforces. An env spelling in flight is a `RETIRED` row with window status, published in `cli.json`'s `retired` array and swept the same way. One window per release pair, not one per rename; still no migration prose in user docs. In flight, all deprecated in 0.6 and removed in 0.7: `ocx run` → `ocx exec`, `ocx package describe` → `ocx package description push`, `ocx package info` → `ocx package description pull`, the `ocx package announce --package` flag → its positional, `-c` → `--cascade` on `config push`, `package copy` and `package push`, `ocx package create -l` → `--compression-level`, `ocx index catalog --tags` → `--with-tags`, `ocx package copy --description` → `--with-description`, `--out` → `--output`/`-o` on `package announce` and `package claim`, and the `OCX_NO_COMPLETIONS` variable → `OCX_NO_COMPLETION` and `OCX_LOG` → `OCX_LOG_LEVEL`.
+
+Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the changelog line — which means the commit subject (see below), never the file.
+
+### ⛔ Never edit `CHANGELOG.md`
+
+`CHANGELOG.md` is **generated**, at release time, by `git-cliff` from the commit history (`task release:prepare`). Editing it by hand is always wrong: the next release overwrites the file, so a hand-written entry is deleted, and until then it is a second source of truth that reads as authoritative. No `docs(changelog):` commits. Do not create the file, append to it, or "fix" an entry in it — not for a feature, not for a breaking change, not when a plan or a rule says to write a CHANGELOG line.
+
+**The changelog entry is the commit subject.** `cliff.toml` renders one bullet per commit from its subject line alone — the body is never read — with the scope as `*(scope)*` and `!` as **BREAKING**. So the subject is the user-facing sentence: write it for someone reading release notes, and put the reasoning in the body where it belongs. `chore:` is excluded from the changelog, which is why AI config and tooling use it.
+
+## ⛔ MODEL POLICY — NON-NEGOTIABLE
+
+Applies to EVERY subagent spawn (Agent tool, Workflow `agent()` incl. ultracode, swarm skills). Always set `model` explicitly — never rely on inherit (a Fable main loop would silently spawn Fable workers).
+
+| Task | Model |
 |---|---|
-| `crates/ocx_sign/**` | `.claude/rules/subsystem-oci.md` |
-| `crates/ocx_store/src/**` | `.claude/rules/subsystem-file-structure.md` |
-| `crates/ocx_package/src/**` | `.claude/rules/subsystem-package.md` |
-| `crates/ocx_package_manager/src/**` | `.claude/rules/subsystem-package-manager.md` |
-| `crates/ocx_cli/src/**` | `.claude/rules/subsystem-cli.md` |
-| `test/**` | `.claude/rules/subsystem-tests.md` |
-| `website/**` | `.claude/rules/subsystem-website.md` |
-| `.github/workflows/**` | `.claude/rules/subsystem-ci.md` |
-| `Cargo.toml`, `deny.toml`, `external/**` | `.claude/rules/subsystem-deps.md` |
+| **Default** — implementation (incl. multi-file, error/exit-code, wire-format work), code review, verification passes, exploration, research, docs, tests, planning workers | **Sonnet 5** (`sonnet`) |
+| **Complex or architectural work** — ADR / architecture decisions, open design (shape not yet decided), multi-subsystem redesigns, security review of auth/SSRF/credential paths | **Opus 5** (`opus`) — may fan work back out to Sonnet workers |
+| Same subtask failed twice on Sonnet | Opus (`opus`) |
+| Final synthesis/decision over results multiple agents prepared (research + context pre-digested) | Fable — main loop / last instance only; (near-)NEVER as subagent; prefer Opus even here |
 
-## Language-level quality rules
+- **Never** Fable for review, research, implementation. Scale **out** (parallel workers with crisp handovers: goal, inputs, output contract).
+- Escalate by **counter, not rationale**: a worker's own claim that its task is "contract", "wire-format" or "security-adjacent" is never grounds for Opus. Raise effort on Sonnet before switching model; the cross-model Codex pass adds the second perspective.
+- **Cross-model (Codex) reviews**: `luna` (trivial) / `terra` (**default** — cost-efficient, use in small review loops too, not just high tiers) / `sol` (max-tier one-way-door gates). One-shot adversarial pass, no cross-family looping. See "Cross-model model tiers" in [workflow-swarm.md](./.claude/rules/workflow-swarm.md).
 
-Shareable, project-independent quality guidance is in
-`.claude/rules/quality-*.md` — load the one matching the file you are
-reviewing:
+## Project Identity
 
-- `quality-rust.md`, `quality-python.md`, `quality-typescript.md`,
-  `quality-bash.md`, `quality-vite.md`
+Vision/positioning/competitors/users/use cases → [`product-context.md`](./.claude/rules/product-context.md). Canonical product context — keep current (update protocol at bottom of same file).
 
-## Adversarial review guidance
+## Rule Catalog
 
-When Claude Code delegates an adversarial review to you (via
-`/codex:adversarial-review` or `/codex-adversary`):
+Before plan/research/architectural decision, scan "By concern" in catalog. Auto-loaded rules fire on file edit; catalog covers cases needing guidance *before* file open.
 
-1. **Load `CLAUDE.md` and the subsystem rules** for the touched paths
-   before flagging anything — the author was likely working against them.
-2. **Challenge design choices**, not style. `cargo fmt` handles formatting;
-   your job is to question whether the chosen approach is right, what
-   assumptions it depends on, and where it could fail under real-world
-   conditions.
-3. **Watch for cross-crate coupling** — especially lifting CLI-specific
-   types into a library crate, which the `crates/ocx_cli` ↔ library boundary
-   is meant to prevent. The workspace is mid-split (`ocx_lib` → 17 `ocx_*`
-   crates, `scripts/crate_map.toml`); `task rust:deps:direction` reds any
-   `ocx_*` edge the map does not allow.
-4. **Security attack surfaces** are enumerated in `.claude/rules/quality-security.md`.
-5. **Do not critique load-bearing conventions** stated in `CLAUDE.md` or
-   `product-tech-strategy.md` (Tokio, Rust 2024, OCI-backed storage, never-push-to-
-   remote, commit format). They are decisions, not invitations.
-6. Return findings with **concrete file paths and line numbers**, grouped
-   by severity (Block / Warn / Suggest — definitions in
-   `.claude/rules/quality-core.md`).
+@.claude/rules.md
 
----
+## Build & Development
 
-# General Agent Safety (applies to any external agent)
+Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped --force` (per task / review-fix iteration — T0 lint + rows check, then routed/scoped checks; escalates to full `task verify` when a path demands it), `task verify` (full gate — required at finalize, on `main` and for `release:`), `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit. Verification level is the agent's call (`workflow-git.md` § Verification Levels). Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
-## Non-interactive shell commands
+**Project toolchain.** `ocx.toml` pins every tool to an exact version equal to `ocx.lock`. `[tools]` lists `actionlint`, `agg`, `bazel`, `cosign`, `git-cliff`, `lychee`, `node`, `pnpm`, `prek`, `python` (CPython 3.14, which uv prefers through the root `uv.toml` and the Bazel acceptance runner pins), `shellcheck`, `shfmt`, `task`, `uv`, `zot`; `[group.lint.tools]` (`prek`, `gitleaks`, `grim`, `uv`, `actionlint`) and `[group.release.tools]` (`git-cliff`) hold the role tools — `gitleaks` and `grim` exist only there, reached with `ocx exec -g lint -- <tool>` — and `test`, `build` and `docs` are declared empty because CI installs `default,<role>` and ocx rejects an undeclared group. `ocx self setup` wires a per-prompt hook that puts the default set on `PATH` when you `cd` in and takes it off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Repo taskfiles call the tools directly — no `ocx package exec` wrapping; only the template-owned `taskfiles/baseline.taskfile.yml` goes through `ocx exec -g lint --`. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [project-toolchain.mdx](./website/src/content/docs/guides/project-toolchain.mdx) § Shell activation.
 
-Shell commands like `cp`, `mv`, `rm` may be aliased to `-i` (interactive)
-mode on some systems, which would hang an agent waiting for y/n input.
-Always use non-interactive flags:
-
-```bash
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
+Single acceptance test:
+```sh
+cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_symlink -v
 ```
 
-Also: `scp -o BatchMode=yes`, `ssh -o BatchMode=yes`, `apt-get -y`,
-`HOMEBREW_NO_AUTO_UPDATE=1 brew …`.
+Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materializes the symlinks under `~/.ocx/`. The toolchain resolves from `ocx.lock` alone — this repository keeps no committed index copy, and tool bumps go through `ocx add` / `ocx lock`.
 
-## Session hygiene
+**Bazel.** Bazel 9.2.0 is the graph over the same crates cargo sees (`rules_rs` resolves them from `Cargo.lock`, hermetic `@llvm` is the C/C++ toolchain, and `task cross:build TARGET=<triple>` cross-builds every platform from Linux), and in `task verify` cargo remains only for fmt, deny and about/metadata: clippy (`rust:clippy:check`), the rustdoc ratchet (`rust:doc:ratchet`), schema generation, the build, unit tests and doctests are Bazel actions. Besides `rust:clippy:check`, `rust:doc:ratchet` and `rust:build`, `task verify` runs eight Bazel gates — `bazel:pin:check` in phase 1, then `bazel:build:nobuild` → `bazel:build:drift` → `bazel:tag:guard` → `bazel:lint` → `bazel:mod:check` → `bazel:test:unit` (doctests included) → `bazel:test:accept` in phase 2. `bazel:test:accept` closes the phase where `task test:parallel` used to: the acceptance suite as one `sh_test` target per `test/tests/test_*.py` module (179 today — check the live `ACCEPTANCE_MODULE_TARGETS` in `scripts/bazel_gate_proofs.py`, it falls as modules move to `test/lint/` or are ported down and rises with each new module), **with results cached** — so an unchanged tree executes only the uncached residual below, an edited module re-runs itself plus any module that imports it (`module_data`), and an edit to a shared input in `//test:suite_inputs` (`test/pyproject.toml`, `test/uv.lock`, `test/ocx.toml`/`ocx.lock`, `docker-compose.yml`, `test/sigstore/**`, `test/src/**`, the `test/tests/` helpers) re-runs every target, as does a Rust edit that changes the bytes of the binary under test — Bazel's own `//crates/ocx_cli:ocx`, a `data` input of every target (`task test`'s `test/bin/ocx` is a copy of it for the xdist path; cargo no longer builds it). The targets **run concurrently** (`--local_test_jobs` on the task's command line, never an rc file) each on zot registries of its own (`test/bazel.bzl` § Concurrency; the toolchain's `@tools//:zot` is a `data` input of every target), and a file only some modules read goes in their `module_data`, not `:suite_inputs` — `bazel:tag:guard` reds a missing read it can derive (reads no AST sees are hand-listed in its `HAND_DECLARED_READS`, and a file one read implies — root `ocx.lock` beside `ocx.toml` — in `IMPLIED_READS`; a module that launches `task` or names a `test/` path outside `:suite_inputs` reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry). The structural sweeps that used to force a sibling re-run on every edit (`test_smoke_coverage`, `test_no_crate_path_assertions`, `test_patch_global_slot`, and `test_doc_scripts_publish`'s sweep, now `test/lint/test_doc_scripts_publish_structure.py` — its acceptance module still exists, only the sweep moved) moved to the uncached T0 lint tier (`test/lint/`, `task test:lint:structure`; `subsystem-tests.md` § Verification tiers) instead of being swept into every acceptance run via `extra_data`, which is deleted — no caller was left once the sweeps moved. A module on `test/bazel.bzl`'s `UNCACHED_MODULES` still re-runs regardless of cache (one named residual today: `tests/test_windows_shim.py`). It carries `test/SUITE_FLOOR` and the skip/xfail ceilings with it, read off the per-case JUnit reports it copies into `target/bazel/accept/`. `task test:parallel` remains the local xdist convenience. Two others are A7's lint lines: `bazel:lint` is buildifier over every `BUILD.bazel` and `.bzl` file, decided on `//:buildifier.check`'s exit code, and `bazel:mod:check` is `bazel mod deps --lockfile_mode=error`, the one place that flag appears — `MODULE.bazel.lock` must already be fresh. `bazel` is the one tool a plain shell cannot reach: every call goes through `ocx exec bazel -- <cmd>`, including a bare `bazel query` you run by hand, or the gates exit 1 on their reader floors (DX-42). `.bazelversion` and `MODULE.bazel` are pinned and `bazel:pin:check` is the authority over both. None of those gates reads the *host*, which is where a first build actually fails: `task bazel:doctor` does that (toolchain pin, the `~/.bazelrc` host block, the cache reader credential, the caches), and `/init-bazel-config` is the same script plus the prompts it cannot answer itself. Host state belongs in `~/.bazelrc`, never `.bazelrc.user` — this machine carries a worktree per agent task and a per-checkout file has to be re-created in each one. The decision is [`adr_bazel_build_adoption.md`](./.claude/artifacts/adr_bazel_build_adoption.md); the ruleset is [bazel-quality.md](./.claude/rules/bazel-quality.md).
 
-- **Never push to remote** — the human decides when to push (CI has real cost).
-- All changes must be committed locally on a feature branch.
-- **Never commit directly to `main`**.
-- Run `task verify` after any implementation change. Inside a hex run, step commits and merges on hex-owned branches skip it (`--no-verify` allowed); the run's integration and release gates satisfy this rule.
+## Architecture
+
+24 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+
+| Crate | Owns |
+|---|---|
+| `ocx_exit` [interface] | Process-outcome vocabulary: `ExitCode`, the `error.detail` slug, the classification traits and `DetailEntry` — an exit code is a CLI contract |
+| `ocx_exit_derive` [internal] | `#[derive(Classify)]`: an error variant declares its exit code and `error.detail` slug (re-exported by `ocx_exit`) |
+| `ocx_env` [ecosystem] | Environment registry: every `OCX_*` / `__OCX_*` variable declared once with its doc, value kind, visibility, secrecy and child propagation, and the one read seam |
+| `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, extension traits, singleflight, TLS roots, archive, compression, path-context errors |
+| `ocx_console` [ecosystem] | Presentation vocabulary: rendering, printer, theme, styles, progress, data interface |
+| `ocx_oci` [ecosystem] | Distribution-spec-generic registry work: references, digests, manifests, transport, referrers, SSRF guard, auth |
+| `ocx_trust` [ecosystem] | Signer-identity policy: `[[trust.policy]]`, tiered resolution, compiled identity rules |
+| `ocx_sign` [ecosystem] | Supply-chain signing: keyless Sigstore sign, DSSE attest, verify, cosign simplesigning, SBOM referrers |
+| `ocx_config` [ecosystem] | Resolved settings from files and environment: the config tiers, the managed tier, settings validation |
+| `ocx_store` [internal] | The on-disk layout: three-tier CAS, symlink namespace, package materialisation, shim blobs |
+| `ocx_index` [ecosystem] | The OCX resolution-index protocol and its local collection |
+| `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication |
+| `ocx_python` [ecosystem] | PEP 751 lock → OCX package translation: lock parse, wheel selection/repack, env composition |
+| `ocx_shell` [internal] | Shell and CI export surface: export generation, per-prompt reconciliation, hook emission |
+| `ocx_project` [internal] | The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt activation |
+| `ocx_package_manager` [internal] | Resolution, install, environment composition, patches, launch, execution records |
+| `ocx_announce` [internal] | Index publication: announce pipeline, forge drivers, index claim |
+| `ocx_script` [internal] | The Starlark host API for `ocx package test --script` |
+| `ocx_setup` [internal] | Self-install: bootstrap, env shim files, managed RC blocks, profile detection |
+| `ocx_sdkgen` [internal; its CLI is an interface] | Published-document contract: the schema subset `reports`, `errors` and `cli.json` may use, and the lint that holds them to it |
+| `ocx_test_support` [internal] | Shared unit-test fixtures and the process-environment override seam — dev-dependency only |
+
+Three are not tier crates: `ocx_cli` [interface] is the application layer (argv, context, commands, reports, and the error-to-exit-code chain walk plus the foreign and CLI-local error types it classifies, pkg `ocx`); `ocx_schema` [internal] generates JSON Schema at build time; `ocx_shim` [interface] is the Windows `.exe` launcher and its wire ABI.
+
+The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Three deps patched to submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential`, `sigstore` (`sigstore-rs`).
+
+Subsystem rules auto-load on path match. Read relevant one before work on that area:
+
+| Subsystem | Rule | Scope |
+|-----------|------|-------|
+| OCI registry/index | [subsystem-oci.md](./.claude/rules/subsystem-oci.md) | `crates/ocx_oci/**`, `crates/ocx_index/**`, `crates/ocx_sign/**` |
+| Storage/symlinks | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md) | `crates/ocx_store/src/**` |
+| Package metadata | [subsystem-package.md](./.claude/rules/subsystem-package.md) | `crates/ocx_package/src/**` |
+| Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_package_manager/src/**` |
+| CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
+| Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_script/src/**` |
+| Machine interface | [subsystem-interface-contract.md](./.claude/rules/subsystem-interface-contract.md) | `crates/ocx_env/**`, `crates/ocx_exit/**`, `crates/ocx_exit_derive/**`, `crates/ocx_schema/**`, `crates/ocx_sdkgen/**`, CLI report/command/option/exit modules, `reference/environment.md`, `reference/command-line/**` |
+| Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
+| Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
+| CI / workflows | [subsystem-ci.md](./.claude/rules/subsystem-ci.md) | `.github/workflows/**` |
+| Dependencies | [subsystem-deps.md](./.claude/rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml`, `external/**` |
+
+## Environment Variables
+
+Canonical reference → [`website/src/content/docs/reference/environment.md`](./website/src/content/docs/reference/environment.md).
+
+## Deep Context
+
+- [`product-context.md`](./.claude/rules/product-context.md) — vision, competitors, use cases
+- [`arch-principles.md`](./.claude/rules/arch-principles.md) — design principles, glossary, ADR index (auto-loads on Rust)
+- [`website/src/content/docs/explanation/storage.mdx`](./website/src/content/docs/explanation/storage.mdx) — three-store architecture; versioning, locking and auth live in `explanation/versioning.mdx`, `guides/lock-and-reproduce.mdx` and `guides/authenticate.mdx`
+
+## Core Principles
+
+Eight principles distill every rule, skill, standard. Deep dive: [`quality-core.md`](./.claude/rules/quality-core.md) (SOLID/DRY/KISS/YAGNI).
+
+### 1. Understand First
+Read before write. Grep before create. Never modify unread code — grep all callers before change function.
+
+### 2. Prove It Works
+Tests for customer use case first. Run before commit. Regression test per bug fix. All gates pass — tests, linter, types, build. Inside a hex run, step commits and merges on hex-owned branches skip verification (`--no-verify` allowed); the run's integration and release gates satisfy this rule.
+
+### 3. Keep It Safe
+No secrets in code — env vars / secret managers. Validate external input. Parameterized queries only. Least privilege. Flag vulnerabilities immediately.
+
+### 4. Keep It Simple
+Small functions, single responsibility. No premature abstraction — three similar lines beat bad helper. Delete dead code. Avoid `any` types. Fix warnings. Comments explain *why*, never *what*.
+
+### 5. Don't Repeat Yourself
+Check `.claude/skills/` before ad-hoc gen. Follow existing patterns. Single source of truth for business logic. Extract on real duplication, not incidental.
+
+### 6. Ship It
+Work on branch, never main. Commit iteratively. **Never push to remote** — human decides. Push triggers CI, real cost.
+
+### 7. Leave a Trail
+Planning artifacts → `./.claude/artifacts/`. ADRs for architectural decisions. Name things so next person understand.
+
+### 8. Learn and Adapt
+On user feedback or corrections, evaluate if insight should persist as AI config update (rules/skills/agents) — not just memory.
+
+## Tech Stack
+
+@.claude/rules/product-tech-strategy.md
+
+## Workflow
+
+**Worktrees**: Four git worktrees, fixed branches:
+
+| Directory | Branch |
+|-----------|--------|
+| `ocx` | `goat` |
+| `ocx-evelynn` | `evelynn` |
+| `ocx-sion` | `sion` |
+| `ocx-soraka` | `soraka` |
+
+**Parallel Agents**: Implementation agents run in git worktrees under `.agents/worktrees/<slug>` (gitignored). Plans MUST be parallel-capable by design: file-disjoint work packages, explicit dependency DAG, contract-first stubs. Details → [workflow-swarm.md](./.claude/rules/workflow-swarm.md) "Parallel Worktree Execution".
+
+Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/AGENTS.md/tooling (no changelog).
+
+Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). **Before finalize, a conventional commit does not need the full `task verify`:** run the checks the change needs — none for docs, one run after a batch of commits — then `task verify:mark`, the unconditional escape hatch (merge commits included; name the deferral in the commit body). The full `task verify` runs once, at finalize. Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
+
+Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `./.claude/artifacts/`; templates → `./.claude/templates/artifacts/`. Filename patterns: `adr_<topic>.md`, `system_design_<comp>.md`, `design_spec_<comp>.md`, `plan_<task>.md`, `security_audit_<date>.md`.
+
+## Skills & Personas
+
+Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + `/init-bazel-config` (host setup for a first Bazel build) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
+
+## Starting Work
+
+Every task starts with [workflow-intent.md](./.claude/rules/workflow-intent.md) — classify (feature/bugfix/refactor), check GitHub for related issues/PRs, route to [workflow-feature.md](./.claude/rules/workflow-feature.md) / [workflow-bugfix.md](./.claude/rules/workflow-bugfix.md) / [workflow-refactor.md](./.claude/rules/workflow-refactor.md).
+
+## Adversarial Review
+
+When an adversarial review is delegated to you (`/codex:adversarial-review`, `/nox-review`): read this file and the subsystem rules for the touched paths first, since the author worked against them. Challenge design choices, not style (`cargo fmt` owns formatting): the assumptions the approach depends on and where it fails in practice, especially CLI types leaking into a library crate. Do not critique the load-bearing decisions here or in `product-tech-strategy.md` (Tokio, Rust 2024, OCI-backed storage, never push, commit format). Attack surfaces → [quality-security.md](./.claude/rules/quality-security.md). Report concrete paths and lines, grouped Block / Warn / Suggest as defined in [quality-core.md](./.claude/rules/quality-core.md).
+
+## Non-interactive Shell
+
+Aliases may make `cp`, `mv` and `rm` prompt and hang an agent: use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`, and `ssh -o BatchMode=yes`, `scp -o BatchMode=yes`, `apt-get -y`.

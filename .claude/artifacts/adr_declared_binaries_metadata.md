@@ -630,7 +630,7 @@ Recorded here as a **fact**, not a decision: no code changes to `package_test.rs
 | `BinaryError::CaseFoldCollision` | `serde` parse or scan-collected `TryFrom` | 65 |
 | `BinScanError::UndeclaredBinary` | `ocx package create --bin-scan` (declared field present only) | 65 |
 | `BinScanError::DeclaredNotExecutable` | `ocx package create --bin-scan` | 65 |
-| `BinScanError::UnsupportedHostScan` | `ocx package create` — every mode that would scan (`--bin-scan`, and the Auto default with `binaries` absent) on a host that cannot evaluate the target platform's executable-file convention | 65 |
+| `BinScanError::UnsupportedHostScan` | `ocx package create` — every mode that would scan (`--bin-scan`, and the Auto default with `binaries` absent) over a non-empty scan scope on a host that cannot evaluate the target platform's executable-file convention | 65 |
 | `--bin-scan` without `-m`/`--metadata` | `ocx package create` CLI validation (`package_create.rs::validate_bin_scan`) | 64 |
 
 The paired `--bin-scan`/`--no-bin-scan` flags themselves have no invalid combination — ordinary
@@ -683,7 +683,9 @@ Recorded, not redesigned — tightened during implementation review, no decision
   the reasoning that `Some([])` would be a false "publisher asserts zero" claim; both are true and
   neither is the point, because downstream an absent `binaries` is indistinguishable from a
   deliberate omission, so a cross-host build shipped an unchecked claim silently. Amended
-  2026-07-29; the mode table above is unchanged for every host that *can* scan.
+  2026-07-29; the mode table above is unchanged for every host that *can* scan. Narrowed
+  2026-10-22: the refusal fires only when the scan scope (interface-visible `${installPath}`-rooted
+  `PATH` vars) is non-empty, because an env-only package scans nothing on any host and proceeds.
 - **`--bin-scan` requires `--metadata`.** Verify mode needs a declaration to verify against;
   `--bin-scan` without `-m`/`--metadata` is now a usage error (exit 64), not a silent no-op.
 

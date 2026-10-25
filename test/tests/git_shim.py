@@ -34,12 +34,11 @@ either would shadow the real `git` for every other acceptance module, for
 `task verify`, and for the developer's own shell. The validation exists because
 "there is no `git` in `test/bin/`" cannot be turned red without writing one.
 
-**POSIX-only, by construction.** A `PATH` shim named `git` with no extension is
-not found by Windows' `CreateProcess` unless `PATHEXT` lists extensionless
-scripts, which it does not — git's own test suite compiles `test-fake-ssh.c`
-for exactly this reason. `subsystem-tests.md` states the pytest leg is Linux-only
-in CI, so a script is sufficient here; a Windows run needs a `.cmd` or compiled
-variant and this module does not pretend otherwise.
+**On Windows the shim is a native `git.exe`:** `ocx` spawns `git` by path, and neither an
+extension-less file nor a `git.cmd` works there (Rust refuses batch-file arguments with
+a newline, as every multi-line commit message has). So `git.exe` is a trampoline compiled
+once with `rustc` (`_windows_trampoline`). A bare `git` resolves against the *parent's*
+`PATH`, so a test running the shim itself passes `executable` (`git_http_fixture.git_program`).
 """
 
 from __future__ import annotations
@@ -47,16 +46,22 @@ from __future__ import annotations
 import base64
 import dataclasses
 import enum
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 #: File name of the generated executable. The point of the whole module is that
 #: `git` resolves to it, so it is not configurable.
 SHIM_NAME = "git"
+
+#: The shim's file name in its directory: what `which` finds on `PATH`.
+SHIM_FILENAME = "git.exe" if sys.platform == "win32" else SHIM_NAME
 
 #: The JSONL file the generated shim appends one object to per invocation. Its
 #: absolute path is baked into the shim's source at generation time.
@@ -143,9 +148,6 @@ from pathlib import Path
 #: child's own code. Never `execv` — an `execv` shim replaces itself and can
 #: observe nothing after the child.
 _SHIM_BODY = '''\
-SHIM_PATH = Path(__file__).resolve()
-
-
 def dash_c_directory(arguments):
     """The first `-C <dir>` value, or None. git accepts several and composes
     them; the fixture drives one, and the first is the one C-033's mode check
@@ -207,7 +209,8 @@ def main():
         mode = None
 
     if VERSION_OVERRIDE is not None and arguments == ["--version"]:
-        sys.stdout.write(VERSION_OVERRIDE + "\\n")
+        # Bytes, so Windows does not turn the newline into CRLF.
+        sys.stdout.buffer.write((VERSION_OVERRIDE + "\\n").encode())
         sys.stdout.flush()
         returncode = 0
     elif REAL_GIT is None:
@@ -405,6 +408,7 @@ def render_shim_source(
     record_path: Path,
     real_git: Path | None,
     version_override: str | None,
+    shim_path: Path | None = None,
 ) -> str:
     """The generated shim's complete source text.
 
@@ -419,10 +423,13 @@ def render_shim_source(
     measures how the import was written rather than where the paths came from.
 
     `version_override` bakes a fixed `git --version` answer; `None` delegates the
-    version query like any other subcommand.
+    version query like any other subcommand. `shim_path` names the executable the
+    caller ran when it is not this script (the Windows trampoline).
     """
+    own_path = "Path(__file__).resolve()" if shim_path is None else f"Path({str(shim_path)!r})"
     literals = "\n".join(
         (
+            f"SHIM_PATH = {own_path}",
             f"RECORD_PATH = Path({str(record_path)!r})",
             f"REAL_GIT = {(None if real_git is None else str(real_git))!r}",
             f"VERSION_OVERRIDE = {version_override!r}",
@@ -430,6 +437,69 @@ def render_shim_source(
         )
     )
     return f"#!{sys.executable}\n{_SHIM_PREAMBLE}\n{literals}\n\n\n{_SHIM_BODY}"
+
+
+#: The Windows `git.exe`: run the shim's Python (line 1 of `launch.txt`, in the
+#: shim's home beside `bin/`) on its script (line 2), with every argument the
+#: caller passed, and return its exit code. `Command` quotes each argument for
+#: `CreateProcess`, so a multi-line commit message arrives intact.
+_TRAMPOLINE_RS = """\
+use std::process::{exit, Command};
+
+fn main() {
+    let exe = std::env::current_exe().expect("own path");
+    let home = exe.parent().and_then(|bin| bin.parent()).expect("shim home");
+    let text = std::fs::read_to_string(home.join("launch.txt")).expect("launch.txt");
+    let mut lines = text.lines();
+    let python = lines.next().expect("python path");
+    let script = lines.next().expect("script path");
+    let status = Command::new(python)
+        .arg(script)
+        .args(std::env::args_os().skip(1))
+        .status()
+        .expect("spawn python");
+    exit(status.code().unwrap_or(1));
+}
+"""
+
+
+def _windows_trampoline() -> Path:
+    """The compiled `_TRAMPOLINE_RS`, built once per source text into the temp
+    directory. Workers race to build it; each compiles in a private directory
+    and the first `os.rename` wins."""
+    digest = hashlib.sha256(_TRAMPOLINE_RS.encode()).hexdigest()[:16]
+    cache = Path(tempfile.gettempdir()) / f"ocx-git-shim-trampoline-{digest}"
+    built = cache / "git.exe"
+    if built.exists():
+        return built
+    rustc = shutil.which("rustc") or str(Path.home() / ".cargo" / "bin" / "rustc.exe")
+    if not Path(rustc).exists():
+        raise FileNotFoundError(
+            "no rustc: the Windows git shim is a small Rust trampoline, because "
+            "ocx cannot spawn a .cmd shim (Rust refuses batch arguments with a newline)"
+        )
+    cache.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(dir=cache))
+    try:
+        (scratch / "trampoline.rs").write_text(_TRAMPOLINE_RS, encoding="utf-8")
+        # cwd outside the checkout: under it, rustup obeys rust-toolchain.toml and installs the
+        # pinned toolchain from inside each xdist worker at once, and concurrent installs collide.
+        subprocess.run(
+            [rustc, "--edition", "2021", "-o", str(scratch / "git.exe"), str(scratch / "trampoline.rs")],
+            check=True,
+            capture_output=True,
+            cwd=scratch,
+        )
+        # Never os.replace: overwriting leaves the old file delete-pending, and a
+        # sibling worker's copyfile of it then fails with PermissionError.
+        try:
+            os.rename(scratch / "git.exe", built)
+        except OSError:  # a racing worker's copy is in place; theirs is the same bytes
+            if not built.exists():
+                raise
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return built
 
 
 def install_git_shim(
@@ -488,16 +558,22 @@ def install_git_shim(
     record_path = directory.parent / RECORD_NAME
     executable: Path | None = None
     if variant is not GitShimVariant.ABSENT:
-        executable = directory / SHIM_NAME
-        executable.write_text(
-            render_shim_source(
-                record_path=record_path,
-                real_git=real_git,
-                version_override=VERSION_OVERRIDES[variant],
-            ),
-            encoding="utf-8",
+        executable = directory / SHIM_FILENAME
+        on_windows = sys.platform == "win32"
+        source = render_shim_source(
+            record_path=record_path,
+            real_git=real_git,
+            version_override=VERSION_OVERRIDES[variant],
+            shim_path=executable.resolve() if on_windows else None,
         )
-        executable.chmod(0o755)
+        if on_windows:
+            script = home / "git_shim.py"
+            script.write_text(source, encoding="utf-8", newline="\n")
+            (home / "launch.txt").write_text(f"{sys.executable}\n{script}\n", encoding="utf-8")
+            shutil.copyfile(_windows_trampoline(), executable)
+        else:
+            executable.write_text(source, encoding="utf-8")
+            executable.chmod(0o755)
 
     return GitShim(
         directory=directory,
@@ -511,6 +587,7 @@ def install_git_shim(
 __all__ = [
     "DENIED_SHIM_ROOTS",
     "RECORD_NAME",
+    "SHIM_FILENAME",
     "SHIM_NAME",
     "SNAPSHOT_PATHS",
     "VERSION_OVERRIDES",

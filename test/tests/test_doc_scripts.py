@@ -67,6 +67,10 @@ pytestmark = [
 
 DOC_SCRIPTS_DIR: Path = PROJECT_ROOT / "test" / "doc_scripts"
 
+# Scripts naming a compiled `__OCX_TESTING_*` seam; release bytes skip them one by one.
+# `test/lint/test_testing_marker.py` holds this set equal to the scripts that do.
+SEAM_SCRIPTS = {"user-guide__managed-config-setup.sh"}
+
 
 SHARED_SLOT_GROUPS: dict[str, str] = {
     # `ocx patch sync` with no `--platform` also probes the registry-wide
@@ -142,15 +146,20 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     Empty or missing root ⇒ zero parameters ⇒ zero cases, no error.
     Case IDs are paths relative to ``DOC_SCRIPTS_DIR`` (parity with
     ``test_scenarios_smoke.py``). Scripts named in ``SHARED_SLOT_GROUPS`` are
-    marked into their group so they never run concurrently.
+    marked into their group so they never run concurrently; those in
+    ``SEAM_SCRIPTS`` carry ``requires_testing_build``.
     """
     if "script" in metafunc.fixturenames:
         scripts = discover_doc_scripts(DOC_SCRIPTS_DIR)
         ids = [str(p.relative_to(DOC_SCRIPTS_DIR)) for p in scripts]
         params = [
-            pytest.param(script, marks=pytest.mark.xdist_group(SHARED_SLOT_GROUPS[script.name]))
-            if script.name in SHARED_SLOT_GROUPS
-            else script
+            pytest.param(
+                script,
+                marks=[
+                    *([pytest.mark.xdist_group(SHARED_SLOT_GROUPS[script.name])] if script.name in SHARED_SLOT_GROUPS else []),
+                    *([pytest.mark.requires_testing_build] if script.name in SEAM_SCRIPTS else []),
+                ],
+            )
             for script in scripts
         ]
         metafunc.parametrize("script", params, ids=ids)

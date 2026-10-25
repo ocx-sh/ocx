@@ -12,6 +12,6 @@ ocx package push --cascade -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linu
 ocx package push --cascade -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
 ocx index update acme/mytool
 ocx index list acme/mytool --platforms
-ocx package install acme/mytool:1.0.0
-ocx package exec acme/mytool:1.0.0 -- mytool
+ocx package install -p linux/amd64 acme/mytool:1.0.0
+ocx package exec -p linux/amd64 acme/mytool:1.0.0 -- mytool
 # endregion cast

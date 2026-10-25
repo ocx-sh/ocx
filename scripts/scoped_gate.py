@@ -13,7 +13,7 @@ The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
      HEAD, else `git merge-base origin/main HEAD`. Changed paths are
      `git diff --name-only <base>...HEAD` plus the working tree (tracked
      modifications and untracked files).
-  2. Non-member paths route. `.agents/**` (swarm memory), `CLAUDE.md` and the
+  2. Non-member paths route. `.agents/**` (swarm memory), `AGENTS.md`, `CLAUDE.md` and the
      `.claude/` subtrees
      whose only gate is `claude:tests` (CLAUDE_TESTS_READS, a permit list —
      any other `.claude/` path escalates (a taskfile excepted),
@@ -125,6 +125,10 @@ def mark_file() -> Path:
 # WP-37. Restore the constant, not a hard-coded path, the day another gate
 # script reads an artifact: it was imported from its consumer on purpose, so a
 # rename there moved the route with it.
+
+# Root agent instructions, which `claude:tests` reads: the content and the template pointer to it.
+AGENT_INSTRUCTIONS = ("AGENTS.md", "CLAUDE.md")
+
 # The .claude/ subtrees whose only gate is `claude:tests`: nothing else —
 # no cargo target, no task, no gate script — consumes them, so that run
 # certifies a change there. A permit list: a path under .claude/ outside it
@@ -1075,7 +1079,7 @@ def classify(
             # shipped binary (features, `[[bin]]`), which no scoped subset certifies.
             crates.add(CLI_PACKAGE)
             plan.escalate.append(f"{path}: CLI crate path outside command/ — permit-list default, full verify")
-        elif path == "CLAUDE.md" or parts[0] == ".agents" or path.startswith(CLAUDE_TESTS_READS):
+        elif path in AGENT_INSTRUCTIONS or parts[0] == ".agents" or path.startswith(CLAUDE_TESTS_READS):
             # `.agents/**` is swarm memory (hex.md, discussions): AI config
             # like `.claude/**`, and `claude:tests` is the cheapest gate
             # that reads it — an escalation to the full run bought nothing.
@@ -1399,6 +1403,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
                 ".agents/memory/hex.md",
                 ".claude/rules/x.md",
                 "CLAUDE.md",
+                "AGENTS.md",
                 ".github/ISSUE_TEMPLATE/bug.yml",
                 "test/tests/test_install.py",
             ],
@@ -1406,7 +1411,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             root,
         )
         return expect(
-            plan.routes["claude"] == [".agents/memory/hex.md", ".claude/rules/x.md", "CLAUDE.md"]
+            plan.routes["claude"] == [".agents/memory/hex.md", ".claude/rules/x.md", "AGENTS.md", "CLAUDE.md"]
             and plan.routes["workflows"] == [".github/ISSUE_TEMPLATE/bug.yml"]
             and plan.routes["tests"] == ["tests/test_install.py"]
             and plan.routes["scripts"] == []
@@ -2237,7 +2242,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         (proj / "trunk_file.txt").write_text("trunk\n", encoding="utf-8")
         _commit(proj, "trunk")
         if merging:
-            git(proj, "merge", "--no-ff", "--no-commit", "side")
+            git(proj, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "--no-commit", "side")
             if not (Path(git(proj, "rev-parse", "--absolute-git-dir").strip()) / "MERGE_HEAD").exists():
                 raise SystemExit("fixture: the paused merge left no MERGE_HEAD")
         return proj
@@ -2403,7 +2408,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         _commit(wp, name)
 
     def _merge_wp(repo: Path) -> str:
-        git(repo, "merge", "--no-ff", "--no-commit", "wp")
+        git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "--no-ff", "--no-commit", "wp")
         return git(repo, "rev-parse", "MERGE_HEAD^{tree}").strip()
 
     def _record(repo: Path, junit: Path, since: float | None = None) -> tuple[int, list[str]]:

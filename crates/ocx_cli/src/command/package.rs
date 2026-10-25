@@ -117,7 +117,9 @@ pub enum Package {
         no render modifier. Anything else needs a hand-authored `binaries`.\n\n\
         A scan needs a host \
         that can evaluate the target's executable convention. A Windows host targeting \
-        anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan. Hand-author `binaries` or pass `--no-bin-scan`.\n\n\
+        anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan. \
+        The exception is metadata with no `${installPath}`-rooted `PATH` variable of interface visibility, \
+        which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.\n\n\
         An unreadable content directory exits 74.\n\n\
         With `--metadata` and a Linux or `any` target, `create` also checks the libc the binaries \
         need against the `os.features` the platform declares. It reads the ELF interpreter \

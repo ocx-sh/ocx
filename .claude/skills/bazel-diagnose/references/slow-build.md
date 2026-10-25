@@ -49,7 +49,7 @@ tagged source trees:
   in the opposite direction: the prose is behind the release.
 
 Both are BZL-FLAG-31's subject: a major bump removes commands and enum values,
-not only flags. `grep -rn 'analyze-profile\|skyframe=working_set' docs/ .github/`
+not only flags. `git ls-files -z --cached --others --exclude-standard -- ':(glob)docs/**' ':(glob).github/**' | xargs -0 -r grep -H -n -E -e 'analyze-profile' -e 'skyframe=working_set' --`
 before and after a bump; any hit on a ≥9.0 pin is dead.
 
 ## Reading the trace

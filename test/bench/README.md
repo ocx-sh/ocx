@@ -1,8 +1,8 @@
 # Benchmark Harness
 
 Permanent local benchmark harness for `ocx install` performance regression tracking.
-Runs against a locally-hosted [registry:2][registry2] with [toxiproxy][toxiproxy] for
-network throttling. Comparison gate exits 1 when any scenario regresses beyond the 0.85x
+Runs against a [zot][zot] registry the harness starts on the host, behind
+[toxiproxy][toxiproxy] for network throttling. Comparison gate exits 1 when any scenario regresses beyond the 0.85x
 threshold versus the committed baseline.
 
 Not part of the pytest acceptance suite — the harness is standalone script-driven.
@@ -199,7 +199,11 @@ composed anything in the first place; requiring the first fire to apply is what 
 
 ## Prerequisites {#prerequisites}
 
-- **Docker** — registry:2 and toxiproxy run as compose services
+- **Docker** — toxiproxy runs as a compose service and must reach the host's registry
+  as `host.docker.internal` (Docker Desktop and WSL2 provide the name; native Linux
+  Docker needs it mapped to `host-gateway` on `bench-proxy`)
+- **[zot][zot]** — on `PATH` from the project toolchain, or set `OCX_TEST_ZOT`; the
+  harness starts it itself
 - **[hyperfine][hyperfine]** — acquired automatically via `.bench:acquire-hyperfine`
   (requires `gh` CLI if not already on `PATH` or in `test/bin/`)
 - **[uv][uv]** — Python environment manager (present via project toolchain)
@@ -216,9 +220,12 @@ from the root taskfile include.
 task test:bench:setup
 ```
 
-Starts the `bench` Docker Compose profile: toxiproxy on `:5002` (proxy) / `:8474` (API)
-and the shared registry on `:5000`. Waits for both services to be reachable before
-returning.
+Starts the `bench` Docker Compose profile: toxiproxy on `:5002` (proxy) / `:8474` (API).
+Waits for the API to be reachable before returning. The registry is not a compose
+service: `harness.py` starts a zot on `OCX_TEST_REGISTRY_PORT` (default `5000`, bound
+to all interfaces so the container can dial it) and points the proxy at
+`host.docker.internal:<port>`. Override the upstream with `REGISTRY_UPSTREAM`. A
+registry already answering on that port is refused rather than reused.
 
 The `bench` profile is isolated from `task test` — the standard acceptance test run
 never starts toxiproxy.
@@ -296,27 +303,14 @@ browser to view the dashboard.
 task test:bench:teardown
 ```
 
-Stops the toxiproxy container only. The shared registry keeps running so
-`task test` is unaffected. Use `docker compose down` manually to stop everything.
+Stops the toxiproxy container only. The registry belongs to the harness run and
+stops with it.
 
-### Registry data hygiene {#running-registry-gc}
+### Registry data {#running-registry-gc}
 
-Bench fixtures use deterministic repo names (`bench-<size>mb-<layers>l-<idx>`) so they
-persist in the registry across sessions. This is intentional — it speeds up repeat
-`bench:quick` runs by skipping fixture push when manifests are already present.
-
-**There is no automatic GC.** If the registry accumulates stale data (e.g. after
-changing payload sizes or layer counts), clean it manually:
-
-```bash
-# Nuclear option: wipe all registry data and restart.
-docker compose -f test/docker-compose.yml down -v
-task test:bench:setup
-```
-
-The `bench-` prefix isolates bench fixtures from acceptance-test repos; removing the
-registry volume also removes acceptance-test data. Run `task test` after restart to
-re-push acceptance fixtures.
+The registry is ephemeral: it starts empty with each `harness.py` run and its data is
+deleted when the run ends, so there is nothing to clean up between sessions. Every run
+pushes its fixtures again before the first scenario.
 
 ## Suite Model {#suites}
 
@@ -332,10 +326,10 @@ The 4 large-suite rows use `runs=10` + larger payloads (50 MB and 25–28 MB lay
 to reduce per-scenario σ and give statistically confident before/after comparisons.
 They are omitted from the medium gate to keep daily CI under 4 minutes.
 
-**Trade-off: deterministic fixture names.** Bench fixtures are named
-`bench-<size>mb-<layers>l-<idx>` (no UUID). A second run reuses existing registry
-fixtures (manifest HEAD probe). This means fixtures from previous sessions persist in
-the registry; they are isolated from acceptance-test repos by the `bench-` prefix.
+**Deterministic fixture names.** Bench fixtures are named
+`bench-<size>mb-<layers>l-<idx>` (no UUID), so the baseline stays comparable between
+runs. The registry starts empty each run, so the manifest HEAD probe that skips an
+existing fixture only matters inside one run.
 
 ## Scenario Matrix {#scenarios}
 
@@ -652,7 +646,7 @@ test/bench/
 ```
 
 <!-- external -->
-[registry2]: https://hub.docker.com/_/registry
+[zot]: https://zotregistry.dev
 [toxiproxy]: https://github.com/Shopify/toxiproxy
 [hyperfine]: https://github.com/sharkdp/hyperfine
 [uv]: https://docs.astral.sh/uv/

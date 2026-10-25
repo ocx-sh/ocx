@@ -18,7 +18,7 @@ from uuid import uuid4
 import pytest
 
 from src.assertions import assert_not_exists
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.runner import OcxRunner, registry_dir
 
 pytestmark = pytest.mark.command("add")
@@ -72,7 +72,7 @@ def _packages_present_count(ocx: OcxRunner) -> int:
     base = Path(ocx.ocx_home) / "packages" / registry_dir(ocx.registry)
     if not base.exists():
         return 0
-    return sum(1 for p in base.rglob("content") if p.is_dir())
+    return sum(1 for p in rglob_no_links(base, "content") if p.is_dir())
 
 
 @pytest.mark.smoke

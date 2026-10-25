@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261024T143141Z-8f6d92a3.json"
+  ],
+  "first_seen": "2026-10-24T14:31:41Z",
+  "fixed": null,
+  "folded_at": "2026-10-24T17:05:26Z",
+  "folds": 1,
+  "id": "project-zot-hint-global-trampoline",
+  "kind": "pitfall",
+  "last_seen": "2026-10-24T14:31:41Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "zot-missing hint says `ocx exec zot --`, which leaks OCX_GLOBAL=1 into pytest via the global uv trampoline",
+  "v": 1,
+  "versions": []
+}

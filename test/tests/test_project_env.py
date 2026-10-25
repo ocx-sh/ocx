@@ -68,8 +68,11 @@ Misc:
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -181,6 +184,18 @@ def _env_value(dump: str, key: str) -> str | None:
     return None
 
 
+def _same_path(printed: str, expected: Path) -> bool:
+    """Whether a path the child printed names ``expected``.
+
+    The Windows runner's ``env`` is an MSYS binary: it prints ``C:\\x`` as ``/c/x``.
+    """
+    if sys.platform == "win32":
+        msys = re.fullmatch(r"/([A-Za-z])(/.*)?", printed)
+        if msys:
+            printed = f"{msys[1]}:{msys[2] or '/'}"
+    return os.path.normcase(os.path.normpath(printed)) == os.path.normcase(os.path.normpath(str(expected)))
+
+
 # =============================================================================
 # CLI contract — `ocx run --env`
 # =============================================================================
@@ -279,6 +294,8 @@ def test_env_flag_bare_key_without_equals_passes_the_name_through(
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     probe = 'printf "FOO=[%s]" "${FOO-<unset>}"'
+    sh = "/bin/sh" if sys.platform != "win32" else shutil.which("sh")
+    assert sh is not None, "a POSIX `sh` must be available"
     forwarded = _run(
         ocx,
         project,
@@ -287,7 +304,7 @@ def test_env_flag_bare_key_without_equals_passes_the_name_through(
         "--env",
         "FOO",
         "--",
-        "/bin/sh",
+        sh,
         "-c",
         probe,
         extra_env={"FOO": "from-the-parent"},
@@ -302,7 +319,7 @@ def test_env_flag_bare_key_without_equals_passes_the_name_through(
     )
 
     skipped = _run(
-        ocx, project, "exec", "--clean", "--env", "FOO", "--", "/bin/sh", "-c", probe
+        ocx, project, "exec", "--clean", "--env", "FOO", "--", sh, "-c", probe
     )
     assert skipped.returncode == EXIT_SUCCESS, (
         f"a bare --env FOO with FOO unset must succeed; "
@@ -436,8 +453,8 @@ def test_env_flag_path_type_prepends_instead_of_replacing(
     path_value = _env_value(result.stdout, "PATH")
     assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
 
-    segments = path_value.split(":")  # POSIX separator; module is Linux-only
-    assert segments[0] == str(extra), (
+    segments = path_value.split(":")  # the child is POSIX `env`: ':' on Windows too
+    assert _same_path(segments[0], extra), (
         f"a :path override must be the FRONT of PATH; got {segments[0]!r}, "
         f"expected {str(extra)!r}; full PATH:\n{path_value}"
     )
@@ -480,7 +497,8 @@ def test_env_flag_without_type_replaces_path(ocx: OcxRunner, tmp_path: Path) -> 
         f"ocx run --env PATH=... must succeed; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
     )
-    assert _env_value(result.stdout, "PATH") == str(only), (
+    replaced = _env_value(result.stdout, "PATH")
+    assert replaced is not None and _same_path(replaced, only), (
         f"an unqualified --env PATH must REPLACE the composed value, dropping "
         f"every package directory — the documented hazard `:path` exists to "
         f"avoid; stdout:\n{result.stdout}"
@@ -513,8 +531,8 @@ def test_env_flag_relative_path_resolves_against_cwd(
     )
     path_value = _env_value(result.stdout, "PATH")
     assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
-    first_segment = path_value.split(":")[0]  # POSIX separator; module is Linux-only
-    assert first_segment == str(subdirectory / "rel_bin"), (
+    first_segment = path_value.split(":")[0]  # the child is POSIX `env`: ':' on Windows too
+    assert _same_path(first_segment, subdirectory / "rel_bin"), (
         f"a relative --env :path must resolve against the invocation directory, "
         f"not the project root; got {first_segment!r}, expected "
         f"{str(subdirectory / 'rel_bin')!r}; full PATH:\n{path_value}"
@@ -935,8 +953,8 @@ B_MARKER = "b-value"
     )
     path_value = _env_value(executed.stdout, "PATH")
     assert path_value is not None, f"PATH must be present; stdout:\n{executed.stdout}"
-    segments = path_value.split(":")  # POSIX separator; module is Linux-only
-    assert segments.count(a_bin) == 1, (
+    segments = path_value.split(":")  # the child is POSIX `env`: ':' on Windows too
+    assert sum(_same_path(segment, project / "a_bin") for segment in segments) == 1, (
         f"the repeated group's directory must appear exactly once on PATH; "
         f"full PATH:\n{path_value}"
     )
@@ -972,9 +990,9 @@ PATH = {{ type = "path", value = "local_bin" }}
     )
     path_value = _env_value(result.stdout, "PATH")
     assert path_value is not None, f"PATH must be present in env dump; stdout:\n{result.stdout}"
-    first_segment = path_value.split(":")[0]  # POSIX separator; module is Linux-only
-    expected = str(project / "local_bin")
-    assert first_segment == expected, (
+    first_segment = path_value.split(":")[0]  # the child is POSIX `env`: ':' on Windows too
+    expected = project / "local_bin"
+    assert _same_path(first_segment, expected), (
         f"the project's [env] path entry must be the FRONT of PATH, ahead of "
         f"the package's own path entry; got first segment {first_segment!r}, "
         f"expected {expected!r}; full PATH:\n{path_value}"
@@ -1525,8 +1543,8 @@ tool = "{pkg.fq}"
     path_value = _env_value(result.stdout, "PATH")
     assert path_value is not None, f"PATH must be present; stdout:\n{result.stdout}"
 
-    segments = path_value.split(":")  # POSIX separator; module is Linux-only
-    assert segments[0] == str(extra), (
+    segments = path_value.split(":")  # the child is POSIX `env`: ':' on Windows too
+    assert _same_path(segments[0], extra), (
         f"the forwarded :path override must be the FRONT of the launcher's "
         f"PATH; got {segments[0]!r}, expected {str(extra)!r}; "
         f"full PATH:\n{path_value}"

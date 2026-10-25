@@ -1,6 +1,9 @@
 name: Discord Notifications
 
-on:
+# `workflow_run` is this workflow's purpose: it reports the outcome of other workflows. It checks out no
+# code and runs none from the triggering run, so the trigger's fork-code risk does not apply; the only
+# triggering-run data it reads are the display fields (name, branch, SHA, URL) of the Discord message.
+on: # zizmor: ignore[dangerous-triggers] workflow_run reports other runs and checks out no code
   pull_request:
     types: [opened, closed]
 
@@ -9,17 +12,15 @@ on:
 
   workflow_run:
     workflows:
-      - "Basic Verification"
-      - "Verify Deep"
+      - "verify-basic"
+      - "verify-deep"
       - "License Compliance"
-      - "Deploy Website"
+      - "Deploy Docs"
       - "Deploy Dev"
       - "Build Windows Shims"
       - "OCI Publish"
       - "Release"
-      - "Test Install Scripts"
       - "Verify Version"
-      - "Notify Test"
     types: [completed]
 
   deployment_status:

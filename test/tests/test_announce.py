@@ -48,6 +48,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 #: A GitLab job token distinct from `TOKEN`, so a run carrying both is
 #: unambiguous about which of the two answered C-063's ladder. Local rather than
 #: shared with the GitLab suite: one scenario reads it, and the assertion it

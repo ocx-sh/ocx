@@ -20,23 +20,19 @@ points at an adversary skill from another.
   One configured entry at `max` runs it and announces
   `max: 1 adversary configured`. Each listed skill resolves its own
   observation mode and bound; the join waits for all of them.
-- **Concurrent launch — a member of the join's batch, never a serial tail**
-  (`adr_0016` C-987). When the axis is on, the adversary is launched **in
-  the same batch as the native seat of the join it gates**: the `L2`
-  aggregate seat, or the sole leaf's `L1` at `N = 1`, in `/hex-execute`
-  ([`loop.md`](loop.md#review-by-join-level)); the Stage 2 batch in
-  `/hex-review`; the Round 1 panel batch in `/hex-plan` and
-  `/hex-architect`. **Batch order is native seats first, adversary last**,
-  so a mode-(c) blocking call blocks the orchestrator only after every
-  native seat is already running. Where the harness cannot issue the call
-  inside the batch at all, the launch degrades to sequential and the
-  existing `Degraded: blocking adversary call …` line takes the suffix
-  `; launched sequentially` — no new degrade axis. **The adversary occupies
-  no `max-workers` slot**: it is not a hex worker (the heartbeat bullet
-  below). **The two clocks are orthogonal**: `review.<level>.budget-minutes`
-  bounds the native seat and nothing else; the bound this contract resolves
-  bounds the adversary and nothing else — neither truncates the other,
-  because hex can stop its own worker and cannot terminate an external
+- **Concurrent launch — a member of the review's batch, never a serial tail.**
+  When the axis is on, the adversary is launched **in the same batch as the
+  native seats it gates**: the Stage 2 batch in `/hex-review`; the Round 1
+  panel batch in `/hex-plan` and `/hex-architect`. **Batch order is native
+  seats first, adversary last**, so a mode-(c) blocking call blocks the
+  orchestrator only after every native seat is already running. Where the
+  harness cannot issue the call inside the batch at all, the launch degrades
+  to sequential and the existing `Degraded: blocking adversary call …` line
+  takes the suffix `; launched sequentially` — no new degrade axis. **The
+  adversary occupies no `max-workers` slot**: it is not a hex worker. **The
+  two clocks are orthogonal**: the bound this contract resolves bounds the
+  adversary and nothing else, and the native seats' own bound does not
+  truncate it — hex can stop its own worker and cannot terminate an external
   skill. The join waits for both; wall clock is `max(native, adversary)`,
   which is the whole gain.
 - **The bound comes from the adversary's own published contract where it
@@ -123,14 +119,10 @@ points at an adversary skill from another.
 
   On elapse of whichever bound the mode resolved to, the orchestrator
   **stops waiting**, takes the graceful skip below and proceeds.
-- **hex writes no heartbeat for an external skill, and terminates nothing.**
-  An adversary is a pluggable external skill, not a hex worker: it emits no
-  hex heartbeat, and hex builds no progress surface for it — mode (b)'s
-  signal is output the harness already exposes, nothing more.
-  [§ Worker liveness](protocol.md#worker-liveness) weighed reading a child's output
-  stream and demoted it; that section's heartbeat contract governs hex's
-  **own** workers and is not restated here, this being the external-skill
-  case it cannot reach. When a bound elapses
+- **hex builds no progress surface for an external skill, and terminates
+  nothing.** An adversary is a pluggable external skill, not a hex worker —
+  mode (b)'s signal is output the harness already exposes, nothing more.
+  When a bound elapses
   hex discards whatever the call may still return and **does not attempt to
   terminate the underlying process** — no shipped file gives an orchestrator
   a capability to terminate an external skill's process. It follows that
@@ -143,9 +135,9 @@ points at an adversary skill from another.
   cost is stated: an adversary that hangs under such a call blocks the run
   until it returns.
 - **4-way triage** of its findings:
-  - **actionable** — folded into the join's **single builder fix pass**
-    together with the native seat's actionable findings, one pass, one
-    re-verify by the join's own resolved verification (`adr_0016` C-988).
+  - **actionable** — folded into the **single fix pass**
+    together with the native seats' actionable findings, one pass, one
+    re-check.
     A finding naming the same defect as a native finding merges into it,
     attribution noted, never counted twice. If that merged pass fails
     verification: **revert it, re-run it native-only, and promote every
@@ -162,7 +154,9 @@ points at an adversary skill from another.
   itself classify. Each adversary skill states its own outcome vocabulary;
   read it there rather than guessing at one here. In **both** cases log
   "Cross-model review skipped: `<reason>`", carrying the reason the skill
-  itself gave, and continue — it is a gate, not a blocker. The skip is
+  itself gave, and continue — it is a gate, not a blocker. **Never wait for
+  quota or credentials to return, and never retry**: the skip line is the
+  whole response. The skip is
   surfaced **prominently at tier `xhigh` and `max`**, where the adversary pass is a
   default part of the flow.
 - **Reason attribution — orthogonal under (a) and (b), a disclosed race

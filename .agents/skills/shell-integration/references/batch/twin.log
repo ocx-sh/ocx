@@ -1,0 +1,4 @@
+admitted: squote dollar backtick backslash trailing_bs dbl_bs lead_dash lead_dashes inject glob_tilde space_tab operators pwsh_special nu_hash trail_sq esc_bell datelike c0-bel c0-bs c0-vt c0-ff c0-so c0-fs c0-us c0-esc
+refused : newline cr_crlf percent unicode empty dquote bang u2018 u2019 u201a u201b u201c u201d u201e curly_inject curly_dq_inject curly_mixed big4k
+twin: admitted 25 of 43 values, 200 runs, 0 failing
+exit 0

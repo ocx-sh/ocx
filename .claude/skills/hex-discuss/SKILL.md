@@ -141,7 +141,7 @@ and (c) fire **never on an opinion**, and never on a question the repo answers, 
 instead; (b) alone may target a judgment question, user-opted and spend-confirmed.
 
 Default gear: at most 3 concurrent `researcher` spawns
-([`workers.md`](../hex-core/references/workers.md#role-index)), `fast-balanced` at every tier
+([`workers.md`](../hex-core/references/workers.md#role-index)), `standard` at every tier
 in [`models.md`](../hex-core/references/models.md#the-matrix) — no self-escalation, disclosed
 like any other ([`models.md`](../hex-core/references/models.md#rules) rule 1) — bound by
 [`protocol.md` § Worker coordination](../hex-core/references/protocol.md#worker-coordination)

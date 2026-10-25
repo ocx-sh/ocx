@@ -59,11 +59,12 @@ box under load 27. Allowlisting those would file a false reason for tests that
 are fast everywhere it matters, and a gate that reds on a busy laptop for code
 nobody touched is a gate someone turns off.
 
-That is not an off-switch: `verify-basic.yml`'s smoke job runs on every pull
-request with `CI` set, so the hard mode runs on every change. Both modes print
-which one they ran in, on every run, green or red. Only the *budget* verdict is
-advisory — a log this reader cannot judge, and an unbounded allowlist pattern,
-fail in both modes, being wiring faults rather than slow tests.
+No workflow runs this gate: the nextest bracket that wrote its log left with
+the Bazel lane swap, so nothing in CI decides, and the hard mode is reached only
+by running it with `CI` set by hand. Both modes print which one they ran in, on
+every run, green or red. Only the *budget* verdict is advisory — a log this
+reader cannot judge, and an unbounded allowlist pattern, fail in both modes,
+being wiring faults rather than slow tests.
 
 Stdlib only; `task rust:test:duration` is the caller, and
 `scripts/tests/test_unit_test_duration_gate.py` holds the fixture logs that show
@@ -165,9 +166,8 @@ def allowlist(path: Path) -> list[str]:
     return entries
 
 
-#: Where the measurement is controlled. GitHub Actions always sets `CI`, and
-#: `verify-basic.yml`'s smoke job — every pull request, drafts included — is
-#: therefore where this gate gates.
+#: Where the measurement is controlled. GitHub Actions always sets `CI`, but no
+#: workflow runs this gate, so the hard mode is a local `CI=1` run.
 def _hard_mode() -> bool:
     """Whether an over-budget finding fails the run.
 
@@ -177,10 +177,7 @@ def _hard_mode() -> bool:
     load at gate time describes the gate's own moment rather than the
     conditions each duration was measured under.
 
-    Empty counts as unset, which is the only spelling that could be used as an
-    off-switch — and it cannot be one, because the switch would have to be
-    flipped in `verify-basic.yml`, where the step's presence is asserted by
-    `.claude/tests/test_workflows.py`.
+    Empty counts as unset.
     """
     return bool(os.environ.get("CI"))
 
@@ -197,9 +194,9 @@ def _mode_line(hard: bool) -> str:
         "nextest duration: advisory mode (CI is unset) — findings are printed and cannot fail "
         "this run: on a shared machine a fast test measures its neighbours rather than itself "
         "(6x to 170x inflation measured at load 27 on a 32-core box, for tests that take 6 ms "
-        "to 190 ms quiet and 12 ms to 160 ms on CI). The gate is the Linux CI leg of "
-        "verify-basic.yml, which runs on every pull request. A log this reader cannot judge "
-        "still fails here — that is a wiring fault, not a slow test"
+        "to 190 ms quiet and 12 ms to 160 ms on CI). No CI lane runs this gate; re-run with "
+        "CI=1 to see the hard verdict. A log this reader cannot judge still fails here — "
+        "that is a wiring fault, not a slow test"
     )
 
 
@@ -252,8 +249,8 @@ def run(log: Path, budget: float, allowlist_path: Path) -> int:
         # findings would be the off-switch this mode must not become.
         print(
             f"nextest duration: advisory mode — {len(failures)} finding(s) above the budget did "
-            "NOT fail this run; the Linux CI leg of verify-basic.yml decides, on every pull "
-            "request. Re-run with CI=1 to see the verdict it will reach",
+            "NOT fail this run, and no CI lane runs this gate. Re-run with CI=1 to see the "
+            "hard verdict",
             file=sys.stderr,
         )
         return 0

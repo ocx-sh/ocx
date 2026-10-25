@@ -41,6 +41,8 @@ from src.registry import fetch_platform_manifest_digest
 
 pytestmark = pytest.mark.command("version", "status")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 # ---------------------------------------------------------------------------
 # `ocx version` JSON contract
 # ---------------------------------------------------------------------------
