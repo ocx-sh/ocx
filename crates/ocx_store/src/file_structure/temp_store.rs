@@ -111,15 +111,19 @@ impl TempStore {
         Ok(result)
     }
 
-    /// Non-blocking exclusive lock that clears leftovers on success; `None` when another process holds it.
+    /// Non-blocking exclusive lock that clears leftovers on success; `None` when another process holds it or the lock
+    /// file cannot be opened.
     ///
-    /// Sync on purpose: `stale_entries` runs outside a Tokio runtime.
+    /// Never sleeps: `clean_temp` and the pull tasks call it on a Tokio worker, which a wait would stall.
     pub fn try_acquire(&self, path: &Path) -> Result<Option<TempAcquireResult>> {
         let lock_path = Self::lock_path_for(path);
         match LockedFile::try_exclusive_blocking(&lock_path) {
             Ok(Some(lock)) => Ok(Some(Self::finish_acquire(path, lock)?)),
             Ok(None) => Ok(None),
-            Err(_) => Ok(None),
+            Err(error) => {
+                log::debug!("treating temp lock as busy: {error}");
+                Ok(None)
+            }
         }
     }
 

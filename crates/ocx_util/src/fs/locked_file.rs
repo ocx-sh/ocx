@@ -42,34 +42,41 @@ fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
     }
 }
 
-/// Opens `path` for locking, creating it.
+/// Opens `path` for locking, creating it, with a single attempt and no sleep.
 ///
-/// Windows keeps a deleted name delete-pending until its last handle closes and refuses every open of it with
-/// `ERROR_ACCESS_DENIED`; failing there turns a peer's lock-file cleanup into an I/O error for the loser of the race.
+/// A try-lock runs on async worker threads; retrying here would stall the runtime for the whole backoff schedule.
 fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let open = || {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-    };
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+/// [`open_lock_file`], waiting out a delete-pending name until `deadline`.
+///
+/// Windows refuses every open of a deleted name with `ERROR_ACCESS_DENIED` until its last handle closes; without the
+/// wait, a peer's lock-file cleanup surfaces as an I/O error. Each sleep is clamped to the time left, or a short
+/// timeout overshoots by the whole backoff schedule.
+fn open_lock_file_until(path: &Path, deadline: std::time::Instant) -> std::io::Result<std::fs::File> {
     #[cfg(windows)]
     {
-        let mut opened = open();
+        let mut opened = open_lock_file(path);
         for backoff in super::WINDOWS_TRANSIENT_BACKOFF {
-            if !matches!(&opened, Err(error) if super::is_transient_windows_error(error)) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() || !matches!(&opened, Err(error) if super::is_transient_windows_error(error)) {
                 break;
             }
-            std::thread::sleep(super::jittered_backoff(backoff));
-            opened = open();
+            std::thread::sleep(super::jittered_backoff(backoff).min(remaining));
+            opened = open_lock_file(path);
         }
         opened
     }
     #[cfg(not(windows))]
     {
-        open()
+        let _ = deadline;
+        open_lock_file(path)
     }
 }
 
@@ -119,6 +126,8 @@ impl LockedFile {
     }
 
     /// Try an exclusive lock without blocking, creating the file and its parents; `Ok(None)` on contention.
+    ///
+    /// Opens once and never sleeps, so an open failure such as a Windows delete-pending name is `Err`, not `Ok(None)`.
     pub async fn try_exclusive(path: impl Into<PathBuf>) -> Result<Option<Self>, FileError> {
         let path = path.into();
         let error_path = path.clone();
@@ -193,7 +202,7 @@ impl LockedFile {
         }
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let file = open_lock_file(&path).map_err(|e| FileError::new(&path, e))?;
+            let file = open_lock_file_until(&path, deadline).map_err(|e| FileError::new(&path, e))?;
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let mut lock = FileLock::lock_exclusive_blocking_with_timeout(file, remaining)
                 .map_err(|e| FileError::new(&path, e))?;
@@ -554,17 +563,39 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn try_exclusive_waits_out_a_delete_pending_lock_file() {
+    fn try_exclusive_returns_promptly_on_a_delete_pending_lock_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pending-try.lock");
-        let releaser = release_after(plant_delete_pending(&path), Duration::from_millis(150));
+        let pending = plant_delete_pending(&path);
+        let started = std::time::Instant::now();
         let acquired = LockedFile::try_exclusive_blocking(&path);
-        releaser.join().unwrap();
+        let elapsed = started.elapsed();
+        drop(pending);
         assert!(
-            acquired
-                .expect("a delete-pending lock file must be waited out, not reported as an I/O error")
-                .is_some(),
-            "nobody holds the lock once the name clears, so the try-lock must succeed"
+            !matches!(acquired, Ok(Some(_))),
+            "a delete-pending name is busy to a try-lock, not acquired"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "a try-lock must not sleep, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_exclusive_never_outlasts_its_timeout_on_a_delete_pending_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pending-timeout.lock");
+        let pending = plant_delete_pending(&path);
+        let started = std::time::Instant::now();
+        let acquired = LockedFile::open_exclusive_blocking_with_timeout(&path, Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        drop(pending);
+        let error = acquired.expect_err("the name is still delete-pending when the timeout passes");
+        assert_eq!(error.cause.raw_os_error(), Some(5), "the last open error must surface");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "a 100 ms timeout must not wait out the retry schedule, took {elapsed:?}"
         );
     }
 

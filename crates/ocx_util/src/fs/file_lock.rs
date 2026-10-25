@@ -81,10 +81,11 @@ impl FileLock {
             match acquired(<std::fs::File as fs4::FileExt>::try_lock(&file)) {
                 Ok(true) => return Ok(FileLock { _lock_file: file }),
                 Ok(false) => {
-                    if std::time::Instant::now() >= deadline {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "lock timed out"));
                     }
-                    std::thread::sleep(TICK);
+                    std::thread::sleep(TICK.min(remaining));
                 }
                 Err(error) => return Err(error),
             }
