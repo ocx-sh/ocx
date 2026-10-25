@@ -2595,6 +2595,7 @@ def test_the_scan_workflow_cannot_pass_by_skipping() -> None:
     body = "\n".join(runs)
     assert f"{PROVENANCE_CHECK} --scan" in body and '--min-files "$MIN_FILES"' in body, body
     assert f"{PROVENANCE_CHECK} --exec" in body, body
+    assert f"{PROVENANCE_CHECK} --link" in body and '--min-files "$LINK_MIN_FILES"' in body, body
 
 
 def test_the_release_scan_floor_is_one_binary_per_dist_target() -> None:
@@ -2608,6 +2609,18 @@ def test_the_release_scan_floor_is_one_binary_per_dist_target() -> None:
     )
     assert _scan_input_default("extract") is True
     assert _scan_input_default("artifact-pattern") == "artifacts-build-local-*"
+
+
+def test_the_release_link_floor_is_one_binary_per_linux_dist_target() -> None:
+    """The link check runs on cargo-dist archives only, so its reader floor is the release's Linux target count."""
+    import tomllib
+
+    targets = tomllib.loads((ROOT / "dist-workspace.toml").read_text(encoding="utf-8"))["dist"]["targets"]
+    linux = [target for target in targets if "-unknown-linux-" in target]
+    assert _scan_input_default("link-min-files") == len(linux), (
+        f"scan-binaries.yml `link-min-files` defaults to {_scan_input_default('link-min-files')}, but "
+        f"dist-workspace.toml builds {len(linux)} Linux targets {linux} — a missing one would pass the floor"
+    )
 
 
 def test_deploy_dev_publish_needs_the_provenance_scan() -> None:
@@ -3446,6 +3459,18 @@ def test_release_readiness_builds_every_dist_target_and_tests_six_platforms() ->
     assert call["with"]["limits-dir"] == "${{ matrix.limits }}", call["with"]["limits-dir"]
     assert set(_needs(call)) == {"stage", "scan"}, _needs(call)
     assert jobs["scan"]["uses"] == SCAN_WORKFLOW_USES and "build" in _needs(jobs["scan"])
+
+
+def test_release_builds_windows_arm64_natively_on_the_runner_readiness_tests_it_on() -> None:
+    """dist cross-builds (xwin, on ubuntu) every target without a `github-custom-runners` entry, so
+    the zip readiness executes natively on `windows-11-arm` would not be the zip `release.yml` ships.
+    `release.yml` reads its build runners from `dist plan` at run time, so the config is the source."""
+    target = "aarch64-pc-windows-msvc"
+    readiness = {entry["target"]: entry["runner"] for entry in _readiness_matrix("build")}[target]
+    entry = _dist_config().get("github-custom-runners", {}).get(target)
+    assert isinstance(entry, dict), f"dist-workspace.toml has no `github-custom-runners.{target}` table: {entry!r}"
+    assert entry.get("runner") == readiness, f"release builds {target} on {entry.get('runner')!r}, readiness on {readiness!r}"
+    assert entry.get("host") == target, f"host {entry.get('host')!r}: dist cross-builds unless the runner's host is {target}"
 
 
 # The `[[tool]]` rows of ocx.lock are the leaves a platform can install; a target maps onto

@@ -46,3 +46,11 @@ github-custom-job-permissions = { verify-version = { contents = "read" }, scan-b
 cargo-auditable = true
 # Whether to use cargo-cyclonedx to generate an SBOM
 cargo-cyclonedx = true
+
+# Build Windows arm64 natively, on the runner release-readiness.yml tests it on. Without this entry
+# dist cross-builds the target with cargo-xwin on ubuntu, and the zip readiness executes is not the zip
+# `release.yml` ships. `host` equal to the target is what makes dist skip the cross toolchain.
+# .claude/tests/test_workflows.py pins the runner to readiness's.
+[dist.github-custom-runners.aarch64-pc-windows-msvc]
+runner = "windows-11-arm"
+host = "aarch64-pc-windows-msvc"

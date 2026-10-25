@@ -12,13 +12,19 @@ from pathlib import Path
 import pytest
 import release_provenance_check as check_mod
 from release_provenance_check import (
+    _GOOD_READELF,
     _GOOD_REPORT,
+    _LINK_GREENS,
+    _LINK_REDS,
     _REPORT_REDS,
     EXIT_CLEAN,
     EXIT_FINDING,
     EXIT_USAGE,
+    GLIBC_FLOOR,
     MARKERS,
+    NEEDED_ALLOWED,
     _broken,
+    evaluate_readelf,
     evaluate_report,
     scan,
 )
@@ -149,3 +155,80 @@ def test_exec_reds_on_non_json_output(tmp_path: Path) -> None:
     garbage = tmp_path / "fake-ocx-garbage"
     _write_fake_binary(garbage, "print('not json')\n")
     assert check_mod.main(["--exec", str(garbage)]) == EXIT_FINDING
+
+
+@pytest.mark.parametrize("name,text,needle", _LINK_REDS, ids=[case[0] for case in _LINK_REDS])
+def test_evaluate_readelf_reds(name: str, text: str, needle: str) -> None:
+    findings = evaluate_readelf(text)
+    assert findings
+    assert any(needle in finding for finding in findings)
+
+
+@pytest.mark.parametrize("name,text", _LINK_GREENS, ids=[case[0] for case in _LINK_GREENS])
+def test_evaluate_readelf_greens(name: str, text: str) -> None:
+    assert evaluate_readelf(text) == []
+
+
+def test_link_constants_match_the_release_bytes() -> None:
+    # v0.6.5: the highest GLIBC_ either gnu binary needs, and the sonames they link, loaders included.
+    assert GLIBC_FLOOR == (2, 34)
+    assert NEEDED_ALLOWED == {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+
+
+def _write_fake_readelf(path: Path, output: str, status: int = 0) -> None:
+    path.write_text(f"#!{sys.executable}\nimport sys\nprint({output!r})\nsys.exit({status})\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+@pytest.fixture
+def elf_file(tmp_path: Path) -> Path:
+    binary = tmp_path / "ocx"
+    binary.write_bytes(b"\x7fELF" + b"\0" * 64)
+    return binary
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
+@pytest.mark.parametrize(
+    "name,output,expected",
+    [("good", _GOOD_READELF, EXIT_CLEAN), ("glibc 2.99", _LINK_REDS[0][1], EXIT_FINDING)],
+)
+def test_link_end_to_end_over_a_fake_readelf(
+    tmp_path: Path, elf_file: Path, monkeypatch: pytest.MonkeyPatch, name: str, output: str, expected: int
+) -> None:
+    fake = tmp_path / "fake-readelf"
+    _write_fake_readelf(fake, output)
+    monkeypatch.setattr(check_mod, "READELF", str(fake))
+    assert check_mod.main(["--link", str(elf_file)]) == expected
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
+def test_link_reds_when_readelf_fails_on_a_file(
+    tmp_path: Path, elf_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Clean-looking stdout, so only the exit status can red it.
+    fake = tmp_path / "fake-readelf"
+    _write_fake_readelf(fake, _GOOD_READELF, status=1)
+    monkeypatch.setattr(check_mod, "READELF", str(fake))
+    assert check_mod.main(["--link", str(elf_file)]) == EXIT_FINDING
+
+
+def test_link_without_readelf_is_usage_error_never_a_pass(
+    tmp_path: Path, elf_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check_mod, "READELF", str(tmp_path / "absent-readelf"))
+    assert check_mod.main(["--link", str(elf_file)]) == EXIT_USAGE
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
+def test_link_reader_floor_reds_under_min_files(
+    tmp_path: Path, elf_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tmp_path / "fake-readelf"
+    _write_fake_readelf(fake, _GOOD_READELF)
+    monkeypatch.setattr(check_mod, "READELF", str(fake))
+    assert check_mod.main(["--link", str(elf_file), "--min-files", "1"]) == EXIT_CLEAN
+    assert check_mod.main(["--link", str(elf_file), "--min-files", "2"]) == EXIT_FINDING
+
+
+def test_link_over_a_missing_file_is_usage_error(tmp_path: Path) -> None:
+    assert check_mod.main(["--link", str(tmp_path / "absent")]) == EXIT_USAGE

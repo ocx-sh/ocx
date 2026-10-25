@@ -37,6 +37,10 @@ Reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-pub
 
 **Enforced in CI.** `verify-release-ci.yml` (hand-written) runs `dist generate --check` on PRs/pushes touching `dist-workspace.toml`, `release.yml`, or any `Cargo.toml`, failing if the committed `release.yml` drifts from a fresh regeneration. Opt-out (discouraged): set `allow-dirty = ["ci"]` in `dist-workspace.toml` so cargo-dist stops managing `release.yml` and the check passes — intentionally unset; only use if `release.yml` is deliberately hand-maintained (you lose config-driven regen).
 
+### Linux glibc Floor
+
+The `-gnu` archives are built by cargo-dist on `ubuntu-22.04` and `ubuntu-22.04-arm` (glibc 2.35, no zigbuild), and v0.6.5's binaries of both arches need nothing above `GLIBC_2.34` and link only `libc.so.6`, `libm.so.6` and `libgcc_s.so.1` (aarch64 also lists `ld-linux-aarch64.so.1`). That is the documented floor (`rust-cargo.md` REL-03); the musl archives are static and carry neither. `release_provenance_check.py --link` holds it with `GLIBC_FLOOR` and `NEEDED_ALLOWED`, the one place the numbers live: `scan-binaries.yml` runs it over every Linux binary of the cargo-dist archives (release and the readiness dispatch), floored at `link-min-files`, the Linux target count. A builder-image bump or a dependency that raises the requirement reds the scan before `host` publishes; raise the constant in the same change, on purpose. `deploy-dev.yml` ships static musl and is not link-checked.
+
 ### Version Source of Truth
 
 `[workspace.package] version` in root `Cargo.toml` = single source of truth. Both crates inherit via `version.workspace = true`. Version compiled in via `env!("CARGO_PKG_VERSION")`.

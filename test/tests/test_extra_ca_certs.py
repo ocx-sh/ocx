@@ -60,8 +60,6 @@ from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner
 from src.tls_index import MintedPki, TlsStaticIndexServer, mint_ca_and_leaf, running_tls
 
-pytestmark = pytest.mark.requires_testing_build
-
 # The logical namespace the HTTPS index serves. Distinct from `ocx.sh` so the
 # compiled-in `index.ocx.sh` entry never enters the picture.
 _NAMESPACE = "corp.example"
@@ -508,6 +506,7 @@ def test_managed_key_wins_over_the_home_file_tier(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_system_tier_lock_beats_every_lower_tier_and_env(
     ocx: OcxRunner,
     unique_repo: str,
@@ -610,6 +609,7 @@ def test_ocx_toml_carrying_either_key_is_refused(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.parametrize("tier", ["home", "system"])
 def test_nonexistent_path_exits_74_with_path_in_message(
     ocx: OcxRunner, tmp_path: Path, tier: str
@@ -769,6 +769,7 @@ def test_config_path_to_private_key_file_exits_65(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_system_tier_inline_private_key_exits_78_naming_the_system_tier(
     ocx: OcxRunner, tmp_path: Path, minted_pki: MintedPki
 ) -> None:

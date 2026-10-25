@@ -40,8 +40,6 @@ import pytest
 from src.helpers import make_package
 from src.runner import OcxRunner
 
-pytestmark = pytest.mark.requires_testing_build
-
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------
@@ -101,6 +99,7 @@ def _write_ocx_toml(project_dir: Path, body: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     os.name == "nt",
     reason="SIGKILL not available on Windows; equivalent path is TerminateProcess",
@@ -181,6 +180,7 @@ def test_kill_mid_add_leaves_recoverable_state(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.skipif(
     os.name == "nt",
     reason="SIGKILL not available on Windows; equivalent path is TerminateProcess",
@@ -242,6 +242,7 @@ def test_kill_mid_add_leaves_ocx_toml_intact(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_partial_lock_write_rolled_back(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

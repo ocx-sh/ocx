@@ -62,8 +62,6 @@ from src.registry import push_raw_config_package
 from src.runner import OcxRunner
 from src.terminal import requires_pty, run_on_a_terminal
 
-pytestmark = pytest.mark.requires_testing_build
-
 # The managed-config fence's own label (ADR "Seed write mechanism" example:
 # `# >>> ocx managed v1 <hash> >>>` ... `# <<< ocx managed <<<`) — distinct
 # from the shell-activation fence's `ocx` label.
@@ -190,6 +188,7 @@ def test_fresh_home_no_seed_is_noop_parity(ocx: OcxRunner) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_onboard_syncs_before_fence_write(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -221,6 +220,7 @@ def test_onboard_syncs_before_fence_write(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_resetup_refreshes_to_newer_payload_via_self_setup(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -263,6 +263,7 @@ def test_resetup_refreshes_to_newer_payload_via_self_setup(
 # `integrations: []` on
 # `test_patch_companion_integrations_appear_once_across_several_bases`.
 # The patch registry is `<registry>/<unique_repo>_patches`, so no group is needed.
+@pytest.mark.requires_testing_build
 def test_setup_refresh_syncs_patch_descriptors(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -353,6 +354,7 @@ def test_setup_refresh_syncs_patch_descriptors(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_resetup_different_ref_re_adopts(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -381,6 +383,7 @@ def test_resetup_different_ref_re_adopts(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_dirty_fence_exit_81_force_overwrites(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -450,6 +453,7 @@ def test_env_only_override_never_writes_seed_and_reverts_without_env(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_config_update_bypasses_throttle(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -476,6 +480,7 @@ def test_config_update_bypasses_throttle(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_config_update_registry_down_leaves_snapshot_untouched(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -535,6 +540,7 @@ def test_ci_env_only_recipe_no_fence_required_satisfied(ocx: OcxRunner, unique_r
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_setup_fetch_failure_no_fence_no_partial_state(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
     bogus_ref = f"127.0.0.1:1/{unique_repo}:v1"
@@ -571,6 +577,7 @@ def test_config_update_absent_ref_exits_79(ocx: OcxRunner, unique_repo: str, reg
     )
 
 
+@pytest.mark.requires_testing_build
 def test_setup_absent_ref_exits_79_no_fence_no_partial_state(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -600,6 +607,7 @@ def test_setup_absent_ref_exits_79_no_fence_no_partial_state(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_managed_fetch_honors_local_mirror_ignores_payload_mirror(
     ocx: OcxRunner, registry: str, mirror_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -646,6 +654,7 @@ def test_managed_fetch_honors_local_mirror_ignores_payload_mirror(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_no_config_refresh_kill_switch_is_reported_and_leaves_explicit_update_working(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -715,6 +724,7 @@ def test_no_config_refresh_kill_switch_stops_the_background_apply_tick(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_no_config_hermetic_suppresses_candidate_and_env_override(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -737,6 +747,7 @@ def test_no_config_hermetic_suppresses_candidate_and_env_override(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_zip_and_move_warm_home_offline_identical(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -770,6 +781,7 @@ def test_zip_and_move_warm_home_offline_identical(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_config_update_check_probe_reports_status_and_json_via_root_format(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -882,6 +894,7 @@ def test_config_update_version_against_digest_pinned_seed_warns_bricked_gate(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_setup_self_heals_wiped_snapshot(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -909,6 +922,7 @@ def test_setup_self_heals_wiped_snapshot(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_testing_build
 def test_setup_managed_config_dry_run_reports_would_adopt_writes_nothing(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -952,6 +966,7 @@ def _bare_self_setup(
     return _run(ocx, "self", "setup", "--no-modify-path", env_overrides=overrides)
 
 
+@pytest.mark.requires_testing_build
 def test_env_only_bare_self_setup_adopts_tier(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -969,6 +984,7 @@ def test_env_only_bare_self_setup_adopts_tier(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_seeded_bare_self_setup_self_heals_deleted_snapshot(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -993,6 +1009,7 @@ def test_seeded_bare_self_setup_self_heals_deleted_snapshot(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_clear_removes_tier(ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path) -> None:
     """W5: `self setup --managed-config ""` removes the fence AND the snapshot
     directory; the tier no longer merges afterwards."""
@@ -1112,6 +1129,7 @@ def test_config_update_pause_writes_and_bare_update_clears(
     assert not _pause_file(ocx).exists(), "an explicit update without --pause must clear the pause"
 
 
+@pytest.mark.requires_testing_build
 def test_paused_setup_skips_refresh_and_keeps_pause(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
