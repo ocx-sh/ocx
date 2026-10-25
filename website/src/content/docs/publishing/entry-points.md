@@ -24,7 +24,7 @@ Declare `entrypoints` when one of these is true:
 - **The tool must run with the env you declared.** PATH exposure cannot do that, because the launched binary inherits whatever the consumer's shell carried in.
 - **Exposing `bin/` would leak too much.** A toolchain with fifty binaries can declare three entry points and keep `bin/` private.
 
-Skip entry points for self-contained static binaries such as [Go][go] or [Rust][rust] builds. [CMake][cmake], [ripgrep][ripgrep] and [mold][mold] have no runtime to conflict over, so a public `${installPath}/bin` on PATH is enough.
+Skip entry points for self-contained static binaries such as [Go programs][go] or [Rust][rust] builds. [CMake][cmake], [ripgrep][ripgrep] and [mold][mold] have no runtime to conflict over, so a public `${installPath}/bin` on PATH is enough.
 
 A package with entry points usually demotes `${installPath}/bin` from `public` to `private` (see [declare the environment][authoring-env-surface]). OCX prepends each installed package's `entrypoints/` directory to PATH at exec time, and consumers see it as `<symlink-root>/current/entrypoints`.
 

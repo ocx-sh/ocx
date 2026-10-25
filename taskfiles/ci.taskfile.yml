@@ -95,18 +95,20 @@ tasks:
     cmds:
       - task: :git:submodules
       - task: :website:build
-      # ponytail: audits only the pages that met every budget on the 2026-10-22 full build (18 of the
-      # 89 measured; the rest miss performance 100, dom <= 800 or bytes <= 147 KiB). A page joins the
-      # list once it passes; drop the list for the whole tree when the docs backlog is empty.
+      # ponytail: audits only the pages that met every budget on the 2026-10-25 full build (36 of the
+      # 113 built pages, redirect stubs excluded; the rest miss performance 100 or dom <= 900). A page
+      # joins the list once it passes; drop the list for the whole tree when the docs backlog is empty.
       - task: :website:lighthouse
         vars:
           CLI_ARGS: >-
             --page /
             --page /404.html
+            --page /explanation/launcher-forwarding/
             --page /explanation/project-groups/
             --page /explanation/records-and-sbom/
             --page /explanation/records-launcher-frames/
             --page /explanation/toolchain-render/
+            --page /explanation/toolchain-tree/
             --page /getting-started/first-package/
             --page /getting-started/first-project/
             --page /guides/authenticate/
@@ -116,9 +118,25 @@ tasks:
             --page /guides/find-packages/
             --page /guides/lock-and-reproduce/
             --page /guides/run-with-dependencies/
+            --page /guides/stable-paths/
+            --page /guides/work-offline/
             --page /integration/
             --page /integration/bazel/
             --page /integration/devcontainers-and-editors/
+            --page /integration/publisher-ci/
+            --page /integration/python/
+            --page /integration/registry-auth-recipes/
+            --page /integration/scripts-and-json/
+            --page /reference/command-line/config/
+            --page /reference/command-line/direnv/
+            --page /reference/command-line/index-commands/
+            --page /reference/command-line/patch/
+            --page /reference/command-line/shell/
+            --page /reference/metadata/dependencies/
+            --page /reference/metadata/integrations/
+            --page /reference/platforms/
+            --page /roadmap/
+            --page /security/
 
   deep:
     desc: 'Deep tier: suite rows check, contract-baseline repository tests and the full self-tests of the gate scripts'

@@ -204,7 +204,7 @@ discovers trusted CAs its own way.
 convention, not a language standard. [`curl`][curl], [`git`][git] and Python's [`ssl`][python-ssl]
 module honor it because they link against [OpenSSL][openssl] or defer to its lookup.
 
-[Go][go]'s `crypto/x509` honors `SSL_CERT_FILE` and `SSL_CERT_DIR` only on Linux and the BSDs.
+[Go's `crypto/x509` package][go] honors `SSL_CERT_FILE` and `SSL_CERT_DIR` only on Linux and the BSDs.
 On Windows and macOS it calls the OS-native certificate store and ignores both variables.
 [Java][java-tools] never reads `SSL_CERT_FILE`. It has no environment variable for its default
 trust store at all.
@@ -212,7 +212,7 @@ trust store at all.
 | Runtime | CA override |
 |---------|-------------|
 | OpenSSL-linked tools ([`curl`][curl], [`git`][git], Python [`ssl`][python-ssl]) | `SSL_CERT_FILE` / `SSL_CERT_DIR` |
-| [Go][go] `crypto/x509` | `SSL_CERT_FILE` / `SSL_CERT_DIR` on Linux/BSD only; ignored on Windows and macOS |
+| [Go `crypto/x509`][go] | `SSL_CERT_FILE` / `SSL_CERT_DIR` on Linux/BSD only; ignored on Windows and macOS |
 | [Java][java-tools] | No environment variable. Set the `javax.net.ssl.trustStore` system property via `JAVA_TOOL_OPTIONS`, or [`keytool`][keytool] `-importcert` the certificate into the JVM's `cacerts` keystore directly. |
 
 A descriptor rule's `match` glob is how a patches tier says "this runtime needs its own
