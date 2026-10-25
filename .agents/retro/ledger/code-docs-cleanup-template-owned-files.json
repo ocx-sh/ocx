@@ -1,0 +1,23 @@
+{
+  "artifact": "code-docs-cleanup",
+  "cost_min": 0,
+  "entries": [
+    "20261024T172044Z-c94a6ab2.json"
+  ],
+  "first_seen": "2026-10-24T17:20:44Z",
+  "fixed": null,
+  "folded_at": "2026-10-25T13:20:57Z",
+  "folds": 1,
+  "id": "code-docs-cleanup-template-owned-files",
+  "kind": "pitfall",
+  "last_seen": "2026-10-24T17:20:44Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "comment sweep edits copier template-owned files; the cleanup procedure has no skip for them",
+  "v": 1,
+  "versions": [
+    "ghcr.io/ocx-sh/lore/code-docs-cleanup@sha256:4b312606567dab8769e98fcf9770072bc425e6f2e9d1b71a3638e9c60bcaed18"
+  ]
+}
