@@ -1,5 +1,2 @@
-blank_issues_enabled: true
-contact_links:
-  - name: Discord
-    url: https://discord.gg/mT2UCF8CVe
-    about: Ask questions and discuss with the community
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+blank_issues_enabled: false

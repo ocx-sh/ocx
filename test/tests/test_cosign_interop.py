@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from src import registry as reg
+from src.helpers import skip_without_docker
 from src.runner import OcxRunner, PackageInfo
 from tests.fixtures import adversarial, attestations, cosign
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -44,6 +45,8 @@ def pinned_cosign() -> Path:
     pin — the resolution this fixture used to buy with a `docker pull`, minus
     the pull.
     """
+    # Before any resolution: a leg without Docker may not compose the cosign pin.
+    skip_without_docker("the Sigstore stack")
     return cosign.cosign_binary()
 
 

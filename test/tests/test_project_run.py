@@ -44,8 +44,11 @@ Test inventory
 
 from __future__ import annotations
 
+import os
 import re as _re_run
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -773,7 +776,8 @@ def test_run_clean_strips_inherited_env(ocx: OcxRunner, tmp_path: Path) -> None:
     # `--clean` strips PATH (mirror `ocx exec --clean`); use absolute path so
     # the child's argv0 resolution does not depend on inherited PATH. Same
     # pattern as `test_exec_forwarding.py::test_clean_encapsulates_parent_env`.
-    env_bin = "/usr/bin/env"
+    env_bin = shutil.which("env")
+    assert env_bin is not None, "the POSIX `env` binary must be available"
 
     # Without --clean: external var visible.
     result_dirty = _run_run(ocx, project, "--", env_bin, extra_env=extra_env)
@@ -928,7 +932,7 @@ def test_run_registers_in_project_registry(ocx: OcxRunner, tmp_path: Path) -> No
     for link in projects_dir.iterdir():
         if link.name.startswith(".tmp-"):
             continue  # in-flight staging entry — not a ledger root
-        if link.is_symlink() and link.resolve() == project_resolved:
+        if (link.is_symlink() or os.path.isjunction(link)) and link.resolve() == project_resolved:
             registered.append(link)
     assert registered, (
         f"a $OCX_HOME/projects/ symlink must resolve to the canonical "
@@ -1100,11 +1104,13 @@ def test_run_flat_manifest_image_any_package_resolves_via_any_fallback(
     bin_name = "hello"
 
     # Push with platform="any" — platform-agnostic package.
+    # Windows cannot scan an `any` package for executables, so the claim stays undeclared there.
     pkg = make_package(
         ocx, repo, tag, tmp_path,
         cascade=False,
         platform="any",
         bins=[bin_name],
+        no_bin_scan=sys.platform == "win32",
     )
 
     project = tmp_path / "proj"

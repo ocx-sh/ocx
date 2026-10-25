@@ -398,7 +398,7 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
 def running(root: Path) -> Iterator[StaticIndexServer]:
     """Starts a `StaticIndexServer` on a background thread, waits for it to
     accept connections (mirroring the registry:2 readiness wait in
-    `test/conftest.py::start_registry`), and tears it down on exit.
+    `test/conftest.py::_wait_for_reachable`), and tears it down on exit.
     """
     server = StaticIndexServer(root)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

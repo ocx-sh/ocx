@@ -13,7 +13,7 @@
 #                              custom-tool, to show the no-merge rule
 #
 # Prerequisites:
-#   cd test && docker compose up -d        (registry on localhost:5000)
+#   cd test && uv run python -m src.zot    (registry on localhost:5000, own terminal)
 #   cargo build --release -p ocx
 #   source test/manual/scripts/env.sh
 #

@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# One Linux host cross-builds `//crates/ocx_cli:ocx` for every target through
+# Bazel (rules_rs + the hermetic `@llvm` toolchain). `TARGETS` is the single
+# list of supported triples — keep it equal to `platform_triples` in
+# `MODULE.bazel`.
+#
+# `-c opt`: the fastbuild (opt-level 0) Windows binary overflows the 1 MiB main
+# thread stack at startup; the optimised one runs.
+
+version: '3'
+
+vars:
+  # `python3` is absent on Windows runners, where only `run` executes.
+  PY: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+  TARGETS: |-
+    aarch64-apple-darwin
+    aarch64-pc-windows-gnullvm
+    aarch64-unknown-linux-gnu
+    aarch64-unknown-linux-musl
+    x86_64-apple-darwin
+    x86_64-pc-windows-gnullvm
+    x86_64-unknown-linux-gnu
+    x86_64-unknown-linux-musl
+
+tasks:
+  targets:
+    desc: Print the supported cross-build target triples, one per line
+    silent: true
+    cmds:
+      - 'printf "%s\n" "{{.TARGETS}}"'
+
+  build:
+    desc: 'Cross-build ocx for TARGET=<triple> into target/cross/<triple>/'
+    requires:
+      vars: [TARGET]
+    cmds:
+      - cmd: |
+          set -euo pipefail
+          t={{shellQuote .TARGET}}
+          printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
+          bin=ocx; case "$t" in *-windows-*) bin=ocx.exe;; esac
+          flags="-c opt --platforms=@rules_rs//rs/platforms:$t"
+          ocx exec bazel -- bazel {{.CACHE_RC}} build $flags //crates/ocx_cli:ocx
+          src=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery $flags --output=files //crates/ocx_cli:ocx 2>/dev/null | tail -n1)
+          mkdir -p "target/cross/$t"
+          cp -L --remove-destination "$src" "target/cross/$t/$bin"
+          echo "$PWD/target/cross/$t/$bin"
+
+  # Unit tests are built here, on Linux, and only executed on the foreign runner:
+  # `test:bundle` packs every `rust_test` with its runfiles, `test:run` needs
+  # nothing but Python. Doctests are build actions and stay Linux-only.
+  test:bundle:
+    desc: 'Cross-build every rust_test for TARGET=<triple> into target/cross/<triple>/unit-tests.tar.gz'
+    requires:
+      vars: [TARGET]
+    cmds:
+      - cmd: |
+          set -euo pipefail
+          t={{shellQuote .TARGET}}
+          printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
+          python3 scripts/test_bundle.py bundle --target "$t" --cache-rc={{shellQuote .CACHE_RC}}
+
+  test:run:
+    desc: 'Run a unit-test bundle natively: BUNDLE=<path> [SOURCE_ROOT=<checkout>] [JUNIT=<path>] [FILTER=<substring>]; needs only Python'
+    summary: |
+      SOURCE_ROOT also runs every `--skip`ped testcase of every target on its own, in
+      that checkout (what `rust:test:bazel-skipped` does under cargo on Linux); without
+      it those testcases run nowhere and the summary says so.
+    requires:
+      vars: [BUNDLE]
+    # `shellQuote` makes each value one literal shell word, so a `"`, `$(` or backtick in it
+    # never runs. An `env:` block would let an exported variable of the same name beat the
+    # task argument, and the run would take the shell's value silently.
+    cmds:
+      - '{{.PY}} scripts/test_bundle.py run --bundle {{shellQuote .BUNDLE}}{{if .SOURCE_ROOT}} --source-root {{shellQuote .SOURCE_ROOT}}{{end}}{{if .JUNIT}} --junit {{shellQuote .JUNIT}}{{end}}{{if .FILTER}} --filter {{shellQuote .FILTER}}{{end}}'
+
+  test:bin:
+    desc: 'Stage the acceptance suite test/bin layout for TARGET=<triple> into target/cross/<triple>/test-bin/'
+    requires:
+      vars: [TARGET]
+    cmds:
+      - cmd: |
+          set -euo pipefail
+          t={{shellQuote .TARGET}}
+          printf '%s\n' "{{.TARGETS}}" | grep -qx -- "$t" || { echo "unsupported TARGET '$t'; see: task cross:targets" >&2; exit 1; }
+          python3 scripts/test_bundle.py bin --target "$t" --cache-rc={{shellQuote .CACHE_RC}}

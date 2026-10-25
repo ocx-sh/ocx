@@ -47,12 +47,12 @@ ARTIFACTS = REPO_ROOT / ".claude" / "artifacts"
 DECISION = ARTIFACTS / "decision_bazel_adoption.md"
 MIGRATION = ARTIFACTS / "migration_plan_bazel.md"
 
-#: `references/go-no-go.md:207`, verbatim, with `<decision-file>` the one
+#: `references/go-no-go.md:207`, verbatim, with `path/to/decision-file` the one
 #: substitution. Kept as a literal so the gate does not depend on the skill
 #: bundle at runtime; its tests assert it is still byte-identical to the
 #: line that ships, so a drift in either spelling is loud rather than silent.
 GO_NO_GO = REPO_ROOT / ".claude" / "skills" / "bazel-adopt" / "references" / "go-no-go.md"
-EXIT_CHECK = "grep -nE '\\|[[:space:]]*\\|' <decision-file> | grep -v -- '---'"
+EXIT_CHECK = "DECISION_FILE=path/to/decision-file; grep -n -E -e '\\|[[:space:]]*\\|' -- \"$DECISION_FILE\" | grep -v -e '---'"
 
 #: C-001's six signal rows, by identity. This list is the reader floor: it is
 #: what makes a deleted table distinguishable from a filled one.
@@ -78,7 +78,7 @@ SECTIONS = (
 
 def empty_cell_rows(path: Path) -> list[str]:
     """`go-no-go.md`'s shipped check, run as shipped. Each line is one bad row."""
-    command = EXIT_CHECK.replace("<decision-file>", shlex.quote(str(path)))
+    command = EXIT_CHECK.replace("path/to/decision-file", shlex.quote(str(path)))
     # `check=False` is the contract, not a shortcut: the pipe's passing state is
     # `grep` matching nothing, which exits **1**. Reading the exit code here —
     # or tolerating a range of them — would invert the gate.

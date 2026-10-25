@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.assertions import assert_not_exists, assert_symlink_exists
-from src.helpers import make_package, make_package_with_entrypoints
+from src.helpers import make_package, make_package_with_entrypoints, rglob_no_links
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
 
@@ -67,7 +67,7 @@ def _count_object_dirs(ocx: OcxRunner) -> int:
     if not objects_root.exists():
         return 0
     count = 0
-    for p in objects_root.rglob("content"):
+    for p in rglob_no_links(objects_root, "content"):
         if p.is_dir():
             count += 1
     return count
@@ -546,7 +546,7 @@ def test_dependency_forward_refs_created(ocx: OcxRunner, unique_repo: str, tmp_p
     dep_entries = list(deps_dir.iterdir())
     assert len(dep_entries) >= 1, f"expected at least 1 forward-ref in refs/deps/, got {len(dep_entries)}"
     # At least one should be a symlink
-    assert any(e.is_symlink() for e in dep_entries), "expected symlink entries in refs/deps/"
+    assert any(e.is_symlink() or e.is_junction() for e in dep_entries), "expected symlink entries in refs/deps/"
 
 
 def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
@@ -566,7 +566,7 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
     app_root = _find_package_root(ocx, app)
     deps_dir = app_root / "refs" / "deps"
     assert deps_dir.exists(), "refs/deps/ should be restored after reinstall"
-    assert any(e.is_symlink() for e in deps_dir.iterdir()), "forward-ref symlinks should be restored"
+    assert any(e.is_symlink() or e.is_junction() for e in deps_dir.iterdir()), "forward-ref symlinks should be restored"
 
 
 # ---------------------------------------------------------------------------
@@ -931,9 +931,9 @@ def test_clean_dry_run_transitive_chain(
     # entries across all three CAS tiers. Split by path-prefix and assert
     # per-tier counts so the test stays robust to changes in the per-package
     # blob shape (single-platform vs image-index).
-    pkg_paths = [e for e in result if "/packages/" in e["path"]]
-    layer_paths = [e for e in result if "/layers/" in e["path"]]
-    blob_paths = [e for e in result if "/blobs/" in e["path"]]
+    pkg_paths = [e for e in result if "packages" in Path(e["path"]).parts]
+    layer_paths = [e for e in result if "layers" in Path(e["path"]).parts]
+    blob_paths = [e for e in result if "blobs" in Path(e["path"]).parts]
     assert len(pkg_paths) == 3, f"expected 3 collectible package entries; got {len(pkg_paths)}"
     assert len(layer_paths) == 3, f"expected 3 collectible layer entries; got {len(layer_paths)}"
     assert len(blob_paths) >= 3, (
@@ -1480,7 +1480,7 @@ def _list_dep_targets(obj_dir: Path) -> list[Path]:
     deps_dir = obj_dir / "refs" / "deps"
     if not deps_dir.exists():
         return []
-    return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink())
+    return sorted(entry.resolve() for entry in deps_dir.iterdir() if entry.is_symlink() or entry.is_junction())
 
 
 # ---------------------------------------------------------------------------

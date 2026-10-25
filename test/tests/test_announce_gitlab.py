@@ -42,6 +42,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 FORK_NAMESPACE = "forkuser"
 FORK_FULL = f"{FORK_NAMESPACE}/{INDEX_REPO}"
 

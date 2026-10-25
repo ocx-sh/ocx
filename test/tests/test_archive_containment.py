@@ -28,13 +28,21 @@ error and leaves no bundle behind.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 from src import current_platform
-from src.helpers import build_archive, make_package, resolved_metadata_path
+from src.helpers import (
+    build_archive,
+    make_package,
+    resolved_metadata_path,
+    rglob_no_links,
+)
 from src.runner import OcxRunner
 
 EXIT_DATA_ERR = 65  # archive::Error::{EntryEscape, SymlinkEscape}
+EXIT_IOERR = 74  # assemble::Error::WindowsSymlinksUnsupported
 
 # Distinct stderr fragments per error kind, so a test that expects one refusal
 # cannot pass on the other. The path-traversal kinds report "escapes the
@@ -42,6 +50,10 @@ EXIT_DATA_ERR = 65  # archive::Error::{EntryEscape, SymlinkEscape}
 # "escapes the root directory" (archive::Error::SymlinkEscape).
 ENTRY_ESCAPE = "escapes the extraction root"
 SYMLINK_ESCAPE = "escapes the root directory"
+# Windows installs refuse any layer that carries a link (assemble.rs
+# `WindowsSymlinksUnsupported`, exit 74), so a hostile-layer install ends there
+# whenever the extractor let the link through.
+WINDOWS_LAYER_LINKS = "layer symlinks are not supported on Windows"
 
 
 def _create(ocx: OcxRunner, source: Path, out: Path, *args: str):
@@ -158,7 +170,7 @@ def _no_marker_outside(ocx: OcxRunner) -> None:
     """
     home = ocx.ocx_home
     for root in (home, home.parent):
-        hits = sorted(str(p) for p in root.rglob(PWNED))
+        hits = sorted(str(p) for p in rglob_no_links(root, PWNED))
         assert not hits, f"a hostile layer entry escaped the extraction root: wrote {hits}"
 
 
@@ -281,13 +293,29 @@ def test_reverse_order_ladder_is_refused_on_the_registry_stream_route(
 
     result = ocx.plain("package", "install", f"{unique_repo}:1.1.0", check=False)
 
+    layers = ocx.ocx_home / "layers"
+    if sys.platform == "win32":
+        # The stream route extracts both links as in-root junctions and the
+        # install then stops at the layer-link refusal. What must hold is that
+        # no link of the finalized layer resolves outside `$OCX_HOME` (a junction
+        # substitute name is absolute, so it names the staging dir it was
+        # extracted in).
+        assert result.returncode == EXIT_IOERR, result.stdout + result.stderr
+        assert WINDOWS_LAYER_LINKS in result.stderr, result.stderr
+        home = os.path.realpath(ocx.ocx_home)
+        for link in rglob_no_links(layers, "*"):
+            if link.is_junction() or link.is_symlink():
+                resolved = os.path.realpath(link)
+                assert os.path.commonpath([home, resolved]) == home, (
+                    f"a finalized layer link resolves outside $OCX_HOME: {link} -> {resolved}"
+                )
+        return
     assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
     assert SYMLINK_ESCAPE in result.stderr, result.stderr
     assert ENTRY_ESCAPE not in result.stderr, result.stderr
     # The finished layer must not exist: a finalized tree carrying the link is
     # the defect, whatever the exit code said.
-    layers = ocx.ocx_home / "layers"
-    hits = sorted(str(p) for p in layers.rglob("e1")) if layers.exists() else []
+    hits = sorted(str(p) for p in rglob_no_links(layers, "e1")) if layers.exists() else []
     assert not hits, f"a layer carrying an escaping link was finalized: {hits}"
 
 
@@ -295,7 +323,7 @@ def _no_pwned_under(root: Path) -> None:
     """Nothing named PWNED anywhere at or above the extraction root — the actual
     security property. Swept against `tmp_path`, which contains both the scratch
     root and its siblings, so a link that climbs out lands somewhere this sees."""
-    hits = sorted(str(p) for p in root.rglob("PWNED"))
+    hits = sorted(str(p) for p in rglob_no_links(root, "PWNED"))
     assert not hits, f"a traversal escaped the extraction root: wrote {hits}"
 
 
@@ -320,7 +348,10 @@ def test_target_component_ladder_traversal_is_refused(ocx: OcxRunner, tmp_path: 
     result = _create(ocx, archive, out)
 
     assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
-    assert SYMLINK_ESCAPE in result.stderr, result.stderr
+    # Win32 folds `a/..` lexically, so on Windows every rung is an in-root
+    # junction and the ladder never climbs: the entry guard refuses the write
+    # through the planted link instead of the target guard refusing the link.
+    assert (ENTRY_ESCAPE if sys.platform == "win32" else SYMLINK_ESCAPE) in result.stderr, result.stderr
     assert not out.exists(), "a refused extraction must leave no bundle behind"
     _no_pwned_under(tmp_path)
 

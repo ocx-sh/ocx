@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20261024T162624Z-886c1fab.json"
+  ],
+  "first_seen": "2026-10-24T16:26:24Z",
+  "fixed": null,
+  "folded_at": "2026-10-24T17:05:26Z",
+  "folds": 1,
+  "id": "hex-execute-worker-commit-denied",
+  "kind": "inconvenient",
+  "last_seen": "2026-10-24T16:26:24Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "step workers' git commit denied in most worktrees while the orchestrator's is allowed",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:b74c31371e0861a500b15b48b2f80733477ac454b449967d816b19a9ddbe01c2"
+  ]
+}

@@ -6,7 +6,7 @@ Part of the [worker registry](../workers.md); universal protocol applies.
 API/data contracts, boundary calls. Design only; no implementation code.
 
 **Tools** — read plus write design documents. No implementation code.
-**Model** — [`models.md`](../models.md) row `architect` — deep-reasoning
+**Model** — [`models.md`](../models.md) row `architect` — `deep` class.
 class at every tier.
 
 ```

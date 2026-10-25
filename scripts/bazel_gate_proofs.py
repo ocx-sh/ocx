@@ -129,11 +129,9 @@ EXTERNAL_PACKAGES = 0
 Two independent reasons, both measured. `external` is Bazel's reserved
 workspace-root directory name, so `//...` never expands into it (the
 `.bazelignore` comment records the same probe). And no first-party target
-reaches one: the patched submodule crates arrive through crate_universe as
-ordinary `@crates//oci-client-0.17.0:oci-client-0.17.0` aliases, not as
-`//external/rust-oci-client:oci_client`. The three `external/*/BUILD.bazel`
-that do exist on disk are crate_universe output, untracked, and depended on by
-nothing."""
+reaches one: the patched submodule crates arrive through rules_rs as
+ordinary `@crates//:oci-client-0.17.0` aliases, not as
+`//external/rust-oci-client:oci_client`."""
 
 CRATES_LIB_TARGETS = 22
 """One `rust_library` per crate that has a lib — every member but `ocx_shim` and the proc-macro `ocx_exit_derive`."""
@@ -172,12 +170,11 @@ CRATES_DOC_TEST_TARGETS = 22
 """One `rust_doc_test(name = "<crate>_doc_test")` per crate with a `src/lib.rs`
 — every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 22, not only
 the crates carrying a fence today, so a crate's first doctest is run with no
-BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so like
-the seam twin these have no nextest suite: each holds its own
-`crates/TEST_TARGET_MAP.toml` row, the drift reader's parity counts
-`rust_doc_test` beside `rust_test` and `sh_test`, and `bazel_test_floor.py`'s
-skip ceiling leaves them out — an `ignore` fence is documentation, not a skipped
-test (C-034)."""
+BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so these
+have no nextest suite, and a passing one writes an empty `test.log`, so they have
+no `crates/TEST_TARGET_MAP.toml` row either: the drift reader's row parity counts
+`rust_test` and `sh_test` only, and `bazel_test_floor.py` gates them by exit status
+and by `CRATES_DOC_TEST_TARGETS` having run."""
 
 CRATES_BINARY_TARGETS = 4
 """`ocx_schema:ocx_schema_bin`, built so the schema consumers (its own
@@ -300,8 +297,8 @@ which excludes the seam twin and the schemas genrule."""
 #    only) is the one thing that would catch it afterwards.
 #
 # 2. **A `@crates//` label carries name AND version, in both halves.** The real
-#    spelling is `@crates//<name>-<version>:<name>-<version>` —
-#    `@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1`, not
+#    spelling is `@crates//:<name>-<version>` —
+#    `@crates//:rustls-pki-types-1.15.1`, not
 #    `@crates//:rustls-pki-types` and never `@crates//:pki-types`. The `name`
 #    is the **crate package name**, so WP-15's mapping table keys on it
 #    directly and the Cargo-rename trap the plan recorded dissolves: this
@@ -421,7 +418,7 @@ BAZEL_VERSION_LINE = re.compile(r"^bazel (\d+\.\d+\.\d+)\b", re.MULTILINE)
 #: `//crates/<name>:<name>` is the first-party convention and needs no mapping
 #: row — with one exception, `//crates/ocx_cli:ocx_cli`, whose cargo package is
 #: `ocx`; that row belongs in `label_map`, which `resolve_label` reads first.
-#: Everything else is a `@crates//<name>-<version>:<name>-<version>` label and
+#: Everything else is a `@crates//:<name>-<version>` label and
 #: must be declared, or it is an unmapped label and its own exit 1. There are no
 #: `//external/...` edges to declare: the patched submodule crates reach
 #: first-party targets as ordinary `@crates//` aliases (trap 2 above).
@@ -591,10 +588,10 @@ def build_drift(
     comparison — skipping it silently is precisely what makes the widened scope
     vacuous for the edges it was widened to cover.
 
-    `rust_test_targets_read` is every test-kind rule the reader counted —
-    `rust_test`, the `sh_test` seam twin and the `rust_doc_test` targets
-    (`CRATES_DOC_TEST_TARGETS`) — because each is a `crates/TEST_TARGET_MAP.toml`
-    row. A doctest target whose row is missing reds `drift-map-parity` here.
+    `rust_test_targets_read` is every map-row test rule the reader counted —
+    `rust_test` and the `sh_test` seam twin — because each is a
+    `crates/TEST_TARGET_MAP.toml` row. A `rust_doc_test` has none: it is gated by
+    exit status.
     """
     findings: list[Finding] = []
 
@@ -1063,9 +1060,9 @@ def write_bep(path: Path, rerunning: set[str], *, remote_hits: set[str] | None =
 #: tree. The version is part of the package segment AND of the target name, and
 #: the name is the crate's real package name — `rustls-pki-types`, never the
 #: workspace's `pki-types` rename.
-TOKIO = "@crates//tokio-1.53.1:tokio-1.53.1"
-SERDE = "@crates//serde-1.0.229:serde-1.0.229"
-OCI_CLIENT = "@crates//oci-client-0.17.0:oci-client-0.17.0"
+TOKIO = "@crates//:tokio-1.53.1"
+SERDE = "@crates//:serde-1.0.229"
+OCI_CLIENT = "@crates//:oci-client-0.17.0"
 #: The one first-party label whose cargo package name is not its directory name.
 OCX_CLI_LABEL = "//crates/ocx_cli:ocx_cli"
 
@@ -1218,7 +1215,7 @@ def prove_drift() -> int:
     )
     print(
         f"S-010 GREEN: {DRIFT_PACKAGE_FLOOR} packages, {DRIFT_TARGET_FLOOR} targets, "
-        "first-party and @crates//<name>-<version> edges agree"
+        "first-party and @crates//:<name>-<version> edges agree"
     )
     checks += 1
 
@@ -1270,9 +1267,9 @@ def prove_drift() -> int:
     # --- an unmapped third-party label is its own exit 1, never a silent skip.
     #     Spelled as a VERSION bump rather than a rename, because that is the
     #     way this label form actually goes unmapped: the version is in both
-    #     halves of `@crates//<name>-<version>:<name>-<version>`, so every
+    #     halves of `@crates//:<name>-<version>`, so every
     #     `cargo update` that moves a pin retires a mapping row.
-    bumped = "@crates//tokio-1.54.0:tokio-1.54.0"
+    bumped = "@crates//:tokio-1.54.0"
     mutated = {key: set(value) for key, value in build.items()}
     mutated["pkg08"].discard(TOKIO)
     mutated["pkg08"].add(bumped)

@@ -1,0 +1,117 @@
+name: Cross
+
+# One parallel leg per target triple, called by the deep tier (`deep-repo.yml`). Serially in one job
+# the eight `-c opt` builds took 2h+ cold; every leg shares the Bazel cache (#638). A leg uploads only
+# its own `ocx`, plus the unit bundle and acceptance binaries where its triple has a native leg.
+# `needs:` names a whole matrix, so a consumer waits for the slowest leg, not only its own.
+#
+# Reusable only: the artifacts it uploads belong to the caller's run, which is how `deep-repo.yml`'s
+# native legs find them.
+
+on:
+  workflow_call:
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  cross:
+    name: Cross-build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Equal to `task cross:targets`; `.claude/tests/test_workflows.py` holds it there.
+        target:
+          - aarch64-apple-darwin
+          - aarch64-pc-windows-gnullvm
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-gnullvm
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+        include:
+          - { target: aarch64-apple-darwin, bundle: true, test-bin: true }
+          - { target: x86_64-pc-windows-gnullvm, bundle: true, test-bin: true }
+          - { target: x86_64-unknown-linux-gnu, test-bin: true }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          cache: false
+      # Reads and writes the shared cache; with no secret (a fork PR, or a caller that passed none) the
+      # action writes no rc and Bazel runs uncached.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      # NO release-provenance `--scan` here. The old cross-compile job ran it
+      # over a real `--release` cargo build; this job has no such build, and
+      # the Bazel-built `ocx` deliberately carries the `__testing` placeholder
+      # provenance (`crates/ocx_cli/BUILD.bazel` `_TESTING_PROVENANCE`), so a
+      # scan of these bytes would red by design. A second, release-profile
+      # compile just to scan it is the cost this restructure removes. The scan
+      # still runs over the real release bytes in `scan-binaries.yml`
+      # (called by `release.yml` and `deploy-dev.yml`) before anything ships.
+      - name: Cross-build ocx
+        env:
+          TARGET: ${{ matrix.target }}
+        run: task cross:build TARGET="$TARGET"
+      - name: Bundle unit tests
+        if: matrix.bundle
+        env:
+          TARGET: ${{ matrix.target }}
+        run: task cross:test:bundle TARGET="$TARGET"
+      - name: Stage acceptance binaries
+        if: matrix.test-bin
+        env:
+          TARGET: ${{ matrix.target }}
+        run: task cross:test:bin TARGET="$TARGET"
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
+      # `ocx*` is `ocx` or `ocx.exe`; `test-bin/` and the bundle do not match.
+      - name: Upload ocx
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ocx-${{ matrix.target }}
+          path: target/cross/${{ matrix.target }}/ocx*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+      - name: Upload unit-test bundle
+        if: matrix.bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unit-tests-${{ matrix.target }}
+          path: target/cross/${{ matrix.target }}/unit-tests.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+      - name: Upload acceptance binaries
+        if: matrix.test-bin
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-bin-${{ matrix.target }}
+          path: target/cross/${{ matrix.target }}/test-bin/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true

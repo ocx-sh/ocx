@@ -18,6 +18,8 @@ import pytest
 
 from src.helpers import SIGSTORE_DIR
 
+pytestmark = pytest.mark.requires_testing_build
+
 LEVELS = ("trace", "debug", "info", "warn", "error")
 # With debug or trace enabled, the compact format (no ANSI on a pipe):
 # `<timestamp> <LEVEL> <spans and message>`.

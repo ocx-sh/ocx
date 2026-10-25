@@ -44,7 +44,7 @@ bazel build --experimental_workspace_rules_log_file=/tmp/wsl.log //...
 # (the same constraint BZL-CACHE-16 states for the execlog parser)
 bazel build src/tools/workspacelog:parser
 bazel-bin/src/tools/workspacelog/parser --log_path=/tmp/wsl.log > /tmp/wsl.txt
-grep -nE '"which"|sha256: ""' /tmp/wsl.txt
+grep -n -E -e '"which"' -e 'sha256: ""' -- /tmp/wsl.txt
 ```
 
 The flag name and its `experimental_` prefix are unchanged on both majors. Any
@@ -195,7 +195,7 @@ as unchanged and is wrongly skipped. Tag it and pass the tag to
 `bazel-diff --alwaysAffectedTags`; `target-determinator` publishes no equivalent
 flag, so on that tool the same target needs a different mitigation (BZL-CI-24).
 
-**The backstop is not optional.** `grep -rn -e 'schedule:\|cron' --include=*.yml .github/workflows`
+**The backstop is not optional.** `git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' | xargs -0 -r grep -H -n -E -e 'schedule:' -e 'cron' --`
 for an unrestricted `bazel test //...`. EMPTY on a repo already using selection is
 itself the finding (BZL-CI-27): both miss classes are silent by construction, so a
 periodic full run is the only check that does not depend on the tool being right.

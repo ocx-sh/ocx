@@ -65,7 +65,7 @@ Clear type: pass `issueTypeId: null` via `-F i=<id> -F t=`.
 
 **Do not invent labels.** If concept not covered below, propose addition to this file first, get approval, then create. Taxonomy has three axes: subsystem routing (`area/*`), priority (`priority/*`), cross-cutting concerns.
 
-### Area labels — subsystem routing (mirrors `CLAUDE.md` subsystem table)
+### Area labels — subsystem routing (mirrors the `AGENTS.md` subsystem table)
 
 | Label | Scope |
 |-------|-------|

@@ -119,6 +119,16 @@ research-axes:
 
 ## Memory
 
+- **Active plan (hex-plan high, 2026-10-22, plan-approved): `.claude/artifacts/plan_pr637_round2.md`** —
+  PR #637 round 2 (findings 1-17 of `.agents/batches/pr637-batch2.md`; issues #631-#636, #638). Phase 1 = cache
+  (P1) then a measured D-CROSS gate; then tiers (conventions adoption), test tooling, platform, cleanups, release
+  readiness. 15 pipelines + contract wave A0, 11 waves; satellites S1 (ocx-sh/conventions) and S2
+  (ocx-sh/grimoire-lore) released once at G7. Research: `research_pr637_round2.md`.
+  Next: `/hex-execute .claude/artifacts/plan_pr637_round2.md`.
+- **Note for the next `/hex-init`:** plans now carry two more satellites — `conventions` →
+  `/home/mherwig/dev/ocx-conventions` and `lore` → `/home/mherwig/dev/grimoire-lore`. Unlike the two in Pointers,
+  both checkouts sit on owner branches, so their WPs use a separate worktree under this repo's
+  `.agents/worktrees/sat-<repo>` from `origin/main` (plan D12), never commit in place.
 - **Active plan (hex-plan high, 2026-10-24, plan-approved): `.claude/artifacts/plan_issue_639_index_closure.md`** —
   federated ocx#639 closure: P1 ocx 7 steps, P2 indexbot 12, P3 catalog 8, P4 cross-repo gate; one serial pipeline
   per repo, repos parallel; critical path P2 → P4; landing catalog → ocx → indexbot.
@@ -191,6 +201,8 @@ research-axes:
 - Retro candidate (checklist-item): "worker-builder must not git stash in a worktree shared with another writer" — ledger worker-builder-stash-shared-worktree, .agents/retro/reports/2026-09-30.md.
 - Retro candidate (project-context): "Take .agents/build.lock with flock -o; a bazel server inherits the fd and wedges the lock" — ledger project-build-lock-bazel-fd-inherit, .agents/retro/reports/2026-09-30.md.
 - Retro candidate (project-context): "Free-disk preflight before a build wave; cargo fmt truncated files at 0 bytes free" — ledger project-disk-full-fmt-truncation, .agents/retro/reports/2026-09-30.md.
+- Retro candidate (checklist-item): "A gate worktree's TMPDIR lives outside every checkout; project-discovery tests walk up into ocx.toml" — ledger project-gate-tmpdir-inside-checkout, .agents/retro/reports/2026-10-24.md.
+- Retro candidate (project-context): "zot-missing hint should name `ocx exec -- task …`; `ocx exec zot --` leaks OCX_GLOBAL=1" — ledger project-zot-hint-global-trampoline, .agents/retro/reports/2026-10-24.md.
 
 - **Plan (hex/patch-lock-advisory-tag, 2026-09-29, review): `.claude/artifacts/plan_patch_lock_advisory_tag.md`** — tag-scoped patch rules vs `ocx.lock`; WP1+WP2 merged, L2 fixed; hex-review (high) round-2 findings applied (one lock-currency predicate); next `/hex-review`.
 - **Plan (hex/code-docs-cleanup, 2026-09-28, plan-approved): `.claude/artifacts/plan_code_docs_cleanup.md`** —

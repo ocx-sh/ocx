@@ -89,7 +89,7 @@ keeps the rest of the procedure from being fiction.
    `ERROR: 'all' is not a known command`, and reading that error as "the flag is
    absent" inverts the answer (BZL-FLAG-11).
 3. **Decide whether a remote executor exists at all**:
-   `grep -rn 'remote_executor' .bazelrc* .github/ 2>/dev/null`. Nearly every
+   `git ls-files -z --cached --others --exclude-standard -- ':(glob).bazelrc*' ':(glob).github/**' | xargs -0 -r grep -H -n -e 'remote_executor' --`. Nearly every
    cache and exit-code behaviour below differs between a cache-only build (no
    `--remote_executor`) and a remote-execution build, and every measurement in
    this skill was taken cache-only. EMPTY = cache-only; read the outage and
@@ -223,13 +223,13 @@ destabilise an action key.
    `--incompatible_remote_local_fallback_for_remote_cache`, a refused cache
    produced `WARNING: Remote Cache: Connection refused`, a full local build and
    **exit 0**. Do not cite either fallback flag as governing this (BZL-CACHE-26).
-   `grep -n 'WARNING: Remote Cache' <build log>` — a hit with exit 0 is the
+   `BUILD_LOG=path/to/build-log; grep -n -e 'WARNING: Remote Cache' -- "${BUILD_LOG}"` — a hit with exit 0 is the
    whole story.
 2. **Never key retry or alerting on exit code 39.** `ExitCode.REMOTE_CACHE_EVICTED
    = 39` is registered on both majors, but across ten invocations, two majors and
    five configurations on a cache-only build it **never surfaced to the caller**.
    Match the error text instead (BZL-CACHE-12):
-   `grep -nE 'lost inputs|Lost inputs no longer available remotely|Found transient remote cache error|Unexpected lost inputs' <build log>`
+   `BUILD_LOG=path/to/build-log; grep -n -E -e 'lost inputs' -e 'Lost inputs no longer available remotely' -e 'Found transient remote cache error' -e 'Unexpected lost inputs' -- "${BUILD_LOG}"`
    EMPTY = this is not an eviction; look elsewhere. A hit plus **exit 0** is the
    default self-heal (retry budget 5, new invocation ID, local re-execution). A
    hit plus **exit 1** with a generic `Target //… failed to build` is the same
@@ -335,7 +335,7 @@ and tags as measured, and the glob failure family.
    bazel build --experimental_workspace_rules_log_file=/tmp/wsl.log //...
    bazel build src/tools/workspacelog:parser
    bazel-bin/src/tools/workspacelog/parser --log_path=/tmp/wsl.log > /tmp/wsl.txt
-   grep -nE '"which"|sha256: ""' /tmp/wsl.txt
+   grep -n -E -e '"which"' -e 'sha256: ""' -- /tmp/wsl.txt
    ```
    Any hit names a non-hermetic call (BZL-HERM-16). EMPTY means no host probe and
    no unchecksummed download on this run — it does **not** clear the rule for a
@@ -387,7 +387,7 @@ A change broke something the selection tool did not schedule.
    that were in effect (BZL-CI-25). `target-determinator`'s
    `-filter-incompatible-targets` defaults true and silently drops targets, and
    `-before-query-error-behavior` defaults to `ignore-and-build-all`.
-4. **Confirm the backstop exists.** `grep -rn --include=*.yml 'schedule:\|cron' .github/workflows`
+4. **Confirm the backstop exists.** `git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' | xargs -0 -r grep -H -n -E -e 'schedule:' -e 'cron' --`
    for an unrestricted `bazel test //...`. EMPTY on a repo that already uses
    target selection is itself the finding (BZL-CI-27) — both miss classes are
    silent by construction, so a periodic full run is the only check that does not

@@ -17,8 +17,10 @@ matrix.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,13 +42,29 @@ class ShellRecipe:
     argv: tuple[str, ...]
     seed: Callable[[str], str]
     readback: str
+    # pwsh and nu join `PATH` with the native separator, `;` on Windows; the POSIX shells use `:`.
+    sep: str = ":"
 
     def script(self, exports: str, seed_path: str, *, twice: bool) -> str:
         body = exports + ("\n" + exports if twice else "")
         return f"{self.seed(seed_path)}\n{body}\n{self.readback}"
 
 
-SEP = ":"  # POSIX hosts; the shell-zoo image is Linux.
+SEP = ":"  # The separator the POSIX shells use, on Windows (Git bash) too.
+
+
+def _split_path(value: str, sep: str = SEP) -> list[str]:
+    """Split a ``sep``-joined ``PATH`` without cutting a Windows ``C:\\...`` entry in two."""
+    parts = value.split(sep)
+    if sys.platform != "win32" or sep != ":":
+        return parts
+    out: list[str] = []
+    while parts:
+        head = parts.pop(0)
+        if len(head) == 1 and head.isalpha() and parts:
+            head = f"{head}{SEP}{parts.pop(0)}"
+        out.append(head)
+    return out
 
 
 def _posix(ocx_shell: str, interpreter: str) -> ShellRecipe:
@@ -77,6 +95,7 @@ RECIPES: dict[str, ShellRecipe] = {
         argv=("pwsh", "-NoProfile", "-Command"),
         seed=lambda p: f"$env:PATH='{p}'",
         readback="$env:PATH",
+        sep=os.pathsep,
     ),
     "nu": ShellRecipe(
         ocx_shell="nu",
@@ -84,6 +103,7 @@ RECIPES: dict[str, ShellRecipe] = {
         argv=("nu", "-c"),
         seed=lambda p: f'$env.PATH = "{p}"',
         readback="$env.PATH | str join (char esep)",
+        sep=os.pathsep,
     ),
     "elvish": ShellRecipe(
         ocx_shell="elvish",
@@ -100,7 +120,7 @@ def _bin_dir(ocx: OcxRunner, pkg: PackageInfo) -> str:
     env_json = ocx.json("package", "env", pkg.short)
     path_entry = next(e for e in env_json["items"] if e["key"] == "PATH")
     # The composed PATH value is the package bin dir (single package, clean env).
-    return path_entry["value"].split(SEP)[0]
+    return _split_path(path_entry["value"])[0]
 
 
 def _exports(ocx: OcxRunner, pkg: PackageInfo, shell: str) -> str:
@@ -124,11 +144,18 @@ def _run(recipe: ShellRecipe, script: str) -> str:
     stays clean to prove the emitted statement is self-contained.
     """
     interpreter = shutil.which(recipe.interpreter) or recipe.interpreter
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    if sys.platform == "win32":
+        # A Windows child needs SYSTEMROOT (Python's subprocess docs). Without it pwsh on arm64
+        # FailFasts at startup (0x80131623) in its SAFER probe, which also writes to TEMP.
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            if key in os.environ:
+                env[key] = os.environ[key]
     proc = subprocess.run(
         [interpreter, *recipe.argv[1:], script],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, check=False,
+        env=env, check=False,
     )
     assert proc.returncode == 0, (
         f"{recipe.interpreter} eval failed (rc={proc.returncode})\n"
@@ -151,9 +178,9 @@ def test_shell_emit_is_idempotent(
     bin_dir = _bin_dir(ocx, pkg)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
-    seed = f"/a/bin{SEP}/b/bin"  # bin dir absent initially
+    seed = f"/a/bin{recipe.sep}/b/bin"  # bin dir absent initially
     final = _run(recipe, recipe.script(exports, seed, twice=True))
-    segments = final.split(SEP)
+    segments = _split_path(final, recipe.sep)
     assert segments.count(bin_dir) == 1, (
         f"{shell}: bin dir {bin_dir!r} must appear exactly once after a double "
         f"source; got PATH={final!r}"
@@ -175,9 +202,9 @@ def test_shell_emit_moves_present_dir_to_front(
     bin_dir = _bin_dir(ocx, pkg)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
-    seed = f"/a/bin{SEP}{bin_dir}{SEP}/b/bin"  # dir present in the middle
+    seed = f"/a/bin{recipe.sep}{bin_dir}{recipe.sep}/b/bin"  # dir present in the middle
     final = _run(recipe, recipe.script(exports, seed, twice=False))
-    segments = final.split(SEP)
+    segments = _split_path(final, recipe.sep)
     assert segments.count(bin_dir) == 1, (
         f"{shell}: re-adding a present dir must not duplicate it; got {final!r}"
     )
@@ -256,7 +283,7 @@ def test_direnv_export_is_idempotent(ocx: OcxRunner, tmp_path: Path):
     # composed the value — a project-tier emitter follows the rendered
     # `<home>/toolchain/<group>/<entry>` links (C-065), so the digest spelling
     # this once matched on is no longer what reaches PATH.
-    tool_dirs = [seg for seg in final.split(SEP) if seg not in seed]
+    tool_dirs = [seg for seg in _split_path(final) if seg not in seed]
     assert tool_dirs, f"tool bin dir missing from PATH after direnv export: {final!r}"
     # Each distinct tool dir must appear exactly once across the two evals.
     for directory in set(tool_dirs):

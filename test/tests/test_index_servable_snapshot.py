@@ -204,7 +204,7 @@ def snapshot(directory: Path) -> dict[str, tuple[bytes, int]]:
     the contract excludes.
     """
     return {
-        str(path.relative_to(directory)): (path.read_bytes(), path.stat().st_mtime_ns)
+        path.relative_to(directory).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
         for path in directory.rglob("*")
         if path.is_file()
     }
@@ -514,7 +514,7 @@ def test_a_file_url_base_resolves_a_tag_with_no_server_at_all(
     # host is never dialed — it names a namespace, not a server.
     configure_index_source(
         ocx,
-        f"file://{site}",
+        site.as_uri(),
         namespace=namespace,
         extra=f'\n[mirrors."{namespace}"]\nregistry = "http://{ocx.registry}"\n',
     )
@@ -578,7 +578,7 @@ def test_a_fleet_snapshot_lands_every_root_and_bounds_its_fan_out(
         f"pkg{number:02d}.json" for number in range(42)
     ), "every package the catalog listed must land a root document"
     assert len(list(subtree.rglob("o/sha256/*.json"))) == 42, "each root's dispatch object lands with it"
-    assert [str(p.relative_to(index_dir)) for p in index_dir.rglob("config.json")] == [
+    assert [p.relative_to(index_dir).as_posix() for p in index_dir.rglob("config.json")] == [
         f"{NAMESPACE}/config.json"
     ], "exactly one config.json, at the source root"
 
@@ -832,10 +832,10 @@ def test_an_unsupported_wire_version_is_refused_identically_on_every_reader(
     runs["--index"] = ocx.plain("--offline", "--index", str(redirected), "index", "list", logical, check=False)
     runs["remote base"] = ocx.plain("--index", str(fresh_index), "index", "update", logical, check=False)
 
-    configure_index_source(ocx, f"file://{file_site}")
+    configure_index_source(ocx, file_site.as_uri())
     runs["file:// base"] = ocx.plain("--index", str(fresh_index), "index", "update", logical, check=False)
 
-    configure_index_source(ocx, f"file://{sibling_site}")
+    configure_index_source(ocx, sibling_site.as_uri())
     runs["file:// base with an unmodelled sibling key"] = ocx.plain(
         "--index", str(fresh_index), "index", "update", logical, check=False
     )
@@ -884,7 +884,7 @@ def test_an_unreadable_index_document_is_refused_not_read_as_absent(
     site.mkdir()
     repository = f"{unique_repo}/pkg"
     publish(site, [repository], registry=ocx.registry)
-    configure_index_source(ocx, f"file://{site}")
+    configure_index_source(ocx, site.as_uri())
     logical = f"{NAMESPACE}/{repository}"
 
     for unreadable in (site / "config.json", site / "p" / f"{repository}.json"):
@@ -1987,6 +1987,7 @@ def test_a_transient_unavailable_is_absorbed_without_an_operator_warning(
     )
 
 
+@pytest.mark.requires_testing_build
 def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ) -> None:

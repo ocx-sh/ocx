@@ -515,7 +515,8 @@ def test_upgrade_on_a_drifted_toml_exits_65(ocx: OcxRunner, tmp_path: Path) -> N
     project, repo = _locked_single(ocx, tmp_path, "up_drift")
     lock_bytes = (project / "ocx.lock").read_bytes()
     drifted = f'[tools]\ncmake = "{ocx.registry}/{repo}:3.28"\nextra = "{ocx.registry}/{repo}:3.28"\n'
-    (project / "ocx.toml").write_text(drifted)
+    # Bytes: `write_text` rewrites `\n` to `\r\n` on Windows, and the refusal is judged byte for byte.
+    (project / "ocx.toml").write_bytes(drifted.encode())
 
     result = _upgrade(ocx, project)
 

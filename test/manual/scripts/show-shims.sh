@@ -8,7 +8,7 @@
 # demo that only prints cannot tell a passing contract from a broken one.
 #
 # Prerequisites:
-#   cd test && docker compose up -d
+#   cd test && uv run python -m src.zot    (own terminal)
 #   cargo build --release -p ocx
 #   source test/manual/scripts/env.sh
 #   test/manual/scripts/bootstrap.sh

@@ -89,10 +89,17 @@ order-dependent and parallelism-dependent failures:
 
 | Invariant | Check | Rule |
 |---|---|---|
-| Output, temp files and state go only under `$TEST_TMPDIR` or `$TEST_UNDECLARED_OUTPUTS_DIR` | `grep -rnE '/tmp/|\$HOME|/var/tmp' <test sources>` — any absolute path outside those two variables is the finding; EMPTY clears only the files searched | BZL-TEST-12 |
+| Output, temp files and state go only under `$TEST_TMPDIR` or `$TEST_UNDECLARED_OUTPUTS_DIR` | see block BZL-TEST-12 — any absolute path outside those two variables is the finding; EMPTY clears only the files searched | BZL-TEST-12 |
 | The runfiles tree is never mutated during a run, and no assertion depends on filesystem atimes | Read each test for in-place writes to a runfiles path | BZL-TEST-13 |
-| A test reaching the network is tagged `requires-network`; one whose only network use was a repository-rule fetch is **not** | `grep -rn 'requires-network' --include='BUILD*' .` against what the test actually opens | BZL-TEST-09 |
+| A test reaching the network is tagged `requires-network`; one whose only network use was a repository-rule fetch is **not** | see block BZL-TEST-09 against what the test actually opens | BZL-TEST-09 |
 | A "no network" claim is proved from a **cold repository cache**, not from a green run | Re-run after `bazel clean --expunge` with the cache emptied | BZL-TEST-21 |
+
+```sh
+# BZL-TEST-12
+TEST_SOURCES=path/to/test-sources; git ls-files -z --cached --others --exclude-standard -- ":(glob)${TEST_SOURCES}/**" | xargs -0 -r grep -H -n -e '/tmp/' -e '\$HOME' -e '/var/tmp' --
+# BZL-TEST-09
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/BUILD*' | xargs -0 -r grep -H -n -e 'requires-network' --
+```
 
 `HOME` is unset in the action environment on both majors, so a test that assumes
 it exists fails differently under `bazel test` than under a direct invocation —
@@ -151,7 +158,7 @@ The separator is the `DA:` record count inside the produced
 `_coverage_report.dat` (BZL-TEST-25):
 
 ```
-grep -c '^DA:' bazel-out/_coverage/_coverage_report.dat
+grep -c -e '^DA:' -- bazel-out/_coverage/_coverage_report.dat
 ```
 
 `0` with a green run is the finding. Then differentiate:

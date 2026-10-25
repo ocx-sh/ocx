@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261024T165734Z-93890e84.json"
+  ],
+  "first_seen": "2026-10-24T16:57:34Z",
+  "fixed": null,
+  "folded_at": "2026-10-24T17:05:26Z",
+  "folds": 1,
+  "id": "project-venv-launcher-job-masks-guard",
+  "kind": "pitfall",
+  "last_seen": "2026-10-24T16:57:34Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "a Windows test spawning via a venv python.exe inherits the launcher's kill-on-close job, masking a job-object guard",
+  "v": 1,
+  "versions": []
+}

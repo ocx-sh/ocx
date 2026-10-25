@@ -191,7 +191,7 @@ tasks:
       [ -s "{{.BEP}}" ] || {
         echo "telemetry: no build event stream at {{.BEP}}, nothing pushed" >&2; exit 0;
       };
-      python3 {{.ROOT_DIR}}/scripts/bep_to_otlp.py --bep "{{.BEP}}"
+      python3 "{{.ROOT_DIR}}/scripts/bep_to_otlp.py" --bep "{{.BEP}}"
       || {
         echo "telemetry: bep_to_otlp.py failed (above); the build is unaffected" >&2; exit 0;
       }

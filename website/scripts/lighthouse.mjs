@@ -2,7 +2,8 @@
 // `pnpm run lighthouse [--page /reference/environment/ ...]`: serve dist/docs under /docs/ with a
 // small gzip static server (what the CDN does), run lhci (mobile preset) on each page and assert 100 in all four
 // categories plus lighthouse.budgets.mjs. Needs `task website:build` first. No --page = every built
-// page. A failing page gets 3 runs and is judged on the median run. CHROME_PATH overrides Chrome.
+// page. A failing page gets 3 runs and is judged on the median run. Chrome: CHROME_PATH, then CHROME_BIN
+// (the GitHub runner images set it), then the Playwright one.
 // Ported from ocx-sh/rules_ocx site/scripts/lighthouse.mjs: sequential, no lanes, no cache.
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -29,7 +30,8 @@ const run = (cmd, args, env = {}) =>
   });
 
 async function chromePath() {
-  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const fromEnv = process.env.CHROME_PATH || process.env.CHROME_BIN;
+  if (fromEnv) return fromEnv;
   return (await import('playwright-core')).chromium.executablePath();
 }
 

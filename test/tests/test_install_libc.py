@@ -29,6 +29,8 @@ from src.assertions import assert_symlink_exists
 
 pytestmark = pytest.mark.command("install", "about", "version")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 
 def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
     """Read the marker from the installed ``bin/hello`` binary.

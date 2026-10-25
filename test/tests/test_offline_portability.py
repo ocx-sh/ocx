@@ -385,10 +385,8 @@ def test_offline_install_missing_blobs_exits_policy_blocked(
 def _indirected_namespace(registry: str) -> str:
     """The `127.0.0.1` spelling of the loopback test registry.
 
-    Derived from the `registry` fixture rather than written out, because the
-    host port is configurable (`OCX_TEST_REGISTRY_PORT`, see CONTRIBUTING.md).
-    A literal `127.0.0.1:5000` would keep resolving on a machine whose test
-    registry moved — to whatever else holds 5000 there.
+    Derived from the `registry` fixture: each session's zot takes a kernel-chosen
+    port, so a literal `127.0.0.1:5000` would name no registry.
     """
     host, _, port = registry.rpartition(":")
     assert host and port.isdigit(), f"registry fixture must be host:port; got {registry!r}"

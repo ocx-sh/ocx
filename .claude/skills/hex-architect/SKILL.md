@@ -1,6 +1,6 @@
 ---
 name: hex-architect
-description: Tiered architecture-decision orchestrator — evaluates trade-offs and produces ADRs or system designs through discover, research, design, and adversarial-review phases. Use for architecture decisions, ADRs, system design, trade-off analysis between approaches, one-way-door decisions, C4-level design, or NFR evaluation (scalability, availability, latency, security, cost, operability). Tier (low|medium|high|xhigh|max, auto by default) scales research-axis count and selection, whether the design is delegated to an architect worker, and review breadth.
+description: Tiered architecture-decision orchestrator — evaluates trade-offs and produces ADRs or system designs through discover, research, design, and adversarial-review phases. Use for architecture decisions, ADRs, system design, trade-off analysis between approaches, one-way-door decisions, C4-level design, or NFR evaluation (scalability, availability, latency, security, cost, operability). Tier (low|medium|high|xhigh|max, auto by default) scales whether the design is delegated to an architect worker and review breadth; research is 0-1 axis unless the user asks for more.
 license: Apache-2.0
 metadata:
   summary: Swarm-backed architecture design - ADRs, C4, trade-off matrices
@@ -259,8 +259,8 @@ Its weight scales:
 
 For hex-architect, **research-axis selection is the primary lever at this
 gate** — more so than in any other hex skill. The announce block lists the
-classifier's ranked candidate axes and the count the tier requires (`high`
-1, `xhigh` 3, `max` 5); a plain approval defaults to the top-ranked candidates, but the
+classifier's ranked candidate axes and the count that runs (default 0-1; 3
+only when the user asks; `max` 5); a plain approval defaults to the top-ranked candidates, but the
 gate is where the user swaps one out, names an axis the classifier missed, or
 drops research entirely. On a client with a **native plan-approval
 mechanism**, use it. Otherwise present the announce block as **one
@@ -285,7 +285,7 @@ hex-architect
     researcher ×1                             (overlay research=1, axis: technology/tooling)
     architect                                 (tier baseline — design delegate)
     reviewer: spec, quality                   (tier baseline — adversarial design panel)
-  Models:    fast-balanced default; architect → deep-reasoning   (models.md)
+  Models:    standard default; architect → deep            (models.md)
   Adversary: off                              (tier baseline)
   Degraded:  no — subagent spawning available
 ```
@@ -293,10 +293,8 @@ hex-architect
 A dossier-floored tier is disclosed on the `Tier:` line's own source
 parenthetical, carrying the classifier's rationale alongside the floor rather
 than replacing it — `Tier: high (floored — dossier input; classifier:
-two-way-door low, single area)`. The adversary pass a dossier turns on is
-attributed the same way, on its own line — `Adversary: on (auto-on — dossier
-input)`, matching the `Overlays:` row's `adversary=on (auto-on — dossier
-input)`. Neither is one of the config-disclosure lines below.
+two-way-door low, single area)`. A dossier does not turn the adversary on; only a one-way-door signal or
+`--adversary` does. The floor is not one of the config-disclosure lines below.
 
 Every spawn line carries its source (`tier baseline` / `classifier` /
 `hex.md preference` / `user flag`) per
@@ -305,7 +303,7 @@ Model names above are class placeholders — shipped files never hardcode
 literals; the running orchestrator resolves and prints each spawn's
 literal model per the
 [Models line contract](../hex-core/references/protocol.md#the-meta-plan-approval-gate). The `architect` row
-recommends `deep-reasoning` at every tier — a downward override is honored
+recommends `deep` at every tier — a downward override is honored
 but announced loudly. On a client that cannot spawn subagents, announce
 `Degraded: inline workers` and run each worker prompt inline and sequentially
 ([`protocol.md`](../hex-core/references/protocol.md#worker-coordination)).
@@ -349,7 +347,7 @@ design phases; the tier files set the actual counts.
 |---|---|---|---|
 | Discover | `architecture-explorer` | 0–1 | Map current architecture, dependency graph, reusable code, precedent (`high` and above) |
 | Discover | `explorer` | 0–1 | Lightweight single-area discovery (`medium` only) |
-| Research | `researcher` | 0–3 | Axis research — technology, pattern precedent, performance, security, operability, or data/compatibility, per axis picked at the gate |
+| Research | `researcher` | 0–3 | Axis research (default 0–1; 3 only when asked) — technology, pattern precedent, performance, security, operability, or data/compatibility, per axis picked at the gate |
 | Design | `architect` | 0–1 | ADR or system design (delegated `high` and above; inline at `low`/`medium` — no worker) |
 | Review | `reviewer` | 1–3 | Adversarial design panel: contract consistency (`spec`), trade-off honesty (`quality`, adversarial framing), security (conditional) |
 | Review | `researcher` | 0–1 | SOTA / known-pitfall gap check against the drafted design |
@@ -492,7 +490,7 @@ proceed question may follow it.
 - Cross-model review: …
 
 ### Next step
-    /hex-plan high "<decision title>, per <ADR path>"
+    /hex-plan "<decision title>, per <ADR path>"
 ```
 
 Consumers: `/hex-plan` (the design feeds a plan) or the human directly, when

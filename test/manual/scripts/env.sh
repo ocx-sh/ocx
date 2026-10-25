@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# Configure the manual-testing shell to publish + consume against the local
-# `registry:2` from `test/docker-compose.yml`. Source this file:
-#
-#   source test/manual/scripts/env.sh
-#
-# Start the registry first: `cd test && docker compose up -d`.
-#
-# This script is sourced into the user's interactive shell, so it does NOT
-# enable `set -euo pipefail` — `set -u` in particular leaks into the parent
-# shell and breaks prompts that reference unset variables (e.g. VSCode's
-# `RPROMPT` integration).
-
-# Port follows the same knob `test/docker-compose.yml` binds with, so a shell
-# configured for a registry moved off 5000 (see CONTRIBUTING.md) talks to the
-# container that was actually started rather than to whatever else holds 5000.
+# Point the shell at the local zot registry from `cd test && uv run python -m src.zot`, on
+# the `OCX_TEST_REGISTRY_PORT` it binds; use as `source test/manual/scripts/env.sh`.
+# Sourced, so no `set -u`: it would leak into the interactive shell and break prompts
+# that read unset variables (VSCode's `RPROMPT` integration).
 export OCX_DEFAULT_REGISTRY="localhost:${OCX_TEST_REGISTRY_PORT:-5000}"
 export OCX_INSECURE_REGISTRIES="${OCX_DEFAULT_REGISTRY}"
 

@@ -1,0 +1,51 @@
+name: Readiness Gate
+
+# Refuses a release whose exact commit has no successful `release-readiness.yml` run
+# (scripts/release_readiness_gate.py; a bypass run counts and names its reason in the log).
+#
+# Called by release.yml: `local-artifacts-jobs` in dist-workspace.toml renders it as
+# `custom-readiness-gate`, which `host` needs, so a red gate means nothing is released. It runs on
+# the tagged commit (`github.sha` of the tag push). Dispatch it by hand with a `sha` to see the
+# gate red or green for any commit without cutting a tag; it publishes nothing.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The cargo-dist plan manifest. cargo-dist passes it to every custom job; unused here.
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-hex commit to check. Defaults to the dispatched ref's head.
+        required: false
+        type: string
+        default: ""
+
+# `actions: read` is what `gh run list` needs to see another workflow's runs.
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Readiness run for the commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require a successful release-readiness run for the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: python3 scripts/release_readiness_gate.py --sha "$SHA"

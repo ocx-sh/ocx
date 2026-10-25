@@ -35,6 +35,8 @@ pytestmark = pytest.mark.skipif(
     reason="State-file path assertions and the child-env probes use POSIX paths and `sh`.",
 )
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 EXIT_DATA = 65
 EXIT_CONFIG = 78
 

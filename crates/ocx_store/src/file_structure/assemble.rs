@@ -1551,6 +1551,22 @@ mod tests {
 
     // Windows-only: file symlink fallback (W1) and directory symlink error (W4)
 
+    /// Whether the test's own symlink exists. A host without the symlink privilege
+    /// (`ERROR_PRIVILEGE_NOT_HELD`, 1314) cannot build the fixture, so the test
+    /// stops there and says so; any other error is a real failure.
+    #[cfg(windows)]
+    fn windows_symlink_created(created: std::io::Result<()>) -> bool {
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        match created {
+            Ok(()) => true,
+            Err(err) if err.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+                eprintln!("skipping: symlink privilege not held: {err}");
+                false
+            }
+            Err(err) => panic!("creating the fixture symlink failed: {err}"),
+        }
+    }
+
     /// Windows: intra-layer file symlinks are currently unsupported and the
     /// walker must surface `AssemblyError::WindowsSymlinksUnsupported` rather
     /// than silently dereferencing the target into a regular-file copy (which
@@ -1564,7 +1580,9 @@ mod tests {
         let link = layer.join("alias.dll");
         // Create the file symlink directly in the layer — not via the walker.
         // Requires Developer Mode or elevation on Windows.
-        std::os::windows::fs::symlink_file(&real, &link).unwrap();
+        if !windows_symlink_created(std::os::windows::fs::symlink_file(&real, &link)) {
+            return;
+        }
 
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         let dest = root.join("pkg/content");
@@ -1597,7 +1615,9 @@ mod tests {
         let link_dir = layer.join("alias_dir");
         // Create the directory symlink directly in the layer — not via walker.
         // Requires Developer Mode or elevation on Windows.
-        std::os::windows::fs::symlink_dir(&real_dir, &link_dir).unwrap();
+        if !windows_symlink_created(std::os::windows::fs::symlink_dir(&real_dir, &link_dir)) {
+            return;
+        }
 
         let dest = root.join("pkg/content");
         let result = assemble_from_layer(&layer, &dest).await;

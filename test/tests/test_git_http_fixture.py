@@ -60,6 +60,7 @@ from git_http_fixture import (
     RefusalShape,
     build_fixture_home,
     git_environment,
+    git_program,
     read_chunked_body,
     run_git,
     split_cgi_response,
@@ -67,7 +68,7 @@ from git_http_fixture import (
 from git_shim import (
     DENIED_SHIM_ROOTS,
     RECORD_NAME,
-    SHIM_NAME,
+    SHIM_FILENAME,
     VERSION_OVERRIDES,
     GitShimVariant,
     ShimPlacementError,
@@ -437,14 +438,14 @@ def _receive_pack_path(fake_forge: FakeForge, project: str) -> str:
 def _refusal_stderr(fake_forge: FakeForge, tmp_path: Path, shape: RefusalShape) -> str:
     """Drive one server-side refusal and return the client's verbatim stderr.
 
-    Each shape gets its own project so the six arms cannot interfere: the two
+    Each shape gets its own project so the seven arms cannot interfere: the two
     403 knobs and the ref-advance knob are per-server, and a shared project would
-    make the order of the six a hidden input.
+    make the order of the seven a hidden input.
 
     The per-project split is not enough on its own. `git_http_pre_receive_refusal`
     and `git_http_forbidden_push_options` are per-SERVER and neither is one-shot,
     so after the `NOT_ALLOWED_TO_PUSH` arm the refusal stays armed for shapes
-    3-6. It is inert there only incidentally — those shapes fail before the hook
+    3-7. It is inert there only incidentally — those shapes fail before the hook
     runs or are refused client-side — which makes the enum's declaration order a
     hidden input: reorder `RefusalShape` and this silently measures something
     else. Both are therefore reset here, at the top of every arm.
@@ -469,10 +470,23 @@ def _refusal_stderr(fake_forge: FakeForge, tmp_path: Path, shape: RefusalShape) 
             fake_forge.git_http_forbid_info_refs = True
         case RefusalShape.FORBIDDEN_RECEIVE_PACK:
             fake_forge.git_http_forbid_receive_pack = True
-        case RefusalShape.NON_FAST_FORWARD:
+        case RefusalShape.FETCH_FIRST:
             fake_forge.git_http_concurrent_advance[f"{project}/{INITIAL_BRANCH}"] = {
                 "race.txt": b"a second writer landed here\n"
             }
+        case RefusalShape.NON_FAST_FORWARD:
+            # The moved tip must be local before the push, or git says `(fetch first)`.
+            fake_forge.git_seed_files(
+                project, INITIAL_BRANCH, {"race.txt": b"a second writer landed here\n"}
+            )
+            run_git(
+                "-C",
+                str(work),
+                "fetch",
+                fake_forge.git_url(project),
+                INITIAL_BRANCH,
+                home=home.path,
+            )
         case RefusalShape.STALE_LEASE:
             fake_forge.git_http_concurrent_advance[f"{project}/{INITIAL_BRANCH}"] = {
                 "race.txt": b"a second writer landed here\n"
@@ -688,6 +702,31 @@ def test_post_receive_hook_invocation_counter_is_nonzero(
     )
 
 
+def test_pushed_ref_is_visible_over_rest_when_the_push_returns(
+    fake_forge: FakeForge, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A branch a push landed is on the REST surface by the time `git push` exits.
+
+    Imported after the reply, the next ocx run's REST branch read could beat the
+    import and see no branch, then push again (macOS CI, test_transport_git's
+    unchanged-with-open-request row). The slowed import makes that window certain.
+    """
+    home, work = _claim_push_ready(fake_forge, tmp_path, PROJECT)
+    original = fake_forge._git_http_import_all_refs
+
+    def slow_import(project_path: str) -> None:
+        time.sleep(1.5)
+        original(project_path)
+
+    monkeypatch.setattr(fake_forge, "_git_http_import_all_refs", slow_import)
+
+    _push(fake_forge, PROJECT, work, home, f"HEAD:refs/heads/{CLAIM_BRANCH}")
+    owner, _, repo = PROJECT.partition("/")
+    assert fake_forge.branch_head(owner, repo, CLAIM_BRANCH) is not None, (
+        "the push returned before its ref reached the REST surface"
+    )
+
+
 def test_push_option_count_is_zero_when_no_options_sent(
     fake_forge: FakeForge, tmp_path: Path
 ) -> None:
@@ -740,8 +779,8 @@ def test_rejection_hook_writes_literal_refusal_line(
     """The `pre-receive` hook writes the refusal line WITHOUT a `remote: ` prefix.
 
     `send-pack` adds that prefix itself. A hook echoing the ADR's quoted string
-    verbatim produces `remote: remote: …`, and an exact-line assertion in WP-12
-    then reds for a reason that has nothing to do with the classifier.
+    verbatim produces `remote: remote: …`, and an exact-line assertion in the stderr
+    classifier's tests then reds for a reason that has nothing to do with the classifier.
     """
     line = "GL-HOOK-ERR: You are not allowed to push code to this project."
     fake_forge.git_http_pre_receive_refusal = line
@@ -762,10 +801,10 @@ def test_rejection_hook_writes_literal_refusal_line(
 def test_server_side_rejection_texts_are_recorded(
     fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """The PRODUCER for WP-12's phrase table: every refusal shape, verbatim.
+    """The PRODUCER for the stderr classifier's phrase table: every refusal shape, verbatim.
 
-    `OBSERVED_REFUSAL_STDERR` ships as six empty strings. This test drives all
-    six shapes against the local `git`, asserts every published value is
+    `OBSERVED_REFUSAL_STDERR` ships as seven empty strings. This test drives all
+    seven shapes against the local `git`, asserts every published value is
     non-empty, and asserts each value appears verbatim in the stderr that shape
     actually produced. An unfilled row therefore reds rather than passing
     vacuously, and a phrase git changes in a later release reds too — which is
@@ -781,7 +820,7 @@ def test_server_side_rejection_texts_are_recorded(
     phrase verbatim, and `NOT_ALLOWED_TO_PUSH`'s contains
     `PRE_RECEIVE_DECLINED`'s. So a table that published one phrase under BOTH
     keys of either pair would pass this loop — which is precisely the state that
-    destroys WP-12's ability to tell six shapes apart. Distinctness and the two
+    destroys the classifier's ability to tell seven shapes apart. Distinctness and the two
     reachable asymmetric guards are what close that.
     """
     observed = {shape: _refusal_stderr(fake_forge, tmp_path, shape) for shape in RefusalShape}
@@ -867,12 +906,12 @@ def test_credential_helper_records_an_invocation(
 
     host, port = _host_port(fake_forge)
     description = f"protocol=http\nhost={host}:{port}\npath={PROJECT}.git\n\n"
+    # Bytes: text mode would send CRLF on Windows, which git reads as part of a value.
     subprocess.run(
         ["git", "credential", "fill"],
-        input=description,
+        input=description.encode(),
         env=git_environment(home.path),
         capture_output=True,
-        text=True,
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
     )
@@ -2300,7 +2339,7 @@ def test_shim_records_argv_and_env_then_delegates(
     shim = install_git_shim(tmp_path)
 
     assert shim.executable is not None
-    assert shim.executable.name == SHIM_NAME
+    assert shim.executable.name == SHIM_FILENAME
     assert shim.record_path.name == RECORD_NAME
     assert shim.variant is GitShimVariant.DELEGATE
     assert shim.executable.resolve().is_relative_to(tmp_path.resolve())
@@ -2313,14 +2352,16 @@ def test_shim_records_argv_and_env_then_delegates(
         record_path=shim.record_path, real_git=shim.real_git, version_override=None
     )
     assert source.splitlines()[0] == f"#!{sys.executable}"
-    assert str(shim.record_path) in source
-    assert str(shim.real_git) in source
+    # As the literal they are baked in as: `repr` doubles a Windows backslash.
+    assert repr(str(shim.record_path)) in source
+    assert repr(str(shim.real_git)) in source
 
     work = tmp_path / "delegated"
+    shim_env = _shim_env(shim, home, OCX_SHIM_MARKER="sentinel")
     result = subprocess.run(
-        ["git", "init", str(work)],
+        [git_program(shim_env), "init", str(work)],
         cwd=str(tmp_path.resolve()),
-        env=_shim_env(shim, home, OCX_SHIM_MARKER="sentinel"),
+        env=shim_env,
         capture_output=True,
         text=True,
         timeout=HTTP_TIMEOUT_SECONDS,
@@ -2377,9 +2418,10 @@ def test_shim_records_the_tempdir_mode_before_it_is_removed(
     work.mkdir(mode=0o700)
 
     def run_status() -> None:
+        env = _shim_env(shim, home)
         subprocess.run(
-            ["git", "-C", str(work), "init"],
-            env=_shim_env(shim, home),
+            [git_program(env), "-C", str(work), "init"],
+            env=env,
             capture_output=True,
             text=True,
             timeout=HTTP_TIMEOUT_SECONDS,
@@ -2397,11 +2439,12 @@ def test_shim_records_the_tempdir_mode_before_it_is_removed(
     assert [inv.dash_c_dir for inv in invocations] == [str(work), str(work)]
     assert invocations[0].dir_mode is not None
     assert invocations[1].dir_mode is not None
-    assert stat.S_IMODE(invocations[0].dir_mode) == 0o700
-    assert stat.S_IMODE(invocations[1].dir_mode) == 0o750, (
-        "both invocations reported the same mode: the shim is not reading it per "
-        "invocation, so C-033's 0700 assertion would hold against a constant"
-    )
+    if sys.platform != "win32":  # Windows has no permission bits to compare.
+        assert stat.S_IMODE(invocations[0].dir_mode) == 0o700
+        assert stat.S_IMODE(invocations[1].dir_mode) == 0o750, (
+            "both invocations reported the same mode: the shim is not reading it per "
+            "invocation, so C-033's 0700 assertion would hold against a constant"
+        )
     assert invocations[1].git_dir == str(work / ".git"), (
         "the shim did not resolve the worktree's git directory; a snapshot taken "
         "elsewhere is empty for a reason no assertion would mention"
@@ -2446,9 +2489,10 @@ def test_shim_preserves_exit_code_and_stderr_bytes(
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
     )
+    shim_env = _shim_env(shim, home)
     through = subprocess.run(
-        ["git", *argv],
-        env=_shim_env(shim, home),
+        [git_program(shim_env), *argv],
+        env=shim_env,
         capture_output=True,
         timeout=HTTP_TIMEOUT_SECONDS,
         check=False,
@@ -2483,9 +2527,10 @@ def test_shim_does_not_recurse_into_itself(fake_forge: FakeForge, tmp_path: Path
     assert shim.executable is not None
     assert shim.real_git.resolve() != shim.executable.resolve()
 
+    shim_env = _shim_env(shim, home)
     result = subprocess.run(
-        ["git", "--version"],
-        env=_shim_env(shim, home),
+        [git_program(shim_env), "--version"],
+        env=shim_env,
         capture_output=True,
         text=True,
         timeout=HTTP_TIMEOUT_SECONDS,

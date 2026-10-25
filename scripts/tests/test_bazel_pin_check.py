@@ -12,6 +12,7 @@ import pytest
 PROOFS = [
     pin_check.prove_pin_gate,
     pin_check.prove_toolchain_gate,
+    pin_check.prove_dep_pins,
     pin_check.prove_entry_point,
 ]
 

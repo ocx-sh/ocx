@@ -15,7 +15,6 @@ rust_proc_macro(
     aliases = aliases(),
     compile_data = ["GRAMMAR.md"],
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_exit_derive"},
     version = "0.6.2",
     deps = all_crate_deps(normal = True),

@@ -31,7 +31,7 @@ user-owned config above the skill-managed sections. (C-202)
 
 ## Key vocabulary
 
-**Two versions; only v1 freezes at first release.**
+**Versions; only v1 froze at first release.**
 
 - **v1 — the six Tier A keys** (`models`, `adversary`, `limits`,
   `perspectives`, `research-axes`, `tiers`). Ships in Wave 2 and **freezes
@@ -43,17 +43,20 @@ user-owned config above the skill-managed sections. (C-202)
   — warn once, ignore, continue), which is correct because that reader has no
   dispatch interception to run. `workflows` ships in Wave 3 and freezes at the
   release after. (C-223)
-- **v3 — v2 plus `review`**, the per-join-level review settings
-  ([`loop.md` § Review by join level](loop.md#review-by-join-level),
-  `adr_0015` C-985). A v2 reader treats it as unknown the same way.
-- **v4 — v3 under the five-value tier segment** (`adr_0017` C-997): the
+- **v4 — v2 under the five-value tier segment** (`adr_0017` C-997): the
   `<tier>` segment of `tiers.<skill>.<tier>` and `workflows.<skill>.<tier>`
   is `low | medium | high | xhigh | max`, and `adversary` also accepts a
-  list. **No new top-level key** — merge rule 8's enumeration is unchanged.
-  A block whose comment says `v3` or lower is read with every tier segment
-  shifted one step up (`low` → `medium`, `medium` → `high`, `high` →
+  list. A block whose comment says `v3` or lower is read with every tier
+  segment shifted one step up (`low` → `medium`, `medium` → `high`, `high` →
   `xhigh`), announced once at the gate, never rewritten
   ([`protocol.md` § Tier grammar](protocol.md#tier-grammar)).
+- **v5 — v4 under the four model classes** ([`models.md`](models.md)): the
+  `models.*` leaves are `light`, `standard`, `standard-high`, `deep`, and the
+  per-join-level `review` key and `limits.heavy` are gone. A block whose
+  comment says `v4` or lower is read with `models.fast-balanced` as
+  `models.standard` and `models.deep-reasoning` as `models.deep`, announced
+  once at the gate, never rewritten. A leftover `review` or `limits.heavy`
+  is an unknown key (merge rule 8).
 
 The block's opening `# hex config, vocabulary vN` comment states the version
 the file was **written** against; merge rule 8's key enumeration lists the
@@ -61,34 +64,29 @@ version the **reader** implements.
 
 | Key | v1 | Type | Default | Effect |
 |---|:--:|---|---|---|
-| `models.fast-balanced` | ✅ | string (literal model name) | unset → shipped class prose | Instantiates the class for this harness. |
-| `models.deep-reasoning` | ✅ | string | unset | As above. Never an orchestrator-class model (`adr_0001` C-002). |
-| `models.overrides` | ✅ | map `role[:focus]` → capability class | `{}` | Per-role class override at every tier, for every **non-review** role. A `reviewer[:focus]` entry is superseded by `review.<level>.class` for the join-level seats — review seats are configured per level, never per role. Escalation above the shipped cell still requires the announced reason ([`models.md`](models.md)). |
+| `models.light` | ✅ | string (literal model name) | unset → shipped class prose | Instantiates the class for this harness ([`models.md`](models.md)). |
+| `models.standard` | ✅ | string | unset | As above. |
+| `models.standard-high` | ✅ | string | unset → `models.standard` at high effort | As above. |
+| `models.deep` | ✅ | string | unset | As above. Never an orchestrator-class model (`adr_0001` C-002). |
+| `models.overrides` | ✅ | map `role[:focus]` → capability class | `{}` | Per-role class override at every tier. Escalation above the shipped cell is the orchestrator's alone, on repeated failure ([`models.md`](models.md)). |
 | `adversary` | ✅ | string skill name, a list of skill names (v4 — every entry launches at tier `max`, the first entry only below it, `adr_0017` C-995), or `none` | unset → adversary contract's per-tier default | Names the cross-model adversary skill ([`adversary.md`](adversary.md#adversary-contract)). |
-| `limits.max-workers` | ✅ | int ≥ 1 | 8 | **A concurrency ceiling, never a floor and never a panel size.** Its enforcement (effective cap `min(8, max-workers)`, recursive count, batch-never-drop-baseline) is C-201, defined in [`protocol.md` § Worker coordination](protocol.md#worker-coordination); its ceiling is that section's 8 ([merge rule 9](#merge-rules)). This file adds only the phase ceiling that bounds preference-added spawns ([merge rule 6](#merge-rules)). |
-| `limits.loop-rounds` | ✅ | int ≥ 1 | 3 | Ceiling over every `review.<level>.rounds` **and** on `--loop-rounds`. Never raises a level's `rounds`; its own ceiling is the hard maximum 3 ([merge rule 9](#merge-rules), [`loop.md`](loop.md#the-review-fix-loop)). |
+| `limits.max-workers` | ✅ | int ≥ 1 | 8 | **A concurrency ceiling, never a floor and never a panel size.** Its enforcement (effective cap `min(8, max-workers)`, batch-never-drop-baseline) is C-201, defined in [`protocol.md` § Worker coordination](protocol.md#worker-coordination); its ceiling is that section's 8 ([merge rule 9](#merge-rules)). This file adds only the phase ceiling that bounds preference-added spawns ([merge rule 6](#merge-rules)). |
+| `limits.loop-rounds` | ✅ | int ≥ 1 | the loop's cap ([`loop.md`](loop.md#the-review-fix-loop)) | Ceiling on `--loop-rounds`. Never raises the loop's cap; its own ceiling is that cap ([merge rule 9](#merge-rules)). |
 | `limits.artifact-loop-rounds` | ✅ | int ≥ 1 | 1 | Plan/ADR-scope loop rounds. Opt-in only; `1` is shipped behaviour. **No ceiling** — the one limit a value raises, honoured as written ([`loop.md`](loop.md#the-review-fix-loop)'s explicit re-enable). |
 | `limits.adversary-timeout` | ✅ | int minutes ≥ 1 | 5 — the mode-(b) stall window | **The stall window for a pollable background adversary call, and only that.** The key name is frozen; [`adversary.md` § Adversary contract](adversary.md#adversary-contract) owns the observation modes, which call this key governs and which it does not, how a mode resolves and the enforcement — beyond the default this table's `Default` column carries, this row restates none of it. Its ceiling is that default ([merge rule 9](#merge-rules)). |
-| `limits.heavy` | ✅ | int ≥ 1 | the value derived in [`resources.md` § 2](resources.md#2-the-measured-resource-profile) from this host's measured profile; `1` where nothing could be measured | **A ceiling on concurrent *heavy commands*, not on agents** — an additive leaf under the frozen `limits` key, and the one value in this vocabulary that is a property of the **host** rather than of the work, which is why a plan cell cannot carry it. What takes a slot, the host-global semaphore, and the derivation are [`resources.md`](resources.md)'s; this row restates none of it. Unset means the derived value, so an unconfigured project gets a measured number rather than a guess. A reader predating this key meets an unknown key under `limits` and degrades by [merge rule 8](#merge-rules) — warn once, ignore, continue — to unbounded heavy commands. Its ceiling is the derived value ([merge rule 9](#merge-rules)). |
-| `perspectives.always` | ✅ | list of rule objects | `[]` | Adds a perspective: a checklist section in the `L2` aggregate seat's brief for `/hex-execute` ([`checklist.md`](checklist.md#composition)), a seat in `/hex-review`'s `L3` panel and in `/hex-plan`'s and `/hex-architect`'s artifact panels ([`loop.md`](loop.md#review-by-join-level)). See [Perspectives](#perspectives). |
+| `perspectives.always` | ✅ | list of rule objects | `[]` | Adds a perspective: a seat in `/hex-review`'s panel and in `/hex-plan`'s and `/hex-architect`'s artifact panels, carrying its checklist section ([`checklist.md`](checklist.md#composition)). See [Perspectives](#perspectives). |
 | `perspectives.never` | ✅ | list of `role[:focus]` | `[]` | Removes a perspective from the resolved panel. Applied last. `reviewer:security` additionally requires the attestation below (merge rule 5). |
 | `perspectives.security-sensitive-paths` | ✅ | the literal `none`, or unset | unset | **Attestation, required to suppress the security reviewer.** `none` asserts this project has no security-sensitive path. Any other value, or absence, makes `never: [reviewer:security]` fail closed (merge rule 5). |
 | `research-axes` | ✅ | list of strings | `[]` | Pre-seeds hex-architect's and hex-plan's candidate axis list; never auto-selects. |
-| `review.<level>.seats` | v3 | int ≥ 1 | `l1` 1, `l2` 1 | Seats at that join level; `<level>` ∈ `l1 \| l2` ([`loop.md` § Review by join level](loop.md#review-by-join-level), C-985). `l0` and `l3` take no keys. |
-| `review.<level>.class` | v3 | capability class | `l1` fast-balanced, `l2` deep-reasoning | The seat's model class. Wins over `models.overrides` for review seats. |
-| `review.<level>.rounds` | v3 | int 1–3 | `l1` 1, `l2` 1 | Fix rounds at that level, under the `limits.loop-rounds` ceiling. |
-| `review.<level>.budget-minutes` | v3 | int ≥ 1 | `l1` 10, `l2` 20 | Wall-clock budget; expiry ends the loop with residue recorded, never a failure. |
-| `review.<level>.delta-only` | v3 | bool | `true` | `false` lets the seat read finding-adjacent files in full beyond the diff. Findings must still sit on a diff line. |
-| `review.<level>.checklist` | v3 | list of focus names (`spec`, `quality`, `security`, `performance`, `docs`, `architecture`, `pitfalls`, `user-feedback`) | derived from the level ([`checklist.md` § Composition](checklist.md#composition)) | Replaces the derived section set for that level's brief (`adr_0016` C-990). The only breadth knob `L1` has; at `L2` an explicit `--review` flag still wins under the ordinary later-wins precedence. |
 | `tiers.<skill>.<tier>.inherits` | ✅ | one of `low\|medium\|high\|xhigh\|max` | unset | This project's `<tier>` starts from the shipped `<inherits>` baseline instead of its own. Resolved **first** ([tiers](#tiers)). |
-| `tiers.<skill>.<tier>.counts` | ✅ | map `<Phase>.<role[:focus]>` → int ≥ 0 | `{}` | Sets the spawn count for that role in that phase, against the resolved `inherits` baseline. `0` removes the spawn. `<Phase>` is a [phase identifier](#phase-identifiers). A `Review-Fix.*` entry for `hex-execute` is superseded by `review.<level>.seats` — ignored with the merge-rule-9 warning shape. |
+| `tiers.<skill>.<tier>.counts` | ✅ | map `<Phase>.<role[:focus]>` → int ≥ 0 | `{}` | Sets the spawn count for that role in that phase, against the resolved `inherits` baseline. `0` removes the spawn. `<Phase>` is a [phase identifier](#phase-identifiers). |
 | `tiers.<skill>.<tier>.overlays` | ✅ | map axis → value | `{}` | Per-project default for an overlay axis (e.g. `review: full`), below a user flag in precedence. Applied last within `tiers`. |
 | `workflows.<skill>.<tier>` | **v2** | path to a markdown file | unset | Dispatch reads this file instead of the shipped `tier-<tier>.md`. File format: [§ Workflows](#workflows). A v1 reader warns and ignores it (merge rule 8). |
 
 Literal model names appear **only** as `models.*` values a user sets — never
 as a hardcoded default anywhere in this file or a shipped one; the currency
-elsewhere is the capability classes `fast-balanced` / `deep-reasoning`
-([`models.md`](models.md)).
+elsewhere is the capability classes `light` / `standard` / `standard-high` /
+`deep` ([`models.md`](models.md)).
 
 ## Dotted keys
 
@@ -108,8 +106,7 @@ map (merge rule 2).
   …}}}` exists) falls to merge rule 9: the scalar is dropped, the map kept,
   warned. Never a silent merge of two shapes.
 
-The `<skill>` segment is `hex-plan` / `hex-execute` / `hex-review` /
-`hex-architect`; the `<tier>` segment is `low` / `medium` / `high` / `xhigh` / `max` (never
+The `<skill>` segment is `hex-plan` / `hex-review` / `hex-architect`; the `<tier>` segment is `low` / `medium` / `high` / `xhigh` / `max` (never
 `auto` — `auto` is a classifier input, not a tier).
 
 ## Perspectives
@@ -120,15 +117,14 @@ The `<skill>` segment is `hex-plan` / `hex-execute` / `hex-review` /
 |---|---|---|---|
 | `role` | `role[:focus]`, required | — | A shipped role ([`workers.md`](workers.md)) or a project-local persona (`.agents/workers/<role>.md`). **This is the persona→panel wiring** — naming a project persona here is how it enters a launch list. |
 | `when` | path glob (below) | unset = every run | Rule fires only when at least one path in the run's **target file set** matches. |
-| `skills` | list of skill names | all four orchestrators | Limits the rule's scope. |
+| `skills` | list of skill names | all three panel skills | Limits the rule's scope. |
 | `phase` | [phase identifier](#phase-identifiers) | the skill's review phase | Which phase the spawn joins. |
 
 **Glob semantics (C-217).** Not a regex and not a shell expansion; the
 gitignore-style subset every hex harness already reads:
 
 - Paths are **repository-relative**, `/`-separated, no leading `/` or `./`.
-  The root is the run's git worktree root (inside `hex-execute`, the WP's
-  worktree — paths identical to the main tree's).
+  The root is the run's git worktree root.
 - `?` matches one character within a segment. `*` matches zero or more within
   one segment and **never crosses `/`**. `**` matches zero or more whole
   segments, including none (`a/**/b` matches `a/b`). `{x,y}` is alternation,
@@ -147,8 +143,7 @@ gitignore-style subset every hex harness already reads:
 | Skill | Target file set |
 |---|---|
 | `hex-review` | Every path added, modified or deleted in the diff. A **rename contributes both** old and new path; a deletion contributes its path. |
-| `hex-execute` | The union of the plan's work-package file lists, plus every path written so far. Evaluated **per phase**, so a rule can fire once the diff that makes it relevant exists. |
-| `hex-plan` | The file lists named by the input issue/PR/task, plus every path Discover read, plus every path named in a drafted work package. |
+| `hex-plan` | The file lists named by the input issue/PR/task, plus every path Discover read, plus every path named in a drafted pipeline. |
 | `hex-architect` | Every path named in the decision input plus every path Discover read. |
 
 An **empty target file set** (a green-field plan naming no files) makes every
@@ -198,9 +193,9 @@ tier *content* is redefinable (C-206).
 > The identifier set for a `<skill>.<tier>` pair is exactly that tier file's
 > heading identifiers, in file order.
 
-`## Phase 3: Verify-Architecture — skipped` → `Verify-Architecture`.
-`## Phase 6: Review-Fix Loop (by join level, `full` checklist)` → `Review-Fix
-Loop`. `## Phase 2: Stage 1 — Correctness (2 workers)` → `Stage 1`. Matching
+`## Phase 3: Classify — skipped` → `Classify`.
+`## Phase 5: Review (plan panel, `full` checklist)` → `Review`.
+`## Phase 2: Stage 1 — Correctness (2 workers)` → `Stage 1`. Matching
 is case-insensitive and whitespace-normalized; identifiers are unique within
 a tier file by construction.
 
@@ -305,8 +300,7 @@ before layers 2 and 3 apply. (C-204)
    you mean 'perspectives.always'? Valid top-level keys: models, adversary,
    limits, perspectives, research-axes, tiers.` The enumeration lists the
    vocabulary version the **reader** implements — a v1 reader omits
-   `workflows` and treats it as unknown; a v2 reader appends it, a v3 reader
-   appends `review`.
+   `workflows` and treats it as unknown; a v2 or later reader appends it.
 9. **Malformed value** (wrong type, a value outside a non-numeric key's
    stated vocabulary, a value below the floor the key's `Type` column
    states, unparseable glob, unknown role, unknown skill/tier/phase segment,
@@ -322,7 +316,7 @@ before layers 2 and 3 apply. (C-204)
    well-formed value stands as written. So `limits.adversary-timeout: 0` is
    malformed (below the `≥ 1` floor: ignored, warned, default 5 stands),
    while `limits.adversary-timeout: 45` clamps to 5 and `loop-rounds: 5`
-   clamps to the tier default.
+   clamps to the loop's cap.
 10. **Unparseable YAML block** — the whole block is skipped, announced once,
     prose bullets in the section still apply, run continues on shipped
     defaults.
@@ -366,18 +360,15 @@ table row verbatim; a renamed heading is a renamed phase.
 **Edges** are happens-before, **within one file only** — no cross-file or
 cross-skill edges. A phase is eligible once every phase it `Depends on` has
 passed its gate; phases with no unmet dependency run concurrently under the
-concurrency cap. This *phase*-level DAG is orthogonal to hex-execute's
-WP-level DAG (`adr_0002` C-101): the WP DAG runs inside whichever phase
-declares the builder roles, and neither graph references the other's ids.
+concurrency cap.
 
 ### Count grammar (C-221)
 
-Three forms, no others:
+Two forms, no others:
 
 | Form | Resolves to | Available in |
 |---|---|---|
 | `<int>` | Exactly that many spawns **of each role** in `Roles`. `0` is not legal — delete the row instead. | all skills |
-| `<int>×WP` | `<int>` spawns of each role **per work package eligible in this phase** (eligibility per the WP-level DAG, `adr_0002` C-101); a coordinator's leaves count recursively toward the concurrency cap ([`protocol.md`](protocol.md#worker-coordination)). Resolves once the plan's WP list is known, before dispatch. | `hex-execute` only |
 | `—` | No spawns; the phase runs inline in the orchestrator. `Roles` must also be `—`. | all skills |
 
 A **range is not a `Count`.** Shipped tier files write ranges ("2–4 explorer
@@ -385,7 +376,7 @@ workers") as prose guidance to a classifier; a workflow table is the resolved
 answer. A range in a `Count` cell is malformed: read as its **lower bound**
 and warned — `Error: Count '2-4' in phase Discover is a range, not a count.
 Fix: write one integer; 2 was used.` The lower bound is used because it cannot
-exceed the phase ceiling. `<int>×WP` outside `hex-execute`, a non-integer, or a
+exceed the phase ceiling. A non-integer or a
 negative is likewise malformed: the row's phase falls back to the shipped tier
 file's count for the same identifier if one exists, else to `1`, warned either
 way.
@@ -425,9 +416,8 @@ this order** (the first three are OpenSpec's only three structural checks):
 
    | Skill | Duty each required identifier must discharge (dependency order) | Forbidden |
    |---|---|---|
-   | `hex-execute` | **Stub** signatures/types compile with no implementations · **Specify** tests that **fail** against the stub · **Implement** makes those tests pass · **Review-Fix Loop** ≥1 reviewer role, a bounded round count, an exit gate · **Merge and commit** merges the worktree and commits. (`Discover` leads; required present.) | — |
    | `hex-review` | **Stage 1** ≥1 reviewer role producing classified findings · **Verdict & Output** emits the verdict, resolves one fold target in the `### Fold-Back` sub-block it carries and applies the delta set or states why not, prints that Fold-Back block, and **writes nothing** but the plan Status block, the convergence rows, and — under the Fold-Back phase's four preconditions — the one resolved spec file and fold receipt. (`Discover` leads.) | any phase writing a file outside `hex-review/SKILL.md` § Constraints |
-   | `hex-plan` | **Decompose** emits work packages with file lists · **Review** ≥1 reviewer role. (`Discover`, `Classify`, `Design` lead.) | — |
+   | `hex-plan` | **Decompose** emits pipelines (steps, file lists) · **Review** ≥1 reviewer role. (`Discover`, `Classify`, `Design` lead.) | — |
    | `hex-architect` | **Reason & Design** emits the ADR or system design · **Review** ≥1 reviewer role. (`Discover`, `Classify` lead.) | `Decompose` |
 
    **Security-reviewer invariant — fail-closed, the same guard as [merge rule
@@ -435,8 +425,8 @@ this order** (the first three are OpenSpec's only three structural checks):
    rule 5 refuses: dropping `reviewer:security`. So the same attestation gates
    it. Where the stamped shipped tier file spawns `reviewer` (focus
    `security`) — conditionally, on security-sensitive paths — a fork that
-   omits that role from a **kept required-duty phase** (`hex-execute`
-   Review-Fix Loop, `hex-review` Stage 1) is **malformed unless** the block
+   omits that role from a **kept required-duty phase** (`hex-review`
+   Stage 1) is **malformed unless** the block
    declares `perspectives.security-sensitive-paths: none`. Without the
    attestation: `Error: fork <file> drops reviewer:security from <phase> with
    no security-sensitive-paths attestation. Fix: keep the role in the fork, or
@@ -472,8 +462,7 @@ fork. Phase identifiers fall back with it (see
 
 ### v2 vocabulary (C-223)
 
-`workflows` is the **v2** addition to the config vocabulary (`review` is
-the v3 one — [Key vocabulary](#key-vocabulary)). The six Tier A
+`workflows` is the **v2** addition to the config vocabulary ([Key vocabulary](#key-vocabulary)). The six Tier A
 keys (v1) froze at the first `grim release`; `workflows` and this format ship
 in Wave 3 and freeze at the release after. A **v1 reader** — one whose merge
 rule 8 enumeration predates `workflows` — treats the key as unknown ([merge
@@ -489,28 +478,22 @@ implements.
 ## Preferences
 
 ```yaml
-# hex config, vocabulary v4. Unknown keys warn once and are ignored.
-# (v1 = these keys minus `workflows` and `review`; see Key vocabulary.)
+# hex config, vocabulary v5. Unknown keys warn once and are ignored.
+# (v1 = these keys minus `workflows`; see Key vocabulary.)
 models:
-  fast-balanced: <this harness's fast-balanced model>
-  deep-reasoning: <this harness's deep-reasoning model>
+  light: <this harness's light model>
+  standard: <this harness's standard model>
+  deep: <this harness's deep model>
   overrides:
-    builder:implement: deep-reasoning
+    researcher: light
 adversary: codex:rescue
 
 limits:
   max-workers: 6            # effective cap = min(8, 6) = 6
-  loop-rounds: 2            # ceiling over review.<level>.rounds and --loop-rounds
+  loop-rounds: 2            # ceiling on --loop-rounds
   artifact-loop-rounds: 1   # 1 = shipped behaviour
   adversary-timeout: 3      # below the default, so it lowers the stall
                             # window. See Key vocabulary
-
-review:                    # v3 — per join level, loop.md § Review by join level
-  l1:
-    budget-minutes: 5        # leaf review must return in 5 min here
-    checklist: [spec, quality, security]   # checklist.md sections in the L1 brief
-  l2:
-    rounds: 2                # one extra fix round over the aggregate
 
 perspectives:
   always:
@@ -518,7 +501,7 @@ perspectives:
       when: "hex/hex-core/**"
     - role: reviewer:accessibility     # .agents/workers/ persona
       when: "src/ui/**"
-      skills: [hex-review, hex-execute]
+      skills: [hex-review, hex-plan]
   never:
     - doc-reviewer
 
@@ -537,7 +520,7 @@ tiers:
     inherits: medium                   # this repo's "high" is medium's panel
 
 workflows:                 # v2 — file format in § Workflows
-  hex-execute.medium: .agents/workflows/exec-docs.md
+  hex-plan.medium: .agents/workflows/plan-docs.md
 ```
 
 - Security review means the contract files under `hex-core/references/`,
@@ -582,31 +565,23 @@ shipped phases), not a phase fork. Everything else in the table ships in
 Wave 2 (the [six Tier A keys](#key-vocabulary)).
 
 A worked reproduction — a swarm that ran a security-auditor scoped to auth
-paths, two builders and three reviewers at its default tier, its architect on
+paths, three reviewers at its default tier, its architect on
 the strongest class, and a Codex adversary — is the [Complete
 example](#complete-example) above, read as config rather than as new
 vocabulary: `perspectives.always` with a `when:` glob is the scoped auditor,
 `tiers.*.counts` are the agent counts, `models.overrides` is the per-role
 routing, `adversary` is the cross-model pass.
 
-### Two known fidelity gaps
+### A known fidelity gap
 
-These are honest limits of the mapping, not gaps to be closed:
-
-1. **hex has two model classes; a three-class swarm loses one distinction.**
-   The shipped matrix is `fast-balanced` / `deep-reasoning`
-   ([`models.md`](models.md)); a swarm with a third, cheaper class (a
-   haiku-tier for the most mechanical work) has **no separate hex class** —
-   such a role **folds into `fast-balanced`**. `models.overrides` can pin any
-   role to either hex class, but cannot recreate a third cost tier hex does
-   not define.
-2. **Config adds a role to a panel; it cannot add a slash command.** A swarm
-   that shipped standalone single-role commands (`/builder`, `/qa-engineer`)
-   let a user invoke one role directly. hex ships no such per-role commands,
-   and **no config key can create one** — `perspectives.always` enrolls a
-   role into an orchestrator's launch list, so the reproduced role runs
-   *inside* `/hex-plan` / `/hex-execute` / `/hex-review`, never as its own
-   command.
+This is an honest limit of the mapping, not a gap to be closed:
+**config adds a role to a panel; it cannot add a slash command.** A swarm
+that shipped standalone single-role commands (`/builder`, `/qa-engineer`)
+let a user invoke one role directly. hex ships no such per-role commands,
+and **no config key can create one** — `perspectives.always` enrolls a
+role into an orchestrator's launch list, so the reproduced role runs
+*inside* `/hex-plan` / `/hex-review` / `/hex-architect`, never as its own
+command.
 
 ### What config cannot express: milestone autonomy
 

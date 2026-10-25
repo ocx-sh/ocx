@@ -937,12 +937,12 @@ def promotion(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
     docs page that nobody runs in production.
 
     The two downstream addresses reach the script as `$STAGING` / `$PROD`
-    (compose ports are overridable), and `OCX_INSECURE_REGISTRIES` names all
+    (the session's own zot ports, `test/src/zot.py`), and `OCX_INSECURE_REGISTRIES` names all
     three, because a copy dials two of them at once and the runner's own value
     names only the source.
     """
-    staging = f"localhost:{os.environ.get('OCX_TEST_TARGET_PORT', '5003')}"
-    prod = f"localhost:{os.environ.get('OCX_TEST_PROD_PORT', '5004')}"
+    staging = f"localhost:{os.environ['OCX_TEST_TARGET_PORT']}"
+    prod = f"localhost:{os.environ['OCX_TEST_PROD_PORT']}"
     ocx.env.update(
         {
             "STAGING": staging,

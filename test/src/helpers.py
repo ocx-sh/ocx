@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import contextlib
+import functools
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
 import tarfile
-import time
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
@@ -50,8 +56,19 @@ class _Unset:
 _UNSET = _Unset()
 
 # ---------------------------------------------------------------------------
-# Docker-compose helpers
+# Docker-compose helpers (the registry:2 mirror and the Sigstore profile)
 # ---------------------------------------------------------------------------
+
+
+#: A job with no Docker declares it with this variable, and the fixtures that need Docker
+#: skip with a `no docker:` reason. Never inferred: a missing CLI or a dead daemon is a red.
+NO_DOCKER_ENV = "OCX_TEST_NO_DOCKER"
+
+
+def skip_without_docker(what: str) -> None:
+    """Skips the calling test or fixture when the job declares ``OCX_TEST_NO_DOCKER=1``."""
+    if os.environ.get(NO_DOCKER_ENV) == "1":
+        pytest.skip(f"no docker: {NO_DOCKER_ENV}=1, {what} is not started")
 
 
 def registry_is_reachable(registry: str) -> bool:
@@ -63,107 +80,18 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
-def compose_up() -> None:
-    """Bring the whole docker-compose stack up.
+def compose_up_service(service: str) -> None:
+    """``docker compose up -d <service>`` under the host-wide compose lock.
 
-    ``start_registry`` short-circuits on a warm primary, so a *sibling*
-    service that was never created stays absent for the rest of the session.
-    A caller that needs a specific service must issue this itself rather than
-    assume the primary's start created everything.
+    Two sessions creating one container at once race, and one loses outright; the
+    lock is held across the call so the second finds the container already there.
     """
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
-        check=True,
-        capture_output=True,
-    )
-
-
-def registry_accepts_writes(registry: str) -> bool:
-    """Return True if the registry can still start a blob upload.
-
-    `GET /v2/` answers 200 from a registry whose storage is full, and the
-    primary one stores to a 2 GB tmpfs that fills up over a day of runs. The
-    suite then pushes into 500s and reds in the thousands with no test naming
-    the cause. This asks the question the suite actually depends on.
-    """
-    request = urllib.request.Request(
-        f"http://{registry}/v2/ocx-write-probe/blobs/uploads/", method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            location = response.headers.get("Location")
-            accepted = response.status in (201, 202)
-    except urllib.error.HTTPError as refusal:
-        return refusal.code in (401, 403, 405)  # answering, just not to us
-    except (urllib.error.URLError, OSError):
-        return False
-    if location:  # do not leave the probe upload behind
-        target = location if location.startswith("http") else f"http://{registry}{location}"
-        try:
-            urllib.request.urlopen(urllib.request.Request(target, method="DELETE"), timeout=5)
-        except (urllib.error.URLError, OSError):
-            pass
-    return accepted
-
-
-def _recycle_registry(registry: str) -> None:
-    """Recreate the primary registry container, discarding its tmpfs.
-
-    A restart is not enough on some daemons -- the volume is recreated with
-    the container, not with the process. Serialized on the same host-wide lock
-    compose bring-up uses, because a sibling worktree shares this container.
-
-    The caller decided on a probe taken WITHOUT that lock, so each step re-asks
-    under it: a sibling may have recycled already. A write-accepting registry is
-    left alone, and after its own `up -d` this holds the lock until the registry
-    accepts writes (30 s): `up -d` returns before it listens, and the next sibling
-    would read "starting" as "full" (`lint/test_registry_recycle.py`).
-    """
-    import fcntl  # POSIX-only, imported where used like the bring-up lock below
-
-    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with _COMPOSE_LOCK.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        registry_accepts_writes(registry) or subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "rm", "-sf", "registry"],
-            capture_output=True, check=False,
+    with _compose_lock():
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", service],
+            check=True,
+            capture_output=True,
         )
-        registry_accepts_writes(registry) or subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "registry"],
-            capture_output=True, check=False,
-        ) and any(registry_accepts_writes(registry) or time.sleep(0.5) for _ in range(60))
-
-
-def start_registry(registry: str) -> None:
-    """Start the registry via docker-compose if it is not already running.
-
-    Reachable is not enough: a registry whose storage is full answers every
-    read and fails every write, so it is recycled rather than handed to the
-    suite.
-    """
-    if registry_is_reachable(registry) and registry_accepts_writes(registry):
-        return
-
-    if registry_is_reachable(registry):
-        print(
-            f"registry at {registry} is reachable but refuses writes (storage full?) — recreating it",
-            file=sys.stderr,
-        )
-        _recycle_registry(registry)
-    else:
-        compose_up()
-
-    # Wait for the registry to answer and to accept a write (up to 30 s).
-    for _ in range(60):
-        if registry_is_reachable(registry) and registry_accepts_writes(registry):
-            return
-        time.sleep(0.5)
-
-    raise RuntimeError(
-        f"Registry at {registry} did not become writable — reachable="
-        f"{registry_is_reachable(registry)}. Check `docker logs` for "
-        f"'no space left on device': its store is a 2 GB tmpfs."
-    )
 
 
 SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
@@ -175,12 +103,42 @@ _WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
 _COMPOSE_LOCK = Path.home() / ".cache" / "ocx-compose.lock"
 
 
-def _compose(*args: str) -> subprocess.CompletedProcess[str]:
+@contextlib.contextmanager
+def _compose_lock() -> Iterator[None]:
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock, and no shared stack to contend for
+        yield
+        return
+    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(_COMPOSE_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _compose(*args: str, profile: bool = True) -> subprocess.CompletedProcess[str]:
+    selector = ["--profile", "sigstore"] if profile else []
     return subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", *args],
+        ["docker", "compose", "-f", str(COMPOSE_FILE), *selector, *args],
         capture_output=True,
         text=True, check=False,
     )
+
+
+def _profile_services() -> list[str] | None:
+    """The services the `sigstore` profile adds, or None when compose cannot say.
+
+    A bare `--profile sigstore up -d` also starts the profile-less
+    `mirror-registry`, which a session that never asked for it must not create.
+    """
+    with_profile = _compose("config", "--services")
+    without = _compose("config", "--services", profile=False)
+    if with_profile.returncode != 0 or without.returncode != 0:
+        return None
+    return sorted(set(with_profile.stdout.split()) - set(without.stdout.split()))
 
 
 def _stack_is_already_running() -> bool:
@@ -191,11 +149,11 @@ def _stack_is_already_running() -> bool:
     containers sharing the project name are ignored — this asks whether ours
     are up, not whether the daemon is idle.
     """
-    declared = _compose("config", "--services")
+    declared = _profile_services()
     running = _compose("ps", "--services", "--filter", "status=running")
-    if declared.returncode != 0 or running.returncode != 0:
+    if declared is None or running.returncode != 0:
         return False  # cannot prove it is up, so fall through to `up -d`
-    return set(declared.stdout.split()) <= set(running.stdout.split())
+    return set(declared) <= set(running.stdout.split())
 
 
 def start_sigstore_stack(timeout: float = 300.0) -> None:
@@ -223,6 +181,7 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
     holding an exclusive lock across a 300s timeout would serialize sessions
     that have nothing left to contend over.
     """
+    skip_without_docker("the Sigstore stack")
     _bring_up_serialized()
     done = subprocess.run(
         [sys.executable, str(_WAIT_FOR_STACK), "--timeout", str(timeout)],
@@ -239,21 +198,9 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
 
 def _bring_up_serialized() -> None:
     """Check-then-``up`` under an exclusive host lock, so the two are atomic."""
-    try:
-        import fcntl
-    except ImportError:  # Windows: no flock, and no shared stack to contend for
+    with _compose_lock():
         if not _stack_is_already_running():
-            _require_up(_compose("up", "-d"))
-        return
-
-    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(_COMPOSE_LOCK, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
-        try:
-            if not _stack_is_already_running():
-                _require_up(_compose("up", "-d"))
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            _require_up(_compose("up", "-d", *(_profile_services() or [])))
 
 
 def _require_up(result: subprocess.CompletedProcess[str]) -> None:
@@ -543,6 +490,71 @@ def bundle_text(bundle: Path, name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def copy_tree_keeping_links(src: Path, dst: Path) -> None:
+    """``shutil.copytree(symlinks=True)`` that also keeps NTFS junctions as links.
+
+    Every store link OCX writes on Windows is a directory junction, which ``copytree`` follows
+    by design; the ``refs/`` junctions point back into the tree they sit in, so the copy
+    recurses until the path overflows.
+    """
+    if sys.platform != "win32":
+        shutil.copytree(src, dst, symlinks=True)
+        return
+    import _winapi
+
+    dst.mkdir()
+    for entry in os.scandir(src):
+        target = dst / entry.name
+        if entry.is_junction() or entry.is_symlink():
+            _winapi.CreateJunction(os.readlink(entry.path).removeprefix("\\\\?\\"), str(target))
+        elif entry.is_dir():
+            copy_tree_keeping_links(Path(entry.path), target)
+        else:
+            shutil.copy2(entry.path, target)
+
+
+def rglob_no_links(root: Path, pattern: str) -> Iterator[Path]:
+    """``root.rglob(pattern)`` that yields links but never descends one, NTFS junctions included.
+
+    Every store link OCX writes on Windows is a junction, and ``rglob`` follows junctions
+    (``is_symlink()`` is false for one); the ``refs/`` and ``symlinks/`` junctions point back
+    into the store, so a plain ``rglob`` over ``$OCX_HOME`` spins forever instead of failing.
+    """
+    # A missing root yields nothing, as rglob does; several callers walk a dir a test may have removed.
+    if not root.is_dir():
+        return
+    for entry in os.scandir(root):
+        path = Path(entry.path)
+        if path.match(pattern):
+            yield path
+        if entry.is_dir(follow_symlinks=False) and not entry.is_junction():
+            yield from rglob_no_links(path, pattern)
+
+
+@functools.cache
+def _symlink_privilege_error() -> str | None:
+    """The reason this host cannot create symlinks, or None when it can.
+
+    Only Windows withholds the right (WinError 1314, no developer mode or elevation);
+    any other failure is a real error and propagates.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        try:
+            os.symlink(Path(scratch) / "target", Path(scratch) / "link")
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                return str(error)
+            raise
+    return None
+
+
+def require_symlink_privilege() -> None:
+    """Skip the calling test when the host lacks the privilege to create symlinks."""
+    reason = _symlink_privilege_error()
+    if reason is not None:
+        pytest.skip(f"symlink privilege not held: {reason}")
+
+
 def shim_bin_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
     """Every published shim launcher directory belonging to ``repo``.
 
@@ -591,6 +603,22 @@ def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
     found = shim_bin_dirs(ocx, repo)
     assert found == [], (
         f"{why}: {repo} must own no shim `bin/`; found {[str(p) for p in found]}"
+    )
+
+
+def _scans_a_directory(env: list[dict]) -> bool:
+    """Whether `ocx package create` scans a directory for `env`: an interface-visible `PATH` entry
+    whose whole value is `${installPath}/<dir>` or its `${self.installPath}` alias, as `scan_scope` in
+    `ocx_package`'s `bin_scan.rs` reads it."""
+    roots = ("${installPath}/", "${self.installPath}/")
+    return any(
+        entry.get("type") == "path"
+        and entry.get("key") == "PATH"
+        and entry.get("visibility", "private") in ("public", "interface")
+        and (value := str(entry.get("value", ""))).startswith(roots)
+        and "${" not in (rest := value.partition("}/")[2])
+        and ".." not in rest.split("/")
+        for entry in env
     )
 
 
@@ -702,7 +730,6 @@ def make_package(
     plat = platform or current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
     bin_names = bins or ["hello"]
-
     # Sanitize repo for use in filesystem paths: replace `/` and other
     # path-separator characters so pathlib does not treat the segment as
     # a subdirectory. The repo value is still passed unchanged to ocx
@@ -770,6 +797,12 @@ def make_package(
             "visibility": "public",
         },
     ]
+    # `create` refuses to fill an absent `binaries` claim for an OS whose executable convention
+    # the host cannot read (a Windows host and any non-Windows target) once the scan scope is
+    # non-empty, so only such a fixture is published claim-less; the rest let `create` run.
+    host_cannot_scan = sys.platform == "win32" and not plat.startswith(("windows/", "wasip"))
+    refused = host_cannot_scan and binaries is _UNSET and _scans_a_directory(metadata_env)
+    scan_args = ["--no-bin-scan"] if no_bin_scan or refused else []
     metadata_obj: dict = {
         "type": "bundle",
         "version": 1,
@@ -806,7 +839,7 @@ def make_package(
         str(bundle_l0),
         "-p",
         plat,
-        *(["--no-bin-scan"] if no_bin_scan else []),
+        *scan_args,
         str(pkg_dir),
     )
 
@@ -827,6 +860,7 @@ def make_package(
             str(bundle_ln),
             "-p",
             plat,
+            *scan_args,
             str(layer_dir),
         )
         all_bundles.append(bundle_ln)
@@ -1029,3 +1063,25 @@ def make_package_with_entrypoints(
         marker=marker,
         platform=plat,
     )
+
+
+def bash_executable() -> str | None:
+    """The bash to spawn, or ``None``; on Windows Git for Windows' bash, never the WSL launcher.
+
+    A bare ``"bash"`` reaches ``CreateProcess``, which searches System32 before ``PATH`` and finds
+    ``C:\\Windows\\System32\\bash.exe``; on a distro-less runner that exits 1 with empty stderr
+    and never runs its argument.
+    """
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    return None

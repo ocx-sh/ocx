@@ -165,6 +165,7 @@ jobs:
           path: ocx-${{ matrix.target }}.exe
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
   # Every built binary is scanned for test provenance before anything is
   # pushed; `publish` needs this job, so a marker in any target skips it.

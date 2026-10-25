@@ -22,9 +22,9 @@ tasks:
     deps:
       - generate:json
     cmds:
-      - uv run {{.ROOT_DIR}}/scripts/sbom-to-markdown.py
-          --input {{.ROOT_DIR}}/crates/ocx_cli/ocx.cdx.json
-          --output {{.ROOT_DIR}}/website/src/content/docs/reference/dependencies.md
+      - uv run "{{.ROOT_DIR}}/scripts/sbom-to-markdown.py"
+          --input "{{.ROOT_DIR}}/crates/ocx_cli/ocx.cdx.json"
+          --output "{{.ROOT_DIR}}/website/src/content/docs/reference/dependencies.md"
 
   default:
     desc: Generate SBOM and dependencies page

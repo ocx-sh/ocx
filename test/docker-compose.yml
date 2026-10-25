@@ -1,76 +1,23 @@
-# Host ports are configurable so a machine already running a `registry:2` on
-# 5000 — another checkout of this repo, an unrelated project, a leftover
-# container — does not silently take over this suite's registry. The container
-# ports never move; only the host side binds elsewhere.
+# Host ports are configurable so a machine already running something on 5001 —
+# another checkout of this repo, an unrelated project, a leftover container —
+# does not silently take over this suite's mirror registry. The container ports
+# never move; only the host side binds elsewhere.
 #
-#   OCX_TEST_REGISTRY_PORT   primary registry (default 5000)
 #   OCX_TEST_MIRROR_PORT     mirror registry  (default 5001)
-#   OCX_TEST_TARGET_PORT     promotion target (default 5003)
-#   OCX_TEST_PROD_PORT       promotion prod   (default 5004)
 #
-# Set them for `task test` and the whole suite follows: `test/conftest.py`
-# derives the `REGISTRY` / `MIRROR_REGISTRY` defaults from the same two
-# variables, `test/taskfile.yml` derives `OCX_INSECURE_REGISTRIES`, and
-# `helpers.start_registry` inherits the environment when it shells out to
-# `docker compose`. Documented in `CONTRIBUTING.md`.
+# Set it for `task test` and the whole suite follows: `test/conftest.py` derives
+# the `MIRROR_REGISTRY` default from the same variable, and `helpers.compose_up_service`
+# inherits the environment when it shells out to `docker compose`. Documented in
+# `CONTRIBUTING.md`.
+#
+# The zot registries (primary, promotion target, promotion prod) are not here:
+# every pytest session starts its own on kernel-chosen ports (`src/zot.py`).
 #
 # The bench profile below is deliberately NOT parametrized: `test/bench/
 # harness.py` reads its own `REGISTRY_URL` / `PROXY_HOST` / `TOXIPROXY_API_URL`
 # overrides, so moving only the compose side would bind one port and dial
 # another.
-#
-# The failure this prevents is quiet rather than loud: with 5000 already taken,
-# the `registry` service still starts, just with no published port, so
-# `localhost:5000` reaches the other project's registry. The suite publishes its
-# own fixtures before reading them and mostly passes — against a registry it did
-# not start, which it then fills with test packages.
 services:
-  # Primary registry — zot (CNCF project-zot), an OCI Distribution 1.1 registry
-  # with a NATIVE Referrers API: GET /v2/<name>/referrers/<digest> plus the
-  # OCI-Subject response header on a manifest push that carries a `subject`.
-  #
-  # Why zot and not registry:2 / registry:3?  distribution (BOTH v2 and v3) does
-  # NOT implement the Referrers API — it relies on the referrers TAG-schema
-  # fallback.  OCX is referrers-only (no tag fallback by design, #106), so the
-  # supply-chain sign/verify path (#194) and the referrers smoke test require a
-  # registry that serves the real endpoint.  Verified empirically for #195:
-  # registry:3 (distribution 3.1.1) returns Go's "404 page not found" on
-  # /referrers/ and omits OCI-Subject on push; zot returns OCI-Subject and a
-  # populated referrers index.  Pinned to a multi-arch tag (linux/amd64 +
-  # linux/arm64).  Config is mounted read-only from ./zot-config.json.
-  registry:
-    image: ghcr.io/project-zot/zot:v2.1.18
-    ports:
-      - "${OCX_TEST_REGISTRY_PORT:-5000}:5000"
-    volumes:
-      - ./zot-config.json:/etc/zot/config.json:ro
-    # The store is throwaway: every fixture repo is minted as `t_<uuid4>_...`
-    # per invocation (`src/state_providers.py`), so no run ever reads another
-    # run's data.  On the container's writable layer it survived `docker
-    # compose restart` and grew without bound -- 14187 repos -- which zot's
-    # dedupe scheduler then walked on every start, pegging a core with no
-    # client connected and failing pushes with `connection closed before
-    # message completed`.  A tmpfs is re-created empty by each container
-    # start, so a restart clears the store while the container stays warm.
-    #
-    # The cap is mandatory, not decorative: an uncapped tmpfs on a host whose
-    # tmpfs default exceeds RAM+swap turns an overrun into an OOM instead of
-    # an ENOSPC.  2g against a measured ~400 MB for a full suite run (166
-    # repos = 8.3 MB, ~50 KB/repo, 3490 collected tests at ~2.3 repos/test).
-    # tmpfs allocates lazily, so this is a ceiling and not a reservation --
-    # a CI runner pays only the bytes a run actually writes.
-    #
-    # The tmpfs is the whole fix.  `dedupe: false` was tried alongside it and
-    # must NOT come back: in zot the dedupe cache is also the blob-location
-    # index that cross-repository mount reads.  `CheckBlob(target, digest)`
-    # stats the target repo, then falls through to that cache to find any repo
-    # holding the digest; with dedupe off it returns not-found and a
-    # `?mount=&from=` request answers 202 (upload from scratch) instead of 201.
-    # Measured against this container: dedupe off -> 202, dedupe on -> 201.
-    # test_package_push_mount.py asserts the 201, so dedupe stays on.
-    tmpfs:
-      - /var/lib/registry:size=2g
-
   # Legacy registry — registry:2 (distribution v2).  The SINGLE registry:2
   # instance in this file; it serves two roles:
   #   1. Mirror-test target (test_oci_registry_mirror.py, `mirror_registry`
@@ -81,67 +28,27 @@ services:
   #      Referrers API, so the ReferrersUnsupported path (exit 82) is exercised
   #      against a genuine v2 registry rather than a mock.
   # Session-scoped via the `mirror_registry` / `legacy_registry` fixtures in
-  # test/conftest.py.  Gated behind the same OCX_TESTS_NO_REGISTRY skip flag as
-  # the primary so a single-registry or Windows runner that never starts
-  # docker-compose is not broken.
+  # test/conftest.py, which `docker compose up -d` this one service on first use
+  # (and skip only under `OCX_TEST_NO_DOCKER=1`), so a run that needs neither
+  # fixture never touches Docker.
   mirror-registry:
     image: registry:2
     ports:
       - "${OCX_TEST_MIRROR_PORT:-5001}:5000"
 
-  # Promotion target — a SECOND zot, so `ocx package copy` can be exercised
-  # across two registries with the Referrers API at both ends.
-  #
-  # It cannot be the `mirror-registry` service above: that one is registry:2 and
-  # has no Referrers API by design, so a cross-registry copy carrying a
-  # signature would fail there for a reason that has nothing to do with the
-  # copy. Keeping both means the suite can assert the good path against this
-  # service AND the exit-82 refusal against that one, which is what proves the
-  # 84 comes from the capability probe rather than merely from the target being
-  # a different host.
-  #
-  # 5003 rather than 5002: the bench profile's toxiproxy owns 5002 and reads its
-  # own un-parametrized overrides, so reusing it would bind one port and dial
-  # another.
-  target-registry:
-    image: ghcr.io/project-zot/zot:v2.1.18
-    ports:
-      - "${OCX_TEST_TARGET_PORT:-5003}:5000"
-    volumes:
-      - ./zot-config.json:/etc/zot/config.json:ro
-
-  # Third registry — the `prod` end of the dev -> staging -> prod promotion the
-  # user guide documents and records as an asciicast.
-  #
-  # A third real host rather than a second repository on `target-registry`,
-  # because the whole shape `--to` documents is a HOST rewrite that preserves
-  # the repository path and tag. Recording that against one registry would put a
-  # command on the docs page that nobody runs in production.
-  prod-registry:
-    image: ghcr.io/project-zot/zot:v2.1.18
-    ports:
-      - "${OCX_TEST_PROD_PORT:-5004}:5000"
-    volumes:
-      - ./zot-config.json:/etc/zot/config.json:ro
-
-  # toxiproxy — TCP proxy with programmable toxics (bandwidth throttle,
-  # latency injection) used by the bench harness (test/bench/) to simulate
-  # realistic network conditions during benchmarking.
-  #
-  # Profile isolation: this service is declared under the `bench` profile so
-  # plain `docker compose up -d` (and `task test`) never starts it.  Only
-  # `task bench:setup` (which passes --profile bench) brings it up.  This
-  # ensures the benchmark infrastructure is zero-cost for the normal
-  # acceptance-test cycle and profile-isolation is enforced structurally.
-  #
-  # Ports:
-  #   5002 — proxied registry endpoint (bench packages install via this port)
-  #   8474 — toxiproxy REST API (bench/harness.py controls toxics here)
+  # toxiproxy: bandwidth and latency toxics for the bench harness (test/bench/).
+  # 5002 is the proxied registry bench packages install through, 8474 the REST API
+  # bench/harness.py drives.
   bench-proxy:
     image: ghcr.io/shopify/toxiproxy:2.12.0
     ports:
       - "5002:5002"
       - "8474:8474"
+    # Native Linux Docker resolves `host.docker.internal`, the host zot the harness
+    # proxies to, only with this mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Under the `bench` profile so plain `docker compose up -d` (and `task test`) never starts it.
     profiles:
       - bench
 
@@ -254,15 +161,20 @@ services:
     profiles:
       - sigstore
 
-  # Trillian's storage. Same image the Trillian project uses in its own CI, so
-  # the schema arrives already migrated.
+  # Trillian's storage: the stock multi-arch `mysql` image with Trillian's own
+  # schema (`sigstore/trillian-storage.sql`, vendored from the v1.7.2 tag the
+  # log server and signer run) loaded by the image's initdb hook. The
+  # `trillian-opensource-ci/db_server` image that used to carry this is a
+  # single-platform amd64 manifest and cannot start on an arm64 runner.
   sigstore-mysql:
-    image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
+    image: mysql:8.4@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
     environment:
       MYSQL_ROOT_PASSWORD: zaphod
       MYSQL_DATABASE: test
       MYSQL_USER: test
       MYSQL_PASSWORD: zaphod
+    volumes:
+      - ./sigstore/trillian-storage.sql:/docker-entrypoint-initdb.d/trillian-storage.sql:ro
     # `mysqladmin ping` answers during this image's *temporary* server phase,
     # while the Trillian schema in docker-entrypoint-initdb.d is still loading —
     # a green there is indistinguishable from a database Trillian cannot use.
@@ -282,7 +194,7 @@ services:
     # Self-heal a lost start race: without this a single failed dial at
     # boot leaves the container dead until the readiness gate times out.
     restart: on-failure
-    image: gcr.io/trillian-opensource-ci/log_server:v1.7.2
+    image: ghcr.io/sigstore/scaffolding/trillian_log_server:v0.7.24@sha256:2c677cab8e4fd9d5d71dc55db574caed93a3896ee8229e50a95c8d09625866db
     command:
       - --storage_system=mysql
       - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test
@@ -303,7 +215,7 @@ services:
     # Self-heal a lost start race: without this a single failed dial at
     # boot leaves the container dead until the readiness gate times out.
     restart: on-failure
-    image: gcr.io/trillian-opensource-ci/log_signer:v1.7.2
+    image: ghcr.io/sigstore/scaffolding/trillian_log_signer:v0.7.24@sha256:65ed1871a11d4bf2c1d0b7c1f8b5fbc90f842788edc577b90adb024dec03dbe2
     command:
       - --storage_system=mysql
       - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test

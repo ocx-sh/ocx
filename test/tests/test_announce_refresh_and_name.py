@@ -50,6 +50,8 @@ from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_announce")
 
+pytestmark = [pytestmark, pytest.mark.requires_testing_build]
+
 #: `--fork` plus the index coordinate, the argv prefix every writing row shares.
 FORK_ARGS = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 

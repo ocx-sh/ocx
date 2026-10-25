@@ -30,7 +30,7 @@ Two more pins in the same chain:
   `.bazeliskrc`; only a matrix or env reference. `USE_BAZEL_VERSION` resolves
   **ahead of** `.bazelversion`, so a literal silently overrides every future bump
   to the committed file (BZL-FLAG-03).
-  `grep -rn --include=*.yml -e 'USE_BAZEL_VERSION' .github/workflows .bazeliskrc` — **empty =
+  `git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' '.bazeliskrc' | xargs -0 -r grep -H -n -e 'USE_BAZEL_VERSION' --` — **empty =
   pass, the committed file is the single source.**
 - Pin the launcher itself as explicitly as the Bazel version. The pin chain has
   two links and only one of them is `.bazelversion`.
@@ -58,11 +58,16 @@ What crossing to 9.x changes, all measured against real binaries:
 | `--incompatible_autoload_externally` defaults empty | Every `py_*`, `sh_*`, `cc_*`, `proto_library` symbol needs an explicit `load()`; bare uses fail at load time | The bump commit must carry a non-trivial BUILD/`.bzl` diff from `buildifier --lint=fix -r -v .` — **an empty diff on a repo with such targets means it has not migrated, it has broken** (BZL-FLAG-16) |
 | `--enable_workspace` / `--enable_bzlmod` removed | Passing either fails the whole invocation with `unrecognized option`; do not describe them as no-ops there | `bazel help build --long 2>&1 \| grep -c enable_bzlmod ; bazel help startup_options 2>&1 \| grep -c enable_bzlmod` — **0 from both is the 9.2.0 result** (BZL-FLAG-13) |
 | `bazel sync` deleted | Any `sync --only=` recipe hard-fails; the replacement is `bazel fetch --repo=@<repo>`, valid on 8.7.0 and 9.2.0 alike | `bazel help fetch --long` lists `--repo`, `--all`, `--configure`, `--force` on both (BZL-RUST-03) |
-| `bazel analyze-profile` deleted, `bazel dump --skyframe` enums renamed | Docs, task files and CI referencing them break | `grep -rn -e 'analyze-profile' -e 'skyframe=working_set' -e 'sync --only' --include='*.md' --include='*.yml' --include='*.yaml' --include='*.bzl' --include='BUILD*' --include='Taskfile*' .` — **empty = pass** (BZL-FLAG-31) |
+| `bazel analyze-profile` deleted, `bazel dump --skyframe` enums renamed | Docs, task files and CI referencing them break | see block BZL-FLAG-31 — **empty = pass** (BZL-FLAG-31) |
 | `--incompatible_strict_action_env` flips to `true` | Actions stop inheriting the ambient environment they silently depended on | Compare `bazel help build --long` on both majors (BZL-CACHE-19) |
 | Protobuf minimum enforced from Bazel's own side | A module graph below that protobuf version fails to resolve | Read the incoming major's release notes for its enforced minimum (BZL-FLAG-15 step 4) |
 | `--repo_contents_cache` on by default | Its path derives from `{--repository_cache}/contents`; an output user root inside the repository makes **every** command hard-fail, `bazel help` included | Keep `--output_user_root` and `--repository_cache` outside the repository tree (BZL-MOD-33) |
 | `package(transitive_visibility = …)` available | A gain, not a cost — and it takes a single `package_group` label **string**, not a list | (BZL-ARCH-34) |
+
+```sh
+# BZL-FLAG-31
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.md' ':(glob)**/*.yml' ':(glob)**/*.yaml' ':(glob)**/*.bzl' ':(glob)**/BUILD*' ':(glob)**/Taskfile*' | xargs -0 -r grep -H -n -e 'analyze-profile' -e 'skyframe=working_set' -e 'sync --only' --
+```
 
 Move the pin across the boundary with the ordered checklist in BZL-FLAG-15, and
 test the incoming major's flips on the **outgoing** pin first: `bazelisk --strict`
@@ -76,7 +81,7 @@ Start from the smallest module that resolves. Two rules bind immediately:
 
 - Mark every dev-only `bazel_dep` — test, lint, docs, formatting tooling —
   `dev_dependency = True`. Without it your build toolchain leaks into every
-  consumer's resolved graph (BZL-MOD-07). `grep -n 'bazel_dep' MODULE.bazel`, then
+  consumer's resolved graph (BZL-MOD-07). `grep -n -e 'bazel_dep' -- MODULE.bazel`, then
   classify each; **empty output means no deps are declared**, which is its own
   question, not a pass.
 - Never write a `single_version_override` whose version is lower than any live
@@ -150,7 +155,7 @@ appearing before the import line and lose to those after it. A personal-override
 import placed anywhere but last is silently defeated (BZL-FLAG-19).
 
 ```sh
-grep -vE '^\s*(#|$)' .bazelrc | tail -1
+grep -v -E -e '^[[:space:]]*(#|$)' -- .bazelrc | tail -n 1
 ```
 
 The printed line must be the `try-import`. **Empty output means `.bazelrc` has no

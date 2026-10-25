@@ -56,7 +56,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import make_package
+from src.helpers import make_package, rglob_no_links
 from src.runner import OcxRunner, registry_dir
 
 pytestmark = pytest.mark.command("clean")
@@ -129,7 +129,7 @@ def _packages_present_count(ocx_home: Path, registry: str) -> int:
     base = ocx_home / "packages" / registry_dir(registry)
     if not base.exists():
         return 0
-    return sum(1 for p in base.rglob("content") if p.is_dir())
+    return sum(1 for p in rglob_no_links(base, "content") if p.is_dir())
 
 
 def _setup_project_a(

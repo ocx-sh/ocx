@@ -155,7 +155,7 @@ Measured on 8.7.0 and 9.2.0, cross-checkout, against a shared `--disk_cache`:
 
 Grep signatures for the two destabilising forms, over rc files, workflows and
 wrapper scripts:
-`grep -rnE -- '--(action_env|define)=[A-Z_]+=\$\(pwd\)|--(action_env|define)=[A-Z_]+=\$PWD' .bazelrc* .github/ scripts/`
+`git ls-files -z --cached --others --exclude-standard -- ':(glob).bazelrc*' ':(glob).github/**' ':(glob)scripts/**' | xargs -0 -r grep -H -n -E -e '--(action_env|define)=[A-Z_]+=\$\(pwd\)' -e '--(action_env|define)=[A-Z_]+=\$PWD' --`
 A hit means every checkout at a different absolute path builds a private,
 unshareable cache entry for every action consuming that variable. EMPTY clears
 only the files you searched — a value injected by a CI wrapper you did not read

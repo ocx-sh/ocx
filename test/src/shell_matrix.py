@@ -38,6 +38,7 @@ import re
 import select
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,9 +219,28 @@ def clean_env(home: Path, shell_abs: str, *, ocx_home: Path, **extra: str) -> di
     return env
 
 
+def shell_which(binary: str, path: str | None = None) -> str | None:
+    """:func:`shutil.which`, minus the WSL launchers on Windows.
+
+    ``System32\\bash.exe`` and the ``WindowsApps`` alias start a Linux distro in
+    its own file namespace, where no Windows path a test hands a shell exists.
+    The Git for Windows bash further down ``PATH`` is the interpreter meant.
+    """
+    if sys.platform != "win32":
+        return shutil.which(binary, path=path)
+    system32 = os.path.normcase(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32"))
+    search = os.environ.get("PATH", "") if path is None else path
+    kept = [
+        directory
+        for directory in search.split(os.pathsep)
+        if os.path.normcase(directory.rstrip("\\/")) != system32 and "windowsapps" not in directory.lower()
+    ]
+    return shutil.which(binary, path=os.pathsep.join(kept))
+
+
 def which_arm(shell: str) -> str | None:
     """Absolute path of the arm's interpreter, or ``None`` when it is absent."""
-    return shutil.which(ARMS[shell].binary)
+    return shell_which(ARMS[shell].binary)
 
 
 def missing_tool_is_fatal(tool: str) -> bool:

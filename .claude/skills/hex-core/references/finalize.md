@@ -55,24 +55,17 @@ behaviour. They are worth having and they are not a guarantee.
    the lease pin and asserting that it is still an ancestor of the local tip
    ([§ Pre-flight halts](#pre-flight-halts)).
 2. **Resolve conventions** — the two resolvers ([§ Trust classes](#trust-classes)).
-3. **Local verification** — the project's own documented level
-   ([`verify.md` § Verification](verify.md#verification)).
+3. **Release gate** — the project's own documented level, run fresh, plus
+   its hooks and lint over the final range ([§ Release gate](#release-gate)).
 4. **Recompose** — rebase, `reset --soft`, re-commit, arm the backup ref
    ([§ Backup-ref lifecycle](#backup-ref-lifecycle)).
 5. **Gate** — the single approval ([§ Consent model](#consent-model)).
 6. **Remote** — the three post-gate acts ([§ The act set](#the-act-set)).
 
-The order is not stylistic. **Verification runs before the rewrite**, on the
-tree that exists, because it is cheap there and because the rewrite
-invalidates it as *testing evidence*: a suite that passed against commits
-that no longer exist is a claim about a tree nobody can produce. The
-rewrite's own **rebase onto the freshly fetched target is the structural
-second check** — a conflict halts, and a clean result proves textual
-compatibility with the base the branch will actually land on. Where that
-rebase moves the branch onto a base that **advanced** since verification
-ran, the local suite **re-runs exactly once**, after the rebase and before
-the gate; where the base did not move, it does not — the earlier result is
-still evidence about the same tree.
+The order is not stylistic: the gate runs on the tree that exists, before
+the rewrite, and the rewrite's rebase onto the freshly fetched target is the
+structural second check. `hex-finalize/SKILL.md` § Release gate owns the
+ordering.
 
 **Phases 1–4 are local and reversible; phase 6 is not. The gate is the
 seam.** Everything before it can be undone with one command against the
@@ -85,6 +78,37 @@ rebase and reset forms, a halt's `Fix:` line, every `gh` and `glab`
 invocation. A refname or a path may legally carry characters the shell
 interprets — `$`, `;`, parentheses — so an unquoted substitution would let a
 hostile but valid name rewrite the command it sits in.
+
+## Release gate
+
+The run's second and last full gate (the first, the integration gate, is the
+orchestrator's before finalize starts). Finalize runs it every time, once per
+invocation, whatever the branch's size. It is a test run, not the approval **gate** of
+[§ Consent model](#consent-model); the bare word *gate* elsewhere means that
+approval.
+
+- **What runs.** (1) The project's documented release-grade verification
+  ([`verify.md` § Verification](verify.md#verification)), **fresh**: no build,
+  test or lint cache reused, by the switch the project's own context records
+  (`/hex-init` writes it; hex invents none). With no switch recorded the release
+  gate runs as documented and its approval-gate row reads `cache: unknown`. (2) The
+  project's documented hooks and lint, run **once over the final range**
+  `<fetched-target>..<branch>` instead of per commit. Both come from
+  authoritative-class sources only ([§ Trust classes](#trust-classes)).
+- **Red.** One fix pass: the fixes are plain commits on the branch
+  (`--no-verify`), which the recompose folds away; then the release gate runs again.
+  Still red → halt with nothing rewritten and hand to the user, naming the
+  failing output. At most two runs before the rewrite.
+- **Base advanced.** The rebase moved the branch onto a base newer than the
+  gated tree's: the release gate runs once more, after the rebase and before the
+  series is committed. Red there halts with the rewrite standing; no fix pass.
+- **`--no-verify` on the recompose.** The recompose commits skip per-commit
+  hooks because the release gate already ran them over the tree these commits build.
+  The tip's tree id must equal the tree id of the last green run — checked
+  after the last commit, halting on mismatch
+  (`hex-finalize/SKILL.md` § Recompose, step 4). A project's documented
+  message lint, which needs the recomposed messages, runs once over the range
+  at the same point.
 
 ## The act set
 

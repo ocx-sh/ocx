@@ -153,7 +153,7 @@ Two boundaries that are load-bearing (BZL-HERM-02, BZL-FLAG-24):
 - A green leg on Windows, on `processwrapper-sandbox`, or on any action routed to
   `local` is not evidence the flag held.
 
-Diagnosing "the build reached the network": `grep -rn 'requires-network\|no-sandbox\|no-remote-exec' --include='BUILD*' .`
+Diagnosing "the build reached the network": `git ls-files -z --cached --others --exclude-standard -- ':(glob)**/BUILD*' | xargs -0 -r grep -H -n -E -e 'requires-network' -e 'no-sandbox' -e 'no-remote-exec' --`
 names the targets exempted. EMPTY means no target opted out — the reach is then
 in a repository rule (section F) or in an action nobody tagged, and the sandbox
 flag was never set at all.
