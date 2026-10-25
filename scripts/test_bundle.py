@@ -5,11 +5,11 @@
 
 Linux builds (`bundle`, `bin`); Windows and macOS only unpack and execute (`run`, stdlib-only, Python 3.8+).
 
-  test_bundle.py bundle --target <triple> [--out PATH] [--cache-rc ARG]
+  test_bundle.py bundle --target <triple> [--out PATH] [--cache-rc ARG] [--with-ocx] [--with-test-bin]
   test_bundle.py run    --bundle PATH [--source-root DIR] [--junit PATH] [--timeout SECS] [--filter SUBSTR]
   test_bundle.py bin    --target <triple> [--out DIR] [--cache-rc ARG]
 
-`--cache-rc` is the root taskfile's `CACHE_RC`: the cross tasks decide once whether the CI cache credential applies.
+`--cache-rc` is the root taskfile's `CACHE_RC`; `--with-*` put `cross:build`'s and `bin`'s outputs in one `bazel build`.
 """
 
 from __future__ import annotations
@@ -134,12 +134,19 @@ def cmd_bundle(a: argparse.Namespace) -> None:
     # universe, doctests included, and those cannot resolve a foreign target.
     labels = rust_test_labels(bazel("query", 'kind("^rust_test", //crates/...)', rc=rc, capture=True))
     expr = "set(" + " ".join(labels) + ")"
+    # What `cross:build` and `bin` stage rides in the same invocation: ocx and the test-bin set.
+    ocx = [(OCX, exe_name("ocx", a.target))] if a.with_ocx else []
+    test_bin = bin_layout(a.target) if a.with_test_bin else []
+    extra = list(dict.fromkeys(label for label, _ in [*ocx, *test_bin]))
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as pf:
-        pf.write("\n".join(labels))
+        pf.write("\n".join([*labels, *extra]))
     try:
         bazel("build", "--jobs=8", *flags(a.target), f"--target_pattern_file={pf.name}", rc=rc)
     finally:
         os.unlink(pf.name)
+    cross_dir = ROOT / "target/cross" / a.target
+    stage(ocx, cross_dir, a.target, rc)
+    stage(test_bin, cross_dir / "test-bin", a.target, rc)
     # Attributes (args/env) resolved for this configuration, plus the executable.
     attrs: dict[str, dict[str, Any]] = {}
     for r in json.loads(cquery(expr, a.target, "--output=jsonproto", rc=rc))["results"]:
@@ -393,26 +400,41 @@ def cmd_run(a: argparse.Namespace) -> None:
 # ---------------------------------------------------------------- bin
 
 
-def cmd_bin(a: argparse.Namespace) -> None:
-    out = Path(a.out or ROOT / "target/cross" / a.target / "test-bin")
-    # Mirrors test/taskfile.yml `.build-binaries`: the acceptance suite's test/bin layout.
-    wanted = [
-        ("//crates/ocx_cli:ocx", exe_name("ocx", a.target)),
-        ("//crates/ocx_shim:ocx_shim", exe_name("ocx-shim", a.target)),
+OCX = "//crates/ocx_cli:ocx"
+
+
+def bin_layout(target: str) -> list[tuple[str, str]]:
+    """The acceptance suite's test/bin layout, mirroring test/taskfile.yml `.build-binaries`."""
+    return [
+        (OCX, exe_name("ocx", target)),
+        ("//crates/ocx_shim:ocx_shim", exe_name("ocx-shim", target)),
         (
             "//crates/ocx_schema:ocx_schema_bin",
-            "schema/" + exe_name("ocx_schema", a.target),
+            "schema/" + exe_name("ocx_schema", target),
         ),
     ]
-    f = flags(a.target)[:3]  # no test toolchain flag: these are not test rules
-    bazel("build", "--jobs=8", *f, *[w[0] for w in wanted], rc=a.cache_rc)
+
+
+def stage(wanted: list[tuple[str, str]], out: Path, target: str, rc: str) -> None:
+    """Copy each already-built label to `out/<rel>`, executable."""
     for label, rel in wanted:
-        src = cquery(label, a.target, "--output=files", rc=a.cache_rc).strip().splitlines()[-1]
+        found = cquery(label, target, "--output=files", rc=rc).strip().splitlines()
+        if not found:
+            sys.exit(f"{label} produced no file for {target}")
+        src = found[-1]
         dst = out / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / src if not Path(src).is_absolute() else src, dst)
         dst.chmod(0o755)
         print(dst)
+
+
+def cmd_bin(a: argparse.Namespace) -> None:
+    out = Path(a.out or ROOT / "target/cross" / a.target / "test-bin")
+    wanted = bin_layout(a.target)
+    f = flags(a.target)[:3]  # no test toolchain flag: these are not test rules
+    bazel("build", "--jobs=8", *f, *[w[0] for w in wanted], rc=a.cache_rc)
+    stage(wanted, out, a.target, a.cache_rc)
 
 
 def main() -> None:
@@ -424,6 +446,8 @@ def main() -> None:
     b.add_argument("--target", required=True)
     b.add_argument("--out")
     b.add_argument("--cache-rc", default="", help="the task's CACHE_RC: Bazel's first startup option, or empty")
+    b.add_argument("--with-ocx", action="store_true", help="also build and stage ocx beside the bundle (what `cross:build` stages)")
+    b.add_argument("--with-test-bin", action="store_true", help="also build and stage test-bin/ beside the bundle (what `bin` stages)")
     r = sub.add_parser("run")
     r.add_argument("--bundle", required=True)
     r.add_argument("--source-root", help="checkout to run the --skip'd testcases in")

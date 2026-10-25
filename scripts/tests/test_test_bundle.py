@@ -192,3 +192,77 @@ def test_a_query_below_the_rust_test_floor_is_red() -> None:
 def test_every_bazel_call_goes_through_the_seam() -> None:
     # `BAZEL` appears in its definition and inside `bazel()` only; a second use is a call that skips the rc.
     assert len(re.findall(r"\bBAZEL\b", Path(tb.__file__).read_text(encoding="utf-8"))) == 2
+
+
+class _BuildSeen(Exception):
+    """Raised by the fake `bazel` once `build` ran, so `cmd_bundle` stops before it needs a real graph."""
+
+
+def _built_labels(monkeypatch: pytest.MonkeyPatch, **flags_: bool) -> tuple[list[str], list[str]]:
+    """`(build argv, labels in its --target_pattern_file)` of the one `bazel build` `cmd_bundle` issues."""
+    from bazel_gate_proofs import CRATES_TEST_TARGETS
+
+    tests = [f"//crates/c{i}:t" for i in range(CRATES_TEST_TARGETS)]
+    seen: dict[str, list[str]] = {}
+
+    def fake_bazel(*args: str, rc: str = "", capture: bool = False) -> str:
+        del rc, capture
+        if args[0] == "query":
+            return "\n".join(tests)
+        assert args[0] == "build", args
+        pattern = next(a for a in args if a.startswith("--target_pattern_file="))
+        seen["argv"] = list(args)
+        seen["labels"] = Path(pattern.split("=", 1)[1]).read_text(encoding="utf-8").split()
+        raise _BuildSeen
+
+    monkeypatch.setattr(tb, "bazel", fake_bazel)
+    ns = Namespace(target="x86_64-pc-windows-gnullvm", out=None, cache_rc="", with_ocx=False, with_test_bin=False)
+    for name, value in flags_.items():
+        setattr(ns, name, value)
+    with pytest.raises(_BuildSeen):
+        tb.cmd_bundle(ns)
+    return seen["argv"], [label for label in seen["labels"] if label not in tests]
+
+
+def test_the_bundle_alone_builds_only_the_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, extra = _built_labels(monkeypatch)
+    assert extra == []
+
+
+def test_with_ocx_and_test_bin_the_same_build_also_produces_the_binary_and_the_acceptance_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    argv, extra = _built_labels(monkeypatch, with_ocx=True, with_test_bin=True)
+    # One invocation; `ocx` is in both sets and is built once.
+    assert extra == [tb.OCX, "//crates/ocx_shim:ocx_shim", "//crates/ocx_schema:ocx_schema_bin"]
+    # The unit-test flags are unchanged by the extra labels (-c opt, the target platform, the test toolchain flag).
+    assert [*argv[2:4]] == ["-c", "opt"] and tb.NO_TEST_TOOLCHAIN in argv
+
+
+def test_with_ocx_alone_adds_only_ocx(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, extra = _built_labels(monkeypatch, with_ocx=True)
+    assert extra == [tb.OCX]
+
+
+@pytest.mark.parametrize(("target", "ocx_name"), [("x86_64-pc-windows-gnullvm", "ocx.exe"), ("aarch64-apple-darwin", "ocx")])
+def test_stage_copies_each_built_label_executable_to_its_layout_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str, ocx_name: str
+) -> None:
+    built = tmp_path / "bazel-out" / "bin"
+    built.mkdir(parents=True)
+    for name in ("ocx", "ocx_shim", "ocx_schema_bin"):
+        (built / name).write_bytes(name.encode())
+        (built / name).chmod(0o444)  # Bazel's outputs are read-only
+    monkeypatch.setattr(tb, "cquery", lambda label, _t, *_o, rc="": str(built / label.rsplit(":", 1)[1]) + "\n")
+    out = tmp_path / "test-bin"
+    tb.stage(tb.bin_layout(target), out, target, "")
+    tb.stage(tb.bin_layout(target)[:1], out, target, "")  # a second run replaces what the first left read-only
+    assert (out / ocx_name).read_bytes() == b"ocx"
+    assert (out / "schema" / tb.exe_name("ocx_schema", target)).read_bytes() == b"ocx_schema_bin"
+    assert (out / ocx_name).stat().st_mode & 0o111
+
+
+def test_stage_refuses_a_label_that_built_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tb, "cquery", lambda *_a, **_k: "\n")
+    with pytest.raises(SystemExit, match="produced no file"):
+        tb.stage([(tb.OCX, "ocx")], tmp_path, "aarch64-apple-darwin", "")

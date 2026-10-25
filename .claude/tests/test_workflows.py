@@ -996,7 +996,7 @@ def test_cross_test_run_passes_shell_metacharacters_as_one_literal_word(tmp_path
     assert not canary.exists(), "a value executed as shell text"
 
 
-@pytest.mark.parametrize("task_name", ["build", "test:bundle", "test:bin"])
+@pytest.mark.parametrize("task_name", ["build", "test:bundle", "test:bin", "build:bundle"])
 @pytest.mark.parametrize("breaker", ["x';touch {canary};'", 'x"$(touch {canary})"'], ids=["single-quote", "subshell"])
 def test_cross_target_with_shell_metacharacters_is_refused_not_run(
     tmp_path: Path, task_name: str, breaker: str
