@@ -82,9 +82,11 @@ research-axes:
   ocx-mirror consumer is upgraded in the same series, before finalize, not after CI says so;
   (2) a native Windows `cargo test --workspace` staged on `C:` (global CLAUDE.md § Windows
   checks) when a branch touches Rust — it also runs the testcases `bazel:test:unit` `--skip`s;
-  (3) `verify-deep.yml` is dispatched the moment the branch is first pushed, and the run is
-  watched **fail-fast** (poll job conclusions; the first red job wakes the orchestrator).
-  Never cancel or supersede a run without reading its failed jobs first.
+  (3) **No deep dispatch** (owner, 2026-10-25): `verify-deep.yml` is the nightly tier and
+  Release Readiness gates a release, so no hex skill — `/hex-finalize` included — dispatches
+  it or counts it as a release-grade workflow; the PR's own `verify-basic` is the remote
+  gate. Dispatch it only when the owner asks. A run that is watched is watched **fail-fast**,
+  and never cancelled or superseded before its failed jobs are read.
 - Review runs on fast-balanced (sonnet) per the CLAUDE.md model policy;
   only the security seat, which fires on the auth/credential paths above,
   stays deep-reasoning.
