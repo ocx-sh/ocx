@@ -870,6 +870,7 @@ def _committed_blob() -> Path:
     Asserts rather than skips: a missing blob is a broken checkout, and a whole
     case skipping itself away is indistinguishable from a pass.
     """
+    # The shim job builds no ocx, so `current_platform()` has nothing to ask.
     machine = platform.machine().lower()
     name = _BLOB_BY_MACHINE.get(machine)
     assert name, f"no committed shim blob for host machine {machine!r}"
