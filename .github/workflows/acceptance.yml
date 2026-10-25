@@ -47,6 +47,13 @@ on:
           registry:2 and Sigstore fixtures skip with a `no docker:` reason. Leave false on Linux.
         type: boolean
         default: false
+      marker:
+        description: >-
+          Run only the tests carrying this pytest marker (`smoke`: the per-verb smoke tier). Empty runs the
+          whole suite. The caller pairs it with a `limits-dir` that holds the selection's own floor and
+          ceilings, since the suite's are for the full run.
+        type: string
+        default: ''
       toolchain-group:
         description: >-
           Install this one `ocx.toml` group instead of the whole project toolchain. For a platform whose
@@ -313,6 +320,8 @@ jobs:
           __OCX_TESTING_REQUIRE_ENVIRONMENT_D: ${{ runner.os == 'Linux' && '1' || '' }}
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ inputs.shard-count }}
+          # pytest reads this itself, so the task line stays the one every caller runs; empty adds nothing.
+          PYTEST_ADDOPTS: ${{ inputs.marker != '' && format('-m {0}', inputs.marker) || '' }}
         run: task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"
       - name: Stop Docker services
         if: ${{ always() && !inputs.no-docker }}

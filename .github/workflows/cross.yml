@@ -1,15 +1,22 @@
 name: Cross
 
-# One parallel leg per target triple, called by the deep tier (`deep-repo.yml`). Serially in one job
-# the eight `-c opt` builds took 2h+ cold; every leg shares the Bazel cache (#638). A leg uploads only
-# its own `ocx`, plus the unit bundle and acceptance binaries where its triple has a native leg.
-# `needs:` names a whole matrix, so a consumer waits for the slowest leg, not only its own.
+# One parallel leg per target triple, called by the deep tier (`deep-repo.yml`, every triple) and by the
+# basic tier (`basic-repo.yml`, the two triples with a native smoke leg). Serially in one job the eight
+# `-c opt` builds took 2h+ cold; every leg shares the Bazel cache (#638). A leg uploads only its own `ocx`,
+# plus the unit bundle and acceptance binaries where its triple has a native leg. `needs:` names a whole
+# matrix, so a consumer waits for the slowest leg, not only its own.
 #
-# Reusable only: the artifacts it uploads belong to the caller's run, which is how `deep-repo.yml`'s
-# native legs find them.
+# Reusable only: the artifacts it uploads belong to the caller's run, which is how the callers' native
+# legs find them.
 
 on:
   workflow_call:
+    inputs:
+      targets:
+        description: >-
+          Whitespace-separated triples to build, each one of `task cross:targets`. Empty builds all of them.
+        type: string
+        default: ''
     secrets:
       BAZEL_CACHE_WRITE_AUTH:
         required: false
@@ -17,28 +24,40 @@ on:
 permissions: {}
 
 jobs:
+  # The matrix comes from `task cross:matrix`, so it is `task cross:targets` by construction (or the
+  # caller's subset of it), and each leg's `bundle` / `test-bin` flags live next to that list.
+  plan:
+    name: Plan the cross-builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Print the matrix
+        id: matrix
+        env:
+          ONLY: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          matrix="$(task cross:matrix ONLY="$ONLY")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   cross:
     name: Cross-build (${{ matrix.target }})
+    needs: plan
     runs-on: ubuntu-latest
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        # Equal to `task cross:targets`; `.claude/tests/test_workflows.py` holds it there.
-        target:
-          - aarch64-apple-darwin
-          - aarch64-pc-windows-gnullvm
-          - aarch64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - x86_64-apple-darwin
-          - x86_64-pc-windows-gnullvm
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-        include:
-          - { target: aarch64-apple-darwin, bundle: true, test-bin: true }
-          - { target: x86_64-pc-windows-gnullvm, bundle: true, test-bin: true }
-          - { target: x86_64-unknown-linux-gnu, test-bin: true }
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

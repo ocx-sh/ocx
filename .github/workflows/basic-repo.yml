@@ -9,8 +9,11 @@ name: Basic (repo)
 # for more fails the whole run at startup. Test results therefore publish as annotations and a job
 # summary, never as a check run or a pull request comment.
 #
-# Cross-builds sit in `deep-repo.yml` (variant B). Flipping to variant A is the `CROSS_VARIANT` constant
-# in `.claude/tests/test_workflows.py` plus one job here that calls `cross.yml`.
+# The cross-builds are split: this tier cross-builds the two targets that have a native leg below
+# (Windows x64 and macOS arm64) and runs their unit tests and the smoke acceptance tier natively, so a
+# pull request compiles and runs each `cfg(windows)` / `cfg(target_os = "macos")` arm once. The other six
+# targets, the full native acceptance suite and the shell activation matrix stay in `deep-repo.yml`.
+# `CROSS_VARIANT` in `.claude/tests/test_workflows.py` records the split.
 
 on:
   workflow_call:
@@ -290,3 +293,104 @@ jobs:
         with:
           junit: test/results/junit-smoke.xml
           suite: smoke
+
+  # The two targets with a native leg, cross-built on Linux in one Bazel invocation per target
+  # (binary, unit-test bundle and acceptance binaries). The deep tier builds all eight from the same
+  # workflow, so a warm cache from either serves the other.
+  cross:
+    name: Cross-build (Windows x64, macOS arm64)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cross.yml
+    with:
+      targets: aarch64-apple-darwin x86_64-pc-windows-gnullvm
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+
+  # The cross-built unit tests, executed on the OS they were built for. Nothing is compiled or installed
+  # here beyond the task runner and a Python for the runner script; `deep-repo.yml`'s `unit-native` runs
+  # the same bundle the same way.
+  unit-native:
+    name: Unit Test (${{ matrix.job.name }})
+    needs: cross
+    runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
+          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm }
+    env:
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+    steps:
+      # The taskfile includes every sub-taskfile, so a sparse checkout would fail to load; a plain
+      # checkout of the tree is a few seconds and needs no submodules.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Download unit-test bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unit-tests-${{ matrix.job.target }}
+          path: bundle
+      # `cross:test:run` reds on a failing test and on an under-run.
+      - name: Run unit tests
+        shell: bash
+        env:
+          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper (ocx#524); both
+          # interpreters ship on the image, so a skip is a red.
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'pwsh,powershell' || '' }}
+        run: task cross:test:run BUNDLE="bundle/unit-tests.tar.gz" SOURCE_ROOT="$GITHUB_WORKSPACE"
+      # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
+      - name: Publish unit test results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: target/cross/unit-junit.xml
+          require_tests: false
+          annotate_only: true
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: target/cross/unit-junit.xml
+          suite: unit
+
+  # The smoke tier (`-m smoke`, as `smoke-acceptance` runs on Linux) against the cross-built binaries,
+  # on a `zot` each pytest session starts itself. Docker is not on these runners, so `no-docker` declares
+  # it; the smoke tier needs only the registry. `test/limits/<os>-smoke` holds the selection's own floor
+  # and ceilings: the full suite's are for the full run.
+  acceptance-native:
+    name: Smoke Acceptance (${{ matrix.job.name }})
+    needs: cross
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: macos-latest, name: macOS, target: aarch64-apple-darwin, limits: test/limits/macos-smoke }
+          - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm, limits: test/limits/windows-smoke }
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      os: ${{ matrix.job.os }}
+      binary: artifact:test-bin-${{ matrix.job.target }}
+      shard-count: 1
+      limits-dir: ${{ matrix.job.limits }}
+      no-docker: true
+      marker: smoke
+    secrets:
+      # Owed by the secret sweep; only the callee's `binary` job reads it, and `artifact:` skips that job.
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
