@@ -16,10 +16,10 @@ Two shapes the crate split can break without any workflow going red:
   `:website:schema:default` and through it a cargo build of a workspace whose
   `external/` patch sources are not on disk.
 - the tier partition: `verify-basic.yml` and `basic-repo.yml` are what a pull
-  request pays for, so they run on Linux only, and the Windows and macOS unit legs
-  are `deep-repo.yml`'s `unit-native` matrix. A leg re-added to basic is a cost every
-  push pays twice; a leg dropped from deep's matrix is a `cfg(windows)` /
-  `cfg(target_os = "macos")` arm nothing compiles anywhere.
+  request pays for: Linux plus two native smoke legs (Windows x64, macOS arm64); the
+  full native matrix is `deep-repo.yml`'s. A further native leg in basic is a cost every
+  push pays; a leg dropped from either tier is a `cfg(windows)` /
+  `cfg(target_os = "macos")` arm nothing compiles.
 
 - the Bazel remote-cache lane policy. Every same-repo
   lane holding the secret reads and writes the shared cache: each `bazel-cache-rc`
@@ -514,7 +514,7 @@ def test_no_claude_document_claims_a_job_its_workflow_lacks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Basic runs on Linux only; deep's native jobs own macOS and Windows
+# Basic runs on Linux except its two native smoke legs; deep owns the full native matrix
 # ---------------------------------------------------------------------------
 
 
@@ -544,18 +544,26 @@ def _off_linux(workflow: Path, inputs: dict | None = None) -> tuple[int, dict[st
     return read, off
 
 
-def test_basic_runs_on_linux_only() -> None:
+#: The basic tier's only jobs off a literal `ubuntu-*` runner: the native smoke legs. `unit-native` is the
+#: unit bundle on macOS and Windows; `acceptance.yml:shard` is read through `acceptance-native`, whose
+#: `os` is a matrix expression, so it reads as non-Linux. Anything else is a cost every push pays.
+BASIC_NATIVE_JOBS = frozenset({"basic-repo.yml:unit-native", "acceptance.yml:shard"})
+
+
+def test_basic_runs_on_linux_except_its_native_smoke_legs() -> None:
     """Strict on purpose: a list or a `${{ matrix.* }}` expression cannot be
-    read as Linux here, so only a literal `ubuntu-*` label passes. The basic tier is the
-    template's `verify-basic.yml` and, through its `repo` job, `basic-repo.yml` and the
-    reusable workflows that calls."""
+    read as Linux here, so only a literal `ubuntu-*` label passes, and the two native legs are
+    named. The basic tier is the template's `verify-basic.yml` and, through its `repo` job,
+    `basic-repo.yml` and the reusable workflows that calls."""
     read, off = _off_linux(VERIFY_BASIC)
     assert read >= 10, f"read {read} basic-tier jobs, expected at least 10 — a caller was not followed"
-    assert not off, (
-        f"basic-tier jobs not on a literal `ubuntu-*` runner: {off}. Basic is the tier a pull request "
-        f"pays for (D5); Windows and macOS unit coverage is deep-repo.yml's `unit-native`, so a leg here "
-        f"runs the same suite twice on every push"
+    assert set(off) == BASIC_NATIVE_JOBS, (
+        f"basic-tier jobs not on a literal `ubuntu-*` runner: {off}, expected exactly {sorted(BASIC_NATIVE_JOBS)}. "
+        f"Basic is the tier a pull request pays for (D5): Windows x64 and macOS arm64 run the unit bundle and "
+        f"the smoke tier there, and every other platform leg is deep-repo.yml's"
     )
+    legs = _repo_job(BASIC_REPO, "unit-native")["strategy"]["matrix"]["job"]
+    assert {leg["os"] for leg in legs} == {"macos-latest", "windows-latest"}, f"basic `unit-native` legs are {legs}"
 
 
 def test_the_linux_reader_reds_an_off_linux_job_and_resolves_an_input(tmp_path: Path) -> None:
@@ -615,15 +623,13 @@ def test_deep_cross_matrix_is_every_supported_target() -> None:
     vars_ = _load(ROOT / "taskfiles" / "cross.taskfile.yml")["vars"]
     targets = vars_["TARGETS"].split()
     assert len(targets) >= 8, f"read {targets} from cross.taskfile.yml TARGETS"
-    matrix = _load(CROSS)["jobs"]["cross"]["strategy"]["matrix"]
-    assert sorted(matrix["target"]) == sorted(targets), (
-        f"cross.yml `cross` matrix is {sorted(matrix['target'])}, "
-        f"`task cross:targets` is {sorted(targets)}"
-    )
+    built = sorted(leg["target"] for leg in _cross_matrix())
+    assert built == sorted(targets), f"cross.yml's default matrix is {built}, `task cross:targets` is {sorted(targets)}"
 
 
-def test_deep_non_linux_jobs_only_download_and_execute() -> None:
-    """Every non-ubuntu job of deep-repo.yml contains no build tooling.
+@pytest.mark.parametrize("workflow_file", ["deep-repo.yml", "basic-repo.yml"])
+def test_non_linux_jobs_only_download_and_execute(workflow_file: str) -> None:
+    """Every non-ubuntu job of deep-repo.yml and basic-repo.yml contains no build tooling.
 
     All compilation happens in `cross.yml`; a macOS or Windows runner that grows a
     `cargo`, `bazel` or Rust-toolchain step is paying 10x-minute rates for a second compile and
@@ -631,7 +637,8 @@ def test_deep_non_linux_jobs_only_download_and_execute() -> None:
     workflow has no runner of its own and is read in that workflow (the shell activation matrix
     is `shell-activation-deep.yml`'s, and installs what it tests).
     """
-    jobs = {name: job for name, job in _repo_jobs(DEEP_REPO).items() if "uses" not in job}
+    workflow = WORKFLOW_DIR / workflow_file
+    jobs = {name: job for name, job in _repo_jobs(workflow).items() if "uses" not in job}
     native = {
         name: job
         for name, job in jobs.items()
@@ -640,21 +647,21 @@ def test_deep_non_linux_jobs_only_download_and_execute() -> None:
     # The floor, before the negative below: a reader that found no native job
     # sweeps clean and says nothing.
     assert set(native) == NATIVE_DEEP_JOBS, (
-        f"deep-repo.yml non-Linux jobs are {sorted(native)}, expected exactly "
+        f"{workflow.name} non-Linux jobs are {sorted(native)}, expected exactly "
         f"{sorted(NATIVE_DEEP_JOBS)}"
     )
     for name, job in native.items():
         labels = _runner_labels(job)
         missing = [family for family in ("macos", "windows") if not any(label.startswith(f"{family}-") for label in labels)]
-        assert not missing, f"deep-repo.yml `{name}` runs on {labels}, no {missing} entry"
-        assert "exclude" not in job["strategy"]["matrix"], f"deep-repo.yml `{name}` matrix has an `exclude`"
+        assert not missing, f"{workflow.name} `{name}` runs on {labels}, no {missing} entry"
+        assert "exclude" not in job["strategy"]["matrix"], f"{workflow.name} `{name}` matrix has an `exclude`"
         offending = [
             step.get("name", step.get("uses", step.get("run")))
             for step in job["steps"]
             if _BUILD_TOOLING.search(yaml.safe_dump({k: v for k, v in step.items() if k != "name"}))
         ]
         assert not offending, (
-            f"deep-repo.yml `{name}` runs on a non-Linux runner and has build steps {offending} — "
+            f"{workflow.name} `{name}` runs on a non-Linux runner and has build steps {offending} — "
             f"non-Linux jobs download what `cross` cross-compiled and execute it, nothing more"
         )
 
@@ -1318,6 +1325,7 @@ REQUIRED_CALL_EDGES = frozenset(
         ("verify-deep.yml", "deep-repo.yml"),
         ("basic-repo.yml", "acceptance.yml"),
         ("deep-repo.yml", "cross.yml"),
+        ("basic-repo.yml", "cross.yml"),
     }
 )
 
@@ -1353,7 +1361,7 @@ _LANE_NEEDLES = (
 #: Lane jobs the reader found (exclusions included). A lower count means the reader
 #: stopped matching, which a clean tree cannot be told from. The floor tracks the live
 #: lane count: a new lane raises it, so a later reader failure cannot hide behind the slack.
-BAZEL_LANE_FLOOR = 15
+BAZEL_LANE_FLOOR = 17
 #: Detected lanes that get no cache credential (least privilege), with the reason each
 #: reaches no Bazel. A row whose job is no longer a detected lane is a finding.
 LANE_EXCLUSIONS = {
@@ -1362,6 +1370,8 @@ LANE_EXCLUSIONS = {
     "acceptance.yml:shard": "test:accept:native runs pytest on the binaries the `binary` job built; "
     "the cache credential stays in that job",
     "deep-repo.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
+    "basic-repo.yml:unit-native": "macOS/Windows runner executing the prebuilt cross bundle",
+    "cross.yml:plan": "prints the matrix JSON (`task cross:matrix`); the cross legs build, this job does not",
     "deep-repo.yml:satellite-verify": "cargo builds of ocx-mirror; no Bazel",
     "deep-repo.yml:satellite-contract": "cargo builds plus pytest; no Bazel",
 }
@@ -2863,9 +2873,14 @@ CROSS = WORKFLOW_DIR / "cross.yml"
 SHELL_ACTIVATION_DEEP = WORKFLOW_DIR / "shell-activation-deep.yml"
 REUSABLE_REPO_WORKFLOWS = (BASIC_REPO, DEEP_REPO, ACCEPTANCE, CROSS)
 
-#: Where the eight cross-build jobs run: "B" keeps them in the deep tier only, "A"
-#: adds them to every pull request. The slowest warm cross job's wall time decides.
-CROSS_VARIANT = "B"
+#: Where the cross-build jobs run. "B" keeps all eight in the deep tier only, "A" adds all eight to every
+#: pull request, "S" (split) adds only the targets with a native smoke leg to every pull request
+#: (`CROSS_BASIC_TARGETS`) and leaves the full matrix to deep. The slowest warm cross job's wall time
+#: decides how much basic can carry.
+CROSS_VARIANT = "S"
+CROSS_BASIC_TARGETS = frozenset({"aarch64-apple-darwin", "x86_64-pc-windows-gnullvm"})
+#: The legs a native runner downloads a unit-test bundle for; `deep-repo.yml`'s `unit-native` matrix.
+NATIVE_BUNDLE_TARGETS = ("aarch64-apple-darwin", "x86_64-pc-windows-gnullvm")
 CROSS_TARGETS = frozenset(
     {
         "aarch64-apple-darwin",
@@ -2945,17 +2960,6 @@ def _permission_overreach(document: dict) -> list[str]:
                 if level != "none" and (scope, level) != ("contents", "read")
             ]
     return found
-
-
-def _matrix_targets(document: dict) -> set[str]:
-    """Every `target` a job matrix of the workflow lists, in `target:` or in `include:`."""
-    targets: set[str] = set()
-    for job in (document.get("jobs") or {}).values():
-        matrix = ((job or {}).get("strategy") or {}).get("matrix") or {}
-        if isinstance(matrix.get("target"), list):
-            targets |= set(matrix["target"])
-        targets |= {entry["target"] for entry in matrix.get("include") or [] if isinstance(entry, dict) and "target" in entry}
-    return targets
 
 
 @pytest.mark.parametrize(
@@ -3123,27 +3127,109 @@ def test_deep_repo_runs_shell_activation_through_its_reusable_workflow() -> None
     )
 
 
+def _cross_targets_passed(job: dict) -> frozenset[str]:
+    """The `targets` a caller hands `cross.yml`; empty means the whole matrix."""
+    return frozenset(str((job.get("with") or {}).get("targets", "")).split())
+
+
 def test_the_cross_jobs_sit_where_the_recorded_variant_puts_them() -> None:
-    """The deep tier always cross-builds; the basic tier does only under variant A."""
-    assert CROSS_VARIANT in {"A", "B"}, f"CROSS_VARIANT is {CROSS_VARIANT!r}, expected 'A' or 'B'"
+    """Deep always cross-builds all eight; basic builds none (B), all eight (A) or the native-leg pair (S)."""
+    assert CROSS_VARIANT in {"A", "B", "S"}, f"CROSS_VARIANT is {CROSS_VARIANT!r}, expected 'A', 'B' or 'S'"
     deep = _repo_job(DEEP_REPO, "cross")
     assert deep.get("uses") == CROSS_WORKFLOW_CALL, (
         f"{DEEP_REPO.name}: job `cross` uses {deep.get('uses')!r}, expected {CROSS_WORKFLOW_CALL}"
     )
-    callers = sorted(name for name, job in _repo_jobs(BASIC_REPO).items() if job.get("uses") == CROSS_WORKFLOW_CALL)
-    if CROSS_VARIANT == "A":
-        assert callers, f"{BASIC_REPO.name}: variant A cross-builds on every pull request, but no job calls cross.yml"
-    else:
-        assert not callers, f"{BASIC_REPO.name}: variant B keeps cross in the deep tier, but {callers} call cross.yml"
+    assert not _cross_targets_passed(deep), f"{DEEP_REPO.name}: `cross` narrows the matrix to {sorted(_cross_targets_passed(deep))}"
+    callers = {name: job for name, job in _repo_jobs(BASIC_REPO).items() if job.get("uses") == CROSS_WORKFLOW_CALL}
+    if CROSS_VARIANT == "B":
+        assert not callers, f"{BASIC_REPO.name}: variant B keeps cross in the deep tier, but {sorted(callers)} call cross.yml"
+        return
+    assert callers, f"{BASIC_REPO.name}: variant {CROSS_VARIANT} cross-builds on every pull request, but no job calls cross.yml"
+    passed = frozenset().union(*(_cross_targets_passed(job) for job in callers.values()))
+    expected = CROSS_BASIC_TARGETS if CROSS_VARIANT == "S" else frozenset()
+    assert passed == expected, (
+        f"{BASIC_REPO.name}: variant {CROSS_VARIANT} passes cross targets {sorted(passed)}, expected {sorted(expected)}"
+        f" (empty is the whole matrix)"
+    )
+
+
+def test_every_basic_native_leg_has_its_binaries_cross_built() -> None:
+    """The subset basic hands `cross.yml` is exactly the targets its native legs download, no more.
+
+    A native leg whose target is not built downloads nothing and reds late; a built target no leg
+    uses is a Bazel build every pull request pays for.
+    """
+    built = _cross_targets_passed(_repo_job(BASIC_REPO, "cross"))
+    for name in ("unit-native", "acceptance-native"):
+        job = _repo_job(BASIC_REPO, name)
+        assert "cross" in _needs(job), f"{BASIC_REPO.name}: `{name}` needs {_needs(job)}, not `cross`"
+        legs = {leg["target"] for leg in job["strategy"]["matrix"]["job"]}
+        assert legs == built, f"{BASIC_REPO.name}: `{name}` runs {sorted(legs)}, `cross` builds {sorted(built)}"
+
+
+def test_the_basic_smoke_acceptance_legs_run_the_smoke_selection_with_their_own_limits() -> None:
+    """`marker: smoke` selects the tier; the full suite's floor would red it, so each leg names smoke limits."""
+    job = _repo_job(BASIC_REPO, "acceptance-native")
+    inputs = job.get("with") or {}
+    assert job.get("uses") == "./.github/workflows/acceptance.yml", f"{BASIC_REPO.name}: `acceptance-native` uses {job.get('uses')!r}"
+    assert inputs.get("marker") == "smoke", f"{BASIC_REPO.name}: `acceptance-native` passes marker={inputs.get('marker')!r}"
+    assert inputs.get("no-docker") is True, f"{BASIC_REPO.name}: `acceptance-native` passes no-docker={inputs.get('no-docker')!r}"
+    assert inputs.get("shard-count") == 1, f"{BASIC_REPO.name}: `acceptance-native` passes shard-count={inputs.get('shard-count')!r}"
+    assert inputs.get("binary") == "artifact:test-bin-${{ matrix.job.target }}", f"binary is {inputs.get('binary')!r}"
+    legs = job["strategy"]["matrix"]["job"]
+    assert {leg["os"]: leg["limits"] for leg in legs} == {
+        "macos-latest": "test/limits/macos-smoke",
+        "windows-latest": "test/limits/windows-smoke",
+    }, f"{BASIC_REPO.name}: `acceptance-native` legs are {legs}"
+    for leg in legs:
+        for name in ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING"):
+            path = ROOT / leg["limits"] / name
+            assert path.read_text(encoding="utf-8").strip().isdigit(), f"{path.relative_to(ROOT)} is missing or not an integer"
+
+
+def test_the_acceptance_marker_reaches_pytest_and_defaults_to_the_whole_suite() -> None:
+    """The input is wired into the shard's pytest call (`PYTEST_ADDOPTS`), and an empty one adds no `-m`."""
+    assert _workflow_call(ACCEPTANCE)["inputs"]["marker"]["default"] == ""
+    step = next(s for s in _repo_jobs(ACCEPTANCE)["shard"]["steps"] if s.get("name") == "Run Acceptance Tests")
+    assert step["env"]["PYTEST_ADDOPTS"] == "${{ inputs.marker != '' && format('-m {0}', inputs.marker) || '' }}", (
+        f"PYTEST_ADDOPTS is bound to {step['env'].get('PYTEST_ADDOPTS')!r}"
+    )
+
+
+def _cross_matrix(only: str = "") -> list[dict]:
+    """`task cross:matrix`, the matrix `cross.yml`'s plan job hands its legs."""
+    done = subprocess.run(
+        ["task", "cross:matrix", f"ONLY={only}"], capture_output=True, encoding="utf-8", cwd=ROOT, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)["include"]
 
 
 def test_the_cross_workflow_builds_exactly_the_supported_targets() -> None:
+    """The default run is every `task cross:targets` triple, each flagged for what its native leg downloads."""
     _workflow_call(CROSS)
-    found = _matrix_targets(_repo_workflow(CROSS))
-    assert found == CROSS_TARGETS, (
-        f"{CROSS.name}: matrix targets differ from the eight supported triples; "
-        f"missing {sorted(CROSS_TARGETS - found)}, unexpected {sorted(found - CROSS_TARGETS)}"
+    legs = _cross_matrix()
+    assert {leg["target"] for leg in legs} == CROSS_TARGETS, (
+        f"cross.yml builds {sorted(leg['target'] for leg in legs)}, the eight supported triples are {sorted(CROSS_TARGETS)}"
     )
+    assert {leg["target"] for leg in legs if leg.get("bundle")} == set(NATIVE_BUNDLE_TARGETS)
+
+
+def test_a_subset_run_of_the_cross_workflow_builds_only_what_it_was_given() -> None:
+    legs = _cross_matrix(" ".join(CROSS_BASIC_TARGETS))
+    assert {leg["target"] for leg in legs} == CROSS_BASIC_TARGETS, legs
+
+
+def test_the_cross_job_takes_its_matrix_from_the_plan_job() -> None:
+    """A literal matrix would be a second list beside `task cross:targets`; the plan job derives it."""
+    jobs = _repo_jobs(CROSS)
+    assert set(jobs) == {"plan", "cross"}, f"cross.yml jobs are {sorted(jobs)}"
+    assert jobs["cross"]["needs"] == "plan"
+    assert jobs["cross"]["strategy"]["matrix"] == "${{ fromJSON(needs.plan.outputs.matrix) }}"
+    runs = "\n".join(str(step.get("run", "")) for step in jobs["plan"]["steps"])
+    assert 'task cross:matrix ONLY="$ONLY"' in runs, f"the plan job runs {runs!r}"
+    assert jobs["plan"]["steps"][-1]["env"]["ONLY"] == "${{ inputs.targets }}"
+    assert _workflow_call(CROSS)["inputs"]["targets"]["default"] == ""
 
 
 #: `platform_triples = [ ... ]` in MODULE.bazel; the list holds only quoted triples, so the first `]` closes it.

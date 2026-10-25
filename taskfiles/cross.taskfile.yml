@@ -30,6 +30,12 @@ tasks:
     cmds:
       - 'printf "%s\n" "{{.TARGETS}}"'
 
+  matrix:
+    desc: 'Print the cross.yml job matrix as JSON; ONLY="<triple> ..." narrows it to those triples'
+    silent: true
+    cmds:
+      - 'python3 scripts/cross_matrix.py --all {{shellQuote .TARGETS}} --only {{shellQuote (.ONLY | default "")}}'
+
   build:
     desc: 'Cross-build ocx for TARGET=<triple> into target/cross/<triple>/'
     requires:
