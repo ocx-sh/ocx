@@ -336,11 +336,11 @@ mod tests {
         }
     }
 
-    /// A malformed `OCX_LAUNCH_IDENTITIES` exits as a malformed `OCX_PATCHES` does.
+    /// A malformed `__OCX_LAUNCH_IDENTITIES` exits as a malformed `OCX_PATCHES` does.
     #[test]
     fn launch_identity_error_classifies_as_a_malformed_patch_tier() {
         let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::OCX_LAUNCH_IDENTITIES, "not json {{{");
+        guard.set(&ocx_env::__OCX_LAUNCH_IDENTITIES, "not json {{{");
         let identity_error = ocx_package::launch::LaunchIdentities::from_env().expect_err("malformed");
         guard.set(&ocx_env::OCX_PATCHES, "not json {{{");
         let patches_error = ocx_config::patch::patches_from_env().expect_err("malformed");

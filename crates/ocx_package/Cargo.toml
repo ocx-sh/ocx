@@ -22,7 +22,7 @@ ocx_oci.workspace = true
 ocx_store.workspace = true
 # `$OCX_HOME` and the composed environment a metadata document declares.
 ocx_config.workspace = true
-# The environment registry: `OCX_ENV`, `OCX_LAUNCH_IDENTITIES` and the env-key validators.
+# The environment registry: `OCX_ENV`, `__OCX_LAUNCH_IDENTITIES` and the env-key validators.
 ocx_env.workspace = true
 # The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
 ocx_exit.workspace = true

@@ -176,7 +176,7 @@ impl Env {
                 &platform,
             )
             .await?;
-        let inherited = ocx_env::OCX_LAUNCH_IDENTITIES
+        let inherited = ocx_env::__OCX_LAUNCH_IDENTITIES
             .get_raw()
             .and_then(|v| v.into_string().ok());
         entries.extend(manager.launch_identity_entry(&info, &std::collections::BTreeSet::new(), inherited.as_deref()));

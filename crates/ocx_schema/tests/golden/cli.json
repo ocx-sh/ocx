@@ -13906,14 +13906,6 @@
       "on_invalid": "default"
     },
     {
-      "name": "OCX_LAUNCH_IDENTITIES",
-      "value": "json",
-      "visibility": "public",
-      "summary": " JSON map from a content digest to the `registry/repository[:tag]` names one composition",
-      "secret": false,
-      "on_invalid": "default"
-    },
-    {
       "name": "OCX_NO_MODIFY_PATH",
       "value": "bool",
       "visibility": "public",
@@ -14238,6 +14230,14 @@
       "value": "string",
       "visibility": "plumbing",
       "summary": " Elvish only: the recording shell's pid and `$pwd`, so the hook re-runs on a directory change.",
+      "secret": false,
+      "on_invalid": "default"
+    },
+    {
+      "name": "__OCX_LAUNCH_IDENTITIES",
+      "value": "json",
+      "visibility": "plumbing",
+      "summary": " JSON map from a content digest to the `registry/repository[:tag]` names one composition",
       "secret": false,
       "on_invalid": "default"
     },

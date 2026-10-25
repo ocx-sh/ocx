@@ -30,7 +30,7 @@ that composed the launch knows which name it used.
      deps), keyed by digest, and calls `identifier.without_digest()`, which keeps the tag.
    - Codecs: `encode() -> String` and `from_env() -> Result<Option<Self>, LaunchIdentityError>`.
    - `identities_for(&Digest) -> &[PackageRef]`.
-2. **Wire.** A new reserved key, `OCX_LAUNCH_IDENTITIES`, holds JSON
+2. **Wire.** A new reserved key, `__OCX_LAUNCH_IDENTITIES`, holds JSON
    `{"sha256:<hex>": {"names": ["ocx.sh/plantuml:1.2024", ...], "no_patches": true}}`, with sorted
    keys and names. `no_patches` is present only for a package the exporting composition opted out, so
    a launcher on an exported `PATH` honours the opt-out exactly as under `ocx exec`. An inherited value
@@ -89,7 +89,7 @@ or P2 producer composed. The launcher keeps the synthetic id, so only `*` rules 
   invocation of an un-composed tool would be noise.
 - It never fails closed. Refusing to run would break every directly invoked entrypoint on any host
   with a `[patches]` tier.
-- A malformed `OCX_LAUNCH_IDENTITIES` does fail closed, with the same error class as a malformed
+- A malformed `__OCX_LAUNCH_IDENTITIES` does fail closed, with the same error class as a malformed
   `OCX_PATCHES`. A corrupt envelope must not silently degrade to "no identity".
 
 ### Tag semantics

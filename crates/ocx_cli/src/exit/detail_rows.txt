@@ -220,7 +220,7 @@ key_reference_invalid	UsageError	A key reference could not be parsed
 key_reference_invalid	UsageError	A key reference could not be parsed
 key_unreadable	IoError	A signing or verification key could not be read from its location
 key_unreadable	IoError	A signing or verification key could not be read from its location
-launch_identities_invalid	ConfigError	The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
+launch_identities_invalid	ConfigError	The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
 launch_spawn_failed	Failure	The resolved command could not be started
 launcher_path_not_utf8	DataError	A path baked into a generated launcher is not valid UTF-8
 launcher_unsafe_character	DataError	A value baked into a generated launcher contains an unsafe character

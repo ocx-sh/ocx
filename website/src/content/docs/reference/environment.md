@@ -333,18 +333,6 @@ generate key pairs.
 - Value: `string`
 - See: [Sign a release](../publishing/sign-a-release.md)
 
-## `OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
-
-JSON map from a content digest to the `registry/repository[:tag]` names one composition resolved it under; read by `ocx launcher exec` to match targeted patch rules.
-
-Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
-`--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
-launcher loses the outer composition's names.
-
-- Visibility: public
-- Value: `json`
-- See: [Execution records](../explanation/execution-records.md)
-
 ## `OCX_LAZY_MODE` {#ocx-lazy-mode}
 
 Lazy materialisation mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.
@@ -834,6 +822,18 @@ Reserved: a package cannot declare it and `--env` cannot set it.
 
 - Visibility: plumbing
 - Value: `string`
+
+## `__OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
+
+JSON map from a content digest to the `registry/repository[:tag]` names one composition resolved it under; read by `ocx launcher exec` to match targeted patch rules.
+
+Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
+`--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
+launcher loses the outer composition's names.
+
+- Visibility: plumbing
+- Value: `json`
+- See: [Execution records](../explanation/execution-records.md)
 
 ## External {#external}
 

@@ -1280,7 +1280,7 @@
         },
         {
           "value": "launch_identities_invalid",
-          "description": "The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed",
+          "description": "The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed",
           "exit_code": 78
         },
         {

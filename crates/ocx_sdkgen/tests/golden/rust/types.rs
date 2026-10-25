@@ -3081,7 +3081,7 @@ pub enum ErrorDetail {
     KeyReferenceInvalid,
     /// A signing or verification key could not be read from its location
     KeyUnreadable,
-    /// The OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
+    /// The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
     LaunchIdentitiesInvalid,
     /// The resolved command could not be started
     LaunchSpawnFailed,

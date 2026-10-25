@@ -155,12 +155,6 @@ pub const PUBLIC: &[EnvVar] = &[
         secret: true,
     },
     EnvVar {
-        name: "OCX_LAUNCH_IDENTITIES",
-        value: "json",
-        summary: "JSON map from a content digest to the `registry/repository[:tag]` names one composition",
-        secret: false,
-    },
-    EnvVar {
         name: "OCX_LAZY_MODE",
         value: "choice",
         summary: "Lazy materialisation mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",

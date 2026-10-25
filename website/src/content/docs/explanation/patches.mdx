@@ -173,7 +173,7 @@ claims and launchers of its dependencies, as for any dependency.
 
 A generated launcher finds its package by directory, and one directory serves every name that
 resolves to its digest. The command that composed the environment passes the names it used in
-[`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. The launcher matches rules against each of
+[`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. The launcher matches rules against each of
 them.
 
 So `ocx.sh/java:*` reaches the JDK's launchers when the JDK runs through `ocx exec`,

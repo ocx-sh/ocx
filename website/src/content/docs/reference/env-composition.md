@@ -56,8 +56,8 @@ A project's [`no-patches`][config-patches-no-patches] opt-out is read from `ocx.
 
 | Invocation | Honors the opt-out | How |
 |---|---|---|
-| [`ocx exec`][cmd-run] | Yes | Forwards the opted-out bases' canonical `registry/repository` keys in [`OCX_PATCHES`][env-ocx-patches] and the names it resolved in [`OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities] |
-| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the per-prompt reconciler mark the opted-out package in `OCX_LAUNCH_IDENTITIES` |
+| [`ocx exec`][cmd-run] | Yes | Forwards the opted-out bases' canonical `registry/repository` keys in [`OCX_PATCHES`][env-ocx-patches] and the names it resolved in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities] |
+| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the per-prompt reconciler mark the opted-out package in `__OCX_LAUNCH_IDENTITIES` |
 | Launcher re-entered from those chains | Yes | Matches the opt-out against the forwarded names |
 | Launcher run by absolute path or through [`ocx package exec`][cmd-package-exec] | No | Decodes no forwarded opt-out and composes the companion overlay as if `no-patches` were never set |
 

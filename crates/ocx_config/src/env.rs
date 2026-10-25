@@ -841,7 +841,7 @@ mod tests {
         assert!(is_reserved_ocx_key("OCX_OFFLINE"));
         assert!(is_reserved_ocx_key("OCX_DEFAULT_REGISTRY"));
         assert!(is_reserved_ocx_key("__OCX_TESTING_INSTALL_BINARY"));
-        assert!(is_reserved_ocx_key(ocx_env::OCX_LAUNCH_IDENTITIES.name));
+        assert!(is_reserved_ocx_key(ocx_env::__OCX_LAUNCH_IDENTITIES.name));
         // Windows env names are case-insensitive, so a lowercase spelling
         // lands in the same slot and must be caught by the same gate.
         assert!(is_reserved_ocx_key("ocx_offline"));

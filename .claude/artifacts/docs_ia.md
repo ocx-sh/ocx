@@ -1222,7 +1222,7 @@ Columns: the reference page and section that leaves, what happens, the home, **w
 | reference/environment.md | `OCX_PATCHES`, `OCX_PATCH_SNAPSHOT` essays | move | guides/patch-packages.md | user-guide/patches.md#patches-config | duplicate |
 | reference/environment.md | `OCX_LAZY_MODE`, `OCX_LAZY_REPORT` essays | move | explanation/deferred-packages.md | in-depth/lazy-loading.md | duplicate |
 | reference/environment.md | `OCX_TOOLCHAIN_*` (activate, dir, pinned, update) essays | move | explanation/toolchain-activation.md; guides/project-toolchain.md (#project-toolchain_dir) | create; user-guide.md#project-toolchain_dir | duplicate |
-| reference/environment.md | `OCX_RECORDS_DIR`, `OCX_RECORDS_NAME`, `OCX_LAUNCH_IDENTITIES` essays | move | reference/execution-records.md | reference/execution-records.md | duplicate |
+| reference/environment.md | `OCX_RECORDS_DIR`, `OCX_RECORDS_NAME`, `__OCX_LAUNCH_IDENTITIES` essays | move | reference/execution-records.md | reference/execution-records.md | duplicate |
 | reference/environment.md | `OCX_HOME` role in setup, `OCX_NO_MODIFY_PATH`, `OCX_NO_COMPLETION` essays | move | getting-started/install-ocx.md | installation.md#script-options | duplicate |
 | reference/environment.md | `OCX_OFFLINE`, `OCX_REMOTE`, `OCX_FROZEN` essays | move | guides/work-offline.md; guides/lock-and-reproduce.md | user-guide.md#offline; user-guide.md#lock | duplicate |
 | reference/environment.md | External CI variables: `CI`, `GITHUB_*`, `GITLAB_CI`, `CI_*`, `SOURCE_DATE_EPOCH` | move | integration/github-actions.md; integration/gitlab-ci.md; integration/unattended-ci.md | in-depth/ci.md | duplicate |

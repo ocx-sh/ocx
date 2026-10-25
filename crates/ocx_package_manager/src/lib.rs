@@ -334,7 +334,7 @@ mod install_info_identifier_tests {
         let entry = patched
             .launch_identity_entry(&infos, &std::collections::BTreeSet::new(), None)
             .expect("a patch tier writes the key");
-        assert_eq!(entry.key, ocx_env::OCX_LAUNCH_IDENTITIES.name);
+        assert_eq!(entry.key, ocx_env::__OCX_LAUNCH_IDENTITIES.name);
         assert_eq!(
             ocx_package::launch::LaunchIdentities::decode(&entry.value).unwrap(),
             identities
@@ -658,7 +658,7 @@ impl PackageManager {
         self.client.is_none()
     }
 
-    /// The [`ocx_env::OCX_LAUNCH_IDENTITIES`] entry an exported environment carries, so a launcher
+    /// The [`ocx_env::__OCX_LAUNCH_IDENTITIES`] entry an exported environment carries, so a launcher
     /// run from its `PATH` matches patch rules by the names `infos` composed under.
     ///
     /// Packages in `no_patches` are marked, so their launchers skip the patch tier; `inherited`,

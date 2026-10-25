@@ -184,13 +184,6 @@ crate::env_vars! {
     ///
     /// Keys starting `OCX_` or `__OCX_` are refused in `ocx.toml` `[env]` (exit 78) and in `--env` (exit 64).
     pub OCX_ENV: Json, Public, child = Forward;
-    /// JSON map from a content digest to the `registry/repository[:tag]` names one composition
-    /// resolved it under; read by `ocx launcher exec` to match targeted patch rules.
-    ///
-    /// Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
-    /// `--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
-    /// launcher loses the outer composition's names.
-    pub OCX_LAUNCH_IDENTITIES: Json, Public;
     /// Boolean — `ocx self setup` modifies no shell profile. Mirrors `--no-modify-path`.
     ///
     /// Suppresses both PATH surfaces on every platform, the managed profile blocks and the
@@ -502,6 +495,13 @@ crate::env_vars! {
     /// Holds the pid, `$pwd`, the direnv/mise yield sentinels and the two consent-grant variables,
     /// space-joined; never set it by hand.
     pub __OCX_ENV_PWD: String, Plumbing;
+    /// JSON map from a content digest to the `registry/repository[:tag]` names one composition
+    /// resolved it under; read by `ocx launcher exec` to match targeted patch rules.
+    ///
+    /// Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
+    /// `--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
+    /// launcher loses the outer composition's names.
+    pub __OCX_LAUNCH_IDENTITIES: Json, Plumbing;
     /// Set by ocx on every credential helper it starts; an ocx running under it never downloads.
     ///
     /// A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that

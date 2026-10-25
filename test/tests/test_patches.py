@@ -1845,7 +1845,7 @@ def test_launcher_identity_opt_out_respects_system_required(
 
     `system_required` needs a SYSTEM-scope config this harness cannot write, so this
     drives `ocx launcher exec` directly with hand-set `OCX_PATCHES` and
-    `OCX_LAUNCH_IDENTITIES`, keyed by the digest the package directory records.
+    `__OCX_LAUNCH_IDENTITIES`, keyed by the digest the package directory records.
     """
     companion_repo = _unique_repo("identity_sysreq_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -1877,7 +1877,7 @@ def test_launcher_identity_opt_out_respects_system_required(
             **ocx.env,
             "OCX_NO_CONFIG": "1",
             "OCX_PATCHES": wire,
-            "OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: identity}),
+            "__OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: identity}),
         }
         return subprocess.run(
             [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
