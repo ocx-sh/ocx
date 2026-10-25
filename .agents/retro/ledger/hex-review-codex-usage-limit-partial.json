@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-review",
+  "cost_min": 0,
+  "entries": [
+    "20261024T172223Z-e510539a.json"
+  ],
+  "first_seen": "2026-10-24T17:22:23Z",
+  "fixed": null,
+  "folded_at": "2026-10-25T13:20:57Z",
+  "folds": 1,
+  "id": "hex-review-codex-usage-limit-partial",
+  "kind": "inconvenient",
+  "last_seen": "2026-10-24T17:22:23Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "Codex adversary hits the account usage limit mid-turn and returns a partial result that reads as complete",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-review@sha256:843ba7b434ad2a1d9cc7935b219b79286ce0767c7e1f2d6f95b324bb1acce536"
+  ]
+}

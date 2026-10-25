@@ -1,0 +1,24 @@
+{
+  "artifact": "hex-loop",
+  "cost_min": 0,
+  "entries": [
+    "20261025T072239Z-ef3e462a.json",
+    "20261025T131918Z-6181b40c.json"
+  ],
+  "first_seen": "2026-10-25T07:22:39Z",
+  "fixed": null,
+  "folded_at": "2026-10-25T13:20:57Z",
+  "folds": 1,
+  "id": "hex-loop-stop-hook-exit-mismatch",
+  "kind": "inconvenient",
+  "last_seen": "2026-10-25T15:10:00Z",
+  "occurrences": 2,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "goal-loop stop hook judges the loop exit differently from the goal file it evaluates",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-loop@sha256:59ccc12245adfa8e0f7531ae3edb819acefeda012f8f37b2c8e8df4402b3ff7f"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-finalize",
+  "cost_min": 0,
+  "entries": [
+    "20261025T121617Z-8f732232.json"
+  ],
+  "first_seen": "2026-10-25T13:30:00Z",
+  "fixed": null,
+  "folded_at": "2026-10-25T13:20:57Z",
+  "folds": 1,
+  "id": "hex-finalize-recompose-commit-exit",
+  "kind": "pitfall",
+  "last_seen": "2026-10-25T13:30:00Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "low",
+  "status": "deferred",
+  "title": "recompose commit lands but git exits non-zero on a transient lock, so a set -e script skips its tree and author checks",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:d2522bd7ec97a6dc8775f1bcdc5c7ad1134df5d89732a5d174d0edc82378fb21"
+  ]
+}

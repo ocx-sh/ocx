@@ -1,0 +1,25 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20261025T103028Z-64f1b8fe.json"
+  ],
+  "first_seen": "2026-10-25T10:30:28Z",
+  "fixed": {
+    "at": "2026-10-25T13:21:50Z",
+    "by": "AGENTS.md",
+    "stale_versions": []
+  },
+  "folded_at": "2026-10-25T13:20:57Z",
+  "folds": 1,
+  "id": "project-hookless-shell-tool-versions",
+  "kind": "pitfall",
+  "last_seen": "2026-10-25T10:30:28Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "fixed",
+  "title": "hookless background shells resolve system tools (pnpm 10) instead of the pinned toolchain",
+  "v": 1,
+  "versions": []
+}
