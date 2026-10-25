@@ -77,16 +77,15 @@ crate::env_vars! {
     /// A path that does not exist exits 79, a directory with no `ocx.toml` exits 64, an unreadable
     /// one exits 74. Empty is unset.
     ///
-    /// Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`.
+    /// Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`. A child ocx, a
+    /// launcher re-entry included, does not inherit it and discovers its own project.
     pub OCX_PROJECT: Path, Public, child = Forward;
     /// Boolean — skip the CWD walk and `OCX_PROJECT`; explicit `--project` paths still load.
-    /// Forwarded only when this invocation resolved no project.
     ///
     /// Skips the CWD walk and ignores `OCX_PROJECT`; explicit `--project` still loads. Env-only: no
     /// `--no-project` flag.
     ///
-    /// Forwarded so children also skip discovery, except when an explicit `--project` is present,
-    /// in which case the path is forwarded instead. Hermetic pattern: `OCX_NO_PROJECT=1 ocx
+    /// Forwarded so children also skip discovery. Hermetic pattern: `OCX_NO_PROJECT=1 ocx
     /// --project /ci/ocx.toml exec -- ...`.
     pub OCX_NO_PROJECT: Bool, Public, child = Forward;
     /// Path at which the CWD walk for a project `ocx.toml` stops; relative values join onto the

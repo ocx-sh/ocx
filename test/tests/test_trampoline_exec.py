@@ -662,6 +662,33 @@ def test_item38_a_tool_under_global_exec_sees_no_ocx_global_and_may_name_its_own
     )
 
 
+def test_item38_a_tool_under_project_exec_sees_no_ocx_project(ocx: OcxRunner, tmp_path: Path) -> None:
+    """The outer ``--project`` never reaches the tool: a nested ocx discovers its own project.
+
+    ``OCX_BINARY_PIN``, forwarded in the same pass, is asserted present so the absence of
+    ``OCX_PROJECT`` is not vacuous.
+
+    RED: forward ``cfg.project`` for ``OCX_PROJECT`` in ``apply_ocx_config``.
+    """
+    label = uuid4().hex[:8]
+    outer = tmp_path / f"outer-{label}"
+    outer.mkdir()
+    outer_toml = write_ocx_toml(outer, "[tools]\n")
+    locked = run_in(ocx, tmp_path, "--project", str(outer_toml), "lock")
+    assert locked.returncode == EXIT_SUCCESS, f"locking the outer project; rc={locked.returncode}\n{locked.stderr}"
+
+    probe = (
+        "import os\n"
+        "print('pin=' + str('OCX_BINARY_PIN' in os.environ))\n"
+        "print('project=' + str('OCX_PROJECT' in os.environ))\n"
+    )
+    result = run_in(ocx, tmp_path, "--project", str(outer_toml), "exec", "--", sys.executable, "-c", probe)
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\n{result.stderr}"
+    assert "pin=True" in result.stdout, f"the forwarding pass must have run; got {result.stdout!r}"
+    assert "project=False" in result.stdout, f"OCX_PROJECT must not reach the tool; got {result.stdout!r}"
+
+
 # ---------------------------------------------------------------------------
 # Item 36 — a trampoline whose baked home went bad
 # ---------------------------------------------------------------------------

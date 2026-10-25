@@ -20,6 +20,7 @@ pub struct OcxConfigView {
     /// Tag resolution may only consult the local index. Forwarded as [`ocx_env::OCX_FROZEN`].
     pub frozen: bool,
     pub config: Option<PathBuf>,
+    /// The explicit `--project` path. Never forwarded: `apply_ocx_config` clears `OCX_PROJECT`.
     pub project: Option<PathBuf>,
     /// The global toolchain is the in-effect project file. Never forwarded: `apply_ocx_config` clears `OCX_GLOBAL`.
     pub global: bool,
@@ -226,11 +227,8 @@ impl Env {
             ocx_env::OCX_CONFIG,
             cfg.config.as_deref().map(std::path::Path::as_os_str),
         );
-        forward!(
-            self,
-            ocx_env::OCX_PROJECT,
-            cfg.project.as_deref().map(std::path::Path::as_os_str),
-        );
+        // Always cleared: the project selector is per invocation, a nested ocx discovers its own.
+        forward!(self, ocx_env::OCX_PROJECT, None::<&str>);
         forward!(
             self,
             ocx_env::OCX_INDEX,
@@ -269,17 +267,7 @@ impl Env {
         // Ambient-only keys: without them a `--clean` child resolves against defaults the parent overrode.
         let ambient = |var: &'static ocx_env::EnvVar| var.bool_or(false).unwrap_or(false).then_some("1");
         forward!(self, ocx_env::OCX_ALLOW_YANKED, ambient(&ocx_env::OCX_ALLOW_YANKED));
-        // Gated on the view: `explicit_project` reads the prune before `OCX_PROJECT`, so forwarding
-        // both makes the child discard the project.
-        forward!(
-            self,
-            ocx_env::OCX_NO_PROJECT,
-            if cfg.project.is_none() {
-                ambient(&ocx_env::OCX_NO_PROJECT)
-            } else {
-                None
-            },
-        );
+        forward!(self, ocx_env::OCX_NO_PROJECT, ambient(&ocx_env::OCX_NO_PROJECT));
         forward!(
             self,
             ocx_env::OCX_NO_CONFIG_REFRESH,
@@ -1625,30 +1613,30 @@ mod tests {
         );
     }
 
-    /// The prune and an explicit project are two answers to one question, and
-    /// the child reads the prune first (`ConfigLoader::explicit_project`). So
-    /// an invocation carrying `--project` must forward the path and NOT the
-    /// prune, or the child discards the path written beside it.
+    /// The project selector is per invocation, like `OCX_GLOBAL`: a tool under
+    /// `ocx --project <p> exec` runs its own nested ocx against its own project, so
+    /// neither `--project` nor a parent-shell export may cross a spawn.
     ///
-    /// Red state: drop the `cfg.project.is_none() &&` guard.
+    /// Red state: forward `cfg.project` for `OCX_PROJECT` in `apply_ocx_config`.
     #[test]
-    fn apply_ocx_config_suppresses_the_project_prune_when_a_project_is_explicit() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::OCX_NO_PROJECT, "1");
-
+    fn apply_ocx_config_never_forwards_ocx_project() {
         let mut cfg = view("/abs/ocx");
         cfg.project = Some(std::path::PathBuf::from("/abs/repo/ocx.toml"));
         let mut env = Env::clean();
         env.apply_ocx_config(&cfg);
-
-        assert_eq!(
-            env.get(ocx_env::OCX_PROJECT.name).map(std::path::Path::new),
-            Some(std::path::Path::new("/abs/repo/ocx.toml")),
-            "the explicit project must reach the child"
-        );
+        // Positive control: the forwarding path ran, so the absence below is not vacuous.
+        assert_eq!(env.get(ocx_env::OCX_BINARY_PIN.name).unwrap(), "/abs/ocx");
         assert!(
-            env.get(ocx_env::OCX_NO_PROJECT.name).is_none(),
-            "the prune must not travel beside a project path the child would then discard"
+            env.get(ocx_env::OCX_PROJECT.name).is_none(),
+            "cfg.project must not forward OCX_PROJECT to the child env"
+        );
+
+        let mut env = Env::clean();
+        env.set(ocx_env::OCX_PROJECT.name, "/stale/ocx.toml");
+        env.apply_ocx_config(&cfg);
+        assert!(
+            env.get(ocx_env::OCX_PROJECT.name).is_none(),
+            "cfg.project must clear an inherited OCX_PROJECT"
         );
     }
 

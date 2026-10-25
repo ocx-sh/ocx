@@ -525,13 +525,12 @@ enable it.
 
 ## `OCX_NO_PROJECT` {#ocx-no-project}
 
-Boolean — skip the CWD walk and `OCX_PROJECT`; explicit `--project` paths still load. Forwarded only when this invocation resolved no project.
+Boolean — skip the CWD walk and `OCX_PROJECT`; explicit `--project` paths still load.
 
 Skips the CWD walk and ignores `OCX_PROJECT`; explicit `--project` still loads. Env-only: no
 `--no-project` flag.
 
-Forwarded so children also skip discovery, except when an explicit `--project` is present,
-in which case the path is forwarded instead. Hermetic pattern: `OCX_NO_PROJECT=1 ocx
+Forwarded so children also skip discovery. Hermetic pattern: `OCX_NO_PROJECT=1 ocx
 --project /ci/ocx.toml exec -- ...`.
 
 - Visibility: public
@@ -615,7 +614,8 @@ this variable, the CWD walk; `OCX_NO_PROJECT` prunes the last two.
 A path that does not exist exits 79, a directory with no `ocx.toml` exits 64, an unreadable
 one exits 74. Empty is unset.
 
-Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`.
+Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`. A child ocx, a
+launcher re-entry included, does not inherit it and discovers its own project.
 
 - Visibility: public
 - Value: `path`
