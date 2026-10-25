@@ -36,8 +36,13 @@ pub enum EntrypointSelection {
     /// Every wheel's console scripts synthesize.
     All,
     /// Only the listed console-script names synthesize; an unprovided name is [`ComposeError::MissingEntrypoint`].
+    ///
+    /// The one exception is `python`: naming it exposes the private interpreter, which no other mode does.
     Explicit(Vec<String>),
 }
+
+/// The one entrypoint synthesized without a wheel declaring it, and only when an `Explicit` selection names it.
+const PYTHON_ENTRYPOINT: &str = "python";
 
 fn entrypoint_admitted(selection: &EntrypointSelection, wheel_dist_name: &str, script_name: &str) -> bool {
     match selection {
@@ -99,7 +104,7 @@ impl EnvComposition {
 /// [`ComposeError::UnknownExtra`] for an undeclared requested extra, [`ComposeError::AbiMismatch`] for a wheel
 /// inconsistent with the target ABI, [`ComposeError::InvalidEntryPoint`] for a malformed object reference or name,
 /// [`ComposeError::EntrypointCollision`] when two wheels claim one name, and [`ComposeError::MissingEntrypoint`]
-/// for an `Explicit` name no wheel provides.
+/// for an `Explicit` name no wheel provides (`python` excepted).
 pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvComposition, ComposeError> {
     for extra in &spec.requested_extras {
         if !spec.declared_extras.contains(extra) {
@@ -164,18 +169,22 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
 
     if let EntrypointSelection::Explicit(names) = &spec.entrypoint_selection {
         for name in names {
-            if !matched_explicit_names.contains(name.as_str()) {
+            if name != PYTHON_ENTRYPOINT && !matched_explicit_names.contains(name.as_str()) {
                 return Err(ComposeError::MissingEntrypoint { name: name.clone() });
             }
         }
+        // Opt-in only: entrypoints are INTERFACE-visible, so an unrequested `python` puts the private interpreter on
+        // every consumer's PATH. `or_default` keeps a wheel's own `python` script. Cannot recurse: `python` resolves
+        // on the SELF-view PATH, which `Entrypoints::IMPLICIT_VISIBILITY` keeps `entrypoints/` off.
+        if names.iter().any(|name| name == PYTHON_ENTRYPOINT) {
+            entries
+                .entry(
+                    EntrypointName::try_from(PYTHON_ENTRYPOINT)
+                        .expect("`python` matches the entrypoint-name slug pattern"),
+                )
+                .or_default();
+        }
     }
-
-    // A bare `python` entrypoint, or a spec's test script runs the host's interpreter (absent on many images).
-    // `or_default`, or a wheel's own `python` script is overwritten. Cannot recurse: `python` resolves on the SELF-view
-    // PATH, which `Entrypoints::IMPLICIT_VISIBILITY` keeps `entrypoints/` off.
-    entries
-        .entry(EntrypointName::try_from("python").expect("`python` matches the entrypoint-name slug pattern"))
-        .or_default();
 
     let entrypoints = Entrypoints::new(entries);
 
@@ -546,7 +555,7 @@ mod tests {
     fn library_wheel_with_no_scripts_composes_without_console_script_entrypoints() {
         // A library env (no console scripts of its own — e.g.
         // google-cloud-aiplatform) is not a compose failure; it just carries
-        // nothing beyond the always-present `python`.
+        // no entrypoints.
         let spec = env_spec(&[], &[], "cp313");
         let wheels = vec![wheel(PURE_WHEEL, Vec::new())];
         let composition = compose_env(&spec, &wheels).expect("composition succeeds");
@@ -557,7 +566,7 @@ mod tests {
             .iter()
             .map(|(name, _)| name.as_str())
             .collect();
-        assert_eq!(names, ["python"], "a library env synthesizes no console scripts");
+        assert!(names.is_empty(), "a library env exposes no entrypoints, got {names:?}");
     }
 
     #[test]
@@ -799,29 +808,56 @@ mod tests {
         );
     }
 
-    // ── The always-present `python` entrypoint ──────────────────────────────
+    // ── The opt-in `python` entrypoint ──────────────────────────────────────
+
+    fn entrypoint_names(composition: &EnvComposition) -> Vec<&str> {
+        composition
+            .metadata
+            .entrypoints()
+            .expect("entrypoints present")
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
 
     #[test]
-    fn python_entrypoint_is_always_synthesized_alongside_console_scripts() {
-        // Regression: without this entry the composed package ships no `python`
-        // launcher, so a test script's bare `python` resolves to the HOST
-        // interpreter under `ocx package test` (or fails to spawn at all on a
-        // container image that has none).
-        let spec = env_spec(&[], &[], "cp313");
+    fn python_is_not_synthesized_unless_asked_for() {
+        // Regression: entrypoints are INTERFACE-visible, so a synthesized `python` put the
+        // private interpreter on every consumer's PATH, shadowing the consumer's own.
+        for selection in [
+            EntrypointSelection::All,
+            EntrypointSelection::RootOnly {
+                root_package: "foo".to_string(),
+            },
+        ] {
+            let mut spec = env_spec(&[], &[], "cp313");
+            spec.entrypoint_selection = selection.clone();
+            let wheels = vec![wheel(PURE_WHEEL, vec![console_script("mytool", "mod:func", &[])])];
+
+            let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+            assert_eq!(
+                entrypoint_names(&composition),
+                ["mytool"],
+                "only the console script is exposed under {selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_python_synthesizes_the_interpreter_launcher() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::Explicit(vec!["python".to_string(), "mytool".to_string()]);
         let wheels = vec![wheel(PURE_WHEEL, vec![console_script("mytool", "mod:func", &[])])];
 
-        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let composition = compose_env(&spec, &wheels).expect("naming `python` is not a MissingEntrypoint");
         let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
         let (_, python) = entrypoints
             .iter()
             .find(|(name, _)| name.as_str() == "python")
-            .expect("every env carries a `python` entrypoint");
-        // No `command`, so `Entrypoints::dispatch_command` returns the name
-        // verbatim and `ocx launcher exec` resolves it on the self-view PATH —
-        // where the root's own `entrypoints/` is absent and the private
-        // interpreter's `bin/` is present. A `command: python` would resolve
-        // identically; leaving it unset is what makes the no-recursion
-        // property structural rather than incidental.
+            .expect("an explicit `python` is synthesized");
+        // No `command`, so `Entrypoints::dispatch_command` returns the name verbatim and
+        // `ocx launcher exec` resolves it on the self-view PATH, where the root's own
+        // `entrypoints/` is absent and the private interpreter's `bin/` is present.
         assert!(
             python.command().is_none(),
             "the `python` entrypoint dispatches its own name, not a divergent command"
@@ -837,6 +873,31 @@ mod tests {
         assert!(
             !entrypoints.iter().any(|(name, _)| name.as_str() == "python3"),
             "only `python` is synthesized: python-build-standalone has no `python3` on Windows"
+        );
+    }
+
+    #[test]
+    fn explicit_selection_without_python_does_not_synthesize_it() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::Explicit(vec!["mytool".to_string()]);
+        let wheels = vec![wheel(PURE_WHEEL, vec![console_script("mytool", "mod:func", &[])])];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        assert_eq!(entrypoint_names(&composition), ["mytool"]);
+    }
+
+    #[test]
+    fn explicit_python_defers_to_a_wheel_declared_python_script() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::Explicit(vec!["python".to_string()]);
+        let wheels = vec![wheel(PURE_WHEEL, vec![console_script("python", "mod:main", &[])])];
+
+        let composition = compose_env(&spec, &wheels).expect("the wheel's script satisfies the name");
+        let args = sole_entrypoint_args(&composition, "python");
+        assert!(
+            args[1].contains("importlib.import_module(\"mod\")"),
+            "a wheel-declared `python` script wins over the synthesized launcher: {}",
+            args[1]
         );
     }
 
