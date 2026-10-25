@@ -1,21 +1,25 @@
 // The docs section of ocx.sh: `/docs/` (a claim in the theme's nav.json).
 // Pages live under src/content/docs; `@/` in an include names src/ (the theme's Markdown includes).
-import { copyFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import starlight from '@astrojs/starlight';
 import ocxTheme from '@ocx-sh/theme/starlight';
 import { defineConfig } from 'astro/config';
 
+import { recentReleases } from './plugins/changelog.mjs';
 import { ocxRedirects } from './plugins/redirects.mjs';
 
 const BASE = '/docs/';
 const redirectsDir = fileURLToPath(new URL('./redirects.d', import.meta.url));
 
 // The theme's includes refuse a file outside srcDir, and Astro 7.4 fails the build on that error
-// (7.3 logged it and rendered an empty changelog). So the generated CHANGELOG.md is mirrored into src/.
+// (7.3 logged it and rendered an empty changelog). So the generated CHANGELOG.md is mirrored into src/,
+// cut to the newest releases.
 const changelog = new URL('../CHANGELOG.md', import.meta.url);
-if (existsSync(changelog)) copyFileSync(changelog, new URL('./src/_changelog.md', import.meta.url));
+if (existsSync(changelog)) {
+  writeFileSync(new URL('./src/_changelog.md', import.meta.url), recentReleases(readFileSync(changelog, 'utf8'), 3));
+}
 
 /** A sidebar entry for a page route under the base. */
 const page = (label, link) => ({ label, link });

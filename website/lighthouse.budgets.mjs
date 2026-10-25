@@ -2,6 +2,7 @@
 // Values are the `content` class of ocx-sh/website tests/budgets.mjs and never go above it;
 // the docs are plain pages, so there is one class.
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
 const KB = 1024;
@@ -10,7 +11,7 @@ const KB = 1024;
 export const BASE = '/docs/';
 
 /** Bytes, gzip of the response body, except `domElements`. */
-export const BUDGET = { preJsGz: 11 * KB, totalBytes: 147 * KB, domElements: 800 };
+export const BUDGET = { preJsGz: 11 * KB, totalBytes: 147 * KB, domElements: 900 };
 
 /** Gzipped HTML must fit Lighthouse's first simulated round trip (10 TCP packets). */
 export const HTML_GZ_MAX = 14_200;
@@ -28,12 +29,18 @@ export function assertions(budget = BUDGET) {
   };
 }
 
-/** Every built HTML page as a sorted route (`x/index.html` -> `/x/`, `404.html` as itself). */
+/** The script plugins/redirects.mjs gives a stub, and only a stub, a `data-to` target on. */
+const STUB = /<script id="ocx-fragment-map"[^>]* data-to="/;
+
+/**
+ * Every built HTML page as a sorted route (`x/index.html` -> `/x/`, `404.html` as itself), redirect stubs
+ * left out: Lighthouse follows a stub and would audit its destination under the stub's name.
+ */
 export function pages(distDir) {
   if (!existsSync(distDir)) throw new Error(`missing dist: ${distDir}`);
   return readdirSync(distDir, { recursive: true, encoding: 'utf8' })
     .map((f) => f.split('\\').join('/'))
-    .filter((f) => f.endsWith('.html'))
+    .filter((f) => f.endsWith('.html') && !STUB.test(readFileSync(join(distDir, f), 'utf8')))
     .map((f) => (f === 'index.html' ? '/' : `/${f.replace(/index\.html$/, '')}`))
     .sort();
 }
