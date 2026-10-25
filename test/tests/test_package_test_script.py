@@ -49,8 +49,6 @@ pytestmark = pytest.mark.skipif(
 )
 pytestmark = [pytestmark, pytest.mark.command("package_test")]
 
-_PLATFORM = current_platform()
-
 # A deterministic version string the test tool prints, so assertions like
 # `expect.contains(r.stdout, "v3")` are stable and version-agnostic.
 _TOOL_VERSION = "v3.7.0"
@@ -163,7 +161,7 @@ def _run_script(
         cmd += ["--format", fmt]
     cmd += [
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg.short,
         str(bundle),
@@ -227,7 +225,7 @@ def test_u2_script_and_trailing_command_conflict(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(meta),
         "--script", str(smoke),
         "-i", pkg.short,
@@ -258,7 +256,7 @@ def test_u3_neither_script_nor_command(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(meta),
         "-i", pkg.short,
         str(bundle),
@@ -674,7 +672,7 @@ def test_u17_child_killed_on_parent_sigterm(
         [
             str(ocx.binary),
             "package", "test",
-            "-p", _PLATFORM,
+            "-p", current_platform(),
             "-m", str(meta),
             "-i", pkg.short,
             str(bundle),
@@ -763,7 +761,7 @@ def test_u18_stdin_read_failure_is_io_error_74(
         [
             str(ocx.binary),
             "package", "test",
-            "-p", _PLATFORM,
+            "-p", current_platform(),
             "-m", str(meta),
             "-i", pkg.short,
             str(bundle),
@@ -974,7 +972,7 @@ def test_target_platform_is_typed_value_with_attrs(
     """ocx.target_platform returns a typed Platform value with `is_any`,
     `os`, `arch`; `os` compares equal to the matching ocx.os.* constant."""
     bundle, meta, pkg = script_test_package
-    os_str, arch_str = _split_platform(_PLATFORM)
+    os_str, arch_str = _split_platform(current_platform())
     pascal_os = _PASCAL_OS[os_str]
     pascal_arch = _PASCAL_ARCH[arch_str]
     body = (
@@ -1182,7 +1180,7 @@ def test_nonexecutable_package_binary_fails_script(
         [
             str(ocx.binary),
             "package", "test",
-            "-p", _PLATFORM,
+            "-p", current_platform(),
             "-m", str(metadata_path),
             "-i", pkg.short,
             str(bundle),
@@ -1332,7 +1330,7 @@ def test_junit_pass_writes_one_case_with_captured_output(
     assert pkg.repo in (case.get("classname") or ""), (
         f"classname must name the package, got {case.get('classname')!r}"
     )
-    assert case.get("name") == _PLATFORM, (
+    assert case.get("name") == current_platform(), (
         "the case name is the PLATFORM, so six per-platform files merge into six "
         f"distinct cases; got {case.get('name')!r}"
     )
@@ -1684,7 +1682,7 @@ def test_junit_requires_script(
     result = subprocess.run(
         [
             str(ocx.binary), "package", "test",
-            "-p", _PLATFORM,
+            "-p", current_platform(),
             "-m", str(meta),
             "-i", pkg.short,
             str(bundle),

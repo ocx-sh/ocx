@@ -45,8 +45,6 @@ pytestmark = pytest.mark.command("package_test")
 # Helpers (DAMP per quality-core.md — keep tests self-contained)
 # ---------------------------------------------------------------------------
 
-_PLATFORM = current_platform()
-
 
 def _make_test_package(
     ocx: OcxRunner,
@@ -72,7 +70,7 @@ def _make_test_package(
     (default: every name in ``bins`` does). A ``False`` entry builds the
     shadow-rule fixture: a package that ships a name it cannot run.
     """
-    plat = _PLATFORM
+    plat = current_platform()
     marker = f"marker-{uuid4().hex[:12]}"
     bin_names = bins or ["hello"]
 
@@ -176,7 +174,7 @@ def test_runs_command_in_env(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -202,7 +200,7 @@ def test_propagates_child_failure(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -228,7 +226,7 @@ def test_cleans_temp_on_success(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -260,7 +258,7 @@ def test_cleans_temp_on_child_failure(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -292,7 +290,7 @@ def test_keep_preserves_temp_on_failure(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--keep",
         "-i", pkg_info.short,
@@ -330,7 +328,7 @@ def test_keep_preserves_temp_on_success(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--keep",
         "-i", pkg_info.short,
@@ -370,7 +368,7 @@ def test_output_dir_honored_same_fs(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-o", str(output_dir),
         "-i", pkg_info.short,
@@ -427,7 +425,7 @@ def test_output_dir_cross_fs_errors(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-o", str(tmp_output),
         "-i", pkg_info.short,
@@ -463,7 +461,7 @@ def test_output_dir_nonempty_errors(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-o", str(output_dir),
         "-i", pkg_info.short,
@@ -506,7 +504,7 @@ def test_auto_installs_deps(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -562,7 +560,7 @@ def test_pulls_digest_layer_on_demand(
         for entry in raw_manifest["manifests"]:
             plat = entry.get("platform", {})
             plat_str = f"{plat.get('os', '')}/{plat.get('architecture', '')}"
-            if plat_str == _PLATFORM or not raw_manifest.get("manifests"):
+            if plat_str == current_platform() or not raw_manifest.get("manifests"):
                 child_digest = entry["digest"]
                 # Fetch child manifest via the registry HTTP API using @digest syntax.
                 child_url = (
@@ -603,7 +601,7 @@ def test_pulls_digest_layer_on_demand(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         digest_ref,
@@ -647,7 +645,7 @@ def test_offline_missing_digest_layer_blocks(
         for entry in raw_manifest["manifests"]:
             plat = entry.get("platform", {})
             plat_str = f"{plat.get('os', '')}/{plat.get('architecture', '')}"
-            if plat_str == _PLATFORM or not raw_manifest.get("manifests"):
+            if plat_str == current_platform() or not raw_manifest.get("manifests"):
                 child_digest = entry["digest"]
                 child_url = (
                     f"http://{ocx.registry}/v2/{pkg_info.repo}/manifests/{child_digest}"
@@ -682,7 +680,7 @@ def test_offline_missing_digest_layer_blocks(
     result = ocx.plain(
         "--offline",
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         digest_ref,
@@ -724,13 +722,13 @@ def test_invalid_metadata_data_error(
     valid_meta.write_text('{"type":"bundle","version":1}')
     ocx.plain(
         "package", "create", "-m", str(valid_meta), "-o", str(bundle),
-        "-p", _PLATFORM, str(bundle_dir),
+        "-p", current_platform(), str(bundle_dir),
     )
 
     fq = f"{ocx.registry}/{unique_repo}-invalid:1.0.0"
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(bad_metadata),
         "-i", fq,
         str(bundle),
@@ -786,7 +784,7 @@ def test_self_view_emits_private_surface(
     # With --self: private var must be visible.
     result_self = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--self",
         "-i", pkg_info.short,
@@ -807,7 +805,7 @@ def test_self_view_emits_private_surface(
     # Without --self (consumer/interface surface): private var must be absent.
     result_consumer = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -873,7 +871,7 @@ def test_clean_strips_ambient_env(
 
     result = ocx_with_ambient.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--clean",
         "-i", pkg_info.short,
@@ -914,7 +912,7 @@ def test_rejects_digest_in_identifier(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", fq_with_digest,
         str(bundle),
@@ -948,7 +946,7 @@ def test_digest_only_no_metadata_usage_error(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         # No -m / --metadata flag
         "-i", pkg_info.short,
         fake_digest_ref,
@@ -978,7 +976,7 @@ def test_arg_parity_with_push(
     # Same argument shape as ``ocx package push -p <plat> -m <meta> <fq> <bundle>``.
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.fq,
         str(bundle),
@@ -1042,7 +1040,7 @@ def test_output_dir_relative_path_works(
         "package",
         "test",
         "-p",
-        _PLATFORM,
+        current_platform(),
         "-m",
         str(metadata_path),
         "-o",
@@ -1093,7 +1091,7 @@ def test_output_dir_rejects_symlink_target(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-o", str(symlink_target),
         "-i", pkg_info.fq,
@@ -1132,7 +1130,7 @@ def test_runs_package_entrypoint(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -1178,7 +1176,7 @@ def test_runs_entrypoint_with_keep(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--keep",
         "-i", pkg_info.short,
@@ -1265,7 +1263,7 @@ def test_env_flag_survives_generated_entrypoint_launcher(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "--env", "LAUNCHER_PROBE=flag-value",
         "-i", pkg_info.short,
@@ -1323,7 +1321,7 @@ def test_nonexecutable_package_binary_fails_instead_of_using_host_copy(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),
@@ -1365,7 +1363,7 @@ def test_host_tool_not_shipped_by_package_resolves_with_warning(
 
     result = ocx.plain(
         "package", "test",
-        "-p", _PLATFORM,
+        "-p", current_platform(),
         "-m", str(metadata_path),
         "-i", pkg_info.short,
         str(bundle),

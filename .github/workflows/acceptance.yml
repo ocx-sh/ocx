@@ -180,8 +180,9 @@ jobs:
       # setup-python provides only `python`, so `python3.exe` is a copy of it in the same directory (a copy
       # elsewhere would lose the DLLs it loads beside itself). Linux images ship `python3`.
       # Windows arm64 takes the x64 interpreter, emulated: cryptography stopped shipping win_arm64 wheels in
-      # 46.0.4 and its source build needs an arm64 OpenSSL. ocx stays the native build, and
-      # `platform.machine()` reads WMI, so the suite still sees windows/arm64.
+      # 46.0.4 and its source build needs an arm64 OpenSSL. ocx stays the native build, and the suite takes its
+      # host platform from `ocx about` (`current_platform()`, test/src/runner.py): `platform.machine()` answers
+      # `AMD64` here whenever its WMI query times out.
       - name: Setup Python
         if: runner.os != 'Linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

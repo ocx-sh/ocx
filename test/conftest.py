@@ -9,7 +9,6 @@ import importlib.util
 import os
 import shutil
 import stat
-import sys
 import textwrap
 import threading
 import time
@@ -21,12 +20,11 @@ import pytest
 from src import forward_proxy as forward_proxy_mod
 from src import zot
 from src.helpers import (
-    PROJECT_ROOT,
     compose_up_service,
     registry_is_reachable,
     skip_without_docker,
 )
-from src.runner import OcxRunner
+from src.runner import OcxRunner, ocx_command
 
 # ---------------------------------------------------------------------------
 # Session hooks
@@ -251,12 +249,7 @@ def ocx_binary() -> Path:
     silent skip of the whole acceptance suite is the false green this guard
     must not create.
     """
-    if env_path := os.environ.get("OCX_COMMAND"):
-        p = Path(env_path)
-    else:
-        p = PROJECT_ROOT / "test" / "bin" / "ocx"
-        if sys.platform == "win32" and not p.suffix:
-            p = p.with_suffix(".exe")
+    p = ocx_command()
     if not p.exists() and os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         pytest.skip(
             f"OCX_TESTS_NO_REGISTRY=1 and no ocx binary at {p}: this runner "
