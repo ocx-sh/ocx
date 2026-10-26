@@ -2,9 +2,10 @@
 // `pnpm run lighthouse [--page /reference/environment/ ...]`: serve dist/docs under /docs/ with a
 // small gzip static server (what the CDN does), run lhci (mobile preset) on each page and assert 100 in all four
 // categories plus lighthouse.budgets.mjs. Needs `task website:build` first. No --page = every built
-// page. A failing page gets 3 runs and is judged on the median run. Chrome: CHROME_PATH, then CHROME_BIN
+// page. Pages run on LH_LANES (default 3) parallel lanes; a failing page gets 3 more runs afterwards, one
+// page at a time on a quiet machine, and is judged on the median run. Chrome: CHROME_PATH, then CHROME_BIN
 // (the GitHub runner images set it), then the Playwright one.
-// Ported from ocx-sh/rules_ocx site/scripts/lighthouse.mjs: sequential, no lanes, no cache.
+// Lanes after ocx-sh/website scripts/lighthouse.mjs, without its cache and memory clamp.
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -17,16 +18,21 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DIST = `${ROOT}dist/docs`;
 const OUT = `${ROOT}.lighthouseci`;
 const PORT = process.env.LH_PORT || '4322';
+const LANES = Math.max(1, Number(process.env.LH_LANES) || 3);
 const argv = process.argv.slice(2);
 const wanted = argv.flatMap((a, i) => (argv[i - 1] === '--page' ? [a] : []));
 
 const NO_WSL = { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require ${ROOT}scripts/no-wsl.cjs` };
-// Async, so the static server below keeps answering while lhci runs.
-const run = (cmd, args, env = {}) =>
+// Async, so the static server below keeps answering while lhci runs. Output is buffered so parallel
+// lanes do not interleave; `audit` prints it when the page fails.
+const run = (cmd, args, cwd, env = {}) =>
   new Promise((done) => {
-    const child = spawn(cmd, args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, ...env } });
-    child.on('exit', (code) => done(code === 0));
-    child.on('error', () => done(false));
+    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env } });
+    let log = '';
+    child.stdout.on('data', (d) => { log += d; });
+    child.stderr.on('data', (d) => { log += d; });
+    child.on('exit', (code) => done({ ok: code === 0, log }));
+    child.on('error', (e) => done({ ok: false, log: `${log}${e}\n` }));
   });
 
 async function chromePath() {
@@ -44,20 +50,21 @@ async function waitFor(url) {
 }
 
 /** One line of category scores and the budgeted numbers from the last collected run. */
-function summary() {
-  const file = readdirSync(OUT).filter((f) => /^lhr-.*\.json$/.test(f)).sort().pop();
-  const lhr = JSON.parse(readFileSync(`${OUT}/${file}`, 'utf8'));
+function summary(out) {
+  const file = readdirSync(out).filter((f) => /^lhr-.*\.json$/.test(f)).sort().pop();
+  if (!file) return 'no report';
+  const lhr = JSON.parse(readFileSync(`${out}/${file}`, 'utf8'));
   const scores = CATEGORIES.map((c) => Math.round(lhr.categories[c].score * 100)).join('/');
   const dom = lhr.audits['dom-size'].numericValue;
   const bytes = Math.round(lhr.audits['total-byte-weight'].numericValue / 1024);
   return `${scores} dom=${dom} bytes=${bytes}KiB`;
 }
 
-/** lhci collect + assert for one URL; true when every assertion passes. */
+/** lhci collect + assert for one URL in its own directory (lhci writes `.lighthouseci` under its cwd). */
 async function audit(url, runs, chrome) {
-  rmSync(OUT, { recursive: true, force: true });
-  mkdirSync(OUT, { recursive: true });
-  const rc = `${OUT}/rc.json`;
+  const dir = `${OUT}/${new URL(url).pathname.replace(/[^a-z0-9]+/gi, '_')}${runs}`;
+  mkdirSync(dir, { recursive: true });
+  const rc = `${dir}/rc.json`;
   writeFileSync(rc, JSON.stringify({
     ci: {
       collect: { url: [url], numberOfRuns: runs, chromePath: chrome,
@@ -65,16 +72,20 @@ async function audit(url, runs, chrome) {
       assert: { assertions: assertions() },
     },
   }));
-  const lhci = (cmd) => run('pnpm', ['exec', 'lhci', cmd, `--config=${rc}`], NO_WSL);
-  const ok = (await lhci('collect')) && (await lhci('assert'));
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${url} ${summary()}`);
+  const lhci = (cmd) => run('pnpm', ['exec', 'lhci', cmd, `--config=${rc}`], dir, NO_WSL);
+  const collect = await lhci('collect');
+  const assert = collect.ok ? await lhci('assert') : { ok: false, log: '' };
+  const ok = assert.ok;
+  if (!ok) process.stdout.write(collect.log + assert.log);
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${url} ${summary(`${dir}/.lighthouseci`)}`);
   return ok;
 }
 
 const routes = wanted.length ? wanted : pages(DIST);
 const chrome = await chromePath();
 const bad = [];
-console.log(`${routes.length} pages under ${BASE}`);
+rmSync(OUT, { recursive: true, force: true });
+console.log(`${routes.length} pages under ${BASE} on ${LANES} lane(s)`);
 const TYPES = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.xml': 'application/xml' };
 const server = createServer((req, res) => {
@@ -102,10 +113,14 @@ const server = createServer((req, res) => {
 }).listen(Number(PORT), '127.0.0.1');
 try {
   await waitFor(`http://localhost:${PORT}${BASE}`);
-  for (const r of routes) {
-    const url = `http://localhost:${PORT}${pathOf(r)}`;
-    if (!(await audit(url, 1, chrome)) && !(await audit(url, 3, chrome))) bad.push(`${r}: Lighthouse failed`);
-  }
+  const urlOf = (r) => `http://localhost:${PORT}${pathOf(r)}`;
+  const queue = [...routes];
+  const failed = [];
+  const lane = async () => {
+    for (let r; (r = queue.shift()) !== undefined; ) if (!(await audit(urlOf(r), 1, chrome))) failed.push(r);
+  };
+  await Promise.all(Array.from({ length: Math.min(LANES, routes.length) }, lane));
+  for (const r of failed) if (!(await audit(urlOf(r), 3, chrome))) bad.push(`${r}: Lighthouse failed`);
 } finally {
   server.close();
   server.closeAllConnections();

@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:5ce396ff3dae763831960e0f81bdf158d57229f247858550de852e5f26dc2a29"
+declaration_hash = "sha256:fa258ca29c524ebbbd79577647342823ad876a9f0e3d5f9ab1e9de25cd838b38"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-24T13:21:53Z"
+generated_at = "2026-10-26T02:07:04Z"
 
 [[tool]]
 name = "actionlint"
@@ -197,6 +197,18 @@ repository = "ocx.sh/project-zot/zot"
 "linux/arm64+libc.glibc" = "sha256:db47881c85243120e19b9a863c6bed82a6b4e593bfb2ef65bf524bac123a42de"
 "windows/amd64" = "sha256:3e765d65aff26b48219bf707d95bc870c75223fddc3f39a639f71cb1abbdff90"
 "windows/arm64" = "sha256:73493ecb40e3dc7cf368686a14bf545f804dd2cd540247248548e69c92738684"
+
+[[tool]]
+name = "cargo-cyclonedx"
+group = "docs"
+repository = "ocx.sh/cyclonedx/cargo-cyclonedx"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ad009ae95d2bf3034a2b5f8add3436a375927a60683f6f9a074b38b3ec06e30e"
+"darwin/arm64" = "sha256:eca90d097192cac953bf5cde3b378b0c377aa7c7008f7fa9290c975f850da9c0"
+"linux/amd64" = "sha256:a64eb97856beda4551c4c66fdf569d46970d7949e768bdbc8e2cf2156046baa4"
+"linux/arm64+libc.glibc" = "sha256:56022a684a164ca94319a7b68ab26ee6dcecf5548ea8fe039cf8ce7d9dc3619c"
+"windows/amd64" = "sha256:377e262a27f9318e0eff340ec4ada6dc65727c20387c6ecdcfd16edd199e0b17"
 
 [[tool]]
 name = "actionlint"

@@ -31,6 +31,7 @@ zot = "ocx.sh/project-zot/zot:2.1.21"
 [group.build.tools]
 
 [group.docs.tools]
+cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
 
 [group.release.tools]
 git-cliff = "ocx.sh/git-cliff/git-cliff:2.14.1"
