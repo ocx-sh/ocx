@@ -35,7 +35,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
+      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
         with:
           groups: default,test,build
           bazel-cache: trusted
@@ -44,7 +44,7 @@ jobs:
       - run: task ci:deep
       - name: Push JUnit telemetry
         if: always()
-        uses: ocx-sh/conventions/.github/actions/setup@31398b5eb99149d6d1d92334a263228c57fa4fc6 # v0.3.1
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
         with:
           report: target/reports/junit/*.xml
           otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
