@@ -94,6 +94,13 @@ exports_files(
     visibility = ["//test:__pkg__"],
 )
 
+# A file under `src/content/docs`, so a crate test that names that directory finds it in its runfiles
+# (`//:workspace_files`).
+exports_files(
+    ["src/content/docs/index.mdx"],
+    visibility = ["//:__pkg__"],
+)
+
 # Every taskfile in this package — the half of the root `task` include graph
 # that lives here (`//:taskfiles` is the other half).
 filegroup(

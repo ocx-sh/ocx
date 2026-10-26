@@ -143,3 +143,19 @@ json_error_format(
     build_setting_default = "json",
     visibility = ["//visibility:private"],
 )
+
+# The root files the isolated workspace-structure cases read (`crates/ocx_test_support/isolated.bzl`).
+filegroup(
+    name = "workspace_files",
+    srcs = [
+        ".bazelrc",
+        "BUILD.bazel",
+        "Cargo.toml",
+        "clippy.toml",
+        "clippy-warn-baseline.json",
+        "rust-toolchain.toml",
+        "scripts/crate_map.toml",
+        "//website:src/content/docs/index.mdx",
+    ],
+    visibility = ["//crates:__subpackages__"],
+)

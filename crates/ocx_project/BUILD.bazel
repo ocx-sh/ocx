@@ -3,8 +3,13 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+load("//crates/ocx_test_support:isolated.bzl", "crate_tree", "isolated_cases")
 
 package(default_visibility = ["//crates:__subpackages__"])
+
+_SKIPPED = [
+    "activate::tests::the_ladder_is_constructed_only_inside_the_two_shared_resolvers",
+]
 
 # Read across the package boundary by another crate's `include_str!`.
 exports_files([
@@ -38,28 +43,13 @@ rust_test(
     # process per testcase, so that is safe there; libtest runs them as threads
     # in one process, and Bazel drives libtest — measured flaky, not merely
     # slower. Serialising the binary is what makes `bazel test` deterministic.
-    # The testcase-level half of C-008's exclusion set. Every name here fails
-    # under `bazel test` for a reason that is a property of the *test*, not of
-    # this graph, and each is still executed by `cargo nextest` — which is what
-    # `rust:test:floor` counts, so nothing here shrinks the declared suite.
-    # Two causes, both measured:
-    #   (a) the testcase walks `crates/*/src` of crates this target does not
-    #       depend on. Declaring that as data would make the target a reverse
-    #       dependency of every crate without being one in `rdeps`, which is
-    #       exactly the shape A1's `a1-graph-too-wide` refuses.
-    #   (b) the testcase needs a process of its own (a `set_global_default`
-    #       tracing subscriber, a per-test `HOME`, or cargo's crate-directory
-    #       CWD). nextest runs one process per testcase; libtest runs threads
-    #       in one, and Bazel drives libtest.
-    # `--exact` is load-bearing: libtest matches `--skip` as a substring by
-    # default, and without it 22 names silently filtered 29 testcases here.
-    # The executed count is recorded in `crates/TEST_TARGET_MAP.toml` and rises
-    # only, so a skip that widens past its name reds there.
+    # The `_SKIPPED` cases run in `:ocx_project_isolated`: they walk `crates/*/src` of crates this target does
+    # not depend on, or need a process of their own. `--exact` is load-bearing: libtest matches
+    # `--skip` as a substring otherwise.
     args = [
         "--test-threads=1",
         "--exact",
-        "--skip=activate::tests::the_ladder_is_constructed_only_inside_the_two_shared_resolvers",
-    ],
+    ] + ["--skip=" + case for case in _SKIPPED],
     compile_data = [
         "//test:sigstore/keys/fulcio-ca.crt.pem",
     ],
@@ -77,4 +67,12 @@ rust_doc_test(
     crate = ":ocx_project",
     # rust_doc_test does not inherit the library's features.
     crate_features = ["__testing"],
+)
+
+crate_tree()
+
+isolated_cases(
+    name = "ocx_project_isolated",
+    binary = ":ocx_project_test",
+    cases = _SKIPPED,
 )

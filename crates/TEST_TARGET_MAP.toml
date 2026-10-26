@@ -70,6 +70,11 @@ crate = "ocx_cli"
 cases = 1
 
 [[target]]
+label = "//crates/ocx_cli:ocx_cli_isolated"
+crate = "ocx_cli"
+cases = 12
+
+[[target]]
 label = "//crates/ocx_cli:ocx_cli_seam_test"
 crate = "ocx_cli"
 cases = 48
@@ -126,10 +131,20 @@ crate = "ocx_index"
 cases = 3
 
 [[target]]
+label = "//crates/ocx_index:ocx_index_isolated"
+crate = "ocx_index"
+cases = 1
+
+[[target]]
 label = "//crates/ocx_index:ocx_index_test"
 crate = "ocx_index"
 cases = 487
 skipped = 1
+
+[[target]]
+label = "//crates/ocx_oci:ocx_oci_isolated"
+crate = "ocx_oci"
+cases = 2
 
 [[target]]
 label = "//crates/ocx_oci:ocx_oci_test"
@@ -154,11 +169,21 @@ crate = "ocx_package"
 cases = 5
 
 [[target]]
+label = "//crates/ocx_package_manager:ocx_package_manager_isolated"
+crate = "ocx_package_manager"
+cases = 3
+
+[[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_test"
 crate = "ocx_package_manager"
 cases = 1194
 skipped = 3
 ignored = 1
+
+[[target]]
+label = "//crates/ocx_project:ocx_project_isolated"
+crate = "ocx_project"
+cases = 1
 
 [[target]]
 label = "//crates/ocx_project:ocx_project_test"
@@ -196,6 +221,11 @@ cases = 63
 label = "//crates/ocx_schema:schema_outputs"
 crate = "ocx_schema"
 cases = 17
+
+[[target]]
+label = "//crates/ocx_script:ocx_script_isolated"
+crate = "ocx_script"
+cases = 1
 
 [[target]]
 label = "//crates/ocx_script:ocx_script_test"
@@ -268,6 +298,11 @@ label = "//crates/ocx_test_support:workspace_structure"
 crate = "ocx_test_support"
 cases = 20
 skipped = 29
+
+[[target]]
+label = "//crates/ocx_test_support:workspace_structure_isolated"
+crate = "ocx_test_support"
+cases = 24
 
 [[target]]
 label = "//crates/ocx_trust:ocx_trust_test"
