@@ -32,7 +32,7 @@ tasks:
     # skipped rather than fetched. `--index-files index.html` is what lets a
     # `…/page/#id` link find its fragment: without it every fragment into a
     # directory page reads as missing. The theme header and footer link the
-    # sibling sections (`/apps/`, `/catalog/`, `/install/`, `/integrations/`)
+    # sibling sections (`/apps/`, `/catalog/`, `/install/`, `/integrations/`, `/learn/`)
     # that other repositories deploy, and the site root `/` belongs to the root site,
     # so those roots are excluded.
     dir: '{{.TASKFILE_DIR}}'
@@ -42,7 +42,7 @@ tasks:
     cmd: >-
       lychee --offline --no-progress --include-fragments
       --index-files index.html
-      --exclude '/dist/(apps|catalog|install|integrations)(/|$|#)'
+      --exclude '/dist/(apps|catalog|install|integrations|learn)(/|$|#)'
       --exclude '/dist/?$'
       --root-dir {{.TASKFILE_DIR}}/dist
       dist
