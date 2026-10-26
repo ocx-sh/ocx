@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_proc_macro")
+load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -19,3 +20,5 @@ rust_proc_macro(
     version = "0.6.2",
     deps = all_crate_deps(normal = True),
 )
+
+crate_tree()

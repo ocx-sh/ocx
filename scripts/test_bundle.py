@@ -66,7 +66,8 @@ CFG_GATED = {"//crates/ocx_cli:macos_self_contained": "-apple-darwin"}
 SKIP = "--skip="
 # Skipped testcases that shell out to `cargo metadata`/`cargo tree`. They read
 # the workspace, not the platform, and need its submodules, which a native
-# runner's checkout lacks; Linux runs them (`rust:test:bazel-skipped`).
+# runner's checkout lacks; Linux runs them (`rust:test:workspace-cargo`).
+# `crates/ocx_test_support/BUILD.bazel` `_NEEDS_CARGO` names the same set.
 NEEDS_CARGO = {
     "anyhow_only_in_cli_runtime",
     "clap_env_feature_is_off_in_the_release_build",
@@ -282,11 +283,11 @@ def run_one(
 
 
 def run_skipped(t: Entry, root: Path, timeout: int, source_root: Path) -> list[Result]:
-    """Each `--skip`ped testcase on its own, as `rust:test:bazel-skipped` runs it under cargo.
+    """Each `--skip`ped testcase on its own, as the `<crate>_isolated` targets run it on Linux.
 
     The cwd is the checkout, so the `crates/*/src` walks that `CARGO_MANIFEST_DIR`
     names relatively resolve. A skip that matches no testcase runs 0 and reds,
-    the same refusal as that script's "names no testcase".
+    the refusal `run_each_case.sh` makes too.
     """
     rest = [x for x in t["args"] if x != "--exact" and not x.startswith(SKIP)]
     out = []

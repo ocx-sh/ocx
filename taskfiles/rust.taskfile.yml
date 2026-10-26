@@ -698,24 +698,24 @@ tasks:
     # toolchain accident rather than a property of this repository.
     cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail deps_direction
 
-  test:bazel-skipped:
-    desc: Every testcase a `rust_test` target `--skip`s, run under cargo nextest
+  test:workspace-cargo:
+    desc: The `workspace_structure` testcases that shell out to cargo, run from the Bazel-built test binary
     summary: |
-      `bazel:test:unit` is the only whole-suite unit-test run in `task verify`,
-      and its `rust_test` targets `--skip` testcases that walk `crates/*/src` of
-      crates they do not depend on or need a process of their own. Without this
-      step those ran nowhere on Linux. The macOS and Windows legs run them from
-      the Linux-built bundle (`cross:test:run SOURCE_ROOT=`), minus the few that
-      shell out to `cargo`.
+      `bazel:test:unit` runs every testcase a `rust_test` target `--skip`s
+      (`<crate>_isolated`, `crates/ocx_test_support/isolated.bzl`) except the
+      five in `NEEDS_CARGO` (`scripts/test_bundle.py`), which read `cargo
+      metadata` and `cargo tree` and so cannot run inside a Bazel sandbox.
+      scripts/workspace_cargo_cases.py runs those five from the binary Bazel
+      already built, in the checkout: nothing is compiled and no nextest is
+      installed. The macOS and Windows legs do not run them at all; the
+      native runners have no cargo checkout.
 
-      scripts/bazel_skipped_tests.py derives the list from the `--skip=` args
-      of every crates/*/BUILD.bazel and maps each to its cargo package and test
-      binary. It reds on zero parsed skips, on a skip that names no testcase,
-      and on fewer testcases run than skips parsed.
+      Reds on a failing case, and on a run that passed any other number of
+      testcases than it named.
     deps:
-      - install:nextest
+      - toolchain
     dir: '{{.ROOT_DIR}}'
-    cmd: python3 scripts/bazel_skipped_tests.py
+    cmd: python3 scripts/workspace_cargo_cases.py --cache-rc '{{.CACHE_RC}}'
 
   test:loop-guard:
     desc: No test holds a loop whose body can neither fail nor be observed
@@ -728,8 +728,8 @@ tasks:
       the keyword — the shape WP-10's in-place strip left behind thirteen
       times, which compiled and passed.
 
-      Reachable without this entry (`test:bazel-skipped` runs the whole
-      target in `task verify`, and so does the `verify:scoped` manifest route), so it gates
+      Reachable without this entry (`bazel:test:unit` runs it as
+      `workspace_structure_isolated` in `task verify`, and so does the `verify:scoped` manifest route), so it gates
       nothing on its own; it exists because the crate-split batches want the
       guard alone, in seconds, between moves.
     deps:

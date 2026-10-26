@@ -86,7 +86,7 @@ tasks:
     desc: 'Run a unit-test bundle natively: BUNDLE=<path> [SOURCE_ROOT=<checkout>] [JUNIT=<path>] [FILTER=<substring>]; needs only Python'
     summary: |
       SOURCE_ROOT also runs every `--skip`ped testcase of every target on its own, in
-      that checkout (what `rust:test:bazel-skipped` does under cargo on Linux); without
+      that checkout (what the `<crate>_isolated` targets do under Bazel on Linux); without
       it those testcases run nowhere and the summary says so.
     requires:
       vars: [BUNDLE]

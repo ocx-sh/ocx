@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -55,3 +56,5 @@ rust_test(
         normal_dev = True,
     ),
 )
+
+crate_tree()

@@ -26,7 +26,8 @@ run 2 reporting everything cached, is consistent with two opposite worlds: a
 graph that really skips per crate, and a graph that invalidates universally but
 was handed an unchanged tree. The summary line cannot tell them apart. So both
 halves are required (ADR § A1): touch a **leaf** (`ocx_exit`) and the re-run set
-must be inside `bazel query 'rdeps(//crates/..., //crates/ocx_exit:ocx_exit)'`;
+must be inside `bazel query 'rdeps(//crates/..., //crates/ocx_exit:ocx_exit + //crates/ocx_exit:tree)'`
+(`:tree` because every `<crate>_isolated` test takes each crate's tree as `data`);
 touch a **hub** (`ocx_util`) and a large set must re-run. **If the two re-run
 sets are equal, the graph is not per-crate and A1 is NOT MET**, whatever run 2
 reported.
@@ -157,14 +158,17 @@ One per nextest suite, so it excludes the filtered twin
 this value is a floor (`>=`), and the twin is held by its own
 `crates/TEST_TARGET_MAP.toml` row and the drift gate's row parity."""
 
-CRATES_TWIN_TEST_TARGETS = 1
-"""`ocx_cli:ocx_cli_seam_test` — a filtered twin of `ocx_cli_test` (ADR C-SEAM:
-the `seam::` cases again, under a poisoned `env`). An `sh_test` over
-`ocx_cli_test`'s binary, not a second `rust_test`, so it adds no compile and
-`kind(rust_test, //crates/...)` does not count it. A Bazel test target with a
+CRATES_TWIN_TEST_TARGETS = 8
+"""`sh_test` twins of a `rust_test`'s own binary — a Bazel test target with a
 `crates/TEST_TARGET_MAP.toml` row but no nextest suite of its own, so the map
 holds `CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS` rows and the drift
-reader's parity counts `rust_test` and `sh_test` alike."""
+reader's parity counts `rust_test` and `sh_test` alike. Neither is a second
+compile, so `kind(rust_test, //crates/...)` does not count them.
+
+`ocx_cli:ocx_cli_seam_test` (ADR C-SEAM) re-runs the `seam::` cases under a
+poisoned `env`. The seven `<crate>_isolated` targets
+(`crates/ocx_test_support/isolated.bzl`) run the testcases a `rust_test`
+`--skip`s, each in a process of its own, with every crate's tree as `data`."""
 
 CRATES_DOC_TEST_TARGETS = 22
 """One `rust_doc_test(name = "<crate>_doc_test")` per crate with a `src/lib.rs`
@@ -188,7 +192,10 @@ CRATES_FILEGROUP_TARGETS = 6
 — fixture trees named as `data`/`compile_data` by a sibling target —
 `ocx_store:shim_blobs`, the committed launcher blobs an acceptance module reads
 (C-020), and `ocx_schema:golden` + `ocx_schema:contract`, the published
-documents and waiver tables `ocx_sdkgen:contract_lint` reads."""
+documents and waiver tables `ocx_sdkgen:contract_lint` reads.
+
+The 24 `:tree` filegroups (`crates/ocx_test_support/isolated.bzl`) are not summands:
+every floor here is a lower bound, and they are one per crate by construction."""
 
 CRATES_RULE_TARGETS = (
     CRATES_LIB_TARGETS
@@ -376,7 +383,7 @@ A1_EMPTY_MSG = (
 )
 A1_WIDE_MSG = (
     "A1: the {which} re-run set is larger than the graph says — {extra} re-ran but is not "
-    "in `bazel query 'rdeps(//crates/..., <{which}>)'`. The graph is wrong"
+    "in `bazel query 'rdeps(//crates/..., <{which}> + <{which}>:tree)'`. The graph is wrong"
 )
 A1_SAME_MSG = (
     "A1 NOT MET: touching the leaf and touching the hub produced the same {count} re-run "

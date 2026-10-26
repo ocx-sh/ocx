@@ -115,7 +115,7 @@ Superseded by AM-1 to AM-3 of the Amendment 2026-10-24 below. The list records t
 
 **Negative:**
 - **gnullvm is the CI-tested Windows target while release ships MSVC.** No gate executes the shipped artifact's linker output or CRT. Recorded gap; moving the release to the Bazel cross-build is a separate decision.
-- Of the 49 testcases `--skip`ped in `rust_test` targets, 44 run on macOS and Windows from the Linux-built bundle (`run_skipped` in `scripts/test_bundle.py`). The 5 `workspace_structure` cases that shell out to `cargo` (`NEEDS_CARGO`) run on Linux only (`rust:test:bazel-skipped`).
+- Of the 49 testcases `--skip`ped in `rust_test` targets, 44 run on macOS and Windows from the Linux-built bundle (`run_skipped` in `scripts/test_bundle.py`). The 5 `workspace_structure` cases that shell out to `cargo` (`NEEDS_CARGO`) run on Linux only (`rust:test:workspace-cargo`, from the Bazel-built binary); the other 44 run under Bazel as `<crate>_isolated` targets.
 - Doctests stay Linux-only (build actions).
 - macOS and Windows run the full acceptance suite in four shards on native zot. The `registry:2` and Sigstore cases skip with a `no docker:` reason, and each OS's `SKIP_CEILING` counts them.
 

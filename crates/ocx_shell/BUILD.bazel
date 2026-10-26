@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -52,3 +53,5 @@ rust_doc_test(
     # `__testing`-gated items' doctests silently drop out (C-031 name diff).
     crate_features = ["__testing"],
 )
+
+crate_tree()
