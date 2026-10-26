@@ -469,7 +469,7 @@ failed assert on a missing prerequisite over `pytest.skip`.
 
 ## Quality Gate
 
-Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
+Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). No local full `task verify`, finalize included — CI is the full gate; `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
 
 **Never run `task website:build` while an acceptance suite is running.** Its
 `website:recordings:ensure-binary` step runs `rust:build`, which republishes

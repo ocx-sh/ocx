@@ -77,7 +77,7 @@ Three gates (ADR `adr_crate_split_workspace.md` § "Verification tiers"): `task`
 
 ## AI Quality Gate Pattern
 
-Each subsystem rule has a Quality Gate section, and every one of them now reads the same sentence: per task / review-fix iteration, `task verify:scoped --force`; full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Stops expensive acceptance tests running every iteration.
+Each subsystem rule has a Quality Gate section, and every one of them now reads the same sentence: per task / review-fix iteration, `task verify:scoped --force`; no local full `task verify`, finalize included — CI is the full gate; `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels). Stops expensive acceptance tests running every iteration.
 
 ## Taskfile Features in Use
 

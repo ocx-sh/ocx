@@ -120,11 +120,11 @@ Otherwise, `AskUserQuestion`:
 - Stage files **by name**, never `git add -A` / `.`. Prevents accidentally-committed secrets **and** bug where pre-staged files from previous session get swept into commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
 - **`--amend` must fold dirty tree into HEAD.** When `/commit --amend` invoked and working tree has uncommitted changes, those changes **must** be staged and included in amend — `--amend` with nothing staged silently becomes message-only amend that drops user's active work. Always `git add <files>` before `git commit --amend`, even when user only asked to "amend". After amend, run `git show --stat HEAD` and confirm expected files appear in diff stat before reporting success.
-- Git's own `commit-msg` hook (a prek shim → `scripts/commit_gate.py`; `task git:hooks` installs it) blocks commits without fresh verify mark. When blocks, run `task verify:scoped --force` (or `task verify`; never `--no-verify`) — both write the mark themselves. **Before finalize, the escape hatch is always fine**: run the checks the change actually needs (none for docs), then
+- Git's own `commit-msg` hook (a prek shim → `scripts/commit_gate.py`; `task git:hooks` installs it) blocks commits without fresh verify mark. When blocks, run the touched checks or `task verify:scoped --force` (never `--no-verify`) — both write the mark themselves. **Before finalize, the escape hatch is always fine**: run the checks the change actually needs (none for docs), then
   ```sh
   task verify:mark
   ```
-  and name what was deferred in the commit body. The full `task verify` runs once, at finalize.
+  and name what was deferred in the commit body. No local full `task verify`; CI is the full gate.
   Manual mark is `scoped`, unconditional on any branch — merge commits included; only a `release:` commit (needs `task verify NOCACHE=1`) and a commit on `main` need the full run. Level per change → `workflow-git.md` § Verification Levels. Bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites JSON mark a verify just wrote. A mark certifies one HEAD **and one working tree** — a sibling agent worktree at the same HEAD must earn its own. Then retry: staging survives, because the gate aborts the commit and never the `git add` before it.
 - Commit with HEREDOC:
 

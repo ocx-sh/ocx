@@ -80,7 +80,7 @@ Use `task` commands: `task test:quick` (all acceptance tests, skip rebuild), `ta
 - Every bug fix gets regression test
 - NEVER remove or skip existing tests
 - Specification mode: NEVER read impl code, only design record + stubs
-- Run `task verify:scoped --force` before reporting done (required by swarm coordination protocol); full `task verify` runs once, at finalize
+- Run `task verify:scoped --force` before reporting done (required by swarm coordination protocol); never a local full `task verify`, finalize included (CI is the full gate)
 
 ## On Completion
 

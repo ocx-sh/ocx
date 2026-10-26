@@ -98,4 +98,4 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 
 ## Quality Gate
 
-Per task / review-fix iteration for website-only changes: `task website:build` (validates generated content, schema, Astro output), then `task website:lint:links`, not full `task verify`. Full `task verify` runs once, at finalize; until then `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels).
+Per task / review-fix iteration for website-only changes: `task website:build` (validates generated content, schema, Astro output), then `task website:lint:links`, not full `task verify`. No local full `task verify`, finalize included — CI is the full gate; `task verify:mark` is always allowed — pick the level the change needs (`workflow-git.md` § Verification Levels).

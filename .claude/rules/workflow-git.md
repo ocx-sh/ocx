@@ -60,15 +60,15 @@ Branch ready to fast-forward onto `main` when **all** hold:
 - [ ] No `Checkpoint` commits remain
 - [ ] No "bundle" commits mixing unrelated concerns (working-phase bundles must split or squash)
 - [ ] Each commit one concern
-- [ ] `task verify` passes on final state
+- [ ] The checks the series touched pass locally (crate tests, routed gates); CI's sharded pipeline is the full gate
 
 `/finalize` checks each and proposes rebase plan for anything that fails.
 
 ## Quality Gate
 
-Every commit on branch must pass `task verify` before landing on `main`. Git enforces it itself: the `commit-msg` hook runs `scripts/commit_gate.py` — a prek hook declared in `.pre-commit-config.yaml`, installed into git's hooks directory by `task git:hooks` (armed by `task` and `task verify`) — so every commit is gated however it was spelled and the index survives a refusal. The push gate is `scripts/pre-push.sh`, copied into the same directory. When it blocks:
+Every commit needs a verify mark. Git enforces it itself: the `commit-msg` hook runs `scripts/commit_gate.py` — a prek hook declared in `.pre-commit-config.yaml`, installed into git's hooks directory by `task git:hooks` (armed by `task` and `task verify`) — so every commit is gated however it was spelled and the index survives a refusal. The push gate is `scripts/pre-push.sh`, copied into the same directory. When it blocks:
 
-1. Run `task verify` or `task verify:scoped --force` (never bypass with `--no-verify`; `--force` is the documented spelling — without it, a `sources:`-cached sub-task can skip while the mark still gets written). Both write the verify mark themselves.
+1. Run the checks the change touched, or `task verify:scoped --force` (never bypass with `--no-verify`; `--force` is the documented spelling — without it, a `sources:`-cached sub-task can skip while the mark still gets written). Both write the verify mark themselves.
 2. Or mark the tree — `task verify:mark` is the **unconditional escape hatch**, always allowed on a branch, merge commits included:
    ```sh
    task verify:mark
@@ -80,7 +80,7 @@ Carve-outs, all deliberate: a rebase in progress commits ungated (git rewrites H
 
 ### Verification Levels
 
-Pick the level the change needs; the agent decides, nobody audits the choice. The inner loop is for speed — cleanup and hardening happen at `/hex-finalize`, which always runs the full `task verify`.
+Pick the level the change needs; the agent decides, nobody audits the choice. **No full `task verify` locally** (owner, 2026-10-26): it takes 20–30 min here, and CI runs the whole pipeline sharded on every push. Finalize included: run what the series touched, then `task verify:mark`.
 
 | Change | Level before committing |
 |---|---|
@@ -89,9 +89,10 @@ Pick the level the change needs; the agent decides, nobody audits the choice. Th
 | Code in one or a few crates | the crate's tests, or `task verify:scoped --force`, then commit (it marks itself) |
 | `verify:scoped` escalates (taskfile, BUILD/bzl, `scripts/**`, workflows) but the edit is small | run what the edit touches, then `task verify:mark` |
 | A work-package merge | `git merge`, then `task verify:mark` or a scoped run — no full verify per merge |
-| Finalize, `release:`, `main` | full `task verify` (mechanically required) |
+| Finalize | what the series touched, then `task verify:mark`; CI is the full gate |
+| `release:` | full `task verify NOCACHE=1` (mechanically required by `release:gate`) |
 
-Full `task verify` otherwise only when you want the signal — never as a ritual.
+Never a full `task verify` otherwise, not even "for the signal" — push and read CI.
 
 ## Phase Boundaries — When to Use Which Skill
 

@@ -7,8 +7,10 @@ not copies. Team-shared — commit it.
 
 - Verification: `CLAUDE.md` › "Build & Development" — `task verify:scoped
   --force` never per step or per merge (steps run the narrowest test they
-  touched; commits and merges use `--no-verify`); `task verify` (full) runs
-  only at the run's integration gate and at finalize; `task` = fast check.
+  touched; commits and merges use `--no-verify`); **no local full `task verify`,
+  integration gate and `/hex-finalize` included** (owner, 2026-10-26: 20–30 min here) —
+  run what the series touched, then `task verify:mark`; CI's sharded pipeline is the
+  full gate. `task` = fast check.
 - Research artifacts: `.claude/artifacts/research_<topic>.md` (project
   convention, per `.claude/templates/artifacts/adr.template.md`; committed).
   `hex-discuss` lanes default to `.agents/research/` (gitignored) — copy into

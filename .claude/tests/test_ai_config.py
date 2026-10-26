@@ -3093,9 +3093,9 @@ class TestAgentGateWording:
     and `.claude/skills/**` that prescribes a gate must state the canonical
     sentence (ADR `adr_test_speed_tiers.md` § C-AGENT):
 
-        Per task / review-fix iteration: `task verify:scoped --force`. Full
-        `task verify` runs once, at finalize; until then `task verify:mark`
-        is always allowed — pick the level the change needs
+        Per task / review-fix iteration: `task verify:scoped --force`. No
+        local full `task verify`, finalize included — CI is the full gate;
+        `task verify:mark` is always allowed — pick the level the change needs
         (`workflow-git.md` § Verification Levels).
 
     The line-scoped regex below is the ADR's own enforcement design: a line
@@ -3162,8 +3162,8 @@ class TestAgentGateWording:
         original = target.read_text(encoding="utf-8")
         canonical = (
             "Per task / review-fix iteration: `task verify:scoped --force`. "
-            "Full `task verify` runs once, at finalize; until then `task "
-            "verify:mark` is always allowed — pick the level the change needs "
+            "No local full `task verify`, finalize included — CI is the full "
+            "gate; `task verify:mark` is always allowed — pick the level the change needs "
             "(`workflow-git.md` § Verification Levels)."
         )
         assert canonical in original, (
@@ -3225,8 +3225,8 @@ class TestAgentGateWording:
         assert self._CANONICAL_FRAGMENT in original
         reverted = original.replace(
             "Use `task` commands for standard workflows: `task verify:scoped "
-            "--force` per task/review-fix iteration; full `task verify` runs "
-            "once, at finalize; until then `task verify:mark` is always "
+            "--force` per task/review-fix iteration; never a local full `task "
+            "verify`, finalize included (CI is the full gate); `task verify:mark` is always "
             "allowed — pick the level the change needs (`workflow-git.md` § "
             "Verification Levels). `task test:quick` (acceptance). Run `task "
             "--list` to discover commands.",

@@ -201,11 +201,13 @@ tasks:
         vars: { SCOPE: full }
 
   verify:scoped:
-    desc: Scoped quality gate — only what changed since the last full verify (hubs and unrouted paths escalate to `task verify`)
+    desc: Scoped quality gate — only what changed since the last mark; an escalating path runs the scoped arm, never the full `task verify`
     summary: |
       scripts/scoped_gate.py --plan decides (plan_crate_split_workspace.md C-019,
       plan_test_speed_tiers.md C-014), reading test/scoped_rows.toml:
-        escalate → task verify: a path under a [security] glob (checked
+        escalate → the scoped arm (or the routed one when no crate changed),
+                   with the reasons printed — never the full `task verify`,
+                   which CI runs sharded: a path under a [security] glob (checked
                    first), a command file a [verbs] entry names or no
                    `command` marker selects, any other path under
                    crates/ocx_cli/ (permit-list default), a hub crate (≥ 4
@@ -215,7 +217,7 @@ tasks:
                    with no route
         routed   → the lint tier (test:lint:structure) and the coverage guard
                    (test:rows:check), on every routed and scoped run (an
-                   escalate reaches both through `verify`), then only the
+                   escalate runs them too), then only the
                    routed checks: ruff for `test/lint/**`, claude:tests for `.claude/**`,
                    `.agents/**`, AGENTS.md and CLAUDE.md, actionlint (+ test_workflows.py)
                    for `.github/**`, test:parallel over the touched
@@ -254,9 +256,9 @@ tasks:
       PLAN:
         sh: python3 "{{.ROOT_DIR}}/scripts/scoped_gate.py" --plan
       DECISION: '{{(fromJson .PLAN).decision}}'
-      # Empty unless the decision is `scoped`: an escalated run must not add
-      # per-crate steps after the full verify it already ran.
-      CRATES: '{{if eq (fromJson .PLAN).decision "scoped"}}{{(fromJson .PLAN).crates | join " "}}{{end}}'
+      # The arm that runs: an escalate takes the scoped arm when a crate changed, else the routed one.
+      ARM: '{{if eq .DECISION "routed"}}routed{{else if (fromJson .PLAN).crates}}scoped{{else}}routed{{end}}'
+      CRATES: '{{if eq .ARM "scoped"}}{{(fromJson .PLAN).crates | join " "}}{{end}}'
       ROUTE_CLAUDE: '{{(fromJson .PLAN).routes.claude | join " "}}'
       ROUTE_WORKFLOWS: '{{(fromJson .PLAN).routes.workflows | join " "}}'
       ROUTE_TESTS: '{{(fromJson .PLAN).routes.tests | join " "}}'
@@ -271,46 +273,45 @@ tasks:
     # preconditions, and a gate must not be silently skippable.
     cmds:
       # Here too, not only in `verify`: this is the gate a work package runs,
-      # and it only reaches `verify` on an escalate. A checkout whose operator
+      # and it never reaches `verify`. A checkout whose operator
       # never runs anything else would otherwise commit with no hooks armed.
       - task: git:hooks
       - printf '%s\n' {{shellQuote .PLAN}}
       - if: '[ "{{.DECISION}}" = escalate ]'
-        task: verify
+        cmd: 'echo "verify:scoped - escalating paths run the {{.ARM}} arm; the sharded CI pipeline is the full gate" >&2'
       # C-015 at T0: a command file or module the table no longer covers reds
       # here, before any build is spent.
-      - if: '[ "{{.DECISION}}" != escalate ]'
-        task: test:rows:check
+      - task: test:rows:check
       # The lint tier on both non-escalating arms: it is uncached and cheap,
       # and a sweep over the tree is exactly what a narrow route cannot select.
       # The scoped arm runs it as a lane of `.verify:scoped:lanes`.
-      - if: '[ "{{.DECISION}}" = routed ]'
+      - if: '[ "{{.ARM}}" = routed ]'
         task: test:lint:structure
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_LINT}}" ]'
+      - if: '[ -n "{{.ROUTE_LINT}}" ]'
         task: test:lint
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_CLAUDE}}" ]'
+      - if: '[ -n "{{.ROUTE_CLAUDE}}" ]'
         task: claude:tests
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_WORKFLOWS}}" ]'
+      - if: '[ -n "{{.ROUTE_WORKFLOWS}}" ]'
         task: ci:actionlint
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_WORKFLOWS}}" ]'
+      - if: '[ -n "{{.ROUTE_WORKFLOWS}}" ]'
         cmd: '{{.WORKFLOW_TEST_CMD}}'
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TESTS}}" ]'
+      - if: '[ -n "{{.ROUTE_TESTS}}" ]'
         task: test:lint
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TESTS}}" ]'
+      - if: '[ -n "{{.ROUTE_TESTS}}" ]'
         task: test:parallel
         vars: { CLI_ARGS: '{{.ROUTE_TESTS}}', OCX_GATE: inner }
       # Gate tooling: its self-tests certify the edit; no escalation.
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_SCRIPTS}}" ]'
+      - if: '[ -n "{{.ROUTE_SCRIPTS}}" ]'
         task: scripts:self-test
       # A taskfile edit: listing every task parses the whole include graph.
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TASKFILES}}" ]'
+      - if: '[ -n "{{.ROUTE_TASKFILES}}" ]'
         cmd: task --list-all
       # A crate's Cargo.toml / README is workspace structure: the guards over
       # it are one test target, and `nextest -p <that crate>` selects none of
       # them. Reaching them used to mean the full verify because they were a
       # test of package `ocx`; since D34 they are a test of `ocx_test_support`,
       # which builds in seconds, so the route certifies the path on its own.
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
+      - if: '[ -n "{{.ROUTE_MANIFESTS}}" ]'
         cmd: cargo nextest run -p ocx_test_support --test workspace_structure --locked
       # D40: a manifest edit decides what the workspace compiles — `[features]`,
       # a dependency edge, `default-features`, a `[[bin]]` — and `Cargo.lock`
@@ -320,24 +321,23 @@ tasks:
       # workspace that does not build. `--locked` is part of the check: a
       # manifest edit the lock has not caught up with fails here by name.
       # The scoped arm runs the same check in `.verify:scoped:cargo`.
-      - if: '[ "{{.DECISION}}" = routed ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
+      - if: '[ "{{.ARM}}" = routed ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
         cmd: cargo check --workspace --all-targets --locked
       # A docs edit: the lint tier already ran above (routed) or in the lanes
       # (scoped); the site's node tests run, and the generated reference must
       # still match its sources.
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_DOCS}}" ]'
+      - if: '[ -n "{{.ROUTE_DOCS}}" ]'
         task: website:test
-      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_DOCS}}" ]'
+      - if: '[ -n "{{.ROUTE_DOCS}}" ]'
         task: website:reference:check
       # Everything else the scoped arm runs, as concurrent lanes.
-      - if: '[ "{{.DECISION}}" = scoped ]'
+      - if: '[ "{{.ARM}}" = scoped ]'
         task: .verify:scoped:lanes
         vars: { CRATES: '{{.CRATES}}', ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
       # LOG_RUN: this run's selection goes to the shared scoped-run log that
       # a failed T2 during a merge reads to attribute escapes (C-018). Only
       # here — a hand `verify:mark` ran no selection and logs nothing.
-      - if: '[ "{{.DECISION}}" != escalate ]'
-        task: .verify:mark
+      - task: .verify:mark
         vars: { SCOPE: scoped, CRATES: '{{.CRATES}}', LOG_RUN: '1' }
 
   .verify:scoped:lanes:

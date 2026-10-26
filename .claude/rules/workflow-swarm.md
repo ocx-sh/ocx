@@ -211,7 +211,7 @@ Every `.claude/state/plans/plan_*.md` carries a `## Status` block at top: `Plan`
 When worker completes assigned task, MUST follow full completion protocol from AGENTS.md:
 
 1. File issues for remaining work
-2. Run quality gates via `task verify:scoped --force` (if code changed) — full `task verify` runs once, at finalize (`workflow-git.md` § Verification Levels); run `task --list` to discover available commands
+2. Run quality gates via `task verify:scoped --force` (if code changed) — never a local full `task verify`, finalize included (`workflow-git.md` § Verification Levels); run `task --list` to discover available commands
 3. **Commit all changes** on feature branch
 4. Report completion to orchestrator
 
@@ -230,7 +230,7 @@ Plans MUST be parallel-capable by design when work packages (WPs) are file-disjo
 - Run `cargo check` after **every** merge — catches cross-file interactions per-file verify misses
 - Remove the worktree after its WP merges
 
-**Merging:** `git merge --no-ff <wp-branch>` with `task verify:mark` (or a scoped run) before it — no full verify per merge; one at finalize. Conflicted or hand-resolved merges: run what the resolution touches.
+**Merging:** `git merge --no-ff <wp-branch>` with `task verify:mark` (or a scoped run) before it — no full verify per merge or at finalize; CI is the full gate. Conflicted or hand-resolved merges: run what the resolution touches.
 
 ### Memory budget — build parallelism, not worktree count
 
