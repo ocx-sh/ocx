@@ -133,6 +133,13 @@ research-axes:
   `/home/mherwig/dev/ocx-conventions` and `lore` → `/home/mherwig/dev/grimoire-lore`. Unlike the two in Pointers,
   both checkouts sit on owner branches, so their WPs use a separate worktree under this repo's
   `.agents/worktrees/sat-<repo>` from `origin/main` (plan D12), never commit in place.
+- **ADR (hex-architect xhigh, 2026-10-25, Proposed): `.claude/artifacts/adr_publisher_trust_distribution.md`** + `system_design_publisher_trust.md` — publisher trust for the ocx.sh index: C1 minimal TUF over the index (offline root, one online key, `tough`, root chaining) beat B "index vouches" 418/370 after round-1 review; gated on owner Q1 (long-lived keys for the index anchor), else Fallback B. Phase 1: each publishing run keyless-signs its own digest. Research: `.claude/artifacts/research_publisher_trust_{package_ecosystems,frameworks,oci_policy,gapcheck}.md`; reviews + triage: `.agents/research/review_publisher_trust_{round1_*,revalidation}.md` (11 actionable left after revalidation, escalated). Next: owner Q1–Q3, then `/hex-plan`.
+- **Discussion (2026-10-25, handed-off → architect): `.agents/discussions/release-signing-trust-default.md`** —
+  phase 1 sign own OCI releases keyless + manual backfill + self-verify, no policy; phase 2 ADR: npm-style
+  self-service signer onboarding for the ocx.sh index without an ocx release, rotation-safe, offline, operator
+  override. Owner mandate: derive from established prior art, four improvised designs rejected. Research:
+  `.agents/research/research_{release_signing_prior_art,signer_binding_ecosystems,trust_metadata_distribution,
+  stable_signer_identity,release_signing_codebase}.md`. Next: `/hex-architect .agents/discussions/release-signing-trust-default.md`.
 - **Active plan (hex-plan high, 2026-10-24, plan-approved): `.claude/artifacts/plan_issue_639_index_closure.md`** —
   federated ocx#639 closure: P1 ocx 7 steps, P2 indexbot 12, P3 catalog 8, P4 cross-repo gate; one serial pipeline
   per repo, repos parallel; critical path P2 → P4; landing catalog → ocx → indexbot.
