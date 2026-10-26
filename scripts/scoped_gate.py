@@ -25,7 +25,7 @@ The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
      existing `test/tests/test_<f>.py` → `task test:parallel --
      tests/test_<f>.py`; `scripts/**` → `task scripts:self-test`; every
      taskfile (root or nested) → `task --list-all` (a parse). Neither escalates:
-     the full verify runs at a run's integration and release gates. Every other
+     the full verify runs in CI. Every other
      non-member path — root manifests, the lockfile,
      `test/src/**`, `test/conftest.py`, `test/tests/` helpers, `external/**`,
      the nextest floor files under `crates/` — escalates to `task verify` and
@@ -870,13 +870,10 @@ def log_run(repo: Path) -> None:
     The selection is recomputed from `make_plan` at mark time: the modules
     `test:scoped` ran (`acceptance_globs`) plus the edited ones `test:parallel`
     ran (`routes["tests"]`), so an edited-and-run module is not an escape. An
-    escalated plan logs nothing — that run was the full verify, not a scoped one.
+    An escalated plan runs the scoped arm too, so it logs like one.
     """
     try:
         plan = make_plan(repo, mark_file())
-        if plan.decision == "escalate":
-            print("scoped_gate: --log-run: the plan escalates, so this is not a scoped run — not logged", file=sys.stderr)
-            return
         log_scoped_run(repo, plan.acceptance_globs + plan.routes["tests"])
     except (SystemExit, OSError, ValueError, ImportError) as problem:
         # ImportError: no `fcntl` off POSIX — the mark above is written already.
@@ -1051,12 +1048,12 @@ def classify(
         member = ws.crate_of_dir.get("/".join(parts[:2])) if parts[0] == "crates" and len(parts) > 2 else None
         glob = security_glob(path, rows)
         if glob:
-            plan.escalate.append(f"{path}: [security] {glob} — full verify")
+            plan.escalate.append(f"{path}: [security] {glob} — escalates to the scoped arm")
             if member:
                 crates.add(member)
         elif path in ws.build_scripts:
             # Named by a manifest's `build =`, whatever the file is called.
-            plan.escalate.append(f"{path}: a crate build script (cargo metadata custom-build) — full verify")
+            plan.escalate.append(f"{path}: a crate build script (cargo metadata custom-build) — escalates to the scoped arm")
             if member:
                 crates.add(member)
         elif path.startswith(COMMAND_DIR):
@@ -1065,12 +1062,12 @@ def classify(
             pattern = verbs_pattern(key, rows)
             selected = selected_modules(key, markers)
             if pattern:
-                plan.escalate.append(f"{path}: [verbs] {pattern} — a file several verbs share, full verify")
+                plan.escalate.append(f"{path}: [verbs] {pattern} — a file several verbs share, escalates to the scoped arm")
             elif not path.endswith(".rs") or not (root / path).is_file():
-                plan.escalate.append(f"{path}: not an existing command file — full verify")
+                plan.escalate.append(f"{path}: not an existing command file — escalates to the scoped arm")
             elif not selected:
                 plan.escalate.append(
-                    f"{path}: no acceptance module carries a `command` marker for {key!r} — full verify"
+                    f"{path}: no acceptance module carries a `command` marker for {key!r} — escalates to the scoped arm"
                 )
             else:
                 modules.update(selected)
@@ -1078,7 +1075,7 @@ def classify(
             # Its manifest and README too: the CLI crate's manifest decides the
             # shipped binary (features, `[[bin]]`), which no scoped subset certifies.
             crates.add(CLI_PACKAGE)
-            plan.escalate.append(f"{path}: CLI crate path outside command/ — permit-list default, full verify")
+            plan.escalate.append(f"{path}: CLI crate path outside command/ — permit-list default, escalates to the scoped arm")
         elif path in AGENT_INSTRUCTIONS or parts[0] == ".agents" or path.startswith(CLAUDE_TESTS_READS):
             # `.agents/**` is swarm memory (hex.md, discussions): AI config
             # like `.claude/**`, and `claude:tests` is the cheapest gate
@@ -1088,18 +1085,18 @@ def classify(
                 plan.routes["docs"].append(path)
         elif parts[-1] == "taskfile.yml" or parts[-1].endswith(".taskfile.yml"):
             # Root and nested taskfiles: a parse/listing (`task --list-all`)
-            # is the cheap check; the full verify runs only at a run's gates.
+            # is the cheap check; the full verify runs in CI.
             plan.routes["taskfiles"].append(path)
         elif parts[0] == "website":
             # The docs content, its plugins and its tests: the structural
             # sweeps and the generated-reference drift check certify an edit;
-            # the full verify runs only at a run's gates.
+            # the full verify runs in CI.
             plan.routes["docs"].append(path)
         elif parts[0] == ".github":
             plan.routes["workflows"].append(path)
         elif parts[0] == "scripts":
             # Gate tooling: its self-tests (`task scripts:self-test`) certify
-            # an edit here; the full verify runs only at a run's gates.
+            # an edit here; the full verify runs in CI.
             plan.routes["scripts"].append(path)
         elif parts[0] == "crates" and len(parts) == 3 and parts[2] in MANIFEST_FILES:
             # C-019 (2): a crate's manifest and README are workspace
@@ -1144,26 +1141,26 @@ def classify(
             if (root / path).is_file():
                 plan.routes["tests"].append("/".join(parts[1:]))
             else:
-                plan.escalate.append(f"{path}: deleted acceptance file — full verify")
+                plan.escalate.append(f"{path}: deleted acceptance file — escalates to the scoped arm")
         elif parts[:2] == ["test", "lint"] or path in LINT_TIER_FILES:
             # The lint tier runs uncached on every non-escalating arm, so its
             # own edit is certified by that run plus ruff over the suite.
             plan.routes["lint"].append(path)
         else:
-            plan.escalate.append(f"{path}: no route — full verify")
+            plan.escalate.append(f"{path}: no route — escalates to the scoped arm")
     plan.crates = sorted(crates)
     plan.hubs = ws.hubs()
     globs: set[str] = set()
     for crate in plan.crates:
         for reason in ws.hub_reasons(crate):
-            plan.escalate.append(f"{crate}: {reason} — full verify")
+            plan.escalate.append(f"{crate}: {reason} — escalates to the scoped arm")
         if crate == CLI_PACKAGE:
             continue
         row = rows.crates.get(crate)
         if row is None:
-            plan.escalate.append(f"{crate}: no [crates] row in test/scoped_rows.toml — full verify")
+            plan.escalate.append(f"{crate}: no [crates] row in test/scoped_rows.toml — escalates to the scoped arm")
         elif row == "escalate":
-            plan.escalate.append(f"{crate}: [crates] row reads escalate — full verify")
+            plan.escalate.append(f"{crate}: [crates] row reads escalate — escalates to the scoped arm")
         else:
             globs.update(row)
     plan.acceptance_globs = sorted(modules | globs)
