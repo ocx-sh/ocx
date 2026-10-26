@@ -194,7 +194,7 @@ jobs:
         if: runner.os != 'Linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.14'
+          python-version: '3.15'
           architecture: ${{ runner.os == 'Windows' && runner.arch == 'ARM64' && 'x64' || '' }}
       - name: Provide POSIX tools and python3 (Windows)
         if: runner.os == 'Windows'
