@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@astrojs/starlight": "0.42.6",
-    "@ocx-sh/theme": "github:ocx-sh/website#77821c8d79e59d68e2593c895f9dcff630d71c9a&path:/packages/theme",
+    "@ocx-sh/theme": "0.3.0",
     "astro": "7.4.0"
   },
   "devDependencies": {

@@ -1,4 +1,5 @@
 allowBuilds:
   esbuild: true
   sharp: true
-  '@ocx-sh/theme@https://codeload.github.com/ocx-sh/website/tar.gz/77821c8d79e59d68e2593c895f9dcff630d71c9a#path:/packages/theme': true
+minimumReleaseAgeExclude:
+  - '@ocx-sh/theme@0.3.0'

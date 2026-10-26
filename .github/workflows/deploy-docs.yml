@@ -87,13 +87,13 @@ jobs:
           name: site
           path: dist
       - name: Deploy docs
-        uses: ocx-sh/website/.github/actions/deploy@1b898a76d4c3bbe60d9619a931c74f21660f4eb4 # v0.1.1
+        uses: ocx-sh/website/.github/actions/deploy@e86b83014538975c186912e5038567c69b2f2f2c # v0.3.0
         with:
           dist: dist/docs
           path: /docs/
           storage-key: ${{ secrets.BUNNY_STORAGE_KEY }}
       - name: Deploy schemas
-        uses: ocx-sh/website/.github/actions/deploy@1b898a76d4c3bbe60d9619a931c74f21660f4eb4 # v0.1.1
+        uses: ocx-sh/website/.github/actions/deploy@e86b83014538975c186912e5038567c69b2f2f2c # v0.3.0
         with:
           dist: dist/schemas
           path: /schemas/
