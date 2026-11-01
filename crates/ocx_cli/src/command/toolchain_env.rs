@@ -689,9 +689,7 @@ mod tests {
     /// `global_env_with_no_flag_follows_the_links` is this test's positive
     /// control and must be read with it: without that one, a fixture whose lock
     /// failed to parse (no toolchain lane at all, hence no heal, hence no root)
-    /// would satisfy this assertion for entirely the wrong reason. They are two
-    /// tests rather than two assertions because `Context::try_init` installs the
-    /// global tracing dispatcher, which a process may do exactly once.
+    /// would satisfy this assertion for entirely the wrong reason.
     #[tokio::test]
     async fn global_env_pinned_selects_the_digest_lane() {
         assert!(

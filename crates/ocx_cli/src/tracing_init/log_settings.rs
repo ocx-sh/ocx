@@ -62,7 +62,7 @@ impl LogSettings {
     /// Installs a plain fmt subscriber on stderr.
     ///
     /// # Errors
-    /// When a global subscriber is already installed, or the filter env var is invalid.
+    /// When the filter env var is invalid. A subscriber already installed is kept, not an error.
     pub fn init(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tracing_subscriber::{layer::SubscriberExt, prelude::*, util::SubscriberInitExt};
 
@@ -74,10 +74,10 @@ impl LogSettings {
             .with_writer(std::io::stderr)
             .with_filter(filter);
 
-        tracing_subscriber::registry()
-            .with(fmt_layer)
-            .try_init()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        // Fails only when a global subscriber or `log` logger is already installed, which happens
+        // when a second `Context` is built in one process (libtest threads); the first one stays.
+        let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+        Ok(())
     }
 
     /// Installs a fmt subscriber writing through `progress`, so log lines never tear an active bar.
@@ -98,10 +98,10 @@ impl LogSettings {
             .with_writer(ProgressLogWriter(progress.writer()))
             .with_filter(filter);
 
-        tracing_subscriber::registry()
-            .with(fmt_layer)
-            .try_init()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        // Fails only when a global subscriber or `log` logger is already installed, which happens
+        // when a second `Context` is built in one process (libtest threads); the first one stays.
+        let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+        Ok(())
     }
 
     /// Builds an `EnvFilter` from `OCX_LOG_CONSOLE` → `OCX_LOG_LEVEL` → `RUST_LOG` → the default level.
