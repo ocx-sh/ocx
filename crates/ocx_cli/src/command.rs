@@ -395,8 +395,7 @@ pub enum Command {
     /// Deprecated spelling of `ocx exec`; removed in 0.7.
     #[command(name = "run", hide = true)]
     DeprecatedRun(toolchain_exec::ToolchainExec),
-    #[command(subcommand)]
-    Shell(shell::Shell),
+    Shell(shell::ShellArgs),
     /// Manage the OCX installation itself (PATH activation, completions, self-update).
     #[command(name = "self", subcommand)]
     Self_(self_group::SelfGroup),

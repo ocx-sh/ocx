@@ -116,7 +116,10 @@ impl App {
         // Static commands bypass `Context::try_init`, which aborts on bad ambient config.
         match cli.command {
             Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await.map_err(fail),
-            Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => {
+            Some(command::Command::Shell(command::shell::ShellArgs {
+                command: Some(command::shell::Shell::Completion(ref c)),
+                ..
+            })) => {
                 let result = c.execute(&cli.context).await;
                 if result.is_err() {
                     init_bypass_logging(&cli.context, color_config);
@@ -316,12 +319,16 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
         Some(
             command::Command::Version(_)
                 | command::Command::About(_)
-                | command::Command::Shell(
-                    command::shell::Shell::Allow(_)
-                        | command::shell::Shell::Completion(_)
-                        | command::shell::Shell::Revoke(_)
-                        | command::shell::Shell::State(_)
-                )
+                | command::Command::Shell(command::shell::ShellArgs {
+                    command: Some(
+                        command::shell::Shell::Allow(_)
+                            | command::shell::Shell::Completion(_)
+                            | command::shell::Shell::Revoke(_)
+                            | command::shell::Shell::State(_),
+                    ),
+                    ..
+                })
+                | command::Command::Shell(command::shell::ShellArgs { command: None, .. })
                 | command::Command::Self_(_)
                 | command::Command::Config(_)
                 | command::Command::Exec(_)
@@ -379,12 +386,15 @@ fn should_check_managed_config_refresh(command: &Option<command::Command>) -> bo
         Some(
             command::Command::Version(_)
                 | command::Command::About(_)
-                | command::Command::Shell(
-                    command::shell::Shell::Allow(_)
-                        | command::shell::Shell::Completion(_)
-                        | command::shell::Shell::Revoke(_)
-                        | command::shell::Shell::State(_)
-                )
+                | command::Command::Shell(command::shell::ShellArgs {
+                    command: Some(
+                        command::shell::Shell::Allow(_)
+                            | command::shell::Shell::Completion(_)
+                            | command::shell::Shell::Revoke(_)
+                            | command::shell::Shell::State(_),
+                    ),
+                    ..
+                })
                 | command::Command::Self_(_)
                 | command::Command::Config(_)
         )
@@ -993,7 +1003,10 @@ mod tests {
                 command::shell::Shell::Revoke(_) => "Shell::Revoke",
                 command::shell::Shell::State(_) => "Shell::State",
             };
-            let cmd = Some(command::Command::Shell(variant));
+            let cmd = Some(command::Command::Shell(command::shell::ShellArgs {
+                command: Some(variant),
+                ..command::shell::ShellArgs::parse_from(["shell"])
+            }));
             assert!(
                 !should_check_for_update(&cmd),
                 "every Shell variant must be in the update-check skip list; \

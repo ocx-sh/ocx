@@ -3,14 +3,100 @@
 
 use std::process::ExitCode;
 
-use clap::Subcommand;
+use clap::{Parser, Subcommand};
 
-/// Shell-integration commands.
+use crate::app::CliRefusal;
+use crate::options;
+
+/// Open your shell inside the project environment.
 ///
-/// Generate static shell completion scripts, consent to a project's shell
-/// activation or withdraw that consent, and report the state of the per-prompt
-/// environment integration. Login-profile activation is handled by
-/// `$OCX_HOME/env.sh` (sourced from your shell profile), not here.
+/// Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it:
+/// `-g` selects groups, `--with` adds packages not in `ocx.toml`, `--stack` keeps the active
+/// environment underneath. `exit` returns to the shell you came from.
+///
+/// The subcommands generate shell completions, grant or revoke a project's shell activation,
+/// and report the state of the per-prompt integration. Login activation is `$OCX_HOME/env.sh`.
+#[derive(Parser)]
+#[command(args_conflicts_with_subcommands = true, subcommand_required = false)]
+pub struct ShellArgs {
+    #[command(subcommand)]
+    pub command: Option<Shell>,
+
+    #[clap(flatten)]
+    pub groups: options::GroupSelection,
+
+    #[clap(flatten)]
+    pub env: options::EnvOverride,
+
+    #[clap(flatten)]
+    pub pinned: options::Pinned,
+
+    #[clap(flatten)]
+    pub with: options::With,
+
+    #[clap(flatten)]
+    pub stack: options::Stack,
+}
+
+impl ShellArgs {
+    pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        match &self.command {
+            Some(command) => command.execute(context).await,
+            None => self.open(context).await,
+        }
+    }
+
+    /// Composes through [`ToolchainExec`](super::toolchain_exec::ToolchainExec) with the shell as the command.
+    async fn open(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        let exec = super::toolchain_exec::ToolchainExec {
+            groups: self.groups.clone(),
+            clean: false,
+            env: self.env.clone(),
+            lazy_mode: Default::default(),
+            pinned: self.pinned.clone(),
+            records: Default::default(),
+            with: self.with.clone(),
+            stack: self.stack,
+            consent: Default::default(),
+            names: Vec::new(),
+            argv: vec![user_shell_program()?],
+        };
+        exec.execute(context).await
+    }
+}
+
+/// `$SHELL`, else the shell that started `ocx`.
+fn user_shell_program() -> anyhow::Result<String> {
+    shell_program(ocx_env::SHELL.get(), ocx_shell::shell::Shell::from_process())
+}
+
+fn shell_program(login: Option<String>, detected: Option<ocx_shell::shell::Shell>) -> anyhow::Result<String> {
+    if let Some(path) = login {
+        return Ok(path);
+    }
+    use ocx_shell::shell::Shell as Kind;
+    let program = match detected {
+        Some(Kind::Ash) => "ash",
+        Some(Kind::Ksh) => "ksh",
+        Some(Kind::Dash) => "dash",
+        Some(Kind::Bash) => "bash",
+        Some(Kind::Elvish) => "elvish",
+        Some(Kind::Fish) => "fish",
+        Some(Kind::Batch) => "cmd",
+        Some(Kind::PowerShell) if cfg!(windows) => "powershell",
+        Some(Kind::PowerShell) => "pwsh",
+        Some(Kind::Zsh) => "zsh",
+        Some(Kind::Nushell) => "nu",
+        None => {
+            return Err(CliRefusal::InvalidCommandLine(
+                "cannot tell which shell to open; set SHELL to its path".to_owned(),
+            )
+            .into());
+        }
+    };
+    Ok(program.to_owned())
+}
+
 #[derive(Subcommand)]
 pub enum Shell {
     /// Consent to a project's shell activation.
@@ -65,8 +151,8 @@ pub enum Shell {
         The shell is inert for one of these reasons, each with its remedy.\n\n\
         The hook is disabled by `--no-hook`, `OCX_NO_HOOK` or `[shell] hook`; the report names the \
         deciding rung and tier. Enable the hook.\n\n\
-        The shell yielded to direnv or mise; the report names the live signal. Stop that tool or \
-        accept the yield.\n\n\
+        The shell yielded to direnv, mise or an enclosing `ocx exec`; the report names the live \
+        signal. Stop that tool or accept the yield.\n\n\
         `ocx.lock` is unavailable: absent, unreadable or unparseable. Run `ocx lock`.\n\n\
         A `[shell.consent] namespaces` grant matches the lock's claim, but the package store does \
         not corroborate those sources. The report names both source sets. Consent with `ocx shell allow`.\n\n\
@@ -113,5 +199,64 @@ impl Shell {
             Shell::Revoke(revoke) => revoke.execute(context).await,
             Shell::State(state) => state.execute(context).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<ShellArgs, clap::Error> {
+        ShellArgs::try_parse_from(std::iter::once("shell").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn bare_shell_opens_the_environment() {
+        assert!(parse(&[]).unwrap().command.is_none());
+    }
+
+    #[test]
+    fn bare_shell_takes_the_exec_composition_flags() {
+        let args = parse(&["-g", "ci", "--with", "cmake:3", "--stack", "--env", "A=b"]).unwrap();
+        assert!(args.command.is_none());
+        assert_eq!(args.groups.names(), ["ci"]);
+        assert!(args.stack.enabled());
+    }
+
+    #[test]
+    fn subcommands_still_parse_with_their_own_arguments() {
+        assert!(matches!(
+            parse(&["state", "-v"]).unwrap().command,
+            Some(Shell::State(_))
+        ));
+        assert!(matches!(
+            parse(&["completion", "--shell", "bash"]).unwrap().command,
+            Some(Shell::Completion(_))
+        ));
+        assert!(matches!(
+            parse(&["allow", "/some/path"]).unwrap().command,
+            Some(Shell::Allow(_))
+        ));
+        assert!(matches!(parse(&["revoke"]).unwrap().command, Some(Shell::Revoke(_))));
+    }
+
+    #[test]
+    fn login_shell_wins_over_the_detected_one() {
+        let program = shell_program(Some("/bin/zsh".to_owned()), Some(ocx_shell::shell::Shell::Bash)).unwrap();
+        assert_eq!(program, "/bin/zsh");
+        let program = shell_program(None, Some(ocx_shell::shell::Shell::Bash)).unwrap();
+        assert_eq!(program, "bash");
+    }
+
+    #[test]
+    fn no_login_shell_and_no_detected_shell_refuses_with_a_usage_error() {
+        let error = shell_program(None, None).unwrap_err();
+        let refusal = error.downcast_ref::<CliRefusal>().expect("a CliRefusal");
+        assert!(matches!(refusal, CliRefusal::InvalidCommandLine(_)));
+    }
+
+    #[test]
+    fn open_flags_do_not_combine_with_a_subcommand() {
+        assert!(parse(&["--stack", "state"]).is_err());
     }
 }

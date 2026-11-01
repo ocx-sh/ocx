@@ -93,6 +93,7 @@ leaves! {
     SelfActivate,
     SelfSetup,
     SelfUpdate,
+    Shell,
     ShellAllow,
     ShellCompletion,
     ShellRevoke,
@@ -169,6 +170,7 @@ impl Leaf {
             Self::SelfActivate => &["self", "activate"],
             Self::SelfSetup => &["self", "setup"],
             Self::SelfUpdate => &["self", "update"],
+            Self::Shell => &["shell"],
             Self::ShellAllow => &["shell", "allow"],
             Self::ShellCompletion => &["shell", "completion"],
             Self::ShellRevoke => &["shell", "revoke"],
@@ -203,6 +205,7 @@ impl Leaf {
             Self::DirenvInit => (1, &[Empty]),
             Self::Env => (1, const { &[OutputMode::report::<data::env::EnvVars>(), ShellStream] }),
             Self::Exec => (1, &[Passthrough]),
+            Self::Shell => (1, &[Passthrough]),
             Self::IndexCatalog => (1, const { &[OutputMode::report::<data::catalog::Catalog>()] }),
             Self::IndexList => (1, const { &[OutputMode::report::<data::tag::Tags>()] }),
             Self::IndexRegenerate => (1, const { &[OutputMode::report::<data::index::RegenerateReport>()] }),
@@ -545,11 +548,14 @@ impl Command {
             Command::Remove(_) => Leaf::Remove,
             Command::Exec(_) => Leaf::Exec,
             Command::DeprecatedRun(_) => Leaf::Run,
-            Command::Shell(group) => match group {
-                Shell::Allow(_) => Leaf::ShellAllow,
-                Shell::Completion(_) => Leaf::ShellCompletion,
-                Shell::Revoke(_) => Leaf::ShellRevoke,
-                Shell::State(_) => Leaf::ShellState,
+            Command::Shell(args) => match &args.command {
+                None => Leaf::Shell,
+                Some(group) => match group {
+                    Shell::Allow(_) => Leaf::ShellAllow,
+                    Shell::Completion(_) => Leaf::ShellCompletion,
+                    Shell::Revoke(_) => Leaf::ShellRevoke,
+                    Shell::State(_) => Leaf::ShellState,
+                },
             },
             Command::Self_(group) => match group {
                 SelfGroup::Activate(_) => Leaf::SelfActivate,

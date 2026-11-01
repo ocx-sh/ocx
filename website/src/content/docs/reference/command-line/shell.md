@@ -5,13 +5,25 @@ title: "ocx shell"
 
 ## `ocx shell` {#shell}
 
-Shell-integration commands.
+Open your shell inside the project environment.
 
-Generate static shell completion scripts, consent to a project's shell activation or withdraw that consent, and report the state of the per-prompt environment integration. Login-profile activation is handled by `$OCX_HOME/env.sh` (sourced from your shell profile), not here.
+Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it: `-g` selects groups, `--with` adds packages not in `ocx.toml`, `--stack` keeps the active environment underneath. `exit` returns to the shell you came from.
+
+The subcommands generate shell completions, grant or revoke a project's shell activation, and report the state of the per-prompt integration. Login activation is `$OCX_HOME/env.sh`.
 
 ```text
+ocx shell [OPTIONS]
 ocx shell <COMMAND>
 ```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
+| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
+| `--pinned` |  | Compose digest paths instead of the toolchain links |
+| `--stack` |  | Layer this project onto the active environment instead of replacing it |
+| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
 
 ## `ocx shell allow` {#shell-allow}
 
@@ -86,7 +98,7 @@ The shell is inert for one of these reasons, each with its remedy.
 
 The hook is disabled by `--no-hook`, `OCX_NO_HOOK` or `[shell] hook`; the report names the deciding rung and tier. Enable the hook.
 
-The shell yielded to direnv or mise; the report names the live signal. Stop that tool or accept the yield.
+The shell yielded to direnv, mise or an enclosing `ocx exec`; the report names the live signal. Stop that tool or accept the yield.
 
 `ocx.lock` is unavailable: absent, unreadable or unparseable. Run `ocx lock`.
 

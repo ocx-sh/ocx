@@ -338,6 +338,14 @@ The extra packages compose after the project's tools, so a project tool wins a `
 
 `ocx exec --stack` keeps the environment an activated parent project already put on the shell and adds this project's tools in front of it, where a plain `ocx exec` replaces the parent's tools.
 
+## Open a shell in the project \{#project-shell-open\}
+
+`ocx shell` starts your shell (`$SHELL`, else the shell that started `ocx`) inside the project environment, composed like `ocx exec`. `-g` selects groups, `--with` adds packages, `--stack` layers the project onto the active environment, and `exit` returns to where you came from.
+
+```shell
+ocx shell -g ci --with ocx.sh/hyperfine:1
+```
+
 ## Shell activation \{#project-shell\}
 
 A project's binaries should land on `PATH` the moment you `cd` into the project and leave again when you `cd` back out. That should need no separate `eval` step and no leak into whatever else the shell does afterward.

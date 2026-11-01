@@ -1025,7 +1025,9 @@ fn collect_leaves(command: &Command, path: &mut Vec<String>, hidden: bool, out: 
         collect_leaves(sub, path, hidden, out);
         path.pop();
     }
-    if !any && !path.is_empty() {
+    // A group that takes its own args instead of a subcommand (bare `ocx shell`) also runs; dropping
+    // it here leaves its CONTRACT entry naming no command and fails the contract test.
+    if (!any || command.is_args_conflicts_with_subcommands_set()) && !path.is_empty() {
         out.push((path.clone(), hidden));
     }
 }
