@@ -112,10 +112,11 @@ tasks:
         fi
 
   # Fast-forward the current branch onto main.
-  # Captures the current branch, switches to main, then `git merge --ff-only`.
+  # Captures the current branch, switches to main, `git merge --ff-only`, then switches back.
+  # The switch back is a `defer:` so a refused fast-forward does not strand the checkout on main.
   # Fails if the working tree is dirty or already on main.
   merge:
-    desc: Fast-forward current branch onto main (fails if tree dirty)
+    desc: Fast-forward current branch onto main, then return to it (fails if tree dirty)
     vars:
       BRANCH:
         sh: git rev-parse --abbrev-ref HEAD
@@ -126,4 +127,5 @@ tasks:
         msg: 'Already on main; nothing to merge.'
     cmds:
       - git switch main
+      - defer: git switch {{.BRANCH}}
       - git merge --ff-only {{.BRANCH}}
