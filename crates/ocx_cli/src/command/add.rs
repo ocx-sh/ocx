@@ -80,6 +80,15 @@ impl Add {
             self.group.as_deref(),
             &bindings,
         );
+        // What the download diff is taken against: re-adding a declared binding names it, so it counts as
+        // added even though the lock already pins it (a first add whose download failed completes here).
+        let download_baseline = guard.previous_lock().map(|lock| {
+            let mut lock = lock.clone();
+            let group = self.group.as_deref().unwrap_or(ocx_project::DEFAULT_GROUP);
+            lock.tools
+                .retain(|tool| !(tool.group == group && plan.already.contains(&tool.name)));
+            lock
+        });
         let eager = self.pull.enabled(true);
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let config_path = guard.config_path().to_path_buf();
@@ -88,7 +97,6 @@ impl Add {
         // aborts the batch before any disk write.
         let bindings_for_stage = plan.stage.clone();
         let group = self.group.clone();
-        let target_groups: Vec<String> = self.group.iter().cloned().collect();
         let staging_config_path = config_path.clone();
         let staged = guard.stage(move |cfg| {
             for (name, identifier) in &bindings_for_stage {
@@ -139,7 +147,7 @@ impl Add {
                 &existing,
                 staged.config(),
                 eager,
-                &target_groups,
+                download_baseline.as_ref(),
                 platform.clone(),
             )
             .await?;
@@ -202,7 +210,15 @@ impl Add {
         }
 
         // After the commit: a failed download leaves the binding declared.
-        materialize_lock(&context, &new_lock, &config, eager, &target_groups, platform.clone()).await?;
+        materialize_lock(
+            &context,
+            &new_lock,
+            &config,
+            eager,
+            download_baseline.as_ref(),
+            platform.clone(),
+        )
+        .await?;
 
         report_lock(&context, &new_lock, &platform)?;
 

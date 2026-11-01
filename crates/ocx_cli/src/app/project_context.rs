@@ -338,20 +338,11 @@ pub(crate) fn lazy_pull_set<'a>(
     }))
 }
 
-/// The groups an `update`/`upgrade` touched: the `-g` set, or every group when none was named.
-pub(crate) fn materialize_groups(groups: &[String]) -> Vec<String> {
-    if groups.is_empty() {
-        vec![ocx_project::ALL_GROUP.to_owned()]
-    } else {
-        groups.to_vec()
-    }
-}
-
-/// Pulls the default group of `lock` plus every group in `groups` (`all` meaning every group) for
-/// `platform` into the object store, as `ocx pull` does: a `never` tool in full, a deferred one prepared only (metadata and launchers). A no-op
-/// unless `eager`.
+/// Pulls the entries of `lock` whose pin `previous` does not already hold, for `platform`, into the object store:
+/// a `never` tool in full, a deferred one prepared only (metadata and launchers). A no-op unless `eager`.
 ///
-/// Each binding carries its `config` tag while `lock` binds to `config`, and none once stale.
+/// An entry is changed when `previous` lacks its `(group, name)` or pins different content; with no `previous`
+/// every entry is. Each binding carries its `config` tag while `lock` binds to `config`, and none once stale.
 /// Never touches `symlinks/`, which would add a redundant GC root. An unshipped platform
 /// surfaces `NoHostLeaf` (exit 78), and a failure does not roll back the manifest or lock.
 ///
@@ -363,7 +354,7 @@ pub async fn materialize_lock(
     lock: &ocx_project::ProjectLock,
     config: &ProjectConfig,
     eager: bool,
-    groups: &[String],
+    previous: Option<&ocx_project::ProjectLock>,
     platform: ocx_oci::Platform,
 ) -> anyhow::Result<()> {
     if !eager {
@@ -373,8 +364,13 @@ pub async fn materialize_lock(
         .lenient_host_identifiers(Some(config), &platform)
         .into_iter()
         .filter(|(tool, _)| {
-            tool.group == ocx_project::DEFAULT_GROUP
-                || groups.iter().any(|g| g == ocx_project::ALL_GROUP || *g == tool.group)
+            !previous.is_some_and(|previous| {
+                previous.tools.iter().any(|old| {
+                    old.group == tool.group
+                        && old.name == tool.name
+                        && ocx_project::locked_tool_content_equal(old, tool)
+                })
+            })
         })
         .map(|(tool, identifier)| identifier.map(|identifier| (tool.group.as_str(), identifier)))
         .collect::<Result<Vec<_>, _>>()?;

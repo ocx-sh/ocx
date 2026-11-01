@@ -14,7 +14,7 @@ use ocx_project::{
 use crate::api::data::update::UpdateReport;
 use crate::api::data::upgrade::{BeyondMajor, SkippedBinding, TagUpgrade, UpgradeReport, VerboseUpgradeReport};
 use crate::app::project_context::{
-    load_project_for_mutate, materialize_groups, materialize_lock, purge_unpinned, record_activation_consent,
+    load_project_for_mutate, materialize_lock, purge_unpinned, record_activation_consent,
 };
 use crate::command::index_common::policy_blocked;
 use crate::command::update::{concrete_versions, missing_lock, print_verdict, select_touched};
@@ -52,7 +52,8 @@ pub struct Upgrade {
     /// Repeatable and comma-separated: `-g ci,lint -g release`. The reserved
     /// name `default` selects the top-level `[tools]` table; `all` expands to
     /// `default` plus every declared `[group.*]`. Combine with binding names to
-    /// upgrade only those bindings within the named groups.
+    /// upgrade only those bindings within the named groups. When omitted,
+    /// scope is exactly the default group.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 
@@ -240,15 +241,7 @@ impl Upgrade {
         }
 
         // After the commit, so a failure here never rolls back the lock.
-        materialize_lock(
-            &context,
-            &new_lock,
-            &config,
-            true,
-            &materialize_groups(&self.groups),
-            platform,
-        )
-        .await?;
+        materialize_lock(&context, &new_lock, &config, true, Some(&previous), platform).await?;
 
         self.emit(&context, report)?;
         Ok(ExitCode::SUCCESS)

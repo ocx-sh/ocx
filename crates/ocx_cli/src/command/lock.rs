@@ -118,7 +118,7 @@ impl Lock {
         }
 
         // After the commit: a failed download leaves the lock committed.
-        materialize_lock(&context, &new_lock, &config, eager, &[], platform.clone()).await?;
+        materialize_lock(&context, &new_lock, &config, eager, previous.as_ref(), platform.clone()).await?;
 
         let project_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         if !gitattributes_has_merge_union(project_dir).await {

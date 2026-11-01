@@ -1239,3 +1239,132 @@ def test_update_purge_deletes_the_superseded_digest(ocx: OcxRunner, tmp_path: Pa
     assert new and new != old, "ocx update must move the lock and pull the new digest"
     for package_dir in old:
         assert_not_exists(package_dir)
+
+
+# ---------------------------------------------------------------------------
+# Default-group scope and changed-pin-only download
+# ---------------------------------------------------------------------------
+
+
+def _in_store(ocx: OcxRunner, cwd: Path, fq: str) -> bool:
+    """Whether ``fq`` is in the package store (``package which`` never installs)."""
+    return subprocess.run(
+        _ocx_cmd(ocx, "package", "which", fq),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    ).returncode == EXIT_SUCCESS
+
+
+def _two_group_project(ocx: OcxRunner, tmp_path: Path) -> tuple[Path, str, str]:
+    """A locked project: default ``tool``, group ``ci`` ``citool`` and ``tool = { from = "default" }``."""
+    short = uuid4().hex[:8]
+    repo_default = f"t_{short}_dg_def"
+    repo_ci = f"t_{short}_dg_ci"
+    make_package(ocx, repo_default, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo_default}:latest"
+
+[group.ci.tools]
+citool = "{ocx.registry}/{repo_ci}:latest"
+tool = {{ from = "default" }}
+""",
+    )
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
+    return project, repo_default, repo_ci
+
+
+def _leaves_in_group(lock_text: str, group: str, name: str) -> list[str]:
+    for block in lock_text.split("[[tool]]")[1:]:
+        if f'name = "{name}"' in block and f'group = "{group}"' in block:
+            return sorted(_LEAF_RE.findall(block))
+    return []
+
+
+def test_update_without_group_touches_only_the_default_group(ocx: OcxRunner, tmp_path: Path) -> None:
+    """No ``-g`` re-resolves the default group only; a ``from = "default"`` entry keeps its own pin."""
+    project, repo_default, repo_ci = _two_group_project(ocx, tmp_path)
+    before = _read_lock_text(project)
+    make_package(ocx, repo_default, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "2.0.0", tmp_path, cascade=True)
+
+    result = _run_update(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    after = _read_lock_text(project)
+    assert _leaves_in_group(before, "default", "tool"), "control: the lock parse must find the entry"
+    assert _leaves_in_group(after, "default", "tool") != _leaves_in_group(before, "default", "tool")
+    assert _leaves_in_group(after, "ci", "citool") == _leaves_in_group(before, "ci", "citool"), (
+        "the ci group's own tool must not move without -g"
+    )
+    assert _leaves_in_group(after, "ci", "tool") == _leaves_in_group(before, "ci", "tool"), (
+        "a `from = \"default\"` entry shares the declared version, not the default group's lock entry"
+    )
+
+
+def test_update_group_all_touches_every_group(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``-g all`` re-resolves default and ``ci``, including the ``from = "default"`` entry."""
+    project, repo_default, repo_ci = _two_group_project(ocx, tmp_path)
+    before = _read_lock_text(project)
+    make_package(ocx, repo_default, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "2.0.0", tmp_path, cascade=True)
+
+    result = _run_update(ocx, project, "-g", "all")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    after = _read_lock_text(project)
+    assert _leaves_in_group(after, "default", "tool") != _leaves_in_group(before, "default", "tool")
+    assert _leaves_in_group(after, "ci", "citool") != _leaves_in_group(before, "ci", "citool")
+    assert _leaves_in_group(after, "ci", "tool") != _leaves_in_group(before, "ci", "tool")
+
+
+def test_update_downloads_only_the_packages_whose_pin_changed(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A tool whose pin held still is not pulled; the one that moved is."""
+    short = uuid4().hex[:8]
+    moving = f"t_{short}_dl_move"
+    still = f"t_{short}_dl_still"
+    make_package(ocx, moving, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, still, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+moving = "{ocx.registry}/{moving}:latest"
+still = "{ocx.registry}/{still}:latest"
+""",
+    )
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
+    make_package(ocx, moving, "2.0.0", tmp_path, cascade=True)
+
+    result = _run_update(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    assert _in_store(ocx, project, f"{ocx.registry}/{moving}:latest"), "the moved pin must be downloaded"
+    assert not _in_store(ocx, project, f"{ocx.registry}/{still}:latest"), "an unchanged pin must not be downloaded"
+
+
+def test_lock_rerun_without_changes_downloads_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A second ``ocx lock`` over a clean lock pulls nothing."""
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_lock_idem"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\ntool = "{ocx.registry}/{repo}:1.0.0"\n')
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
+    assert not _in_store(ocx, project, f"{ocx.registry}/{repo}:1.0.0"), "precondition: cold store"
+
+    result = _run_lock(ocx, project)
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert not _in_store(ocx, project, f"{ocx.registry}/{repo}:1.0.0"), "no pin changed, so nothing is downloaded"

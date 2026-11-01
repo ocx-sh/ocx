@@ -2757,7 +2757,7 @@
           "update"
         ],
         "version": 1,
-        "summary": "Re-resolve declared tags against the registry; whole file or a subset",
+        "summary": "Re-resolve declared tags against the registry; the default group or a subset",
         "hidden": false,
         "external_subcommands": false,
         "output": [

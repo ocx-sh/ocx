@@ -385,15 +385,19 @@ ocx status [OPTIONS]
 
 ## `ocx update` {#update}
 
-Re-resolve declared tags against the registry; whole file or a subset.
+Re-resolve declared tags against the registry; the default group or a subset.
 
 Resolves declared tags live against the registry by default (the root `--remote` flag is redundant here, but accepted). It records the result in `ocx.lock` only and never modifies the local index tag snapshot.
 
 A moving tag (`:latest`, `:3`) advances to wherever it points today.
 
-Under `--frozen`, resolution is capped at the local index snapshot (an unsnapshotted tag exits 81); `--offline` forbids network access. Pass binding names or `-g/--group` to advance only part of the toolchain and freeze the rest: `ocx update ripgrep` advances one binding, `ocx update -g ci` advances a whole group.
+Under `--frozen`, resolution is capped at the local index snapshot (an unsnapshotted tag exits 81); `--offline` forbids network access. Without `-g` only the default group is re-resolved; `-g ci` selects a group and `-g all` every group.
 
-A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64). With no arguments every declared tag is re-resolved, even when the lock is current, and an unchanged result rewrites the lock byte-identically.
+Binding names narrow the selection further: `ocx update ripgrep` advances one binding. A group tool declared `{ from = "default" }` keeps its own lock entry until its group is selected.
+
+A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64). A bare update on a missing or drifted lock resolves every group, and an unchanged result rewrites the lock byte-identically.
+
+Only the packages whose pin changed are downloaded.
 
 The command is transactional: any resolution failure writes nothing. It moves only what a declared tag points to and never edits the declaration; to move the tag itself, use `ocx upgrade`.
 
@@ -432,7 +436,9 @@ A newer major is listed as a hint either way. A binding that cannot move is left
 
 The retagged bindings are then re-locked and the project toolchain re-rendered, as `ocx update` does.
 
-Pass binding names or `-g/--group` to upgrade only part of the toolchain. `--check` writes nothing and exits 65 when a tag would move.
+Without `-g` only the default group is considered; `-g ci` selects a group and `-g all` every group. Binding names narrow the selection.
+
+`--check` writes nothing and exits 65 when a tag would move.
 
 Needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), rejects an unknown group or name (exit 64), and is refused under `--frozen` or `--offline` (exit 81).
 

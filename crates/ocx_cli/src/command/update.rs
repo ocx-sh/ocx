@@ -13,8 +13,7 @@ use ocx_project::{
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
 use crate::app::CliRefusal;
 use crate::app::project_context::{
-    load_project_for_mutate, materialize_groups, materialize_lock, purge_unpinned, record_activation_consent,
-    warn_unrendered,
+    load_project_for_mutate, materialize_lock, purge_unpinned, record_activation_consent, warn_unrendered,
 };
 use crate::conventions;
 use crate::options;
@@ -53,8 +52,9 @@ pub struct Update {
     /// Repeatable and comma-separated: `-g ci,lint -g release`. The reserved
     /// name `default` selects the top-level `[tools]` table; `all` expands to
     /// `default` plus every declared `[group.*]`. Combine with binding names
-    /// to advance only those bindings within the named groups. Omit both this
-    /// flag and any names to re-resolve the whole file.
+    /// to advance only those bindings within the named groups. When omitted,
+    /// scope is exactly the default group; a group tool declared
+    /// `{ from = "default" }` keeps its own lock entry until its group is named.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 
@@ -83,7 +83,10 @@ impl Update {
         let update_index = context.update_index();
         let resolve_index = &update_index;
 
-        let scoped = !self.groups.is_empty() || !self.names.is_empty();
+        // A missing or drifted lock has nothing valid to carry forward, so a bare update re-resolves every group.
+        let scoped = !self.groups.is_empty()
+            || !self.names.is_empty()
+            || previous.as_ref().is_some_and(|lock| lock.is_current(staged.config()));
 
         // `examined` narrows the report's `unchanged` list, so a carried-forward pin is never reported as checked.
         let (new_lock, examined) = if scoped {
@@ -166,15 +169,7 @@ impl Update {
         }
 
         // After the commit, so a failure here never rolls back the lock.
-        materialize_lock(
-            &context,
-            &new_lock,
-            &config,
-            eager,
-            &materialize_groups(&self.groups),
-            platform,
-        )
-        .await?;
+        materialize_lock(&context, &new_lock, &config, eager, previous.as_ref(), platform).await?;
 
         self.emit(&context, report)?;
         if let Some(line) = summary {
@@ -242,7 +237,7 @@ pub(crate) fn missing_lock(lock_path: &std::path::Path) -> CliRefusal {
 
 /// Resolve the `-g` and name selection into the `(group, binding)` pairs a scoped `ocx update` re-resolves.
 ///
-/// A name in several in-scope groups advances in each, unlike `ocx exec`'s ambiguity error.
+/// An empty `groups` selects the default group only. A name in several in-scope groups advances in each, unlike `ocx exec`'s ambiguity error.
 ///
 /// # Errors
 ///
@@ -252,25 +247,23 @@ pub(crate) fn select_touched(
     groups: &[String],
     names: &[String],
 ) -> Result<Vec<(String, String)>, CliRefusal> {
-    let scope: Option<Vec<String>> = if groups.is_empty() {
-        None
-    } else {
-        for raw in groups {
-            if raw.is_empty() {
-                return Err(CliRefusal::EmptyGroupFilter(
-                    "empty group segment in --group value; check for stray commas".to_string(),
-                ));
-            }
-            if raw != DEFAULT_GROUP && raw != ALL_GROUP && !config.groups.contains_key(raw) {
-                return Err(CliRefusal::UnknownGroup(format!(
-                    "unknown group '{raw}' in --group filter"
-                )));
-            }
+    let default_only = [DEFAULT_GROUP.to_string()];
+    let groups = if groups.is_empty() { &default_only[..] } else { groups };
+    for raw in groups {
+        if raw.is_empty() {
+            return Err(CliRefusal::EmptyGroupFilter(
+                "empty group segment in --group value; check for stray commas".to_string(),
+            ));
         }
-        Some(expand_all_keyword(groups, config))
-    };
+        if raw != DEFAULT_GROUP && raw != ALL_GROUP && !config.groups.contains_key(raw) {
+            return Err(CliRefusal::UnknownGroup(format!(
+                "unknown group '{raw}' in --group filter"
+            )));
+        }
+    }
+    let scope = expand_all_keyword(groups, config);
 
-    let in_scope = |group: &str| scope.as_ref().is_none_or(|s| s.iter().any(|g| g == group));
+    let in_scope = |group: &str| scope.iter().any(|g| g == group);
     let name_filter: Option<HashSet<&str>> = (!names.is_empty()).then(|| names.iter().map(String::as_str).collect());
     let selected = |binding: &str| name_filter.as_ref().is_none_or(|f| f.contains(binding));
 
@@ -392,10 +385,24 @@ mod tests {
         err.classify()
     }
 
-    /// A bare name advances the binding in every group it appears in.
+    /// With no `-g`, only the default group is in scope, so a bare name reaches its default entry alone.
     #[test]
-    fn select_touched_by_name_spans_every_group() {
+    fn select_touched_without_group_is_the_default_group_only() {
         let touched = select_touched(&sample_config(), &[], &["ripgrep".to_string()]).expect("known name");
+        assert_eq!(touched, vec![pair("default", "ripgrep")]);
+        let all_default = select_touched(&sample_config(), &[], &[]).expect("no names");
+        assert!(
+            all_default.iter().all(|(group, _)| group == "default"),
+            "{all_default:?}"
+        );
+        assert_eq!(all_default.len(), 2, "ripgrep and fd");
+    }
+
+    /// `-g all` spans every group, so a bare name advances in each group it appears in.
+    #[test]
+    fn select_touched_by_name_with_all_spans_every_group() {
+        let touched =
+            select_touched(&sample_config(), &["all".to_string()], &["ripgrep".to_string()]).expect("known name");
         assert_eq!(touched.len(), 2, "ripgrep is declared in default + ci");
         assert!(touched.contains(&pair("default", "ripgrep")));
         assert!(touched.contains(&pair("ci", "ripgrep")));

@@ -117,9 +117,9 @@ The two commands that intentionally advance version pins are:
 | Command | When it re-resolves |
 |---------|---------------------|
 | `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
-| `ocx update` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
+| `ocx update` | The default group by default; `-g GROUP` / `-g all` / `NAME` selects the subset (those advance, the rest stay frozen) |
 
-Groups are primarily a **composition concern** — they scope which bindings `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim. `ocx add` and `ocx remove` do the same for the bindings they touch.
+Groups are primarily a **composition concern** — they scope which bindings `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: it advances the default group, or the groups `-g` names (`-g all` for every group), or only the binding `NAME` given, and carries every other pin forward verbatim. A group tool written `{ from = "default" }` shares the declared version, not the default group's lock entry, so it moves only when its own group is selected. `ocx add`, `ocx update`, `ocx upgrade` and `ocx lock` download only the packages whose pin they changed. `ocx add` and `ocx remove` do the same for the bindings they touch.
 
 `ocx update` is the only command that holds both the predecessor `ocx.lock` and the candidate at once. So only this command can answer what moved, rather than what is pinned now. It reports exactly that: a table of the bindings whose pull identifier changed. The pins that held still are summarized behind a hint line (`-v`/`--verbose` lists them too). `--check` runs the same diff without writing anything, exiting 65 when it would move something. See [`ocx update`][cmd-update] for the full report shape.
 

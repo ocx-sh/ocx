@@ -51,9 +51,9 @@ Three commands move a pin, and each moves a different thing.
 | [`ocx update`][cmd-update] | The lock, to where a declared tag points today. | Every run | No |
 | [`ocx upgrade`][cmd-upgrade] | The declared tag itself, then the lock for the retagged bindings only. | Tag listing every run | Yes |
 
-`ocx update` talks to the registry every time, because its purpose is to see where a moving tag such as `:latest` or `:3` points today. With no arguments it re-resolves every declared tag, even when the lock is current. A resolution failure writes nothing.
+`ocx update` talks to the registry every time, because its purpose is to see where a moving tag such as `:latest` or `:3` points today. With no arguments it re-resolves every declared tag of the default group, even when the lock is current; `-g all` covers every group. A resolution failure writes nothing.
 
-By default `ocx update` also installs the versions it re-resolved. Pass `--no-pull` to write the lock only, and let `ocx pull` or the next `ocx exec` fetch them.
+By default `ocx update` also installs the packages whose pin moved; a pin that held still is not downloaded. Pass `--no-pull` to write the lock only, and let `ocx pull` or the next `ocx exec` fetch them.
 
 `ocx upgrade` rewrites the tag in `ocx.toml`, so `cmake:3.28` becomes `cmake:3.29`. Each binding keeps its variant and its precision. A `debug-3.28` binding considers only `debug-*` tags, and a two-component tag moves to a two-component tag. Comments and formatting in `ocx.toml` survive the edit.
 
@@ -64,7 +64,8 @@ A binding on `:3` follows the tag with `ocx update`. A binding pinned to `:3.28`
 :::
 
 ```shell
-ocx update                # re-resolve every declared tag against the registry
+ocx update                # re-resolve the default group's tags against the registry
+ocx update -g all         # re-resolve every group
 ocx update ripgrep        # advance just ripgrep
 ocx update -g ci          # advance the ci group, freezing the rest
 ocx upgrade --check       # see which tags would move, write nothing

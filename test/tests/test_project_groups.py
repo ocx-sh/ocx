@@ -461,3 +461,21 @@ def test_add_to_named_group_pulls_the_package(ocx: OcxRunner, tmp_path: Path) ->
         f"a package added with -g lint must be in the store; which rc={located.returncode}, "
         f"stderr={located.stderr!r}"
     )
+
+
+def test_add_to_named_group_downloads_only_the_added_package(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx add -g lint pkg`` stores pkg and nothing else in lint (or any group)."""
+    other = make_package(ocx, f"t_{uuid4().hex[:8]}_grp_other", "1.0.0", tmp_path, cascade=False)
+    added = make_package(ocx, f"t_{uuid4().hex[:8]}_grp_added", "1.0.0", tmp_path, cascade=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "ocx.toml").write_text(f'[group.lint.tools]\nother = "{other.fq}"\n')
+    assert _run_cmd(ocx, project_dir, "lock", "--no-pull").returncode == EXIT_SUCCESS
+
+    result = _add_tool(ocx, project_dir, added.fq, group="lint")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    assert _run_cmd(ocx, project_dir, "package", "which", added.fq).returncode == EXIT_SUCCESS
+    assert _run_cmd(ocx, project_dir, "package", "which", other.fq).returncode != EXIT_SUCCESS, (
+        "a pin `add` did not change must not be downloaded"
+    )
