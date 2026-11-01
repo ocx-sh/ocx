@@ -63,6 +63,20 @@ ocx add shfmt/shfmt:3.13              # adds to default [tools]
 ocx add --group ci shfmt/shfmt:3.13   # also legal: coexists in [group.ci]
 ```
 
+### Reuse a default pin in a group \{#project-group-from\}
+
+A group binding written `{ from = "default" }` takes the `[tools]` entry of the same name, so the pin lives in one place:
+
+```toml
+[tools]
+uv = "ocx.sh/astral-sh/uv:0.12.5"
+
+[group.lint.tools]
+uv = { from = "default" }
+```
+
+`ocx.lock` is identical to the repeated-literal form. `ocx update` and `ocx upgrade` move the `[tools]` pin and every `from` binding follows. A `from` with no matching `[tools]` entry, or any value other than `"default"`, exits 78.
+
 ### Binding names \{#project-add-names\}
 
 Without `NAME=`, the binding key is the repository basename. Two packages that share a basename collide under that default. `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists". Prefix an identifier with `NAME=` to bind it under a distinct key:

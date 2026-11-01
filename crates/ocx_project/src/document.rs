@@ -6,7 +6,7 @@
 //! CRLF comes back as LF and a BOM is dropped; re-encoding by hand would
 //! corrupt a multi-line string containing `\n`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, Table, TableLike, value};
@@ -81,7 +81,7 @@ fn take_header(document: &mut DocumentMut) -> String {
 fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
     let root: &mut dyn TableLike = document.as_table_mut();
     sync_activate(root, candidate.activate);
-    sync_section(root, "tools", &candidate.tools)?;
+    sync_section(root, "tools", &candidate.tools, &BTreeSet::new())?;
 
     if candidate.groups.is_empty() {
         // A bare `[group]` header parses to no groups and stays; one with
@@ -101,7 +101,7 @@ fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
     }
     for (name, group) in &candidate.groups {
         let group_table = ensure_table(groups, name, true)?;
-        sync_section(group_table, "tools", &group.tools)?;
+        sync_section(group_table, "tools", &group.tools, &group.inherited)?;
     }
     Some(())
 }
@@ -118,18 +118,23 @@ fn sync_activate(root: &mut dyn TableLike, activate: Option<crate::activate::Act
 }
 
 /// Sync one `tools` table, creating it only when there is something to put in it.
-fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<String, PackageRef>) -> Option<()> {
+fn sync_section(
+    parent: &mut dyn TableLike,
+    key: &str,
+    bindings: &BTreeMap<String, PackageRef>,
+    inherited: &BTreeSet<String>,
+) -> Option<()> {
     if bindings.is_empty() && !parent.contains_key(key) {
         return Some(());
     }
-    sync_bindings(ensure_table(parent, key, false)?, bindings);
+    sync_bindings(ensure_table(parent, key, false)?, bindings, inherited);
     Some(())
 }
 
 /// Bring `table` in line with `bindings`, leaving an unchanged binding's line
 /// untouched. Compared parsed, not as text: `parse_tool_value` injects
 /// `:latest`, so a text compare rewrites untargeted lines and drops their comments.
-fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageRef>) {
+fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageRef>, inherited: &BTreeSet<String>) {
     let stale: Vec<String> = table
         .iter()
         .map(|(key, _)| key.to_owned())
@@ -140,6 +145,10 @@ fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageR
     }
 
     for (key, identifier) in bindings {
+        // A `{ from = "default" }` line already says what the candidate says.
+        if inherited.contains(key) && table.get(key).is_some_and(is_from_default) {
+            continue;
+        }
         let declared = table
             .get(key)
             .and_then(Item::as_str)
@@ -149,6 +158,11 @@ fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageR
         }
         write_binding(table, key, identifier.to_string());
     }
+}
+
+fn is_from_default(item: &Item) -> bool {
+    item.as_table_like()
+        .is_some_and(|table| table.len() == 1 && table.get("from").and_then(Item::as_str) == Some("default"))
 }
 
 /// Set `key`, keeping an existing cell's decor; `Table::insert` drops comments
@@ -318,6 +332,46 @@ mod tests {
         let added = rendered.find("shellcheck").expect("shellcheck present");
         assert!(zeta < alpha, "user order must survive: {rendered}");
         assert!(added > alpha, "a new binding is appended, not sorted in: {rendered}");
+    }
+
+    const FROM_FORM: &str =
+        "[tools]\nuv = \"example.com/uv:0.9.3\"\n\n[group.lint.tools]\nuv = { from = \"default\" } # follows\n";
+
+    #[test]
+    fn an_unrelated_add_keeps_a_from_binding_verbatim() {
+        let rendered = render_after_add(FROM_FORM, "shellcheck", "0.11", None);
+        assert!(rendered.contains("uv = { from = \"default\" } # follows"), "{rendered}");
+    }
+
+    #[test]
+    fn retagging_the_default_pin_updates_every_from_user_implicitly() {
+        let mut candidate = ProjectConfig::from_toml_str(FROM_FORM).expect("fixture parses");
+        crate::mutate::retag_binding_in_memory(&mut candidate, &path(), "uv", "lint", "0.10.0").expect("retag");
+        let rendered = render_preserving(FROM_FORM, &candidate, &path()).expect("render succeeds");
+        assert!(rendered.contains("uv = \"example.com/uv:0.10.0\""), "{rendered}");
+        assert!(rendered.contains("uv = { from = \"default\" } # follows"), "{rendered}");
+        let reparsed = ProjectConfig::from_toml_str(&rendered).expect("reparse");
+        assert_eq!(reparsed.groups["lint"].tools["uv"], reparsed.tools["uv"]);
+    }
+
+    #[test]
+    fn removing_the_group_entry_removes_the_from_line() {
+        let mut candidate = ProjectConfig::from_toml_str(FROM_FORM).expect("fixture parses");
+        remove_binding_in_memory(&mut candidate, &path(), "uv", Some("lint")).expect("remove");
+        let rendered = render_preserving(FROM_FORM, &candidate, &path()).expect("render succeeds");
+        assert!(!rendered.contains("from"), "{rendered}");
+        assert!(rendered.contains("uv = \"example.com/uv:0.9.3\""), "{rendered}");
+    }
+
+    #[test]
+    fn removing_the_default_pin_leaves_the_group_a_literal() {
+        let mut candidate = ProjectConfig::from_toml_str(FROM_FORM).expect("fixture parses");
+        remove_binding_in_memory(&mut candidate, &path(), "uv", Some("default")).expect("remove");
+        let rendered = render_preserving(FROM_FORM, &candidate, &path()).expect("render succeeds");
+        assert!(
+            rendered.contains("[group.lint.tools]\nuv = \"example.com/uv:0.9.3\""),
+            "{rendered}"
+        );
     }
 
     #[test]

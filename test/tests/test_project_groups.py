@@ -24,7 +24,7 @@ import pytest
 from src.helpers import make_package
 from src.runner import OcxRunner
 
-pytestmark = pytest.mark.command("add", "remove")
+pytestmark = pytest.mark.command("add", "remove", "lock")
 
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs
@@ -402,3 +402,41 @@ def test_no_ocx_lock_sentinel_after_lock(
         ".ocx-lock sentinel must NOT exist after ocx lock; "
         "the in-place lock is held only during the resolve cycle and released immediately"
     )
+
+
+# ---------------------------------------------------------------------------
+# { from = "default" } group bindings
+# ---------------------------------------------------------------------------
+
+EXIT_CONFIG = 78
+
+
+def test_group_from_without_a_default_entry_is_a_config_error(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A dangling ``{ from = "default" }`` exits 78 and names the group and tool."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text(
+        '[group.lint.tools]\nuv = { from = "default" }\n'
+    )
+
+    result = _run_cmd(ocx, project, "lock")
+
+    assert result.returncode == EXIT_CONFIG, result.stderr
+    assert "lint" in result.stderr and "uv" in result.stderr, result.stderr
+
+
+def test_group_from_other_than_default_is_a_config_error(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Only ``"default"`` is a valid ``from`` source."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text(
+        '[tools]\nuv = "ocx.sh/uv:0.9.3"\n\n[group.lint.tools]\nuv = { from = "ci" }\n'
+    )
+
+    result = _run_cmd(ocx, project, "lock")
+
+    assert result.returncode == EXIT_CONFIG, result.stderr

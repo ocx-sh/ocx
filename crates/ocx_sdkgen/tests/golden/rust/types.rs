@@ -2715,6 +2715,8 @@ pub enum ErrorDetail {
     BindingAlreadyExists,
     /// A binding exists in several groups and no group was named
     BindingAmbiguous,
+    /// A group binding's from reference is malformed or has no target
+    BindingFromInvalid,
     /// The named binding is not declared in ocx.toml
     BindingNotDeclared,
     /// The named binding does not exist in ocx.toml
@@ -3734,6 +3736,7 @@ impl ErrorDetail {
             Self::BinScanUnsupportedHost => "bin_scan_unsupported_host",
             Self::BindingAlreadyExists => "binding_already_exists",
             Self::BindingAmbiguous => "binding_ambiguous",
+            Self::BindingFromInvalid => "binding_from_invalid",
             Self::BindingNotDeclared => "binding_not_declared",
             Self::BindingNotFound => "binding_not_found",
             Self::BindingNotSelected => "binding_not_selected",
@@ -4259,6 +4262,7 @@ impl ErrorDetail {
             "bin_scan_unsupported_host" => Self::BinScanUnsupportedHost,
             "binding_already_exists" => Self::BindingAlreadyExists,
             "binding_ambiguous" => Self::BindingAmbiguous,
+            "binding_from_invalid" => Self::BindingFromInvalid,
             "binding_not_declared" => Self::BindingNotDeclared,
             "binding_not_found" => Self::BindingNotFound,
             "binding_not_selected" => Self::BindingNotSelected,

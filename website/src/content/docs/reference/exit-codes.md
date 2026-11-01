@@ -459,6 +459,7 @@ Configuration is invalid or incomplete.
 | `ambiguous_extra_ca_certs` | Both extra_ca_certs and extra_ca_certs_pem are declared |
 | `ambiguous_trust_root` | The payload declares both trusted_root and trusted_root_json |
 | `auth_env_missing` | An environment variable the authentication type needs is not set |
+| `binding_from_invalid` | A group binding's from reference is malformed or has no target |
 | `binding_value_invalid` | A binding's value is not a valid identifier |
 | `binding_value_missing_registry` | A binding's identifier names no registry |
 | `ci_missing_env` | A CI environment variable the export needs is not set |

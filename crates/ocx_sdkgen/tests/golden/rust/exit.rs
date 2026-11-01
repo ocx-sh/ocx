@@ -67,6 +67,7 @@ impl ErrorDetail {
             Self::BinScanUnsupportedHost => Some(ExitCode::DataError),
             Self::BindingAlreadyExists => Some(ExitCode::UsageError),
             Self::BindingAmbiguous => Some(ExitCode::UsageError),
+            Self::BindingFromInvalid => Some(ExitCode::ConfigError),
             Self::BindingNotDeclared => Some(ExitCode::NotFound),
             Self::BindingNotFound => Some(ExitCode::NotFound),
             Self::BindingNotSelected => Some(ExitCode::UsageError),

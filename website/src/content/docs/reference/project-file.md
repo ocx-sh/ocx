@@ -130,12 +130,19 @@ An edit never invalidates `ocx.lock`.
 
 ## `group.<name>.tools.<name>` {#project-group-tools}
 
-Tool bindings for this group. Values are fully-qualified package
-references, validated exactly as `[tools]` is.
+Tool bindings for this group. A value is a fully-qualified package
+reference, validated exactly as `[tools]` is, or `{ from = "default" }`
+to reuse the `[tools]` entry of the same name.
 
 A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
 
-- Type: `string`
+- Type: `string or table`
+- See: [Project groups](../explanation/project-groups.md)
+
+## `group.<name>.tools.<name>.from` {#project-group-tools-from}
+
+- Type: `enum`
+- Values: `default`
 - See: [Project groups](../explanation/project-groups.md)
 
 ## `lazy-mode` {#project-config-toolchain-lazy}

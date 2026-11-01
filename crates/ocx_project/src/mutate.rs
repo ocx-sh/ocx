@@ -268,9 +268,26 @@ pub fn add_binding_in_memory(
         }
     }
 
+    sync_inherited(config);
     // The mutation stales any cached declaration hash.
     config.invalidate_declaration_hash_cache();
     Ok(key)
+}
+
+/// Re-point every `{ from = "default" }` group binding at its `[tools]` entry; one whose
+/// source is gone keeps its last identifier as a literal.
+fn sync_inherited(config: &mut crate::config::ProjectConfig) {
+    let defaults = &config.tools;
+    for group in config.groups.values_mut() {
+        let tools = &mut group.tools;
+        group.inherited.retain(|name| match defaults.get(name) {
+            Some(source) => {
+                tools.insert(name.clone(), source.clone());
+                true
+            }
+            None => false,
+        });
+    }
 }
 
 /// Apply a `remove` binding to `config` in memory; no I/O. `name` is the key
@@ -302,6 +319,7 @@ pub fn remove_binding_in_memory(
             let group = config.groups.get_mut(group_name).filter(|g| g.tools.contains_key(&key));
             if let Some(g) = group {
                 g.tools.remove(&key);
+                g.inherited.remove(&key);
             } else {
                 return Err(Error::from(ProjectError::new(
                     path.to_path_buf(),
@@ -333,12 +351,9 @@ pub fn remove_binding_in_memory(
                     if target == "default" {
                         config.tools.remove(&key);
                     } else {
-                        config
-                            .groups
-                            .get_mut(target)
-                            .expect("group must exist — just found it")
-                            .tools
-                            .remove(&key);
+                        let group = config.groups.get_mut(target).expect("group must exist — just found it");
+                        group.tools.remove(&key);
+                        group.inherited.remove(&key);
                     }
                 }
                 _ => {
@@ -354,6 +369,7 @@ pub fn remove_binding_in_memory(
         }
     }
 
+    sync_inherited(config);
     // Any successful path mutated `config`: drop the cached hash.
     config.invalidate_declaration_hash_cache();
     Ok(())
@@ -373,7 +389,13 @@ pub fn retag_binding_in_memory(
     group: &str,
     tag: &str,
 ) -> Result<PackageRef, Error> {
-    let table = if group == super::internal::DEFAULT_GROUP {
+    // A `{ from = "default" }` binding follows `[tools]`: retag the source, never
+    // turn the reference into a literal.
+    let inherited = config
+        .groups
+        .get(group)
+        .is_some_and(|body| body.inherited.contains(name));
+    let table = if group == super::internal::DEFAULT_GROUP || inherited {
         Some(&mut config.tools)
     } else {
         config.groups.get_mut(group).map(|body| &mut body.tools)
@@ -386,6 +408,7 @@ pub fn retag_binding_in_memory(
     };
     *binding = binding.clone_with_tag(tag);
     let retagged = binding.clone();
+    sync_inherited(config);
 
     config.invalidate_declaration_hash_cache();
     Ok(retagged)

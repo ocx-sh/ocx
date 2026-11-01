@@ -467,6 +467,19 @@ pub enum ProjectErrorKind {
         source: IdentifierError,
     },
 
+    /// A `{ from = "default" }` group binding is malformed or names no `[tools]` entry.
+    #[error("group '{group}' binding '{name}': {reason}")]
+    #[exit(
+        ConfigError,
+        slug = "binding_from_invalid",
+        summary = "A group binding's from reference is malformed or has no target"
+    )]
+    ToolFromInvalid {
+        group: String,
+        name: String,
+        reason: String,
+    },
+
     /// A `[package."<key>"]` key lacks a registry, as the `[tools]` rule requires.
     #[error("package key '{key}' is missing a registry; expected 'registry/repo[:tag]' (e.g. 'ocx.sh/cmake')")]
     #[exit(

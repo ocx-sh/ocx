@@ -27,6 +27,7 @@ bin_scan_failed	Failure	Scanning for interface binaries failed with an unclassif
 bin_scan_unsupported_host	DataError	This host cannot scan for the target platform's executables
 binding_already_exists	UsageError	A binding with this name already exists
 binding_ambiguous	UsageError	A binding exists in several groups and no group was named
+binding_from_invalid	ConfigError	A group binding's from reference is malformed or has no target
 binding_not_declared	NotFound	The named binding is not declared in ocx.toml
 binding_not_found	NotFound	The named binding does not exist in ocx.toml
 binding_not_selected	UsageError	The named binding is declared in no selected group

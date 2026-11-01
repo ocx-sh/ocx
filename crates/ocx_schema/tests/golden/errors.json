@@ -369,6 +369,11 @@
           "exit_code": 64
         },
         {
+          "value": "binding_from_invalid",
+          "description": "A group binding's from reference is malformed or has no target",
+          "exit_code": 78
+        },
+        {
           "value": "binding_not_declared",
           "description": "The named binding is not declared in ocx.toml",
           "exit_code": 79

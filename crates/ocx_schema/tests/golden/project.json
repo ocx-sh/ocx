@@ -151,10 +151,27 @@
       "type": "object",
       "properties": {
         "tools": {
-          "description": "Tool bindings for this group. Values are fully-qualified package\nreferences, validated exactly as `[tools]` is.\n\nA binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.",
+          "description": "Tool bindings for this group. A value is a fully-qualified package\nreference, validated exactly as `[tools]` is, or `{ from = \"default\" }`\nto reuse the `[tools]` entry of the same name.\n\nA binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.",
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/PackageRef"
+            "oneOf": [
+              {
+                "$ref": "#/$defs/PackageRef"
+              },
+              {
+                "description": "Reuse the top-level `[tools]` entry of the same name.",
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "const": "default"
+                  }
+                },
+                "required": [
+                  "from"
+                ],
+                "additionalProperties": false
+              }
+            ]
           }
         },
         "env": {

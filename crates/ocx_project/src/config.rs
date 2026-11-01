@@ -3,7 +3,7 @@
 
 //! `ocx.toml` schema: the developer-editable project-tier declaration.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
 
@@ -26,12 +26,21 @@ use ocx_package::metadata::slug::SLUG_MAX_LEN;
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
-    /// Tool bindings for this group. Values are fully-qualified package
-    /// references, validated exactly as `[tools]` is.
+    /// Tool bindings for this group. A value is a fully-qualified package
+    /// reference, validated exactly as `[tools]` is, or `{ from = "default" }`
+    /// to reuse the `[tools]` entry of the same name.
     ///
     /// A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(schema_with = "group_tools_schema")]
     pub tools: BTreeMap<String, PackageRef>,
+
+    /// Names in `tools` written as `{ from = "default" }`; their value is the
+    /// resolved `[tools]` identifier. Kept so a mutation rewrites the file
+    /// without turning the reference into a literal.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub inherited: BTreeSet<String>,
 
     /// Environment variables applied when this group is selected.
     ///
@@ -50,6 +59,25 @@ pub struct Group {
     pub lazy_mode: Option<LazyMode>,
     // No group-tier `lazy-report`: it is read in `ocx launcher shim`, which cannot
     // learn the group, so the tier would be settable but never read.
+}
+
+fn group_tools_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let package = generator.subschema_for::<PackageRef>();
+    schemars::json_schema!({
+        "type": "object",
+        "additionalProperties": {
+            "oneOf": [
+                package,
+                {
+                    "type": "object",
+                    "description": "Reuse the top-level `[tools]` entry of the same name.",
+                    "properties": { "from": { "const": "default" } },
+                    "required": ["from"],
+                    "additionalProperties": false
+                }
+            ]
+        }
+    })
 }
 
 /// Per-package resolve-time settings: `[package."<registry/repo[:tag]>"]`.
@@ -298,6 +326,7 @@ impl ProjectConfig {
                             tools,
                             env: ProjectEnv::default(),
                             lazy_mode: None,
+                            inherited: BTreeSet::new(),
                         },
                     )
                 })
@@ -536,7 +565,7 @@ impl ProjectConfig {
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (group_name, group_body) in raw.groups {
             validate_toolchain_name("group", &group_name, &path)?;
-            let parsed = parse_group(&group_name, &group_body, &path)?;
+            let parsed = parse_group(&group_name, &group_body, &tools, &path)?;
             groups.insert(group_name, parsed);
         }
 
@@ -557,6 +586,49 @@ impl ProjectConfig {
     }
 }
 
+/// A `[group.<g>.tools]` value: a literal identifier or `{ from = "default" }`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawGroupTool {
+    Literal(String),
+    From(RawFromRef),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFromRef {
+    from: String,
+}
+
+/// Resolve `{ from = "default" }` against `[tools]`, so everything downstream
+/// (declaration hash, lock join) sees the plain identifier.
+fn resolve_from(
+    group: &str,
+    tool: &str,
+    from: &str,
+    default_tools: &BTreeMap<String, PackageRef>,
+    path: &Path,
+) -> Result<PackageRef, super::Error> {
+    let fail = |reason: String| -> super::Error {
+        ProjectError::new(
+            path.to_path_buf(),
+            ProjectErrorKind::ToolFromInvalid {
+                group: group.to_string(),
+                name: tool.to_string(),
+                reason,
+            },
+        )
+        .into()
+    };
+    if from != super::internal::DEFAULT_GROUP {
+        return Err(fail(format!("from = \"{from}\" is not supported; only \"default\" is")));
+    }
+    default_tools
+        .get(tool)
+        .cloned()
+        .ok_or_else(|| fail(format!("from = \"default\" needs a '{tool}' entry in [tools]")))
+}
+
 /// Parse one `[group.<name>]` body into a [`Group`].
 ///
 /// Hand-walked rather than `deny_unknown_fields`: the group name is the outer
@@ -567,7 +639,12 @@ impl ProjectConfig {
 /// [`ProjectErrorKind::GroupHoldsDirectBinding`] for a string under an
 /// unrecognized key, [`ProjectErrorKind::UnknownGroupSection`] for any other
 /// unrecognized key, or any error from [`parse_tool_map`] / [`parse_project_env`].
-fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, super::Error> {
+fn parse_group(
+    name: &str,
+    raw: &toml::Table,
+    default_tools: &BTreeMap<String, PackageRef>,
+    path: &Path,
+) -> Result<Group, super::Error> {
     if raw.is_empty() {
         return Ok(Group::default());
     }
@@ -589,11 +666,27 @@ fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, supe
         }
         match key.as_str() {
             "tools" => {
-                let raw_tools: BTreeMap<String, String> = value
+                let raw_tools: BTreeMap<String, RawGroupTool> = value
                     .clone()
                     .try_into()
                     .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
-                group.tools = parse_tool_map(&format!("group.{name}.tools"), &raw_tools, path)?;
+                let mut literals: BTreeMap<String, String> = BTreeMap::new();
+                for (tool, raw_tool) in raw_tools {
+                    match raw_tool {
+                        RawGroupTool::Literal(text) => {
+                            literals.insert(tool, text);
+                        }
+                        RawGroupTool::From(RawFromRef { from }) => {
+                            let target = resolve_from(name, &tool, &from, default_tools, path)?;
+                            validate_toolchain_name(&format!("group.{name}.tools"), &tool, path)?;
+                            group.tools.insert(tool.clone(), target);
+                            group.inherited.insert(tool);
+                        }
+                    }
+                }
+                group
+                    .tools
+                    .extend(parse_tool_map(&format!("group.{name}.tools"), &literals, path)?);
             }
             "env" => {
                 let raw_env: toml::Table = value
@@ -945,6 +1038,53 @@ signers = [
             crate::declaration_hash(&policy_config),
             "trust policy must not perturb the lock-invalidating declaration hash",
         );
+    }
+
+    // ── { from = "default" } group bindings ─────────────────────────────────
+
+    const FROM_FORM: &str = "[tools]\nuv = \"ocx.sh/uv:0.9.3\"\n\n[group.lint.tools]\nuv = { from = \"default\" }\n";
+    const LITERAL_FORM: &str = "[tools]\nuv = \"ocx.sh/uv:0.9.3\"\n\n[group.lint.tools]\nuv = \"ocx.sh/uv:0.9.3\"\n";
+
+    #[test]
+    fn from_default_resolves_to_the_default_identifier() {
+        let config = ProjectConfig::from_toml_str(FROM_FORM).expect("parse");
+        assert_eq!(config.groups["lint"].tools["uv"], config.tools["uv"]);
+        assert!(config.groups["lint"].inherited.contains("uv"));
+    }
+
+    #[test]
+    fn from_default_and_literal_forms_share_one_declaration_hash() {
+        let from = ProjectConfig::from_toml_str(FROM_FORM).expect("parse from");
+        let literal = ProjectConfig::from_toml_str(LITERAL_FORM).expect("parse literal");
+        assert_eq!(crate::declaration_hash(&from), crate::declaration_hash(&literal));
+    }
+
+    #[test]
+    fn from_default_without_a_default_entry_is_a_config_error_naming_group_and_tool() {
+        let text = "[group.lint.tools]\nuv = { from = \"default\" }\n";
+        let pe = refuse_ocx_toml(text);
+        let ProjectErrorKind::ToolFromInvalid { group, name, .. } = &pe.kind else {
+            panic!("expected ToolFromInvalid, got {:?}", pe.kind);
+        };
+        assert_eq!((group.as_str(), name.as_str()), ("lint", "uv"));
+    }
+
+    #[test]
+    fn from_other_than_default_is_refused() {
+        let text = "[tools]\nuv = \"ocx.sh/uv:0.9.3\"\n[group.a.tools]\nuv = { from = \"ci\" }\n";
+        let pe = refuse_ocx_toml(text);
+        assert!(matches!(pe.kind, ProjectErrorKind::ToolFromInvalid { .. }));
+    }
+
+    #[test]
+    fn from_with_an_extra_key_is_a_parse_error() {
+        let text = "[tools]\nuv = \"ocx.sh/uv:0.9.3\"\n[group.a.tools]\nuv = { from = \"default\", x = 1 }\n";
+        assert!(ProjectConfig::from_toml_str(text).is_err());
+    }
+
+    #[test]
+    fn from_is_not_accepted_in_the_default_tools_table() {
+        assert!(ProjectConfig::from_toml_str("[tools]\nuv = { from = \"default\" }\n").is_err());
     }
 
     // ── [package] per-package settings ──────────────────────────────────────
