@@ -385,7 +385,7 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     project.mkdir()
     write_ocx_toml(project, f'[tools]\nshadowkey{label} = "{package.fq}"\n')
     assert run_in(ocx, project, "lock").returncode == EXIT_SUCCESS
-    assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = resolved_toolchain_home(ocx, project)
     assert "ocx" in bin_entries(home), (
@@ -437,7 +437,7 @@ def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Ar
     package = make_package(ocx, f"t_{label}_gpin", "1.0.0", tmp_path, cascade=False, bins=["ocx"])
     (arena.ocx_home / "ocx.toml").write_text(f'[tools]\ngpin{label} = "{package.fq}"\n', encoding="utf-8")
     assert run_in(ocx, tmp_path, "--global", "lock").returncode == EXIT_SUCCESS
-    assert run_in(ocx, tmp_path, "--global", "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, tmp_path, "--global", "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     project_free = tmp_path / f"plain-{label}"
     project_free.mkdir()
@@ -485,7 +485,7 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
         f'[tools]\nglobalkeya3 = "{project.default_package.fq}"\n', encoding="utf-8"
     )
     assert run_in(ocx, tmp_path, "--global", "lock").returncode == EXIT_SUCCESS
-    assert run_in(ocx, tmp_path, "--global", "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, tmp_path, "--global", "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = resolved_toolchain_home(ocx, project.directory)
     global_home = resolved_toolchain_home(ocx, tmp_path)
@@ -776,7 +776,7 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
     home = resolved_toolchain_home(ocx, project.directory)
     poisoned = _poison_trampoline(home, project.default_binary)
 
-    assert run_in(ocx, project.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert (shell_bin(home) / project.default_binary).read_bytes() != poisoned, (
         "`ocx pull` must re-render the trampoline the prompt refused to touch"
     )
@@ -816,7 +816,7 @@ def test_the_activate_pinned_matrix_emits_the_contracted_set(
     """
     project = locked_project(ocx, tmp_path, label="d1")
     write_ocx_toml(project.directory, project.config_body(pinned=pinned))
-    assert run_in(ocx, project.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = resolved_toolchain_home(ocx, project.directory)
     store = str(arena.ocx_home / "packages")
@@ -1051,7 +1051,7 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     hostile.chmod(0o755)
     _write_home_config(arena, f"[shell.consent]\npaths = [{json.dumps(str(clone))}]\n")
 
-    assert run_in(ocx, clone, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, clone, "pull", "-g", "all").returncode == EXIT_SUCCESS
     # `bin_entries` answers `[]` for a missing directory, so the negative below
     # is satisfied by an unrendered tree unless something pins the set non-empty.
     assert project.default_binary in bin_entries(home), (
@@ -1283,7 +1283,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     that distinguishes "the link was healed" from "the link looks plausible".
     """
     checkout = two_branch_checkout(ocx, tmp_path, label="d12")
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     trampoline = shell_bin(checkout.home) / checkout.binary
     before = trampoline.read_bytes()
     stale_target = link_entries(checkout.home)[f"default/{checkout.key}"]

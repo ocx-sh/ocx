@@ -1101,7 +1101,7 @@ def _make_multigroup_project(
         f'[group.ci.tools]\n{repos["ci"]} = "{reg}/{repos["ci"]}:1.0.0"\n',
     )
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home_keys = {g: r.upper().replace("-", "_") + "_HOME" for g, r in repos.items()}
     return project, home_keys

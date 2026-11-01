@@ -356,7 +356,7 @@ def test_mutation_commands_reject_dry_run(
         f"got {result.returncode}\n{result.stderr}"
     )
     # The positive control on the same binary: `ocx pull` does take the flag.
-    assert _run(ocx, project, "pull", "--dry-run").returncode != EXIT_USAGE, (
+    assert _run(ocx, project, "pull", "-g", "all", "--dry-run").returncode != EXIT_USAGE, (
         "the control: `ocx pull --dry-run` must not be a usage error"
     )
 
@@ -528,7 +528,7 @@ def test_pull_renders_the_toolchain_bin_directory(
     """C-054 — ``ocx pull`` renders ``<home>/toolchain/`` after the roots it
     selected have resolved. The baseline every case below is a delta against."""
     project, binary = locked_project
-    result = _run(ocx, project, "pull")
+    result = _run(ocx, project, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     trampoline = shell_bin(_toolchain_home(project)) / trampoline_name(binary)
@@ -565,7 +565,7 @@ def test_the_rendered_trampoline_executes_the_tool_it_names(
     project.mkdir()
     _write_ocx_toml(project, f'[tools]\nsmoke = "{package.fq}"\n')
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     trampoline = shell_bin(_toolchain_home(project)) / trampoline_name("wp8smoke")
     assert trampoline.exists(), (
@@ -626,7 +626,7 @@ def test_remove_prunes_the_removed_tool_s_trampoline(
     """C-054 / S-008 — ``ocx remove`` re-renders, and the prune half of C-044
     takes the trampoline with it. No other name changes."""
     project, binary = locked_project
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
     trampoline = shell_bin(_toolchain_home(project)) / trampoline_name(binary)
     assert trampoline.exists(), "the control: the trampoline must exist before removal"
 
@@ -647,7 +647,7 @@ def test_lock_and_update_re_render(
     be this command's doing.
     """
     project, binary = locked_project
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert (shell_bin(_toolchain_home(project)) / trampoline_name(binary)).exists(), (
         "the control: `ocx pull` must have rendered the tree first, or this case "
         "cannot tell a re-render from a tree that was never built"
@@ -714,7 +714,7 @@ def test_a_render_skip_never_rolls_the_commit_back(
     would trade a recoverable state for a lost one.
     """
     project, binary = locked_project
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
     home = _toolchain_home(project)
     assert (shell_bin(home) / trampoline_name(binary)).exists(), (
         "the control: there must be a rendered tree to make unwritable, or the "
@@ -751,7 +751,7 @@ def test_pull_dry_run_over_a_poisoned_tree_writes_nothing(
     would report a delta the run had itself already closed.
     """
     project, binary = locked_project
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     # Poison: repoint the rendered trampoline at a foreign body.
     poisoned = shell_bin(_toolchain_home(project)) / trampoline_name(binary)
@@ -764,7 +764,7 @@ def test_pull_dry_run_over_a_poisoned_tree_writes_nothing(
     poisoned.chmod(0o755)
 
     before = _snapshot(project)
-    result = _run(ocx, project, "pull", "--dry-run")
+    result = _run(ocx, project, "pull", "-g", "all", "--dry-run")
     after = _snapshot(project)
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -798,7 +798,7 @@ def test_exec_never_resolves_a_command_out_of_a_trampoline_directory(
     ``ToolchainExec::execute``.
     """
     project, binary = locked_project
-    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
     trampoline = shell_bin(_toolchain_home(project)) / trampoline_name(binary)
     assert trampoline.exists(), "the control: the trampoline must exist"
 
@@ -1076,7 +1076,7 @@ def test_exec_no_consent_reaches_a_nested_ocx(
     """
     outer, _ = _unconsented_project(ocx, tmp_path, "proj_outer")
     inner, _ = _unconsented_project(ocx, tmp_path, "proj_inner")
-    nested = [str(ocx.binary), "--project", str(inner / "ocx.toml"), "pull"]
+    nested = [str(ocx.binary), "--project", str(inner / "ocx.toml"), "pull", "-g", "all"]
 
     # Control: nothing suppresses, so both frames stamp — two keys, two stamps.
     # Without it the arm below would also pass on an `exec` that never reached

@@ -244,9 +244,9 @@ def pulled_toolchain(
         ocx, unique_repo, tmp_path, index_server
     )
 
-    for verb in ("lock", "pull"):
-        result = run_in(ocx, directory, verb)
-        assert result.returncode == EXIT_SUCCESS, f"ocx {verb} failed:\n{result.stderr}"
+    for verb in (("lock",), ("pull", "-g", "all")):
+        result = run_in(ocx, directory, *verb)
+        assert result.returncode == EXIT_SUCCESS, f"ocx {verb[0]} failed:\n{result.stderr}"
 
     cold_requests = len(index_server.requests)
 
@@ -455,7 +455,7 @@ def _cold_index_pull(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
     *,
-    pull_args: tuple[str, ...] = ("pull",),
+    pull_args: tuple[str, ...] = ("pull", "-g", "all",),
 ) -> ColdIndexProject:
     """Lock, wipe the index copy, then pull — the digest-addressed pull into an
     empty index that a fresh clone of a locked repository performs.
@@ -581,7 +581,7 @@ def test_a_frozen_pull_records_no_routing_pointer(
     the flag simply rejecting the command.
     """
     frozen = _cold_index_pull(
-        ocx, unique_repo, tmp_path, index_server, pull_args=("--frozen", "pull")
+        ocx, unique_repo, tmp_path, index_server, pull_args=("--frozen", "pull", "-g", "all")
     )
 
     assert not frozen.root_path.exists(), (

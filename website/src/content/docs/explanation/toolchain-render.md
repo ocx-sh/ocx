@@ -12,7 +12,7 @@ A warm object store is not yet a usable toolchain: something has to point at tho
 
 The render is a reconcile, not an append. The computed name set is written and every name no longer in it is pruned. A group that leaves the lock is pruned at `links/<group>`, not at the tree root. A depth-1 directory named after a locked group is therefore an orphan of the tree's own namespace, and the render prunes it as one.
 
-`-g` narrows the render. A bare `ocx pull` covers every group the lock declares plus the default group unconditionally, and `-g ci,lint` covers exactly those. The trampoline directory belongs to the default group and to nothing else. A run that narrows the default group away leaves `shells/default/bin/` entirely untouched rather than emptied. Reconciling it would force the default group's metadata to resolve, which adds a network dependency nobody asked for.
+`-g` selects the render. A bare `ocx pull` covers the default group, `-g all` covers every group the lock declares plus the default group, and `-g ci,lint` covers exactly those. Naming bindings (`ocx pull cmake`) narrows what is pulled and never the render. The trampoline directory belongs to the default group and to nothing else. A run that narrows the default group away leaves `shells/default/bin/` entirely untouched rather than emptied. Reconciling it would force the default group's metadata to resolve, which adds a network dependency nobody asked for.
 
 The repair of a stale or absent link is not the pull's alone. Every composing emitter repairs the groups it is about to emit before it probes a link. `--dry-run` performs no repair, so a poisoned or stale link is still there afterwards. Every write step the repair needs is a step a dry run does not take.
 

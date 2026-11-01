@@ -741,7 +741,7 @@ def locked_project(
     lock = run_in(ocx, project_dir, "lock", env_extra=env_extra)
     assert lock.returncode == EXIT_SUCCESS, f"ocx lock failed:\n{lock.stderr}"
     if pull:
-        pulled = run_in(ocx, project_dir, "pull", env_extra=env_extra)
+        pulled = run_in(ocx, project_dir, "pull", "-g", "all", env_extra=env_extra)
         assert pulled.returncode == EXIT_SUCCESS, f"ocx pull failed:\n{pulled.stderr}"
     return project
 

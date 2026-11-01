@@ -317,14 +317,14 @@ Every package comes from the digest-pinned `ocx.lock`, never from the index, whi
 After a successful pull it re-saves the file to advance its mtime.
 
 ```text
-ocx pull [OPTIONS]
+ocx pull [OPTIONS] [NAME]...
 ```
 
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--dry-run` |  | Preview which locked packages are cached vs. would be fetched |
-| `--group`, `-g` | `GROUPS` | Restrict the pull to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |

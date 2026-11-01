@@ -31,6 +31,8 @@ Pass `--group` (repeatable, comma-separated) to scope a command:
 ```shell
 ocx pull -g ci,lint               # CI runner — only what's needed for lint jobs
 ocx pull -g release               # release runner — only release packages
+ocx pull -g all                   # every group
+ocx pull                          # the default group only
 ocx lock                          # workstation — every group resolved
 ```
 

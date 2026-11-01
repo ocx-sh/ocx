@@ -1405,7 +1405,7 @@ def test_pull_materializes_a_package_any_selected_group_wants_eager(
     project = _lazy_project(ocx, tmp_path, body)
     assert not _is_materialized(ocx, project, pkg), "precondition: the store starts cold"
 
-    result = _run(ocx, project, "--format", "json", "pull")
+    result = _run(ocx, project, "--format", "json", "pull", "-g", "all")
 
     assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
     rows = json.loads(result.stdout)["paths"]

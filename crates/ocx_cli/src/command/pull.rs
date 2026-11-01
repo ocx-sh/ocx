@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_project::{expand_all_keyword, lazy_mode_for_tool};
+use ocx_project::{DEFAULT_GROUP, expand_all_keyword, lazy_mode_for_tool};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock_consenting;
@@ -13,8 +13,10 @@ use crate::options;
 
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
 ///
-/// Pulls every digest-pinned lock entry across the requested groups of the
-/// nearest `ocx.toml` into the local object store. Unlike `ocx package pull`
+/// Pulls the digest-pinned lock entries of the selected groups of the nearest
+/// `ocx.toml` into the local object store; without `-g` that is the default
+/// group only, and `-g all` selects every group. Naming bindings narrows the
+/// pull to those entries. Unlike `ocx package pull`
 /// it is project-tier (driven by the lock file) and never touches the
 /// candidate or current symlink namespace. A successful pull re-saves
 /// `ocx.lock` byte-identically so direnv's `watch_file` fires, except under
@@ -33,15 +35,15 @@ pub struct Pull {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
-    /// Restrict the pull to the named group(s).
+    #[clap(flatten)]
+    pub groups: options::GroupSelection,
+
+    /// Pull only these bindings, from within the selected groups.
     ///
-    /// Repeatable and comma-separated: `-g ci,lint -g release`. The
-    /// reserved name `default` selects the top-level `[tools]` table; the
-    /// reserved name `all` expands to `default` + every declared `[group.*]`.
-    /// When omitted, every `[tools]` and `[group.*]` entry from the lock
-    /// is pulled.
-    #[arg(short = 'g', long = "group", value_delimiter = ',')]
-    pub groups: Vec<String>,
+    /// A name that matches no binding in the selected groups exits 64. The
+    /// toolchain home render still follows the group selection, not the names.
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
 
     #[clap(flatten)]
     pub platform: options::PlatformOption,
@@ -57,27 +59,23 @@ pub struct Pull {
 
 impl Pull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        crate::app::project_context::ensure_group_segments_nonempty(&self.groups)?;
+        crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
         // The consenting load, unlike read-only callers: build tooling runs `pull` in checkouts no
         // operator chose, so `OCX_NO_CONSENT` must be able to suppress the stamp.
         let ctx = load_project_with_lock_consenting(&context, self.consent.explicit()).await?;
 
-        crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;
+        crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
 
         let platform = conventions::platform_or_default(self.platform.platform.clone());
-        let render_groups = render_groups(&self.groups, &ctx);
+        // No `-g` is the default group, as for `ocx exec`; the render covers exactly these groups.
+        let mut render_groups = expand_all_keyword(self.groups.names(), &ctx.config);
+        if render_groups.is_empty() {
+            render_groups = vec![DEFAULT_GROUP.to_owned()];
+        }
         // The hash gate passed; a per-entry desync it cannot see refuses the same way.
         let bound = ctx.lock.bind_current(&ctx.config)?;
-        let selected: Vec<&ocx_project::BoundTool> = if self.groups.is_empty() {
-            bound.iter().collect()
-        } else {
-            let expanded = expand_all_keyword(&self.groups, &ctx.config);
-            bound
-                .iter()
-                .filter(|t| expanded.iter().any(|g| g == &t.locked().group))
-                .collect()
-        };
+        let selected = select_bound(&bound, &render_groups, &self.names)?;
         let host = selected
             .iter()
             .map(|tool| {
@@ -179,20 +177,30 @@ fn report_key(identifier: &ocx_oci::PackageRef) -> String {
     identifier.without_tag().to_string()
 }
 
-/// The groups this render covers: `-g` expanded, else every lock group plus the default group
-/// unconditionally, or `bin/` stops reconciling once a hand edit drops the last default-group tool.
-/// A `-g` without the default group leaves `bin/` untouched, since reconciling it needs the network.
-fn render_groups(selected: &[String], project: &crate::app::project_context::ProjectContext) -> Vec<String> {
-    if !selected.is_empty() {
-        return expand_all_keyword(selected, &project.config);
+/// The bound tools in `groups`, narrowed to `names` when any are given.
+///
+/// # Errors
+///
+/// Exit 64 when a name matches no binding in `groups`.
+fn select_bound<'a>(
+    bound: &'a [ocx_project::BoundTool],
+    groups: &[String],
+    names: &[String],
+) -> anyhow::Result<Vec<&'a ocx_project::BoundTool>> {
+    let in_groups: Vec<&ocx_project::BoundTool> = bound
+        .iter()
+        .filter(|tool| groups.iter().any(|group| group == &tool.locked().group))
+        .collect();
+    if let Some(missing) = names
+        .iter()
+        .find(|name| !in_groups.iter().any(|tool| &tool.locked().name == *name))
+    {
+        return Err(crate::error::UsageError::new(format!("binding '{missing}' not found in selected groups")).into());
     }
-    let mut groups = vec![ocx_project::DEFAULT_GROUP.to_owned()];
-    for tool in &project.lock.tools {
-        if !groups.iter().any(|group| group == &tool.group) {
-            groups.push(tool.group.clone());
-        }
-    }
-    groups
+    Ok(in_groups
+        .into_iter()
+        .filter(|tool| names.is_empty() || names.contains(&tool.locked().name))
+        .collect())
 }
 
 /// Renders the toolchain home and warns on stderr about what the render could not do.
@@ -323,8 +331,8 @@ mod tests {
             Some("linux/arm64".to_owned())
         );
         assert_eq!(
-            pull.groups,
-            vec!["ci".to_owned()],
+            pull.groups.names(),
+            ["ci".to_owned()],
             "-g must still parse alongside --platform"
         );
     }
@@ -343,7 +351,23 @@ mod tests {
     #[test]
     fn parses_all_group_keyword() {
         let pull = Pull::try_parse_from(["pull", "-g", "all"]).unwrap();
-        assert_eq!(pull.groups, vec!["all".to_owned()]);
+        assert_eq!(pull.groups.names(), ["all".to_owned()]);
+    }
+
+    /// No `-g` and no names parse to empty selections; the default group is applied at execute time.
+    #[test]
+    fn parses_bare_pull_as_empty_selection() {
+        let pull = Pull::try_parse_from(["pull"]).unwrap();
+        assert!(pull.groups.names().is_empty());
+        assert!(pull.names.is_empty());
+    }
+
+    /// Positional names parse beside `-g`.
+    #[test]
+    fn parses_binding_names() {
+        let pull = Pull::try_parse_from(["pull", "-g", "lint", "cmake", "ninja"]).unwrap();
+        assert_eq!(pull.groups.names(), ["lint".to_owned()]);
+        assert_eq!(pull.names, ["cmake".to_owned(), "ninja".to_owned()]);
     }
 
     // ── `--dry-run` stays `ocx pull`-only ─────────────────────────────────
@@ -437,6 +461,71 @@ repository = "ghcr.io/cmake"
         for needle in ["'cmake'", "ghcr.io/cmake", "ocx.sh/cmake"] {
             assert!(rendered.contains(needle), "{needle} missing from {rendered:?}");
         }
+    }
+
+    fn two_group_bound() -> (ocx_project::ProjectConfig, Vec<ocx_project::BoundTool>) {
+        let config = ocx_project::ProjectConfig::from_toml_str(
+            "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n[group.ci.tools]\nninja = \"ocx.sh/ninja:1.0\"\n",
+        )
+        .expect("parse ocx.toml");
+        let leaf = "a".repeat(64);
+        let lock = ocx_project::ProjectLock::from_toml_str(&format!(
+            r#"[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "{hash}"
+generated_by = "ocx test"
+generated_at = "2026-01-01T00:00:00Z"
+
+[[tool]]
+name = "cmake"
+group = "default"
+repository = "ocx.sh/cmake"
+
+[tool.platforms]
+"linux/amd64" = "sha256:{leaf}"
+
+[[tool]]
+name = "ninja"
+group = "ci"
+repository = "ocx.sh/ninja"
+
+[tool.platforms]
+"linux/amd64" = "sha256:{leaf}"
+"#,
+            hash = config.declaration_hash_cached(),
+        ))
+        .expect("parse ocx.lock");
+        let bound = lock.bind_current(&config).expect("bind");
+        (config, bound)
+    }
+
+    fn selected_names(groups: &[&str], names: &[&str]) -> anyhow::Result<Vec<String>> {
+        let (_, bound) = two_group_bound();
+        let groups: Vec<String> = groups.iter().map(|g| (*g).to_owned()).collect();
+        let names: Vec<String> = names.iter().map(|n| (*n).to_owned()).collect();
+        Ok(select_bound(&bound, &groups, &names)?
+            .into_iter()
+            .map(|tool| tool.locked().name.clone())
+            .collect())
+    }
+
+    /// The default group alone excludes `[group.ci]`; both groups select both entries.
+    #[test]
+    fn select_bound_follows_the_group_selection() {
+        assert_eq!(selected_names(&["default"], &[]).unwrap(), ["cmake"]);
+        assert_eq!(selected_names(&["default", "ci"], &[]).unwrap(), ["cmake", "ninja"]);
+    }
+
+    /// Names narrow within the groups; a name outside them exits 64.
+    #[test]
+    fn select_bound_narrows_by_name_and_rejects_unknown() {
+        assert_eq!(selected_names(&["default", "ci"], &["ninja"]).unwrap(), ["ninja"]);
+        let outside = selected_names(&["default"], &["ninja"]).expect_err("ninja is not in the default group");
+        assert_eq!(
+            crate::exit::classify_error(outside.as_ref()),
+            ocx_exit::ExitCode::UsageError
+        );
     }
 
     /// Report keys stay `registry/repository@sha256:...`; the tag only selects patches.

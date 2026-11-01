@@ -405,7 +405,7 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     directory.mkdir(parents=True)
     write_ocx_toml(directory, f'[tools]\n{key} = "{package.fq}"\n')
     assert run_in(ocx, directory, "lock").returncode == EXIT_SUCCESS
-    pulled = run_in(ocx, directory, "pull")
+    pulled = run_in(ocx, directory, "pull", "-g", "all")
     assert pulled.returncode == EXIT_SUCCESS, (
         f"a project root spelling the marker must still render; {pulled.stderr}"
     )
@@ -801,7 +801,7 @@ def test_item16_a_package_claiming_the_name_ocx_renders_a_trampoline_and_runs(
     write_ocx_toml(directory, f'[tools]\nkey{label} = "{package.fq}"\n')
     assert run_in(ocx, directory, "lock").returncode == EXIT_SUCCESS
 
-    pulled = run_in(ocx, directory, "pull")
+    pulled = run_in(ocx, directory, "pull", "-g", "all")
     assert pulled.returncode == EXIT_SUCCESS, (
         f"claiming the name `ocx` must not refuse; rc={pulled.returncode}\n{pulled.stderr}"
     )
@@ -850,7 +850,7 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
     )
     assert run_in(ocx, directory, "lock").returncode == EXIT_SUCCESS
 
-    pulled = run_in(ocx, directory, "pull")
+    pulled = run_in(ocx, directory, "pull", "-g", "all")
     assert pulled.returncode == EXIT_SUCCESS, (
         f"a name collision never refuses; rc={pulled.returncode}\n{pulled.stderr}"
     )

@@ -1880,8 +1880,10 @@ impl PatchWhyArgs {
 pub struct PullArgs {
     /// Preview which locked packages are cached vs. would be fetched
     pub dry_run: bool,
-    /// Restrict the pull to the named group(s)
+    /// Restrict the composition to the named group(s)
     pub groups: Vec<String>,
+    /// Pull only these bindings, from within the selected groups
+    pub names: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Control when a package's content downloads: now, or on first use
@@ -1897,6 +1899,7 @@ impl PullArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.switch("dry-run", self.dry_run);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.flag("lazy-mode", &self.lazy_mode, Presence::Optional, &["never", "always"]);
         argv.switch("consent", self.consent);

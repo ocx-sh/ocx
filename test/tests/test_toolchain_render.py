@@ -288,7 +288,7 @@ def test_a_project_path_carrying_a_launcher_unsafe_character_is_not_rendered(
         pytest.skip(f"this host cannot create a directory named {name!r}: {error}")
     project = locked_project(ocx, tmp_path, directory=project_dir, pull=False)
 
-    result = run_in(ocx, project_dir, "pull")
+    result = run_in(ocx, project_dir, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"C-050 — an unrenderable home never blocks a pull; rc={result.returncode}\n"
         f"{result.stderr}"
@@ -334,7 +334,7 @@ def test_two_consecutive_pulls_produce_a_byte_identical_tree(
     first = snapshot_tree(project.home)
     assert first, "the control: the first pull must have rendered something"
 
-    again = run_in(ocx, project.directory, "pull")
+    again = run_in(ocx, project.directory, "pull", "-g", "all")
     assert again.returncode == EXIT_SUCCESS, again.stderr
 
     assert snapshot_tree(project.home) == first, (
@@ -360,7 +360,7 @@ def test_rendering_the_same_project_from_a_different_directory_rewrites_every_bo
     moved = tmp_path / "relocated"
     copy_tree(project.directory, moved)
     shutil.rmtree(toolchain_home(moved), ignore_errors=True)
-    result = run_in(ocx, moved, "pull")
+    result = run_in(ocx, moved, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     relocated_body = trampoline_body(
@@ -456,7 +456,7 @@ def test_a_branch_switch_leaves_a_stale_link_that_the_next_composing_emit_heals(
     assertion reds while every ``pull``-driven case stays green.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
-    pulled = run_in(ocx, checkout.directory, "pull")
+    pulled = run_in(ocx, checkout.directory, "pull", "-g", "all")
     assert pulled.returncode == EXIT_SUCCESS, pulled.stderr
 
     on_main = read_link(checkout.link)
@@ -493,7 +493,7 @@ def test_pull_dry_run_performs_no_heal_on_a_poisoned_link(
     remove_link(project.default_link)
     make_link(poison, project.default_link)
 
-    result = run_in(ocx, project.directory, "pull", "--dry-run")
+    result = run_in(ocx, project.directory, "pull", "-g", "all", "--dry-run")
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert read_link(project.default_link) == poison, (
         "C-049 — a dry run performs no heal; the poisoned link must survive it"
@@ -548,7 +548,7 @@ def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_
         f'mtkey{label} = "{empty_package.fq}"\n',
     )
     assert run_in(ocx, project, "lock").returncode == EXIT_SUCCESS
-    assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = toolchain_home(project)
     copied = entry_link(home, DEFAULT_GROUP, f"cpkey{label}")
@@ -570,7 +570,7 @@ def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_
     remove_link(emptied)
     emptied.mkdir()
 
-    result = run_in(ocx, project, "pull")
+    result = run_in(ocx, project, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"C-050 — one unhealable entry never fails the render; "
         f"rc={result.returncode}\n{result.stderr}"
@@ -630,7 +630,7 @@ def test_a_regular_file_where_an_entry_link_belongs_is_still_replaced(
     remove_link(entry)
     entry.write_text("not a link\n")
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert is_link(entry), (
@@ -670,7 +670,7 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
     remove_link(entry)
     group = entry.parent
     with read_only_dir(group):
-        result = run_in(ocx, project.directory, "pull")
+        result = run_in(ocx, project.directory, "pull", "-g", "all")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — the render continues; rc={result.returncode}\n{result.stderr}"
         )
@@ -952,7 +952,7 @@ def test_a_refused_toolchain_dir_also_stops_a_pull_and_names_the_environment_tie
     project = locked_project(ocx, tmp_path, pull=False)
 
     write_toolchain_dir_config(ocx, _SYSTEM_DIR)
-    blocked = run_in(ocx, project.directory, "pull")
+    blocked = run_in(ocx, project.directory, "pull", "-g", "all")
     assert blocked.returncode == EXIT_CONFIG, (
         f"item 18 — a refused root must stop the writer too; rc={blocked.returncode}\n"
         f"{blocked.stderr}"
@@ -1101,7 +1101,7 @@ def test_a_render_that_cannot_write_warns_on_stderr_and_still_exits_zero(
     parent = project.directory / ".ocx"
     shutil.rmtree(project.home, ignore_errors=True)
     with read_only_dir(parent):
-        result = run_in(ocx, project.directory, "pull")
+        result = run_in(ocx, project.directory, "pull", "-g", "all")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — a write failure never fails the pull; rc={result.returncode}\n"
             f"{result.stderr}"
@@ -1192,7 +1192,7 @@ def test_an_orphan_trampoline_is_pruned_and_every_group_link_is_left_alone(
     orphan.write_text("#!/bin/sh\necho pwned\n")
     os.chmod(orphan, 0o755)
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert not orphan.exists(), (
@@ -1243,7 +1243,7 @@ def test_an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline(
     both = f'[tools]\nkeepkey{label} = "{keeper.fq}"\nleavekey{label} = "{leaver.fq}"\n'
     write_ocx_toml(project, both)
     assert run_in(ocx, project, "lock").returncode == EXIT_SUCCESS
-    assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = toolchain_home(project)
     assert bin_entries(home) == expected_bin(f"keepbin{label}", f"leavebin{label}")
@@ -1290,7 +1290,7 @@ def test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_
     payload = populated / "payload"
     payload.write_text("keep me\n")
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"RUL-32 — a skip never aborts the render; rc={result.returncode}\n{result.stderr}"
     )
@@ -1327,7 +1327,7 @@ def test_an_orphan_directory_in_bin_is_skipped_and_never_removed_recursively(
     hostile.mkdir()
     (hostile / "payload").write_text("keep me\n")
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"RUL-32 — the render continues; rc={result.returncode}\n{result.stderr}"
     )
@@ -1424,7 +1424,7 @@ def test_shifting_a_trampolines_mtime_perturbs_neither_the_stamp_nor_the_tree(
     inode = trampoline.lstat().st_ino
     os.utime(trampoline, (1_000_000, 1_000_000))
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert json.loads(stamp_file.read_text(encoding="utf-8")) == before, (
@@ -1441,7 +1441,7 @@ def test_shifting_a_trampolines_mtime_perturbs_neither_the_stamp_nor_the_tree(
     # The positive control: a byte change *is* noticed.
     tampered = trampoline.read_text(encoding="utf-8") + "# tamper\n"
     trampoline.write_text(tampered, encoding="utf-8")
-    assert run_in(ocx, project.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert not trampoline.read_text(encoding="utf-8").endswith("# tamper\n"), (
         "C-003 — a changed body must be noticed and rewritten, or the mtime "
         "assertion above cannot tell 'unchanged' from 'never inspected'"
@@ -1496,7 +1496,7 @@ def test_pinned_suppresses_the_whole_link_pass_and_leaves_bin_byte_identical(
     make_link(poison, project.default_link)
 
     write_ocx_toml(project.directory, project.config_body(pinned=True))
-    pinned = run_in(ocx, project.directory, "pull")
+    pinned = run_in(ocx, project.directory, "pull", "-g", "all")
     assert pinned.returncode == EXIT_SUCCESS, pinned.stderr
 
     assert read_link(project.default_link) == poison, (
@@ -1520,7 +1520,7 @@ def test_pinned_suppresses_the_whole_link_pass_and_leaves_bin_byte_identical(
     )
 
     write_ocx_toml(project.directory, project.config_body(pinned=False))
-    unpinned = run_in(ocx, project.directory, "pull")
+    unpinned = run_in(ocx, project.directory, "pull", "-g", "all")
     assert unpinned.returncode == EXIT_SUCCESS, unpinned.stderr
 
     assert read_link(project.default_link) != poison, (
@@ -1563,7 +1563,7 @@ def test_relocating_the_home_renders_the_new_tree_and_abandons_the_old_one_in_pl
     )
     assert relocated != project.home
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert bin_entries(relocated) == expected_bin(project.default_binary), (
@@ -1603,8 +1603,8 @@ def test_clean_prunes_a_departed_projects_ledger_entry_and_stamp_only(
     sibling = locked_project(ocx, tmp_path, directory=tmp_path / "sibling")
     departing_home = resolved_toolchain_home(ocx, departing.directory)
     sibling_home = resolved_toolchain_home(ocx, sibling.directory)
-    assert run_in(ocx, departing.directory, "pull").returncode == EXIT_SUCCESS
-    assert run_in(ocx, sibling.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, departing.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
+    assert run_in(ocx, sibling.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert bin_entries(departing_home) and bin_entries(sibling_home), (
         "the control: both keyed trees must exist before the sweep"
     )
@@ -1689,7 +1689,7 @@ def test_a_managed_config_tier_relocates_every_project_tree_under_the_fleet_root
         f"C-002 — `<root>/<project-key>/toolchain`, key first; got {reported}"
     )
 
-    pulled = run_in(ocx, project.directory, "pull", env_extra=managed)
+    pulled = run_in(ocx, project.directory, "pull", "-g", "all", env_extra=managed)
     assert pulled.returncode == EXIT_SUCCESS, pulled.stderr
     assert bin_entries(reported) == expected_bin(project.default_binary), (
         f"S-004 — the project tree renders under the fleet root; {reported} holds "
@@ -1800,7 +1800,7 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
     """
     checkout = two_branch_checkout(ocx, tmp_path)
 
-    first = run_in(ocx, checkout.directory, "pull")
+    first = run_in(ocx, checkout.directory, "pull", "-g", "all")
     assert first.returncode == EXIT_SUCCESS, first.stderr
     assert set(link_entries(checkout.home)) == checkout.expected_links(
         checkout.main_branch
@@ -1816,7 +1816,7 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
 
     # The checkout, exactly as a user makes it: git swaps both files at once.
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
-    second = run_in(ocx, checkout.directory, "pull")
+    second = run_in(ocx, checkout.directory, "pull", "-g", "all")
     assert second.returncode == EXIT_SUCCESS, second.stderr
 
     links = link_entries(checkout.home)
@@ -1879,7 +1879,7 @@ def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
     because ``crate::symlink::remove`` is ``std::fs::remove_file`` on Unix.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert checkout.main_group_link_present(), (
         "the control: `main`'s group link is on disk before the switch"
     )
@@ -1889,7 +1889,7 @@ def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
     planted.write_bytes(b"planted\n")
 
     for run in (1, 2):
-        result = run_in(ocx, checkout.directory, "pull")
+        result = run_in(ocx, checkout.directory, "pull", "-g", "all")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — a skip never fails the render (run {run}); "
             f"rc={result.returncode}\n{result.stderr}"
@@ -1939,7 +1939,7 @@ def test_a_foreign_file_in_a_live_group_directory_is_reported_never_removed(
     planted = entry_link(project.home, DEFAULT_GROUP, "not-ocxs.txt")
     planted.write_bytes(b"planted\n")
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"C-050 — a skip never fails the render; rc={result.returncode}\n"
         f"{result.stderr}"
@@ -1972,9 +1972,9 @@ def test_a_departed_group_directory_converges_instead_of_skipping_forever(
     never declared, and the directory is still on disk.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     assert set(link_entries(checkout.home)) == checkout.expected_links(
         checkout.other_branch
@@ -2005,13 +2005,13 @@ def test_a_skipped_group_directory_says_why_and_what_to_do(
     passes, which is what makes them the two halves this row adds.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
     # A departed group whose contents are all ocx's own now converges, so a file
     # ocx did not write is what keeps the directory unremovable — the only state
     # in which there is a skip to read at all.
     (checkout.main_group_dir / "not-ocxs.txt").write_bytes(b"planted\n")
-    result = run_in(ocx, checkout.directory, "pull")
+    result = run_in(ocx, checkout.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert rust_debug(str(checkout.main_group_dir)) in result.stderr, (
@@ -2066,7 +2066,7 @@ def test_a_dereferenced_toolchain_copy_reports_the_same_entry_on_every_pull(
     before = {p: p.read_bytes() for p in payload}
 
     for run in (1, 2):
-        result = run_in(ocx, alt, "pull")
+        result = run_in(ocx, alt, "pull", "-g", "all")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — one unhealable entry never fails the render (run {run}); "
             f"rc={result.returncode}\n{result.stderr}"
@@ -2112,7 +2112,7 @@ def test_an_emptied_shells_directory_is_repopulated_by_the_next_pull(
     assert before, "the control: the first render produced trampolines"
 
     shutil.rmtree(project.home / SHELLS_DIR)
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert bin_entries(project.home) == before, (
@@ -2308,7 +2308,7 @@ def test_a_read_only_home_skips_rather_than_fails(
     """
     project = locked_project(ocx, tmp_path)
     with read_only_dir(project.home):
-        result = run_in(ocx, project.directory, "pull")
+        result = run_in(ocx, project.directory, "pull", "-g", "all")
 
     assert result.returncode == EXIT_SUCCESS, (
         f"row 13 — an unwritable home skips; rc={result.returncode}\n{result.stderr}"
@@ -2347,12 +2347,12 @@ def test_two_concurrent_pulls_leave_one_consistent_tree(
     and both round-trip assertions red.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
-    assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
 
     processes = [
         subprocess.Popen(
-            [str(ocx.binary), "pull"],
+            [str(ocx.binary), "pull", "-g", "all"],
             cwd=checkout.directory,
             env=dict(ocx.env),
             stdout=subprocess.PIPE,
@@ -2416,7 +2416,7 @@ def test_a_legacy_bin_directory_beside_the_new_names_is_pruned_when_empty_and_re
 
     # Arm 1 — empty: pruned, and pruning is not an event worth a warning.
     legacy.mkdir()
-    first = run_in(ocx, project.directory, "pull")
+    first = run_in(ocx, project.directory, "pull", "-g", "all")
     assert first.returncode == EXIT_SUCCESS, first.stderr
     assert not legacy.exists(), (
         f"row 17 — an empty legacy `bin/` is removed by the depth-1 scan; "
@@ -2429,7 +2429,7 @@ def test_a_legacy_bin_directory_beside_the_new_names_is_pruned_when_empty_and_re
     # Arm 2 — populated: never removed recursively, and named every render.
     legacy.mkdir()
     (legacy / "oldtool").write_text("#!/bin/sh\necho legacy\n")
-    second = run_in(ocx, project.directory, "pull")
+    second = run_in(ocx, project.directory, "pull", "-g", "all")
     assert second.returncode == EXIT_SUCCESS, second.stderr
     assert (legacy / "oldtool").read_text(encoding="utf-8") == "#!/bin/sh\necho legacy\n", (
         "RUL-32 — a populated legacy `bin/` is never removed recursively"
@@ -2470,7 +2470,7 @@ def test_a_legacy_group_directory_at_the_home_root_is_reported_and_never_deleted
     (legacy / "payload").write_bytes(b"legacy bytes\n")
 
     for run in (1, 2):
-        result = run_in(ocx, project.directory, "pull")
+        result = run_in(ocx, project.directory, "pull", "-g", "all")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — a render skip is never `pull`'s exit code (run {run}); "
             f"rc={result.returncode}\n{result.stderr}"
@@ -2535,7 +2535,7 @@ def test_an_escaping_active_link_is_repointed_and_nothing_is_written_through_it(
     remove_link(active)
     make_link(str(evil), active)
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"C-081 — an escaping `active` is healed, not refused; "
         f"rc={result.returncode}\n{result.stderr}"
@@ -2574,7 +2574,7 @@ def test_an_absent_active_is_recreated_silently(ocx: OcxRunner, tmp_path: Path) 
         "the control: `active` is genuinely gone before the render runs"
     )
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert_symlink_exists(active_link(project.home))
     assert read_link(active_link(project.home)) == active_target(project.home), (
@@ -2617,7 +2617,7 @@ def test_a_dangling_active_is_repointed_not_pruned(
         "the control: it dangles"
     )
 
-    result = run_in(ocx, project.directory, "pull")
+    result = run_in(ocx, project.directory, "pull", "-g", "all")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
     assert snapshot_tree(project.home)[ACTIVE_LINK] == (
@@ -2703,7 +2703,7 @@ def test_a_junction_dereferencing_copy_leaves_a_real_directory_at_active(
         "the control: the dereferencing copy left a real directory at `active`"
     )
 
-    assert run_in(ocx, copied, "pull").returncode == EXIT_SUCCESS
+    assert run_in(ocx, copied, "pull", "-g", "all").returncode == EXIT_SUCCESS
     assert_symlink_exists(active_link(copied_home))
     assert read_link(active_link(copied_home)) == active_target(copied_home)
 
