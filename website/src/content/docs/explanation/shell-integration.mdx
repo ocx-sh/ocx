@@ -79,6 +79,8 @@ That matters the moment a repository holds a second `ocx.toml` below its first. 
 
 If a nested project needs a package the enclosing one declares, declare it there too. [`ocx add`][cmd-add] inside `test/` writes it into `test/ocx.toml`. That file plus its `ocx.lock` is the whole answer for everything beneath it. [`ocx exec`][cmd-run] follows the same walk, so it composes the nearest file's lock alone. To run against the enclosing project from inside the nested one, name it, as in `ocx --project .. exec -- cmake --version`. The walk never reaches past the nearer file.
 
+To keep the active project's tools and add the nested one in front of them for a single run, pass `--stack`, as in `ocx exec --stack -- pytest`.
+
 :::note[direnv's shape, not mise's]
 [direnv][direnv] loads the closest `.envrc` and nothing above it unless that file opts in with `source_up`. By contrast, [mise][mise-config-hierarchy] does the opposite: every `mise.toml` up the tree is merged, and the nearest wins per tool. OCX follows direnv here, minus the opt-in. That gives one file, one lock and one reproducible answer per directory, with no second file able to change what the lock says.
 :::

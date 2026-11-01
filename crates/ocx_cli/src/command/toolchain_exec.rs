@@ -68,6 +68,9 @@ pub struct ToolchainExec {
     #[clap(flatten)]
     pub with: options::With,
 
+    #[clap(flatten)]
+    pub stack: options::Stack,
+
     // `--consent` (the default) / `--no-consent`; clap renders the flattened struct's docs, not a `///` here.
     #[clap(flatten)]
     pub consent: options::Consent,
@@ -216,6 +219,8 @@ impl ToolchainExec {
 
         let mut process_env = if self.clean {
             env::Env::clean()
+        } else if self.stack.enabled() {
+            reconcile::stacked_env()
         } else {
             reconcile::inherited_env()
         };

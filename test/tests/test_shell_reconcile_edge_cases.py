@@ -4412,3 +4412,53 @@ def test_ec_proc_015_a_carrier_crossing_a_host_or_user_boundary_is_treated_as_fo
         f"a carrier crossing a host/OCX_HOME boundary must never cause the WRONG value to be trusted — the freshly "
         f"recomposed D, not the foreign ledger's bookkeeping, is authoritative for what applies: {applied_values}\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Nested projects: `ocx exec --stack`
+# ---------------------------------------------------------------------------
+
+
+def _activated_parent(arena: Arena, parent: Path) -> dict[str, str]:
+    """The environment a hooked shell holds after the prompt applied ``parent``: its PATH entry and its ledger."""
+    applied = matrix.reconcile(arena.ocx, "bash", parent, arena.env())
+    assert applied.returncode == 0, f"stderr:\n{applied.stderr}"
+    # Evaluated, not parsed: PATH is exported through a loop form a regex over `export K='v'` cannot see.
+    evaluated = subprocess.run(
+        ["bash", "-c", f'eval "$1"; printf "%s\\0%s" "$PATH" "${{{matrix.CARRIER}-}}"', "bash", applied.stdout],
+        capture_output=True, check=False, text=True, env=arena.env(),
+    )
+    assert evaluated.returncode == 0, f"stderr:\n{evaluated.stderr}"
+    path, carrier = evaluated.stdout.split("\0", 1)
+    assert carrier and path, f"the fixture must apply PATH and a ledger:\n{applied.stdout}"
+    return arena.env() | {"PATH": path, matrix.CARRIER: carrier}
+
+
+def test_exec_stack_keeps_the_active_parent_toolchain_and_puts_the_child_first(arena: Arena) -> None:
+    """EC-SCOPE-004 opt-out — ``ocx exec --stack`` layers a nested project over the active one; without it the parent is replaced."""
+    parent_bin = arena.ocx_home / "parent-tc" / "bin"
+    child_bin = arena.ocx_home / "child-tc" / "bin"
+    parent_bin.mkdir(parents=True)
+    child_bin.mkdir(parents=True)
+    parent = _locked_project(arena, "parent", f'PATH = {{ type = "path", value = "{parent_bin}" }}\n')
+    child = _locked_project(arena, "child", f'PATH = {{ type = "path", value = "{child_bin}" }}\n')
+    live = _activated_parent(arena, parent)
+    assert str(parent_bin) in live["PATH"].split(os.pathsep), "fixture sanity: the parent is active"
+
+    def child_view(*flags: str) -> tuple[list[str], str]:
+        result = subprocess.run(
+            [str(arena.ocx), "exec", *flags, "--", "sh", "-c", 'printf "%s\\n%s" "$PATH" "${__OCX_ENV_STATE-__OCX_ABSENT__}"'],
+            capture_output=True, check=False, text=True, cwd=str(child), env=live,
+        )
+        assert result.returncode == 0, f"stderr:\n{result.stderr}"
+        path, carrier = result.stdout.split("\n", 1)
+        return path.split(os.pathsep), carrier
+
+    stacked, stacked_carrier = child_view("--stack")
+    assert str(parent_bin) in stacked and str(child_bin) in stacked, f"both toolchains must be on PATH: {stacked}"
+    assert stacked.index(str(child_bin)) < stacked.index(str(parent_bin)), f"the child project must come first: {stacked}"
+    assert stacked_carrier == "__OCX_ABSENT__", "the ledger must not reach the child, stacked or not"
+
+    replaced, replaced_carrier = child_view()
+    assert str(child_bin) in replaced and str(parent_bin) not in replaced, f"without --stack the parent is replaced: {replaced}"
+    assert replaced_carrier == "__OCX_ABSENT__"

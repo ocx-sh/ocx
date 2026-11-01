@@ -107,6 +107,15 @@ pub fn inherited_env() -> Env {
     env
 }
 
+/// [`Env::new`] keeping what the per-prompt reconciler applied; the start env of `--stack`.
+///
+/// Only the ledger key goes, so a nested hook does not try to undo entries it never wrote.
+pub fn stacked_env() -> Env {
+    let mut env = Env::new();
+    env.remove(CARRIER_KEY);
+    env
+}
+
 /// Revert the ledger's contribution by [`plan`]ning against an empty desired set.
 ///
 /// `owned_prefixes` stays empty, or the lost-ledger repair strips `ocx self activate`'s own `bin/`.
@@ -250,6 +259,33 @@ mod tests {
             env.get(reconcile::CARRIER_KEY).is_none(),
             "the carrier describes an environment the child no longer has"
         );
+    }
+
+    /// `--stack` keeps the parent's applied entries, and the ledger key still goes, with or without a stack.
+    #[test]
+    fn stacked_start_env_keeps_parent_entries_but_never_the_carrier() {
+        let fixture = || {
+            let mut env = Env::clean();
+            env.set("PATH", "/opt/tc/bin:/usr/bin");
+            env.set(
+                reconcile::CARRIER_KEY,
+                carrier(
+                    vec![recorded("PATH", "/opt/tc/bin", ModifierKind::Path, None)],
+                    Priors::new(),
+                ),
+            );
+            env
+        };
+
+        let mut stacked = fixture();
+        stacked.remove(CARRIER_KEY);
+        assert_eq!(segments(&stacked, "PATH"), ["/opt/tc/bin", "/usr/bin"]);
+        assert!(stacked.get(CARRIER_KEY).is_none());
+
+        let mut replaced = fixture();
+        revert_reconciled(&mut replaced);
+        assert_eq!(segments(&replaced, "PATH"), ["/usr/bin"]);
+        assert!(replaced.get(CARRIER_KEY).is_none());
     }
 
     /// Constants revert to their recorded prior — restoring a value, unsetting

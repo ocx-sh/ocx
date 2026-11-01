@@ -336,6 +336,8 @@ ocx env --with ocx.sh/hyperfine:1 --shell=bash
 
 The extra packages compose after the project's tools, so a project tool wins a `PATH` tie. The execution record lists them under `scope.with`.
 
+`ocx exec --stack` keeps the environment an activated parent project already put on the shell and adds this project's tools in front of it, where a plain `ocx exec` replaces the parent's tools.
+
 ## Shell activation \{#project-shell\}
 
 A project's binaries should land on `PATH` the moment you `cd` into the project and leave again when you `cd` back out. That should need no separate `eval` step and no leak into whatever else the shell does afterward.

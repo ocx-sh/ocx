@@ -173,6 +173,7 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
 | `--records-dir` | `DIRECTORY` | Directory to write this invocation's execution record into |
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
+| `--stack` |  | Layer this project onto the active environment instead of replacing it |
 | `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
 
 ## `ocx init` {#init}

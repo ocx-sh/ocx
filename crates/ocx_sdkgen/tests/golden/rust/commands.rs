@@ -338,6 +338,8 @@ pub struct ExecArgs {
     pub name: Option<String>,
     /// Add a package that is not in ocx.toml to the composed environment
     pub with: Vec<String>,
+    /// Layer this project onto the active environment instead of replacing it
+    pub stack: bool,
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     pub consent: bool,
     /// Run without consenting to this project's shell activation
@@ -364,6 +366,7 @@ impl ExecArgs {
         argv.flag("records-dir", &self.dir, Presence::Optional, &[]);
         argv.flag("records-name", &self.name, Presence::Optional, &[]);
         argv.flag("with", &self.with, Presence::Optional, &[]);
+        argv.switch("stack", self.stack);
         argv.switch("consent", self.consent);
         argv.switch("no-consent", self.no_consent);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
