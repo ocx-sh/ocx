@@ -1308,6 +1308,10 @@ class TestAiConfigOverhaulPhase2:
         # useful the moment a diff is too large to eyeball.
         "review-surface": False,
         "security-auditor": False,
+        # Read-only ticket triage; `fix` writes nothing before plan approval.
+        "rca": False,
+        "assess": False,
+        "fix": False,
     }
 
     @staticmethod

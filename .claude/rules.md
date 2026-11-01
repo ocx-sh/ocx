@@ -31,7 +31,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Adopting a third-party library or tool | [product-tech-strategy.md](./rules/product-tech-strategy.md), [subsystem-deps.md](./rules/subsystem-deps.md), skill `deps`, `quality-{lang}.md` |
 | Starting any task (work-type routing) | [workflow-intent.md](./rules/workflow-intent.md) (global) — classifies work, checks GitHub context, routes to correct workflow |
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
-| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify |
+| Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify; skills `rca`, `fix` |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
 | Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [docs-quality.md](./rules/docs-quality.md), skill `docs` |
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
@@ -179,6 +179,9 @@ Exempt from overlap detection (intended broad coupling):
 | Architecture decision | `hex-architect` |
 | Code quality audit | `code-check` |
 | Triaging a large diff — what to actually read | `review-surface` |
+| Root-causing a bug ticket (read-only verdict, evidence, size) | `rca` |
+| Assessing a feature request before planning | `assess` |
+| Planning a fix from a bug ticket (RCA → regression-test-first plan) | `fix` |
 | Implementation / debugging | `builder` |
 | Standing a Bazel build up on a new machine | `init-bazel-config` (the same checks as `task bazel:doctor`, plus the prompts) |
 | Test strategy | `qa-engineer` |

@@ -183,7 +183,7 @@ Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `.
 
 ## Skills & Personas
 
-Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + `/init-bazel-config` (host setup for a first Bazel build) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
+Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + `/init-bazel-config` (host setup for a first Bazel build) + ticket triage (`/rca` bugs, `/assess` features, `/fix` RCA → plan) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
 
 ## Starting Work
 

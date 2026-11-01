@@ -33,7 +33,7 @@ Confirm bug exist + capture exact conditions.
 
 ## Phase 2: Root Cause Analysis
 
-Trace symptom to actual cause. No stop at first suspicious code.
+Trace symptom to actual cause. No stop at first suspicious code. `/rca` drives this phase from a ticket; `/fix` drives Phases 1–4 to an approved plan.
 
 - [ ] Read code path that produce error — trace symptom to source
 - [ ] Identify root cause vs proximate cause (line that throw vs condition that made it throw)
