@@ -437,6 +437,7 @@ impl OciTransport for NativeTransport {
     }
 
     async fn pull_blob(&self, image: &crate::native::Reference, digest: &crate::Digest) -> Result<Vec<u8>> {
+        self.authenticate(image, crate::RegistryOperation::Pull).await?;
         let digest_str = digest.to_string();
         log::debug!("Pulling blob {} for image {} into memory", digest_str, image);
         let mut buf = Vec::new();
@@ -453,6 +454,7 @@ impl OciTransport for NativeTransport {
         digest: &crate::Digest,
         path: &Path,
     ) -> Result<()> {
+        self.authenticate(image, crate::RegistryOperation::Pull).await?;
         let digest_str = digest.to_string();
         log::debug!("Pulling blob {} for image {} to {}", digest_str, image, path.display());
         if let Some(parent) = path.parent() {
@@ -476,6 +478,7 @@ impl OciTransport for NativeTransport {
     }
 
     async fn head_blob(&self, image: &crate::native::Reference, digest: &crate::Digest) -> Result<u64> {
+        self.authenticate(image, crate::RegistryOperation::Pull).await?;
         let digest_str = digest.to_string();
         log::debug!("HEAD blob {} for image {}", digest_str, image);
         match self.client.fetch_blob_size(image, digest_str.as_str()).await {
@@ -490,6 +493,7 @@ impl OciTransport for NativeTransport {
         image: &crate::native::Reference,
         digest: &crate::Digest,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>> {
+        self.authenticate(image, crate::RegistryOperation::Pull).await?;
         let digest_str = digest.to_string();
         log::debug!("Streaming blob {} for image {}", digest_str, image);
 
@@ -648,6 +652,7 @@ impl OciTransport for NativeTransport {
         subject_digest: &crate::Digest,
         artifact_type: Option<&str>,
     ) -> Result<Vec<crate::Descriptor>> {
+        self.authenticate(image, crate::RegistryOperation::Pull).await?;
         let target = image.clone_with_digest(subject_digest.to_string());
         // A 404 is a capability verdict (`ReferrersUnsupported`), never an empty listing: the fallback path and
         // exit 82 both depend on telling the two apart.

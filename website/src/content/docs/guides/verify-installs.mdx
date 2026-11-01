@@ -85,6 +85,8 @@ Nothing has reached the package store or a symlink yet, so a rejected artifact c
 
 Trust is opt-in per scope. A package outside every `[[trust.policy]]` scope installs as it always did. OCX logs an `INFO` line that no policy covered it, and nothing blocks. The same rule applies to transitive dependencies, which are verified only if a policy also covers their scope. Pin a broad scope such as `ghcr.io/acme/*` to verify a whole dependency closure, and use `exclude` to carve out any subtree that must stay unsigned.
 
+A scope matches the name you install by, not the registry behind it. A package installed by its index name, such as `ocx.sh/acme/tool`, needs a scope on `ocx.sh/acme/tool` even when its index entry points at `ghcr.io/acme/tool`.
+
 Auto-verify reads only the operator `config.toml` tier. Unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
 
 ### Skip the check \{#supply-chain-skip\}

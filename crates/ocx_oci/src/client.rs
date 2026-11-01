@@ -7191,6 +7191,31 @@ mod tests {
             );
         }
 
+        /// A cold client lists referrers and pulls blobs authenticated: the verify pipeline
+        /// calls the transport directly, and over an index-routed name nothing else has
+        /// authenticated the backing registry first, so ghcr.io answered 401 (#670).
+        #[tokio::test]
+        async fn a_cold_referrers_listing_and_blob_pull_carry_the_token() {
+            let registry = StubRegistry::start().await;
+            let client = registry.client();
+            let image = client.transport_reference(&registry.identifier("test/pkg"));
+            let digest = crate::Algorithm::Sha256.hash(b"subject");
+
+            let listed = client.transport().list_referrers(&image, &digest, None).await;
+            assert!(listed.is_err(), "the stub serves no referrers, got {listed:?}");
+            let sent = registry.state.authorizations.lock().unwrap().clone();
+            assert_eq!(
+                sent.last().map(String::as_str),
+                Some("Bearer minted-1"),
+                "a cold referrers listing must authenticate, saw {sent:?}"
+            );
+
+            let pulled = client.transport().pull_blob(&image, &digest).await;
+            assert!(pulled.is_err(), "the stub serves no blobs, got {pulled:?}");
+            let sent = registry.state.authorizations.lock().unwrap().clone();
+            assert_eq!(sent.len(), 2, "the blob pull must carry the token too, saw {sent:?}");
+        }
+
         /// Eight concurrent *cold* `ensure_auth` calls for one identifier
         /// produce one token exchange — the shape `ocx index sync` actually
         /// makes, which neither a sequential test nor a fork-level unit test
