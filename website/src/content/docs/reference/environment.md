@@ -823,6 +823,17 @@ Reserved: a package cannot declare it and `--env` cannot set it.
 - Visibility: plumbing
 - Value: `string`
 
+## `__OCX_EXEC_SCOPE` {#ocx-exec-scope}
+
+Set by `ocx exec` in the child it composes: the project directory the environment came from.
+
+While present, `ocx self activate` and its per-prompt `--reconcile` arm leave the
+environment alone, so an interactive shell started by `ocx exec -g <group>` keeps the
+groups it was given instead of the global and default sets its rc file would apply.
+
+- Visibility: plumbing
+- Value: `string`
+
 ## `__OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
 
 JSON map from a content digest to the `registry/repository[:tag]` names one composition resolved it under; read by `ocx launcher exec` to match targeted patch rules.

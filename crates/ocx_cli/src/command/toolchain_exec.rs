@@ -241,6 +241,11 @@ impl ToolchainExec {
             },
             &forwarded_config,
         );
+        // The child's rc file must not re-apply the global or default set over what was just composed.
+        process_env.set(
+            ocx_env::__OCX_EXEC_SCOPE.declaration().name,
+            ctx.config_path.parent().unwrap_or(&ctx.config_path).as_os_str(),
+        );
         // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;

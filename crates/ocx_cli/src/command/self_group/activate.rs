@@ -2,6 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 use std::path::{Path, PathBuf};
+
+use ocx_shell::shell::coexistence;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
@@ -79,6 +81,12 @@ pub struct SelfActivate {
 impl SelfActivate {
     /// Called from `app.rs` before `Context::try_init`, which a shell start and a stat-only prompt must not pay.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
+        // Under `ocx exec` the composed environment is the contract: emit nothing for the PATH, the global set or the hook.
+        // The login arm yields whenever the marker is present; the hook only in the project the marker names, so a
+        // long-lived tree started under exec (tmux, an IDE) still switches when it `cd`s into another project.
+        if yields_to_exec() && (!self.reconcile || self.cwd_project_is_exec_scope(options).await) {
+            return self.run_yielded(options).await;
+        }
         if self.reconcile {
             // Always exit 0 so the prompt renders; failures log at debug, and the emitted body discards stderr anyway.
             let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
@@ -91,6 +99,23 @@ impl SelfActivate {
             return Ok(ExitCode::SUCCESS);
         }
         self.run_startup(options).await
+    }
+
+    /// The yielded startup path: completions only, since they touch neither `PATH` nor the environment.
+    async fn run_yielded(&self, options: &ContextOptions) -> anyhow::Result<ExitCode> {
+        if self.reconcile {
+            return Ok(ExitCode::SUCCESS);
+        }
+        let shell = self.target_shell()?;
+        let (shell_config, _) = load_shell_config(options).await;
+        let interactive = self.interactive.resolve_probed();
+        let load_completions = self
+            .completion
+            .enabled(interactive, shell_config.as_ref().and_then(|shell| shell.completions));
+        if load_completions {
+            emit(generate_completion_inline(shell));
+        }
+        Ok(ExitCode::SUCCESS)
     }
 
     /// Resolve the target shell: absent and bare `--shell` both autodetect, unlike `ocx env`'s report path.
@@ -158,6 +183,28 @@ impl SelfActivate {
             seed: hook_enabled.then(|| seed_carrier(&tiers, &watch)).flatten().as_deref(),
         });
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Whether an enclosing `ocx exec` composed this process's environment.
+fn yields_to_exec() -> bool {
+    ocx_env::__OCX_EXEC_SCOPE.get_raw().is_some()
+}
+
+/// The `ocx exec` observation when the exec marker names `project_dir`; the marker is canonicalised for the compare.
+pub(crate) async fn exec_scope_observation(project_dir: &Path) -> Option<coexistence::Observation> {
+    let marker = ocx_env::__OCX_EXEC_SCOPE.get_raw().and_then(|v| v.into_string().ok())?;
+    let canonical = tokio::fs::canonicalize(&marker).await.ok()?;
+    coexistence::exec_scope(&marker, &canonical, project_dir)
+}
+
+impl SelfActivate {
+    /// Whether the project the cwd walk would activate is the one the exec marker names.
+    async fn cwd_project_is_exec_scope(&self, options: &ContextOptions) -> bool {
+        match resolve_walk(options, &Ledger::empty()).await {
+            Walk::Resolved(project) => exec_scope_observation(&project.dir).await.is_some(),
+            Walk::Determinate | Walk::Indeterminate => false,
+        }
     }
 }
 
@@ -1185,6 +1232,21 @@ mod tests {
             bin_path.starts_with("/tmp/ocx_home/symlinks"),
             "bin path must be rooted under $OCX_HOME/symlinks; got: {bin_path:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod exec_yield_tests {
+    use super::yields_to_exec;
+
+    /// Refs #668 - the marker `ocx exec` sets is what makes activation step aside.
+    #[test]
+    fn activation_yields_only_while_the_exec_marker_is_present() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::__OCX_EXEC_SCOPE);
+        assert!(!yields_to_exec());
+        env.set(&ocx_env::__OCX_EXEC_SCOPE, "/work/acme");
+        assert!(yields_to_exec());
     }
 }
 

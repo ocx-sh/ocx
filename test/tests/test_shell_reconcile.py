@@ -409,6 +409,55 @@ def test_leaving_a_project_reverts_its_constant_path_and_list(shell: str, arena:
     )
 
 
+def test_a_shell_started_by_exec_keeps_the_composed_path_and_is_not_reactivated(arena: Arena) -> None:
+    """Refs #668 - `ocx exec` composes the child's env; the child's own rc must not replace it.
+
+    An interactive child sources its rc, whose managed block runs `env.sh` and so
+    `ocx self activate`, and its first prompt runs `--reconcile`. Neither carries a
+    ledger, so both used to re-apply the global and default-set environment in front of
+    what `exec` composed - `ocx exec -g lint -- zsh -ic 'command -v grim'` then found the
+    global trampoline. Observed by `PATH` and by the reconcile stream, both of which need
+    no registry: a project `[env]` path entry stands in for a group's tool link.
+    """
+    _self_setup(arena)
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (project / "binA").mkdir()
+    other = _locked_project(arena, "bravo", _ENV_BLOCK_B)
+    (other / "binB").mkdir()
+    script = (
+        'before="$PATH"; . "$OCX_HOME/env.sh"; '
+        'echo "SAME=$([ "$before" = "$PATH" ] && echo yes || echo no)"; '
+        'echo "PATH=$PATH"; '
+        '"$OCX_TEST_BIN" self activate --reconcile --shell=bash > "$OCX_TEST_OUT" 2>/dev/null; '
+        'echo "RECONCILE_BYTES=$(wc -c < "$OCX_TEST_OUT")"; '
+        # A long-lived tree started under exec must still switch projects: only the marked project yields.
+        f'cd "{other}"; '
+        '"$OCX_TEST_BIN" self activate --reconcile --shell=bash > "$OCX_TEST_OUT" 2>/dev/null; '
+        'echo "OTHER_BYTES=$(wc -c < "$OCX_TEST_OUT")"; '
+        'echo "OTHER_HAS_BINB=$(grep -c binB "$OCX_TEST_OUT")"'
+    )
+    env = arena.env("/bin/bash", OCX_TEST_BIN=str(arena.ocx), OCX_TEST_OUT=str(arena.scripts / "reconcile.out"))
+    result = subprocess.run(
+        [str(arena.ocx), "--offline", "exec", "--", "bash", "-c", script],
+        cwd=str(project),
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, f"exec must succeed; stderr:\n{result.stderr}"
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    segments = matrix.path_segments(lines["PATH"])
+    assert segments[0] == str(project / "binA"), (
+        f"sourcing env.sh in the exec child must leave the composed PATH untouched; got {segments[:3]}"
+    )
+    assert lines["SAME"] == "yes", f"env.sh changed the composed PATH: {lines['PATH']}"
+    assert lines["RECONCILE_BYTES"].strip() == "0", "the first prompt's reconcile must emit nothing under exec"
+    assert int(lines["OTHER_BYTES"]) > 0 and int(lines["OTHER_HAS_BINB"]) > 0, (
+        "a `cd` into another consented project from inside the exec tree must reconcile normally"
+    )
+
+
 def test_ocx_no_project_reverts_the_recorded_scope_at_the_next_prompt(arena: Arena) -> None:
     """A-11 — `OCX_NO_PROJECT=1` is a deliberate instruction, not a failed probe, so the scope reverts.
 

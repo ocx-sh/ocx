@@ -5763,6 +5763,10 @@
         {
           "value": "mise",
           "description": "Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present."
+        },
+        {
+          "value": "ocx_exec",
+          "description": "An enclosing `ocx exec` composed this shell's environment for the resolved project\n(`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: the\nactivation session keeps applying the global scope; only the per-prompt hook steps aside."
         }
       ]
     },

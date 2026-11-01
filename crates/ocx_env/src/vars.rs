@@ -504,6 +504,12 @@ crate::env_vars! {
     ///
     /// The per-prompt `ocx:` summary line never lists it, nor any other `__OCX_*` key.
     pub __OCX_LAUNCH_IDENTITIES: Json, Plumbing;
+    /// Set by `ocx exec` in the child it composes: the project directory the environment came from.
+    ///
+    /// While present, `ocx self activate` and its per-prompt `--reconcile` arm leave the
+    /// environment alone, so an interactive shell started by `ocx exec -g <group>` keeps the
+    /// groups it was given instead of the global and default sets its rc file would apply.
+    pub __OCX_EXEC_SCOPE: String, Plumbing;
     /// Set by ocx on every credential helper it starts; an ocx running under it never downloads.
     ///
     /// A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that

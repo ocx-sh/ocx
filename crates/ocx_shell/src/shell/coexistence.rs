@@ -23,6 +23,10 @@ wire_words! {
         Direnv = "direnv",
         /// Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present.
         Mise = "mise",
+        /// An enclosing `ocx exec` composed this shell's environment for the resolved project
+        /// (`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: the
+        /// activation session keeps applying the global scope; only the per-prompt hook steps aside.
+        OcxExec = "ocx_exec",
     }
 }
 
@@ -73,6 +77,17 @@ pub fn detect(project_dir: &Path) -> Yield {
     }
 
     Yield { observed }
+}
+
+/// The `ocx exec` observation when `marker` (the raw `__OCX_EXEC_SCOPE` value) names `project_dir`.
+///
+/// `canonical_marker` is the marker resolved by the caller (this crate does no async I/O);
+/// `project_dir` is already canonical. A marker naming another project is no yield for this one.
+pub fn exec_scope(marker: &str, canonical_marker: &Path, project_dir: &Path) -> Option<Observation> {
+    (canonical_marker == project_dir).then(|| Observation {
+        tool: Tool::OcxExec,
+        signal: format!("{}={marker}", ocx_env::__OCX_EXEC_SCOPE.declaration().name),
+    })
 }
 
 /// The value, empty included: an exported-but-empty `MISE_SHELL` is still a live mise session.
@@ -134,6 +149,14 @@ mod tests {
             detect(project.path()).observed.is_empty(),
             "direnv managing another directory is not a yield for this one"
         );
+    }
+
+    /// Refs #668 - the exec marker yields only for the project it names.
+    #[test]
+    fn exec_scope_matches_only_the_marked_project() {
+        let marked = Path::new("/work/acme");
+        assert!(exec_scope("/work/acme", marked, marked).is_some());
+        assert!(exec_scope("/work/acme", marked, Path::new("/work/other")).is_none());
     }
 
     /// S-018, C-049 — `MISE_SHELL` present yields, symmetric to direnv.

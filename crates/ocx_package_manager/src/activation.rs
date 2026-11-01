@@ -345,6 +345,7 @@ pub fn yield_messages(yielded: &coexistence::Yield) -> Vec<String> {
             let tool = match observation.tool {
                 coexistence::Tool::Direnv => "direnv",
                 coexistence::Tool::Mise => "mise",
+                coexistence::Tool::OcxExec => "ocx exec",
             };
             format!(
                 "ocx: {tool} manages this directory ({signal}); applying the global toolchain only",

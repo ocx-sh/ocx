@@ -14399,6 +14399,14 @@
       "on_invalid": "default"
     },
     {
+      "name": "__OCX_EXEC_SCOPE",
+      "value": "string",
+      "visibility": "plumbing",
+      "summary": " Set by `ocx exec` in the child it composes: the project directory the environment came from.",
+      "secret": false,
+      "on_invalid": "default"
+    },
+    {
       "name": "__OCX_CREDENTIAL_HELPER",
       "value": "bool",
       "visibility": "plumbing",
