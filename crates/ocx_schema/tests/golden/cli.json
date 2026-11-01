@@ -11477,31 +11477,6 @@
             "help": "Restrict the composition to the named group(s)"
           },
           {
-            "id": "names",
-            "position": 1,
-            "value": {
-              "type": "string"
-            },
-            "required": false,
-            "required_unless": [],
-            "num_args": {
-              "min": 1
-            },
-            "repeatable": true,
-            "global": false,
-            "hidden": false,
-            "default": [],
-            "requires": [],
-            "conflicts": [],
-            "overrides": [],
-            "require_equals": false,
-            "allow_hyphen_values": false,
-            "last": false,
-            "trailing_var_arg": false,
-            "stdin_secret": false,
-            "help": "Pull only these bindings, from within the selected groups"
-          },
-          {
             "id": "platform",
             "long": "platform",
             "short": "p",
@@ -11619,6 +11594,31 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Run without consenting to this project's shell activation"
+          },
+          {
+            "id": "names",
+            "position": 1,
+            "value": {
+              "type": "string"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Pull only these bindings, from within the selected groups"
           }
         ],
         "groups": [],

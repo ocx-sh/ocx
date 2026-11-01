@@ -38,13 +38,6 @@ pub struct Pull {
     #[clap(flatten)]
     pub groups: options::GroupSelection,
 
-    /// Pull only these bindings, from within the selected groups.
-    ///
-    /// A name that matches no binding in the selected groups exits 64. The
-    /// toolchain home render still follows the group selection, not the names.
-    #[arg(value_name = "NAME")]
-    pub names: Vec<String>,
-
     #[clap(flatten)]
     pub platform: options::PlatformOption,
 
@@ -55,6 +48,13 @@ pub struct Pull {
 
     #[clap(flatten)]
     pub consent: options::Consent,
+
+    /// Pull only these bindings, from within the selected groups.
+    ///
+    /// A name that matches no binding in the selected groups exits 64. The
+    /// toolchain home render still follows the group selection, not the names.
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
 }
 
 impl Pull {

@@ -603,8 +603,9 @@ mod tests {
                     .find_subcommand(word)
                     .unwrap_or_else(|| panic!("`ocx {}` is not in the clap tree", leaf.path().join(" ")));
             }
+            // A group that runs on its own (bare `ocx shell`) is a leaf too.
             assert!(
-                !command.has_subcommands(),
+                !command.has_subcommands() || command.is_args_conflicts_with_subcommands_set(),
                 "`ocx {}` is a group, not a leaf",
                 leaf.path().join(" ")
             );
