@@ -127,6 +127,7 @@ ocx env [OPTIONS]
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |
 | `--shell` | `ash\|ksh\|dash (sh)\|bash\|elvish\|fish\|batch (cmd)\|powershell (pwsh)\|zsh\|nushell (nu)` | Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable |
 | `--show-patches` |  | Annotate each entry with its origin package or companion identifier |
+| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
 
 ## `ocx exec` {#exec}
 
@@ -172,6 +173,7 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
 | `--records-dir` | `DIRECTORY` | Directory to write this invocation's execution record into |
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
+| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
 
 ## `ocx init` {#init}
 

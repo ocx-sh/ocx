@@ -80,6 +80,9 @@ pub struct ToolchainEnv {
     #[clap(flatten)]
     pull: options::Pull,
 
+    #[clap(flatten)]
+    with: options::With,
+
     /// Top tier of the `lazy-mode` ladder for every tool this command composes.
     ///
     /// `always` composes a tool as a generated shim: its declared names reach
@@ -144,6 +147,7 @@ impl ToolchainEnv {
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
+        let with_packages = self.with.packages(context.default_registry())?;
 
         let shell = resolve_shell_arg(self.shell)?;
         // Early, so a bare-`--ci` autodetect failure beats the slow entry resolution.
@@ -185,18 +189,19 @@ impl ToolchainEnv {
             // `--no-pull` composes through an offline clone, so a miss is warned about and omitted, never fetched.
             let manager = context.manager();
             let materialization = self.materialization();
-            let requests: Vec<ComposeRequest> = composed
-                .iter()
-                .map(|tool| ComposeRequest {
-                    identifier: tool.identifier.clone(),
-                    mode: lazy_mode_for_tool(
-                        &ctx.config,
-                        &tool.identifier,
-                        group_of(&tool.origin),
-                        self.lazy_mode.mode(),
-                    ),
-                })
-                .collect();
+            // `--with` first, as `ocx exec` orders them: the last request leads PATH, so a project tool wins.
+            let mut requests: Vec<ComposeRequest> = options::With::requests(&with_packages, |identifier| {
+                lazy_mode_for_tool(&ctx.config, identifier, None, self.lazy_mode.mode())
+            });
+            requests.extend(composed.iter().map(|tool| ComposeRequest {
+                identifier: tool.identifier.clone(),
+                mode: lazy_mode_for_tool(
+                    &ctx.config,
+                    &tool.identifier,
+                    group_of(&tool.origin),
+                    self.lazy_mode.mode(),
+                ),
+            }));
             let composing = match materialization {
                 Materialization::LocalOnly => manager.offline_view(context.local_index().clone()),
                 _ => manager.clone(),

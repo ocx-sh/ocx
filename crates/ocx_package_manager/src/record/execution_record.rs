@@ -313,6 +313,9 @@ pub enum ScopeBlock {
         lock: LockReference,
         /// Selected groups, in selection order.
         groups: Vec<String>,
+        /// Packages layered on with `--with`, exactly as requested; omitted when none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        with: Vec<String>,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
@@ -554,6 +557,8 @@ pub enum Scope {
         groups: Vec<String>,
         /// Which `ocx.toml` binding each root package was selected under.
         bindings: Vec<PackageBinding>,
+        /// Packages layered on with `--with`, as requested; they have no binding.
+        with: Vec<PackageRef>,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
@@ -649,6 +654,7 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             lock,
             declaration_digest,
             groups,
+            with,
             ..
         } => ScopeBlock::Project {
             clean_env: inputs.clean_env,
@@ -658,6 +664,7 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
                 declaration_digest: digest_map(declaration_digest),
             },
             groups: groups.clone(),
+            with: with.iter().map(ToString::to_string).collect(),
         },
         Scope::Package { requested } => ScopeBlock::Package {
             clean_env: inputs.clean_env,
@@ -1251,6 +1258,7 @@ mod tests {
                 group: "default".to_string(),
                 package: pinned("ocx/cmake", "index.ocx.sh", None, LEAF_HEX),
             }],
+            with: Vec::new(),
         }
     }
 
@@ -2360,7 +2368,9 @@ mod tests {
                 project_root,
                 lock,
                 groups,
+                with,
             } => {
+                assert!(with.is_empty());
                 assert!(!clean_env);
                 assert_eq!(project_root, PathBuf::from("/scratch/job-88213"));
                 assert_eq!(lock.path, PathBuf::from("/scratch/job-88213/ocx.lock"));

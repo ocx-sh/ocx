@@ -325,6 +325,17 @@ ocx env --env PATH:path=node_modules/.bin --shell=bash     # print the same thin
 
 The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec]. Those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx exec`][cmd-run] documents the full precedence order.
 
+## Add a package for one run \{#project-with\}
+
+`--with IDENTIFIER` layers a package that is not in `ocx.toml` onto the environment of a single `ocx exec` or `ocx env`. The flag repeats, a missing package is installed first, and neither `ocx.toml` nor `ocx.lock` is touched.
+
+```shell
+ocx exec --with ocx.sh/hyperfine:1 -- hyperfine 'make'
+ocx env --with ocx.sh/hyperfine:1 --shell=bash
+```
+
+The extra packages compose after the project's tools, so a project tool wins a `PATH` tie. The execution record lists them under `scope.with`.
+
 ## Shell activation \{#project-shell\}
 
 A project's binaries should land on `PATH` the moment you `cd` into the project and leave again when you `cd` back out. That should need no separate `eval` step and no leak into whatever else the shell does afterward.

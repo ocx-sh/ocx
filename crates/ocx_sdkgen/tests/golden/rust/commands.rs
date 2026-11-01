@@ -268,6 +268,8 @@ pub struct EnvArgs {
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
     /// pull` or the first `ocx exec` / direnv hit
     pub no_pull: bool,
+    /// Add a package that is not in ocx.toml to the composed environment
+    pub with: Vec<String>,
     /// Control when a package's content downloads: now, or on first use
     pub lazy_mode: Option<String>,
     /// Compose digest paths instead of the toolchain links
@@ -305,6 +307,7 @@ impl EnvArgs {
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.switch("pull", self.pull);
         argv.switch("no-pull", self.no_pull);
+        argv.flag("with", &self.with, Presence::Optional, &[]);
         argv.flag("lazy-mode", &self.lazy_mode, Presence::Optional, &["never", "always"]);
         argv.switch("pinned", self.pinned);
         argv.switch("no-pinned", self.no_pinned);
@@ -333,6 +336,8 @@ pub struct ExecArgs {
     pub dir: Option<PathBuf>,
     /// Filename template for the record, e.g. `{time}-{host}-{pid}.json`
     pub name: Option<String>,
+    /// Add a package that is not in ocx.toml to the composed environment
+    pub with: Vec<String>,
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     pub consent: bool,
     /// Run without consenting to this project's shell activation
@@ -358,6 +363,7 @@ impl ExecArgs {
         argv.switch("no-pinned", self.no_pinned);
         argv.flag("records-dir", &self.dir, Presence::Optional, &[]);
         argv.flag("records-name", &self.name, Presence::Optional, &[]);
+        argv.flag("with", &self.with, Presence::Optional, &[]);
         argv.switch("consent", self.consent);
         argv.switch("no-consent", self.no_consent);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);

@@ -65,6 +65,9 @@ pub struct ToolchainExec {
     #[clap(flatten)]
     pub records: options::Records,
 
+    #[clap(flatten)]
+    pub with: options::With,
+
     // `--consent` (the default) / `--no-consent`; clap renders the flattened struct's docs, not a `///` here.
     #[clap(flatten)]
     pub consent: options::Consent,
@@ -106,6 +109,7 @@ impl ToolchainExec {
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
+        let with_packages = self.with.packages(context.default_registry())?;
 
         // Before any I/O too, so a malformed record template is heard before tools install.
         let records = context.records(self.records.options())?;
@@ -142,21 +146,23 @@ impl ToolchainExec {
 
         let manager = context.manager();
 
-        let requests: Vec<ComposeRequest> = resolved
-            .iter()
-            .map(|tool| ComposeRequest {
-                identifier: tool.identifier.clone(),
-                mode: lazy_mode_for_tool(
-                    &ctx.config,
-                    &tool.identifier,
-                    match &tool.origin {
-                        Origin::Group(name) => Some(name.as_str()),
-                        Origin::Explicit => None,
-                    },
-                    self.lazy_mode.mode(),
-                ),
-            })
-            .collect();
+        // Composition prepends, so the last request leads PATH: `--with` packages go first and the
+        // project tools after them, so a project tool wins a name clash.
+        let mut requests: Vec<ComposeRequest> = options::With::requests(&with_packages, |identifier| {
+            lazy_mode_for_tool(&ctx.config, identifier, None, self.lazy_mode.mode())
+        });
+        requests.extend(resolved.iter().map(|tool| ComposeRequest {
+            identifier: tool.identifier.clone(),
+            mode: lazy_mode_for_tool(
+                &ctx.config,
+                &tool.identifier,
+                match &tool.origin {
+                    Origin::Group(name) => Some(name.as_str()),
+                    Origin::Explicit => None,
+                },
+                self.lazy_mode.mode(),
+            ),
+        }));
         // Deliberate deviation from `ocx env` = `ocx exec`: under the credential-helper marker nothing
         // installs, or the install waits on the pull that is waiting on this helper (#623).
         let from_credential_helper = ocx_env::__OCX_CREDENTIAL_HELPER.bool_or(false)?;
@@ -233,7 +239,7 @@ impl ToolchainExec {
         // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
-        let bindings = project_bindings(&resolved, &omitted, &install_infos);
+        let bindings = project_bindings(&resolved, &omitted, &with_packages, &install_infos);
 
         let (command, _) = self
             .argv
@@ -273,6 +279,7 @@ impl ToolchainExec {
                     declaration_digest,
                     groups: expanded,
                     bindings,
+                    with: with_packages,
                 },
             },
             &records,
@@ -286,16 +293,21 @@ impl ToolchainExec {
 /// Pair each root package with the `ocx.toml` binding it was selected under.
 ///
 /// Zipped by index once the `omitted` requests are set aside: `compose_roots` yields one root per
-/// surviving request, in order.
+/// surviving request, in order, the surviving `--with` roots leading (they are requested first).
 fn project_bindings(
     resolved: &[ocx_project::ResolvedTool],
     omitted: &[ComposeOmission],
+    with_packages: &[ocx_oci::PackageRef],
     install_infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
 ) -> Vec<PackageBinding> {
+    let surviving_with = with_packages
+        .iter()
+        .filter(|package| !omitted.iter().any(|omission| omission.identifier == **package))
+        .count();
     resolved
         .iter()
         .filter(|tool| !omitted.iter().any(|omission| omission.identifier == tool.identifier))
-        .zip(install_infos)
+        .zip(install_infos.iter().skip(surviving_with))
         .filter_map(|(tool, info)| match &tool.origin {
             Origin::Group(group) => Some(PackageBinding {
                 binding: tool.binding.clone(),

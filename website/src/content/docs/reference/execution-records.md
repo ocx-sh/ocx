@@ -68,7 +68,7 @@ A record describes what OCX was about to run and not what happened, so it has no
 | `process` | `pid`, `user`, `parent`, `arch`, `executable` and `working_directory` of the process that runs the binary |
 | `host`, `os` | `host.name` and `os.type` |
 | `executable` | `sh.ocx.provenance`, `sh.ocx.kind` and `sh.ocx.package` of the resolved executable |
-| `scope` | `tier`, `cleanEnv`, and the requested identifiers or the project's `projectRoot`, `lock` and `groups` |
+| `scope` | `tier`, `cleanEnv`, and the requested identifiers or the project's `projectRoot`, `lock`, `groups` and, when `--with` named any, `with` |
 | `resolution` | How the closure was resolved: see [Resolution](#execution-records-format-resolution) |
 | `packages` | One descriptor per package that composed the child's environment |
 

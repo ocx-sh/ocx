@@ -720,6 +720,32 @@
             "help": "Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit"
           },
           {
+            "id": "with",
+            "long": "with",
+            "value": {
+              "type": "identifier"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Add a package that is not in ocx.toml to the composed environment"
+          },
+          {
             "id": "lazy_mode",
             "long": "lazy-mode",
             "value": {
@@ -11935,6 +11961,32 @@
             "help": "Filename template for the record, e.g. `{time}-{host}-{pid}.json`"
           },
           {
+            "id": "with",
+            "long": "with",
+            "value": {
+              "type": "identifier"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Add a package that is not in ocx.toml to the composed environment"
+          },
+          {
             "id": "consent",
             "long": "consent",
             "value": {
@@ -12279,6 +12331,32 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Filename template for the record, e.g. `{time}-{host}-{pid}.json`"
+          },
+          {
+            "id": "with",
+            "long": "with",
+            "value": {
+              "type": "identifier"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Add a package that is not in ocx.toml to the composed environment"
           },
           {
             "id": "consent",

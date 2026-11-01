@@ -2036,3 +2036,60 @@ def test_the_activate_mode_is_not_an_input_to_the_composing_emitters(
     assert observed["env"] == observed["bin"] == observed["none"], (
         f"`ocx {emitter}` must compose the same environment in every activate mode: {observed}"
     )
+
+
+# ---------------------------------------------------------------------------
+# `--with`: packages outside ocx.toml, layered for one invocation
+# ---------------------------------------------------------------------------
+
+
+def _publish_extra(ocx: OcxRunner, tmp_path: Path, label: str, bin_name: str = "extra") -> str:
+    repo = f"t_{uuid4().hex[:8]}_{label}"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=[bin_name])
+    return f"{ocx.registry}/{repo}:1.0.0"
+
+
+def test_env_and_exec_with_compose_the_same_extra_package(ocx: OcxRunner, tmp_path: Path) -> None:
+    """`--with` is a per-invocation layer: env and exec compose the same dirs in the same order, the project's first, nothing is written."""
+    project, _ = _make_project(ocx, tmp_path, "with_base")
+    extra = _publish_extra(ocx, tmp_path, "with_extra")
+    manifest_before = (project / "ocx.toml").read_bytes()
+    lock_before = (project / "ocx.lock").read_bytes()
+
+    baseline = _env_path_dirs(ocx, project)
+    with_env = _env_path_dirs(ocx, project, "--with", extra)
+    with_exec = _exec_path_dirs(ocx, project, "--with", extra)
+
+    assert len(with_env) > len(baseline), "`--with` added no PATH directory; the oracle would be vacuous"
+    # `ocx env` lists PATH entries in application order (each prepends, the last leads);
+    # `ocx exec` reports the resulting order, leading directory first.
+    env_priority = _real_dirs(with_env)[::-1]
+    assert env_priority == _real_dirs(with_exec), f"env={with_env} exec={with_exec}"
+    assert env_priority[: len(baseline)] == _real_dirs(baseline)[::-1], "`--with` dirs precede the project's"
+    assert (project / "ocx.toml").read_bytes() == manifest_before
+    assert (project / "ocx.lock").read_bytes() == lock_before
+
+
+def test_with_package_loses_a_binary_name_clash_to_the_project_tool(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A `--with` package exposing a project tool's binary name does not shadow it, in exec or env."""
+    project, _ = _make_project(ocx, tmp_path, "clash_base", bin_name="clash")
+    extra = _publish_extra(ocx, tmp_path, "clash_extra", bin_name="clash")
+
+    baseline = _real_dirs(_env_path_dirs(ocx, project))
+    with_env = _real_dirs(_env_path_dirs(ocx, project, "--with", extra))
+    assert len(with_env) > len(baseline), "`--with` added no PATH directory; the oracle would be vacuous"
+    # Application order: the last entry leads PATH, and it must be the project's.
+    assert with_env[-1] == baseline[-1], f"env: a `--with` dir leads the project's: {with_env}"
+
+    result = run_in(ocx, project, "exec", "--with", extra, "--", "sh", "-c", "command -v clash")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    resolved = os.path.realpath(os.path.dirname(result.stdout.strip()))
+    assert resolved == baseline[-1], f"exec resolved `clash` from {resolved}, project dir is {baseline[-1]}"
+
+
+def test_with_malformed_identifier_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
+    project, _ = _make_project(ocx, tmp_path, "with_bad")
+    for command in (("env",), ("exec", "--", "true")):
+        args = (command[0], "--with", "::bad::", *command[1:])
+        result = _run(ocx, project, *args)
+        assert result.returncode in (EXIT_USAGE, EXIT_CLAP), result.stderr

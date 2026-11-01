@@ -29,6 +29,7 @@ pub mod signature_format;
 pub mod tags;
 mod verification;
 mod verify;
+mod with;
 
 pub use bin_scan::{BinScan, BinScanMode};
 pub use completion::Completion;
@@ -54,3 +55,4 @@ pub use records::Records;
 pub use referrers::Referrers;
 pub use verification::Verification;
 pub use verify::{SignatureVerify, Verify};
+pub use with::With;
