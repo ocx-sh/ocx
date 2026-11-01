@@ -531,10 +531,18 @@ impl Forge for GitHubForge {
         }
         // The identity comes only from the response body: a composed `{namespace}/{project}`
         // misses a renamed fork.
+        // `organization` naming a user account is a 422; omitted, GitHub forks into the token's login.
+        let organization = match target_owner {
+            Some(owner) => {
+                let login = self.authenticated_login().await?;
+                (!owner.eq_ignore_ascii_case(&login)).then_some(owner)
+            }
+            None => None,
+        };
         let create_url = self.url(&format!("/repos/{}/forks", upstream.full_path()));
         let (status, body) = self
             .send(
-                self.json_request(Method::POST, &create_url, &fork_create_body(target_owner))?,
+                self.json_request(Method::POST, &create_url, &fork_create_body(organization))?,
                 &create_url,
             )
             .await?;
@@ -2201,6 +2209,49 @@ mod tests {
             matches!(&error, ForgeError::PushAccessDenied { repo } if repo == "forkuser/index"),
             "{error:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_ensure_fork_into_the_token_login_sends_no_organization() {
+        // GitHub answers `organization` naming a user account with 422 (#671).
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&created);
+        let fork = r#"{"full_name":"ForkUser/index","parent":{"full_name":"ocx-sh/index"}}"#;
+        let fake = FakeForge::start(move |method, path| match (method, path) {
+            ("GET", "/user") => (200, r#"{"login":"ForkUser"}"#.to_string()),
+            ("GET", "/repos/forkuser/index") if !seen.load(std::sync::atomic::Ordering::SeqCst) => {
+                (404, r#"{"message":"Not Found"}"#.to_string())
+            }
+            ("GET", "/repos/forkuser/index" | "/repos/ForkUser/index") => (200, fork.to_string()),
+            ("POST", "/repos/ocx-sh/index/forks") => {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                (202, fork.to_string())
+            }
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let upstream = RepoCoordinate {
+            host: None,
+            namespace: "ocx-sh".to_string(),
+            project: "index".to_string(),
+        };
+        fake.forge()
+            .ensure_fork(&upstream, Some("forkuser"))
+            .await
+            .expect("the fork is created into the token's own account");
+
+        let recorded = fake.recorded();
+        let create = recorded
+            .iter()
+            .find(|call| call.route() == "POST /repos/ocx-sh/index/forks")
+            .expect("the fork is created");
+        assert_eq!(
+            serde_json::from_str::<Value>(&create.body).expect("JSON body"),
+            json!({})
+        );
+        assert!(created.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1238,6 +1238,17 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
     def handle_post_fork(self, handler: _Handler, owner: str, repo: str, body: dict[str, Any]) -> None:
         upstream_full = f"{owner}/{repo}"
         target_owner = body.get("organization")
+        # GitHub accepts `organization` only for organization accounts.
+        if target_owner is not None and target_owner.lower() == self.token_identity_login.lower():
+            handler._reply_json(
+                422,
+                {
+                    "message": f"'{target_owner}' is the login for a user account. "
+                    "You must pass the login for an organization account.",
+                    "errors": [{"resource": "Fork", "code": "invalid", "field": "organization"}],
+                },
+            )
+            return
         key = (upstream_full, target_owner)
         with self.lock:
             record = self.forks.get(key)

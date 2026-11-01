@@ -1359,6 +1359,37 @@ def test_announce_explicit_target_owner_fork_threads_organization(
     assert fork_bodies and fork_bodies[0].get("organization") == "ocx-contrib"
 
 
+def test_announce_fork_into_the_token_login_omits_organization(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """#671: `--fork <token login>/index` names a user account, which GitHub
+    refuses as `organization` with 422; the fork is created into the token's
+    own account instead."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    login = fake_forge.token_identity_login
+
+    report = announce_json(
+        ocx,
+        fake_forge,
+        "--tags",
+        "1.0.0",
+        "--fork",
+        f"{login}/index",
+        "--index-repo",
+        INDEX_FULL,
+        package,
+    )
+    assert report["status"] == "updated"
+    assert report["fork"] == f"{login}/index"
+
+    fork_bodies = [body for path, body in fake_forge.bodies if path == "/repos/ocx-sh/index/forks"]
+    assert fork_bodies and "organization" not in fork_bodies[0]
+
+
 # ── fork readiness poll ──────────────────────────────────────────────────
 
 
