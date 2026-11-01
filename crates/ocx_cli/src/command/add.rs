@@ -11,7 +11,7 @@ use ocx_project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resol
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
     ensure_global_project_initialized, load_project_for_mutate, materialize_lock, purge_unpinned,
-    record_activation_consent,
+    record_activation_consent, warn_unrendered,
 };
 use crate::conventions;
 use crate::options;
@@ -88,6 +88,7 @@ impl Add {
         // aborts the batch before any disk write.
         let bindings_for_stage = plan.stage.clone();
         let group = self.group.clone();
+        let target_groups: Vec<String> = self.group.iter().cloned().collect();
         let staging_config_path = config_path.clone();
         let staged = guard.stage(move |cfg| {
             for (name, identifier) in &bindings_for_stage {
@@ -133,7 +134,15 @@ impl Add {
             let pinned = ocx_package_manager::pinned_for_project(None, staged.config());
             guard.rollback();
             record_activation_consent(&config_path, &existing, None).await;
-            materialize_lock(&context, &existing, staged.config(), eager, platform.clone()).await?;
+            materialize_lock(
+                &context,
+                &existing,
+                staged.config(),
+                eager,
+                &target_groups,
+                platform.clone(),
+            )
+            .await?;
             render_and_warn(&context, &render_manager, &existing, pinned, &scope, &platform).await;
             report_lock(&context, &existing, &platform)?;
             return Ok(ExitCode::SUCCESS);
@@ -170,7 +179,7 @@ impl Add {
         let config = staged.config().clone();
         // Through `commit_and_render`, never `MutationGuard::commit`, or the toolchain tree keeps
         // describing the previous lock.
-        let commit = render_manager
+        let outcome = render_manager
             .commit_and_render(
                 guard,
                 staged,
@@ -181,8 +190,9 @@ impl Add {
                     platform: &platform,
                 },
             )
-            .await?
-            .commit;
+            .await?;
+        warn_unrendered(&context, &outcome);
+        let commit = outcome.commit;
 
         // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
@@ -192,7 +202,7 @@ impl Add {
         }
 
         // After the commit: a failed download leaves the binding declared.
-        materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;
+        materialize_lock(&context, &new_lock, &config, eager, &target_groups, platform.clone()).await?;
 
         report_lock(&context, &new_lock, &platform)?;
 
@@ -229,6 +239,9 @@ async fn render_and_warn(
     match manager.render_home(lock, pinned, &render, &groups, false).await {
         Ok(report) => {
             for line in ocx_package_manager::skipped_render_warnings(&report) {
+                context.ui().warn(line);
+            }
+            if let Some(line) = ocx_package_manager::unrendered_warning(&report) {
                 context.ui().warn(line);
             }
         }

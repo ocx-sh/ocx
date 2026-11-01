@@ -170,26 +170,69 @@ impl PackageManager {
             .toolchain_home(render.scope, render.toolchain_root)
             .map_err(PackageErrorKind::Internal)?;
 
-        let surface = if groups.iter().any(|group| group == DEFAULT_GROUP) {
+        let mut surface = Vec::new();
+        let mut unrendered = Vec::new();
+        if groups.iter().any(|group| group == DEFAULT_GROUP) {
             let roots = default_group_roots(lock, render.platform);
-            self.toolchain_surface(&roots, render.platform).await?
-        } else {
-            Vec::new()
-        };
+            if self.is_offline() {
+                // A cold store is ordinary offline: render what is present, name the rest.
+                for root in &roots {
+                    match self
+                        .toolchain_surface(std::slice::from_ref(root), render.platform)
+                        .await
+                    {
+                        Ok(nodes) => surface.extend(nodes),
+                        Err(error) => {
+                            log::debug!("'{root}' is not renderable offline: {error}");
+                            unrendered.extend(
+                                lock.tools
+                                    .iter()
+                                    .filter(|tool| tool.group == DEFAULT_GROUP)
+                                    .filter(|tool| {
+                                        tool.host_leaf(render.platform).is_ok_and(|leaf| {
+                                            ocx_oci::PackageRef::from(tool.repository.pin_untagged(leaf)) == *root
+                                        })
+                                    })
+                                    .map(|tool| tool.name.clone()),
+                            );
+                        }
+                    }
+                }
+            } else {
+                surface = self.toolchain_surface(&roots, render.platform).await?;
+            }
+        }
 
-        self.render_toolchain(RenderRequest {
-            home: &home,
-            scope: render.scope,
-            lock,
-            surface: &surface,
-            groups,
-            pinned,
-            platform: render.platform,
-            // Passed through, never short-circuited here, or a dry run reports a delta of zero.
-            dry_run,
-        })
-        .await
+        let mut report = self
+            .render_toolchain(RenderRequest {
+                home: &home,
+                scope: render.scope,
+                lock,
+                surface: &surface,
+                groups,
+                pinned,
+                platform: render.platform,
+                // Passed through, never short-circuited here, or a dry run reports a delta of zero.
+                dry_run,
+            })
+            .await?;
+        report.unrendered = unrendered;
+        Ok(report)
     }
+}
+
+/// The one stderr line for the tools a render left out of a cold store, or `None` when none were.
+// `{:?}` per name: binding names come from a manifest a hostile clone controls (CWE-117).
+#[must_use]
+pub fn unrendered_warning(report: &RenderReport) -> Option<String> {
+    if report.unrendered.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = report.unrendered.iter().map(|name| format!("{name:?}")).collect();
+    Some(format!(
+        "Not rendered, not in the local store: {}; run `ocx pull`",
+        names.join(", ")
+    ))
 }
 
 /// The **default group's** root identifiers, deduplicated; a tool with no leaf
@@ -571,8 +614,8 @@ mod tests {
     /// A render that cannot run **never rolls the commit back**.
     ///
     /// The lock declares a tool whose package is in no index this offline
-    /// manager can reach, so the surface walk fails. The contract is: `Ok`, a
-    /// `render` of `None`, and the new lock still on disk.
+    /// manager can reach, so the surface walk fails. The contract is: `Ok`, the tool
+    /// named in `unrendered`, and the new lock still on disk.
     ///
     /// Mutation that reds it: propagating the render's error out of
     /// `commit_and_render` (the obvious `?`), or restoring the predecessor lock
@@ -594,9 +637,13 @@ mod tests {
             .await
             .expect("RUL-53 — a render failure after a successful commit is not an error");
 
-        assert!(
-            outcome.render.is_none(),
-            "an unresolvable surface must report `render: None`, not a fabricated empty report"
+        let report = outcome
+            .render
+            .expect("offline, an unresolvable tool is named, not fatal");
+        assert_eq!(
+            report.unrendered,
+            vec!["unreachable".to_owned()],
+            "an unresolvable offline tool is reported by binding name"
         );
         let written = std::fs::read_to_string(tree.lock_path()).expect("the committed lock is readable");
         assert!(
@@ -725,6 +772,7 @@ mod tests {
             items,
             bin_in_scope: true,
             stamp_written: false,
+            unrendered: Vec::new(),
         }
     }
 

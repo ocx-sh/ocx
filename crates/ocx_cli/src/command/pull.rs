@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_project::{DEFAULT_GROUP, expand_all_keyword, lazy_mode_for_tool};
+use ocx_project::{DEFAULT_GROUP, expand_all_keyword};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock_consenting;
@@ -78,18 +78,9 @@ impl Pull {
         let selected = select_bound(&bound, &render_groups, &self.names)?;
         let host = selected
             .iter()
-            .map(|tool| {
-                let pinned = tool.host_leaf_identifier(&platform)?;
-                let mode = lazy_mode_for_tool(
-                    &ctx.config,
-                    &pinned.clone().into(),
-                    Some(tool.locked().group.as_str()),
-                    self.lazy_mode.mode(),
-                );
-                Ok((mode, pinned))
-            })
+            .map(|tool| Ok((tool.locked().group.as_str(), tool.host_leaf_identifier(&platform)?)))
             .collect::<Result<Vec<_>, ocx_project::Error>>()?;
-        let pull_set = ocx_project::eager_per_content(host);
+        let pull_set = crate::app::project_context::lazy_pull_set(&ctx.config, host, self.lazy_mode.mode());
         let pinned: Vec<ocx_oci::PinnedPackageRef> = pull_set.iter().map(|(_, id)| id.clone()).collect();
 
         // After the staleness gate, so a stale lock exits 65 before any preview prints.
@@ -234,6 +225,9 @@ async fn render_and_warn(
     match rendered {
         Ok(report) => {
             for line in ocx_package_manager::skipped_render_warnings(&report) {
+                context.ui().warn(line);
+            }
+            if let Some(line) = ocx_package_manager::unrendered_warning(&report) {
                 context.ui().warn(line);
             }
         }

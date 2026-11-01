@@ -13,7 +13,8 @@ use ocx_project::{
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
 use crate::app::CliRefusal;
 use crate::app::project_context::{
-    load_project_for_mutate, materialize_lock, purge_unpinned, record_activation_consent,
+    load_project_for_mutate, materialize_groups, materialize_lock, purge_unpinned, record_activation_consent,
+    warn_unrendered,
 };
 use crate::conventions;
 use crate::options;
@@ -142,7 +143,7 @@ impl Update {
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         // Cloned before the commit consumes `staged`; the eager pull binds the new lock to it.
         let config = staged.config().clone();
-        let commit = render_manager
+        let outcome = render_manager
             .commit_and_render(
                 guard,
                 staged,
@@ -153,8 +154,9 @@ impl Update {
                     platform: &platform,
                 },
             )
-            .await?
-            .commit;
+            .await?;
+        warn_unrendered(&context, &outcome);
+        let commit = outcome.commit;
 
         // After the commit, so the stamp records the new source set.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
@@ -164,7 +166,15 @@ impl Update {
         }
 
         // After the commit, so a failure here never rolls back the lock.
-        materialize_lock(&context, &new_lock, &config, eager, platform).await?;
+        materialize_lock(
+            &context,
+            &new_lock,
+            &config,
+            eager,
+            &materialize_groups(&self.groups),
+            platform,
+        )
+        .await?;
 
         self.emit(&context, report)?;
         if let Some(line) = summary {

@@ -10,7 +10,7 @@ use ocx_project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
     ProjectContextError, load_project_for_mutate, load_project_with_lock, materialize_lock, purge_unpinned,
-    record_activation_consent,
+    record_activation_consent, warn_unrendered,
 };
 use crate::conventions;
 use crate::options;
@@ -95,7 +95,7 @@ impl Lock {
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         // Cloned before the commit consumes `staged`; the eager pull binds the new lock to it.
         let config = staged.config().clone();
-        let commit = render_manager
+        let outcome = render_manager
             .commit_and_render(
                 guard,
                 staged,
@@ -106,8 +106,9 @@ impl Lock {
                     platform: &platform,
                 },
             )
-            .await?
-            .commit;
+            .await?;
+        warn_unrendered(&context, &outcome);
+        let commit = outcome.commit;
 
         // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
@@ -117,7 +118,7 @@ impl Lock {
         }
 
         // After the commit: a failed download leaves the lock committed.
-        materialize_lock(&context, &new_lock, &config, eager, platform.clone()).await?;
+        materialize_lock(&context, &new_lock, &config, eager, &[], platform.clone()).await?;
 
         let project_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         if !gitattributes_has_merge_union(project_dir).await {

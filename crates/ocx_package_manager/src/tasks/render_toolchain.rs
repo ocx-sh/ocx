@@ -135,6 +135,10 @@ pub struct RenderReport {
     /// [`Self::items`] marks an incomplete render
     /// (`adr_toolchain_activation.md` § Rationale from code: render_toolchain).
     pub stamp_written: bool,
+
+    /// Default-group tools left out because their closure could not be walked offline (a cold
+    /// store); empty online, where such a failure aborts the render instead.
+    pub unrendered: Vec<String>,
 }
 
 impl PackageManager {
@@ -301,6 +305,7 @@ fn skipped_render() -> RenderReport {
         items: Vec::new(),
         bin_in_scope: false,
         stamp_written: false,
+        unrendered: Vec::new(),
     }
 }
 
@@ -492,6 +497,7 @@ async fn render_with(
         items,
         bin_in_scope,
         stamp_written,
+        unrendered: Vec::new(),
     })
 }
 

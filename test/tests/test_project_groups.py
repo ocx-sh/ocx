@@ -440,3 +440,24 @@ def test_group_from_other_than_default_is_a_config_error(
     result = _run_cmd(ocx, project, "lock")
 
     assert result.returncode == EXIT_CONFIG, result.stderr
+
+
+def test_add_to_named_group_pulls_the_package(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx add -g lint <pkg>`` materialises the package, not only the default group.
+
+    Regression: the default-group-only pull left a package added to a named group
+    declared and locked but absent from the object store.
+    """
+    pkg = make_package(ocx, f"t_{uuid4().hex[:8]}_grp_pull", "1.0.0", tmp_path, cascade=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _init_project(ocx, project_dir)
+
+    added = _add_tool(ocx, project_dir, pkg.fq, group="lint")
+    assert added.returncode == EXIT_SUCCESS, f"rc={added.returncode}, stderr={added.stderr!r}"
+
+    located = _run_cmd(ocx, project_dir, "package", "which", pkg.fq)
+    assert located.returncode == EXIT_SUCCESS, (
+        f"a package added with -g lint must be in the store; which rc={located.returncode}, "
+        f"stderr={located.stderr!r}"
+    )

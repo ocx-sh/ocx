@@ -1530,3 +1530,41 @@ def test_sequence_9_recomposing_a_published_shim_stages_nothing(
     assert temp_root.is_file(), (
         "sequence 9: the sabotage must still be in place, or the assertion above proves nothing"
     )
+
+
+def test_lock_with_lazy_mode_always_leaves_the_content_in_the_registry(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """ocx-sh/ocx#667: `ocx lock` pulls eagerly but honours `lazy-mode`, as `ocx pull` does."""
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    write_ocx_toml(project, _toolchain_lazy(pkg))
+
+    result = _run(ocx, project, "lock")
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    assert not _is_materialized(ocx, project, pkg), "a deferred tool must not be fully pulled by `ocx lock`"
+
+
+def test_lock_no_pull_names_the_tools_it_could_not_render_and_renders_the_rest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """ocx-sh/ocx#667: offline render keeps the present tool and warns about the absent one."""
+    present = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["here"], env=PUBLIC_BIN_PATH)
+    absent = make_package(ocx, f"{unique_repo}_b", "1.0.0", tmp_path, bins=["gone"], env=PUBLIC_BIN_PATH)
+    body = f'[tools]\nhere = "{present.fq}"\ngone = "{absent.fq}"\n'
+    project = _lazy_project(ocx, tmp_path, body)
+    # `here` stays installed as a candidate, so `clean` keeps its metadata and collects `gone`'s.
+    assert _run(ocx, project, "package", "install", present.short).returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "clean", "--force").returncode == EXIT_SUCCESS
+
+    result = _run(ocx, project, "lock", "--no-pull")
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    assert "gone" in result.stderr and "ocx pull" in result.stderr, f"stderr:\n{result.stderr}"
+    assert '"here"' not in result.stderr, f"the present tool must not be named:\n{result.stderr}"
+    bin_dir = project / ".ocx" / "toolchain" / "active" / "bin"
+    assert bin_dir.is_dir() and any(bin_dir.iterdir()), "the present tool's trampoline must be rendered"

@@ -389,7 +389,7 @@ pub use composer::{ToolchainLinks, pinned_for_project, pinned_ladder_for_project
 pub use concurrency::Concurrency;
 pub use error::DependencyError;
 pub use error::{Error, Result, file_error};
-pub use mutate::{MutationOutcome, ToolchainRender, default_group_roots, skipped_render_warnings};
+pub use mutate::{MutationOutcome, ToolchainRender, default_group_roots, skipped_render_warnings, unrendered_warning};
 pub use tasks::attest::{AttestOptions, AttestReport};
 pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
 pub use tasks::clean::{CleanResult, CleanedObject};

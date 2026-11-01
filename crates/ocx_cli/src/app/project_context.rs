@@ -302,6 +302,17 @@ pub async fn record_activation_consent_over(
     }
 }
 
+/// Warns on stderr about the tools an offline render left out of a cold store.
+pub fn warn_unrendered(context: &crate::app::Context, outcome: &ocx_package_manager::MutationOutcome) {
+    if let Some(line) = outcome
+        .render
+        .as_ref()
+        .and_then(ocx_package_manager::unrendered_warning)
+    {
+        context.ui().warn(line);
+    }
+}
+
 /// After a commit, deletes each package `previous` pinned and `next` does not, when nothing
 /// else references it. A failure warns; the committed lock stands.
 pub async fn purge_unpinned(context: &crate::app::Context, previous: Option<&ProjectLock>, next: &ProjectLock) {
@@ -313,7 +324,32 @@ pub async fn purge_unpinned(context: &crate::app::Context, previous: Option<&Pro
     );
 }
 
-/// Pulls every binding in `lock` for `platform` into the object store; a no-op unless `eager`.
+/// The per-content pull set for entries given as `(group, pinned leaf)`: each tool's lazy mode
+/// resolved down the ladder, eager when any entry of its content is. Shared by `ocx pull` and
+/// [`materialize_lock`], so the two cannot disagree on what a deferred tool is.
+pub(crate) fn lazy_pull_set<'a>(
+    config: &ProjectConfig,
+    entries: impl IntoIterator<Item = (&'a str, ocx_oci::PinnedPackageRef)>,
+    cli: Option<ocx_project::lazy::LazyMode>,
+) -> Vec<(ocx_project::lazy::LazyMode, ocx_oci::PinnedPackageRef)> {
+    ocx_project::eager_per_content(entries.into_iter().map(|(group, pinned)| {
+        let mode = ocx_project::lazy_mode_for_tool(config, &pinned.clone().into(), Some(group), cli);
+        (mode, pinned)
+    }))
+}
+
+/// The groups an `update`/`upgrade` touched: the `-g` set, or every group when none was named.
+pub(crate) fn materialize_groups(groups: &[String]) -> Vec<String> {
+    if groups.is_empty() {
+        vec![ocx_project::ALL_GROUP.to_owned()]
+    } else {
+        groups.to_vec()
+    }
+}
+
+/// Pulls the default group of `lock` plus every group in `groups` (`all` meaning every group) for
+/// `platform` into the object store, as `ocx pull` does: a `never` tool in full, a deferred one prepared only (metadata and launchers). A no-op
+/// unless `eager`.
 ///
 /// Each binding carries its `config` tag while `lock` binds to `config`, and none once stale.
 /// Never touches `symlinks/`, which would add a redundant GC root. An unshipped platform
@@ -327,6 +363,7 @@ pub async fn materialize_lock(
     lock: &ocx_project::ProjectLock,
     config: &ProjectConfig,
     eager: bool,
+    groups: &[String],
     platform: ocx_oci::Platform,
 ) -> anyhow::Result<()> {
     if !eager {
@@ -335,17 +372,40 @@ pub async fn materialize_lock(
     let host = lock
         .lenient_host_identifiers(Some(config), &platform)
         .into_iter()
-        .map(|(tool, identifier)| identifier.map(|identifier| (tool, identifier)))
+        .filter(|(tool, _)| {
+            tool.group == ocx_project::DEFAULT_GROUP
+                || groups.iter().any(|g| g == ocx_project::ALL_GROUP || *g == tool.group)
+        })
+        .map(|(tool, identifier)| identifier.map(|identifier| (tool.group.as_str(), identifier)))
         .collect::<Result<Vec<_>, _>>()?;
-    // One pull per distinct content; a second tag on the same leaf rides the first.
-    let identifiers: Vec<ocx_oci::PackageRef> = ocx_project::first_per_content(host)
-        .into_iter()
-        .map(|(_, identifier)| identifier.into())
-        .collect();
+    let mut eager_set: Vec<ocx_oci::PackageRef> = Vec::new();
+    let mut deferred: Vec<ocx_oci::PackageRef> = Vec::new();
+    for (mode, identifier) in lazy_pull_set(config, host, None) {
+        if mode == ocx_project::lazy::LazyMode::Never {
+            eager_set.push(identifier.into());
+        } else {
+            deferred.push(identifier.into());
+        }
+    }
     context
         .manager()
-        .pull_all(&identifiers, platform, context.concurrency(), false)
+        .pull_all(&eager_set, platform.clone(), context.concurrency(), false)
         .await?;
+    for identifier in deferred {
+        let prepared = context
+            .manager()
+            .prepare_lazy(&identifier, platform.clone())
+            .await
+            .map_err(|kind| {
+                ocx_package_manager::error::Error::ResolveFailed(vec![ocx_package_manager::error::PackageError::new(
+                    identifier.clone(),
+                    kind,
+                )])
+            })?;
+        for advisory in &prepared.advisories {
+            context.ui().warn(advisory.to_string());
+        }
+    }
     Ok(())
 }
 
