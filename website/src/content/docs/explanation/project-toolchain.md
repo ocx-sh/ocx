@@ -38,15 +38,15 @@ The project file describes packages the project needs, not how a contributor's s
 
 `ocx.toml` declares advisory tags; the registry resolves those tags to immutable digests. To make the project reproducible, [`ocx lock`][cmd-lock] resolves every tag once and writes the result to `ocx.lock` next to `ocx.toml`. Subsequent commands read the lock, never the registry, so two machines running [`ocx pull`][cmd-pull] from the same commit get the same bytes.
 
-The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx exec`][cmd-run]) detect the mismatch and refuse to run with stale digests. Re-run [`ocx lock`][cmd-lock] to regenerate the file.
+The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx exec`][cmd-run]) detect the mismatch and refuse to run with stale digests. Re-run [`ocx lock`][cmd-lock] to reconcile the file. It re-resolves only the bindings whose `ocx.toml` entry changed and carries every other pin forward.
 
 ### Lock format — per-platform leaf digests {#lock-format}
 
-`lock_version = 3` is the only lock format this build reads or writes — see [Platforms][reference-platforms] for the canonical grammar its keys use. A `[metadata]` header carries the format version, a `declaration_hash` over the canonicalized `ocx.toml`, and provenance (`generated_by`, `generated_at`). Each `[[tool]]` entry records the bare registry/repository coordinates (no tag, no digest). A `[tool.platforms]` table maps each platform the publisher ships to its per-platform leaf manifest digest:
+`lock_version = 4` is the format this build writes — see [Platforms][reference-platforms] for the canonical grammar its keys use. A `[metadata]` header carries the format version, a `declaration_hash` over the canonicalized `ocx.toml`, and provenance (`generated_by`, `generated_at`). Each `[[tool]]` entry records the bare registry/repository coordinates (no tag, no digest) and `declared`, the full `ocx.toml` spelling it was resolved from. A `[tool.platforms]` table maps each platform the publisher ships to its per-platform leaf manifest digest:
 
 ```toml
 [metadata]
-lock_version = 3
+lock_version = 4
 declaration_hash_version = 1
 declaration_hash = "sha256:<hex>"
 generated_by = "ocx 0.3.0"
@@ -56,6 +56,7 @@ generated_at = "2026-04-19T00:00:00Z"
 name = "cmake"
 group = "default"
 repository = "ocx.sh/kitware/cmake"           # registry/repo only — no tag, no digest
+declared = "ocx.sh/kitware/cmake:3.29"        # the ocx.toml spelling this entry was resolved from
 
 [tool.platforms]
 "linux/amd64"  = "sha256:<leaf-amd64>"
@@ -63,6 +64,8 @@ repository = "ocx.sh/kitware/cmake"           # registry/repo only — no tag, n
 "darwin/arm64" = "sha256:<leaf-darwin-arm64>"
 # darwin/amd64, windows/amd64 absent — publisher ships no such leaf
 ```
+
+A `lock_version = 3` lock, which records no `declared`, is still read. Read-only commands never rewrite it. [`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update] and [`ocx upgrade`][cmd-upgrade] write version 4. A current version 3 lock migrates without contacting the registry. An older OCX release rejects a version 4 lock.
 
 Only the platforms the publisher ships are recorded: a platform absent from the map means the publisher does not ship it at the locked version. `ocx lock` records every shipped platform at once, regardless of which OS the command runs on. A lock committed on Linux is already complete for macOS and Windows CI runners. No re-resolution or re-commit is required on a different machine.
 
@@ -83,7 +86,7 @@ A newly-shipped platform becomes available after an explicit `ocx update <name>`
 :::caution[`ocx.lock` is machine-generated]
 Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the file-level `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions.
 
-Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v3.json`][schema-lock]. The schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
+Tooling that reads `ocx.lock` should validate against the published schema at [`https://ocx.sh/schemas/project-lock/v4.json`][schema-lock]. The schema's top-level `$comment` field carries a machine-readable do-not-edit marker recognizable to JSON Schema processors.
 :::
 
 :::tip[Commit `ocx.lock` and tame merge conflicts]
@@ -108,7 +111,7 @@ Because rename rotates the inode, a lock held *on* `ocx.toml` would strand on th
 
 `ocx add` is also **idempotent** for a binding the target group already declares with the exact same identifier. The manifest is left byte-identical, `ocx.lock` is re-locked only when it has no entry yet, and an already-pinned binding is never re-resolved. Re-running `ocx add` after an interrupted download therefore just finishes the install — it never restates a version. Adding the same name with a *different* identifier still fails (exit 64): `ocx add` never moves a pin, only [`ocx update`][cmd-update] does.
 
-Every surviving entry is passed through byte-identical — no registry contact. Because `ocx.lock` is always the current V3 format (an older lock fails to load outright, per the warning above), there is nothing to transcribe. `ocx add` and `ocx remove` never touch the network for pins they are not adding or removing.
+Every surviving entry is passed through byte-identical — no registry contact. `ocx add` and `ocx remove` never touch the network for pins they are not adding or removing.
 
 The freshness gate runs before any carry-forward. If `ocx.toml` drifted from `ocx.lock` since the lock was last written (the `declaration_hash` does not match), the mutator fails with exit 65 before touching anything. The fix is a single `ocx lock` to reconcile the file, after which the add or remove succeeds.
 
@@ -116,8 +119,8 @@ The two commands that intentionally advance version pins are:
 
 | Command | When it re-resolves |
 |---------|---------------------|
-| `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
-| `ocx update` | The default group by default; `-g GROUP` / `-g all` / `NAME` selects the subset (those advance, the rest stay frozen) |
+| `ocx lock` | Only the bindings whose `ocx.toml` entry is new or changed; every other pin carries forward, even a moved tag |
+| `ocx update` | The default group by default, plus the bindings whose `ocx.toml` entry changed when it drifted; `-g GROUP` / `-g all` / `NAME` selects the subset (those advance, the rest stay frozen) |
 
 Groups are primarily a **composition concern** — they scope which bindings `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: it advances the default group, or the groups `-g` names (`-g all` for every group), or only the binding `NAME` given, and carries every other pin forward verbatim. A group tool written `{ from = "default" }` shares the declared version, not the default group's lock entry, so it moves only when its own group is selected. `ocx add`, `ocx update`, `ocx upgrade` and `ocx lock` download only the packages whose pin they changed. `ocx add` and `ocx remove` do the same for the bindings they touch.
 
@@ -262,12 +265,15 @@ What is not yet shipped is a signed build attestation describing how each packag
 [slsa-attestation]: https://slsa.dev/spec/v1.0/attestation-model
 [sigstore]: https://www.sigstore.dev/
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-lock]: https://ocx.sh/schemas/project-lock/v3.json
+[schema-lock]: https://ocx.sh/schemas/project-lock/v4.json
 [composer-source]: https://github.com/ocx-sh/ocx/blob/main/crates/ocx_package_manager/src/composer.rs
 [cmd-clean]: ../reference/command-line/commands.md#clean
 [cmd-exec]: ../reference/command-line/package-consuming.md#package-exec
 [cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
 [cmd-global-flag]: ../reference/command-line/index.md#global-flag
+[cmd-add]: ../reference/command-line/commands.md#add
+[cmd-remove]: ../reference/command-line/commands.md#remove
+[cmd-upgrade]: ../reference/command-line/commands.md#upgrade
 [cmd-lock]: ../reference/command-line/commands.md#lock
 [cmd-pull]: ../reference/command-line/commands.md#pull
 [cmd-update]: ../reference/command-line/commands.md#update

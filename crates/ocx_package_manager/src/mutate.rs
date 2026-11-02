@@ -488,6 +488,7 @@ mod tests {
 
     fn locked_tool(name: &str, group: &str, repository: &str) -> LockedTool {
         LockedTool {
+            declared: None,
             name: name.to_owned(),
             group: group.to_owned(),
             repository: ocx_oci::Repository::new(REGISTRY, repository),

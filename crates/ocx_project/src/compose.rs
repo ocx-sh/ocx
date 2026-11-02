@@ -387,6 +387,7 @@ mod tests {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256(sha(c)));
         LockedTool {
+            declared: None,
             name: name.into(),
             group: group.into(),
             repository: ocx_oci::Repository::new(reg, repo),
@@ -403,6 +404,7 @@ mod tests {
         let mut platforms = BTreeMap::new();
         platforms.insert("windows/amd64".to_string(), Digest::Sha256(sha(c)));
         LockedTool {
+            declared: None,
             name: name.into(),
             group: group.into(),
             repository: ocx_oci::Repository::new(reg, repo),

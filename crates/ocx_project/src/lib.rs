@@ -45,7 +45,7 @@ pub use mutate::{
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
-pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};
+pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_reconcile, resolve_lock_touched};
 pub use toolchain_home::resolve_toolchain_home;
 
 /// The crate's own `Result`, keyed to the tier's own [`Error`].

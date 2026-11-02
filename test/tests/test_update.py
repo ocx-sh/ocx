@@ -1368,3 +1368,63 @@ def test_lock_rerun_without_changes_downloads_nothing(ocx: OcxRunner, tmp_path: 
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert not _in_store(ocx, project, f"{ocx.registry}/{repo}:1.0.0"), "no pin changed, so nothing is downloaded"
+
+
+# ---------------------------------------------------------------------------
+# Bare ``ocx update`` on a drifted lock — default group plus the changed bindings
+# ---------------------------------------------------------------------------
+
+
+def test_update_on_drifted_lock_moves_default_group_and_edited_binding_only(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """After an ``ocx.toml`` edit, bare ``ocx update`` re-resolves the default
+    group and the edited group binding, and carries the other group's pin
+    even though its tag moved upstream.
+    """
+    short = uuid4().hex[:8]
+    repo_default = f"t_{short}_drift_def"
+    repo_ci = f"t_{short}_drift_ci"
+    repo_lint = f"t_{short}_drift_lint"
+    make_package(ocx, repo_default, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_ci, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_lint, "1.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    toml_template = f"""\
+[tools]
+tool = "{ocx.registry}/{repo_default}:latest"
+
+[group.ci.tools]
+citool = "{ocx.registry}/{repo_ci}:{{ci_tag}}"
+
+[group.lint.tools]
+linttool = "{ocx.registry}/{repo_lint}:latest"
+"""
+    _write_ocx_toml(project, toml_template.format(ci_tag="1.0.0"))
+    initial = _run_lock(ocx, project)
+    assert initial.returncode == EXIT_SUCCESS, initial.stderr
+    initial_text = _read_lock_text(project)
+
+    # Both moving tags advance upstream, then one group binding is edited: the lock drifts.
+    make_package(ocx, repo_default, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_lint, "2.0.0", tmp_path, cascade=True)
+    _write_ocx_toml(project, toml_template.format(ci_tag="2.0.0"))
+
+    result = _run_update(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx update failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    after_text = _read_lock_text(project)
+    assert _leaves_for(after_text, "tool") != _leaves_for(initial_text, "tool"), (
+        "the default group must advance"
+    )
+    assert _leaves_for(after_text, "citool") != _leaves_for(initial_text, "citool"), (
+        "the edited group binding must re-resolve"
+    )
+    assert _leaves_for(after_text, "linttool") == _leaves_for(initial_text, "linttool"), (
+        "the other group's pin must be carried forward although its tag moved"
+    )

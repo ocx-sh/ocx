@@ -1349,6 +1349,11 @@
           "exit_code": 65
         },
         {
+          "value": "lock_declared_mismatch",
+          "description": "ocx.lock records a declared spelling its version does not allow",
+          "exit_code": 78
+        },
+        {
           "value": "lock_missing",
           "description": "ocx.lock does not exist",
           "exit_code": 78

@@ -509,6 +509,7 @@ mod tests {
     /// given `(platform key, digest byte)` leaves.
     fn tool(name: &str, repo: &str, leaves: &[(&str, char)]) -> LockedTool {
         LockedTool {
+            declared: None,
             name: name.to_string(),
             group: DEFAULT_GROUP.to_string(),
             repository: ocx_oci::Repository::new("ocx.sh", repo),

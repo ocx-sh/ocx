@@ -3109,6 +3109,8 @@ pub enum ErrorDetail {
     LinkPathOccupied,
     /// A list-valued environment entry conflicts with or edges on its separator
     ListSeparatorInvalid,
+    /// ocx.lock records a declared spelling its version does not allow
+    LockDeclaredMismatch,
     /// ocx.lock does not exist
     LockMissing,
     /// ocx.lock records a repository carrying a tag or digest
@@ -3932,6 +3934,7 @@ impl ErrorDetail {
             Self::LibcScanScopeUnresolvable => "libc_scan_scope_unresolvable",
             Self::LinkPathOccupied => "link_path_occupied",
             Self::ListSeparatorInvalid => "list_separator_invalid",
+            Self::LockDeclaredMismatch => "lock_declared_mismatch",
             Self::LockMissing => "lock_missing",
             Self::LockRepositoryNotBare => "lock_repository_not_bare",
             Self::LockStale => "lock_stale",
@@ -4458,6 +4461,7 @@ impl ErrorDetail {
             "libc_scan_scope_unresolvable" => Self::LibcScanScopeUnresolvable,
             "link_path_occupied" => Self::LinkPathOccupied,
             "list_separator_invalid" => Self::ListSeparatorInvalid,
+            "lock_declared_mismatch" => Self::LockDeclaredMismatch,
             "lock_missing" => Self::LockMissing,
             "lock_repository_not_bare" => Self::LockRepositoryNotBare,
             "lock_stale" => Self::LockStale,

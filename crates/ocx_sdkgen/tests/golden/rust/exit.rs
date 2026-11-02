@@ -263,6 +263,7 @@ impl ErrorDetail {
             Self::LibcScanScopeUnresolvable => Some(ExitCode::DataError),
             Self::LinkPathOccupied => Some(ExitCode::DataError),
             Self::ListSeparatorInvalid => Some(ExitCode::DataError),
+            Self::LockDeclaredMismatch => Some(ExitCode::ConfigError),
             Self::LockMissing => Some(ExitCode::ConfigError),
             Self::LockRepositoryNotBare => Some(ExitCode::ConfigError),
             Self::LockStale => Some(ExitCode::DataError),

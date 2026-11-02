@@ -522,6 +522,7 @@ mod tests {
                     Digest::Sha256(std::iter::repeat_n('a', 64).collect()),
                 );
                 LockedTool {
+                    declared: None,
                     name: format!("tool{i}"),
                     group: (*group).to_owned(),
                     repository: ocx_oci::Repository::new("ocx.sh", format!("tool{i}")),

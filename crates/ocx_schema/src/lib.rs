@@ -38,7 +38,7 @@ macro_rules! reports_version {
 // A foreign crate owns the number behind each of the next two; a test below pins the equality.
 macro_rules! project_lock_version {
     () => {
-        3
+        4
     };
 }
 macro_rules! execution_record_version {
@@ -52,7 +52,7 @@ pub mod docs;
 pub mod errors;
 pub mod reports;
 
-/// `$id` of the project-lock schema; the version is `LockVersion::V3`'s.
+/// `$id` of the project-lock schema; the version is `LockVersion::V4`'s.
 const PROJECT_LOCK_ID: &str = schema_id!("project-lock", project_lock_version!());
 
 /// `$id` of the execution-record schema; the version is the record's in-band `schemaVersion`.
@@ -69,7 +69,7 @@ const EXECUTION_RECORD_COMMENT: &str =
 ///
 /// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`, `errors`,
 /// `cli` (the grammar document itself) and `cli-schema` (the JSON Schema of `cli`).
-/// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v3`; `cli` has none.
+/// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v4`; `cli` has none.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
         // Authoring form with digest-optional dependencies, so published blobs stay a valid subset of the
@@ -155,7 +155,7 @@ mod tests {
     fn id_versions_equal_the_versions_their_owners_declare() {
         assert_eq!(
             project_lock_version!(),
-            ocx_project::LockVersion::V3 as u8,
+            ocx_project::LockVersion::V4 as u8,
             "bump `project_lock_version!` with `LockVersion`"
         );
         assert_eq!(

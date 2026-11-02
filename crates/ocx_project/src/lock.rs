@@ -29,13 +29,16 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
     config_path.parent().unwrap_or_else(|| Path::new(".")).join("ocx.lock")
 }
 
-/// Lock format version. `V3` is the only one accepted; older locks are rejected
-/// with [`ProjectErrorKind::UnsupportedLockVersion`], never bridged.
+/// Lock format version. `V3` and `V4` are read; older locks are rejected with
+/// [`ProjectErrorKind::UnsupportedLockVersion`], never bridged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum LockVersion {
-    /// The only version this build reads or writes.
+    /// Read-only: entries carry no `declared`. A lock is written as `V3` only by
+    /// re-saving one that was read as `V3`.
     V3 = 3,
+    /// Every entry records the `ocx.toml` spelling it was resolved from.
+    V4 = 4,
 }
 
 // Hand-written: the derive cannot see through `serde_repr`.
@@ -47,8 +50,8 @@ impl schemars::JsonSchema for LockVersion {
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "integer",
-            "description": "OCX lock format version (lock-format version 3). Written locks are always 3.",
-            "enum": [3]
+            "description": "OCX lock format version. Version 4 adds the per-entry `declared` field; version 3 locks are still read.",
+            "enum": [3, 4]
         })
     }
 }
@@ -65,14 +68,13 @@ struct LockVersionPeekMetadata {
     lock_version: u8,
 }
 
-const SUPPORTED_LOCK_VERSION: u8 = 3;
+const SUPPORTED_LOCK_VERSIONS: [u8; 2] = [LockVersion::V3 as u8, LockVersion::V4 as u8];
 
 /// Lock metadata header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockMetadata {
-    /// On-disk schema version. `V3` is the only version this build reads or
-    /// writes.
+    /// On-disk schema version.
     pub lock_version: LockVersion,
     /// Canonicalization contract version for `declaration_hash`. Currently
     /// always `1`.
@@ -90,8 +92,8 @@ pub struct LockMetadata {
 /// Top-level `ocx.lock` document.
 ///
 /// Tools are sorted by `(group, name)` at write time for byte-stable output.
-/// Only `lock_version` `3` is accepted, every tool's `repository` must be bare
-/// and every platform key canonical.
+/// Only `lock_version` `3` and `4` are accepted, every tool's `repository` must
+/// be bare and every platform key canonical.
 // The version check runs before the full parse, so a foreign version never surfaces as a shape error.
 #[derive(Debug, Clone, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +126,10 @@ pub struct LockedTool {
     /// Bare registry/repo coordinates shared by every platform leaf.
     #[schemars(with = "PackageRef")]
     pub repository: Repository,
+    /// The `ocx.toml` spelling this entry was resolved from (e.g.
+    /// `ocx.sh/kitware/cmake:3.29`). Present on every `V4` entry, absent on `V3`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared: Option<String>,
     /// Available-only per-platform leaf digests, keyed by the canonical
     /// platform string (`os/arch[/variant][+feature,...]` or `any`).
     // `BTreeMap<String, _>`: byte-stable output without `Ord` on `Platform`.
@@ -180,6 +186,8 @@ struct RawLockedTool {
     name: String,
     group: String,
     repository: PackageRef,
+    #[serde(default)]
+    declared: Option<String>,
     platforms: BTreeMap<String, Digest>,
 }
 
@@ -205,6 +213,7 @@ impl RawProjectLock {
                     name: raw.name,
                     group: raw.group,
                     repository: Repository::from(&raw.repository),
+                    declared: raw.declared,
                     platforms: raw.platforms,
                 })
             })
@@ -535,12 +544,12 @@ impl ProjectLock {
         }
     }
 
-    /// Rejects a `lock_version` other than [`SUPPORTED_LOCK_VERSION`] before the
+    /// Rejects a `lock_version` outside [`SUPPORTED_LOCK_VERSIONS`] before the
     /// full parse, naming the found version, then validates.
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
         let peek: LockVersionPeek =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
-        if peek.metadata.lock_version != SUPPORTED_LOCK_VERSION {
+        if !SUPPORTED_LOCK_VERSIONS.contains(&peek.metadata.lock_version) {
             return Err(ProjectError::new(
                 path,
                 ProjectErrorKind::UnsupportedLockVersion {
@@ -560,8 +569,8 @@ impl ProjectLock {
         Ok(lock)
     }
 
-    /// V3 invariants beyond parsing: hash version and canonical platform keys
-    /// (`repository` is bare by type). Runs on write too, or a hand-assembled
+    /// Invariants beyond parsing: hash version, canonical platform keys
+    /// (`repository` is bare by type) and `declared` on every `V4` entry, none on `V3`. Runs on write too, or a hand-assembled
     /// lock is saved in a shape every later load rejects.
     fn validate(&self, path: &Path) -> Result<(), super::Error> {
         // A hash from another algorithm version would compare wrong, so refuse it.
@@ -578,6 +587,17 @@ impl ProjectLock {
         for tool in &self.tools {
             validate_canonical_platform_keys(&tool.platforms)
                 .map_err(|kind| ProjectError::new(path.to_path_buf(), kind))?;
+            if tool.declared.is_some() != (self.metadata.lock_version == LockVersion::V4) {
+                return Err(ProjectError::new(
+                    path.to_path_buf(),
+                    ProjectErrorKind::LockDeclaredMismatch {
+                        group: tool.group.clone(),
+                        name: tool.name.clone(),
+                        lock_version: self.metadata.lock_version as u8,
+                    },
+                )
+                .into());
+            }
         }
 
         Ok(())
@@ -766,6 +786,7 @@ mod tests {
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), digest_of(leaf_byte));
         LockedTool {
+            declared: None,
             name: name.to_string(),
             group: group.to_string(),
             repository: bare_repo(registry, repo),
@@ -896,7 +917,7 @@ generated_at = "2026-04-19T00:00:00Z"
         let toml_str = format!(
             r#"
 [metadata]
-lock_version = 4
+lock_version = 5
 declaration_hash_version = 1
 declaration_hash = "sha256:{abc}"
 generated_by = "ocx 99.0.0"
@@ -905,7 +926,7 @@ generated_at = "2099-01-01T00:00:00Z"
             abc = sha256_of('a'),
         );
         let err = ProjectLock::from_toml_str(&toml_str).expect_err("unknown future version must reject");
-        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 4 });
+        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 5 });
     }
 
     #[test]
@@ -963,6 +984,50 @@ generated_at = "2026-04-19T00:00:00Z"
             !cmake.platforms.contains_key("windows/amd64"),
             "an unshipped platform must be absent from the map"
         );
+    }
+
+    /// `v3_lock_toml` re-written as version 4, each entry optionally carrying `declared`.
+    fn v4_lock_toml(declared: Option<&str>) -> String {
+        let declared_line = declared
+            .map(|value| format!("declared = \"{value}\"\n"))
+            .unwrap_or_default();
+        v3_lock_toml()
+            .replace("lock_version = 3", "lock_version = 4")
+            .replace("\n[tool.platforms]", &format!("\n{declared_line}\n[tool.platforms]"))
+    }
+
+    #[test]
+    fn v4_lock_round_trips_with_declared() {
+        let text = v4_lock_toml(Some("ocx.sh/cmake:3.28"));
+        let lock = ProjectLock::from_toml_str(&text).expect("V4 lock parses");
+        assert_eq!(lock.metadata.lock_version, LockVersion::V4);
+        assert_eq!(lock.tools[0].declared.as_deref(), Some("ocx.sh/cmake:3.28"));
+        let reparsed = ProjectLock::from_toml_str(&lock.to_toml_string().expect("V4 lock serializes"))
+            .expect("serialized V4 lock parses");
+        assert_eq!(reparsed, lock);
+    }
+
+    #[test]
+    fn v4_entry_without_declared_rejects() {
+        let err = ProjectLock::from_toml_str(&v4_lock_toml(None)).expect_err("V4 entry needs declared");
+        assert_kind!(err, ProjectErrorKind::LockDeclaredMismatch { lock_version: 4, .. });
+    }
+
+    #[test]
+    fn v3_entry_with_declared_rejects() {
+        let text = v4_lock_toml(Some("ocx.sh/cmake:3.28")).replace("lock_version = 4", "lock_version = 3");
+        let err = ProjectLock::from_toml_str(&text).expect_err("V3 entry must not carry declared");
+        assert_kind!(err, ProjectErrorKind::LockDeclaredMismatch { lock_version: 3, .. });
+    }
+
+    #[test]
+    fn v3_lock_re_saves_byte_identical_without_declared() {
+        let lock = ProjectLock::from_toml_str(&v3_lock_toml()).expect("V3 lock parses");
+        let serialized = lock.to_toml_string().expect("V3 lock serializes");
+        assert!(serialized.contains("lock_version = 3"));
+        assert!(!serialized.contains("declared"));
+        let reparsed = ProjectLock::from_toml_str(&serialized).expect("re-serialized V3 lock parses");
+        assert_eq!(reparsed.to_toml_string().expect("serializes"), serialized);
     }
 
     #[test]
@@ -1240,6 +1305,7 @@ repository = "ocx.sh/cmake"
         let lock = ProjectLock {
             metadata: sample_metadata(),
             tools: vec![LockedTool {
+                declared: None,
                 name: "cmake".to_string(),
                 group: "default".to_string(),
                 repository: bare_repo("ocx.sh", "cmake"),
@@ -1267,6 +1333,7 @@ repository = "ocx.sh/cmake"
         let lock = ProjectLock {
             metadata: sample_metadata(),
             tools: vec![LockedTool {
+                declared: None,
                 name: "cmake".to_string(),
                 group: "default".to_string(),
                 repository: bare_repo("ocx.sh", "cmake"),
@@ -1329,6 +1396,7 @@ repository = "ocx.sh/cmake"
             ProjectLock {
                 metadata: sample_metadata(),
                 tools: vec![LockedTool {
+                    declared: None,
                     name: "rosetta".to_string(),
                     group: "default".to_string(),
                     repository: bare_repo("ocx.sh", "rosetta"),
@@ -1789,6 +1857,7 @@ repository = "ocx.sh/cmake"
         platforms.insert("linux/amd64".to_string(), digest_of('a'));
         platforms.insert("darwin/arm64".to_string(), digest_of('b'));
         let next = vec![LockedTool {
+            declared: None,
             name: "cmake".to_string(),
             group: "default".to_string(),
             repository: bare_repo("ocx.sh", "cmake"),
@@ -1809,6 +1878,7 @@ repository = "ocx.sh/cmake"
         platforms.insert("linux/amd64".to_string(), digest_of('a'));
         platforms.insert("darwin/arm64".to_string(), digest_of('b'));
         let prev = vec![LockedTool {
+            declared: None,
             name: "cmake".to_string(),
             group: "default".to_string(),
             repository: bare_repo("ocx.sh", "cmake"),
@@ -1850,12 +1920,14 @@ repository = "ocx.sh/cmake"
         b.insert("linux/amd64".to_string(), digest_of('1'));
 
         let lhs = vec![LockedTool {
+            declared: None,
             name: "cmake".to_string(),
             group: "default".to_string(),
             repository: bare_repo("ocx.sh", "cmake"),
             platforms: a,
         }];
         let rhs = vec![LockedTool {
+            declared: None,
             name: "cmake".to_string(),
             group: "default".to_string(),
             repository: bare_repo("ocx.sh", "cmake"),

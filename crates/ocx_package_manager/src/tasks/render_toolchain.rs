@@ -1859,6 +1859,7 @@ mod tests {
 
     fn locked_tool(name: &str, group: &str, repository: &str, platforms: &[(&str, char)]) -> LockedTool {
         LockedTool {
+            declared: None,
             name: name.to_string(),
             group: group.to_string(),
             repository: ocx_oci::Repository::new(REGISTRY, repository),

@@ -1188,6 +1188,7 @@ mod consent_evidence_tests {
                 generated_at: String::new(),
             },
             tools: vec![LockedTool {
+                declared: None,
                 name: "cmake".into(),
                 group: "default".into(),
                 repository: ocx_oci::Repository::new(registry, path),
@@ -2622,6 +2623,7 @@ mod bin_mode_entry_tests {
                 generated_at: String::new(),
             },
             tools: vec![LockedTool {
+                declared: None,
                 name: "cmake".into(),
                 group: DEFAULT_GROUP.into(),
                 repository: ocx_oci::Repository::from(&identifier()),

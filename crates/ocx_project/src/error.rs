@@ -193,6 +193,22 @@ pub enum ProjectErrorKind {
     )]
     UnsupportedLockVersion { found: u8 },
 
+    /// An entry's `declared` field disagrees with the lock version: `V4` requires
+    /// it, `V3` has none.
+    #[error(
+        "ocx.lock version {lock_version} entry '{name}' in group '{group}' has a `declared` field its version does not allow or require; regenerate with `ocx lock`"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "lock_declared_mismatch",
+        summary = "ocx.lock records a declared spelling its version does not allow"
+    )]
+    LockDeclaredMismatch {
+        group: String,
+        name: String,
+        lock_version: u8,
+    },
+
     /// A lock entry ships no leaf for the host (nor `"any"`) at the locked
     /// version; decided from lock bytes, before any network.
     #[error(

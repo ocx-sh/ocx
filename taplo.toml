@@ -29,4 +29,4 @@ include = [
   "**/ocx.lock",
   "/**/ocx.lock",
 ]
-schema = { url = "https://ocx.sh/schemas/project-lock/v3.json" }
+schema = { url = "https://ocx.sh/schemas/project-lock/v4.json" }

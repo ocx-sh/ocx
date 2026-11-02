@@ -162,23 +162,72 @@ pub async fn resolve_lock_touched(
     let index = Arc::new(index.clone());
     let resolved = resolve_work(work, index, &options).await?;
 
-    let tools = merge_carry_forward(previous, resolved, candidate);
+    let tools = merge_carry_forward(&previous.tools, resolved, candidate);
 
     // Stamped with `hash(candidate)`, so the commit's coherence gate passes.
     Ok(build_lock(tools, candidate))
 }
 
+/// Reconcile `previous` with `config`: re-resolve the `forced` bindings and every binding
+/// `ocx.toml` changed, and carry the rest forward. Returns the lock and the bindings it
+/// re-resolved.
+///
+/// A binding changed when it has no predecessor entry, names another repository, or its
+/// `declared` spelling differs. A `V3` predecessor records no spelling, so it counts as a
+/// whole: current changes nothing, drifted changes everything. No predecessor resolves all.
+///
+/// # Errors
+/// [`resolve_lock`]'s failures for the re-resolved bindings.
+pub async fn resolve_lock_reconcile(
+    config: &ProjectConfig,
+    previous: Option<&ProjectLock>,
+    index: &Index,
+    forced: &[(String, String)],
+    options: ResolveLockOptions,
+) -> Result<(ProjectLock, Vec<(String, String)>), super::Error> {
+    let v3_drifted =
+        previous.is_some_and(|prev| prev.metadata.lock_version == LockVersion::V3 && !prev.is_current(config));
+    let changed = |group: &str, name: &str, identifier: &PackageRef| {
+        let entry = previous.and_then(|prev| prev.tools.iter().find(|tool| tool.group == group && tool.name == name));
+        entry.is_none_or(|tool| {
+            v3_drifted
+                || tool.repository != Repository::from(identifier)
+                || tool
+                    .declared
+                    .as_deref()
+                    .is_some_and(|declared| declared != identifier.to_string())
+        })
+    };
+
+    let work: Vec<(String, String, PackageRef)> = collect_work(config, &None)
+        .into_iter()
+        .filter(|(group, name, identifier)| {
+            forced.iter().any(|(g, n)| g == group && n == name) || changed(group, name, identifier)
+        })
+        .collect();
+    let touched = work
+        .iter()
+        .map(|(group, name, _)| (group.clone(), name.clone()))
+        .collect();
+
+    let resolved = resolve_work(work, Arc::new(index.clone()), &options).await?;
+    let carried = previous.map_or(&[][..], |prev| &prev.tools[..]);
+    Ok((
+        build_lock(merge_carry_forward(carried, resolved, config), config),
+        touched,
+    ))
+}
+
 /// Carry forward each predecessor entry not just resolved and still declared in
 /// `candidate` (so a `remove` drops its binding), then append `resolved` and sort.
 fn merge_carry_forward(
-    previous: &ProjectLock,
+    previous: &[LockedTool],
     resolved: Vec<LockedTool>,
     candidate: &ProjectConfig,
 ) -> Vec<LockedTool> {
     let mut tools: Vec<LockedTool> = {
         let new_keys: HashSet<(&str, &str)> = resolved.iter().map(|t| (t.group.as_str(), t.name.as_str())).collect();
         previous
-            .tools
             .iter()
             .filter(|tool| !new_keys.contains(&(tool.group.as_str(), tool.name.as_str())))
             .filter(|tool| declared_identifier(candidate, &tool.group, &tool.name).is_some())
@@ -350,6 +399,8 @@ async fn resolve_one(
         name,
         group,
         repository: Repository::from(&identifier),
+        // Filled by `build_lock` for resolved and carried entries alike.
+        declared: None,
         platforms,
     })
 }
@@ -839,13 +890,16 @@ fn project_err_from_client(
 }
 
 /// Assemble a [`ProjectLock`] from resolved tools and the source config.
-fn build_lock(tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
+fn build_lock(mut tools: Vec<LockedTool>, config: &ProjectConfig) -> ProjectLock {
+    for tool in &mut tools {
+        tool.declared = declared_identifier(config, &tool.group, &tool.name).map(ToString::to_string);
+    }
     // ISO-8601 UTC with second resolution. `ProjectLock::save` will
     // preserve this value when the resolved content equals `previous`.
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     ProjectLock {
         metadata: LockMetadata {
-            lock_version: LockVersion::V3,
+            lock_version: LockVersion::V4,
             declaration_hash_version: DECLARATION_HASH_VERSION,
             declaration_hash: config.declaration_hash_cached().to_string(),
             generated_by: format!("ocx {}", env!("CARGO_PKG_VERSION")),
@@ -1756,6 +1810,7 @@ gamma = "{r}/gamma:1"
         let mut platforms = BTreeMap::new();
         platforms.insert("linux/amd64".to_string(), Digest::Sha256(leaf.repeat(64)));
         LockedTool {
+            declared: Some(format!("{TEST_REGISTRY}/{name}:1")),
             name: name.to_string(),
             group: "default".to_string(),
             repository: ocx_oci::Repository::new(TEST_REGISTRY, name),
@@ -1768,7 +1823,7 @@ gamma = "{r}/gamma:1"
     fn predecessor_lock(config: &ProjectConfig, tools: Vec<LockedTool>) -> ProjectLock {
         ProjectLock {
             metadata: LockMetadata {
-                lock_version: LockVersion::V3,
+                lock_version: LockVersion::V4,
                 declaration_hash_version: DECLARATION_HASH_VERSION,
                 declaration_hash: config.declaration_hash_cached().to_string(),
                 generated_by: "ocx test".to_string(),
@@ -1903,6 +1958,7 @@ delta = "{r}/delta:1"
         // it carries verbatim through the PanicMock; reuse locked_tool_fixture's
         // shape but with the right repo coordinates.
         let cmake = LockedTool {
+            declared: Some(format!("{TEST_REGISTRY}/{TOOL_REPO}:{TOOL_TAG}")),
             repository: ocx_oci::Repository::new(TEST_REGISTRY, TOOL_REPO),
             platforms: {
                 let mut p = BTreeMap::new();
@@ -1992,6 +2048,163 @@ delta = "{r}/delta:1"
             cause = c.source();
         }
         assert!(found, "error chain must contain LockOutOfSync; chain: {err:#}");
+    }
+
+    // ── resolve_lock_reconcile ───────────────────────────────────────────────
+
+    /// `previous` as a version 3 lock: no entry records its spelling.
+    fn as_v3(mut lock: ProjectLock) -> ProjectLock {
+        lock.metadata.lock_version = LockVersion::V3;
+        lock.tools.iter_mut().for_each(|tool| tool.declared = None);
+        lock
+    }
+
+    /// An index answering every resolve with one `linux/amd64` leaf of `leaf` repeated.
+    fn fresh_leaf_index(leaf: char) -> Index {
+        let manifest =
+            image_index_manifest(&[(format!("sha256:{}", leaf.to_string().repeat(64)), Some("linux/amd64"))]);
+        Index::from_impl(ManifestMock::new(test_digest(), Some(manifest)))
+    }
+
+    fn leaf_of(lock: &ProjectLock, name: &str) -> Digest {
+        locked(lock, "default", name).platforms["linux/amd64"].clone()
+    }
+
+    fn key(name: &str) -> (String, String) {
+        ("default".to_string(), name.to_string())
+    }
+
+    #[tokio::test]
+    async fn reconcile_v4_resolves_only_the_binding_whose_spelling_changed() {
+        let before = three_tool_config();
+        let previous = predecessor_lock(
+            &before,
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
+        );
+        let edited = ProjectConfig::from_toml_str(&format!(
+            "[tools]\nalpha = \"{r}/alpha:1\"\nbeta = \"{r}/beta:2\"\ngamma = \"{r}/gamma:1\"\n",
+            r = TEST_REGISTRY
+        ))
+        .expect("edited config parses");
+
+        let (lock, touched) =
+            resolve_lock_reconcile(&edited, Some(&previous), &fresh_leaf_index('c'), &[], fast_options())
+                .await
+                .expect("reconcile resolves");
+
+        assert_eq!(touched, vec![key("beta")]);
+        assert_eq!(leaf_of(&lock, "beta"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(leaf_of(&lock, "alpha"), Digest::Sha256("a".repeat(64)), "alpha carried");
+        assert_eq!(leaf_of(&lock, "gamma"), Digest::Sha256("g".repeat(64)), "gamma carried");
+        assert_eq!(
+            locked(&lock, "default", "beta").declared.as_deref(),
+            Some("registry.test/beta:2")
+        );
+        assert_eq!(lock.metadata.lock_version, LockVersion::V4);
+        assert_eq!(lock.metadata.declaration_hash, declaration_hash(&edited));
+    }
+
+    #[tokio::test]
+    async fn reconcile_current_v3_migrates_without_the_registry() {
+        let config = three_tool_config();
+        let previous = as_v3(predecessor_lock(
+            &config,
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
+        ));
+
+        let (lock, touched) = resolve_lock_reconcile(
+            &config,
+            Some(&previous),
+            &Index::from_impl(PanicMock),
+            &[],
+            fast_options(),
+        )
+        .await
+        .expect("a current v3 lock migrates with zero registry contact");
+
+        assert!(touched.is_empty());
+        assert_eq!(lock.metadata.lock_version, LockVersion::V4);
+        for name in ["alpha", "beta", "gamma"] {
+            let tool = locked(&lock, "default", name);
+            assert_eq!(tool.declared, Some(format!("registry.test/{name}:1")));
+            assert_eq!(tool.platforms, locked(&previous, "default", name).platforms);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_drifted_v3_resolves_everything() {
+        let before = three_tool_config();
+        let previous = as_v3(predecessor_lock(
+            &before,
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
+        ));
+        let edited = ProjectConfig::from_toml_str(&format!(
+            "[tools]\nalpha = \"{r}/alpha:1\"\nbeta = \"{r}/beta:1\"\ngamma = \"{r}/gamma:2\"\n",
+            r = TEST_REGISTRY
+        ))
+        .expect("edited config parses");
+
+        let (lock, touched) =
+            resolve_lock_reconcile(&edited, Some(&previous), &fresh_leaf_index('c'), &[], fast_options())
+                .await
+                .expect("reconcile resolves");
+
+        assert_eq!(touched, vec![key("alpha"), key("beta"), key("gamma")]);
+        for name in ["alpha", "beta", "gamma"] {
+            assert_eq!(leaf_of(&lock, name), Digest::Sha256("c".repeat(64)));
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_without_a_predecessor_resolves_everything() {
+        let config = three_tool_config();
+
+        let (lock, touched) = resolve_lock_reconcile(&config, None, &fresh_leaf_index('c'), &[], fast_options())
+            .await
+            .expect("reconcile resolves");
+
+        assert_eq!(touched, vec![key("alpha"), key("beta"), key("gamma")]);
+        assert_eq!(lock.tools.len(), 3);
+        assert!(lock.tools.iter().all(|tool| tool.declared.is_some()));
+    }
+
+    #[tokio::test]
+    async fn reconcile_forced_binding_resolves_although_unchanged() {
+        let config = three_tool_config();
+        let previous = predecessor_lock(
+            &config,
+            vec![
+                locked_tool_fixture("alpha", "a"),
+                locked_tool_fixture("beta", "b"),
+                locked_tool_fixture("gamma", "g"),
+            ],
+        );
+
+        let (lock, touched) = resolve_lock_reconcile(
+            &config,
+            Some(&previous),
+            &fresh_leaf_index('c'),
+            &[key("beta")],
+            fast_options(),
+        )
+        .await
+        .expect("reconcile resolves");
+
+        assert_eq!(touched, vec![key("beta")]);
+        assert_eq!(leaf_of(&lock, "beta"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(leaf_of(&lock, "alpha"), Digest::Sha256("a".repeat(64)));
     }
 
     /// Spec §8.1 — `merge_carry_forward` (exercised via `resolve_lock_touched`

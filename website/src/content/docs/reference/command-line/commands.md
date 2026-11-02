@@ -233,11 +233,13 @@ ocx inspect [OPTIONS] [NAMES]...
 
 Resolve package tags to digests and write ocx.lock.
 
-Resolves every binding in the nearest `ocx.toml` to per-platform leaf digests and writes `ocx.lock` beside it. It is a whole-file reconcile.
+Resolves the bindings in the nearest `ocx.toml` to per-platform leaf digests and writes `ocx.lock` beside it. Each lock entry records `declared`, the `ocx.toml` spelling it was resolved from.
 
-When the lock is current, every pin is carried forward verbatim and nothing moves, even if a moving tag has moved upstream. A lock is current when its `declaration_hash` over the canonicalized `ocx.toml` matches.
+Only a binding that is new, or whose spelling or repository changed, is re-resolved. Every other pin is carried forward verbatim, even if a moving tag has moved upstream.
 
-When the config drifted, every declared tag is re-resolved and a moving tag may advance. To force-advance pins on a current lock, use `ocx update`.
+A lock whose entries all match `ocx.toml` is rewritten byte-identically.
+
+A lock written by an older ocx, which records no `declared`, migrates without contacting the registry when it is current, and is re-resolved in full when `ocx.toml` drifted. To advance pins whose declaration did not change, use `ocx update`.
 
 Each binding records its registry and repository plus a table of every platform the publisher ships, whatever OS the command runs on. A lock committed on Linux is therefore complete for macOS and Windows runners.
 
@@ -395,9 +397,9 @@ Under `--frozen`, resolution is capped at the local index snapshot (an unsnapsho
 
 Binding names narrow the selection further: `ocx update ripgrep` advances one binding. A group tool declared `{ from = "default" }` keeps its own lock entry until its group is selected.
 
-A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64). A bare update on a missing or drifted lock resolves every group, and an unchanged result rewrites the lock byte-identically.
+A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64). A bare update re-resolves the default group; when `ocx.toml` drifted it also re-resolves the bindings whose declaration changed, and other groups keep their pins.
 
-Only the packages whose pin changed are downloaded.
+A bare update on a missing lock resolves every group, and an unchanged result rewrites the lock byte-identically. Only the packages whose pin changed are downloaded.
 
 The command is transactional: any resolution failure writes nothing. It moves only what a declared tag points to and never edits the declaration; to move the tag itself, use `ocx upgrade`.
 
@@ -405,7 +407,7 @@ The command is transactional: any resolution failure writes nothing. It moves on
 
 Because it holds both the old lock and the new one, it reports what moved. A table lists the bindings whose pull identifier changed.
 
-Those that held still are summarized behind a hint line unless `--verbose` lists them too. Unlike `ocx lock`, which resolves through the local index and only when `ocx.toml` drifted, `ocx update` consults the registry every time.
+Those that held still are summarized behind a hint line unless `--verbose` lists them too. Unlike `ocx lock`, which re-resolves only the bindings whose `ocx.toml` entry changed, `ocx update` consults the registry every time.
 
 Re-renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. The `links/<group>/<entry>` tree and the `shells/default/bin` launchers reached through the `active` link follow the advanced lock.
 

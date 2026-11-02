@@ -393,6 +393,7 @@ mod tests {
     /// the partition — only the `(group, name)` identity is consulted.
     fn locked(group: &str, name: &str, text: &str) -> ocx_project::LockedTool {
         ocx_project::LockedTool {
+            declared: None,
             name: name.to_owned(),
             group: group.to_owned(),
             repository: ocx_oci::Repository::from(&identifier(text)),

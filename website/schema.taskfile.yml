@@ -36,7 +36,7 @@ tasks:
           execution-record/v1.json
           metadata/v1.json
           patch/v1.json
-          project-lock/v3.json
+          project-lock/v4.json
           project/v1.json
           reports/v1.json'
           expected=$(printf '%s\n' "$expected" | sort)

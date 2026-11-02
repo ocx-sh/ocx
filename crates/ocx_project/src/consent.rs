@@ -628,6 +628,7 @@ mod tests {
                 generated_at: String::new(),
             },
             tools: vec![LockedTool {
+                declared: None,
                 name: "cmake".into(),
                 group: "default".into(),
                 repository: ocx_oci::Repository::new(registry, path),
@@ -735,18 +736,21 @@ mod tests {
             },
             tools: vec![
                 LockedTool {
+                    declared: None,
                     name: "cmake".into(),
                     group: "default".into(),
                     repository: ocx_oci::Repository::new("ghcr.io", "acme/tools/cmake"),
                     platforms: BTreeMap::new(),
                 },
                 LockedTool {
+                    declared: None,
                     name: "ninja".into(),
                     group: "default".into(),
                     repository: ocx_oci::Repository::new("ghcr.io", "acme/ninja"),
                     platforms: BTreeMap::new(),
                 },
                 LockedTool {
+                    declared: None,
                     name: "uv".into(),
                     group: "ci".into(),
                     repository: ocx_oci::Repository::new("ocx.sh", "uv"),

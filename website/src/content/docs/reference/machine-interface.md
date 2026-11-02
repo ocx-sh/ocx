@@ -141,7 +141,7 @@ See the [command reference][cmd-reference] for flags, arguments and output modes
 [schema-errors]: https://ocx.sh/schemas/errors/v1.json
 [schema-config]: https://ocx.sh/schemas/config/v1.json
 [schema-project]: https://ocx.sh/schemas/project/v1.json
-[schema-project-lock]: https://ocx.sh/schemas/project-lock/v3.json
+[schema-project-lock]: https://ocx.sh/schemas/project-lock/v4.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
 [schema-execution-record]: https://ocx.sh/schemas/execution-record/v1.json

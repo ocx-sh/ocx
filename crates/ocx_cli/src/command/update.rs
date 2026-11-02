@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use futures::StreamExt;
 use ocx_project::{
-    ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_all_keyword, resolve_lock, resolve_lock_touched,
+    ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_all_keyword, resolve_lock,
+    resolve_lock_reconcile, resolve_lock_touched,
 };
 
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
@@ -83,7 +84,7 @@ impl Update {
         let update_index = context.update_index();
         let resolve_index = &update_index;
 
-        // A missing or drifted lock has nothing valid to carry forward, so a bare update re-resolves every group.
+        // A bare update on a missing or drifted lock takes the unscoped path: drift reconciles, a missing lock resolves all.
         let scoped = !self.groups.is_empty()
             || !self.names.is_empty()
             || previous.as_ref().is_some_and(|lock| lock.is_current(staged.config()));
@@ -113,8 +114,25 @@ impl Update {
                 return Err(missing_lock(guard.lock_path()).into());
             }
 
-            let lock = resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?;
-            (lock, None)
+            match previous.as_ref() {
+                // Drifted: the default group and the bindings `ocx.toml` changed re-resolve; other groups keep their pins.
+                Some(previous) if !previous.is_current(staged.config()) => {
+                    let forced = select_touched(staged.config(), &[DEFAULT_GROUP.to_string()], &[])?;
+                    let (lock, touched) = resolve_lock_reconcile(
+                        staged.config(),
+                        Some(previous),
+                        resolve_index,
+                        &forced,
+                        ResolveLockOptions::default(),
+                    )
+                    .await?;
+                    (lock, Some(touched))
+                }
+                _ => {
+                    let lock = resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?;
+                    (lock, None)
+                }
+            }
         };
 
         // Built while the guard still holds the declaration the tag column reads; the commit consumes it.

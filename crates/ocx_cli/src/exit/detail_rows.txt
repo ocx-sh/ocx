@@ -234,6 +234,7 @@ libc_scan_scope_modifier	DataError	The libc scan scope carries a modifier it can
 libc_scan_scope_unresolvable	DataError	The libc scan scope cannot be resolved
 link_path_occupied	DataError	The install link path holds something other than an ocx package link
 list_separator_invalid	DataError	A list-valued environment entry conflicts with or edges on its separator
+lock_declared_mismatch	ConfigError	ocx.lock records a declared spelling its version does not allow
 lock_missing	ConfigError	ocx.lock does not exist
 lock_missing	ConfigError	ocx.lock does not exist
 lock_missing	ConfigError	ocx.lock does not exist

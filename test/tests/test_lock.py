@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -183,9 +184,9 @@ def test_lock_two_tools_produces_valid_lock_file(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx lock`` against a fixture registry with two tools → produces
-    a correctly shaped V3 ``ocx.lock`` (``[[tool]]`` entries with a bare
+    a correctly shaped V4 ``ocx.lock`` (``[[tool]]`` entries with a bare
     ``repository`` + ``[tool.platforms]`` leaf map, sorted by ``(group,
-    name)``, valid declaration hash, ``lock_version = 3``).
+    name)``, valid declaration hash, ``lock_version = 4``).
     """
     repo_a, tag_a, repo_b, tag_b = _two_pushed_tools(ocx, tmp_path)
     project = tmp_path / "proj"
@@ -209,7 +210,7 @@ beta = "{ocx.registry}/{repo_b}:{tag_b}"
     lock_text = _read_lock_text(project)
 
     # Metadata header: required fields present. The writer only emits V3.
-    assert "lock_version = 3" in lock_text, "lock_version = 3 missing"
+    assert "lock_version = 4" in lock_text, "lock_version = 4 missing"
     assert "declaration_hash_version = 1" in lock_text, (
         "declaration_hash_version = 1 missing"
     )
@@ -362,15 +363,14 @@ mover = "{ocx.registry}/{repo}:latest"
     )
 
 
-def test_lock_dirty_reresolves_all_declared_tags(
+def test_lock_dirty_keeps_the_pins_of_unchanged_bindings(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """A whole-file ``ocx lock`` reconcile on a DIRTY lock (``ocx.toml``
-    changed since the last lock, so its ``declaration_hash`` no longer
-    matches) re-resolves every declared tag. Here a second tool is appended
-    to ``ocx.toml`` between the two lock runs: the config genuinely changed,
-    so the whole file is reconciled and the pre-existing tool is re-resolved
-    along with the new one.
+    """``ocx lock`` on a DIRTY lock (``ocx.toml`` changed since the last
+    lock, so its ``declaration_hash`` no longer matches) re-resolves only the
+    bindings whose declaration changed. Here a second tool is appended to
+    ``ocx.toml`` between the two lock runs: the new tool is locked and the
+    pre-existing tool keeps its pin although its moving tag advanced.
     """
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_dirty_a"
@@ -396,8 +396,7 @@ a = "{ocx.registry}/{repo_a}:latest"
 
     # Advance `a`'s moving tag upstream, AND change `ocx.toml` by appending a
     # second tool. The config change makes the lock DIRTY (declaration_hash
-    # mismatch), so a whole-file reconcile re-resolves every declared tag —
-    # including the moved `a`.
+    # mismatch), but `a`'s declaration is untouched, so its pin carries forward.
     make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
     for repo in (repo_a, repo_b):
         refresh = subprocess.run(
@@ -417,18 +416,16 @@ b = "{ocx.registry}/{repo_b}:1.0.0"
 """,
     )
 
-    # Dirty whole-file reconcile: bare `ocx lock` re-resolves the moved tag
-    # for `a` (the config changed, so the bump is the intended whole-file
-    # behaviour) and locks the new tool `b`.
+    # Bare `ocx lock` locks the new tool `b` and leaves `a` where it was.
     result = _run_lock(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
         f"dirty ocx lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     after_a = _tool_leaf_digests(_read_lock_text(project), "a")
     after_b = _tool_leaf_digests(_read_lock_text(project), "b")
-    assert after_a != initial_a, (
-        "a dirty whole-file lock must re-resolve the moved tag for 'a' "
-        "(leaves advance)"
+    assert after_a == initial_a, (
+        "ocx lock must carry forward 'a': its declaration did not change, "
+        "so its moved tag is `ocx update`'s job"
     )
     assert after_b, "the newly declared tool 'b' must be locked"
 
@@ -1672,3 +1669,149 @@ tool = "{ocx.registry}/{repo}:{tag}"
         "generated_at must advance when the platforms map content changes "
         f"(first={first_generated_at!r}, second={second_generated_at!r})"
     )
+
+
+# ---------------------------------------------------------------------------
+# lock_version 4 — each entry records the ocx.toml spelling it was resolved from
+# ---------------------------------------------------------------------------
+
+
+def _as_v3(lock_text: str) -> str:
+    """Rewrite a freshly written lock into the v3 shape: drop ``declared``,
+    set ``lock_version = 3``. A no-op on a lock that is already v3."""
+    kept = [line for line in lock_text.splitlines() if not line.startswith("declared = ")]
+    return "\n".join(kept).replace("lock_version = 4", "lock_version = 3") + "\n"
+
+
+def test_lock_after_toml_edit_resolves_only_the_edited_binding(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Editing one binding's tag in ``ocx.toml`` re-resolves that binding and
+    carries every other pin forward, even when another tag moved upstream.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_edit_a"
+    repo_b = f"t_{short}_edit_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    toml_template = f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:{{a_tag}}"
+b = "{ocx.registry}/{repo_b}:latest"
+"""
+    _write_ocx_toml(project, toml_template.format(a_tag="1.0.0"))
+    first = _run_lock(ocx, project, "--no-pull")
+    assert first.returncode == EXIT_SUCCESS, first.stderr
+    first_text = _read_lock_text(project)
+    first_a = _tool_leaf_digests(first_text, "a")
+    first_b = _tool_leaf_digests(first_text, "b")
+
+    # B's moving tag advances upstream (and in the local index); A's declaration changes.
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=True)
+    _write_ocx_toml(project, toml_template.format(a_tag="2.0.0"))
+
+    second = _run_lock(ocx, project, "--no-pull")
+    assert second.returncode == EXIT_SUCCESS, second.stderr
+    second_text = _read_lock_text(project)
+
+    assert _tool_leaf_digests(second_text, "a") != first_a, (
+        "the edited binding 'a' must re-resolve to its new tag"
+    )
+    assert _tool_leaf_digests(second_text, "b") == first_b, (
+        "the untouched binding 'b' must keep its pin although its tag moved upstream"
+    )
+
+
+def test_lock_migrates_a_clean_v3_lock_without_the_registry(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A current v3 lock is rewritten as v4 by ``ocx lock``: ``declared`` on
+    every entry, identical digests, no registry contact (``--offline``).
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_mig_a"
+    repo_b = f"t_{short}_mig_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:1.0.0"
+b = "{ocx.registry}/{repo_b}:2.0.0"
+""",
+    )
+    first = _run_lock(ocx, project, "--no-pull")
+    assert first.returncode == EXIT_SUCCESS, first.stderr
+    v3_text = _as_v3(_read_lock_text(project))
+    (project / "ocx.lock").write_text(v3_text)
+    leaves_before = sorted(_leaf_digests(v3_text))
+
+    offline = subprocess.run(
+        _ocx_cmd(ocx, "--offline", "lock", "--no-pull"),
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=ocx.env, check=False,
+    )
+    assert offline.returncode == EXIT_SUCCESS, (
+        f"a clean v3 lock must migrate without the registry; rc={offline.returncode}\n"
+        f"stderr:\n{offline.stderr}"
+    )
+    migrated = _read_lock_text(project)
+    assert "lock_version = 4" in migrated, f"lock must be v4 after ocx lock:\n{migrated}"
+    assert f'declared = "{ocx.registry}/{repo_a}:1.0.0"' in migrated
+    assert f'declared = "{ocx.registry}/{repo_b}:2.0.0"' in migrated
+    assert sorted(_leaf_digests(migrated)) == leaves_before, "migration must not move a digest"
+
+
+def test_read_only_commands_leave_a_v3_lock_untouched(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx exec``, ``ocx env`` and ``ocx pull`` read a v3 lock and never
+    upgrade it: the file stays v3, byte-identical.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_ro"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:1.0.0"
+""",
+    )
+    first = _run_lock(ocx, project)
+    assert first.returncode == EXIT_SUCCESS, first.stderr
+    (project / "ocx.lock").write_text(_as_v3(_read_lock_text(project)))
+    v3_bytes = _read_lock_bytes(project)
+
+    for args in (
+        ["exec", "--", sys.executable, "-c", "pass"],
+        ["env"],
+        ["pull"],
+    ):
+        result = subprocess.run(
+            _ocx_cmd(ocx, *args),
+            cwd=project,
+            capture_output=True,
+            text=True,
+            env=ocx.env, check=False,
+        )
+        assert result.returncode == EXIT_SUCCESS, (
+            f"ocx {args[0]} failed on a v3 lock: rc={result.returncode}\n"
+            f"stderr:\n{result.stderr}"
+        )
+        assert _read_lock_bytes(project) == v3_bytes, (
+            f"ocx {args[0]} must not rewrite a v3 lock"
+        )

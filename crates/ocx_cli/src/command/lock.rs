@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
+use ocx_project::{ResolveLockOptions, resolve_lock_reconcile};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
@@ -17,8 +17,8 @@ use crate::options;
 
 /// Resolve package tags to digests and write `ocx.lock`.
 ///
-/// A current lock is carried forward verbatim, never advancing a moving tag; a drifted one
-/// re-resolves every tag. Transactional: every binding resolves or nothing is written.
+/// Only bindings whose `ocx.toml` entry changed are re-resolved; every other pin is carried
+/// forward, never advancing a moving tag. Transactional: every binding resolves or nothing is written.
 #[derive(Parser, Clone)]
 pub struct Lock {
     /// Verify `ocx.lock` is current relative to `ocx.toml` and exit.
@@ -56,31 +56,16 @@ impl Lock {
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
         let previous = guard.previous_lock().cloned();
-        let new_lock = match &previous {
-            // Clean: carry every pin forward; advancing a moved tag here would silently do `ocx update`'s job.
-            Some(prev) if prev.is_current(staged.config()) => {
-                resolve_lock_touched(
-                    staged.config(), // candidate
-                    staged.config(), // pre-mutation snapshot (lock-only: identical to candidate)
-                    prev,
-                    context.default_index(),
-                    &[], // empty touched ⇒ resolve nothing; carry every pin forward
-                    ResolveLockOptions::default(),
-                )
-                .await?
-            }
-            // Dirty or no predecessor: re-resolve every declared tag.
-            _ => {
-                resolve_lock(
-                    staged.config(),
-                    context.default_index(),
-                    &[],
-                    ResolveLockOptions::default(),
-                )
-                .await?
-            }
-        };
-        // `save` keeps `generated_at` when nothing else changed, so a clean reconcile is byte-identical.
+        // Only bindings whose `ocx.toml` entry changed re-resolve; advancing a moved tag is `ocx update`'s job.
+        let (new_lock, _) = resolve_lock_reconcile(
+            staged.config(),
+            previous.as_ref(),
+            context.default_index(),
+            &[],
+            ResolveLockOptions::default(),
+        )
+        .await?;
+        // `save` keeps `generated_at` when nothing else changed, so a clean version 4 reconcile is byte-identical.
 
         let config_path = guard.config_path().to_path_buf();
         // `--no-pull` promises no downloads and the render's closure walk is one, so render offline; a

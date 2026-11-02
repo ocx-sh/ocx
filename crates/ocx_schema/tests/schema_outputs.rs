@@ -244,8 +244,8 @@ fn project_lock_schema_publishes_at_canonical_id() {
         .and_then(Value::as_str)
         .expect("project-lock schema must carry a top-level $id");
     assert_eq!(
-        id, "https://ocx.sh/schemas/project-lock/v3.json",
-        "project-lock schema $id must advance to v3 in lock-step with LockVersion::V3"
+        id, "https://ocx.sh/schemas/project-lock/v4.json",
+        "project-lock schema $id must advance to v4 in lock-step with LockVersion::V4"
     );
 }
 
@@ -276,12 +276,10 @@ fn project_lock_schema_carries_machine_generated_comment() {
 }
 
 #[test]
-fn project_lock_schema_pins_lock_version_to_three() {
+fn project_lock_schema_admits_lock_versions_three_and_four() {
     // ported-from: test/tests/test_schema_generation.py::test_project_lock_schema_pins_lock_version_to_three
-    // The written on-disk format version is now 3 (V3 is the only shape the
-    // writer emits). Tightening to `enum: [3]` means a v1 OR v2 manuscript
-    // fed into the v3 schema fails validation — the guard so consumers don't
-    // silently validate a foreign-format file against the v3 schema.
+    // The writer emits 4 and the reader still accepts 3, so `enum: [3, 4]`
+    // rejects a v1/v2 manuscript instead of validating it silently.
     let schema = parse("project-lock");
 
     // Walk: properties.metadata is a `$ref` to `#/$defs/LockMetadata`,
@@ -329,17 +327,14 @@ fn project_lock_schema_pins_lock_version_to_three() {
         .get("enum")
         .and_then(Value::as_array)
         .expect("lock_version must declare an `enum` constraint");
+    let values: Vec<i64> = enum_values
+        .iter()
+        .map(|value| value.as_i64().expect("lock_version enum value must be an integer"))
+        .collect();
     assert_eq!(
-        enum_values.len(),
-        1,
-        "lock_version enum must contain exactly one value (`[3]`); got {enum_values:?}"
-    );
-    let value = enum_values[0]
-        .as_i64()
-        .expect("lock_version enum value must be an integer");
-    assert_eq!(
-        value, 3,
-        "lock_version enum must constrain to `[3]` (rejects v1/v2 manuscripts)"
+        values,
+        vec![3, 4],
+        "lock_version enum must constrain to `[3, 4]` (rejects v1/v2 manuscripts)"
     );
 }
 
@@ -621,7 +616,7 @@ fn every_schema_kind_the_binary_prints_carries_its_canonical_id() {
         ("metadata", "https://ocx.sh/schemas/metadata/v1.json"),
         ("config", "https://ocx.sh/schemas/config/v1.json"),
         ("project", "https://ocx.sh/schemas/project/v1.json"),
-        ("project-lock", "https://ocx.sh/schemas/project-lock/v3.json"),
+        ("project-lock", "https://ocx.sh/schemas/project-lock/v4.json"),
         ("execution-record", "https://ocx.sh/schemas/execution-record/v1.json"),
         ("reports", "https://ocx.sh/schemas/reports/v1.json"),
         ("errors", "https://ocx.sh/schemas/errors/v1.json"),

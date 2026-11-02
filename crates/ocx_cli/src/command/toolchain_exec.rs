@@ -462,6 +462,7 @@ mod tests {
             let mut platforms = BTreeMap::new();
             platforms.insert(platform_key.to_string(), Digest::Sha256(sha(c)));
             LockedTool {
+                declared: None,
                 name: name.into(),
                 group: "default".into(),
                 repository: ocx_oci::Repository::new("ocx.sh", name),

@@ -6937,6 +6937,7 @@ mod wp15_following_lane_spec_tests {
 
     fn locked_tool(name: &str, group: &str, repository: &str, seed: char) -> LockedTool {
         LockedTool {
+            declared: None,
             name: name.to_string(),
             group: group.to_string(),
             repository: ocx_oci::Repository::new(REGISTRY, repository),
@@ -6949,6 +6950,7 @@ mod wp15_following_lane_spec_tests {
     /// for.
     fn locked_tool_for_another_platform(name: &str, group: &str, repository: &str, seed: char) -> LockedTool {
         LockedTool {
+            declared: None,
             name: name.to_string(),
             group: group.to_string(),
             repository: ocx_oci::Repository::new(REGISTRY, repository),
