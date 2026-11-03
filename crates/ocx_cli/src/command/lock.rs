@@ -18,7 +18,9 @@ use crate::options;
 /// Resolve package tags to digests and write `ocx.lock`.
 ///
 /// Only bindings whose `ocx.toml` entry changed are re-resolved; every other pin is carried
-/// forward, never advancing a moving tag. Transactional: every binding resolves or nothing is written.
+/// forward, so a moving tag advances only through `ocx update`. A version 3 lock records no
+/// declared tags, so a drifted one re-resolves every binding. Transactional: every binding
+/// resolves or nothing is written.
 #[derive(Parser, Clone)]
 pub struct Lock {
     /// Verify `ocx.lock` is current relative to `ocx.toml` and exit.
@@ -56,6 +58,7 @@ impl Lock {
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
         let previous = guard.previous_lock().cloned();
+        warn_v3_re_resolve(&context, previous.as_ref(), staged.config());
         // Only bindings whose `ocx.toml` entry changed re-resolve; advancing a moved tag is `ocx update`'s job.
         let (new_lock, _) = resolve_lock_reconcile(
             staged.config(),
@@ -122,6 +125,22 @@ impl Lock {
         context.api().report(&report)?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Says so when a drifted version 3 lock is about to re-resolve every binding: it records no
+/// declared tags, so no binding can be proved unchanged and a moving tag may advance.
+pub(crate) fn warn_v3_re_resolve(
+    context: &crate::app::Context,
+    previous: Option<&ocx_project::ProjectLock>,
+    config: &ocx_project::ProjectConfig,
+) {
+    if previous
+        .is_some_and(|lock| lock.metadata.lock_version == ocx_project::LockVersion::V3 && !lock.is_current(config))
+    {
+        context
+            .ui()
+            .warn("ocx.lock v3 carries no declared tags; re-resolving every binding");
     }
 }
 

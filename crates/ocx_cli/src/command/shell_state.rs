@@ -84,7 +84,8 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         .map(|project| coexistence::detect(&project.identity.dir).observed)
         .unwrap_or_default();
     if let Some(project) = project {
-        yielded_to.extend(super::self_group::activate::exec_scope_observation(&project.identity.dir).await);
+        let exec_scope = activation::ExecScope::from_env().await;
+        yielded_to.extend(exec_scope.and_then(|scope| scope.observe(&project.identity.dir)));
     }
 
     let mut notes = Vec::new();

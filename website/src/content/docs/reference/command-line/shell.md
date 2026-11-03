@@ -18,12 +18,14 @@ ocx shell <COMMAND>
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
 | `--stack` |  | Layer this project onto the active environment instead of replacing it |
-| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
+| `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
 ## `ocx shell allow` {#shell-allow}
 

@@ -662,6 +662,8 @@ crate::env_vars! {
     pub XDG_DATA_HOME: Path, Foreign;
     /// The user's login shell.
     pub SHELL: Path, Foreign;
+    /// Windows command interpreter; bare `ocx shell` runs it when the shell to open is `cmd`.
+    pub COMSPEC: Path, Foreign;
     /// Executable search path.
     pub PATH: PathList, Foreign;
     /// Windows user name.

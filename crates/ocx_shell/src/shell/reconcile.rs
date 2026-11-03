@@ -116,6 +116,69 @@ pub fn stacked_env() -> Env {
     env
 }
 
+/// [`Env::clean`] plus what the per-prompt reconciler applied; the start env of `--clean --stack`.
+///
+/// The ledger only names what to keep and every kept value is read from the ambient environment,
+/// so the untrusted carrier never supplies a value. An over-cap scope recorded nothing and keeps nothing.
+pub fn stacked_clean_env() -> Env {
+    let ambient = Env::new();
+    let mut env = Env::clean();
+    if let Some(ledger) = ambient
+        .get(CARRIER_KEY)
+        .and_then(|raw| Ledger::decode(&raw.to_string_lossy()))
+    {
+        keep_applied(&ambient, &ledger, &mut env);
+    }
+    env
+}
+
+/// Copies into `env` each ambient value or element `ledger` records as applied, in ambient order.
+fn keep_applied(ambient: &Env, ledger: &Ledger, env: &mut Env) {
+    let applied: Vec<&LedgerEntry> = ledger.applied_in_emission_order().collect();
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &applied {
+        if !done.insert(key_norm(&entry.key)) {
+            continue;
+        }
+        let Some(current) = ambient.get(&entry.key).map(os_to_string) else {
+            continue;
+        };
+        let claims = |kind: &ModifierKind, element: &str| {
+            applied
+                .iter()
+                .any(|e| key_eq(&e.key, &entry.key) && e.kind == *kind && element_eq(element, &e.value, kind))
+        };
+        match entry.kind {
+            ModifierKind::Constant => {
+                if claims(&ModifierKind::Constant, &current) {
+                    env.set(entry.key.as_str(), current);
+                }
+            }
+            ModifierKind::Path => {
+                let kept: Vec<_> = std::env::split_paths(&current)
+                    .filter(|segment| claims(&ModifierKind::Path, &segment.to_string_lossy()))
+                    .collect();
+                // A kept segment came out of `split_paths`, so it carries no separator and the join cannot fail.
+                if let Ok(value) = std::env::join_paths(kept)
+                    && !value.is_empty()
+                {
+                    env.set(entry.key.as_str(), value);
+                }
+            }
+            ModifierKind::List => {
+                let separator = entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR);
+                let kept: Vec<&str> = current
+                    .split(separator)
+                    .filter(|element| !element.is_empty() && claims(&ModifierKind::List, element))
+                    .collect();
+                if !kept.is_empty() {
+                    env.set(entry.key.as_str(), kept.join(separator));
+                }
+            }
+        }
+    }
+}
+
 /// Revert the ledger's contribution by [`plan`]ning against an empty desired set.
 ///
 /// `owned_prefixes` stays empty, or the lost-ledger repair strips `ocx self activate`'s own `bin/`.
@@ -266,7 +329,9 @@ mod tests {
     fn stacked_start_env_keeps_parent_entries_but_never_the_carrier() {
         let fixture = || {
             let mut env = Env::clean();
-            env.set("PATH", "/opt/tc/bin:/usr/bin");
+            let path =
+                std::env::join_paths(["/opt/tc/bin", "/usr/bin"]).expect("fixture segments carry no path separator");
+            env.set("PATH", &path);
             env.set(
                 reconcile::CARRIER_KEY,
                 carrier(
@@ -286,6 +351,51 @@ mod tests {
         revert_reconciled(&mut replaced);
         assert_eq!(segments(&replaced, "PATH"), ["/usr/bin"]);
         assert!(replaced.get(CARRIER_KEY).is_none());
+    }
+
+    /// `--clean --stack` keeps only the ledger's entries still present, valued from the ambient env.
+    #[test]
+    fn clean_stacked_env_keeps_only_what_the_ledger_applied() {
+        let path = std::env::join_paths(["/opt/tc/bin", "/home/u/bin", "/usr/bin"])
+            .expect("fixture segments carry no path separator");
+        let mut ambient = Env::clean();
+        ambient.set("PATH", &path);
+        ambient.set("JAVA_HOME", "/opt/tc/jdk");
+        ambient.set("CC", "/usr/bin/gcc");
+        ambient.set("FLAGS", "-a -b");
+        ambient.set("EDITOR", "vim");
+        let raw = carrier(
+            vec![
+                recorded("PATH", "/opt/tc/bin", ModifierKind::Path, None),
+                recorded("PATH", "/opt/gone/bin", ModifierKind::Path, None),
+                recorded("JAVA_HOME", "/opt/tc/jdk", ModifierKind::Constant, None),
+                recorded("CC", "/opt/tc/clang", ModifierKind::Constant, None),
+                recorded("FLAGS", "-b", ModifierKind::List, Some(" ")),
+            ],
+            Priors::new(),
+        );
+        ambient.set(reconcile::CARRIER_KEY, &raw);
+        let ledger = Ledger::decode(&raw).expect("fixture ledger decodes");
+
+        let mut env = Env::clean();
+        keep_applied(&ambient, &ledger, &mut env);
+
+        assert_eq!(
+            segments(&env, "PATH"),
+            ["/opt/tc/bin"],
+            "only the applied segment still on PATH"
+        );
+        assert_eq!(env.get("JAVA_HOME"), Some(OsStr::new("/opt/tc/jdk")));
+        assert!(
+            env.get("CC").is_none(),
+            "a constant the user overwrote is not the parent's"
+        );
+        assert_eq!(env.get("FLAGS"), Some(OsStr::new("-b")));
+        assert!(
+            env.get("EDITOR").is_none(),
+            "the user's own vars stay out of a clean env"
+        );
+        assert!(env.get(CARRIER_KEY).is_none());
     }
 
     /// Constants revert to their recorded prior — restoring a value, unsetting

@@ -66,7 +66,7 @@ pub async fn resolve_lock(
 
     // One `Arc` shared by every task: cloning the boxed index per spawn is not cheap.
     let index = Arc::new(index.clone());
-    let mut resolved = resolve_work(work, index, &options).await?;
+    let mut resolved = resolve_work(work, config, index, &options).await?;
 
     resolved.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
@@ -75,14 +75,28 @@ pub async fn resolve_lock(
 
 /// Resolve every tuple in `work`, failing fast on the first error. Unsorted:
 /// partial-update callers merge the output before sorting.
+///
+/// A `{ from = "default" }` follower whose source is also in `work` is not resolved:
+/// it takes a copy of the source's entry, so the two share one pin even when a tag
+/// moves mid-run.
 async fn resolve_work(
     work: Vec<(String, String, PackageRef)>,
+    config: &ProjectConfig,
     index: Arc<Index>,
     options: &ResolveLockOptions,
 ) -> Result<Vec<LockedTool>, super::Error> {
     if work.is_empty() {
         return Ok(Vec::new());
     }
+
+    let sources: HashSet<String> = work
+        .iter()
+        .filter(|(group, _, _)| group == super::internal::DEFAULT_GROUP)
+        .map(|(_, name, _)| name.clone())
+        .collect();
+    let (followers, work): (Vec<_>, Vec<_>) = work
+        .into_iter()
+        .partition(|(group, name, _)| is_follower(config, group, name) && sources.contains(name));
 
     let mut set: JoinSet<Result<LockedTool, super::Error>> = JoinSet::new();
     for (group, name, identifier) in work {
@@ -102,7 +116,69 @@ async fn resolve_work(
         }
     }
 
+    for (group, name, _) in followers {
+        if let Some(source) = resolved
+            .iter()
+            .find(|tool| tool.group == super::internal::DEFAULT_GROUP && tool.name == name)
+        {
+            resolved.push(LockedTool {
+                group,
+                ..source.clone()
+            });
+        }
+    }
+
     Ok(resolved)
+}
+
+/// Whether `name` in `group` is declared `{ from = "default" }`.
+fn is_follower(config: &ProjectConfig, group: &str, name: &str) -> bool {
+    config
+        .groups
+        .get(group)
+        .is_some_and(|body| body.inherited.contains(name))
+}
+
+/// `touched` widened to every binding that must move with it, sorted and deduplicated.
+///
+/// A binding whose predecessor entry records a different `declared` spelling is added, so
+/// a retag never leaves its old digest under the new spelling. A `{ from = "default" }`
+/// follower and its source then pull each other in: one package, one version across groups.
+pub fn expand_touched(
+    config: &ProjectConfig,
+    previous: Option<&ProjectLock>,
+    touched: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut set: std::collections::BTreeSet<(String, String)> = touched.iter().cloned().collect();
+    if let Some(previous) = previous {
+        for (group, name, identifier) in collect_work(config, &None) {
+            let moved = previous
+                .tools
+                .iter()
+                .find(|tool| tool.group == group && tool.name == name)
+                .and_then(|tool| tool.declared.as_deref())
+                .is_some_and(|declared| declared != identifier.to_string());
+            if moved {
+                set.insert((group, name));
+            }
+        }
+    }
+    let shared: Vec<String> = set
+        .iter()
+        .filter(|(group, name)| group == super::internal::DEFAULT_GROUP || is_follower(config, group, name))
+        .map(|(_, name)| name.clone())
+        .collect();
+    for name in shared {
+        if config.tools.contains_key(&name) {
+            set.insert((super::internal::DEFAULT_GROUP.to_string(), name.clone()));
+        }
+        for (group, body) in &config.groups {
+            if body.inherited.contains(&name) {
+                set.insert((group.clone(), name.clone()));
+            }
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Re-resolve only the `touched` `(group, name)` bindings and carry every other
@@ -138,6 +214,9 @@ pub async fn resolve_lock_touched(
         .into());
     }
 
+    // A moved declaration or a shared pin widens the set; a carried digest never outlives its spelling.
+    let touched = &expand_touched(candidate, Some(previous), touched);
+
     // The hash covers `ocx.toml`, not `[[tool]]` entries, so a hand-edited lock
     // with the right hash must still match structurally.
     validate_predecessor_coherence(candidate, previous, touched)?;
@@ -160,7 +239,7 @@ pub async fn resolve_lock_touched(
     }
 
     let index = Arc::new(index.clone());
-    let resolved = resolve_work(work, index, &options).await?;
+    let resolved = resolve_work(work, candidate, index, &options).await?;
 
     let tools = merge_carry_forward(&previous.tools, resolved, candidate);
 
@@ -199,19 +278,52 @@ pub async fn resolve_lock_reconcile(
         })
     };
 
+    let forced_pair = |group: &str, name: &str| forced.iter().any(|(g, n)| g == group && n == name);
+    let seed: Vec<(String, String)> = collect_work(config, &None)
+        .into_iter()
+        .filter(|(group, name, identifier)| forced_pair(group, name) || changed(group, name, identifier))
+        .map(|(group, name, _)| (group, name))
+        .collect();
+    // A follower that is only new (not forced) adopts its source's carried pin: it must not
+    // drag an unchanged source into re-resolution, which would advance the project pin.
+    let carried = previous.map_or(&[][..], |prev| &prev.tools[..]);
+    let source_moves: HashSet<String> = seed
+        .iter()
+        .filter(|(group, _)| group == super::internal::DEFAULT_GROUP)
+        .map(|(_, name)| name.clone())
+        .collect();
+    let (adopting, seed): (Vec<_>, Vec<_>) = seed.into_iter().partition(|(group, name)| {
+        is_follower(config, group, name)
+            && !forced_pair(group, name)
+            && !source_moves.contains(name)
+            && carried
+                .iter()
+                .any(|tool| tool.group == super::internal::DEFAULT_GROUP && tool.name == *name)
+    });
+    // A source that re-resolves takes its followers with it, and a forced follower its source.
+    let moving = expand_touched(config, previous, &seed);
     let work: Vec<(String, String, PackageRef)> = collect_work(config, &None)
         .into_iter()
-        .filter(|(group, name, identifier)| {
-            forced.iter().any(|(g, n)| g == group && n == name) || changed(group, name, identifier)
-        })
+        .filter(|(group, name, _)| moving.iter().any(|(g, n)| g == group && n == name))
         .collect();
-    let touched = work
+    let touched: Vec<(String, String)> = work
         .iter()
         .map(|(group, name, _)| (group.clone(), name.clone()))
+        .chain(adopting.iter().cloned())
         .collect();
 
-    let resolved = resolve_work(work, Arc::new(index.clone()), &options).await?;
-    let carried = previous.map_or(&[][..], |prev| &prev.tools[..]);
+    let mut resolved = resolve_work(work, config, Arc::new(index.clone()), &options).await?;
+    for (group, name) in adopting {
+        if let Some(source) = carried
+            .iter()
+            .find(|tool| tool.group == super::internal::DEFAULT_GROUP && tool.name == name)
+        {
+            resolved.push(LockedTool {
+                group,
+                ..source.clone()
+            });
+        }
+    }
     Ok((
         build_lock(merge_carry_forward(carried, resolved, config), config),
         touched,
@@ -2475,6 +2587,148 @@ gamma = "{r}/gamma:1"
             Some(&Digest::Sha256(beta_new_leaf)),
             "beta's lock entry must carry the freshly resolved leaf"
         );
+    }
+
+    // ── `{ from = "default" }` followers share their source's pin ───────────
+
+    fn follower_config(tag: &str) -> ProjectConfig {
+        ProjectConfig::from_toml_str(&format!(
+            "[tools]\nuv = \"{r}/uv:{tag}\"\n\n[group.lint.tools]\nuv = {{ from = \"default\" }}\n",
+            r = TEST_REGISTRY
+        ))
+        .expect("follower config parses")
+    }
+
+    /// A predecessor pinning both `default/uv` and `lint/uv` to leaf `leaf` under tag `tag`.
+    fn follower_lock(config: &ProjectConfig, tag: &str, leaf: &str) -> ProjectLock {
+        let source = LockedTool {
+            declared: Some(format!("{TEST_REGISTRY}/uv:{tag}")),
+            ..locked_tool_fixture("uv", leaf)
+        };
+        let follower = LockedTool {
+            group: "lint".to_string(),
+            ..source.clone()
+        };
+        predecessor_lock(config, vec![source, follower])
+    }
+
+    fn pin_of(lock: &ProjectLock, group: &str) -> Digest {
+        locked(lock, group, "uv").platforms["linux/amd64"].clone()
+    }
+
+    /// Touching the source alone re-resolves its follower to the same pin.
+    #[tokio::test]
+    async fn resolve_lock_touched_moves_a_follower_with_its_source() {
+        let config = follower_config("1");
+        let previous = follower_lock(&config, "1", "a");
+        let lock = resolve_lock_touched(
+            &config,
+            &config,
+            &previous,
+            &fresh_leaf_index('c'),
+            &[key("uv")],
+            fast_options(),
+        )
+        .await
+        .expect("source touch resolves");
+        assert_eq!(pin_of(&lock, "default"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(
+            pin_of(&lock, "lint"),
+            pin_of(&lock, "default"),
+            "follower shares the pin"
+        );
+    }
+
+    /// Touching a follower pulls its source along: one version per package.
+    #[tokio::test]
+    async fn resolve_lock_touched_moves_the_source_with_a_touched_follower() {
+        let config = follower_config("1");
+        let previous = follower_lock(&config, "1", "a");
+        let touched = [("lint".to_string(), "uv".to_string())];
+        let lock = resolve_lock_touched(
+            &config,
+            &config,
+            &previous,
+            &fresh_leaf_index('c'),
+            &touched,
+            fast_options(),
+        )
+        .await
+        .expect("follower touch resolves");
+        assert_eq!(pin_of(&lock, "default"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(pin_of(&lock, "lint"), pin_of(&lock, "default"));
+    }
+
+    /// A retag that moved the follower's declaration re-resolves it even when only the
+    /// source is named, so the carried digest never sits under a newer `declared`.
+    #[tokio::test]
+    async fn resolve_lock_touched_re_resolves_a_binding_whose_declaration_moved() {
+        let before = follower_config("1");
+        let after = follower_config("2");
+        let previous = follower_lock(&before, "1", "a");
+        let lock = resolve_lock_touched(
+            &after,
+            &before,
+            &previous,
+            &fresh_leaf_index('c'),
+            &[key("uv")],
+            fast_options(),
+        )
+        .await
+        .expect("retag resolves");
+        assert_eq!(pin_of(&lock, "lint"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(
+            locked(&lock, "lint", "uv").declared.as_deref(),
+            Some("registry.test/uv:2")
+        );
+    }
+
+    /// Declaration moved with an empty touched set: the carried entry is still re-resolved.
+    #[tokio::test]
+    async fn resolve_lock_touched_never_stamps_a_new_declaration_on_a_carried_pin() {
+        let before = follower_config("1");
+        let after = follower_config("2");
+        let previous = follower_lock(&before, "1", "a");
+        let lock = resolve_lock_touched(&after, &before, &previous, &fresh_leaf_index('c'), &[], fast_options())
+            .await
+            .expect("moved declarations resolve");
+        assert_eq!(pin_of(&lock, "default"), Digest::Sha256("c".repeat(64)));
+        assert_eq!(pin_of(&lock, "lint"), Digest::Sha256("c".repeat(64)));
+    }
+
+    /// `ocx lock` forcing only the source also moves its follower.
+    #[tokio::test]
+    async fn reconcile_forced_source_moves_its_follower() {
+        let config = follower_config("1");
+        let previous = follower_lock(&config, "1", "a");
+        let (lock, touched) = resolve_lock_reconcile(
+            &config,
+            Some(&previous),
+            &fresh_leaf_index('c'),
+            &[key("uv")],
+            fast_options(),
+        )
+        .await
+        .expect("reconcile resolves");
+        assert_eq!(pin_of(&lock, "lint"), Digest::Sha256("c".repeat(64)));
+        assert!(touched.contains(&("lint".to_string(), "uv".to_string())));
+    }
+
+    /// A newly declared follower takes the source's carried pin; the source stays byte-identical
+    /// even though its tag moved in the index.
+    #[tokio::test]
+    async fn reconcile_new_follower_adopts_the_carried_source_pin() {
+        let config = follower_config("1");
+        let full = follower_lock(&config, "1", "a");
+        let source_only = predecessor_lock(&config, vec![locked(&full, "default", "uv").clone()]);
+        let (lock, touched) =
+            resolve_lock_reconcile(&config, Some(&source_only), &fresh_leaf_index('c'), &[], fast_options())
+                .await
+                .expect("reconcile resolves");
+        assert_eq!(pin_of(&lock, "default"), Digest::Sha256("a".repeat(64)));
+        assert_eq!(pin_of(&lock, "lint"), Digest::Sha256("a".repeat(64)));
+        assert_eq!(locked(&lock, "default", "uv"), locked(&source_only, "default", "uv"));
+        assert!(touched.contains(&("lint".to_string(), "uv".to_string())));
     }
 
     // ── resolve_one: candidate fan-out edge cases ───────────────────────────

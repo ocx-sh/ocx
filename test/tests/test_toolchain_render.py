@@ -1208,6 +1208,73 @@ def test_an_orphan_trampoline_is_pruned_and_every_group_link_is_left_alone(
     )
 
 
+def test_an_offline_render_keeps_the_launchers_of_a_tool_it_could_not_walk(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A cold store after a render must not cost the tools it cannot walk their launchers.
+
+    ``ocx lock --no-pull`` re-renders offline. A closure walk that fails there
+    leaves the tool out of the surface, and the render must not read "absent from
+    the surface" as "no longer declared": its launchers stay, and the warning
+    names the tool.
+
+    RED: prune ``bin/`` against the partial surface - both launchers vanish.
+    """
+    label = uuid4().hex[:8]
+    keeper = make_package(
+        ocx, f"t_{label}_keep", "1.0.0", tmp_path, cascade=False, bins=[f"keepbin{label}"]
+    )
+    cold = make_package(
+        ocx, f"t_{label}_cold", "1.0.0", tmp_path, cascade=False, bins=[f"coldbin{label}"]
+    )
+    project = tmp_path / f"proj-{label}"
+    project.mkdir()
+    write_ocx_toml(
+        project, f'[tools]\nkeepkey{label} = "{keeper.fq}"\ncoldkey{label} = "{cold.fq}"\n'
+    )
+    assert run_in(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
+
+    home = toolchain_home(project)
+    both = expected_bin(f"keepbin{label}", f"coldbin{label}")
+    assert bin_entries(home) == both
+
+    # The registry cache is what the offline walk reads; without it every root fails to walk.
+    for cache in ("blobs", "index"):
+        shutil.rmtree(ocx.ocx_home / cache, ignore_errors=True)
+
+    offline = run_in(ocx, project, "lock", "--no-pull")
+    assert offline.returncode == EXIT_SUCCESS, offline.stderr
+    assert bin_entries(home) == both, (
+        "an offline render that could not walk a tool must keep the launchers "
+        f"an earlier render wrote; got {bin_entries(home)}\nstderr:\n{offline.stderr}"
+    )
+
+
+def test_a_bare_pull_after_pull_all_leaves_the_named_groups_links_and_the_default_bin(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A bare ``ocx pull`` renders the default group only and must not prune the rest.
+
+    ``locked_project`` has already run ``pull -g all``. The narrower pull selects
+    just ``[tools]``, so the ``ci`` group's links are outside its scope: they
+    must survive, and ``bin/`` (the default group's) must come out unchanged.
+
+    RED: reconcile every group against the selection - ``ci/`` is pruned as orphaned.
+    """
+    project = locked_project(ocx, tmp_path)
+    links_before = link_entries(project.home)
+    bin_before = bin_entries(project.home)
+    assert project.group_link.exists() and bin_before == expected_bin(project.default_binary)
+
+    result = run_in(ocx, project.directory, "pull")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert project.group_link.exists(), "a bare pull must leave the unselected group's link alone"
+    assert link_entries(project.home) == links_before
+    assert bin_entries(project.home) == bin_before
+
+
 def test_an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

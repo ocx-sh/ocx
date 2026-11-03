@@ -24,8 +24,9 @@ wire_words! {
         /// Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present.
         Mise = "mise",
         /// An enclosing `ocx exec` composed this shell's environment for the resolved project
-        /// (`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: the
-        /// activation session keeps applying the global scope; only the per-prompt hook steps aside.
+        /// (`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: exec is hermetic,
+        /// so the per-prompt hook applies neither the project nor the global toolchain while the cwd
+        /// stays in that project, and reconciles again once it leaves.
         OcxExec = "ocx_exec",
     }
 }

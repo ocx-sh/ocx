@@ -190,3 +190,11 @@ pub fn update_index(&self) -> oci::index::Index { /* Offline ▸ Frozen ▸ Remo
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-10 | Michael Herwig | Initial draft — update family rule; rename `upgrade` → `update`; remote-by-default, lock-only writes |
+
+## Amendment 2026-11-03 — default group and `from` followers
+
+Amends the unscoped (whole-file) behaviour of `update` and `upgrade`.
+
+- A bare `ocx update`, `ocx upgrade` or `ocx pull` acts on the default group. `-g all` selects every group. An empty default group is reported on stderr rather than treated as a silent no-op.
+- `{ from = "default" }` followers move with their source on `update` and `upgrade`, in a selected or unselected group alike (uv, cargo and poetry keep one version per package across groups).
+- `ocx lock` is not part of the advance-a-pin family: it reconciles per binding (lock v4 `declared`), re-resolving only bindings whose `ocx.toml` entry is new or changed and carrying every other pin forward.

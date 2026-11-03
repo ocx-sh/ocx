@@ -44,7 +44,6 @@ pytestmark = pytest.mark.command("toolchain_env")
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE)
-EXIT_CLAP = 2  # clap parse error (unrecognised subcommand / flag)
 
 # ---------------------------------------------------------------------------
 # Helpers (DAMP — descriptive and meaningful, co-located with tests)
@@ -2081,15 +2080,99 @@ def test_with_package_loses_a_binary_name_clash_to_the_project_tool(ocx: OcxRunn
     # Application order: the last entry leads PATH, and it must be the project's.
     assert with_env[-1] == baseline[-1], f"env: a `--with` dir leads the project's: {with_env}"
 
-    result = run_in(ocx, project, "exec", "--with", extra, "--", "sh", "-c", "command -v clash")
+    # `shutil.which` honours `PATHEXT`, so the Windows `clash.bat` launcher resolves as `clash` does on POSIX.
+    which = "import shutil, sys; sys.stdout.write(shutil.which('clash') or '')"
+    result = run_in(ocx, project, "exec", "--with", extra, "--", sys.executable, "-c", which)
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    resolved = os.path.realpath(os.path.dirname(result.stdout.strip()))
+    assert result.stdout, "`clash` is not on the exec PATH"
+    resolved = os.path.realpath(os.path.dirname(result.stdout))
     assert resolved == baseline[-1], f"exec resolved `clash` from {resolved}, project dir is {baseline[-1]}"
 
 
 def test_with_malformed_identifier_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A `--with` value that is not an identifier is a usage error naming that value, on both commands."""
     project, _ = _make_project(ocx, tmp_path, "with_bad")
     for command in (("env",), ("exec", "--", "true")):
         args = (command[0], "--with", "::bad::", *command[1:])
         result = _run(ocx, project, *args)
-        assert result.returncode in (EXIT_USAGE, EXIT_CLAP), result.stderr
+        assert result.returncode == EXIT_USAGE, f"`ocx {command[0]} --with ::bad::`: {result.stderr}"
+        assert "::bad::" in result.stderr, f"stderr must name the rejected identifier: {result.stderr}"
+
+
+def _publish_tagged_script(ocx: OcxRunner, tmp_path: Path, repo: str, tag: str, bin_name: str) -> str:
+    """Publish `repo:tag` whose `bin_name` prints a per-version marker, so a run shows which version won."""
+    return make_package(ocx, repo, tag, tmp_path, cascade=False, bins=[bin_name]).marker
+
+
+def test_exec_with_overrides_a_project_binding_of_the_same_repository(ocx: OcxRunner, tmp_path: Path) -> None:
+    """`--with hello:2.0.0` replaces the project's `hello:1.0.0` for one run instead of being refused."""
+    repo = f"t_{uuid4().hex[:8]}_override"
+    marker_v1 = _publish_tagged_script(ocx, tmp_path, repo, "1.0.0", "hello")
+    marker_v2 = _publish_tagged_script(ocx, tmp_path, repo, "2.0.0", "hello")
+    assert marker_v1 != marker_v2
+    project = tmp_path / "proj_override"
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\nhello = "{ocx.registry}/{repo}:1.0.0"\n')
+    assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+    manifest_before = (project / "ocx.toml").read_bytes()
+    lock_before = (project / "ocx.lock").read_bytes()
+
+    plain = _run(ocx, project, "exec", "--", "hello")
+    assert plain.returncode == EXIT_SUCCESS, plain.stderr
+    assert plain.stdout.strip() == marker_v1
+
+    overridden = _run(ocx, project, "exec", "--with", f"{ocx.registry}/{repo}:2.0.0", "--", "hello")
+    assert overridden.returncode == EXIT_SUCCESS, overridden.stderr
+    assert overridden.stdout.strip() == marker_v2, f"`--with` must win the same-repository clash: {overridden.stdout}"
+
+    exported = _run(
+        ocx, project, "env", "--with", f"{ocx.registry}/{repo}:2.0.0", "--shell=sh"
+    )
+    assert exported.returncode == EXIT_SUCCESS, exported.stderr
+    assert (project / "ocx.toml").read_bytes() == manifest_before
+    assert (project / "ocx.lock").read_bytes() == lock_before
+
+
+def test_env_with_under_no_pull_warns_and_omits_an_uninstalled_package(ocx: OcxRunner, tmp_path: Path) -> None:
+    """`--no-pull` keeps a `--with` package that is not installed out of the env, with a warning, exit 0."""
+    project, _ = _make_project(ocx, tmp_path, "with_nopull")
+    extra = _publish_extra(ocx, tmp_path, "with_nopull_extra")
+    baseline = _env_path_dirs(ocx, project, "--no-pull")
+
+    result = _run(ocx, project, "--format", "json", "env", "--with", extra, "--no-pull")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "not installed" in result.stderr, f"the omitted `--with` package must be warned about: {result.stderr}"
+    composed = [entry["value"] for entry in json.loads(result.stdout)["items"] if entry["key"] == "PATH"]
+    assert composed == baseline, "an omitted `--with` package must add no PATH directory"
+
+    installed = _env_path_dirs(ocx, project, "--with", extra)
+    assert len(installed) > len(baseline), "without `--no-pull` the same `--with` package installs and composes"
+
+
+def test_global_env_with_composes_like_global_exec(ocx: OcxRunner, tmp_path: Path) -> None:
+    """`ocx --global env --with X` composes X as `ocx --global exec --with X` does, the global tool leading."""
+    base = f"t_{uuid4().hex[:8]}_gwith_base"
+    make_package(ocx, base, "1.0.0", tmp_path, cascade=False, bins=["tool"])
+    extra = _publish_extra(ocx, tmp_path, "gwith_extra")
+    empty = tmp_path / "no_project"
+    empty.mkdir()
+    assert _run(ocx, empty, "--global", "add", f"{ocx.registry}/{base}:1.0.0").returncode == EXIT_SUCCESS
+
+    def global_env_dirs(*args: str) -> list[str]:
+        result = _run(ocx, empty, "--global", "--format", "json", "env", *args)
+        assert result.returncode == EXIT_SUCCESS, result.stderr
+        return [entry["value"] for entry in json.loads(result.stdout)["items"] if entry["key"] == "PATH"]
+
+    baseline = global_env_dirs()
+    with_env = global_env_dirs("--with", extra)
+    assert len(with_env) > len(baseline), "`--global env --with` dropped the extra package"
+
+    reader = [sys.executable, "-c", "import os; print(os.environ['PATH'])"]
+    executed = _run(ocx, empty, "--global", "exec", "--with", extra, "--", *reader)
+    assert executed.returncode == EXIT_SUCCESS, executed.stderr
+    exec_dirs = [segment for segment in executed.stdout.strip().split(os.pathsep) if segment]
+    assert _real_dirs(with_env)[::-1] == _real_dirs(exec_dirs)[: len(with_env)], (
+        f"env={with_env} exec={exec_dirs}"
+    )
+    assert _real_dirs(with_env)[-1] == _real_dirs(baseline)[-1], "the global toolchain's directory must lead PATH"

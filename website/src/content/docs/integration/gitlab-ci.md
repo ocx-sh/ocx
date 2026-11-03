@@ -27,7 +27,7 @@ build:
     - shellcheck --version
 ```
 
-[`ocx pull`][cmd-pull] reads `ocx.toml` and `ocx.lock` from the repository, so the job needs the project files and nothing else. The `eval` line puts the composed environment on the rest of the job. For a single command, [`ocx exec`][cmd-exec] runs it inside the composed environment without touching the shell:
+[`ocx pull`][cmd-pull] reads `ocx.toml` and `ocx.lock` from the repository, so the job needs the project files and nothing else. It downloads the default group; use `ocx pull -g all` or `-g <group>` for group tools. The `eval` line puts the composed environment on the rest of the job. For a single command, [`ocx exec`][cmd-exec] runs it inside the composed environment without touching the shell:
 
 ```yaml
 build:

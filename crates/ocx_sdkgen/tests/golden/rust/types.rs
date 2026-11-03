@@ -9943,6 +9943,11 @@ pub enum Tool {
     Direnv,
     /// Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present.
     Mise,
+    /// An enclosing `ocx exec` composed this shell's environment for the resolved project
+    /// (`__OCX_EXEC_SCOPE` names that project's directory). Not part of \[`detect`\]: exec is
+    /// hermetic, so the per-prompt hook applies neither the project nor the global toolchain while
+    /// the cwd stays in that project, and reconciles again once it leaves.
+    OcxExec,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -9953,6 +9958,7 @@ impl Tool {
         match self {
             Self::Direnv => "direnv",
             Self::Mise => "mise",
+            Self::OcxExec => "ocx_exec",
             Self::Unknown(value) => value,
         }
     }
@@ -9962,6 +9968,7 @@ impl Tool {
         match value.as_str() {
             "direnv" => Self::Direnv,
             "mise" => Self::Mise,
+            "ocx_exec" => Self::OcxExec,
             _ => Self::Unknown(value),
         }
     }

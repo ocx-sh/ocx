@@ -8,7 +8,7 @@ mod consent;
 mod content_path;
 mod env_override;
 mod forge_write;
-mod group_selection;
+pub(crate) mod group_selection;
 pub mod hook;
 mod identifier;
 mod interactive;

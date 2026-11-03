@@ -36,7 +36,7 @@ pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
 pub use lock::{
     Binding, BoundTool, LockCurrency, LockDrift, LockMetadata, LockVersion, LockedTool, ProjectLock, eager_per_content,
-    first_per_content, locked_tool_content_equal,
+    first_per_content, lazy_pull_set, locked_tool_content_equal,
 };
 pub use mutate::{
     add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding_in_memory,
@@ -45,7 +45,9 @@ pub use mutate::{
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
-pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_reconcile, resolve_lock_touched};
+pub use resolve::{
+    ResolveLockOptions, expand_touched, lookup_host_leaf, resolve_lock, resolve_lock_reconcile, resolve_lock_touched,
+};
 pub use toolchain_home::resolve_toolchain_home;
 
 /// The crate's own `Result`, keyed to the tier's own [`Error`].

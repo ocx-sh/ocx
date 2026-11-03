@@ -10,7 +10,7 @@ pub struct Stack {
     /// environment is dropped before this project is composed. With `--stack`
     /// it stays, and this project's tools come first on `PATH`.
     ///
-    /// https://ocx.sh/docs/explanation/shell-integration/#activation-nested-projects
+    /// <https://ocx.sh/docs/explanation/shell-integration/#activation-nested-projects>
     #[clap(long = "stack")]
     stack: bool,
 }

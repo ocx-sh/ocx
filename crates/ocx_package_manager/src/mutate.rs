@@ -176,7 +176,7 @@ impl PackageManager {
             let roots = default_group_roots(lock, render.platform);
             if self.is_offline() {
                 // A cold store is ordinary offline: render what is present, name the rest.
-                for root in &roots {
+                for (root, names) in &roots {
                     match self
                         .toolchain_surface(std::slice::from_ref(root), render.platform)
                         .await
@@ -184,21 +184,12 @@ impl PackageManager {
                         Ok(nodes) => surface.extend(nodes),
                         Err(error) => {
                             log::debug!("'{root}' is not renderable offline: {error}");
-                            unrendered.extend(
-                                lock.tools
-                                    .iter()
-                                    .filter(|tool| tool.group == DEFAULT_GROUP)
-                                    .filter(|tool| {
-                                        tool.host_leaf(render.platform).is_ok_and(|leaf| {
-                                            ocx_oci::PackageRef::from(tool.repository.pin_untagged(leaf)) == *root
-                                        })
-                                    })
-                                    .map(|tool| tool.name.clone()),
-                            );
+                            unrendered.extend(names.iter().cloned());
                         }
                     }
                 }
             } else {
+                let roots: Vec<ocx_oci::PackageRef> = roots.into_iter().map(|(root, _)| root).collect();
                 surface = self.toolchain_surface(&roots, render.platform).await?;
             }
         }
@@ -214,6 +205,7 @@ impl PackageManager {
                 platform: render.platform,
                 // Passed through, never short-circuited here, or a dry run reports a delta of zero.
                 dry_run,
+                unrendered: &unrendered,
             })
             .await?;
         report.unrendered = unrendered;
@@ -235,18 +227,22 @@ pub fn unrendered_warning(report: &RenderReport) -> Option<String> {
     ))
 }
 
-/// The **default group's** root identifiers, deduplicated; a tool with no leaf
-/// for this platform is skipped, not refused.
+/// The **default group's** root identifiers, deduplicated, each with the binding names that share
+/// it; a tool with no leaf for this platform is skipped, not refused.
 // Refusing would make one tool without a build here cost every other trampoline.
 #[must_use]
-pub fn default_group_roots(lock: &ProjectLock, platform: &ocx_oci::Platform) -> Vec<ocx_oci::PackageRef> {
-    let mut roots: Vec<ocx_oci::PackageRef> = Vec::new();
+pub fn default_group_roots(
+    lock: &ProjectLock,
+    platform: &ocx_oci::Platform,
+) -> Vec<(ocx_oci::PackageRef, Vec<String>)> {
+    let mut roots: Vec<(ocx_oci::PackageRef, Vec<String>)> = Vec::new();
     for tool in lock.tools.iter().filter(|tool| tool.group == DEFAULT_GROUP) {
         match tool.host_leaf(platform) {
             Ok(leaf) => {
                 let identifier = ocx_oci::PackageRef::from(tool.repository.pin_untagged(leaf));
-                if !roots.contains(&identifier) {
-                    roots.push(identifier);
+                match roots.iter_mut().find(|(root, _)| *root == identifier) {
+                    Some((_, names)) => names.push(tool.name.clone()),
+                    None => roots.push((identifier, vec![tool.name.clone()])),
                 }
             }
             Err(error) => log::debug!(

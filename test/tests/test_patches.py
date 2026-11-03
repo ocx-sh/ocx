@@ -5619,6 +5619,78 @@ def test_clean_keeps_companion_of_lock_only_tool(
     )
 
 
+def _publish_base_with_dependency_scoped_companion(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, *, required: bool, env_key: str
+) -> PackageInfo:
+    """Publish base `A` depending on `D` and a global rule that matches `D` only, so
+    the companion reaches `A`'s env through the dependency alone."""
+    dep_repo = _unique_repo("dep_only_dep")
+    dep_pkg = make_package(ocx, dep_repo, "1.0.0", tmp_path, cascade=True)
+    base_pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        dependencies=[_dep_entry(ocx, dep_pkg, visibility="public")],
+        cascade=True,
+    )
+    companion_repo = _unique_repo("dep_only_companion")
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, env_key, "dep-only-value")
+    descriptor_path = tmp_path / "dep_only_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": f"{registry}/{dep_repo}:*", "packages": [f"{registry}/{companion_repo}:1.0.0"]}],
+    )
+    _write_config(ocx, registry, required=required)
+    _publish_descriptor_global(ocx, descriptor_path)
+    ocx.plain("package", "install", base_pkg.short)
+    return base_pkg
+
+
+def test_clean_keeps_companion_matched_only_through_a_dependency(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Compose matches patch rules against the base's dependencies, so `ocx clean` must
+    keep a companion whose rule names only a dependency (ocx#666)."""
+    base_pkg = _publish_base_with_dependency_scoped_companion(
+        ocx, unique_repo, tmp_path, registry, required=True, env_key="DEP_ONLY_CA"
+    )
+    assert _entry_by_key(_env_entries(ocx, base_pkg.short), "DEP_ONLY_CA") is not None, (
+        "precondition: the dependency-matched companion composes before the clean"
+    )
+
+    ocx.plain("clean")
+
+    # Offline, or compose re-fetches a collected required companion and masks the collection.
+    result = ocx.run("--offline", "package", "env", base_pkg.short, check=False)
+    assert result.returncode == 0, (
+        f"offline env must succeed after clean; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "DEP_ONLY_CA")
+    assert entry is not None and entry["value"] == "dep-only-value", (
+        f"ocx clean must keep a companion matched through a dependency; got: {result.stdout}"
+    )
+
+
+def test_patch_sync_installs_companion_matched_only_through_a_dependency(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """`ocx patch sync` must visit the installed bases' dependencies, or an optional
+    companion matched through one is never installed (ocx#666)."""
+    base_pkg = _publish_base_with_dependency_scoped_companion(
+        ocx, unique_repo, tmp_path, registry, required=False, env_key="DEP_SYNC_CA"
+    )
+
+    sync = ocx.run("patch", "sync", format=None, check=False)
+    assert sync.returncode == 0, f"ocx patch sync must succeed:\n{sync.stderr}"
+
+    result = ocx.run("--offline", "package", "env", base_pkg.short, check=False)
+    assert result.returncode == 0, (
+        f"offline env must succeed after sync; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    entry = _entry_by_key(json.loads(result.stdout)["items"], "DEP_SYNC_CA")
+    assert entry is not None and entry["value"] == "dep-only-value", (
+        f"ocx patch sync must install a companion matched through a dependency; got: {result.stdout}"
+    )
+
+
 def test_clean_keeps_companion_of_digest_glob_rule_for_lock_only_tool(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:

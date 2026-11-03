@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
-use ocx_project::{DEFAULT_GROUP, MissingState, expand_all_keyword, lazy_mode_for_tool, load_project_state};
+use ocx_project::{MissingState, lazy_mode_for_tool, load_project_state};
 use ocx_shell::shell;
 
 use crate::conventions::emit_lines;
@@ -78,11 +78,7 @@ impl DirenvExport {
         }
 
         // An unknown `-g` is an `.envrc` typo and fails (64) rather than silently exporting nothing.
-        crate::app::project_context::ensure_groups_known(self.groups.names(), &project.config)?;
-        let mut expanded = expand_all_keyword(self.groups.names(), &project.config);
-        if expanded.is_empty() {
-            expanded = vec![DEFAULT_GROUP.to_owned()];
-        }
+        let expanded = self.groups.effective(&project.config)?;
 
         let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
 

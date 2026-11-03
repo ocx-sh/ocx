@@ -7191,29 +7191,53 @@ mod tests {
             );
         }
 
-        /// A cold client lists referrers and pulls blobs authenticated: the verify pipeline
-        /// calls the transport directly, and over an index-routed name nothing else has
-        /// authenticated the backing registry first, so ghcr.io answered 401 (#670).
+        /// Each transport read authenticates itself: the verify pipeline calls the transport
+        /// directly, and over an index-routed name nothing else has authenticated the backing
+        /// registry first, so ghcr.io answered 401 (#670). A fresh cold client per method keeps
+        /// an earlier call from warming the token for a later one.
         #[tokio::test]
-        async fn a_cold_referrers_listing_and_blob_pull_carry_the_token() {
-            let registry = StubRegistry::start().await;
-            let client = registry.client();
-            let image = client.transport_reference(&registry.identifier("test/pkg"));
-            let digest = crate::Algorithm::Sha256.hash(b"subject");
+        async fn every_cold_transport_read_carries_the_token_on_its_first_request() {
+            const METHODS: [&str; 5] = [
+                "list_referrers",
+                "pull_blob",
+                "pull_blob_to_file",
+                "head_blob",
+                "pull_blob_streaming",
+            ];
+            let scratch = tempfile::tempdir().unwrap();
+            for method in METHODS {
+                let registry = StubRegistry::start().await;
+                let client = registry.client();
+                let transport = client.transport();
+                let image = client.transport_reference(&registry.identifier("test/pkg"));
+                let digest = crate::Algorithm::Sha256.hash(b"subject");
 
-            let listed = client.transport().list_referrers(&image, &digest, None).await;
-            assert!(listed.is_err(), "the stub serves no referrers, got {listed:?}");
-            let sent = registry.state.authorizations.lock().unwrap().clone();
-            assert_eq!(
-                sent.last().map(String::as_str),
-                Some("Bearer minted-1"),
-                "a cold referrers listing must authenticate, saw {sent:?}"
-            );
+                // The stub serves no referrers and no blobs: only the wire matters.
+                let outcome = match method {
+                    "list_referrers" => transport.list_referrers(&image, &digest, None).await.map(|_| ()),
+                    "pull_blob" => transport.pull_blob(&image, &digest).await.map(|_| ()),
+                    "pull_blob_to_file" => transport
+                        .pull_blob_to_file(&image, &digest, &scratch.path().join("blob"))
+                        .await
+                        .map(|_| ()),
+                    "head_blob" => transport.head_blob(&image, &digest).await.map(|_| ()),
+                    "pull_blob_streaming" => transport.pull_blob_streaming(&image, &digest).await.map(|_| ()),
+                    other => unreachable!("unlisted transport method {other}"),
+                };
+                assert!(outcome.is_err(), "{method}: the stub serves nothing, got {outcome:?}");
 
-            let pulled = client.transport().pull_blob(&image, &digest).await;
-            assert!(pulled.is_err(), "the stub serves no blobs, got {pulled:?}");
-            let sent = registry.state.authorizations.lock().unwrap().clone();
-            assert_eq!(sent.len(), 2, "the blob pull must carry the token too, saw {sent:?}");
+                let sent = registry.state.authorizations.lock().unwrap().clone();
+                assert_eq!(
+                    sent.first().map(String::as_str),
+                    Some("Bearer minted-1"),
+                    "{method}: a cold read must authenticate before its first request, saw {sent:?}"
+                );
+                assert_eq!(
+                    registry.state.exchanges.load(Ordering::SeqCst),
+                    1,
+                    "{method}: one cold read, one token exchange"
+                );
+            }
         }
 
         /// Eight concurrent *cold* `ensure_auth` calls for one identifier

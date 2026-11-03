@@ -1815,3 +1815,44 @@ tool = "{ocx.registry}/{repo}:1.0.0"
         assert _read_lock_bytes(project) == v3_bytes, (
             f"ocx {args[0]} must not rewrite a v3 lock"
         )
+
+
+def test_lock_re_resolves_every_binding_of_a_drifted_v3_lock_and_says_so(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A v3 lock records no ``declared`` tags, so once ``ocx.toml`` drifts no
+    pin can be proved unchanged: ``ocx lock`` re-resolves every binding, writes
+    v4 and names the reason on stderr.
+    """
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_v3d_a"
+    repo_b = f"t_{short}_v3d_b"
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    toml_template = f"""\
+[tools]
+a = "{ocx.registry}/{repo_a}:{{a_tag}}"
+b = "{ocx.registry}/{repo_b}:latest"
+"""
+    _write_ocx_toml(project, toml_template.format(a_tag="1.0.0"))
+    first = _run_lock(ocx, project, "--no-pull")
+    assert first.returncode == EXIT_SUCCESS, first.stderr
+    (project / "ocx.lock").write_text(_as_v3(_read_lock_text(project)))
+    first_b = _tool_leaf_digests(_read_lock_text(project), "b")
+
+    # b's moving tag advances upstream; only a's declaration is edited.
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=True)
+    _write_ocx_toml(project, toml_template.format(a_tag="2.0.0"))
+
+    second = _run_lock(ocx, project, "--no-pull")
+    assert second.returncode == EXIT_SUCCESS, second.stderr
+    assert "carries no declared tags; re-resolving every binding" in second.stderr, second.stderr
+    second_text = _read_lock_text(project)
+    assert "lock_version = 4" in second_text, second_text
+    assert _tool_leaf_digests(second_text, "b") != first_b, (
+        "a drifted v3 lock proves no pin unchanged, so the untouched binding 'b' re-resolves too"
+    )

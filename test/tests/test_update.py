@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -221,6 +222,60 @@ b = "{ocx.registry}/{repo_b}:latest"
 
     assert after_a != initial_a, "'a' leaves must change — update bumps every tag"
     assert after_b != initial_b, "'b' leaves must change — update bumps every tag"
+
+
+def test_update_moves_a_from_follower_with_its_source(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A group binding declared ``{ from = "default" }`` shares its source's pin: bare
+    ``ocx update`` (default group only) advances both lock entries to the same digest."""
+    repo = f"t_{uuid4().hex[:8]}_from_upd"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+uv = "{ocx.registry}/{repo}:latest"
+
+[group.lint.tools]
+uv = {{ from = "default" }}
+""",
+    )
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
+
+    def pins() -> dict[str, list[str]]:
+        lock = tomllib.loads(_read_lock_text(project))
+        return {t["group"]: sorted(t["platforms"].values()) for t in lock["tool"]}
+
+    before = pins()
+    assert before["default"] == before["lint"]
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True)
+
+    result = _run_update(ocx, project, "--no-pull")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    after = pins()
+    assert after["default"] != before["default"], "the source pin must move"
+    assert after["lint"] == after["default"], "the follower must share the source's new pin"
+
+
+def test_update_with_an_empty_default_group_hints_instead_of_silently_doing_nothing(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Bare ``ocx update`` on a groups-only project selects nothing: it exits 0 and says so."""
+    repo = f"t_{uuid4().hex[:8]}_empty_def"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, f'[group.ci.tools]\ntool = "{ocx.registry}/{repo}:latest"\n')
+    assert _run_lock(ocx, project, "--no-pull").returncode == EXIT_SUCCESS
+
+    result = _run_update(ocx, project, "--no-pull")
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert "the default group is empty; pass -g <group> or -g all" in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1345,7 @@ def _leaves_in_group(lock_text: str, group: str, name: str) -> list[str]:
 
 
 def test_update_without_group_touches_only_the_default_group(ocx: OcxRunner, tmp_path: Path) -> None:
-    """No ``-g`` re-resolves the default group only; a ``from = "default"`` entry keeps its own pin."""
+    """No ``-g`` re-resolves the default group only; a ``from = "default"`` entry follows its source."""
     project, repo_default, repo_ci = _two_group_project(ocx, tmp_path)
     before = _read_lock_text(project)
     make_package(ocx, repo_default, "2.0.0", tmp_path, cascade=True)
@@ -1305,8 +1360,8 @@ def test_update_without_group_touches_only_the_default_group(ocx: OcxRunner, tmp
     assert _leaves_in_group(after, "ci", "citool") == _leaves_in_group(before, "ci", "citool"), (
         "the ci group's own tool must not move without -g"
     )
-    assert _leaves_in_group(after, "ci", "tool") == _leaves_in_group(before, "ci", "tool"), (
-        "a `from = \"default\"` entry shares the declared version, not the default group's lock entry"
+    assert _leaves_in_group(after, "ci", "tool") == _leaves_in_group(after, "default", "tool"), (
+        "a `from = \"default\"` entry shares its source's pin, so it moves with the default group"
     )
 
 

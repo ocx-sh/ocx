@@ -33,7 +33,7 @@ ocx pull -g ci,lint               # CI runner — only what's needed for lint jo
 ocx pull -g release               # release runner — only release packages
 ocx pull -g all                   # every group
 ocx pull                          # the default group only
-ocx lock                          # workstation — every group resolved
+ocx lock                          # workstation — every group written to the lock; unchanged pins carry forward
 ```
 
 ### Per-group binding identity {#groups-binding-identity}

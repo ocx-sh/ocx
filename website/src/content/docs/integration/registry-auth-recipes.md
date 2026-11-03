@@ -65,7 +65,7 @@ export OCX_AUTH_123456789012_dkr_ecr_eu_west_1_amazonaws_com_TOKEN="$(aws ecr ge
 ocx pull
 ```
 
-The long names come from the host: `123456789012.dkr.ecr.eu-west-1.amazonaws.com` with every dot and hyphen turned into `_`.
+The long names come from the host: `123456789012.dkr.ecr.eu-west-1.amazonaws.com` with every dot and hyphen turned into `_`. A bare `ocx pull` downloads the default group; add `-g all` for every group.
 
 The login form writes the same credential to the Docker configuration:
 

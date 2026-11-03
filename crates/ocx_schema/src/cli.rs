@@ -297,7 +297,10 @@ fn command_spec(command: &Command, path: &[String], inherited: &BTreeSet<String>
 
     let subcommands: Vec<&Command> = subcommands(command).collect();
     let (version, output) = match sources.contract.iter().find(|(entry, _, _)| *entry == path) {
-        Some((_, version, output)) if subcommands.is_empty() => (*version, output.to_vec()),
+        // An executable parent (bare `ocx shell`) also runs, so it carries its own contract like a leaf.
+        Some((_, version, output)) if subcommands.is_empty() || command.is_args_conflicts_with_subcommands_set() => {
+            (*version, output.to_vec())
+        }
         _ => (0, Vec::new()),
     };
     let deprecated = sources
@@ -1737,5 +1740,44 @@ mod tests {
     fn the_ocx_contract_has_no_findings() {
         let findings = contract_findings(&ocx_command(), contract::CONTRACT, &crate::reports::root_names());
         assert!(findings.is_empty(), "{}", findings.join("\n"));
+    }
+
+    fn find<'a>(spec: &'a CommandSpec, path: &[&str]) -> &'a CommandSpec {
+        spec.commands
+            .iter()
+            .find(|sub| sub.path.iter().map(String::as_str).eq(path.iter().copied()))
+            .unwrap_or_else(|| panic!("no command {path:?}"))
+    }
+
+    /// A group that runs itself exports its contract; a plain group stays version 0.
+    #[test]
+    fn an_executable_parent_exports_its_own_contract() {
+        let command = Command::new("t")
+            .subcommand(
+                Command::new("run")
+                    .args_conflicts_with_subcommands(true)
+                    .subcommand(Command::new("inner")),
+            )
+            .subcommand(Command::new("group").subcommand(Command::new("inner")));
+        let contract: &[(&[&str], u32, &[OutputMode])] = &[(&["run"], 1, &[OutputMode::Passthrough])];
+        let cli = export(
+            command,
+            &Sources {
+                contract,
+                ..no_sources()
+            },
+        );
+
+        let run = find(&cli.root, &["run"]);
+        assert_eq!((run.version, run.output.len()), (1, 1));
+        assert_eq!(find(&cli.root, &["group"]).version, 0);
+    }
+
+    #[test]
+    fn bare_shell_exports_version_one_and_passthrough() {
+        let cli = export(ocx_command(), &Sources::ocx());
+        let shell = find(&cli.root, &["shell"]);
+        assert_eq!(shell.version, 1);
+        assert!(!shell.output.is_empty());
     }
 }

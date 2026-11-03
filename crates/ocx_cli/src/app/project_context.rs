@@ -324,20 +324,6 @@ pub async fn purge_unpinned(context: &crate::app::Context, previous: Option<&Pro
     );
 }
 
-/// The per-content pull set for entries given as `(group, pinned leaf)`: each tool's lazy mode
-/// resolved down the ladder, eager when any entry of its content is. Shared by `ocx pull` and
-/// [`materialize_lock`], so the two cannot disagree on what a deferred tool is.
-pub(crate) fn lazy_pull_set<'a>(
-    config: &ProjectConfig,
-    entries: impl IntoIterator<Item = (&'a str, ocx_oci::PinnedPackageRef)>,
-    cli: Option<ocx_project::lazy::LazyMode>,
-) -> Vec<(ocx_project::lazy::LazyMode, ocx_oci::PinnedPackageRef)> {
-    ocx_project::eager_per_content(entries.into_iter().map(|(group, pinned)| {
-        let mode = ocx_project::lazy_mode_for_tool(config, &pinned.clone().into(), Some(group), cli);
-        (mode, pinned)
-    }))
-}
-
 /// Pulls the entries of `lock` whose pin `previous` does not already hold, for `platform`, into the object store:
 /// a `never` tool in full, a deferred one prepared only (metadata and launchers). A no-op unless `eager`.
 ///
@@ -360,47 +346,14 @@ pub async fn materialize_lock(
     if !eager {
         return Ok(());
     }
-    let host = lock
-        .lenient_host_identifiers(Some(config), &platform)
-        .into_iter()
-        .filter(|(tool, _)| {
-            !previous.is_some_and(|previous| {
-                previous.tools.iter().any(|old| {
-                    old.group == tool.group
-                        && old.name == tool.name
-                        && ocx_project::locked_tool_content_equal(old, tool)
-                })
-            })
-        })
-        .map(|(tool, identifier)| identifier.map(|identifier| (tool.group.as_str(), identifier)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut eager_set: Vec<ocx_oci::PackageRef> = Vec::new();
-    let mut deferred: Vec<ocx_oci::PackageRef> = Vec::new();
-    for (mode, identifier) in lazy_pull_set(config, host, None) {
-        if mode == ocx_project::lazy::LazyMode::Never {
-            eager_set.push(identifier.into());
-        } else {
-            deferred.push(identifier.into());
-        }
-    }
-    context
+    let host = lock.changed_host_identifiers(config, previous, &platform)?;
+    let set = ocx_project::lazy_pull_set(config, host, None);
+    for advisory in context
         .manager()
-        .pull_all(&eager_set, platform.clone(), context.concurrency(), false)
-        .await?;
-    for identifier in deferred {
-        let prepared = context
-            .manager()
-            .prepare_lazy(&identifier, platform.clone())
-            .await
-            .map_err(|kind| {
-                ocx_package_manager::error::Error::ResolveFailed(vec![ocx_package_manager::error::PackageError::new(
-                    identifier.clone(),
-                    kind,
-                )])
-            })?;
-        for advisory in &prepared.advisories {
-            context.ui().warn(advisory.to_string());
-        }
+        .pull_or_prepare(&set, platform, context.concurrency())
+        .await?
+    {
+        context.ui().warn(advisory.to_string());
     }
     Ok(())
 }
@@ -436,10 +389,15 @@ pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> 
 ///
 /// # Errors
 ///
-/// Exit 64 ([`crate::error::UsageError`]) when a requested name matches
-/// nothing in the selected groups, or matches entries in two or more
-/// selected groups that resolve it differently -- narrow with `-g <group>`.
-pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> anyhow::Result<Vec<SelectedTool>> {
+/// A `binding_not_selected` refusal (exit 64) when a requested name matches
+/// nothing in `groups`; exit 64 ([`crate::error::UsageError`]) when it
+/// matches entries in two or more selected groups that resolve it differently
+/// -- narrow with `-g <group>`.
+pub(crate) fn filter_by_names(
+    selected: Vec<SelectedTool>,
+    groups: &[String],
+    names: &[String],
+) -> anyhow::Result<Vec<SelectedTool>> {
     if names.is_empty() {
         return Ok(selected);
     }
@@ -460,9 +418,11 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
         let hits = hits_by_binding.get(name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
         match hits {
             [] => {
-                return Err(
-                    crate::error::UsageError::new(format!("binding '{name}' not found in selected groups")).into(),
-                );
+                return Err(crate::app::CliRefusal::BindingNotSelected(format!(
+                    "binding '{name}' not found in the selected groups ({}); pass `-g` to select another group",
+                    groups.join(", ")
+                ))
+                .into());
             }
             [single] => out.push(selected[*single].clone()),
             // Reachable: selection keeps both conflicting entries so a name filter can narrow past them.
@@ -820,7 +780,7 @@ mod tests {
     #[test]
     fn filter_empty_names_returns_full_set() {
         let selected = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
-        let result = filter_by_names(selected.clone(), &[]).expect("empty names must succeed");
+        let result = filter_by_names(selected.clone(), &[], &[]).expect("empty names must succeed");
         assert_eq!(result.len(), selected.len());
         assert!(result.iter().any(|entry| entry.binding == "cmake"));
         assert!(result.iter().any(|entry| entry.binding == "ninja"));
@@ -830,10 +790,18 @@ mod tests {
     #[test]
     fn filter_unknown_name_errors() {
         let selected = vec![tool("cmake", 'a', "default")];
-        let error = filter_by_names(selected, &["does-not-exist".into()]).expect_err("unknown name must fail");
+        let error = filter_by_names(selected, &["default".into()], &["does-not-exist".into()])
+            .expect_err("unknown name must fail");
+        assert!(
+            matches!(
+                error.downcast_ref::<crate::app::CliRefusal>(),
+                Some(crate::app::CliRefusal::BindingNotSelected(_))
+            ),
+            "must be a BindingNotSelected refusal: {error:?}"
+        );
         let rendered = format!("{error:#}");
         assert!(
-            rendered.contains("binding 'does-not-exist' not found in selected groups"),
+            rendered.contains("binding 'does-not-exist' not found in the selected groups (default)"),
             "unexpected message: {rendered}"
         );
     }
@@ -844,7 +812,7 @@ mod tests {
     #[test]
     fn filter_ambiguous_name_errors_with_groups_listed() {
         let selected = vec![tool("tool", 'a', "ci"), tool("tool", 'b', "release")];
-        let error = filter_by_names(selected, &["tool".into()]).expect_err("ambiguous name must fail");
+        let error = filter_by_names(selected, &[], &["tool".into()]).expect_err("ambiguous name must fail");
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("binding 'tool' exists in multiple selected groups"),
@@ -858,7 +826,7 @@ mod tests {
     #[test]
     fn filter_unique_name_picks_single_entry() {
         let selected = vec![tool("cmake", 'a', "default"), tool("ninja", 'b', "default")];
-        let result = filter_by_names(selected, &["cmake".into()]).expect("ok");
+        let result = filter_by_names(selected, &[], &["cmake".into()]).expect("ok");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].binding, "cmake");
     }
@@ -872,7 +840,7 @@ mod tests {
             tool("c", 'c', "default"),
         ];
         let names: Vec<String> = vec!["b".into(), "a".into()];
-        let result = filter_by_names(selected, &names).expect("ok");
+        let result = filter_by_names(selected, &[], &names).expect("ok");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].binding, "b", "user-order: b must come first");
         assert_eq!(result[1].binding, "a", "user-order: a must come second");
@@ -883,7 +851,7 @@ mod tests {
     fn filter_duplicate_names_deduplicated_silently() {
         let selected = vec![tool("cmake", 'a', "default")];
         let names: Vec<String> = vec!["cmake".into(), "cmake".into()];
-        let result = filter_by_names(selected, &names).expect("dedup must succeed");
+        let result = filter_by_names(selected, &[], &names).expect("dedup must succeed");
         assert_eq!(result.len(), 1, "duplicate name must be silently deduped to one entry");
         assert_eq!(result[0].binding, "cmake");
     }
@@ -898,7 +866,8 @@ mod tests {
             tool("shellcheck", 'b', "lint"),
             tool("cmake", 'c', "ci"),
         ];
-        let result = filter_by_names(selected, &["cmake".into()]).expect("naming an unrelated binding must succeed");
+        let result =
+            filter_by_names(selected, &[], &["cmake".into()]).expect("naming an unrelated binding must succeed");
         ocx_project::check_duplicate_selection(&result).expect("the surviving set carries no conflict");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].binding, "cmake");

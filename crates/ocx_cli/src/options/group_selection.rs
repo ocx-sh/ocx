@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_project::{DEFAULT_GROUP, ProjectConfig, expand_all_keyword};
+
 /// The repeatable `-g` / `--group` scope selector, read through
 /// [`GroupSelection::names`].
 // Project-tier commands only: groups live in `ocx.toml`, so on an OCI-tier command the flag silently does nothing.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct GroupSelection {
-    /// Restrict the composition to the named group(s).
+    /// Restrict to the named group(s).
     ///
     /// Repeatable and comma-separated: `-g ci,lint -g release`. The reserved
     /// name `default` selects the top-level `[tools]` table. The reserved name
@@ -24,6 +26,26 @@ impl GroupSelection {
     /// The requested group names in `-g` order, unexpanded (`expand_all_keyword` expands `default`/`all`).
     pub fn names(&self) -> &[String] {
         &self.groups
+    }
+
+    /// The groups to act on: `-g` validated against `config`, `all` expanded, and an omitted `-g` read as `default`.
+    ///
+    /// # Errors
+    ///
+    /// Exit 64 for an unknown group name.
+    pub fn effective(&self, config: &ProjectConfig) -> anyhow::Result<Vec<String>> {
+        crate::app::project_context::ensure_groups_known(&self.groups, config)?;
+        Ok(expand_with_default(&self.groups, config))
+    }
+}
+
+/// [`expand_all_keyword`] with an empty selection read as the default group; unvalidated.
+pub(crate) fn expand_with_default(names: &[String], config: &ProjectConfig) -> Vec<String> {
+    let expanded = expand_all_keyword(names, config);
+    if expanded.is_empty() {
+        vec![DEFAULT_GROUP.to_owned()]
+    } else {
+        expanded
     }
 }
 

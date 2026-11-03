@@ -4462,3 +4462,28 @@ def test_exec_stack_keeps_the_active_parent_toolchain_and_puts_the_child_first(a
     replaced, replaced_carrier = child_view()
     assert str(child_bin) in replaced and str(parent_bin) not in replaced, f"without --stack the parent is replaced: {replaced}"
     assert replaced_carrier == "__OCX_ABSENT__"
+
+
+def test_exec_clean_stack_keeps_only_the_parent_toolchain(arena: Arena) -> None:
+    """EC-SCOPE-004 opt-out under ``--clean`` — the shell's own environment goes, the active parent project's stays."""
+    parent_bin = arena.ocx_home / "parent-tc" / "bin"
+    child_bin = arena.ocx_home / "child-tc" / "bin"
+    parent_bin.mkdir(parents=True)
+    child_bin.mkdir(parents=True)
+    parent = _locked_project(arena, "parent", f'PATH = {{ type = "path", value = "{parent_bin}" }}\n')
+    child = _locked_project(arena, "child", f'PATH = {{ type = "path", value = "{child_bin}" }}\n')
+    live = _activated_parent(arena, parent) | {"OCX_TEST_USER_VAR": "mine"}
+    sh = shutil.which("sh", path=live["PATH"])
+    assert sh, "fixture sanity: sh is on the live PATH"
+
+    result = subprocess.run(
+        [str(arena.ocx), "exec", "--clean", "--stack", "--", sh, "-c",
+         'printf "%s\\n%s" "$PATH" "${OCX_TEST_USER_VAR-__OCX_ABSENT__}"'],
+        capture_output=True, check=False, text=True, cwd=str(child), env=live,
+    )
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    path, user_var = result.stdout.split("\n", 1)
+    dirs = path.split(os.pathsep)
+    assert str(parent_bin) in dirs and str(child_bin) in dirs, f"both toolchains must be on PATH: {dirs}"
+    assert dirs.index(str(child_bin)) < dirs.index(str(parent_bin)), f"the child project must come first: {dirs}"
+    assert user_var == "__OCX_ABSENT__", "--clean still drops the shell's own variables"

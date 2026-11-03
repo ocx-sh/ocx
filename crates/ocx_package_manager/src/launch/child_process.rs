@@ -32,6 +32,21 @@ async fn stop_refused_child(child: &mut tokio::process::Child) {
     }
 }
 
+/// Wait for `child` while swallowing Ctrl-C on Windows.
+///
+/// Ctrl-C reaches every process on the console. With the default handler the parent dies first and
+/// orphans an interactive child (`ocx shell`); a registered handler replaces it, and is drained here.
+#[cfg(windows)]
+async fn wait_ignoring_ctrl_c(child: &mut tokio::process::Child) -> std::io::Result<ExitStatus> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    loop {
+        tokio::select! {
+            status = child.wait() => return status,
+            _ = ctrl_c.recv() => {}
+        }
+    }
+}
+
 /// Exit with the child's status, skipping the drop chain.
 #[cfg(not(unix))]
 #[inline(never)] // ensure the diverging path is not inlined away in tests
@@ -95,7 +110,7 @@ where
             return error;
         }
 
-        match child.wait().await {
+        match wait_ignoring_ctrl_c(&mut child).await {
             Ok(status) => propagate_exit_status(status),
             Err(source) => LaunchError::Spawn {
                 resolved: program.to_path_buf(),
@@ -146,7 +161,7 @@ where
         return Err(error);
     }
 
-    // On Unix, SIGINT/SIGTERM kill the child; elsewhere `kill_on_drop` plus the default Ctrl-C handler cover it.
+    // On Unix, SIGINT/SIGTERM kill the child. On Windows the parent ignores Ctrl-C and lets the child decide.
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -169,9 +184,9 @@ where
         Ok(status)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        child.wait().await.map_err(spawn_error)
+        wait_ignoring_ctrl_c(&mut child).await.map_err(spawn_error)
     }
 }
 

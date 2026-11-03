@@ -95,6 +95,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 import jsonschema
 import pytest
@@ -412,6 +413,40 @@ def test_exec_frame_emits_record(
         "the declaration digest is bare lowercase hex (format rule 1); got "
         f"{lock['declarationDigest']}"
     )
+
+
+def test_exec_with_and_stack_are_recorded_beside_the_bindings(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """A `--with` package is listed in `scope.with` and carries no binding; `scope.stack` echoes `--stack`."""
+    project = _project_with_tool(ocx, tmp_path, published_package)
+    extra_repo = f"t_{uuid4().hex[:8]}_recwith"
+    make_package(ocx, extra_repo, "1.0.0", tmp_path, cascade=False, bins=["extra"])
+    extra = f"{ocx.registry}/{extra_repo}:1.0.0"
+
+    runs = {}
+    for label, flags in (("plain", ()), ("stacked", ("--stack",))):
+        sink = _sink(tmp_path, f"with-{label}")
+        result = _run_in(
+            ocx, project, "exec", "--records-dir", str(sink), "--with", extra, *flags, "--", "hello"
+        )
+        assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+        runs[label] = _one_record(sink)
+
+    for label, record in runs.items():
+        assert record["scope"]["with"] == [extra], f"{label}: scope.with must echo --with as typed: {record['scope']}"
+        bound = {
+            entry["annotations"]["sh.ocx.binding"]
+            for entry in record["packages"]
+            if "sh.ocx.binding" in entry.get("annotations", {})
+        }
+        assert bound == {published_package.repo}, (
+            f"{label}: only the ocx.toml tool carries a binding, the `--with` package carries none: {bound}"
+        )
+        roots = {entry["name"] for entry in _entries_with_role(record, "root")}
+        assert {published_package.repo, extra_repo} <= roots, f"{label}: both roots are recorded: {roots}"
+    assert not runs["plain"]["scope"].get("stack", False), "`stack` is omitted when `--stack` is not given"
+    assert runs["stacked"]["scope"]["stack"] is True
 
 
 def test_package_exec_frame_emits_record(

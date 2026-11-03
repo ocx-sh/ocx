@@ -470,7 +470,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "env",
@@ -743,7 +743,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Add a package that is not in ocx.toml to the composed environment"
+            "help": "Add a package that `ocx.toml` does not pin to the composed environment"
           },
           {
             "id": "lazy_mode",
@@ -1708,7 +1708,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Restrict the composition to the named group(s)"
+                "help": "Restrict to the named group(s)"
               },
               {
                 "id": "env",
@@ -11474,7 +11474,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "platform",
@@ -11791,7 +11791,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "clean",
@@ -12009,7 +12009,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Add a package that is not in ocx.toml to the composed environment"
+            "help": "Add a package that `ocx.toml` does not pin to the composed environment"
           },
           {
             "id": "stack",
@@ -12190,7 +12190,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "clean",
@@ -12408,7 +12408,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Add a package that is not in ocx.toml to the composed environment"
+            "help": "Add a package that `ocx.toml` does not pin to the composed environment"
           },
           {
             "id": "stack",
@@ -12550,11 +12550,15 @@
         "path": [
           "shell"
         ],
-        "version": 0,
+        "version": 1,
         "summary": "Open your shell inside the project environment",
         "hidden": false,
         "external_subcommands": false,
-        "output": [],
+        "output": [
+          {
+            "type": "passthrough"
+          }
+        ],
         "args": [
           {
             "id": "groups",
@@ -12581,7 +12585,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "env",
@@ -12691,7 +12695,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Add a package that is not in ocx.toml to the composed environment"
+            "help": "Add a package that `ocx.toml` does not pin to the composed environment"
           },
           {
             "id": "stack",
@@ -12719,6 +12723,64 @@
             "trailing_var_arg": false,
             "stdin_secret": false,
             "help": "Layer this project onto the active environment instead of replacing it"
+          },
+          {
+            "id": "consent",
+            "long": "consent",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_consent"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Record a consent stamp (the default unless OCX_NO_CONSENT is set)"
+          },
+          {
+            "id": "no_consent",
+            "long": "no-consent",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "consent"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Run without consenting to this project's shell activation"
           }
         ],
         "groups": [],
@@ -13869,7 +13931,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Restrict the composition to the named group(s)"
+            "help": "Restrict to the named group(s)"
           },
           {
             "id": "platform",
@@ -14912,6 +14974,14 @@
       "value": "path",
       "visibility": "foreign",
       "summary": " The user's login shell.",
+      "secret": false,
+      "on_invalid": "default"
+    },
+    {
+      "name": "COMSPEC",
+      "value": "path",
+      "visibility": "foreign",
+      "summary": " Windows command interpreter; bare `ocx shell` runs it when the shell to open is `cmd`.",
       "secret": false,
       "on_invalid": "default"
     },

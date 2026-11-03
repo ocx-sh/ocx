@@ -190,6 +190,10 @@ OCX's hook prints nothing at shell startup. What can still reach [powerlevel10k]
 So a `.zshrc` that sources the ocx activation line before p10k's instant-prompt preamble puts that `precmd` ahead of p10k's own file-descriptor restore. Then p10k flags it the same way it flags [direnv, mise and nvm][p10k-instant-prompt]. Source the activation line after the instant-prompt preamble instead, and the ordering resolves the same way it already does for direnv and mise.
 :::
 
+:::caution[A tool in `ocx shell` is not the pinned one]
+The shell that `ocx shell` spawns reads its rc files (`.zshrc`, `.bashrc`, or a [mise][mise-security], [pyenv][pyenv] or [nvm][nvm] hook in them), and they can prepend their own directories to `PATH` after OCX composed the environment. Run the command with `ocx exec -- <cmd>` instead: it starts no shell and reads no rc file, so the composed `PATH` is the one the command sees.
+:::
+
 ## Error: the shell's ledger is out of sync \{#repair\}
 
 This issue occurs when a write landed inside the filesystem-timestamp granularity of OCX's change-detection window, or when the carrier itself looks corrupted.
@@ -215,6 +219,8 @@ Whether a shell has already registered its hook is read off the registered closu
 
 [mise-security]: https://mise.jdx.dev/
 [direnv]: https://direnv.net/
+[pyenv]: https://github.com/pyenv/pyenv
+[nvm]: https://github.com/nvm-sh/nvm
 [devcontainer-features]: https://containers.dev/implementors/features/
 [p10k]: https://github.com/romkatv/powerlevel10k
 [p10k-instant-prompt]: https://github.com/romkatv/powerlevel10k/issues/1023

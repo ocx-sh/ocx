@@ -1491,7 +1491,6 @@ const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "from_file_magic",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
-    "serde_ext",
     "with_level",
 ];
 

@@ -8,7 +8,8 @@ use futures::StreamExt;
 use ocx_package::upgrade_target::{SkipReason, newest_beyond_major, tracked_version, upgrade_target};
 use ocx_package::version::Version;
 use ocx_project::{
-    DEFAULT_GROUP, ProjectConfig, ProjectLock, ResolveLockOptions, resolve_lock_touched, retag_binding_in_memory,
+    DEFAULT_GROUP, ProjectConfig, ProjectLock, ResolveLockOptions, expand_touched, resolve_lock_touched,
+    retag_binding_in_memory,
 };
 
 use crate::api::data::update::UpdateReport;
@@ -59,8 +60,9 @@ pub struct Upgrade {
 
     /// Binding names to upgrade; leave every other binding as declared.
     ///
-    /// Each name is the `ocx.toml` binding key and is upgraded in every group
-    /// it appears in (narrow with `-g`). An unknown name exits 64.
+    /// Each name is the `ocx.toml` binding key and is upgraded in the default
+    /// group, or in every group `-g` names (`-g all` for every group). An
+    /// unknown name exits 64.
     #[arg(num_args = 0..)]
     pub names: Vec<String>,
 
@@ -187,6 +189,8 @@ impl Upgrade {
             .iter()
             .map(|row| (row.group.clone(), row.name.clone()))
             .collect();
+        // A retag moves every `{ from = "default" }` follower of the binding with it.
+        let retagged = expand_touched(staged.config(), Some(&previous), &retagged);
         let new_lock = resolve_lock_touched(
             staged.config(),
             guard.config(),

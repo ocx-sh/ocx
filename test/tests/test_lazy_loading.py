@@ -1549,6 +1549,27 @@ def test_lock_with_lazy_mode_always_leaves_the_content_in_the_registry(
     assert not _is_materialized(ocx, project, pkg), "a deferred tool must not be fully pulled by `ocx lock`"
 
 
+def test_lock_without_lazy_mode_materialises_the_content(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """Positive control for the test above: the same project without `lazy-mode` is fully pulled.
+
+    Without it, "not materialised after `ocx lock`" would hold even if `ocx lock`
+    never pulled at all.
+    """
+    pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    write_ocx_toml(project, f'[tools]\nhello = "{pkg.fq}"\n')
+
+    result = _run(ocx, project, "lock")
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    assert _is_materialized(ocx, project, pkg), "an eager tool must be fully pulled by `ocx lock`"
+
+
 def test_lock_no_pull_names_the_tools_it_could_not_render_and_renders_the_rest(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

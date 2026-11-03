@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_shell::shell::coexistence;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
@@ -81,12 +80,6 @@ pub struct SelfActivate {
 impl SelfActivate {
     /// Called from `app.rs` before `Context::try_init`, which a shell start and a stat-only prompt must not pay.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
-        // Under `ocx exec` the composed environment is the contract: emit nothing for the PATH, the global set or the hook.
-        // The login arm yields whenever the marker is present; the hook only in the project the marker names, so a
-        // long-lived tree started under exec (tmux, an IDE) still switches when it `cd`s into another project.
-        if yields_to_exec() && (!self.reconcile || self.cwd_project_is_exec_scope(options).await) {
-            return self.run_yielded(options).await;
-        }
         if self.reconcile {
             // Always exit 0 so the prompt renders; failures log at debug, and the emitted body discards stderr anyway.
             let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
@@ -99,23 +92,6 @@ impl SelfActivate {
             return Ok(ExitCode::SUCCESS);
         }
         self.run_startup(options).await
-    }
-
-    /// The yielded startup path: completions only, since they touch neither `PATH` nor the environment.
-    async fn run_yielded(&self, options: &ContextOptions) -> anyhow::Result<ExitCode> {
-        if self.reconcile {
-            return Ok(ExitCode::SUCCESS);
-        }
-        let shell = self.target_shell()?;
-        let (shell_config, _) = load_shell_config(options).await;
-        let interactive = self.interactive.resolve_probed();
-        let load_completions = self
-            .completion
-            .enabled(interactive, shell_config.as_ref().and_then(|shell| shell.completions));
-        if load_completions {
-            emit(generate_completion_inline(shell));
-        }
-        Ok(ExitCode::SUCCESS)
     }
 
     /// Resolve the target shell: absent and bare `--shell` both autodetect, unlike `ocx env`'s report path.
@@ -174,6 +150,7 @@ impl SelfActivate {
             bin_path: &bin_path,
             toolchain_bin: &toolchain_bin,
             activate,
+            apply_env: !yields_to_exec(),
             completion: completion.as_deref(),
             hook_binary: hook_enabled.then(|| ocx_binary_path(&bin_path)).as_deref(),
             wrapper_binary: hook_enabled
@@ -187,25 +164,11 @@ impl SelfActivate {
 }
 
 /// Whether an enclosing `ocx exec` composed this process's environment.
+///
+/// The login stream then changes no environment but still registers the hook, so a `cd` out of the
+/// exec project reconciles; inside it the hook emits nothing.
 fn yields_to_exec() -> bool {
     ocx_env::__OCX_EXEC_SCOPE.get_raw().is_some()
-}
-
-/// The `ocx exec` observation when the exec marker names `project_dir`; the marker is canonicalised for the compare.
-pub(crate) async fn exec_scope_observation(project_dir: &Path) -> Option<coexistence::Observation> {
-    let marker = ocx_env::__OCX_EXEC_SCOPE.get_raw().and_then(|v| v.into_string().ok())?;
-    let canonical = tokio::fs::canonicalize(&marker).await.ok()?;
-    coexistence::exec_scope(&marker, &canonical, project_dir)
-}
-
-impl SelfActivate {
-    /// Whether the project the cwd walk would activate is the one the exec marker names.
-    async fn cwd_project_is_exec_scope(&self, options: &ContextOptions) -> bool {
-        match resolve_walk(options, &Ledger::empty()).await {
-            Walk::Resolved(project) => exec_scope_observation(&project.dir).await.is_some(),
-            Walk::Determinate | Walk::Indeterminate => false,
-        }
-    }
 }
 
 /// The per-prompt path: it never consults [`options::Hook::enabled`], and its fast path reads no config.
@@ -236,6 +199,22 @@ impl SelfActivate {
             Walk::Resolved(project) => Some(*project),
             Walk::Determinate | Walk::Indeterminate => None,
         };
+        // Exec is hermetic: while the cwd stays in the exec project nothing applies, not even the global toolchain.
+        // A `cd` to another project falls through and reconciles it.
+        if let Some(project) = project.as_ref()
+            && yields_to_exec()
+            && activation::ExecScope::from_env()
+                .await
+                .is_some_and(|scope| scope.observe(&project.dir).is_some())
+        {
+            // Back from another project: its recorded entries would otherwise shadow the exec project's tools.
+            if ledger.scopes.project.is_some()
+                || ledger.scopes.global.as_ref().is_some_and(|applied| !applied.is_empty())
+            {
+                return undo_recorded_scopes(shell, &ledger, color_config, file_structure).await;
+            }
+            return Ok(());
+        }
         let watch = reconcile::watch_paths(
             file_structure,
             project.as_ref().map(|project| project.config_path.as_path()),
@@ -340,6 +319,39 @@ impl SelfActivate {
         emit(hook::checkpoint(shell));
         Ok(())
     }
+}
+
+/// Revert everything `ledger` recorded and apply nothing, then advance the stamp.
+async fn undo_recorded_scopes(
+    shell: Shell,
+    ledger: &Ledger,
+    color_config: ColorModeConfig,
+    file_structure: &FileStructure,
+) -> anyhow::Result<()> {
+    let outcome = Outcome {
+        session: activation::SessionPath::new(file_structure),
+        global: Vec::new(),
+        project: Vec::new(),
+        owned_home: None,
+        slot: None,
+        resolved: false,
+        inert: false,
+        messages: Vec::new(),
+    };
+    let owned_root = file_structure.root().to_path_buf();
+    let previous = ledger.clone();
+    let (plan, outcome, current) = tokio::task::spawn_blocking(move || {
+        let current = Env::new();
+        let plan = activation::plan_for(&previous, &outcome, &[owned_root.as_path()], &current);
+        (plan, outcome, current)
+    })
+    .await?;
+    let theme = Theme::new(color_config.relayed);
+    for line in reconcile_lines(shell, ledger, &ledger.fp, None, &outcome, &plan, &current, &theme) {
+        println!("{line}");
+    }
+    emit(hook::checkpoint(shell));
+    Ok(())
 }
 
 /// What a prompt emits when the consenting project's lock is absent or stale: no plan, so the scope is retained.
@@ -659,6 +671,11 @@ struct LoginStream<'a> {
     /// env eval; neither `PATH` prepend consults it.
     activate: ActivateMode,
 
+    /// Whether the stream changes the environment (the `PATH` prepends and the global env eval).
+    ///
+    /// `false` under an enclosing `ocx exec`, whose composed environment is the contract.
+    apply_env: bool,
+
     /// The completion script to emit inline, or `None` when disabled or unsupported.
     completion: Option<&'a str>,
 
@@ -691,6 +708,7 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
         bin_path,
         toolchain_bin,
         activate,
+        apply_env,
         completion,
         hook_binary,
         wrapper_binary,
@@ -707,12 +725,14 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
     // ── PATH prepend ─────────────────────────────────────────────────────────
     // Absolute paths with no `$VAR`, so `export_path` is safe; install bin first so a pinned global toolchain wins.
     // Both in every mode: the session registration `ocx self setup` writes may be absent (container, no systemd, `sh`).
-    lines.extend(path_prepend_line(shell, bin_path));
-    lines.extend(path_prepend_line(shell, toolchain_bin));
+    if apply_env {
+        lines.extend(path_prepend_line(shell, bin_path));
+        lines.extend(path_prepend_line(shell, toolchain_bin));
+    }
 
     // ── Global toolchain env ─────────────────────────────────────────────────
     // No `OCX_ACTIVATED` guard: re-sourcing is idempotent, and an exported guard would leak into children.
-    if activate == ActivateMode::Env {
+    if apply_env && activate == ActivateMode::Env {
         lines.push(format_global_env_eval(shell, &ocx_binary_path(bin_path)));
     }
 
@@ -1237,7 +1257,50 @@ mod tests {
 
 #[cfg(test)]
 mod exec_yield_tests {
-    use super::yields_to_exec;
+    use super::{ActivateMode, LoginStream, activation_lines, yields_to_exec};
+    use ocx_shell::shell::Shell;
+    use std::path::PathBuf;
+
+    /// Under an enclosing `ocx exec` the login stream registers the hook (so a `cd` out reconciles)
+    /// but changes no environment.
+    #[test]
+    fn exec_owned_login_stream_registers_the_hook_and_changes_no_environment() {
+        let bin = PathBuf::from("/tmp/ocx_home/bin");
+        let toolchain = PathBuf::from("/tmp/ocx_home/toolchain/active/bin");
+        let hook_binary = bin.join("ocx");
+        let lines = |apply_env| {
+            activation_lines(&LoginStream {
+                shell: Shell::Bash,
+                bin_path: &bin,
+                toolchain_bin: &toolchain,
+                activate: ActivateMode::Env,
+                apply_env,
+                completion: None,
+                hook_binary: Some(&hook_binary),
+                wrapper_binary: None,
+                watch: &[],
+                seed: None,
+            })
+            .join("\n")
+        };
+        let owned = lines(false);
+        assert!(
+            !owned.contains("toolchain/active/bin"),
+            "exec-owned stream must not touch PATH; got: {owned}"
+        );
+        assert!(
+            !owned.contains("--global env"),
+            "exec-owned stream must not eval the global env; got: {owned}"
+        );
+        assert!(
+            owned.contains("--reconcile"),
+            "the hook must still be registered; got: {owned}"
+        );
+        assert!(
+            lines(true).contains("toolchain/active/bin"),
+            "control: the applying stream does prepend PATH"
+        );
+    }
 
     /// Refs #668 - the marker `ocx exec` sets is what makes activation step aside.
     #[test]
@@ -1372,6 +1435,7 @@ mod reconcile_tests {
             bin_path: &bin,
             toolchain_bin: &toolchain_bin_dir(),
             activate,
+            apply_env: true,
             completion: super::generate_completion_inline(shell).as_deref(),
             hook_binary: binary.as_deref(),
             wrapper_binary: None,
@@ -2791,6 +2855,7 @@ mod bare_ocx_tests {
                 bin_path: &bin_dir(),
                 toolchain_bin: &toolchain_bin_dir(),
                 activate: ActivateMode::Env,
+                apply_env: true,
                 completion: generate_completion_inline(shell).as_deref(),
                 hook_binary: Some(&binary),
                 wrapper_binary: None,
@@ -3279,6 +3344,7 @@ mod ordering_tests {
             bin_path: &bin,
             toolchain_bin: &PathBuf::from("/tmp/ocx_home/toolchain/bin"),
             activate: super::ActivateMode::Env,
+            apply_env: true,
             completion: None,
             hook_binary: Some(&binary),
             wrapper_binary: None,
@@ -3854,6 +3920,7 @@ mod global_activate_tests {
             bin_path: &bin_dir(),
             toolchain_bin: &toolchain_bin_dir(),
             activate,
+            apply_env: true,
             completion: None,
             hook_binary: Some(&super::ocx_binary_path(&bin_dir())),
             wrapper_binary: None,

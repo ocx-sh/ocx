@@ -73,6 +73,11 @@ pub struct RenderRequest<'a> {
 
     /// Report the delta and write nothing — no heal, no case-fold probe, no `projects/` registration.
     pub dry_run: bool,
+
+    /// Default-group tools whose closure could not be walked, so [`Self::surface`] omits them. Their
+    /// launcher names are unknown, so `bin/` is not pruned while any exist: pruning would delete the
+    /// launchers an earlier render wrote for tools that are still locked.
+    pub unrendered: &'a [String],
 }
 
 /// What one render did to one artifact.
@@ -148,7 +153,8 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// The first failing root's walk error: a partial surface renders a quietly incomplete `bin/`.
+    /// The first failing root's walk error. A caller that renders on a partial surface (offline) must
+    /// say so through [`RenderRequest::unrendered`], or the render treats the missing tools as gone.
     pub async fn toolchain_surface(
         &self,
         roots: &[ocx_oci::PackageRef],
@@ -610,9 +616,18 @@ async fn reconcile_bin(
         }
     }
 
-    // The prune half; a non-UTF-8 name is neither reported nor removed.
+    // The prune half; a non-UTF-8 name is neither reported nor removed. Withheld while a tool is
+    // unwalked: its launchers are not in `expected` yet are still wanted, so they are stamped as
+    // landed instead (an unnamed on-disk file reads as a mismatch and turns activation inert).
+    // ponytail: an offline partial render keeps every unexpected launcher, including those of
+    // tools removed from the lock, until the next online render.
+    let withheld = !request.unrendered.is_empty();
     for name in read_dir_utf8_names(&bin).await {
         if is_expected(&expected, &name, case_insensitive) {
+            continue;
+        }
+        if withheld {
+            landed.insert(name);
             continue;
         }
         let artifact = RenderedArtifact::Trampoline(name);
@@ -2313,6 +2328,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2359,6 +2375,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2405,6 +2422,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2445,6 +2463,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2492,6 +2511,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2535,6 +2555,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2592,6 +2613,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2653,6 +2675,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2696,6 +2719,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2750,6 +2774,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2808,6 +2833,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2854,6 +2880,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2882,6 +2909,54 @@ mod tests {
         );
     }
 
+    /// An unwalked tool withholds the prune: the orphan survives and the stamp still names it,
+    /// so the activation gate keeps matching (the `&[]` control above prunes the same orphan).
+    #[tokio::test]
+    async fn a_withheld_prune_keeps_the_orphan_and_stamps_it() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        let bin = tree.home.shell_bin(DEFAULT_SHELL);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("gone"), b"#!/bin/sh\n").unwrap();
+
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
+        let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
+        let scope = tree.scope();
+        let lock = lock_of(vec![tool]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        let unrendered = vec!["ns/other".to_string()];
+        let report = render_with(
+            &tree.file_structure,
+            RenderRequest {
+                unrendered: &unrendered,
+                home: &tree.home,
+                scope: &scope,
+                lock: &lock,
+                surface: &surface,
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds");
+
+        assert!(bin.join("gone").exists(), "the withheld prune keeps the orphan");
+        assert!(
+            !report.items.iter().any(|item| item.outcome == RenderOutcome::Pruned),
+            "nothing is pruned: {report:?}"
+        );
+        let stamp = tree.stamp().expect("the stamp exists");
+        assert!(
+            crate::activation::bin_stamp_matches(&bin, &stamp).await,
+            "the stamp names the retained launcher: {stamp:?}"
+        );
+    }
+
     /// C-044, case 14 — an orphan **link** (its entry left the lock) takes its
     /// trampoline with it: both halves are pruned in one render.
     ///
@@ -2907,6 +2982,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -2956,6 +3032,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3009,6 +3086,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3066,6 +3144,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3115,6 +3194,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3189,6 +3269,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3297,6 +3378,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3340,6 +3422,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3383,6 +3466,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3436,6 +3520,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3488,6 +3573,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3542,6 +3628,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3564,6 +3651,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &relocated,
                 scope: &scope,
                 lock: &lock,
@@ -3787,6 +3875,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3833,6 +3922,7 @@ mod tests {
         let result = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -3936,6 +4026,7 @@ mod tests {
         let result = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4000,6 +4091,7 @@ mod tests {
         let parameters = render_lock_parameters(
             &tree.file_structure,
             &RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4030,6 +4122,7 @@ mod tests {
             async {
                 let outcome = manager
                     .render_toolchain(RenderRequest {
+                        unrendered: &[],
                         home: &tree.home,
                         scope: &scope,
                         lock: &lock,
@@ -4126,6 +4219,7 @@ mod tests {
         let parameters = render_lock_parameters(
             &tree.file_structure,
             &RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4143,6 +4237,7 @@ mod tests {
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4270,6 +4365,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4356,6 +4452,7 @@ mod tests {
             render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home,
                     scope: &scope,
                     lock: &lock,
@@ -4409,6 +4506,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4428,6 +4526,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4491,6 +4590,7 @@ mod tests {
             render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
                     lock: &lock,
@@ -4549,6 +4649,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4595,6 +4696,7 @@ mod tests {
             render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home,
                     scope: &scope,
                     lock: &lock,
@@ -4642,6 +4744,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4695,6 +4798,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4774,6 +4878,7 @@ mod tests {
         let result = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4812,6 +4917,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4864,6 +4970,7 @@ mod tests {
         let first = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4884,6 +4991,7 @@ mod tests {
         let second = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4935,6 +5043,7 @@ mod tests {
         for _ in 0..1 {
             manager
                 .render_toolchain(RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
                     lock: &lock,
@@ -4951,6 +5060,7 @@ mod tests {
 
         manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -4994,6 +5104,7 @@ mod tests {
         let result = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5042,6 +5153,7 @@ mod tests {
         let result = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5098,6 +5210,7 @@ mod tests {
         let result = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5169,6 +5282,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5241,6 +5355,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5356,6 +5471,7 @@ mod tests {
         let platform = platform();
         tree.manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5398,6 +5514,7 @@ mod tests {
         assert!(!tree.home.root().exists(), "precondition: this is a first-ever render");
         tree.manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -5468,6 +5585,7 @@ mod tests {
         let project_scope = tree.scope();
         manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &project_scope,
                 lock: &lock,
@@ -5489,6 +5607,7 @@ mod tests {
         let global_home = tree.file_structure.toolchain.home().clone();
         manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &global_home,
                 scope: &RenderStampScope::Global,
                 lock: &lock,
@@ -5816,6 +5935,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6039,6 +6159,7 @@ mod tests {
         render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6061,6 +6182,7 @@ mod tests {
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6114,6 +6236,7 @@ mod tests {
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6160,6 +6283,7 @@ mod tests {
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6207,6 +6331,7 @@ mod tests {
 
         let predicted = manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6220,6 +6345,7 @@ mod tests {
             .expect("the dry run succeeds");
         let applied = manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6270,6 +6396,7 @@ mod tests {
 
         manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6286,6 +6413,7 @@ mod tests {
 
         let report = manager
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6614,6 +6742,7 @@ mod tests {
             let report = render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
                     lock: &lock,
@@ -6678,6 +6807,7 @@ mod tests {
             let report = render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
                     lock: &lock,
@@ -6743,6 +6873,7 @@ mod tests {
         let platform = platform();
         let manager = tree.manager();
         let request = || RenderRequest {
+            unrendered: &[],
             home: &tree.home,
             scope: &scope,
             lock: &lock,
@@ -6888,6 +7019,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -6947,6 +7079,7 @@ mod tests {
         // `shells/<shell>/` under the code that chooses their modes.
         tree.manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -7166,6 +7299,7 @@ mod tests {
         let report = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -7194,6 +7328,7 @@ mod tests {
         let report = honest
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &honest.home,
                 scope: &scope,
                 lock: &lock,
@@ -7469,6 +7604,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -7524,6 +7660,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -7590,6 +7727,7 @@ mod tests {
             let report = render_with(
                 &tree.file_structure,
                 RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &scope,
                     lock: &lock,
@@ -7669,6 +7807,7 @@ mod tests {
             let report = tree
                 .manager()
                 .render_toolchain(RenderRequest {
+                    unrendered: &[],
                     home: &tree.home,
                     scope: &tree.scope(),
                     lock: &lock,
@@ -7799,6 +7938,7 @@ mod tests {
         let report = render_with(
             &tree.file_structure,
             RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -8010,6 +8150,7 @@ mod tests {
         let outcome = tree
             .manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &tree.scope(),
                 lock: &lock,
@@ -8047,6 +8188,7 @@ mod tests {
         let platform = platform();
         tree.manager()
             .render_toolchain(RenderRequest {
+                unrendered: &[],
                 home: &tree.home,
                 scope: &tree.scope(),
                 lock: &lock,

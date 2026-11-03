@@ -6,7 +6,7 @@
 **Date:** 2026-10-25
 **Deciders:** Michael Herwig (owner); architect draft, round-1 fix pass
 **Beads Issue:** N/A — related [ocx-sh/ocx#199](https://github.com/ocx-sh/ocx/issues/199), [ocx-sh/ocx#102](https://github.com/ocx-sh/ocx/issues/102), [ocx-sh/ocx#108](https://github.com/ocx-sh/ocx/issues/108), [ocx-sh/ocx#109](https://github.com/ocx-sh/ocx/issues/109), [ocx-sh/ocx#403](https://github.com/ocx-sh/ocx/issues/403), [ocx-sh/ocx-mirror#7](https://github.com/ocx-sh/ocx-mirror/issues/7)
-**Related PRD:** `.agents/discussions/release-signing-trust-default.md` (handed off to architect, 2026-10-25)
+**Related PRD:** `prd_release_signing_trust_default.md` (handed off to architect, 2026-10-25)
 **Tech Strategy Alignment:**
 - [x] GitHub Actions + OIDC, Rust/Tokio; `tough` is already in `Cargo.lock` (0.22.0, line 7150) — a direct dependency, no new crate
 - [ ] No deviation — an online key in a cloud KMS deviates from "Secrets: GitHub Secrets" (Q1); the environment-secret fallback does not
@@ -21,9 +21,9 @@ Citation keys:
 **[FW]** `research_publisher_trust_frameworks.md` ·
 **[OCI]** `research_publisher_trust_oci_policy.md` ·
 **[GAP]** `research_publisher_trust_gapcheck.md` ·
-**[MAP]** `discover_publisher_trust_architecture_map.md` (all `.claude/artifacts/`) ·
-**[SSI]** `.agents/research/research_stable_signer_identity.md` ·
-**[TRI]** `.agents/research/review_publisher_trust_round1_triage.md`.
+**[MAP]** `discover_publisher_trust_architecture_map.md` ·
+**[SSI]** `research_stable_signer_identity.md` ·
+**[TRI]** `research_publisher_trust_round1_triage.md` (all `.claude/artifacts/`).
 Every mechanism names a production adopter, or is labelled **NOVEL** or **variant** in [Labels](#labels).
 
 ## Context
@@ -173,7 +173,7 @@ B as drafted, plus:
 - Rekor monitoring of the index identity as an S2 gate (A19);
 - the compiled-in identity labelled rejected design #1 at infrastructure scope, Homebrew as precedent.
 
-Every other decision below holds unchanged.
+Under this fallback, D1 (TUF repository), D2 (embedded `root.json`), D3 (`tough` client and datastore) and the TUF-specific parts of D4 (TUF refresh, the update lock through root commit) are **replaced** by the bullets above: the catalog is signed keylessly, and the trust anchor is a compiled-in identity, not a root. D4's placement rule survives, because it does not depend on the metadata format: verify only on the remote-to-local write path, through one seam, with committed resolves, `--offline`, `--frozen` and `ocx.lock` making no check. D5 (levels), D6 (`github_actions` signer kind), D7 (`publishers` and the G-21 ingest gate), D8 (sign in the run that pushed) and D10 (rollout, external watchdog) survive unchanged, since every option keeps the ingest gate and the signer kind. D9 survives except that `index_trust_root` names an operator-supplied signer identity instead of a TUF root. The threat model, the rotation table and the offline semantics are written for C1; under the fallback, the rows about root keys, the online key and TUF metadata errors are replaced by the signing-identity and freshness rules above.
 
 ### Decision summary
 
@@ -269,6 +269,8 @@ Rules:
 - **Backfill:** a separate `backfill-sign.yml` (dispatch, environment with a required reviewer). Subjects come from release records, using the last merged image-index digest per multi-platform push, never registry listings. The workflow is deleted after the run. Its SAN never enters `publishers` (old rows are grandfathered); operators may opt in via `[[trust.policy]]`.
 
 ### Wire and persisted changes
+
+This table describes the chosen option, C1. Under the fallback, the `/tuf/` rows and the `index-tuf` datastore row do not exist and are replaced by a signature bundle beside `c/index.json`, whose location the fallback does not yet specify; the other rows hold.
 
 | Surface | Change | Read-path back-compat | Contract ledger |
 |---|---|---|---|

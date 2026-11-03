@@ -14,10 +14,7 @@ use ocx_package::metadata::env::entry::Entry;
 use ocx_package_manager::composer::{ComposeOmission, ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{PackageBinding, RecordInputs, Scope};
-use ocx_project::{
-    DEFAULT_GROUP, Origin, check_duplicate_selection, expand_all_keyword, lazy_mode_for_tool, resolve_selected_tools,
-    select_tool_set,
-};
+use ocx_project::{Origin, check_duplicate_selection, lazy_mode_for_tool, resolve_selected_tools, select_tool_set};
 
 use crate::app::CliRefusal;
 use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
@@ -27,12 +24,11 @@ use ocx_shell::shell::reconcile;
 
 /// Run a command with the composed environment from the project toolchain.
 ///
-/// Loads the nearest `ocx.toml` and its `ocx.lock`, selects the tool bindings
-/// in the requested groups, composes their environment, and execs `ARGV` with
-/// it. `--` is mandatory: before it is a binding name filter, after it the
-/// command and arguments, forwarded unchanged. Composition order is the group
-/// selection order (`-g` flags after `all` expansion, deduplicated), then
-/// alphabetical by binding name within each group (lock-file order).
+/// Composes the selected groups' bindings from `ocx.toml` + `ocx.lock` in group
+/// order, then binding name, and execs `ARGV` (after the mandatory `--`) with it.
+/// `--stack` keeps the environment an activated parent project put on the shell;
+/// `--with` packages layer after the project's tools and override a project tool
+/// of the same repository.
 #[derive(Parser, Clone)]
 pub struct ToolchainExec {
     #[clap(flatten)]
@@ -40,6 +36,9 @@ pub struct ToolchainExec {
 
     /// Start with a clean environment containing only the package
     /// variables, instead of inheriting the current shell environment.
+    ///
+    /// With `--stack`, the toolchain an activated parent project put on the
+    /// shell is kept as well.
     #[arg(long = "clean", default_value_t = false)]
     pub clean: bool,
 
@@ -124,14 +123,8 @@ impl ToolchainExec {
             .await
             .map_err(|error| attribute_to_selected_project(context.project_path(), error))?;
 
-        crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
-
-        // ── Phase C: `all` expansion + default scope ───────────────────────
-
-        let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
-        if expanded.is_empty() {
-            expanded = vec![DEFAULT_GROUP.to_owned()];
-        }
+        // ── Phase C: validation, `all` expansion + default scope ──────────
+        let expanded = self.groups.effective(&ctx.config)?;
 
         // ── Phase D: resolution-free selection ────────────────────────────
         // Resolution-free, so an unnamed sibling (no host leaf, a group collision) cannot abort a narrowly-named run.
@@ -140,7 +133,10 @@ impl ToolchainExec {
 
         // ── Phase E: NAME filter, then duplicate validation ───────────────
         // Order is load-bearing: the duplicate check must run over the narrowed set only.
-        let filtered = filter_by_names(selected, &self.names)?;
+        let mut filtered = filter_by_names(selected, &expanded, &self.names)?;
+        // After the name filter (a named, replaced binding is still a valid name), before the duplicate check
+        // and host-leaf resolution: a replaced binding must not fail either.
+        options::With::drop_overridden(&with_packages, &mut filtered);
         check_duplicate_selection(&filtered)?;
 
         // ── Phase F: resolve host leaves (named subset) + install ─────────
@@ -217,12 +213,11 @@ impl ToolchainExec {
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
-        let mut process_env = if self.clean {
-            env::Env::clean()
-        } else if self.stack.enabled() {
-            reconcile::stacked_env()
-        } else {
-            reconcile::inherited_env()
+        let mut process_env = match (self.clean, self.stack.enabled()) {
+            (true, true) => reconcile::stacked_clean_env(),
+            (true, false) => env::Env::clean(),
+            (false, true) => reconcile::stacked_env(),
+            (false, false) => reconcile::inherited_env(),
         };
         let mut forwarded_config = context.config_view().clone();
         if let Some(patches) = forwarded_config.patches.as_mut() {
@@ -249,7 +244,8 @@ impl ToolchainExec {
         // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
-        let bindings = project_bindings(&resolved, &omitted, &with_packages, &install_infos);
+        let root_identifiers: Vec<_> = install_infos.iter().map(|info| info.identifier().clone()).collect();
+        let bindings = project_bindings(&resolved, &omitted, &with_packages, &root_identifiers);
 
         let (command, _) = self
             .argv
@@ -290,6 +286,7 @@ impl ToolchainExec {
                     groups: expanded,
                     bindings,
                     with: with_packages,
+                    stack: self.stack.enabled(),
                 },
             },
             &records,
@@ -308,7 +305,7 @@ fn project_bindings(
     resolved: &[ocx_project::ResolvedTool],
     omitted: &[ComposeOmission],
     with_packages: &[ocx_oci::PackageRef],
-    install_infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
+    roots: &[ocx_oci::PinnedPackageRef],
 ) -> Vec<PackageBinding> {
     let surviving_with = with_packages
         .iter()
@@ -317,12 +314,12 @@ fn project_bindings(
     resolved
         .iter()
         .filter(|tool| !omitted.iter().any(|omission| omission.identifier == tool.identifier))
-        .zip(install_infos.iter().skip(surviving_with))
-        .filter_map(|(tool, info)| match &tool.origin {
+        .zip(roots.iter().skip(surviving_with))
+        .filter_map(|(tool, root)| match &tool.origin {
             Origin::Group(group) => Some(PackageBinding {
                 binding: tool.binding.clone(),
                 group: group.clone(),
-                package: info.identifier().clone(),
+                package: root.clone(),
             }),
             Origin::Explicit => None,
         })
@@ -488,7 +485,7 @@ mod tests {
 
         // names = ["cmake"] → resolve only cmake → Ok.
         let selected = select_tool_set(&config, Some(&lock), &groups, &[]).expect("select ok");
-        let named = filter_by_names(selected, &["cmake".to_owned()]).expect("filter ok");
+        let named = filter_by_names(selected, &[], &["cmake".to_owned()]).expect("filter ok");
         assert!(
             resolve_selected_tools(&named, &host).is_ok(),
             "named subset (cmake) must resolve on linux host"
@@ -496,11 +493,75 @@ mod tests {
 
         // names = [] (whole group) → resolve every tool → Err (winonly NoHostLeaf).
         let selected_all = select_tool_set(&config, Some(&lock), &groups, &[]).expect("select ok");
-        let unnamed = filter_by_names(selected_all, &[]).expect("filter ok");
+        let unnamed = filter_by_names(selected_all, &[], &[]).expect("filter ok");
         assert!(
             resolve_selected_tools(&unnamed, &host).is_err(),
             "unnamed whole-group run must still surface the windows-only sibling's NoHostLeaf"
         );
+    }
+
+    // ── project_bindings (index zip once omitted requests are set aside) ─────────
+
+    fn pinned(repository: &str, hex_char: char) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::pin(
+            &ocx_oci::PackageRef::new_registry(repository, "ocx.sh"),
+            Digest::Sha256(sha(hex_char)),
+        )
+    }
+
+    fn tool(binding: &str, group: &str) -> ocx_project::ResolvedTool {
+        ocx_project::ResolvedTool {
+            binding: binding.to_owned(),
+            identifier: ocx_oci::PackageRef::new_registry(binding, "ocx.sh").clone_with_tag("1"),
+            origin: Origin::Group(group.to_owned()),
+        }
+    }
+
+    fn omission(repository: &str) -> ComposeOmission {
+        ComposeOmission {
+            identifier: ocx_oci::PackageRef::new_registry(repository, "ocx.sh").clone_with_tag("1"),
+            reason: ocx_package_manager::error::PackageErrorKind::NotFound,
+        }
+    }
+
+    fn bound(bindings: &[PackageBinding]) -> Vec<(&str, &str)> {
+        bindings
+            .iter()
+            .map(|binding| (binding.binding.as_str(), binding.package.repository()))
+            .collect()
+    }
+
+    /// `--with` roots lead the composed roots; each project tool must pair with its own root, not a neighbour's.
+    #[test]
+    fn project_bindings_pair_each_tool_with_its_own_root() {
+        let resolved = [tool("cmake", "default"), tool("ninja", "ci")];
+        let with = [ocx_oci::PackageRef::new_registry("extra", "ocx.sh").clone_with_tag("1")];
+        let roots = [pinned("extra", '1'), pinned("cmake", '2'), pinned("ninja", '3')];
+
+        let bindings = project_bindings(&resolved, &[], &with, &roots);
+
+        assert_eq!(bound(&bindings), [("cmake", "cmake"), ("ninja", "ninja")]);
+        assert_eq!(bindings[1].group, "ci");
+    }
+
+    /// An omitted `--with` package shifts the leading roots by one, an omitted project tool drops out of the zip.
+    #[test]
+    fn project_bindings_skip_an_omitted_with_package_and_an_omitted_tool() {
+        let resolved = [
+            tool("cmake", "default"),
+            tool("lazy", "default"),
+            tool("ninja", "default"),
+        ];
+        let with = [
+            ocx_oci::PackageRef::new_registry("gone", "ocx.sh").clone_with_tag("1"),
+            ocx_oci::PackageRef::new_registry("extra", "ocx.sh").clone_with_tag("1"),
+        ];
+        let omitted = [omission("gone"), omission("lazy")];
+        let roots = [pinned("extra", '1'), pinned("cmake", '2'), pinned("ninja", '3')];
+
+        let bindings = project_bindings(&resolved, &omitted, &with, &roots);
+
+        assert_eq!(bound(&bindings), [("cmake", "cmake"), ("ninja", "ninja")]);
     }
 
     // ── no-strip clap surface ────────────────────────────────────────────

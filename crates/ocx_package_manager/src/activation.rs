@@ -342,17 +342,44 @@ pub fn yield_messages(yielded: &coexistence::Yield) -> Vec<String> {
         .observed
         .iter()
         .map(|observation| {
-            let tool = match observation.tool {
-                coexistence::Tool::Direnv => "direnv",
-                coexistence::Tool::Mise => "mise",
-                coexistence::Tool::OcxExec => "ocx exec",
-            };
-            format!(
-                "ocx: {tool} manages this directory ({signal}); applying the global toolchain only",
-                signal = observation.signal,
-            )
+            let signal = &observation.signal;
+            match observation.tool {
+                coexistence::Tool::Direnv => {
+                    format!("ocx: direnv manages this directory ({signal}); applying the global toolchain only")
+                }
+                coexistence::Tool::Mise => {
+                    format!("ocx: mise manages this directory ({signal}); applying the global toolchain only")
+                }
+                // Exec is hermetic: neither the project nor the global toolchain is layered on top of it.
+                coexistence::Tool::OcxExec => {
+                    format!("ocx: an enclosing `ocx exec` owns this environment ({signal})")
+                }
+            }
         })
         .collect()
+}
+
+/// The enclosing `ocx exec` scope: `__OCX_EXEC_SCOPE` and the canonical form the project compare needs.
+///
+/// The one derivation behind both the per-prompt yield and `ocx shell state`'s report.
+#[derive(Debug, Clone)]
+pub struct ExecScope {
+    marker: String,
+    canonical: PathBuf,
+}
+
+impl ExecScope {
+    /// The scope the environment names, or `None` outside `ocx exec` or when the marked directory is gone.
+    pub async fn from_env() -> Option<Self> {
+        let marker = ocx_env::__OCX_EXEC_SCOPE.get_raw().and_then(|v| v.into_string().ok())?;
+        let canonical = tokio::fs::canonicalize(&marker).await.ok()?;
+        Some(Self { marker, canonical })
+    }
+
+    /// The observation when this scope is the one `project_dir` (already canonical) belongs to.
+    pub fn observe(&self, project_dir: &Path) -> Option<coexistence::Observation> {
+        coexistence::exec_scope(&self.marker, &self.canonical, project_dir)
+    }
 }
 
 /// Whether this prompt can answer from `stat`s alone.
