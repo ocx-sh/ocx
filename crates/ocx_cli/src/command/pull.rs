@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_project::{DEFAULT_GROUP, expand_all_keyword};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock_consenting;
@@ -65,14 +64,9 @@ impl Pull {
         // operator chose, so `OCX_NO_CONSENT` must be able to suppress the stamp.
         let ctx = load_project_with_lock_consenting(&context, self.consent.explicit()).await?;
 
-        crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
-
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         // No `-g` is the default group, as for `ocx exec`; the render covers exactly these groups.
-        let mut render_groups = expand_all_keyword(self.groups.names(), &ctx.config);
-        if render_groups.is_empty() {
-            render_groups = vec![DEFAULT_GROUP.to_owned()];
-        }
+        let render_groups = self.groups.effective(&ctx.config)?;
         // The hash gate passed; a per-entry desync it cannot see refuses the same way.
         let bound = ctx.lock.bind_current(&ctx.config)?;
         let selected = select_bound(&bound, &render_groups, &self.names)?;
@@ -80,7 +74,7 @@ impl Pull {
             .iter()
             .map(|tool| Ok((tool.locked().group.as_str(), tool.host_leaf_identifier(&platform)?)))
             .collect::<Result<Vec<_>, ocx_project::Error>>()?;
-        let pull_set = crate::app::project_context::lazy_pull_set(&ctx.config, host, self.lazy_mode.mode());
+        let pull_set = ocx_project::lazy_pull_set(&ctx.config, host, self.lazy_mode.mode());
         let pinned: Vec<ocx_oci::PinnedPackageRef> = pull_set.iter().map(|(_, id)| id.clone()).collect();
 
         // After the staleness gate, so a stale lock exits 65 before any preview prints.
@@ -172,7 +166,7 @@ fn report_key(identifier: &ocx_oci::PackageRef) -> String {
 ///
 /// # Errors
 ///
-/// Exit 64 when a name matches no binding in `groups`.
+/// A `binding_not_selected` refusal (exit 64) when a name matches no binding in `groups`.
 fn select_bound<'a>(
     bound: &'a [ocx_project::BoundTool],
     groups: &[String],
@@ -186,7 +180,11 @@ fn select_bound<'a>(
         .iter()
         .find(|name| !in_groups.iter().any(|tool| &tool.locked().name == *name))
     {
-        return Err(crate::error::UsageError::new(format!("binding '{missing}' not found in selected groups")).into());
+        return Err(crate::app::CliRefusal::BindingNotSelected(format!(
+            "binding '{missing}' not found in the selected groups ({}); pass `-g` to select another group",
+            groups.join(", ")
+        ))
+        .into());
     }
     Ok(in_groups
         .into_iter()

@@ -428,6 +428,33 @@ impl ProjectLock {
             .collect()
     }
 
+    /// The `(group, host leaf)` of every entry `previous` does not already pin, for `platform`.
+    ///
+    /// An entry is changed when `previous` lacks its `(group, name)` or pins different content; with no
+    /// `previous` every entry is. Tagged as [`Self::lenient_host_identifiers`] tags.
+    ///
+    /// # Errors
+    ///
+    /// The first changed entry that ships no build for `platform`.
+    pub fn changed_host_identifiers(
+        &self,
+        config: &crate::ProjectConfig,
+        previous: Option<&ProjectLock>,
+        platform: &Platform,
+    ) -> Result<Vec<(&str, PinnedPackageRef)>, super::Error> {
+        self.lenient_host_identifiers(Some(config), platform)
+            .into_iter()
+            .filter(|(tool, _)| {
+                !previous.is_some_and(|previous| {
+                    previous.tools.iter().any(|old| {
+                        old.group == tool.group && old.name == tool.name && locked_tool_content_equal(old, tool)
+                    })
+                })
+            })
+            .map(|(tool, identifier)| identifier.map(|identifier| (tool.group.as_str(), identifier)))
+            .collect()
+    }
+
     /// Every entry with its host identifier for `platform`, for callers that
     /// never refuse a stale lock: tagged from `config` while the lock binds to
     /// it, untagged otherwise, so a new tag never pairs with an old digest.
@@ -461,6 +488,19 @@ fn declaration_of<'c>(config: &'c crate::ProjectConfig, tool: &LockedTool) -> Op
     super::resolve::declared_identifier(config, &tool.group, &tool.name).filter(|declared| {
         declared.registry() == tool.repository.registry() && declared.repository() == tool.repository.repository()
     })
+}
+
+/// The per-content pull set for entries given as `(group, pinned leaf)`: each tool's lazy mode
+/// resolved down the ladder, eager when any entry of its content is.
+pub fn lazy_pull_set<'a>(
+    config: &crate::ProjectConfig,
+    entries: impl IntoIterator<Item = (&'a str, PinnedPackageRef)>,
+    cli: Option<crate::lazy::LazyMode>,
+) -> Vec<(crate::lazy::LazyMode, PinnedPackageRef)> {
+    eager_per_content(entries.into_iter().map(|(group, pinned)| {
+        let mode = crate::lazy_mode_for_tool(config, &pinned.clone().into(), Some(group), cli);
+        (mode, pinned)
+    }))
 }
 
 /// Content equality ignoring `name`/`group`: `repository` and the full
@@ -639,7 +679,15 @@ impl ProjectLock {
             }
         }
 
-        let serialized = to_write.to_toml_string()?;
+        let mut serialized = to_write.to_toml_string()?;
+        // A CRLF checkout (git `autocrlf` on Windows) keeps CRLF, or a byte-identical re-save rewrites every line.
+        // An unreadable file is treated as absent: the rename below reports any real fault.
+        if tokio::fs::read(path)
+            .await
+            .is_ok_and(|existing| existing.windows(2).any(|pair| pair == b"\r\n"))
+        {
+            serialized = serialized.replace('\n', "\r\n");
+        }
 
         crate::mutate::publish_by_rename_async(path, serialized.into_bytes()).await?;
 
@@ -1690,6 +1738,41 @@ repository = "ocx.sh/cmake"
         assert_eq!(
             original_bytes, after_bytes,
             "original lock file must be preserved when save fails"
+        );
+    }
+
+    /// A re-save keeps the line endings already on disk, CRLF or LF.
+    #[tokio::test]
+    async fn save_keeps_the_line_endings_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("ocx.lock");
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
+        };
+        let cfg = stage_sibling_ocx_toml(&path);
+        lock.save(&path, None, tmp.path(), &cfg).await.expect("save ok");
+        let lf = std::fs::read(&path).expect("read");
+        assert!(
+            !lf.windows(2).any(|pair| pair == b"\r\n"),
+            "a new lock is written with LF"
+        );
+
+        let crlf = String::from_utf8(lf.clone()).expect("utf8").replace('\n', "\r\n");
+        std::fs::write(&path, &crlf).expect("seed CRLF");
+        lock.save(&path, Some(&lock), tmp.path(), &cfg).await.expect("save ok");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            crlf.as_bytes(),
+            "a CRLF lock stays byte-identical"
+        );
+
+        std::fs::write(&path, &lf).expect("seed LF");
+        lock.save(&path, Some(&lock), tmp.path(), &cfg).await.expect("save ok");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            lf,
+            "an LF lock stays byte-identical"
         );
     }
 

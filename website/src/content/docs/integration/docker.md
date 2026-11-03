@@ -67,7 +67,7 @@ COPY . .
 ENTRYPOINT ["ocx", "--offline", "exec", "--", "task", "serve"]
 ```
 
-[`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned package for the image platform. It needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx exec`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull. If the image builds, it runs.
+[`ocx pull`][cmd-pull] walks the lockfile and downloads the digest-pinned packages of the default group for the image platform. An image that needs group tools passes `-g all` or `-g <group>`. It needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx exec`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull. If the image builds, it runs.
 
 ## Reproducible Resolution {#frozen}
 

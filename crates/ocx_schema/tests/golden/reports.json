@@ -5766,7 +5766,7 @@
         },
         {
           "value": "ocx_exec",
-          "description": "An enclosing `ocx exec` composed this shell's environment for the resolved project\n(`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: the\nactivation session keeps applying the global scope; only the per-prompt hook steps aside."
+          "description": "An enclosing `ocx exec` composed this shell's environment for the resolved project\n(`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: exec is hermetic,\nso the per-prompt hook applies neither the project nor the global toolchain while the cwd\nstays in that project, and reconciles again once it leaves."
         }
       ]
     },

@@ -7,8 +7,8 @@ use std::process::ExitCode;
 use clap::Parser;
 use futures::StreamExt;
 use ocx_project::{
-    ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_all_keyword, resolve_lock,
-    resolve_lock_reconcile, resolve_lock_touched,
+    ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_touched, resolve_lock, resolve_lock_reconcile,
+    resolve_lock_touched,
 };
 
 use crate::api::data::update::{UpdateReport, VerboseUpdateReport, VersionKey};
@@ -24,8 +24,8 @@ use crate::options;
 pub struct Update {
     /// Verify the candidate lock would match the predecessor and exit; exits 65 when a pin would change.
     ///
-    /// Re-resolves the selected scope (every declared tag, or only the
-    /// bindings named by `-g`/positional names), prints the bindings that
+    /// Re-resolves the selected scope (the default group, or the bindings
+    /// named by `-g`/positional names), prints the bindings that
     /// would move, and exits 0 (nothing would move) or 65 (`DataError`, a pin
     /// would change). No writes, no commit. When the predecessor lock is
     /// absent, exits 78 (`ConfigError`).
@@ -55,14 +55,14 @@ pub struct Update {
     /// `default` plus every declared `[group.*]`. Combine with binding names
     /// to advance only those bindings within the named groups. When omitted,
     /// scope is exactly the default group; a group tool declared
-    /// `{ from = "default" }` keeps its own lock entry until its group is named.
+    /// `{ from = "default" }` shares its source's pin and advances with it.
     #[arg(short = 'g', long = "group", value_delimiter = ',')]
     pub groups: Vec<String>,
 
     /// Binding names to advance; freeze every other pin.
     ///
-    /// Each name is the `ocx.toml` binding key and is advanced in every group
-    /// it appears in (narrow with `-g`). Advancing moves the declared tag to
+    /// Each name is the `ocx.toml` binding key and is advanced in the default
+    /// group, or in every group `-g` names (`-g all` for every group). Advancing moves the declared tag to
     /// today's resolution - it does not change the declaration; edit `ocx.toml`
     /// to pin a new explicit version. Scoped mode needs an existing `ocx.lock`
     /// (exit 78 when absent) and refuses a drifted `ocx.toml` (exit 65). An
@@ -97,6 +97,13 @@ impl Update {
             };
 
             let touched = select_touched(guard.config(), &self.groups, &self.names)?;
+            // A `{ from = "default" }` follower and its source are one pin, so they move together.
+            let touched = expand_touched(staged.config(), Some(previous), &touched);
+            if self.groups.is_empty() && self.names.is_empty() && touched.is_empty() {
+                context
+                    .ui()
+                    .warn("the default group is empty; pass -g <group> or -g all");
+            }
 
             let lock = resolve_lock_touched(
                 staged.config(),
@@ -117,6 +124,7 @@ impl Update {
             match previous.as_ref() {
                 // Drifted: the default group and the bindings `ocx.toml` changed re-resolve; other groups keep their pins.
                 Some(previous) if !previous.is_current(staged.config()) => {
+                    crate::command::lock::warn_v3_re_resolve(&context, Some(previous), staged.config());
                     let forced = select_touched(staged.config(), &[DEFAULT_GROUP.to_string()], &[])?;
                     let (lock, touched) = resolve_lock_reconcile(
                         staged.config(),
@@ -265,8 +273,6 @@ pub(crate) fn select_touched(
     groups: &[String],
     names: &[String],
 ) -> Result<Vec<(String, String)>, CliRefusal> {
-    let default_only = [DEFAULT_GROUP.to_string()];
-    let groups = if groups.is_empty() { &default_only[..] } else { groups };
     for raw in groups {
         if raw.is_empty() {
             return Err(CliRefusal::EmptyGroupFilter(
@@ -279,7 +285,7 @@ pub(crate) fn select_touched(
             )));
         }
     }
-    let scope = expand_all_keyword(groups, config);
+    let scope = crate::options::group_selection::expand_with_default(groups, config);
 
     let in_scope = |group: &str| scope.iter().any(|g| g == group);
     let name_filter: Option<HashSet<&str>> = (!names.is_empty()).then(|| names.iter().map(String::as_str).collect());

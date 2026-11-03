@@ -2495,3 +2495,11 @@ syscall, a binary unlinked out from under a long-running process, a `/proc`
 that is not mounted. There, `unix_trampoline_body` degrades to the bare-name
 fallback and the self-resolution loop is accepted, for a population that is
 now a rounding error rather than every bare-binary user.
+
+## Amendment 2026-11-03 — render scope of bare `pull`
+
+Amends the "Render and heal triggers" table and the `-g` default sentence under it; the original text stays as the record of the earlier decision.
+
+- Bare `ocx [--global] pull` renders the **default group's** `links/` and leaves the `links/` of every other group untouched. `-g GROUP` selects the groups pulled and rendered, and `-g all` selects every group in the lock. `pull` is the one command whose `-g` narrows the render.
+- `ocx {add,remove,lock,update}` still render every group in the lock, because each writes the lock and the render follows the lock, not a selection.
+- Consequence: a bare `pull` after `pull -g all` keeps the non-default groups' links; it never prunes them.

@@ -101,12 +101,15 @@ def test_pull_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: st
 def test_lock_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """`ocx lock --platform=linux/arm64` warms the arm64 leaf and ONLY that leaf.
 
-    `--platform` takes at most one value for every resolution command (D4 of
+    The project starts unlocked: `ocx lock` downloads only the entries whose pin
+    changed, so a re-lock over an unchanged lock warms nothing
+    (`test_lock_rerun_without_changes_downloads_nothing`). `--platform` takes at
+    most one value for every resolution command (D4 of
     `adr_platform_model_unification.md`); a second occurrence is a clap usage
     error (see `test_lock_repeated_platform_flag_exits_64`).
     """
     _publish_multiplatform(ocx, unique_repo, tmp_path)
-    project_dir = _project_with_lock(ocx, unique_repo, tmp_path)
+    project_dir = _project_with_lock(ocx, unique_repo, tmp_path, lock=False)
 
     result = _run(ocx, project_dir, "lock", f"--platform={ARM64}")
     assert result.returncode == EXIT_SUCCESS, f"cross-platform lock failed: {result.stderr}"

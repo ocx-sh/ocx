@@ -75,7 +75,7 @@ Then let `devcontainer.json` pull the lock and wire the shell. The extension id 
 }
 ```
 
-[`ocx pull`][cmd-pull] downloads every digest-pinned package once. `ocx --offline env --shell=bash` then prints export lines from the lock with no network access, so each new shell opens fast. The `grep` guard keeps a rebuild from appending the line twice. For a zsh login, pass `--shell=zsh` and append the line to `~/.zshrc` instead, since a zsh login never reads `~/.bashrc`. Bake the pull into the image with the [Docker recipe][p-docker-project-toolchain] when the container must start without a registry.
+[`ocx pull`][cmd-pull] downloads the default group's digest-pinned packages once; pass `-g all` or `-g <group>` when the container needs group tools. `ocx --offline env --shell=bash` then prints export lines from the lock with no network access, so each new shell opens fast. The `grep` guard keeps a rebuild from appending the line twice. For a zsh login, pass `--shell=zsh` and append the line to `~/.zshrc` instead, since a zsh login never reads `~/.bashrc`. Bake the pull into the image with the [Docker recipe][p-docker-project-toolchain] when the container must start without a registry.
 
 Private packages need credentials in the container. [Registry authentication recipes][p-istry-auth-recipes-auth-method] lists the variables. Put them in `remoteEnv` from the host's environment and never in the `Dockerfile`.
 

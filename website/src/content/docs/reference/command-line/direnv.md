@@ -36,7 +36,7 @@ ocx direnv export [OPTIONS]
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-pull` |  | Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit |
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |

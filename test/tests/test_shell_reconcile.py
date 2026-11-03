@@ -458,6 +458,88 @@ def test_a_shell_started_by_exec_keeps_the_composed_path_and_is_not_reactivated(
     )
 
 
+def test_a_shell_started_by_exec_registers_the_hook_and_reconciles_after_a_cd(arena: Arena) -> None:
+    """The login stream under exec changes no environment but still hooks the prompt.
+
+    Without the hook a long-lived tree started under `ocx exec` (or bare `ocx shell`) never
+    reconciles, so a `cd` into another project would leave its environment unapplied. The hook
+    stays quiet inside the exec project and applies the other project's environment once the
+    cwd leaves it.
+    """
+    _self_setup(arena)
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (project / "binA").mkdir()
+    other = _locked_project(arena, "bravo", _ENV_BLOCK_B)
+    (other / "binB").mkdir()
+    script = (
+        'before="$PATH"; '
+        'eval "$("$OCX_TEST_BIN" self activate --shell=bash --hook)"; '
+        'echo "STREAM_PATH_SAME=$([ "$before" = "$PATH" ] && echo yes || echo no)"; '
+        'echo "HOOK=$(type -t __ocx_prompt_hook)"; '
+        "__ocx_prompt_hook; "
+        'echo "INSIDE_HAS_BINB=$(printf %s "$PATH" | grep -c binB)"; '
+        f'cd "{other}"; '
+        "__ocx_prompt_hook; "
+        'echo "OUTSIDE_HAS_BINB=$(printf %s "$PATH" | grep -c binB)"'
+    )
+    env = arena.env("/bin/bash", OCX_TEST_BIN=str(arena.ocx))
+    result = subprocess.run(
+        [str(arena.ocx), "--offline", "exec", "--", "bash", "-c", script],
+        cwd=str(project),
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, f"exec must succeed; stderr:\n{result.stderr}"
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert lines["STREAM_PATH_SAME"] == "yes", "the login stream under exec must not touch PATH"
+    assert lines["HOOK"] == "function", f"the prompt hook must be registered under exec; got {result.stdout!r}"
+    assert lines["INSIDE_HAS_BINB"].strip() == "0", "inside the exec project the hook applies nothing"
+    assert int(lines["OUTSIDE_HAS_BINB"]) > 0, "a `cd` into another project must reconcile through the hook"
+
+
+def test_returning_to_the_exec_project_undoes_the_environment_of_the_project_left(arena: Arena) -> None:
+    """A -> B -> A under exec: B's `PATH` entries must not outlive the return to A.
+
+    Inside the exec project the hook emits nothing, which is right only while the ledger is empty;
+    once `cd` into B recorded B's environment, staying silent leaves it in front of A's pinned tools.
+    """
+    _self_setup(arena)
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (project / "binA").mkdir()
+    other = _locked_project(arena, "bravo", _ENV_BLOCK_B)
+    (other / "binB").mkdir()
+    for directory in (project / "binA", other / "binB"):
+        tool = directory / "pinned-tool"
+        tool.write_text("#!/bin/sh\n")
+        tool.chmod(0o755)
+    script = (
+        'eval "$("$OCX_TEST_BIN" self activate --shell=bash --hook)"; '
+        f'cd "{other}"; '
+        "__ocx_prompt_hook; "
+        'echo "AWAY_HAS_BINB=$(printf %s "$PATH" | grep -c binB)"; '
+        f'cd "{project}"; '
+        "__ocx_prompt_hook; "
+        'echo "BACK_HAS_BINB=$(printf %s "$PATH" | grep -c binB)"; '
+        'echo "BACK_TOOL=$(command -v pinned-tool)"'
+    )
+    env = arena.env("/bin/bash", OCX_TEST_BIN=str(arena.ocx))
+    result = subprocess.run(
+        [str(arena.ocx), "--offline", "exec", "--", "bash", "-c", script],
+        cwd=str(project),
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, f"exec must succeed; stderr:\n{result.stderr}"
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert int(lines["AWAY_HAS_BINB"]) > 0, "the control: B's environment must apply after the `cd`"
+    assert lines["BACK_HAS_BINB"].strip() == "0", f"B's PATH entries survived the return to A:\n{result.stdout}"
+    assert lines["BACK_TOOL"] == str(project / "binA" / "pinned-tool"), "A's pinned tool must resolve again"
+
+
 def test_ocx_no_project_reverts_the_recorded_scope_at_the_next_prompt(arena: Arena) -> None:
     """A-11 — `OCX_NO_PROJECT=1` is a deliberate instruction, not a failed probe, so the scope reverts.
 

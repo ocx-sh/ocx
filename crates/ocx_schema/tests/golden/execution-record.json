@@ -275,6 +275,10 @@
               "items": {
                 "type": "string"
               }
+            },
+            "stack": {
+              "description": "Whether `--stack` kept the parent project's environment under this one; omitted when not.",
+              "type": "boolean"
             }
           },
           "required": [

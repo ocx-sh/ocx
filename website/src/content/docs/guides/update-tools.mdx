@@ -47,7 +47,7 @@ Three commands move a pin, and each moves a different thing.
 
 | Command | What it moves | Registry contact | Edits `ocx.toml` |
 |---|---|---|---|
-| [`ocx lock`][cmd-lock] | Nothing when the lock is current. A drifted config re-resolves every declared tag. | Local index | No |
+| [`ocx lock`][cmd-lock] | Only the bindings whose `ocx.toml` entry is new or changed. Every other pin carries forward. | Local index | No |
 | [`ocx update`][cmd-update] | The lock, to where a declared tag points today. | Every run | No |
 | [`ocx upgrade`][cmd-upgrade] | The declared tag itself, then the lock for the retagged bindings only. | Tag listing every run | Yes |
 

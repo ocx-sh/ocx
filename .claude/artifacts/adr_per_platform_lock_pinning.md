@@ -831,3 +831,12 @@ override? `ocx lock --update <tool>` re-resolves all platforms or only `default`
 - `adr_index_routing_semantics.md` (`IndexOperation::Resolve`, offline/frozen policy)
 - `adr_project_gc_symlink_ledger.md` (project GC roots)
 - Workflow run: `wf_b8b96d57-30a` (`adr-per-platform-lock-142`) — 6 analyses + 2 adversarial verifications
+
+## Amendment 2026-11-03 — lock v4 `declared` and per-binding reconcile
+
+Amends "`ocx lock` — whole-file reconcile", "`ocx upgrade` — whole-file forced bump" and the validation rows that say `ocx lock` and `ocx upgrade` take no `-g`/PKGS subset. The earlier text stays as history.
+
+- **Lock v4** records, per entry, the `declared` identifier the entry was resolved from. Whether an entry is current is decided by comparing `declared` with the binding's effective declaration, not by the file-level declaration hash alone.
+- **`ocx lock` reconciles per binding.** A binding whose `ocx.toml` entry is new or changed re-resolves; every other pin carries forward verbatim, even if its tag has moved since. Resolution uses the local index. A v3 lock, which has no `declared`, re-resolves in full on the first write. Moving a tag forward is `ocx update`'s job, not `lock`'s.
+- **Default group for `update`, `upgrade` and `pull`.** A bare `ocx update`, `ocx upgrade` or `ocx pull` acts on the default group; `-g GROUP` selects groups and `-g all` selects every group. `ocx lock` ignores groups and writes every group.
+- **`{ from = "default" }` followers move with their source.** `update` and `upgrade` advance the default pin and every `from` follower to the same digest, and any binding whose effective declaration changed is re-resolved. A carried digest is never stamped with a new `declared`. Prior art: uv, cargo and poetry each keep a single version per package across groups, so one package never resolves to two versions in one lock.

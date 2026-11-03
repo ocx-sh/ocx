@@ -205,7 +205,7 @@ impl ConfigUpdateArgs {
 /// The arguments of `ocx direnv export`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DirenvExportArgs {
-    /// Restrict the composition to the named group(s)
+    /// Restrict to the named group(s)
     pub groups: Vec<String>,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -248,7 +248,7 @@ impl DirenvInitArgs {
 /// The arguments of `ocx env`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnvArgs {
-    /// Restrict the composition to the named group(s)
+    /// Restrict to the named group(s)
     pub groups: Vec<String>,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -268,7 +268,7 @@ pub struct EnvArgs {
     /// Skip materialization; resolve against local state only. Materialization is deferred to `ocx
     /// pull` or the first `ocx exec` / direnv hit
     pub no_pull: bool,
-    /// Add a package that is not in ocx.toml to the composed environment
+    /// Add a package that `ocx.toml` does not pin to the composed environment
     pub with: Vec<String>,
     /// Control when a package's content downloads: now, or on first use
     pub lazy_mode: Option<String>,
@@ -318,7 +318,7 @@ impl EnvArgs {
 /// The arguments of `ocx exec`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExecArgs {
-    /// Restrict the composition to the named group(s)
+    /// Restrict to the named group(s)
     pub groups: Vec<String>,
     /// Start with a clean environment containing only the package variables, instead of inheriting
     /// the current shell environment
@@ -336,7 +336,7 @@ pub struct ExecArgs {
     pub dir: Option<PathBuf>,
     /// Filename template for the record, e.g. `{time}-{host}-{pid}.json`
     pub name: Option<String>,
-    /// Add a package that is not in ocx.toml to the composed environment
+    /// Add a package that `ocx.toml` does not pin to the composed environment
     pub with: Vec<String>,
     /// Layer this project onto the active environment instead of replacing it
     pub stack: bool,
@@ -478,7 +478,7 @@ impl InitArgs {
 /// The arguments of `ocx inspect`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InspectArgs {
-    /// Restrict the composition to the named group(s)
+    /// Restrict to the named group(s)
     pub groups: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
@@ -1880,10 +1880,8 @@ impl PatchWhyArgs {
 pub struct PullArgs {
     /// Preview which locked packages are cached vs. would be fetched
     pub dry_run: bool,
-    /// Restrict the composition to the named group(s)
+    /// Restrict to the named group(s)
     pub groups: Vec<String>,
-    /// Pull only these bindings, from within the selected groups
-    pub names: Vec<String>,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
     /// Control when a package's content downloads: now, or on first use
@@ -1892,6 +1890,8 @@ pub struct PullArgs {
     pub consent: bool,
     /// Run without consenting to this project's shell activation
     pub no_consent: bool,
+    /// Pull only these bindings, from within the selected groups
+    pub names: Vec<String>,
 }
 
 impl PullArgs {
@@ -1899,11 +1899,11 @@ impl PullArgs {
     pub fn push(&self, argv: &mut Argv) {
         argv.switch("dry-run", self.dry_run);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
-        argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
         argv.flag("platform", &self.platform, Presence::Optional, &[]);
         argv.flag("lazy-mode", &self.lazy_mode, Presence::Optional, &["never", "always"]);
         argv.switch("consent", self.consent);
         argv.switch("no-consent", self.no_consent);
+        argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
     }
 }
 
@@ -2040,6 +2040,42 @@ impl SelfUpdateArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
         argv.switch("check", self.check);
+    }
+}
+
+/// The arguments of `ocx shell`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShellArgs {
+    /// Restrict to the named group(s)
+    pub groups: Vec<String>,
+    /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
+    /// a value exits 64
+    pub env: Vec<String>,
+    /// Compose digest paths instead of the toolchain links
+    pub pinned: bool,
+    /// Compose through the toolchain links instead of digest paths
+    pub no_pinned: bool,
+    /// Add a package that `ocx.toml` does not pin to the composed environment
+    pub with: Vec<String>,
+    /// Layer this project onto the active environment instead of replacing it
+    pub stack: bool,
+    /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
+    pub consent: bool,
+    /// Run without consenting to this project's shell activation
+    pub no_consent: bool,
+}
+
+impl ShellArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.flag("env", &self.env, Presence::Optional, &[]);
+        argv.switch("pinned", self.pinned);
+        argv.switch("no-pinned", self.no_pinned);
+        argv.flag("with", &self.with, Presence::Optional, &[]);
+        argv.switch("stack", self.stack);
+        argv.switch("consent", self.consent);
+        argv.switch("no-consent", self.no_consent);
     }
 }
 
@@ -2772,6 +2808,15 @@ impl Ocx {
         self.call_raw("self update", &["SelfUpdateData", "UpdateCheckData"], argv)
     }
 
+    /// Open your shell inside the project environment
+    ///
+    /// Runs `ocx shell`.
+    pub fn shell(&self, args: &ShellArgs) -> Result<Raw, Error> {
+        let mut argv = self.argv(&["shell"]);
+        args.push(&mut argv);
+        self.call_passthrough("shell", &[], argv)
+    }
+
     /// Consent to a project's shell activation
     ///
     /// Runs `ocx shell allow`.
@@ -2817,7 +2862,7 @@ impl Ocx {
         self.call("status", "StatusReport", argv)
     }
 
-    /// Re-resolve declared tags against the registry; whole file or a subset
+    /// Re-resolve declared tags against the registry; the default group or a subset
     ///
     /// Runs `ocx update`.
     pub fn update(&self, args: &UpdateArgs) -> Result<Raw, Error> {

@@ -728,3 +728,11 @@ on every ordinary tool addition. The method lives on the `PackageRef`
 coordinate rather than in `project::consent` because it is a property of
 the coordinate, and `ocx shell state`'s diagnostics are already a second
 consumer of the same coordinate.
+
+## Amendment 2026-11-03 — exec scope, `--stack`, bare `ocx shell`
+
+Amends the statement that `apply_ocx_config` leaves `__OCX_ENV_STATE` in a child env.
+
+- **`ocx exec --stack`** strips only the ledger carrier from the child env (`stacked_env`) and keeps the entries already applied, so the child sees the parent project's applied environment with this project's tools in front. Without `--stack`, exec composes hermetically and replaces the parent's tools.
+- **`__OCX_EXEC_SCOPE`** makes the global toolchain yield inside an `exec`/`shell` environment: exec is hermetic, so the global tier is not applied. The per-prompt hook stays registered, so leaving the project reconciles at the next prompt.
+- **Bare `ocx shell`** opens the user's shell in the project environment composed like `exec`. It records activation consent like `exec`; `--no-consent` opts out.

@@ -334,9 +334,11 @@ ocx exec --with ocx.sh/hyperfine:1 -- hyperfine 'make'
 ocx env --with ocx.sh/hyperfine:1 --shell=bash
 ```
 
-The extra packages compose after the project's tools, so a project tool wins a `PATH` tie. The execution record lists them under `scope.with`.
+The extra packages compose after the project's tools, so a project tool wins a `PATH` tie. An extra package whose repository matches a project binding replaces that binding for the run instead: `--with` overrides the project's pin of the same repository. The execution record lists them under `scope.with`.
 
 `ocx exec --stack` keeps the environment an activated parent project already put on the shell and adds this project's tools in front of it, where a plain `ocx exec` replaces the parent's tools.
+
+With `--clean` as well, the child gets only those two toolchains: the parent's tools, then this project's in front, and none of the shell's own variables.
 
 ## Open a shell in the project \{#project-shell-open\}
 
@@ -345,6 +347,10 @@ The extra packages compose after the project's tools, so a project tool wins a `
 ```shell
 ocx shell -g ci --with ocx.sh/hyperfine:1
 ```
+
+Like `ocx exec`, a bare `ocx shell` records activation consent for the project. `--no-consent` opts out, and `OCX_NO_CONSENT` makes that the default. `--pinned` and `--env` behave as they do for `ocx exec`.
+
+The environment inside is hermetic, as with `ocx exec`: the global toolchain is not applied there. The per-prompt hook stays registered, so leaving the project's `ocx exec` or `ocx shell` session resumes normal activation at the next prompt. `exit` returns you to the outer shell.
 
 ## Shell activation \{#project-shell\}
 

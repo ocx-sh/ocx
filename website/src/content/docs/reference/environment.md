@@ -945,6 +945,13 @@ Non-`0` forces colour output.
 - Visibility: foreign
 - Value: `string`
 
+## `COMSPEC` {#external-comspec}
+
+Windows command interpreter; bare `ocx shell` runs it when the shell to open is `cmd`.
+
+- Visibility: foreign
+- Value: `path`
+
 ## `DIRENV_DIR` {#external-direnv-dir}
 
 Set by direnv inside an allowed directory.

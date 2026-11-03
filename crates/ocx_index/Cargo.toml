@@ -12,8 +12,9 @@ publish = false
 # and index-host seams: `lib.rs`'s `current_timestamp` (so an announce or
 # claim writes byte-deterministic output) and `ocx_index.rs`'s hosted-index
 # base URL. Forwarded by `ocx_lib`'s and `ocx`'s own `__testing`; forwards
-# `ocx_env`'s, which declares those seams.
-__testing = ["ocx_env/__testing"]
+# `ocx_env`'s, which declares those seams, and `ocx_oci`'s, whose
+# `ProxyRules::direct` the test source's `into_index` dials through.
+__testing = ["ocx_env/__testing", "ocx_oci/__testing"]
 
 [dependencies]
 # `$OCX_HOME` and the index-collection root the local index is homed under.

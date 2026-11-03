@@ -118,7 +118,7 @@ ocx env [OPTIONS]
 | `--ci` | `github (github-actions)\|gitlab (gitlab-ci)` | Write the composed environment into a CI system's persistence channel. Bare `--ci` autodetects the provider and exits 64 when none is found |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--export-file` | `PATH` | Write the GitLab export to this file instead of stdout |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
 | `--no-pull` |  | Skip materialization; resolve against local state only. Materialization is deferred to `ocx pull` or the first `ocx exec` / direnv hit |
@@ -127,7 +127,7 @@ ocx env [OPTIONS]
 | `--pull` |  | Materialize resolved packages into the object store, installing on a local miss |
 | `--shell` | `ash\|ksh\|dash (sh)\|bash\|elvish\|fish\|batch (cmd)\|powershell (pwsh)\|zsh\|nushell (nu)` | Target shell for eval-safe export lines. A bare `--shell` autodetects it from `$SHELL` or the parent process and exits 64 when undetectable |
 | `--show-patches` |  | Annotate each entry with its origin package or companion identifier |
-| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
+| `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
 ## `ocx exec` {#exec}
 
@@ -166,7 +166,7 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 | `--clean` |  | Start with a clean environment containing only the package variables, instead of inheriting the current shell environment |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
@@ -174,7 +174,7 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 | `--records-dir` | `DIRECTORY` | Directory to write this invocation's execution record into |
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
 | `--stack` |  | Layer this project onto the active environment instead of replacing it |
-| `--with` | `IDENTIFIER` | Add a package that is not in ocx.toml to the composed environment |
+| `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
 ## `ocx init` {#init}
 
@@ -225,7 +225,7 @@ ocx inspect [OPTIONS] [NAMES]...
 | --- | --- | --- |
 | `--closure` |  | Compute each binding's dependency closure from metadata alone, without installing |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
 | `--resolve` |  | Select this host's leaf and emit its metadata plus the OCI resolution chain |
 
@@ -239,7 +239,7 @@ Only a binding that is new, or whose spelling or repository changed, is re-resol
 
 A lock whose entries all match `ocx.toml` is rewritten byte-identically.
 
-A lock written by an older ocx, which records no `declared`, migrates without contacting the registry when it is current, and is re-resolved in full when `ocx.toml` drifted. To advance pins whose declaration did not change, use `ocx update`.
+To advance pins whose declaration did not change, use `ocx update`.
 
 Each binding records its registry and repository plus a table of every platform the publisher ships, whatever OS the command runs on. A lock committed on Linux is therefore complete for macOS and Windows runners.
 
@@ -306,9 +306,11 @@ ocx logout [REGISTRY]
 
 Pre-warm the object store, then render the project toolchain.
 
-Fetches every digest-pinned entry the project `ocx.lock` declares into the local object store. Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured.
+Fetches the digest-pinned `ocx.lock` entries of the selected groups into the local object store: the default group without `-g`, every group with `-g all`. Naming bindings narrows the pull to those entries.
 
-That is one link per `links/<group>/<entry>`, plus the `shells/default/bin` launchers for the default group, reached through the `active` link. That directory carries its own `.gitignore`, so `git status` stays clean.
+Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or under the `toolchain_dir` root when one is configured. That is one link per `links/<group>/<entry>`, plus the `shells/default/bin` launchers for the default group, reached through the `active` link.
+
+That directory carries its own `.gitignore`, so `git status` stays clean.
 
 This is the primary way a project toolchain is rendered; `--dry-run` reports the delta and writes nothing.
 
@@ -326,7 +328,7 @@ ocx pull [OPTIONS] [NAME]...
 | --- | --- | --- |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--dry-run` |  | Preview which locked packages are cached vs. would be fetched |
-| `--group`, `-g` | `GROUPS` | Restrict the composition to the named group(s) |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
@@ -395,7 +397,7 @@ A moving tag (`:latest`, `:3`) advances to wherever it points today.
 
 Under `--frozen`, resolution is capped at the local index snapshot (an unsnapshotted tag exits 81); `--offline` forbids network access. Without `-g` only the default group is re-resolved; `-g ci` selects a group and `-g all` every group.
 
-Binding names narrow the selection further: `ocx update ripgrep` advances one binding. A group tool declared `{ from = "default" }` keeps its own lock entry until its group is selected.
+Binding names narrow the selection further: `ocx update ripgrep` advances one binding. A group tool declared `{ from = "default" }` moves with its source: both land on the same pin.
 
 A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65), and rejects an unknown group or name (exit 64). A bare update re-resolves the default group; when `ocx.toml` drifted it also re-resolves the bindings whose declaration changed, and other groups keep their pins.
 

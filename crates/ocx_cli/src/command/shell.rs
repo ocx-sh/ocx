@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use ocx_package_manager::activation;
+
 use crate::app::CliRefusal;
 use crate::options;
 
@@ -36,6 +38,9 @@ pub struct ShellArgs {
 
     #[clap(flatten)]
     pub stack: options::Stack,
+
+    #[clap(flatten)]
+    pub consent: options::Consent,
 }
 
 impl ShellArgs {
@@ -48,6 +53,11 @@ impl ShellArgs {
 
     /// Composes through [`ToolchainExec`](super::toolchain_exec::ToolchainExec) with the shell as the command.
     async fn open(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Resolved before the composed env, so a `--with` or project package missing from the ambient PATH cannot become the shell.
+        let program = user_shell_program()?;
+        if !self.stack.enabled() {
+            warn_when_nested(&context).await;
+        }
         let exec = super::toolchain_exec::ToolchainExec {
             groups: self.groups.clone(),
             clean: false,
@@ -57,17 +67,47 @@ impl ShellArgs {
             records: Default::default(),
             with: self.with.clone(),
             stack: self.stack,
-            consent: Default::default(),
+            consent: self.consent.clone(),
             names: Vec::new(),
-            argv: vec![user_shell_program()?],
+            argv: vec![program],
         };
         exec.execute(context).await
     }
 }
 
-/// `$SHELL`, else the shell that started `ocx`.
+/// One stderr line when the project this shell would open is the one an enclosing `ocx exec` or `ocx shell` composed.
+async fn warn_when_nested(context: &crate::app::Context) {
+    let Ok((config_path, _)) = crate::app::project_context::resolve_project_paths(context, None).await else {
+        return;
+    };
+    let Ok(identity) = activation::ProjectIdentity::resolve(config_path).await else {
+        return;
+    };
+    if activation::ExecScope::from_env()
+        .await
+        .is_some_and(|scope| scope.observe(&identity.dir).is_some())
+    {
+        context.ui().warn(format!(
+            "already inside an `ocx exec` or `ocx shell` environment for {}; `ocx exec --stack` layers a new one on top",
+            identity.dir.display()
+        ));
+    }
+}
+
+/// `$SHELL`, else the shell that started `ocx`, as an absolute path found on the ambient `PATH`.
 fn user_shell_program() -> anyhow::Result<String> {
-    shell_program(ocx_env::SHELL.get(), ocx_shell::shell::Shell::from_process())
+    let program = shell_program(ocx_env::SHELL.get(), ocx_shell::shell::Shell::from_process())?;
+    // `%ComSpec%` is what Windows itself means by `cmd`, whatever `PATH` holds.
+    let program = match ocx_env::COMSPEC.get() {
+        Some(comspec) if cfg!(windows) && program == "cmd" => comspec,
+        _ => program,
+    };
+    absolute_program(&program, &ocx_config::env::Env::new())
+}
+
+/// `program` resolved against `ambient`'s `PATH`, which must never be the composed project environment.
+fn absolute_program(program: &str, ambient: &ocx_config::env::Env) -> anyhow::Result<String> {
+    Ok(ambient.resolve_command(program)?.to_string_lossy().into_owned())
 }
 
 fn shell_program(login: Option<String>, detected: Option<ocx_shell::shell::Shell>) -> anyhow::Result<String> {
@@ -258,5 +298,33 @@ mod tests {
     #[test]
     fn open_flags_do_not_combine_with_a_subcommand() {
         assert!(parse(&["--stack", "state"]).is_err());
+    }
+
+    #[test]
+    fn consent_flags_reach_bare_shell() {
+        assert_eq!(parse(&["--no-consent"]).unwrap().consent.explicit(), Some(false));
+        assert_eq!(parse(&[]).unwrap().consent.explicit(), None);
+    }
+
+    /// A project package shipping a binary named like the shell must not become the shell.
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_resolves_against_the_ambient_path_not_a_composed_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let ambient_dir = tempfile::tempdir().unwrap();
+        let composed_dir = tempfile::tempdir().unwrap();
+        for dir in [&ambient_dir, &composed_dir] {
+            let fake = dir.path().join("bash");
+            std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut ambient = ocx_config::env::Env::clean();
+        ambient.set("PATH", ambient_dir.path());
+
+        let program = absolute_program("bash", &ambient).unwrap();
+
+        assert_eq!(std::path::Path::new(&program), ambient_dir.path().join("bash"));
+        assert!(!program.starts_with(composed_dir.path().to_str().unwrap()));
     }
 }

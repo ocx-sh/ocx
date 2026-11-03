@@ -15,8 +15,8 @@ use ocx_package_manager::{
     composer::{ComposeRequest, ComposeRoots, Materialization},
 };
 use ocx_project::{
-    ALL_GROUP, DEFAULT_GROUP, Origin, ProjectLock, ResolvedTool, compose_tool_set, expand_all_keyword,
-    lazy_mode_for_tool, lock::lock_path_for,
+    ALL_GROUP, DEFAULT_GROUP, Origin, ProjectLock, ResolvedTool, check_duplicate_selection, lazy_mode_for_tool,
+    lock::lock_path_for, resolve_selected_tools, select_tool_set,
 };
 
 use crate::{
@@ -28,12 +28,10 @@ use crate::{
 
 /// Emit the composed environment for the in-scope toolchain.
 ///
-/// Reads `ocx.toml` + `ocx.lock`, or the global toolchain's offline `current` set under
-/// `--global`. The default output is a report in the root `--format` and is not eval-safe;
-/// `--shell[=NAME]` is the only sourceable form. Missing tools are installed first unless
-/// `--no-pull`, which never contacts the registry: an unmaterialized package is warned about
-/// on stderr and omitted, and the exit code stays 0. The global tier never installs and is
-/// lenient: an unconfigured or corrupt toolchain yields an empty env.
+/// Reads `ocx.toml` + `ocx.lock`, or the global toolchain's pinned set under `--global`.
+/// `--shell[=NAME]` is the only sourceable form. Missing tools are installed unless
+/// `--no-pull` (warn and omit); the global tier never installs and yields an empty env when
+/// unconfigured. `--with` packages replace a tool of the same repository on both tiers.
 /// Exit codes: <https://ocx.sh/docs/reference/command-line/commands/#env-root>
 #[derive(Parser)]
 pub struct ToolchainEnv {
@@ -123,23 +121,6 @@ impl ToolchainEnv {
         }
     }
 
-    /// Reports the deferred tools' omissions and advisories on stderr, omissions in the eager `--no-pull` shape.
-    fn report_deferred(&self, context: &crate::app::Context, composed: &ComposeRoots, tools: &[ResolvedTool]) {
-        for omission in &composed.omitted {
-            // Named by binding, as the user reads `ocx.toml`.
-            let name = tools
-                .iter()
-                .find(|tool| tool.identifier == omission.identifier)
-                .map_or_else(|| omission.identifier.to_string(), |tool| tool.binding.clone());
-            context.ui().warn(format!(
-                "{name} not installed; run `ocx pull` to fetch or drop --no-pull"
-            ));
-        }
-        for advisory in &composed.advisories {
-            context.ui().warn(advisory.to_string());
-        }
-    }
-
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
 
@@ -161,12 +142,18 @@ impl ToolchainEnv {
         // ── Resolve entries: one global path, one project path ───────────────
         // `patch_start` marks where companion-overlay entries begin, for `--show-patches` on both tiers.
         let (mut entries, patch_start, provenance, attribution) = if context.global() {
-            match resolve_global_pinned_env(
+            let with = GlobalWith {
+                packages: &with_packages,
+                lazy_mode: self.lazy_mode.mode(),
+                install: self.pull.enabled(true),
+            };
+            match resolve_global_env(
                 &context,
                 &target,
                 self.groups.names(),
                 &env_overrides,
                 self.pinned.pinned(),
+                &with,
             )
             .await
             {
@@ -177,14 +164,14 @@ impl ToolchainEnv {
         } else {
             let ctx = load_project_with_lock(&context).await?;
 
-            crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
+            let expanded = self.groups.effective(&ctx.config)?;
 
-            let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
-            if expanded.is_empty() {
-                expanded = vec![DEFAULT_GROUP.to_owned()];
-            }
-
-            let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &target)?;
+            let mut selected = select_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
+            // As `ocx exec` does, before the duplicate check and host-leaf resolution, or `env` refuses a
+            // same-repository override that `exec` runs.
+            options::With::drop_overridden(&with_packages, &mut selected);
+            check_duplicate_selection(&selected)?;
+            let composed = resolve_selected_tools(&selected, &target)?;
 
             // `--no-pull` composes through an offline clone, so a miss is warned about and omitted, never fetched.
             let manager = context.manager();
@@ -209,7 +196,7 @@ impl ToolchainEnv {
             let roots = composing
                 .compose_roots(&requests, &target, materialization, context.concurrency())
                 .await?;
-            self.report_deferred(&context, &roots, &composed);
+            report_deferred(&context, &roots, &composed);
             advisories = roots.advisories;
             let infos: Vec<Arc<ocx_package::install_info::InstallInfo>> = roots.roots;
             // Assembled exactly as `ocx exec` assembles them: what this prints is what `ocx exec` applies.
@@ -301,6 +288,23 @@ impl ToolchainEnv {
     }
 }
 
+/// Reports the deferred tools' omissions and advisories on stderr, omissions in the eager `--no-pull` shape.
+fn report_deferred(context: &crate::app::Context, composed: &ComposeRoots, tools: &[ResolvedTool]) {
+    for omission in &composed.omitted {
+        // Named by binding, as the user reads `ocx.toml`; a `--with` package has none.
+        let name = tools
+            .iter()
+            .find(|tool| tool.identifier == omission.identifier)
+            .map_or_else(|| omission.identifier.to_string(), |tool| tool.binding.clone());
+        context.ui().warn(format!(
+            "{name} not installed; run `ocx pull` to fetch or drop --no-pull"
+        ));
+    }
+    for advisory in &composed.advisories {
+        context.ui().warn(advisory.to_string());
+    }
+}
+
 /// The group tier of the `lazy-mode` ladder for one selected tool; `None` for a positional package.
 fn group_of(origin: &Origin) -> Option<&str> {
     match origin {
@@ -325,6 +329,31 @@ pub(crate) async fn resolve_global_pinned_env(
     env_overrides: &[Entry],
     pinned_cli: Option<bool>,
 ) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
+    let no_with = GlobalWith {
+        packages: &[],
+        lazy_mode: None,
+        install: false,
+    };
+    resolve_global_env(context, target, groups, env_overrides, pinned_cli, &no_with).await
+}
+
+/// The `--with` packages `ocx --global env` layers beneath the global toolchain, as `ocx --global exec` does.
+struct GlobalWith<'a> {
+    packages: &'a [ocx_oci::PackageRef],
+    lazy_mode: Option<ocx_project::lazy::LazyMode>,
+    /// Applies to the `--with` packages only; the lock-pinned set never installs.
+    install: bool,
+}
+
+/// [`resolve_global_pinned_env`] plus the `--with` packages, which are composed before the lock's tools so a global tool wins a name clash.
+async fn resolve_global_env(
+    context: &crate::app::Context,
+    target: &Platform,
+    groups: &[String],
+    env_overrides: &[Entry],
+    pinned_cli: Option<bool>,
+    with: &GlobalWith<'_>,
+) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
     let home = context.file_structure().root();
     let global_config = ocx_project::ProjectConfig::global_manifest_path(home);
     let global_lock_path = lock_path_for(&global_config);
@@ -334,10 +363,7 @@ pub(crate) async fn resolve_global_pinned_env(
     let (no_patches, mut project_env, pinned) = match &parsed_config {
         Ok(config) => {
             // Against the config's groups, not the lock's: an env-only group has no lock entry.
-            let mut env_groups = expand_all_keyword(groups, config);
-            if env_groups.is_empty() {
-                env_groups = vec![DEFAULT_GROUP.to_owned()];
-            }
+            let env_groups = crate::options::group_selection::expand_with_default(groups, config);
             let env = ocx_project::project_env_entries(config, &global_config, &env_groups);
             let pinned = ocx_package_manager::pinned_for_project(pinned_cli, config);
             (config.no_patches_repositories(), env, pinned)
@@ -364,6 +390,26 @@ pub(crate) async fn resolve_global_pinned_env(
     };
 
     let mut infos = Vec::new();
+    if !with.packages.is_empty() {
+        let defaults = ocx_project::ProjectConfig::default();
+        let config = parsed_config.as_ref().unwrap_or(&defaults);
+        let requests = options::With::requests(with.packages, |identifier| {
+            lazy_mode_for_tool(config, identifier, None, with.lazy_mode)
+        });
+        let (composing, materialization) = if with.install {
+            (context.manager().clone(), Materialization::Install)
+        } else {
+            (
+                context.manager().offline_view(context.local_index().clone()),
+                Materialization::LocalOnly,
+            )
+        };
+        let composed = composing
+            .compose_roots(&requests, target, materialization, context.concurrency())
+            .await?;
+        report_deferred(context, &composed, &[]);
+        infos.extend(composed.roots);
+    }
     let mut toolchain = None;
     if let Some(lock) = &lock {
         let selected_groups = selected_groups_global(groups, lock);
@@ -394,6 +440,10 @@ pub(crate) async fn resolve_global_pinned_env(
             let Ok(identifier) = identifier else {
                 continue;
             };
+            // A `--with` package of the same repository replaces the locked tool, as in `ocx exec`.
+            if options::With::overrides(with.packages, &identifier) {
+                continue;
+            }
             match manager.find(&identifier, target.clone()).await {
                 Ok(info) => infos.push(Arc::new(info)),
                 Err(_) => continue,

@@ -11,10 +11,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_package_manager::InspectOptions;
-use ocx_project::{
-    DEFAULT_GROUP, SelectedTool, ToolSource, check_duplicate_selection, expand_all_keyword, resolve_selected_tools,
-    select_tool_set,
-};
+use ocx_project::{SelectedTool, ToolSource, check_duplicate_selection, resolve_selected_tools, select_tool_set};
 
 use crate::api::data::package_inspect::{InspectReport, PackageInspect};
 use crate::app::project_context::{filter_by_names, load_project_with_lock};
@@ -81,16 +78,11 @@ impl Inspect {
         let env_overrides = self.env.entries(&cwd)?;
 
         let ctx = load_project_with_lock(&context).await?;
-        crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
-
-        let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
-        if expanded.is_empty() {
-            expanded = vec![DEFAULT_GROUP.to_owned()];
-        }
+        let expanded = self.groups.effective(&ctx.config)?;
 
         // Filter before duplicate validation: a disagreeing binding fails only when it is in the narrowed set.
         let selected = select_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
-        let filtered = filter_by_names(selected, &self.names)?;
+        let filtered = filter_by_names(selected, &expanded, &self.names)?;
         check_duplicate_selection(&filtered)?;
 
         let declared: Vec<ocx_oci::PackageRef> = filtered

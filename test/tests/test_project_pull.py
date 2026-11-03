@@ -180,8 +180,10 @@ def _symlinks_root(ocx_home: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _two_group_project(ocx: OcxRunner, tmp_path: Path, label: str) -> Path:
-    """A locked project with one default-group tool and one ``[group.ci]`` tool."""
+def _two_group_project(
+    ocx: OcxRunner, tmp_path: Path, label: str
+) -> tuple[Path, str, str]:
+    """A locked project: (project, default tool reference, ``[group.ci]`` tool reference)."""
     repo_default, tag_default = _published_tool(ocx, tmp_path, f"{label}_default")
     repo_ci, tag_ci = _published_tool(ocx, tmp_path, f"{label}_ci")
 
@@ -201,11 +203,23 @@ ci_tool = "{ocx.registry}/{repo_ci}:{tag_ci}"
     assert lock.returncode == EXIT_SUCCESS, (
         f"ocx lock failed: rc={lock.returncode}\nstderr:\n{lock.stderr}"
     )
-    return project
+    return (
+        project,
+        f"{ocx.registry}/{repo_default}:{tag_default}",
+        f"{ocx.registry}/{repo_ci}:{tag_ci}",
+    )
 
 
-def _pulled_count(ocx: OcxRunner) -> int:
-    return _packages_present_count(Path(ocx.env["OCX_HOME"]), ocx.registry)
+def _in_store(ocx: OcxRunner, cwd: Path, reference: str) -> bool:
+    """Whether ``reference`` is in the package store (``package which`` never installs)."""
+    return subprocess.run(
+        _ocx_cmd(ocx, "package", "which", reference),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+        check=False,
+    ).returncode == EXIT_SUCCESS
 
 
 @pytest.mark.smoke
@@ -213,39 +227,42 @@ def test_pull_no_args_pulls_only_the_default_group(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx pull`` with no ``-g`` pulls the default group only, as ``ocx exec`` composes it."""
-    project = _two_group_project(ocx, tmp_path, "noargs")
+    project, default_ref, ci_ref = _two_group_project(ocx, tmp_path, "noargs")
 
     result = _run_pull(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    assert _pulled_count(ocx) == 1, "a bare pull must leave [group.ci] unpulled"
+    assert _in_store(ocx, project, default_ref), "a bare pull must fetch the default group"
+    assert not _in_store(ocx, project, ci_ref), "a bare pull must leave [group.ci] unpulled"
 
 
 def test_pull_group_all_pulls_every_group(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx pull -g all`` pulls the default group and every named group."""
-    project = _two_group_project(ocx, tmp_path, "allgroups")
+    project, default_ref, ci_ref = _two_group_project(ocx, tmp_path, "allgroups")
 
     result = _run_pull(ocx, project, "-g", "all")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx pull -g all failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    assert _pulled_count(ocx) == 2
+    assert _in_store(ocx, project, default_ref)
+    assert _in_store(ocx, project, ci_ref)
 
 
 def test_pull_names_narrow_within_the_selected_groups(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """``ocx pull -g all ci_tool`` pulls that binding only; an unknown name exits 64."""
-    project = _two_group_project(ocx, tmp_path, "names")
+    project, default_ref, ci_ref = _two_group_project(ocx, tmp_path, "names")
 
     result = _run_pull(ocx, project, "-g", "all", "ci_tool")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx pull NAME failed: rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    assert _pulled_count(ocx) == 1
+    assert _in_store(ocx, project, ci_ref), "the named binding must be fetched"
+    assert not _in_store(ocx, project, default_ref), "an unnamed binding must not be fetched"
 
     # ``ci_tool`` lives in [group.ci]; the default-group scope does not contain it.
     outside = _run_pull(ocx, project, "ci_tool")

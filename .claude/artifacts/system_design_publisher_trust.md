@@ -702,7 +702,7 @@ Owned by the ADR: Q1 long-lived keys for the index anchor, Q2 third-party packag
 
 - [`adr_publisher_trust_distribution.md`](./adr_publisher_trust_distribution.md)
 - `.claude/artifacts/research_publisher_trust_{package_ecosystems,frameworks,oci_policy,gapcheck}.md`, `discover_publisher_trust_architecture_map.md`
-- `.agents/research/research_stable_signer_identity.md`, `.agents/research/review_publisher_trust_round1_triage.md`
+- [`research_stable_signer_identity.md`](./research_stable_signer_identity.md), [`research_publisher_trust_round1_triage.md`](./research_publisher_trust_round1_triage.md), [`prd_release_signing_trust_default.md`](./prd_release_signing_trust_default.md)
 - `.claude/rules/subsystem-oci.md` (local index = lock), `subsystem-file-structure.md` (`state/` contract), `subsystem-interface-contract.md` (IC-22)
 
 ---

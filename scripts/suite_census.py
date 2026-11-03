@@ -116,7 +116,9 @@ SUITE = REPO_ROOT / "test"
 #: skipped 122 -> 127: five `win32` skips for POSIX-only behaviour, added when
 #: the full suite started running natively on Windows (project concurrency,
 #: shell hook, toolchain env, trampoline exec, git transport permission bits).
-PINNED = {"tests": 2885, "skipped": 127, "xfailed": 4, "parametrized": 147}
+#: skipped 127 -> 130: three `win32` skips in `test_shell_open.py`, whose stub
+#: shell is a POSIX script; its smoke case runs on Windows too.
+PINNED = {"tests": 2885, "skipped": 130, "xfailed": 4, "parametrized": 147}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

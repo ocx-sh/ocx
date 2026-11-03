@@ -466,6 +466,79 @@ citool = "{ocx.registry}/{repo_ci}:3.28"
     assert config["group"]["ci"]["tools"]["citool"] == f"{ocx.registry}/{repo_ci}:3.29"
 
 
+def _pins(project: Path) -> dict[tuple[str, str], list[str]]:
+    """Leaf digests per ``(group, name)`` lock entry."""
+    lock = tomllib.loads(_lock_text(project))
+    return {(t["group"], t["name"]): sorted(t["platforms"].values()) for t in lock["tool"]}
+
+
+def test_upgrade_bare_moves_only_the_default_group_and_all_moves_every_group(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Bare ``ocx upgrade`` retags the default group only; ``-g all`` also retags the others."""
+    short = uuid4().hex[:8]
+    repo_default, repo_ci = f"t_{short}_up_bd", f"t_{short}_up_bc"
+    _publish(ocx, repo_default, tmp_path, "3.28.0")
+    _publish(ocx, repo_ci, tmp_path, "3.28.0")
+    project = _locked_project(
+        ocx,
+        tmp_path,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo_default}:3.28"
+
+[group.ci.tools]
+citool = "{ocx.registry}/{repo_ci}:3.28"
+""",
+    )
+    _publish(ocx, repo_default, tmp_path, "3.29.0")
+    _publish(ocx, repo_ci, tmp_path, "3.29.0")
+
+    bare = _upgrade(ocx, project)
+    assert bare.returncode == EXIT_SUCCESS, bare.stderr
+    assert [(row["group"], row["name"]) for row in _payload(bare)["upgrades"]] == [("default", "tool")]
+    config = _toml(project)
+    assert config["tools"]["tool"] == f"{ocx.registry}/{repo_default}:3.29"
+    assert config["group"]["ci"]["tools"]["citool"] == f"{ocx.registry}/{repo_ci}:3.28"
+
+    everything = _upgrade(ocx, project, "-g", "all")
+    assert everything.returncode == EXIT_SUCCESS, everything.stderr
+    assert [(row["group"], row["name"]) for row in _payload(everything)["upgrades"]] == [("ci", "citool")]
+    assert _toml(project)["group"]["ci"]["tools"]["citool"] == f"{ocx.registry}/{repo_ci}:3.29"
+
+
+def test_upgrade_moves_a_from_follower_to_the_same_pin_as_its_source(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``{ from = "default" }`` follows ``[tools]``: a bare upgrade retags the source and
+    both lock entries land on the one new digest."""
+    repo = f"t_{uuid4().hex[:8]}_up_from"
+    _publish(ocx, repo, tmp_path, "3.28.0")
+    project = _locked_project(
+        ocx,
+        tmp_path,
+        f"""\
+[tools]
+uv = "{ocx.registry}/{repo}:3.28"
+
+[group.lint.tools]
+uv = {{ from = "default" }}
+""",
+    )
+    before = _pins(project)
+    assert before[("default", "uv")] == before[("lint", "uv")]
+    _publish(ocx, repo, tmp_path, "3.29.0")
+
+    result = _upgrade(ocx, project)
+
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    after = _pins(project)
+    assert after[("default", "uv")] != before[("default", "uv")], "the source pin must move"
+    assert after[("lint", "uv")] == after[("default", "uv")], "the follower must share the source's new pin"
+    assert _toml(project)["group"]["lint"]["tools"]["uv"] == {"from": "default"}
+    assert 'declared = "' + f"{ocx.registry}/{repo}:3.29" + '"' in _lock_text(project)
+
+
 # ---------------------------------------------------------------------------
 # Guards: exit codes, and nothing is written on a refusal
 # ---------------------------------------------------------------------------

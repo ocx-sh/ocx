@@ -316,6 +316,9 @@ pub enum ScopeBlock {
         /// Packages layered on with `--with`, exactly as requested; omitted when none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         with: Vec<String>,
+        /// Whether `--stack` kept the parent project's environment under this one; omitted when not.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stack: bool,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
@@ -559,6 +562,8 @@ pub enum Scope {
         bindings: Vec<PackageBinding>,
         /// Packages layered on with `--with`, as requested; they have no binding.
         with: Vec<PackageRef>,
+        /// Whether `--stack` kept the parent project's environment under this one.
+        stack: bool,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
@@ -655,6 +660,7 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             declaration_digest,
             groups,
             with,
+            stack,
             ..
         } => ScopeBlock::Project {
             clean_env: inputs.clean_env,
@@ -665,6 +671,7 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             },
             groups: groups.clone(),
             with: with.iter().map(ToString::to_string).collect(),
+            stack: *stack,
         },
         Scope::Package { requested } => ScopeBlock::Package {
             clean_env: inputs.clean_env,
@@ -1259,6 +1266,7 @@ mod tests {
                 package: pinned("ocx/cmake", "index.ocx.sh", None, LEAF_HEX),
             }],
             with: Vec::new(),
+            stack: false,
         }
     }
 
@@ -2360,6 +2368,21 @@ mod tests {
     }
 
     #[test]
+    fn scope_records_stack_only_when_it_was_requested() {
+        let frame = Frame::project();
+        let serialized = |stack: bool| {
+            let mut scope = project_scope();
+            if let Scope::Project { stack: slot, .. } = &mut scope {
+                *slot = stack;
+            }
+            serde_json::to_value(scope_block(&frame.inputs(scope))).expect("scope block serializes")
+        };
+
+        assert_eq!(serialized(true)["stack"], serde_json::Value::Bool(true));
+        assert!(serialized(false).get("stack").is_none());
+    }
+
+    #[test]
     fn scope_projects_its_tier_specific_block() {
         let frame = Frame::project();
         match scope_block(&frame.inputs(project_scope())) {
@@ -2369,8 +2392,10 @@ mod tests {
                 lock,
                 groups,
                 with,
+                stack,
             } => {
                 assert!(with.is_empty());
+                assert!(!stack);
                 assert!(!clean_env);
                 assert_eq!(project_root, PathBuf::from("/scratch/job-88213"));
                 assert_eq!(lock.path, PathBuf::from("/scratch/job-88213/ocx.lock"));

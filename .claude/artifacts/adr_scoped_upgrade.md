@@ -197,3 +197,11 @@ Library layer is **unchanged** — `resolve_lock_touched`, `expand_all_keyword`,
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-09 | Michael Herwig | Initial draft — reverse "no subset upgrade"; scope `upgrade` by name/group via `resolve_lock_touched`, guarantees preserved |
+
+## Amendment 2026-11-03 — default group, `from` followers
+
+Amends "no `groups` and no `names` → existing whole-file path" (the unscoped case) and the whole-file wording in the options above.
+
+- A bare `ocx upgrade` and a bare `ocx update` act on the **default group**; `-g GROUP` and `NAME` scope them further and `-g all` restores the every-group behaviour. Names and groups still re-resolve only the touched bindings through `resolve_lock_touched` and carry the rest forward.
+- `{ from = "default" }` followers always move with their source: the default pin and each follower land on the same digest, even when the follower's group is not selected. A scoped command does not leave a follower on the source's old digest.
+- `ocx lock` reconciles per binding (lock v4 `declared`): only bindings whose `ocx.toml` entry is new or changed re-resolve. Details in `adr_per_platform_lock_pinning.md`, Amendment 2026-11-03.

@@ -222,6 +222,71 @@ pub(crate) fn union_bases(
     installed
 }
 
+/// `bases` plus each installed base's dependency closure: compose matches patch rules against
+/// every package in the env, so GC roots, sync and freeze must see the same set (ocx#666).
+///
+/// # Errors
+///
+/// An installed base's unreadable `resolve.json`; skipping it would let `ocx clean` collect a
+/// companion compose still reads.
+pub(crate) async fn with_dependency_bases(
+    manager: &PackageManager,
+    bases: Vec<ocx_oci::PackageRef>,
+) -> crate::Result<Vec<ocx_oci::PackageRef>> {
+    let dependencies = dependency_bases(manager, &bases).await?;
+    Ok(union_bases(bases, dependencies))
+}
+
+/// The dependencies of each installed base in `bases`, read from its `resolve.json`.
+async fn dependency_bases(
+    manager: &PackageManager,
+    bases: &[ocx_oci::PackageRef],
+) -> crate::Result<Vec<ocx_oci::PackageRef>> {
+    use ocx_util::serde_ext::SerdeExt as _;
+
+    let file_structure = manager.file_structure();
+    let mut dependencies: Vec<ocx_oci::PackageRef> = Vec::new();
+    for base in bases {
+        let Some(resolve_path) = installed_resolve_path(file_structure, base).await? else {
+            continue;
+        };
+        if !ocx_util::fs::path_exists_lossy(&resolve_path).await {
+            continue;
+        }
+        let resolved = ocx_package::resolved_package::ResolvedPackage::read_json(&resolve_path).await?;
+        dependencies.extend(
+            resolved
+                .dependencies
+                .into_iter()
+                .map(|dependency| dependency.identifier.into()),
+        );
+    }
+    Ok(dependencies)
+}
+
+/// Where `base`'s `resolve.json` lives: by digest for a lock base, through the candidate link for
+/// an installed one; `None` when the base is not installed here. The candidate probe and the
+/// canonicalisation are blocking syscalls, so they run off the runtime thread.
+async fn installed_resolve_path(
+    file_structure: &ocx_store::file_structure::FileStructure,
+    base: &ocx_oci::PackageRef,
+) -> crate::Result<Option<std::path::PathBuf>> {
+    if let Ok(pinned) = ocx_oci::PinnedPackageRef::try_from(base.clone()) {
+        return Ok(Some(file_structure.packages.resolve(&pinned)));
+    }
+    let candidate = file_structure.symlinks.candidate(base);
+    let packages = file_structure.packages.clone();
+    let probe = candidate.clone();
+    tokio::task::spawn_blocking(move || {
+        if !ocx_util::fs::symlink::is_link(&probe) {
+            return None;
+        }
+        packages.resolve_for_content(&probe).ok()
+    })
+    .await
+    .map_err(|join_error| crate::error::file_error(&candidate, std::io::Error::other(join_error)))
+}
+
 impl PackageManager {
     /// Project-lock bases for `platform` from the live registered projects and the home lock,
     /// read-only; an unreadable ledger or lock warns and is skipped.
@@ -262,18 +327,23 @@ impl PackageManager {
             return Ok(PatchSyncReport::default());
         };
 
-        let installed = enumerate_installed_bases(self).await?;
+        // Expanded once: the installed bases' `resolve.json` reads do not depend on the platform.
+        let installed = with_dependency_bases(self, enumerate_installed_bases(self).await?).await?;
+        let installed_set: std::collections::HashSet<&ocx_oci::PackageRef> = installed.iter().collect();
         let project_locks = load_project_locks(self.file_structure(), UnreadableConfig::Fallback).await?;
         // Per platform: a project base carries that platform's leaf, as `ocx lock` discovered it.
-        let bases_per_platform: Vec<(&ocx_oci::Platform, Vec<ocx_oci::PackageRef>)> = platforms
-            .iter()
-            .map(|platform| {
-                let project = project_locks
-                    .iter()
-                    .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform));
-                (platform, union_bases(installed.clone(), project))
-            })
-            .collect();
+        let mut bases_per_platform: Vec<(&ocx_oci::Platform, Vec<ocx_oci::PackageRef>)> =
+            Vec::with_capacity(platforms.len());
+        for platform in platforms {
+            let project: Vec<ocx_oci::PackageRef> = project_locks
+                .iter()
+                .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform))
+                // `resolve.json` dependencies are the full transitive closure, so an installed base adds nothing.
+                .filter(|base| !installed_set.contains(base))
+                .collect();
+            let bases = union_bases(installed.clone(), with_dependency_bases(self, project).await?);
+            bases_per_platform.push((platform, bases));
+        }
         let all_bases = union_bases(
             Vec::new(),
             bases_per_platform.iter().flat_map(|(_, bases)| bases.iter().cloned()),

@@ -1226,6 +1226,7 @@ impl PackageManager {
     /// (callers pass the host); `scope` picks which pins count ([`PatchRootScope`]).
     /// `project_bases` joins the installed bases: project installs link nothing under `symlinks/`,
     /// so their lock entries are bases only through it, identified for the same `platform`.
+    /// Every base's installed dependency closure is a base too, as compose matches it.
     ///
     /// # Errors
     ///
@@ -1247,10 +1248,14 @@ impl PackageManager {
         // Same reader as `find_companion_local_at`, so GC roots and compose derive from one answer.
         let local_index = companion_manifest_index(self);
 
-        let installed_base_ids = super::patch_sync::union_bases(
-            super::patch_sync::enumerate_installed_bases(self).await?,
-            project_bases.iter().cloned(),
-        );
+        let installed_base_ids = super::patch_sync::with_dependency_bases(
+            self,
+            super::patch_sync::union_bases(
+                super::patch_sync::enumerate_installed_bases(self).await?,
+                project_bases.iter().cloned(),
+            ),
+        )
+        .await?;
         let _ = symlink_root;
 
         let mut companion_set: Vec<ocx_oci::PackageRef> = Vec::new();
@@ -7804,6 +7809,85 @@ mod phase5a_spec_tests {
         let slug_base_id = PackageRef::new_registry("cmake", "localhost_5000").clone_with_tag("3.28");
         let recovered = recover_with_root_pointer(&slug_base_id, "oci://localhost:5000/cmake").await;
         assert_eq!(recovered.to_string(), "localhost:5000/cmake:3.28");
+    }
+
+    /// Compose matches patch rules against a base's whole dependency closure, so a
+    /// companion whose rule names only a dependency must be a GC root too, or
+    /// `ocx clean` collects a companion the next compose still reads (ocx#666).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_site_patch_roots_roots_a_companion_matched_only_through_a_dependency() {
+        use ocx_package::resolved_package::ResolvedDependency;
+
+        use super::phase4_spec_tests::{seed_global_descriptor_rules, seed_package_in_store};
+
+        let dir = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let store = manager.file_structure().packages.clone();
+        let file_structure = manager.file_structure().clone();
+
+        let dependency = PinnedPackageRef::try_from(
+            PackageRef::new_registry("openssl", REGISTRY)
+                .clone_with_tag("3")
+                .clone_with_digest(sha256('d')),
+        )
+        .unwrap();
+        seed_package_in_store(&store, &dependency, &ResolvedPackage::new());
+        let base =
+            PinnedPackageRef::try_from(PackageRef::new_registry("curl", REGISTRY).clone_with_digest(sha256('b')))
+                .unwrap();
+        let base_resolved = ResolvedPackage {
+            dependencies: vec![ResolvedDependency {
+                identifier: dependency.clone(),
+                visibility: Visibility::PUBLIC,
+            }],
+        };
+        seed_package_in_store(&store, &base, &base_resolved);
+
+        let mut companions = Vec::new();
+        for (name, hex) in [("dependency-ca", 'e'), ("unmatched-ca", 'f')] {
+            let tag_id = PackageRef::new_registry(name, PATCH_REGISTRY).clone_with_tag("1");
+            let pinned = PinnedPackageRef::try_from(tag_id.clone_with_digest(sha256(hex))).unwrap();
+            seed_package_with_constant_var(
+                &store,
+                &pinned,
+                &ResolvedPackage::new(),
+                "CA_BUNDLE",
+                "/ca.pem",
+                Visibility::INTERFACE,
+            );
+            seed_companion_pin(&file_structure, &tag_id, &sha256(hex));
+            companions.push((tag_id, pinned));
+        }
+        let [
+            (dependency_ca, dependency_ca_pinned),
+            (unmatched_ca, unmatched_ca_pinned),
+        ] = <[_; 2]>::try_from(companions).unwrap();
+        seed_global_descriptor_rules(
+            &manager,
+            &patch_config,
+            serde_json::json!([
+                { "match": format!("{REGISTRY}/openssl:*"), "packages": [dependency_ca.to_string()] },
+                { "match": format!("{REGISTRY}/unrelated:*"), "packages": [unmatched_ca.to_string()] },
+            ]),
+        )
+        .await;
+
+        let roots = manager
+            .resolve_site_patch_roots(&ocx_oci::Platform::any(), PatchRootScope::Recorded, &[base.into()])
+            .await
+            .expect("resolve_site_patch_roots must succeed");
+
+        assert!(
+            roots.companions.contains(&dependency_ca_pinned),
+            "a companion matched through the base's dependency must be rooted; got: {:?}",
+            roots.companions
+        );
+        assert!(
+            !roots.companions.contains(&unmatched_ca_pinned),
+            "a rule matching no package in the closure must root nothing; got: {:?}",
+            roots.companions
+        );
     }
 }
 

@@ -25,6 +25,7 @@ pub(crate) mod patch_test;
 pub(crate) mod prepare_lazy;
 pub(crate) mod pull;
 pub(crate) mod pull_local;
+pub(crate) mod pull_or_prepare;
 pub(crate) mod purge;
 // `pub`: `ocx_cli` constructs the `RenderRequest` that `render_toolchain` takes.
 pub mod render_toolchain;

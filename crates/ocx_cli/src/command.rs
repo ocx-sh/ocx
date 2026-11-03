@@ -218,9 +218,7 @@ pub enum Command {
         resolved from. Only a binding that is new, or whose spelling or repository changed, is \
         re-resolved. Every other pin is carried forward verbatim, even if a moving tag has moved \
         upstream. A lock whose entries all match `ocx.toml` is rewritten byte-identically.\n\n\
-        A lock written by an older ocx, which records no `declared`, migrates without contacting \
-        the registry when it is current, and is re-resolved in full when `ocx.toml` drifted. To \
-        advance pins whose declaration did not change, use `ocx update`.\n\n\
+        To advance pins whose declaration did not change, use `ocx update`.\n\n\
         Each binding records its registry and repository plus a table of every platform the \
         publisher ships, whatever OS the command runs on. A lock committed on Linux is therefore \
         complete for macOS and Windows runners. The command is transactional: either every \
@@ -267,7 +265,7 @@ pub enum Command {
         tag exits 81); `--offline` forbids network access. Without `-g` only the default group \
         is re-resolved; `-g ci` selects a group and `-g all` every group. Binding names narrow \
         the selection further: `ocx update ripgrep` advances one binding. A group tool declared \
-        `{ from = \"default\" }` keeps its own lock entry until its group is selected.\n\n\
+        `{ from = \"default\" }` moves with its source: both land on the same pin.\n\n\
         A scoped update needs an existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` \
         (exit 65), and rejects an unknown group or name (exit 64). A bare update re-resolves the \
         default group; when `ocx.toml` drifted it also re-resolves the bindings whose \
@@ -334,8 +332,9 @@ pub enum Command {
     /// config is `ocx lock`. After a successful pull it re-saves the file to advance its mtime.
     #[command(long_about = "\
         Pre-warm the object store, then render the project toolchain.\n\n\
-        Fetches every digest-pinned entry the project `ocx.lock` declares into the local \
-        object store. Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or \
+        Fetches the digest-pinned `ocx.lock` entries of the selected groups into the local \
+        object store: the default group without `-g`, every group with `-g all`. Naming bindings \
+        narrows the pull to those entries. Then it renders the project toolchain into `<project>/.ocx/toolchain/`, or \
         under the `toolchain_dir` root when one is configured. That is one link per \
         `links/<group>/<entry>`, plus the `shells/default/bin` launchers for the default \
         group, reached through the `active` link. That directory carries its own `.gitignore`, \
