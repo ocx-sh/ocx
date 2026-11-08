@@ -1622,6 +1622,7 @@ def test_relocating_the_home_renders_the_new_tree_and_abandons_the_old_one_in_pl
 
     root = Path(ocx.env["OCX_HOME"]) / "relocated"
     root.mkdir()
+    root.chmod(0o755)
     write_toolchain_dir_config(ocx, root)
 
     relocated = resolved_toolchain_home(ocx, project.directory)
@@ -1664,6 +1665,7 @@ def test_clean_prunes_a_departed_projects_ledger_entry_and_stamp_only(
     """
     root = Path(ocx.env["OCX_HOME"]) / "fleet"
     root.mkdir()
+    root.chmod(0o755)
     write_toolchain_dir_config(ocx, root)
 
     departing = locked_project(ocx, tmp_path, directory=tmp_path / "departing")
@@ -1737,6 +1739,7 @@ def test_a_managed_config_tier_relocates_every_project_tree_under_the_fleet_root
     label = uuid4().hex[:8]
     root = Path(ocx.env["OCX_HOME"]) / "fleet"
     root.mkdir()
+    root.chmod(0o755)
     repo = f"t_{label}_fleetcfg"
     push_managed_config(
         ocx, repo, "1.0.0", f'toolchain_dir = "{root.as_posix()}"\n', tmp_path

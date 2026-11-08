@@ -1358,6 +1358,9 @@ HAND_DECLARED_READS: dict[str, frozenset[str]] = {
     # needles a sweep searches for, and the `test/recordings/*.py` it reads are
     # `:recording_sources`.
     "test_doc_scripts_one_tree.py": frozenset({"//test:recording_sources"}),
+    # `src/previous_release.py` joins `ocx.toml` onto the repository root, a path no
+    # AST read shows: the pinned previous-release `ocx` comes from the toolchain.
+    "test_hardening_nesting.py": frozenset({"//:ocx.toml"}),
     # Reviewed: `scripts/setup.sh` is a file the test writes under `tmp_path`.
     "test_config_push.py": frozenset(),
 }

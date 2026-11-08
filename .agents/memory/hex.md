@@ -123,6 +123,41 @@ research-axes:
 
 ## Memory
 
+- **Active plan addendum (hex-plan high, 2026-11-07, plan-approved): `.claude/artifacts/plan_exec_env_model.md` § Addendum A2** — the goal's open criteria 10–13 (follow-ups #611, #682–#687; owner decisions on the decoder, the deleted secret classifier and PowerShell ASCII literals; ocx-mirror and ocx-sdk-python lockstep). 9 pipelines in 2 waves (W1 SEC, PS, HSIG, HARN, HCAP, HCEIL, SATS, SATM; W2 NU), then I2 + review R3; decisions D-28..D-44. Satellites are cloned into `.agents/worktrees/sat-ocx-{mirror,sdk-python}` on `hex/exec-env-model-lockstep`, with local commits only. The mirror's pointer moves to the finalized SHA after the lead pushes. Next: `/hex-execute high .claude/artifacts/plan_exec_env_model.md` (A2 only).
+- **Active plan (hex-plan xhigh, 2026-11-07, plan-approved): `.claude/artifacts/plan_exec_env_model.md`** — implements `adr_exec_env_model.md` on `hex/adr-exec-env-model` under the `/hex-loop` goal `.agents/goals/adr-exec-env-model.md`. 22 pipelines, 57 implementation steps (A0 contract wave; W1 ENV/CODEC/POLICY/PROJ/PIN/SDK; W2 CTX/SPAWN/HOOK/EXPORT/DUMP; W3 SEAM/E2E/DOCS/RULES; I1 gate + review R1; W4 hardening H1–H5; W5 HFIX; HR report + review R2). Critical path A0 → PROJ → HOOK → SEAM → I1 → H2 → HFIX → HR. Landing gate: ocx-mirror lockstep upgrade (F-1) + `task satellite:verify` before the branch lands. Decisions D-01..D-07 accepted under goal-loop authority (owner may revisit); old and new seams coexist until SEAM (D-08); two exit slugs deleted (D-09); the nested-exec owner rule is green today for a plain chain, red only under a hook layer (D-10). `satellite:verify` absent locally (no ocx-mirror checkout); mirror upgrade is follow-up F-1. Next: `/hex-execute .claude/artifacts/plan_exec_env_model.md`.
+- **ADR (hex-architect xhigh, 2026-11-07, Accepted 2026-11-07 under goal-loop authority): `.claude/artifacts/adr_exec_env_model.md`** + `system_design_exec_env_model.md`, built from the exec-env-model dossier below.
+  - Decision: Option A, two variables with one rule each. Re-scored matrix: A 49, D 46, B 45, C 37. The margins are within noise; the choice rests on the owner's rule-count priority and the frozen on-disk surface.
+  - What the panel added:
+    - a frozen plaintext header carrying narrowing policy and home, honoured when the payload is unreadable;
+    - major/minor versioning;
+    - a session token (pid plus start time);
+    - secret priors withheld;
+    - `--no-verify` kept to one command;
+    - Pinned stores names and a digest only;
+    - exporters write a minimal state;
+    - the precedence split: relaxing fields let ambient beat received.
+  - The claim diff corrected the dossier in four places: today's default exec already reverts the hook's values; #678 is caused by `OCX_GLOBAL`; the ledger's v-1 revert arm was never built; the trampoline's `unset OCX_PROJECT` is still needed.
+  - Inputs: `discover_exec_env_model.md`, `research_env_state_encoding.md` and the six dossier research files, copied as `.claude/artifacts/research_*.md`.
+  - Second fix pass (2026-11-07): owner decision O-1 (the hook never reloads an inherited scope; `cd` into another project layers it on top; an exec'd shell is a snapshot, so `ocx.toml` edits refresh only `ocx shell`), modelled as `inherited_scopes` (at most 16). Also the 4 codex fixes (cmd.exe cap now 8,169) and all 10 re-validation leftovers. A spec check passed; its 3 wording warns were fixed inline. Open: OQ-1 to OQ-3 (Windows junction, SDK strip, credential-helper spawn).
+  - Owner must confirm: rewording product principle 4 (`product-context.md` in the same change); relaxing fields letting ambient beat received; global staying out inside an inherited project (the architect's reading of O-1); `__OCX_CREDENTIAL_HELPER=1` kept as a third variable in the helper spawn until 0.7.
+  - Cross-model review: absent during the run, because the host's AppArmor blocked codex's sandbox (see the note below). It was re-run on 2026-11-07 against the post-fix ADR and system design, after the owner loaded the AppArmor profile and the docs were staged outside `.claude/`. Verdict needs-attention, 5 findings, none overlapping the panel:
+    - actionable: the cmd.exe cap arithmetic (it ignores the variable name); S-6 constant coalescing erasing a user change made between two ocx writes; a pinned refresh overwriting `--env` overrides; field names unstable within a major;
+    - dropped (stated convention): the system design delegates to the ADR.
+  - Accepted 2026-11-07 under goal-loop authority: OQ-1..OQ-3 take their Recommended answers, the four owner confirmations take the ADR's positions (plan D-01..D-07; owner may revisit). Planned in `plan_exec_env_model.md`.
+- **Note for the next `/hex-init`:** `adversary: codex:rescue` names a skill that is not installed; `nox-review --harness codex --exclude claude` is the installed hex adversary and works. Its earlier refusals (`unsupported`, C-1007) came from the host, not from nox. codex-cli 0.166.0 sandboxes through its bundled bubblewrap, which Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` blocked (`bwrap: loopback: Failed RTM_NEWADDR`). The owner fixed it on 2026-11-07 with an AppArmor profile, `/etc/apparmor.d/codex-bwrap` (`userns` for `~/.codex/packages/standalone/releases/*/codex-resources/bwrap`). After a codex or OS update, re-check with `codex sandbox -c sandbox_mode=read-only -- true`. Second trap: in `--scope plan-artifact`, nox neutralizes the target itself when it sits under `.claude/`, and every ADR here does. Stage a copy in a throwaway git repo in the scratchpad and pass `--repo` there, or the reviewer gets an empty checkout (`neutralized=1 of 1`). Candidate checklist item, raised by three seats: state an ocx process inherits must never supply a value or path it applies unvalidated, and session state must be bound to the shell that owns it.
+- **Discussion (2026-11-06, handed-off → architect → ADR drafted): `.agents/discussions/exec-env-model.md`** —
+  Simplify the exec-environment model, triggered by grimoire#297 and ocx#678.
+  - Two transported variables:
+    - `__OCX_ENV_STATE`: ocx-only, format-versioned, fail-safe. It holds flag policy, applied values tagged session or inherited, and the session selection.
+    - `OCX_BINARY_PIN`: frozen name, now written with the stable install path.
+  - Exec modes: layer by default, `--isolate`, `--clean`.
+  - Removed: the `OCX_GLOBAL` env form, `--stack` and `__OCX_EXEC_SCOPE`.
+  - `ocx shell` opens a pinned session.
+  - Nothing generated files on disk read may change. Refreshing them is deferred to ocx#679.
+  - 10 open questions carry recommendations. The Verification section includes an exploratory hardening session.
+  - Research: `.agents/research/research_{ocx-exec-env-transport-inventory,nested-env-state-prior-art,ocx-env-transport-history,env-leak-community-reports,inherited-state-adjacent-fields,env-transport-shape-council}.md`.
+  - Consumed by `/hex-architect` on 2026-11-07 → `.claude/artifacts/adr_exec_env_model.md` (see the ADR entry above). After the ADR is accepted, the owner intends `/hex-loop <adr>` with the hardening session in the extras.
+
 - **Active plan (hex-plan high, 2026-10-22, plan-approved): `.claude/artifacts/plan_pr637_round2.md`** —
   PR #637 round 2 (findings 1-17 of `.agents/batches/pr637-batch2.md`; issues #631-#636, #638). Phase 1 = cache
   (P1) then a measured D-CROSS gate; then tiers (conventions adoption), test tooling, platform, cleanups, release

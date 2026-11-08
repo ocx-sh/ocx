@@ -578,9 +578,10 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... [-- <COMMAND>..
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--clean` |  | Strip ambient parent env before composing - only `OCX_*` config and composed package vars reach the child. Mirrors `ocx exec --clean` |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--identifier`, `-i` | `IDENTIFIER` | Identifier under which the package is materialized. Tag form (`repo:tag`) only; an explicit `@digest` is rejected (the digest is computed locally during this command and supplying one would conflict) |
+| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
 | `--junit` | `PATH` | Write a JUnit XML report for the scripted run to PATH, truncating an existing file, even on a red run; needs `--script`, and an unwritable path exits 74 |
 | `--keep` |  | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/` |
 | `--metadata`, `-m` | `METADATA` | Path to the package metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` -> `pkg-metadata.json`). Required when no file layers are provided |

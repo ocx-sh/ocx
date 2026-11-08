@@ -404,6 +404,8 @@ def _stand_in_ocx(
         f"""    printf 'current=%s\\n' "$(cd -P {shlex.quote(str(current))} 2>/dev/null && pwd -P"""
         """ || printf '(absent)')"\n"""
         f"}} >> {shlex.quote(str(receipt))}\n"
+        # Kept apart from the two-line receipt: the pin is what the hand-off's environment carried.
+        f"""printf '%s\\n' "$OCX_BINARY_PIN" > {shlex.quote(str(receipt) + ".pin")}\n"""
         f"{tail}\n"
     )
 
@@ -850,6 +852,46 @@ def test_self_update_installs_newer_version(
     assert store.is_file(), (
         f"the new binary's own setup must reach phase 3.5 and write {store}; "
         "an update that leaves it absent is the 0.6.0 -> 0.6.1 regression"
+    )
+
+
+@_skip_on_windows
+def test_self_update_handoff_does_not_inherit_the_old_binary_pin(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    unique_repo: str,
+) -> None:
+    """The hand-off child's ``OCX_BINARY_PIN`` names the freshly pulled binary.
+
+    The updater runs in an environment whose ``OCX_BINARY_PIN`` names the binary being replaced
+    (a launcher in a pre-existing env). The child must not inherit it, or the new build's own
+    launchers would re-enter the old one.
+    """
+    repo = unique_repo
+    receipt = _publish_two_versions(ocx, repo, tmp_path)
+    ocx.json("package", "install", "-s", f"{repo}:0.0.1")
+    stale_pin = tmp_path / "stale" / "ocx"
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**ocx.env, "__OCX_TESTING_SELF_IMAGE": f"{ocx.registry}/{repo}", "HOME": str(home)}
+    env["OCX_BINARY_PIN"] = str(stale_pin)
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "self", "update"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    _hand_off_receipt(receipt)
+
+    seen = Path(str(receipt) + ".pin").read_text().strip()
+    assert seen != str(stale_pin), "the hand-off child inherited the old binary pin"
+    new_binary = _current_symlink(ocx, repo).resolve() / "content" / "bin" / "ocx"
+    assert Path(seen).resolve() == new_binary.resolve(), (
+        f"the hand-off child's pin must be the new binary {new_binary}; got {seen!r}"
     )
 
 

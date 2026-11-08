@@ -1629,6 +1629,15 @@ mod tests {
         // Same path, same length, different content — a reinstall that writes
         // through the existing inode.
         write_fake_loader(&loader, b"a DIFFERENT libc altogether samelen").await;
+        // Two writes can land in one filesystem timestamp tick under load, so
+        // the later mtime is set explicitly instead of left to the clock.
+        let rewritten_at = before.modified().expect("mtime") + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(&loader)
+            .expect("open the rewritten loader")
+            .set_modified(rewritten_at)
+            .expect("set the rewritten mtime");
         let after = tokio::fs::metadata(&loader).await.expect("stat the replacement");
         assert_eq!(
             after.len(),

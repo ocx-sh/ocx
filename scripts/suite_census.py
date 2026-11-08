@@ -118,7 +118,11 @@ SUITE = REPO_ROOT / "test"
 #: shell hook, toolchain env, trampoline exec, git transport permission bits).
 #: skipped 127 -> 130: three `win32` skips in `test_shell_open.py`, whose stub
 #: shell is a POSIX script; its smoke case runs on Windows too.
-PINNED = {"tests": 2885, "skipped": 130, "xfailed": 4, "parametrized": 147}
+#: 2885 / 130 / 4 / 147 -> 3419 / 143 / 4 / 201 with the exec-env state model:
+#: `tests` +534, `skipped` +13, `parametrized` +54, `xfailed` unchanged.
+#: -> 3526 / 144 / 4 / 224 with the five `test_hardening_*.py` modules and the
+#: HFIX param rename: `tests` +107, `skipped` +1, `parametrized` +23.
+PINNED = {"tests": 3526, "skipped": 144, "xfailed": 4, "parametrized": 224}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

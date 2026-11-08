@@ -5,6 +5,9 @@ version: '3'
 vars:
   BIN_DIR: "{{toSlash .ROOT_DIR}}/test/bin"
   OCX_BINARY: "{{.BIN_DIR}}/ocx{{exeExt}}"
+  # The `-c opt` build the latency gate measures; `OCX_BINARY` is `fastbuild`.
+  OPT_BIN_DIR: "{{.BIN_DIR}}/opt"
+  OPT_OCX_BINARY: "{{.OPT_BIN_DIR}}/ocx{{exeExt}}"
   # The Windows native launcher shim. test_windows_shim.py is skipif
   # non-Windows, so on Linux/macOS legs this is a harmless check-only
   # compile (the ELF is never exercised; _find_shim_binary keeps skipping
@@ -125,9 +128,9 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
 
-  # The binaries alone, with no schema generation. `shells` and `shell-latency`
-  # mount one binary and three Python modules into a container and read no
-  # schema at all, and their CI job checks out WITHOUT submodules on purpose —
+  # The binaries alone, with no schema generation. `shells` mounts one binary
+  # and three Python modules into a container and reads no schema at all, and
+  # its CI job checks out WITHOUT submodules on purpose —
   # so going through `build` there builds `//crates/ocx_schema:schemas` against
   # absent `external/` patch sources and reds the job on a tree that is fine.
   # `smoke` also calls this directly rather than `build`: no smoke-marked test
@@ -171,6 +174,24 @@ tasks:
     status:
       - '{{eq .SKIP_BUILD "true"}}'
 
+  # `ocx` alone, optimized. The latency budgets (C-044) are a few milliseconds
+  # above the bare-exec floor and hold for a release build; the `fastbuild`
+  # binary `.build-binaries` publishes is three times slower and reds them at
+  # any load. Its own output directory keeps the two configurations apart.
+  .build-binary-opt:
+    internal: true
+    dir: '{{toSlash .ROOT_DIR}}'
+    cmds:
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build -c opt //crates/ocx_cli:ocx
+      - mkdir -p "{{.OPT_BIN_DIR}}"
+      - cmd: |
+          set -eu
+          src=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery -c opt --output=files //crates/ocx_cli:ocx 2>/dev/null)
+          [ -f "$src" ] || { echo "test:.build-binary-opt: bazel reports no output file (got '$src')" >&2; exit 1; }
+          cp "$src" '{{.OPT_OCX_BINARY}}.new' && chmod u+w '{{.OPT_OCX_BINARY}}.new' && mv '{{.OPT_OCX_BINARY}}.new' '{{.OPT_OCX_BINARY}}'
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
   default:
     desc: Run acceptance tests (builds binary + starts registry automatically)
     cmds:
@@ -208,6 +229,9 @@ tasks:
     # plain YAML.)
     env: &pytest-env
       OCX_COMMAND: "{{.OCX_BINARY}}"
+      # The previous-release ocx (`test/src/previous_release.py`) is not exported
+      # here: it resolves from `OCX_TEST_PREVIOUS_OCX` or the root toolchain's
+      # `test` group, so every leg sees the same pin and none can drift from it.
       # _find_shim_binary() honours OCX_SHIM_BINARY first; pointing it at the
       # copied test/bin/ocx-shim{exe} makes test_windows_shim.py a live gate
       # on windows-latest and a no-op skip elsewhere (module is skipif Win32).
@@ -608,7 +632,7 @@ tasks:
       uncached with no binary, no registry and no task runner
       (test/lint/conftest.py refuses each). Fails below test/LINT_FLOOR
       collected, above test/LINT_SKIP_CEILING skipped or
-      test/LINT_XFAIL_CEILING xfailed, and above a 30 s wall-clock budget (90 s on GitHub Actions).
+      test/LINT_XFAIL_CEILING xfailed, and above a 140 CPU-second budget (240 s on GitHub Actions; wall only at 5x).
       The `deep` marker is deselected: `lint:deep` runs those.
     dir: '{{toSlash .TASKFILE_DIR}}'
     # No `sources:`, by design (ADR C-LINT): a sweep's input is the whole tree,
@@ -630,24 +654,26 @@ tasks:
         [ "$count" -ge "$floor" ] || {
           echo "lint floor: $count tests collected, floor is $floor (test/LINT_FLOOR) — the lint tier shrank" >&2; exit 1; };
         echo "lint floor: $count tests collected (floor $floor)"
-      # The budget (S-015) is the conftest's — it clocks the session, fails it
-      # above OCX_LINT_BUDGET_SECONDS and prints measured against budget, and
+      # The budget (S-015) is the conftest's — it sums the CPU seconds of the
+      # controller and every xdist worker, fails the session above
+      # OCX_LINT_BUDGET_SECONDS (wall time only backs that up at 5x, so a loaded
+      # host never reds it alone) and prints measured against budget;
       # test_lint_tier_guards.py shows that red and green. Pinned inline rather
       # than in `env:`, which loses to an inherited variable: a budget the
       # calling environment could raise would not gate the run it measures.
-      # 30 s is the dev host's; a 4-vCPU hosted runner shares phase 1 with
-      # cold rustup and Bazel setup and measured 35 s, so GitHub Actions gets 90.
+      # 140 CPU s is 1.5x the largest of three measured runs (87.7), rounded
+      # up to 10; GitHub Actions gets 240.
       #
       # Teed, with `set -o pipefail` so pytest's status survives the tee, for
       # the skip/xfail ceilings below — the acceptance tier's pattern.
       - >-
         start=$(date +%s);
         set -o pipefail;
-        budget=30; [ "${GITHUB_ACTIONS:-}" = true ] && budget=90;
+        budget=140; [ "${GITHUB_ACTIONS:-}" = true ] && budget=240;
         OCX_LINT_BUDGET_SECONDS=$budget uv run pytest lint/ -m "not deep" -n auto --basetemp="{{.TEST_BASETEMP}}-lint"
         {{.CLI_ARGS | default "-q"}} 2>&1 | tee "{{.TEST_BASETEMP}}-lint.log";
         status=$?;
-        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget $budget s)";
+        echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (CPU budget $budget s)";
         exit $status
       # A skip added to dodge a red is not caught by the collected floor.
       - task: .suite-ceilings
@@ -727,7 +753,8 @@ tasks:
       - >-
         missing='';
         for f in tests/test_shell_activation.py tests/test_shell_reconcile.py
-        tests/test_shell_reconcile_edge_cases.py src/shell_matrix.py; do
+        tests/test_shell_reconcile_edge_cases.py src/shell_matrix.py
+        tests/data/elvish_hook_main.elv; do
         [ -f "{{toSlash .TASKFILE_DIR}}/$f" ] || missing="$missing $f";
         done;
         [ -z "$missing" ] || { echo "missing shell-zoo mount source(s):$missing" >&2; exit 1; }
@@ -745,28 +772,40 @@ tasks:
       # of the two: pwsh, nushell and elvish exist on the Debian leg, so a skip
       # there is a defect rather than an environment fact.
       #
-      # No `--basetemp` here, deliberately, unlike every host-side pytest leg
-      # above: the container writes to its own ephemeral upper layer, not to
-      # this host's /tmp tmpfs, so the failure `--basetemp` exists to prevent is
-      # not reachable in here — and a host path passed into the container names
-      # a directory that does not exist there.
+      # Scratch is bounded: `/tmp` is a size-capped tmpfs, and `TMPDIR`, `HOME` and
+      # pytest's `--basetemp` all sit inside it. The cap is 10 GB of RAM-backed
+      # memory (pages are used only as written), so a runaway writer fails on
+      # ENOSPC at the mount instead of growing the container's overlay layer
+      # and filling the host disk.
+      # The cap is sized for one debug-binary copy per module process (the
+      # seeded candidates are hard links to it) plus the few tests that keep
+      # their own copy, with headroom. `--basetemp` is the container's /tmp
+      # path, not a host path, so it names a directory that exists in here.
+      # `exec` is load-bearing: docker mounts a tmpfs `noexec` by default, and
+      # the seeded candidate the shims run lives in it, so without the option
+      # every shim finds `[ -x ocx ]` false and activates nothing.
       - >-
         docker run --rm
+        --tmpfs /tmp:size=10g,exec
+        -e TMPDIR=/tmp
+        -e HOME=/tmp/home
         -v "{{.SHELLS_OCX_BINARY}}:/work/ocx:ro"
         -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_activation.py:/work/test_shell_activation.py:ro"
         -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_reconcile.py:/work/test_shell_reconcile.py:ro"
         -v "{{toSlash .TASKFILE_DIR}}/tests/test_shell_reconcile_edge_cases.py:/work/test_shell_reconcile_edge_cases.py:ro"
         -v "{{toSlash .TASKFILE_DIR}}/src/shell_matrix.py:/work/shell_matrix.py:ro"
+        -v "{{toSlash .TASKFILE_DIR}}/tests/data/elvish_hook_main.elv:/work/data/elvish_hook_main.elv:ro"
         -e OCX_ACTIVATION_BINARY=/work/ocx
         -e __OCX_TESTING_REQUIRE_LIVE_SHELLS={{.SHELLS_REQUIRE_LIVE}}
         {{.SHELLS_IMAGE}}
-        python3 -m pytest -v -p no:cacheprovider
+        sh -c 'mkdir -p "$HOME" && exec python3 -m pytest -v -p no:cacheprovider --basetemp=/tmp/pytest "$@"' pytest
         /work/test_shell_activation.py /work/test_shell_reconcile.py
         /work/test_shell_reconcile_edge_cases.py
 
   shell-latency:
     desc: >-
-      NFR latency gate for the per-prompt reconciler (C-044): zero execs on the
+      NFR latency gate for the per-prompt reconciler (C-044), run on a `-c opt`
+      build (`fastbuild` reds every budget): zero execs on the
       no-op prompt path, shell startup within exec_floor + 2 ms and the
       per-prompt reconcile - in `env` mode AND in `bin` mode (D-V5) - within
       exec_floor + 10 ms, with the floor measured in the same run. It also
@@ -786,10 +825,10 @@ tasks:
       running.
     dir: '{{toSlash .TASKFILE_DIR}}'
     vars:
-      LATENCY_OCX_BINARY: '{{.LATENCY_OCX_BINARY | default .OCX_BINARY}}'
+      LATENCY_OCX_BINARY: '{{.LATENCY_OCX_BINARY | default .OPT_OCX_BINARY}}'
       LATENCY_RESULTS_DIR: '{{.LATENCY_RESULTS_DIR | default "bench/results"}}'
     cmds:
-      - task: .build-binaries
+      - task: .build-binary-opt
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       # 1. The pure functions, on inputs nobody has to schedule - the evaluator's

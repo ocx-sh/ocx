@@ -21,14 +21,12 @@ Three tiers, each with an honest reach:
 * **Tier 1 assertions on the emitted string** where a tier-2/3 failure would be
   a *silent wrong value* — the escaping rows.
 
-**Nushell.** Its ``env_change.PWD`` hook is inlined in ``ENV_NU``
-(``crates/ocx_setup/src/shims.rs``) and calls only ``ocx --format json
---global env``: it applies the global toolchain and never consumes
-``--reconcile``. So the nushell arm takes part in **global-scope tier-2 rows
-only**; every project-scope row skips through
-:func:`_skip_nushell_without_reconcile`, which **greps the shipped ``env.nu``**
-for the string ``reconcile`` and skips on its absence. The skip therefore names
-a condition the test observed, not one it assumed.
+**Nushell.** It has no string ``eval``, so ``ENV_NU``
+(``crates/ocx_setup/src/shims.rs``) applies the ``--reconcile`` plan as JSON data
+from a ``pre_prompt`` hook. The nushell arm therefore takes part in every
+project-scope row: :func:`shell_matrix.prompt` runs the same plan call and the
+applier the shipped ``env.nu`` carries, read out of the file the binary under
+test writes, so a row exercises the shipped code and not a copy.
 
 Registry hygiene: this module builds every fixture on disk and runs ocx
 ``--offline``. It touches none of the shared-registry fixtures, so it is safe to
@@ -72,9 +70,8 @@ pytestmark.append(pytest.mark.command("shell_state", "self_group/activate"))
 # The install-layout path the offline bootstrap candidate lives at.
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"
 
-# Project-scope rows are parametrized over nushell too, so its exclusion is a
-# VISIBLE skip carrying the cause `_skip_nushell_without_reconcile` observed —
-# never a silent absence from the matrix.
+# Project-scope rows are parametrized over every arm that applies a reconcile
+# plan, nushell included.
 _PROJECT_SCOPE_SHELLS: tuple[str, ...] = (*matrix.SESSION_SHELLS, "nushell")
 
 # A value with every character that has ever broken a shell escaper, including
@@ -115,8 +112,7 @@ def arena(tmp_path: Path) -> Arena:
     ocx_home = home / ".ocx"
     candidate = ocx_home / _CANDIDATE_REL
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_OCX, candidate)
-    candidate.chmod(0o755)
+    matrix.seed_binary(_OCX, candidate)
 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -183,33 +179,6 @@ def _self_setup(arena: Arena, shell_name: str = "bash") -> subprocess.CompletedP
     )
     assert result.returncode == 0, f"self setup must succeed; stderr:\n{result.stderr}"
     return result
-
-
-def _skip_nushell_without_reconcile(shell: str, arena: Arena) -> None:
-    """Skip a project-scope row on nushell — after **observing** why.
-
-    Reads the ``env.nu`` the binary under test actually writes and counts the
-    string ``reconcile`` in it. Nushell's whole per-prompt path is inlined in
-    that body (it has no string ``eval``, A-24), so a body that never names
-    ``--reconcile`` cannot apply a project scope, cannot revert one, and cannot
-    advance ``__OCX_ENV_STATE``. The skip message quotes the count it read, so it
-    cannot outlive WP-12b landing.
-    """
-    if shell != "nushell":
-        return
-    env_nu = arena.ocx_home / "env.nu"
-    if not env_nu.is_file():
-        _self_setup(arena, "nu")
-    assert env_nu.is_file(), f"self setup must write {env_nu}; without it the skip below would be unobserved"
-    body = env_nu.read_text(encoding="utf-8")
-    occurrences = body.count("reconcile")
-    if occurrences == 0:
-        pytest.skip(
-            "WP-12b unlanded: `ENV_NU` never calls `--reconcile` — the shipped "
-            f"{env_nu} contains 0 occurrences of 'reconcile' (observed), so nushell's "
-            "env_change.PWD hook applies the global toolchain only and can neither "
-            "revert a project scope nor advance __OCX_ENV_STATE"
-        )
 
 
 def _locate_prompt_tool(tool: str) -> str:
@@ -340,7 +309,6 @@ _ENV_BLOCK_B = (
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_entering_a_consented_project_applies_constant_path_and_list(shell: str, arena: Arena) -> None:
     """S-001 / C-013 / C-018 — one prompt inside a consented project applies all three kinds."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
 
@@ -367,7 +335,6 @@ def test_entering_a_consented_project_applies_constant_path_and_list(shell: str,
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_leaving_a_project_reverts_its_constant_path_and_list(shell: str, arena: Arena) -> None:
     """S-002 / C-016 / C-017 — leaving reverts the project section and only it."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
     outside = arena.projects / "outside"
@@ -429,8 +396,10 @@ def test_a_shell_started_by_exec_keeps_the_composed_path_and_is_not_reactivated(
         'echo "SAME=$([ "$before" = "$PATH" ] && echo yes || echo no)"; '
         'echo "PATH=$PATH"; '
         '"$OCX_TEST_BIN" self activate --reconcile --shell=bash > "$OCX_TEST_OUT" 2>/dev/null; '
-        'echo "RECONCILE_BYTES=$(wc -c < "$OCX_TEST_OUT")"; '
-        # A long-lived tree started under exec must still switch projects: only the marked project yields.
+        'echo "RECONCILE_NAMES_BINA=$(grep -c binA "$OCX_TEST_OUT")"; '
+        'eval "$(cat "$OCX_TEST_OUT")"; '
+        'echo "RECONCILE_PATH_SAME=$([ "$before" = "$PATH" ] && echo yes || echo no)"; '
+        # A long-lived tree started under exec must still switch projects: only an inherited project stands aside.
         f'cd "{other}"; '
         '"$OCX_TEST_BIN" self activate --reconcile --shell=bash > "$OCX_TEST_OUT" 2>/dev/null; '
         'echo "OTHER_BYTES=$(wc -c < "$OCX_TEST_OUT")"; '
@@ -452,7 +421,10 @@ def test_a_shell_started_by_exec_keeps_the_composed_path_and_is_not_reactivated(
         f"sourcing env.sh in the exec child must leave the composed PATH untouched; got {segments[:3]}"
     )
     assert lines["SAME"] == "yes", f"env.sh changed the composed PATH: {lines['PATH']}"
-    assert lines["RECONCILE_BYTES"].strip() == "0", "the first prompt's reconcile must emit nothing under exec"
+    assert lines["RECONCILE_NAMES_BINA"].strip() == "0", (
+        "the first prompt's reconcile must not re-apply the project `exec` already composed"
+    )
+    assert lines["RECONCILE_PATH_SAME"] == "yes", "evaluating the first prompt's reconcile must leave the composed PATH untouched"
     assert int(lines["OTHER_BYTES"]) > 0 and int(lines["OTHER_HAS_BINB"]) > 0, (
         "a `cd` into another consented project from inside the exec tree must reconcile normally"
     )
@@ -598,7 +570,6 @@ def test_ocx_no_project_reverts_the_recorded_scope_at_the_next_prompt(arena: Are
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_switching_projects_reverts_a_and_applies_b_in_one_pass(shell: str, arena: Arena) -> None:
     """S-003 / C-018 — a direct A→B switch leaves no element of A behind."""
-    _skip_nushell_without_reconcile(shell, arena)
     alpha = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (alpha / "binA").mkdir()
     bravo = _locked_project(arena, "bravo", _ENV_BLOCK_B)
@@ -635,7 +606,6 @@ def test_switching_projects_reverts_a_and_applies_b_in_one_pass(shell: str, aren
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_project_nested_inside_another_is_a_switch_not_a_push(shell: str, arena: Arena) -> None:
     """S-003 edge / C-018 — the walk returns the NEAREST ocx.toml, so nesting still switches."""
-    _skip_nushell_without_reconcile(shell, arena)
     outer = _locked_project(arena, "outer", _ENV_BLOCK_A)
     (outer / "binA").mkdir()
     inner = _locked_project(arena, "outer/inner", _ENV_BLOCK_B)
@@ -664,7 +634,6 @@ def test_a_project_nested_inside_another_is_a_switch_not_a_push(shell: str, aren
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_first_prompt_of_a_new_shell_applies_without_a_carrier(shell: str, arena: Arena) -> None:
     """S-042 / C-046 — the carrier is unset by construction on the first prompt."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
 
@@ -683,7 +652,7 @@ def test_first_prompt_of_a_new_shell_applies_without_a_carrier(shell: str, arena
     assert _read(result, "before") == matrix.ABSENT, (
         f"{shell}: the carrier must be unset before the first prompt, or this test proves nothing"
     )
-    assert _read(result, "after").startswith("1."), (
+    assert _read(result, "after").startswith(f"{matrix.CARRIER_MAJOR}."), (
         f"{shell}: the first prompt must write a versioned carrier envelope"
     )
     assert _read(result, "const") == "alpha"
@@ -770,7 +739,6 @@ def _run_fragment(shell: str, command: str) -> str:
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_changed_env_value_resolves_at_the_next_prompt(shell: str, arena: Arena) -> None:
     """S-005 / S-009 — an `[env]`-only change (a branch switch that touches no lock) applies."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'WP14_VERSION = "1.0.0"\n')
 
     result = _session(
@@ -799,7 +767,6 @@ def test_a_removed_env_entry_is_gone_not_shadowed(shell: str, arena: Arena) -> N
     An apply-only reconciler passes "the new one is in front" vacuously; it
     cannot pass this.
     """
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(
         arena,
         "alpha",
@@ -842,7 +809,6 @@ def test_a_digest_change_leaves_zero_occurrences_of_the_old_segment(shell: str, 
     state is demonstrable on an input this file controls — see
     ``test_the_digest_duplicate_assertion_reds_on_an_additive_path``.
     """
-    _skip_nushell_without_reconcile(shell, arena)
     old_digest = "sha256_" + "aa" * 8
     new_digest = "sha256_" + "bb" * 8
     packages = arena.ocx_home / "packages"
@@ -918,7 +884,6 @@ def test_the_digest_duplicate_assertion_reds_on_an_additive_path(arena: Arena) -
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_branch_switch_that_deletes_a_locked_tool_retires_its_scope(shell: str, arena: Arena) -> None:
     """S-008 — a `git checkout` that rewrites `ocx.lock` retires in place, with no ocx command run."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
     branch_lock = (project / "ocx.lock").read_text(encoding="utf-8")
@@ -954,7 +919,6 @@ def test_a_branch_switch_that_deletes_a_locked_tool_retires_its_scope(shell: str
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_five_prompts_in_one_project_leave_path_byte_identical(shell: str, arena: Arena) -> None:
     """S-039 — PATH does not grow across N prompts; the same snippet is idempotent."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
 
@@ -975,7 +939,6 @@ def test_five_prompts_in_one_project_leave_path_byte_identical(shell: str, arena
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_evaluating_one_snippet_twice_leaves_path_byte_identical(shell: str, arena: Arena) -> None:
     """S-039 (double-eval half) — the emitted stream itself is idempotent."""
-    _skip_nushell_without_reconcile(shell, arena)
     shell_abs = _require(shell)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
@@ -1015,7 +978,6 @@ def test_evaluating_one_snippet_twice_leaves_path_byte_identical(shell: str, are
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_constant_the_user_set_by_hand_is_restored_on_scope_exit(shell: str, arena: Arena) -> None:
     """S-002 / S-031 / C-015 — the prior is restored, never deleted, on leave."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'JAVA_HOME = "/project/jdk"\n')
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -1043,7 +1005,6 @@ def test_a_constant_the_user_set_by_hand_is_restored_on_scope_exit(shell: str, a
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_constant_overridden_after_apply_is_left_alone_on_exit(shell: str, arena: Arena) -> None:
     """C-015 rule 2 — the `C == L.applied` guard: a hand override survives the leave."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'JAVA_HOME = "/project/jdk"\n')
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -1070,7 +1031,6 @@ def test_a_constant_overridden_after_apply_is_left_alone_on_exit(shell: str, are
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_prior_is_recaptured_when_the_projects_intent_changes(shell: str, arena: Arena) -> None:
     """S-031 (b)+(c) / C-018 — prior re-capture, so the leave restores the hand value."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'JAVA_HOME = "/project/jdk"\n')
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -1110,7 +1070,6 @@ def test_a_space_separated_list_applies_and_reverts_around_a_foreign_value(shell
     separator, passes every other row here and fails this one: the pre-apply
     value must come back byte-identical with the foreign flags preserved.
     """
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'CFLAGS = { type = "list", separator = " ", value = "-DPROJECT_A" }\n')
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -1201,7 +1160,6 @@ def test_the_quote_context_detector_reds_on_the_wrong_escaper(arena: Arena) -> N
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_hostile_path_element_round_trips_through_a_real_shell(shell: str, arena: Arena) -> None:
     """S-026 (tier 2) — the value the shell ends up with is the value declared, byte for byte."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", f'PATH = {{ type = "path", value = "{_HOSTILE_SEGMENT}" }}\n')
 
     result = _session(
@@ -1226,7 +1184,6 @@ def test_a_hostile_path_element_round_trips_through_a_real_shell(shell: str, are
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_a_constant_with_every_hostile_character_round_trips(shell: str, arena: Arena) -> None:
     """S-026 / C-009 — the ledger holds RAW text, so a value survives one round trip unchanged."""
-    _skip_nushell_without_reconcile(shell, arena)
     toml_value = _HOSTILE_CONSTANT.replace("\\", "\\\\").replace('"', '\\"')
     project = _locked_project(arena, "alpha", f'WP14_HOSTILE = "{toml_value}"\n')
 
@@ -1257,7 +1214,6 @@ def test_a_foreign_never_tracked_ocx_bin_dir_on_path_is_left_alone(shell: str, a
     The shipped `_clean_env` deliberately excludes this state, so it needs its
     own variant: the reconciler only ever retires what its own ledger recorded.
     """
-    _skip_nushell_without_reconcile(shell, arena)
     shell_abs = _require(shell)
     foreign = arena.projects / "foreign-ocx" / "bin"
     foreign.mkdir(parents=True)
@@ -1290,18 +1246,16 @@ def test_a_foreign_never_tracked_ocx_bin_dir_on_path_is_left_alone(shell: str, a
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — the nushell arm: what it CAN do, and the evidence for what it cannot
+# Tier 2 — the nushell arm
 # ---------------------------------------------------------------------------
 
 
 def test_the_nushell_arm_applies_the_global_scope_from_the_emitted_snippet(arena: Arena) -> None:
-    """S-040 (the half that works today) — nushell has no string `eval`, so its
+    """S-040 — nushell has no string `eval`, so the non-JSON `--reconcile --shell=nushell`
     stream goes through a file; the global toolchain still lands.
 
-    This is the one scope nushell participates in: `ENV_NU`'s `env_change.PWD`
-    hook calls `ocx --format json --global env`, and `--reconcile --shell=nushell`
-    emits an evaluable stream for it. Everything project-scoped is skipped with
-    the cause :func:`_skip_nushell_without_reconcile` observes.
+    This is the evaluable stream for a caller that holds no applier; the shipped
+    shim applies the JSON plan instead, which the project-scope rows drive.
     """
     shell_abs = _require("nushell")
     global_toml = arena.ocx_home / "ocx.toml"
@@ -1336,31 +1290,15 @@ def test_the_nushell_arm_applies_the_global_scope_from_the_emitted_snippet(arena
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "WP-12b unlanded: the shipped `env.nu` never names `--reconcile`. Its env_change.PWD hook "
-        "calls only `ocx --format json --global env`, so nushell applies the global toolchain and "
-        "can neither revert a project scope nor advance __OCX_ENV_STATE. This is the evidence every "
-        "nushell project-scope skip in this module cites — when it lands, this row goes green and "
-        "the strict marker fails the suite until the skips are removed."
-    ),
-)
 def test_the_shipped_env_nu_registers_a_reconcile_call(arena: Arena) -> None:
-    """C-048 / S-040 — the nushell hook must invoke the reconciler, like every other arm.
-
-    Deliberately paired with :func:`_skip_nushell_without_reconcile`: the helper
-    skips on the same observation this row asserts, so the two can never drift
-    apart into "skipped for a reason nobody re-checks".
-    """
+    """C-048 / S-040 — the nushell hook must invoke the reconciler, like every other arm."""
     _self_setup(arena, "nu")
     env_nu = arena.ocx_home / "env.nu"
     assert env_nu.is_file(), f"self setup must write {env_nu}"
     body = env_nu.read_text(encoding="utf-8")
-    assert "--global env" in body, "the fixture must be the real shipped body, not an empty file"
-    assert "reconcile" in body, (
-        f"{env_nu} contains 0 occurrences of 'reconcile' — nushell's inlined hook cannot reconcile"
-    )
+    assert "reconcile" in body, f"{env_nu} never names the reconciler — nushell's hook cannot apply a project scope"
+    assert "pre_prompt" in body, f"{env_nu} registers no per-prompt hook, so a project scope applies once at startup"
+    assert "--shell-pid $nu.pid" in body, f"{env_nu} must hand the binary its own pid to claim a session token"
 
 
 # ---------------------------------------------------------------------------
@@ -1504,13 +1442,14 @@ def test_a_ledger_written_by_one_shell_is_read_by_another(parent: str, child: st
         ("no-tag", ".abc"),
         ("garbage-payload", "1.not-base64url-@@@"),
         ("unknown-tag", "x.abc"),
-        ("future-tag", "2.eyJ2IjoxfQ"),
+        ("future-tag", "3.eyJ2IjoxfQ"),
+        ("current-tag-not-zlib", "2.eyJ2IjoxfQ"),
     ],
 )
-def test_a_degraded_carrier_is_treated_as_absent_and_never_breaks_the_prompt(
+def test_an_unreadable_carrier_stands_the_hook_down_and_never_breaks_the_prompt(
     label: str, carrier: str, arena: Arena
 ) -> None:
-    """S-028 / C-006 — every malformed envelope degrades: exit 0, a usable stream, no panic."""
+    """S-028 / C-024 — every unreadable envelope: exit 0, one notice, nothing applied, nothing written over it."""
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
 
@@ -1518,13 +1457,19 @@ def test_a_degraded_carrier_is_treated_as_absent_and_never_breaks_the_prompt(
     assert result.returncode == 0, (
         f"{label}: the hook path exits 0 in every state (C-051); got {result.returncode}\nstderr:\n{result.stderr}"
     )
-    assert f"export {matrix.CARRIER}=" in result.stdout, (
-        f"{label}: a degraded carrier must be REPLACED with a fresh one, not left corrupt:\n{result.stdout}"
+    assert "stopped updating this shell" in result.stdout, (
+        f"{label}: an unreadable state must stand the hook down with one notice:\n{result.stdout}"
+    )
+    assert f"export {matrix.CARRIER}=" not in result.stdout, (
+        f"{label}: an unreadable state is never written over (`unset {matrix.CARRIER}` is the shell's way out):\n{result.stdout}"
+    )
+    assert "WP14_CONST" not in result.stdout and str(project / "binA") not in result.stdout, (
+        f"{label}: a stood-down hook applies nothing:\n{result.stdout}"
     )
     assert "panicked" not in result.stderr, f"{label}: the reconciler must never panic\n{result.stderr}"
 
 
-def test_a_truncated_but_well_formed_carrier_is_treated_as_absent(arena: Arena) -> None:
+def test_a_truncated_but_well_formed_carrier_stands_the_hook_down(arena: Arena) -> None:
     """S-028 — truncation of a genuinely valid payload, not a hand-typed string."""
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
@@ -1538,25 +1483,26 @@ def test_a_truncated_but_well_formed_carrier_is_treated_as_absent(arena: Arena) 
 
     result = matrix.reconcile(arena.ocx, "bash", project, arena.env(), carrier=truncated)
     assert result.returncode == 0, f"a truncated carrier must not break the prompt; stderr:\n{result.stderr}"
-    assert f"export {matrix.CARRIER}=" in result.stdout
+    assert "stopped updating this shell" in result.stdout, f"the hook must stand down:\n{result.stdout}"
+    assert f"export {matrix.CARRIER}=" not in result.stdout, "an unreadable state is never written over"
     state = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: truncated})
     assert state["carrier_present"] is True
-    assert state["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": False}, (
+    assert state["env_state"]["status"] == "unreadable", f"the report must call the value unreadable: {state['env_state']}"
+    assert state["inert_reason"] == {"type": "state_unreadable", "first_prompt": False}, (
         "a corrupt carrier and an absent one are DIFFERENT reasons (C-006); got "
         f"{state['inert_reason']}"
     )
 
 
 @pytest.mark.parametrize("shell", ("bash", "zsh", "fish", "pwsh"))
-def test_unsetting_the_carrier_repairs_lists_and_leaves_constants_in_place(shell: str, arena: Arena) -> None:
-    """S-021 / C-012 / C-006 — the repair gesture, inside the project where S-021 places it.
+def test_unsetting_the_carrier_starts_over_and_leaves_what_was_applied_in_place(shell: str, arena: Arena) -> None:
+    """S-021 / C-024 / C-027 — the start-over gesture, inside the project where S-021 places it.
 
-    With the ledger gone, `D` is rebuilt from truth and PATH is repaired
-    **subtractively against the owned prefix** — every `$OCX_HOME`-owned segment
-    `D` no longer wants is removed even though nothing records it. Constants are
-    **left in place**, never guess-unset, because `priors` went with the ledger.
-    A segment outside the owned prefix is left alone: the repair is scoped, and a
-    repair that reached outside it would eat a user's own PATH.
+    With the state gone, `D` is rebuilt from truth and applied afresh. Nothing records what the
+    gone state had applied, and an intact absent state is not a lost one, so no owned-prefix repair
+    runs (it is limited to a state that dropped every applied record): the old segment and the
+    constant **stay**, exactly as the stand-down notice promises ("values already applied stay").
+    A segment outside the owned prefix is left alone as well.
     """
     owned_old = arena.ocx_home / "packages" / "old" / "bin"
     owned_new = arena.ocx_home / "packages" / "new" / "bin"
@@ -1600,18 +1546,19 @@ def test_unsetting_the_carrier_repairs_lists_and_leaves_constants_in_place(shell
     )
     assert _read(result, "unset") == matrix.ABSENT, "the gesture must actually unset the carrier"
     after = matrix.path_segments(_read(result, "after.path"))
-    assert after.count(str(owned_old)) == 0, (
-        f"{shell}: an OCX_HOME-owned segment D no longer wants must be repaired away subtractively "
-        f"with no ledger to name it; PATH was {after}"
+    assert after.count(str(owned_old)) == 1, (
+        f"{shell}: nothing names the segment the gone state applied, so it stays — once, not duplicated; PATH was {after}"
     )
     assert str(owned_new) in after, f"{shell}: the newly declared segment must be applied; PATH was {after}"
     assert str(foreign) in after, (
-        f"{shell}: the repair is scoped to owned prefixes — a foreign segment must be left alone"
+        f"{shell}: a foreign segment must be left alone"
     )
     assert _read(result, "after.const") == "alpha", (
-        f"{shell}: a constant must be LEFT IN PLACE after the repair — priors are gone, so it is never guess-unset"
+        f"{shell}: a constant must be LEFT IN PLACE after starting over — priors are gone, so it is never guess-unset"
     )
-    assert _read(result, "after.carrier").startswith("1."), f"{shell}: the next prompt must rebuild a carrier"
+    assert _read(result, "after.carrier").startswith(f"{matrix.CARRIER_MAJOR}."), (
+        f"{shell}: the next prompt must rebuild a carrier"
+    )
 
 
 def test_shell_state_distinguishes_an_absent_carrier_from_a_corrupt_one(arena: Arena) -> None:
@@ -1620,48 +1567,42 @@ def test_shell_state_distinguishes_an_absent_carrier_from_a_corrupt_one(arena: A
 
     absent = matrix.shell_state(arena.ocx, project, arena.env())
     assert absent["carrier_present"] is False
-    assert absent["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": True}
+    assert absent["inert_reason"] == {"type": "state_unreadable", "first_prompt": True}
 
     corrupt = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: "1.@@@not-a-payload"})
     assert corrupt["carrier_present"] is True
-    assert corrupt["inert_reason"] == {"type": "ledger_unreadable", "first_prompt": False}
+    assert corrupt["inert_reason"] == {"type": "state_unreadable", "first_prompt": False}
 
 
-def test_an_over_cap_ledger_still_carries_a_decodable_marker(arena: Arena) -> None:
-    """S-027 / C-004 / A-01 — over cap keeps `v`, `fp`, `verdict`, `over_cap`; both payloads drop.
+def test_an_over_cap_state_still_carries_a_decodable_marker(arena: Arena) -> None:
+    """S-027 / C-004 / A-01 — over cap drops the applied records whole and keeps the session's identity.
 
-    Driven by a project whose `[env]` alone exceeds the 16 KiB carrier cap, so
-    the ledger has to abandon the project scope rather than omit the variable —
-    omission would lose `fp` with it and every later prompt would recompose,
-    re-overflow and re-report.
+    Driven by a project whose `[env]` alone exceeds the carrier cap even compressed, so the
+    ladder has to drop the applied records rather than omit the variable — omission would lose
+    the fingerprint with it and every later prompt would recompose, re-overflow and re-report.
     """
-    padding = "x" * 900
-    block = "".join(f'WP14_BIG_{index:02d} = "{padding}"\n' for index in range(24))
-    project = _locked_project(arena, "big", block)
+    project = _locked_project(
+        arena, "big", "".join(f'WP14_BIG_{index:02d} = "{matrix.incompressible_text(index, 900)}"\n' for index in range(24))
+    )
 
     emitted = matrix.reconcile(arena.ocx, "bash", project, arena.env())
     assert emitted.returncode == 0, f"an over-cap project must not break the prompt; stderr:\n{emitted.stderr}"
     match = re.search(rf"export {matrix.CARRIER}='([^']+)'", emitted.stdout)
     assert match, (
-        "the carrier must still be SET, to a marker-only ledger — omitting it loses `fp` too:\n"
+        "the carrier must still be SET, to a marker-only state — omitting it loses the fingerprint too:\n"
         f"{emitted.stdout}"
     )
     carrier = match.group(1)
-    assert len(carrier) <= 16384, f"the marker must fit the cap; got {len(carrier)} bytes"
+    assert len(carrier) <= 8_169, f"the state must fit the cap; got {len(carrier)} bytes"
+    decoded = matrix.decode_carrier(carrier)
+    assert decoded["truncated"] == "all_applied_dropped", f"got {decoded['truncated']!r}"
+    assert decoded["applied"] == [], "the applied records are dropped whole, never partially retained"
+    assert decoded["session"]["fp"], "the state must retain the fingerprint"
 
     state = matrix.shell_state(arena.ocx, project, arena.env() | {matrix.CARRIER: carrier})
-    assert state["inert_reason"]["type"] == "ledger_over_cap", (
-        f"the over-cap state must be read FROM THE MARKER, never inferred from an absent carrier; got "
-        f"{state['inert_reason']}"
-    )
-    ledger = state["ledger"]
-    assert ledger is not None and ledger["fp"], "the marker must retain the fingerprint"
-    # One rule, not a ladder (C-004): BOTH payloads drop, so both scopes the
-    # ledger carried are named — never a partial payload.
-    assert "project" in ledger["over_cap"], f"the abandoned project scope must be named; got {ledger['over_cap']}"
-    assert not ledger["scopes"].get("project"), "the abandoned scope's payload must be dropped whole"
-    assert "too large to record" in emitted.stdout, (
-        f"one summary line must name the abandoned scope:\n{emitted.stdout}"
+    assert state["env_state"]["status"] == "readable", f"a truncated state is still readable: {state['env_state']}"
+    assert any(note["type"] == "env_state_truncated" for note in state["notes"]), (
+        f"the truncation must be reported from the state itself, never inferred from an absent carrier: {state['notes']}"
     )
 
 
@@ -1940,10 +1881,10 @@ def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> 
     )
 
     # Outside a live shell there is no carrier, so the reason ladder still has
-    # `ledger_unreadable` to report — what must be gone is the *consent*
+    # `state_unreadable` to report — what must be gone is the *consent*
     # refusal, and the grant is what says so.
     after = matrix.shell_state(arena.ocx, clone, arena.env())
-    assert after["inert_reason"]["type"] == "ledger_unreadable", (
+    assert after["inert_reason"]["type"] == "state_unreadable", (
         f"consent must no longer be the refusal; got {after['inert_reason']}"
     )
     assert after["project_stamped"] is True, "the stamp must be readable back through the predicate"
@@ -2867,13 +2808,13 @@ def test_shell_state_verbose_is_a_rendering_tier_not_a_payload(arena: Arena) -> 
     bare_json = json.loads(run("--format", "json", "shell", "state").stdout)
     verbose_json = json.loads(run("--format", "json", "shell", "state", "--verbose").stdout)
     assert bare_json == verbose_json, "`--verbose` must not change the structured payload"
-    # No carrier in this shell, so `ledger` is absent here by contract: an unset optional is omitted.
+    # No carrier in this shell: the execution state reports `absent` and is still a structured field.
     for key in ("watch_set", "carrier_bytes", "priors", "hook", "project_key"):
         assert key in bare_json, f"the structured report must carry {key!r}: {sorted(bare_json)}"
 
     default_text = run("shell", "state").stdout
     verbose_text = run("shell", "state", "--verbose").stdout
-    for section in ("watch set:", "carrier:", "ledger:"):
+    for section in ("watch set:", "carrier:", "execution state:"):
         assert section in verbose_text, f"`--verbose` must carry {section!r}:\n{verbose_text}"
         assert section not in default_text, f"the default rendering must not carry {section!r}:\n{default_text}"
 
@@ -3197,6 +3138,113 @@ def test_a_real_pwsh_prompt_hook_applies_on_cd(arena: Arena) -> None:
     )
 
 
+def _hook_session_recipe(shell: str, arena: Arena) -> tuple[list[str], str, str, str]:
+    """``(argv after the interpreter, install line, cd verb, delete line)`` for a live hook shell."""
+    ocx = arena.ocx
+    if shell == "fish":
+        install = f'"{ocx}" --offline self activate --shell=fish --hook --no-completion | source'
+        return ["--no-config", "-i"], install, "cd", "rm -f {victims}"
+    if shell == "pwsh":
+        install = f'Invoke-Expression (& "{ocx}" --offline self activate --shell=pwsh --hook --no-completion | Out-String)'
+        return ["-NoProfile", "-NoLogo"], install, "Set-Location", "Remove-Item -Force {victims}"
+    install = f'eval "$("{ocx}" --offline self activate --shell={shell} --hook --no-completion)"'
+    argv = ["--norc", "-i"] if shell == "bash" else ["--no-rcs", "-i"]
+    return argv, install, "cd", "rm -f {victims}"
+
+
+def _split_marker_probe(shell: str, label: str, name: str) -> str:
+    """Print ``@@label@@<value or ABSENT>`` with the marker split, so a redrawn echo never claims a label."""
+    if shell == "pwsh":
+        return (
+            f'$v = if (Test-Path env:{name}) {{ (Get-Item env:{name}).Value }} else {{ "{matrix.ABSENT}" }}; '
+            f'Write-Output ("@" + "@{label}@" + "@" + $v)'
+        )
+    if shell == "fish":
+        return (
+            f"if set -q {name}; printf '%s\\n' \"@\"\"@{label}@\"\"@${name}\"; "
+            f"else; printf '%s\\n' \"@\"\"@{label}@\"\"@{matrix.ABSENT}\"; end"
+        )
+    return f'printf "%s\\n" "@""@{label}@""@${{{name}-{matrix.ABSENT}}}"'
+
+
+@pytest.mark.parametrize("victims", ("ocx.toml ocx.lock", "ocx.toml", "ocx.lock"))
+@pytest.mark.parametrize("shell", ("bash", "zsh", "fish", "pwsh"))
+def test_deleting_the_project_files_mid_session_reverts_at_the_next_prompt_in_every_hook_shell(
+    shell: str, victims: str, arena: Arena
+) -> None:
+    """B-1 presence gate, live per hook shell: removing a watched project file reverts its values with no `cd`.
+
+    The gate's `-nt stamp` test is false for a vanished file, so only the presence term the hook
+    now carries (bash, zsh, fish, pwsh) can notice. Each shell runs its own hook on a real pty.
+    """
+    shell_abs = _require(shell)
+    argv, install, cd_verb, delete = _hook_session_recipe(shell, arena)
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (project / "binA").mkdir()
+    settle = "$null = $true" if shell == "pwsh" else "true"
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+
+    output = matrix.pty_session(
+        [shell_abs, *argv],
+        [
+            install,
+            f"{cd_verb} '{project}'",
+            _split_marker_probe(shell, "before", "WP14_CONST"),
+            delete.format(victims=", ".join(victims.split()) if shell == "pwsh" else victims),
+            settle,
+            _split_marker_probe(shell, "after", "WP14_CONST"),
+        ],
+        cwd=arena.projects,
+        env=env,
+        controlling_tty=shell == "fish",
+    )
+    found = matrix.probes(output)
+    ctx = f"\npty transcript:\n{output}"
+    assert found.get("before") == "alpha", f"{shell}: fixture: the hook must apply the project first{ctx}"
+    assert found.get("after") == matrix.ABSENT, (
+        f"{shell}: deleting {victims} must revert the project at the next prompt{ctx}"
+    )
+
+
+@pytest.mark.parametrize(
+    "directory",
+    ("plain", "back\\slash", "\u0451", "astral-\U0001f600", "\u4e2d\u6587", "\u65e5\u672c\u8a9e", "\ud55c\uad6d\uc5b4"),
+)
+def test_pwsh_hook_stays_quiet_when_a_watched_path_contains_a_backslash(directory: str, arena: Arena) -> None:
+    """A watched file whose path holds a backslash or a non-ASCII char must read as present.
+
+    Otherwise pwsh reconciles at every prompt.
+
+    The reconcile checkpoint rewrites ``$global:__ocxStamp``, so an unchanged stamp across idle
+    prompts means the gate stayed shut. The plain directory is the control for that signal.
+    """
+    shell_abs = _require("pwsh")
+    argv, install, _, _ = _hook_session_recipe("pwsh", arena)
+    config = arena.scripts / directory / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("", encoding="utf-8")
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["OCX_CONFIG"] = str(config)
+
+    def stamp(label: str) -> str:
+        return f'Write-Output ("@" + "@{label}@" + "@" + $global:__ocxStamp.Ticks)'
+
+    output = matrix.pty_session(
+        [shell_abs, *argv],
+        [install, "$null = $true", stamp("first"), "$null = $true", "$null = $true", stamp("second")],
+        cwd=arena.projects,
+        env=env,
+    )
+    found = matrix.probes(output)
+    ctx = f"\npty transcript:\n{output}"
+    assert found.get("first", "").isdigit(), f"fixture: the hook must have stamped a reconcile{ctx}"
+    assert found.get("second") == found["first"], (
+        f"idle prompts must not reconcile with a config under {directory!r}: the stamp moved{ctx}"
+    )
+
+
 @pytest.mark.parametrize("tool", ("starship", "oh-my-zsh", "powerlevel10k"))
 def test_prompt_hook_coexists_with_a_third_party_prompt_framework(tool: str, arena: Arena) -> None:
     """S-001 / C-043 — append-only registration must survive a foreign prompt owner.
@@ -3349,8 +3397,10 @@ def test_ec_hook_017_a_clobbered_registration_is_repaired_by_re_sourcing(shell: 
     each keeps its marker *inside* the registration (fish's `functions -q
     __ocx_prompt_hook` asks about the very function that carries `--on-event
     fish_prompt`; elvish reads the rest parameter of the registered closure), so
-    neither has a marker that can outlive what it guards. ash, ksh, dash,
-    nushell and batch host no per-prompt hook to clobber.
+    neither has a marker that can outlive what it guards. Nushell reads its marker out
+    of the registered closure's own source, and has its own row in
+    `test_shell_reconcile_edge_cases.py`. ash, ksh, dash and batch host no
+    per-prompt hook to clobber.
     """
     arm = _CLOBBER_ARMS[shell]
     shell_abs = _require(shell)

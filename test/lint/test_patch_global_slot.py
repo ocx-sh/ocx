@@ -127,7 +127,7 @@ _PATCHES_TIER = re.compile(r'\[patches\]\s*registry\s*=\s*"(?P<value>[^"]*)"')
 
 #: The reader floor of the per-function sweep, observed like the one above.
 _KNOWN_SITES = {
-    "tests/test_patches.py": (14, 6),
+    "tests/test_patches.py": (14, 5),
     "tests/test_managed_config.py": (1, 2),
     "tests/test_frozen.py": (0, 2),
     "recordings/setups.py": (0, 2),

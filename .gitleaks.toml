@@ -13,7 +13,10 @@ paths = [
   '''^crates/ocx_cli/src/command/shell_state\.rs$''',
   '''^crates/ocx_cli/src/command/self_group/activate\.rs$''',
   '''^crates/ocx_lib/src/activation\.rs$''',
+  '''^crates/ocx_package_manager/src/activation\.rs$''',
   '''^crates/ocx_shell/src/ci\.rs$''',
+  '''^crates/ocx_shell/src/shell/reconcile/plan\.rs$''',
+  '''^test/tests/test_shell_session\.py$''',
 ]
 
 [[allowlists]]

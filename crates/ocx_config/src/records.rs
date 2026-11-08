@@ -45,9 +45,18 @@ impl RecordsOptions {
     ///
     /// An empty value is unset, or `OCX_RECORDS_DIR=""` scatters records across each tool's cwd.
     pub fn from_env() -> Self {
+        Self::from_values(
+            ocx_env::OCX_RECORDS_DIR.get().map(PathBuf::from),
+            ocx_env::OCX_RECORDS_NAME.get(),
+        )
+    }
+
+    /// The environment tier from values already read, e.g. the ones a parent ocx handed down in its
+    /// execution state; an empty value is unset, as in [`Self::from_env`].
+    pub fn from_values(dir: Option<PathBuf>, name: Option<String>) -> Self {
         Self {
-            dir: ocx_env::OCX_RECORDS_DIR.get().map(PathBuf::from),
-            name: ocx_env::OCX_RECORDS_NAME.get(),
+            dir: dir.filter(|dir| !dir.as_os_str().is_empty()),
+            name: name.filter(|name| !name.is_empty()),
             required: None,
             system_locked: false,
         }
@@ -188,6 +197,24 @@ mod tests {
         assert_eq!(folded.required, Some(true));
     }
 
+    #[test]
+    fn from_values_treats_empty_as_unset_and_never_sets_required() {
+        let empty = RecordsOptions::from_values(Some(PathBuf::new()), Some(String::new()));
+        assert!(empty.dir.is_none() && empty.name.is_none() && empty.required.is_none());
+        let set = RecordsOptions::from_values(Some(PathBuf::from("/r")), Some("{pid}.json".into()));
+        assert_eq!(set.dir.as_deref(), Some(Path::new("/r")));
+        assert_eq!(set.name.as_deref(), Some("{pid}.json"));
+    }
+
+    /// A `records_dir` a parent ocx handed down is an environment-tier value, so a locked sink wins.
+    #[test]
+    fn a_locked_sink_clamps_a_received_records_dir() {
+        let mut system = options(Some("/var/log/ocx/records"), None, Some(true));
+        system.lock_as_system();
+        system.merge(RecordsOptions::from_values(Some(PathBuf::from("/tmp/mine")), None));
+        assert_eq!(system.dir.as_deref(), Some(Path::new("/var/log/ocx/records")));
+    }
+
     // ── merge: the SYSTEM clamp ──────────────────────────────────────────────
 
     /// The clamp is binary and per-block: once an operator declares `[records]`
@@ -252,16 +279,9 @@ mod tests {
 #[cfg(test)]
 mod env_tier_tests {
     use super::*;
-    use crate::env::{Env, OcxConfigView};
-
-    fn view(self_exe: &str) -> OcxConfigView {
-        OcxConfigView::new(std::path::PathBuf::from(self_exe))
-    }
-
-    /// `required` has no environment peer, in either direction. Nothing reads
-    /// an `OCX_RECORDS_REQUIRED`, and nothing writes one — the fail-closed
-    /// posture is an operator decision that lives in the config file, so a
-    /// forwarded env var would hand it to any caller who can set one.
+    /// `required` has no environment peer. Nothing reads an `OCX_RECORDS_REQUIRED` — the fail-closed
+    /// posture is an operator decision that lives in the config file, so an env var would hand it to
+    /// any caller who can set one.
     #[test]
     fn records_required_is_never_an_env_var() {
         const NOT_A_KEY: &str = "OCX_RECORDS_REQUIRED";
@@ -270,8 +290,7 @@ mod env_tier_tests {
         guard.set_raw(NOT_A_KEY, "1");
         guard.set(&ocx_env::OCX_RECORDS_DIR, "/var/log/ocx-records");
 
-        // Read side: the env tier never populates `required`, whatever the
-        // ambient environment claims.
+        // The env tier never populates `required`, whatever the ambient environment claims.
         let from_env = RecordsOptions::from_env();
         assert!(
             from_env.required.is_none(),
@@ -280,17 +299,6 @@ mod env_tier_tests {
         assert_eq!(
             from_env.dir.as_deref(),
             Some(std::path::Path::new("/var/log/ocx-records"))
-        );
-
-        // Write side: a view carrying `required` forwards nothing for it.
-        let mut cfg = view("/abs/ocx");
-        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
-        cfg.records.required = Some(true);
-        let mut env = Env::clean();
-        env.apply_ocx_config(&cfg);
-        assert!(
-            env.get(NOT_A_KEY).is_none(),
-            "`required` must never be forwarded to a child env"
         );
     }
 
@@ -331,37 +339,6 @@ mod env_tier_tests {
         let empty = RecordsOptions::from_env();
         assert!(empty.dir.is_none(), "OCX_RECORDS_DIR=\"\" must read as unset");
         assert!(empty.name.is_none(), "OCX_RECORDS_NAME=\"\" must read as unset");
-    }
-
-    /// Round-trip across the process boundary: what `apply_ocx_config` writes
-    /// onto a child env is exactly what the child's env tier reads back. The
-    /// two halves are one contract — a launcher re-entry must resolve the same
-    /// sink and template its parent did.
-    #[test]
-    fn records_round_trip_from_forwarded_child_env() {
-        let guard = ocx_env::overrides::lock();
-
-        let mut cfg = view("/abs/ocx");
-        cfg.records.dir = Some(std::path::PathBuf::from("/var/log/ocx-records"));
-        cfg.records.name = Some("{time}-{host}-{pid}-{rand}.json".to_string());
-
-        let mut child = Env::clean();
-        child.apply_ocx_config(&cfg);
-        for var in [&ocx_env::OCX_RECORDS_DIR, &ocx_env::OCX_RECORDS_NAME] {
-            let key = var.name;
-            let value = child
-                .get(key)
-                .unwrap_or_else(|| panic!("{key} must be set on the child env"))
-                .to_str()
-                .expect("a forwarded records value must be valid UTF-8")
-                .to_string();
-            guard.set(var, value);
-        }
-
-        let parsed = RecordsOptions::from_env();
-        assert_eq!(parsed.dir, cfg.records.dir, "the sink must survive the hop");
-        assert_eq!(parsed.name, cfg.records.name, "the template must survive the hop");
-        assert!(parsed.required.is_none(), "no posture rides along");
     }
 
     /// The relocated reader answers what the contract names, field by

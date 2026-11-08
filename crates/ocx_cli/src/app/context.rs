@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_config::env;
+use ocx_config::exec_state::{
+    Disagreement, ExecState, Inherited, Narrowing, PolicyInputs, PolicyLayer, RootFlags, UnreadableReason, WriteMode,
+};
 use ocx_config::loader::ConfigInputs;
 use ocx_config::loader::ConfigLoader;
 use ocx_config::tls::TlsError;
@@ -11,6 +13,8 @@ use ocx_config::tls::resolve_extra_roots;
 use ocx_config::tls::sigstore_extra_roots;
 use ocx_console::{ColorModeConfig, Printer, UserInterface};
 use ocx_package::publisher::Publisher;
+use ocx_package_manager::exec_env::ProjectionWarning;
+use ocx_package_manager::record::RecordedConfig;
 use ocx_store::file_structure::{self, StateStore};
 use ocx_util::tls::ExtraRoots;
 
@@ -41,7 +45,12 @@ pub struct Context {
     manager: ocx_package_manager::PackageManager,
     default_registry: String,
     config_trust: ocx_trust::TrustConfig,
-    config_view: env::OcxConfigView,
+    /// Whether `--global` selected `$OCX_HOME/ocx.toml`.
+    global: bool,
+    /// The resolution policy an execution record states about this invocation.
+    recorded_config: RecordedConfig,
+    /// The received `config_path` that was skipped because its file had vanished (`ocx shell state` only).
+    skipped_received_config: Option<PathBuf>,
     /// The `toolchain_dir` root, already past every refusal; `None` for the in-project default.
     toolchain_root: Option<ocx_config::ToolchainRoot>,
     concurrency: ocx_package_manager::Concurrency,
@@ -77,8 +86,20 @@ pub struct Context {
     /// Extra-CA roots from env and the local tiers only, so the managed-tier fetch is never
     /// secured by material that tier delivered.
     extra_roots_local: ExtraRoots,
+    /// The view `try_init` handed the process-wide Sigstore install, kept so a test reads this
+    /// context's own answer, not whichever install won the first-wins global.
+    #[cfg(test)]
+    extra_roots_sigstore: ExtraRoots,
     /// Resolved on first use, so only a command that runs an update check prints `[update]` warnings.
     update_policy: std::sync::OnceLock<ocx_config::update::ResolvedUpdatePolicy>,
+    /// The root flags as typed, before any ambient `OCX_*` was folded in.
+    root_flags: RootFlags,
+    /// The `__OCX_ENV_STATE` this process received, decoded on first use.
+    inherited: std::sync::OnceLock<Inherited>,
+    written_policy: [std::sync::OnceLock<PolicyLayer>; 2],
+    env_slot: std::sync::OnceLock<(PolicyLayer, Vec<Disagreement>)>,
+    /// The `OCX_BINARY_PIN` value for this process's children, resolved once at init.
+    binary_pin: Option<std::path::PathBuf>,
 }
 
 /// The two `[managed]` gates `Context::try_init` needs, named so the adjacent `bool`s cannot
@@ -91,6 +112,19 @@ pub struct ManagedConfigGate {
     /// `true` only for `ocx config setup`, `ocx config update` and `ocx self setup`, which can adopt
     /// a new managed source with no seed and so need the fetch client even when none resolves.
     pub onboarding: bool,
+    /// `true` only for `ocx shell state`, which reports in every reportable state: a received
+    /// `config_path` whose file has vanished is skipped (the report carries a note) instead of failing
+    /// as a missing `--config` would (exit 79).
+    pub tolerate_vanished_received_config: bool,
+}
+
+/// Whether the file is gone (`NotFound`); any other stat failure (permissions, I/O) is not "missing".
+async fn received_config_is_missing(path: &std::path::Path) -> bool {
+    is_not_found(tokio::fs::metadata(path).await.map(|_| ()))
+}
+
+fn is_not_found(stat: std::io::Result<()>) -> bool {
+    matches!(stat, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 impl Context {
@@ -109,11 +143,6 @@ impl Context {
         };
 
         if !in_seam {
-            // Process-global, set once: every helper this process spawns carries the re-entry marker.
-            docker_credential::set_helper_env(vec![(
-                ocx_env::__OCX_CREDENTIAL_HELPER.declaration().name.to_owned(),
-                "1".to_owned(),
-            )]);
             crate::tracing_init::LogSettings::default()
                 .with_console_level(options.log_level)
                 .with_stderr_color(color_config.stderr)
@@ -127,6 +156,22 @@ impl Context {
         let mut env_notices = retired_env_notices()?;
         check_hardening_env()?;
         env_notices.extend(invalid_boolean_env_notices());
+
+        // Decoded once for the whole process: the env slot below and every later accessor read it.
+        let inherited = Inherited::from_process_env();
+        // For the seams too far from `Context` to take it as a parameter (the loader, the project walk).
+        install_received_policy(&inherited);
+        let (env_slot, disagreements) =
+            with_policy_inputs(&options.root_flags(), false, &inherited, |inputs| inputs.env_slot());
+        if !in_seam {
+            // Direct to stderr, once per process: the warnings name a field and never print a received value.
+            for line in state_notices(&inherited, &disagreements) {
+                eprintln!("{line}");
+            }
+            if matches!(inherited, Inherited::Unreadable { .. }) {
+                UNREADABLE_NOTICED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
         // Fills the host-libc cache `Platform::current()` reads; local-only, so it runs offline too.
         if !in_seam {
@@ -149,8 +194,28 @@ impl Context {
         let project_path = options.project.clone();
 
         let cwd = ocx_env::current_dir()?;
+        // `--config` ▸ an explicitly set `OCX_CONFIG` (which the loader reads itself) ▸ the path the parent
+        // ocx passed down, which joins only when neither is set.
+        let mut skipped_received_config = None;
+        let explicit_config = if ocx_env::OCX_CONFIG.get_raw().is_some() {
+            options.config.clone()
+        } else {
+            let received = env_slot.policy.config_path.clone();
+            match received {
+                // Only a path the parent handed down is tolerated; an explicit `--config` still fails (79).
+                Some(path)
+                    if managed_config_gate.tolerate_vanished_received_config
+                        && options.config.is_none()
+                        && received_config_is_missing(&path).await =>
+                {
+                    skipped_received_config = Some(path);
+                    None
+                }
+                other => other,
+            }
+        };
         let loaded_config = ConfigLoader::load_with_local_view(ConfigInputs {
-            explicit_path: options.config.as_deref(),
+            explicit_path: explicit_config.as_deref(),
             explicit_project_path: options.project.as_deref(),
             cwd: Some(&cwd),
         })
@@ -163,11 +228,14 @@ impl Context {
         let resolved_managed_config = loaded_config.resolved_managed_config;
         let managed_snapshot_state = loaded_config.managed_snapshot_state;
 
-        // Every plain-HTTP gate below shares this one set.
-        let insecure_hosts = ocx_config::insecure::insecure_hosts(&config, &env::insecure_registries());
+        // The env tier of the three seams: the ambient variable, else what the parent ocx handed down.
+        let seams = slot_seams(&env_slot).map_err(anyhow::Error::new)?;
+
+        // Every plain-HTTP gate below shares this one set; a SYSTEM `insecure = false` clamps a received host too.
+        let insecure_hosts = ocx_config::insecure::insecure_hosts(&config, &seams.insecure);
 
         // The registry role feeds only the OCI client's transport rewrite.
-        let resolved_mirrors = ocx_config::mirror::resolve_mirror_map(&config, env::mirrors()?, &insecure_hosts)
+        let resolved_mirrors = ocx_config::mirror::resolve_mirror_map(&config, seams.mirrors.clone(), &insecure_hosts)
             .map_err(anyhow::Error::new)?;
         let mirror_map = ocx_oci::MirrorMap::new(resolved_mirrors.registry.clone());
 
@@ -207,14 +275,17 @@ impl Context {
         } else {
             (config, local_only_config, ExtraRoots::default(), ExtraRoots::default())
         };
-        ocx_util::tls::install_sigstore_roots(sigstore_extra_roots(
+        let extra_roots_sigstore = sigstore_extra_roots(
             &extra_roots_merged,
             &extra_roots_local,
             extra_ca_tier_merged,
             resolved_managed_config
                 .as_ref()
                 .is_some_and(|resolved| resolved.source.digest().is_some()),
-        ));
+        );
+        #[cfg(test)]
+        let sigstore_view = extra_roots_sigstore.clone();
+        ocx_util::tls::install_sigstore_roots(extra_roots_sigstore);
 
         // A plain-HTTP mirror needs its own host declared insecure; the scheme alone opts nothing
         // out (`adr_oci_registry_mirror.md`).
@@ -235,19 +306,14 @@ impl Context {
         let file_structure = file_structure::FileStructure::new();
         // `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index` (`adr_index_indirection.md`). A redirected
         // home may be read-only, so its locks stay under `$OCX_HOME/locks`.
-        let index_store = options
-            .index
+        let index_store = env_slot
+            .policy
+            .index_dir
             .clone()
-            .or_else(|| {
-                ocx_env::OCX_INDEX
-                    .get_raw()
-                    .and_then(|v| v.into_string().ok())
-                    .map(PathBuf::from)
-            })
             .map(|home| ocx_index::IndexStore::new(home).with_locks_root(file_structure.locks.clone()))
             .unwrap_or_else(|| ocx_index::IndexStore::machine_local(&file_structure));
         // Also gates the offline path: a committed root's yanked tag is refused on a local resolve.
-        let allow_yanked = ocx_env::OCX_ALLOW_YANKED.bool_or(false)?;
+        let allow_yanked = allow_yanked_setting(&inherited)?;
         let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
             index_store: index_store.clone(),
         })
@@ -283,7 +349,7 @@ impl Context {
             file_structure.blobs.clone(),
         );
 
-        let default_registry = ocx_env::OCX_DEFAULT_REGISTRY.get().unwrap_or_else(|| {
+        let default_registry = env_slot.policy.default_registry.clone().unwrap_or_else(|| {
             config
                 .resolved_default_registry()
                 .map(str::to_owned)
@@ -298,10 +364,10 @@ impl Context {
         };
 
         // `OCX_PATCH_SNAPSHOT` is the sole selector, orthogonal to `--frozen`.
-        let patch_snapshot_path = ocx_env::OCX_PATCH_SNAPSHOT
-            .get_raw()
-            .and_then(|v| v.into_string().ok())
-            .map(PathBuf::from);
+        let patch_snapshot_path = match ocx_env::OCX_PATCH_SNAPSHOT.get_raw() {
+            Some(raw) => raw.into_string().ok().map(PathBuf::from),
+            None => env_slot.policy.patch_snapshot_path.clone(),
+        };
         let loaded_patch_snapshot = if let Some(ref path) = patch_snapshot_path {
             ocx_package_manager::patch::PatchSnapshot::read(path)
                 .await
@@ -316,14 +382,17 @@ impl Context {
 
         // Captured raw: the per-command flags fold on top later (see the `records_config` field).
         let records_config = config.records.clone().unwrap_or_default();
-        let records_env = ocx_package_manager::record::RecordsOptions::from_env();
+        let records_env = seams.records_env;
 
         // `OCX_NO_CONFIG=1` is hermetic: it also suppresses the env override read here.
-        let no_config = ocx_env::OCX_NO_CONFIG.bool_or(false)?;
+        let no_config = bool_or_received(&ocx_env::OCX_NO_CONFIG, env_slot.policy.no_config)?;
         let managed_config_env_override = if no_config {
             None
         } else {
-            ocx_env::OCX_MANAGED_CONFIG.get_raw().and_then(|v| v.into_string().ok())
+            match ocx_env::OCX_MANAGED_CONFIG.get_raw() {
+                Some(raw) => raw.into_string().ok(),
+                None => env_slot.policy.managed_config.clone(),
+            }
         };
 
         // The fetch client uses the local-only mirror view, or the payload's own `[mirrors]` could
@@ -344,8 +413,8 @@ impl Context {
         } else {
             Some(build_managed_config_client(
                 &local_only_config,
-                env::mirrors()?,
-                &env::insecure_registries(),
+                seams.mirrors.clone(),
+                &seams.insecure,
                 &progress,
                 &extra_roots_local,
             )?)
@@ -396,8 +465,8 @@ impl Context {
 
         // Attached once on the shared manager so every install surface inherits auto-verify.
         let operator_policies = config.trust_policies().to_vec();
-        // Read once: auto-verify and the forwarded `config_view` must see the same value.
-        let no_verify_env = ocx_env::OCX_NO_VERIFY.bool_or(false)?;
+        // Read once: auto-verify and the recorded config must see the same value.
+        let no_verify_env = bool_or_received(&ocx_env::OCX_NO_VERIFY, env_slot.policy.no_verify)?;
         let auto_verify = if operator_policies.is_empty() {
             None
         } else {
@@ -418,36 +487,36 @@ impl Context {
 
         // Pins child spawns to this binary via `OCX_BINARY_PIN`; on failure the child's
         // `${OCX_BINARY_PIN:-ocx}` degrades to a `$PATH` lookup.
-        let self_exe = std::env::current_exe().unwrap_or_else(|e| {
-            log::warn!("Could not resolve current exe: {e}");
-            std::path::PathBuf::from("ocx")
-        });
-        let mut config_view = options.as_view(self_exe);
-        // The merged pre-role-parse map, so a child re-parses what the parent's transport used.
-        config_view.mirrors = resolved_mirrors.merged.into_iter().collect();
-        config_view.patches = resolved_patches;
-        config_view.patch_snapshot = patch_snapshot_path;
-        config_view.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
-        // Only the env opt-out is forwarded; `--no-verify` is a one-shot choice.
-        config_view.no_verify = no_verify_env;
-        // Forwarded, or the child re-reads the config chain the parent pruned and the two frames
-        // of one launch resolve against different configuration.
-        config_view.no_config = ocx_env::OCX_NO_CONFIG.bool_or(false)?;
-        // Forwarded because `apply_ocx_config` is set-or-remove and would strip `OCX_RECORDS_DIR`.
-        // The clamp applies during `merge`, so the lock clears only after it.
-        let mut forwarded_records = records_config.clone();
-        forwarded_records.merge(records_env.clone());
-        forwarded_records.required = None;
-        forwarded_records.system_locked = false;
-        config_view.records = forwarded_records;
-        check_global_project_exclusivity(&config_view)?;
-        check_frozen_remote_exclusivity(&config_view)?;
+        let running = std::env::current_exe()
+            .inspect_err(|e| log::warn!("Could not resolve current exe: {e}"))
+            .ok();
+        let binary_pin = {
+            let file_structure = file_structure.clone();
+            tokio::task::spawn_blocking(move || {
+                ocx_package_manager::launcher::binary_pin_value(&file_structure, running.as_deref())
+            })
+            .await
+            .map_err(|join| std::io::Error::other(format!("binary pin task panicked: {join}")))?
+        };
+        if !in_seam {
+            // Process-global, set once: every helper this process spawns gets a fixed state, not the ambient one.
+            docker_credential::set_helper_env(helper_env_pairs(binary_pin.as_deref()));
+        }
+        let self_exe = binary_pin.clone().unwrap_or_else(|| std::path::PathBuf::from("ocx"));
+        let mut recorded_config = RecordedConfig::new(self_exe);
+        recorded_config.offline = options.offline;
+        recorded_config.remote = options.remote;
+        recorded_config.frozen = options.frozen;
+        // The merged pre-role-parse map, as the parent's transport used it.
+        recorded_config.mirrors = resolved_mirrors.merged.into_iter().collect();
+        recorded_config.managed_config_source = managed_config.as_ref().map(|resolved| resolved.source.to_string());
+        // Only the env opt-out is recorded; `--no-verify` is a one-shot choice.
+        recorded_config.no_verify = no_verify_env;
+        check_global_project_exclusivity(options.global, options.project.is_some())?;
+        check_frozen_remote_exclusivity(options.frozen, options.remote)?;
         // Resolved here so a refused root exits 78 on every command, read-only ones included; mapped
         // through `ConfigError` so `classify_error` reaches it via `source()`.
         let toolchain_root = ocx_config::ToolchainRoot::resolve(&config).map_err(ocx_config::error::Error::from)?;
-        // Forwarded because `apply_ocx_config` is set-or-remove and would strip `OCX_TOOLCHAIN_DIR`,
-        // leaving a hermetic child with no root.
-        config_view.toolchain_dir = toolchain_root.as_ref().map(|root| root.as_path().to_path_buf());
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
@@ -466,7 +535,9 @@ impl Context {
             manager,
             default_registry,
             config_trust: config.trust.clone().unwrap_or_default(),
-            config_view,
+            global: options.global,
+            recorded_config,
+            skipped_received_config,
             toolchain_root,
             concurrency,
             progress,
@@ -482,7 +553,14 @@ impl Context {
             records_env,
             extra_roots_merged,
             extra_roots_local,
+            #[cfg(test)]
+            extra_roots_sigstore: sigstore_view,
             update_policy: std::sync::OnceLock::new(),
+            root_flags: options.root_flags(),
+            inherited: std::sync::OnceLock::from(inherited),
+            written_policy: Default::default(),
+            env_slot: std::sync::OnceLock::new(),
+            binary_pin,
         })
     }
 
@@ -549,10 +627,10 @@ impl Context {
         Ok(RenderStampScope::Project(directory))
     }
 
-    /// Whether `--global` / `OCX_GLOBAL` selected `$OCX_HOME/ocx.toml`; exclusive with an
+    /// Whether `--global` selected `$OCX_HOME/ocx.toml`; exclusive with an
     /// explicit project (see [`check_global_project_exclusivity`]).
     pub fn global(&self) -> bool {
-        self.config_view.global
+        self.global
     }
 
     pub fn remote_client(&self) -> Result<&ocx_oci::Client, ocx_package_manager::Error> {
@@ -584,7 +662,7 @@ impl Context {
     /// Sharing it keeps one identifier from naming two artifacts in one invocation, and it keeps
     /// the invocation's ceiling so `--frozen` still refuses an unindexed tag (exit 81).
     pub fn chain_sources(&self) -> (ocx_index::ChainMode, Vec<ocx_index::Index>) {
-        let online_mode = Self::online_chain_mode(self.config_view.frozen, self.config_view.remote);
+        let online_mode = Self::online_chain_mode(self.recorded_config.frozen, self.recorded_config.remote);
         Self::chain_mode_and_sources(self.oci_index.as_ref(), &self.index_sources, online_mode)
     }
 
@@ -602,7 +680,7 @@ impl Context {
     /// Index for `ocx update`: resolves tags live under the `--offline` / `--frozen` ceilings and
     /// never commits tag pointers to the shared local index (`adr_toolchain_update_family.md`).
     pub fn update_index(&self) -> ocx_index::Index {
-        let online_mode = if self.config_view.frozen {
+        let online_mode = if self.recorded_config.frozen {
             ocx_index::ChainMode::Frozen
         } else {
             ocx_index::ChainMode::Remote
@@ -665,7 +743,7 @@ impl Context {
             .collect();
         namespaces.sort();
 
-        let allow_yanked = ocx_env::OCX_ALLOW_YANKED.bool_or(false)?;
+        let allow_yanked = allow_yanked_setting(&Inherited::from_process_env())?;
         let mut sources = Vec::with_capacity(namespaces.len());
         for namespace in namespaces {
             // Pins the connect address so a root `repository` host cannot rebind between validate and
@@ -725,6 +803,12 @@ impl Context {
     /// Hosts this invocation may contact over plain HTTP; take this rather than re-deriving it.
     pub fn insecure_hosts(&self) -> &[String] {
         &self.insecure_hosts
+    }
+
+    /// The Sigstore view this context installed process-wide, for tests that cannot read the first-wins global.
+    #[cfg(test)]
+    pub(crate) fn extra_roots_sigstore(&self) -> &ExtraRoots {
+        &self.extra_roots_sigstore
     }
 
     /// The merged extra-CA view, for clients built outside [`Self::try_init`] (the forge clients).
@@ -791,9 +875,63 @@ impl Context {
             .get_or_init(|| ocx_config::update::ResolvedUpdatePolicy::resolve(self.config.update.as_ref()))
     }
 
-    /// Resolution-affecting policy to forward to subprocesses via [`env::Env::apply_ocx_config`].
-    pub fn config_view(&self) -> &env::OcxConfigView {
-        &self.config_view
+    /// The execution state this process received, decoded once.
+    pub fn inherited(&self) -> &Inherited {
+        self.inherited.get_or_init(Inherited::from_process_env)
+    }
+
+    /// What this process writes into a child's policy for `mode`, computed once per mode.
+    pub fn written_policy(&self, mode: WriteMode) -> &PolicyLayer {
+        let slot = match mode {
+            WriteMode::Inherit => &self.written_policy[0],
+            WriteMode::Clean => &self.written_policy[1],
+        };
+        slot.get_or_init(|| self.with_policy_inputs(|inputs| inputs.to_write(mode)))
+    }
+
+    /// What `ocx self update`'s hand-off child inherits: the received state and the policy this process writes.
+    pub fn handoff_state(&self) -> ocx_package_manager::HandoffState {
+        ocx_package_manager::HandoffState {
+            inherited: self.inherited().clone(),
+            written: self.written_policy(WriteMode::Inherit).clone(),
+        }
+    }
+
+    /// The `OCX_BINARY_PIN` value for this process's children, memoised at init.
+    pub fn binary_pin(&self) -> Option<&std::path::Path> {
+        self.binary_pin.as_deref()
+    }
+
+    /// The policy each seam reads where it reads the variable today, with the disagreements found.
+    pub fn env_slot(&self) -> &(PolicyLayer, Vec<Disagreement>) {
+        self.env_slot
+            .get_or_init(|| self.with_policy_inputs(|inputs| inputs.env_slot()))
+    }
+
+    /// Builds the policy inputs from the typed flags, the received state and the explicitly set `OCX_*` values.
+    fn with_policy_inputs<T>(&self, run: impl FnOnce(&PolicyInputs<'_>) -> T) -> T {
+        // `--consent` / `--no-consent` are per-command and never reach the context.
+        with_policy_inputs(&self.root_flags, false, self.inherited(), run)
+    }
+
+    /// The resolution policy an execution record states about this invocation.
+    pub fn recorded_config(&self) -> &RecordedConfig {
+        &self.recorded_config
+    }
+
+    /// The received `config_path` whose file had vanished and was therefore not loaded.
+    pub fn skipped_received_config(&self) -> Option<&Path> {
+        self.skipped_received_config.as_deref()
+    }
+
+    /// Whether tag resolution may only consult the local index (`--frozen` / `OCX_FROZEN`).
+    pub fn frozen(&self) -> bool {
+        self.recorded_config.frozen
+    }
+
+    /// Whether the ambient `OCX_NO_VERIFY` opt-out is in effect.
+    pub fn no_verify(&self) -> bool {
+        self.recorded_config.no_verify
     }
 
     /// Parallel-pull cap: `--jobs` ▸ `OCX_JOBS` ▸ unbounded.
@@ -1055,17 +1193,17 @@ fn resolve_concurrency(jobs: Option<usize>) -> ocx_package_manager::Concurrency 
 
 /// Refuse `--global` alongside an explicit `--project` / `OCX_PROJECT`.
 ///
-/// clap rejects the flag pair; this closes the env-sourced gaps (`OCX_GLOBAL` via the arg
-/// default, `OCX_PROJECT` not a clap arg). A CWD-discovered project is not explicit, so
+/// clap rejects the flag pair; this closes the env-sourced gap (`OCX_PROJECT` is not a clap
+/// arg). A CWD-discovered project is not explicit, so
 /// `--global` inside a project tree is legal (`adr_global_toolchain_tier.md`).
 ///
 /// # Errors
 ///
 /// [`UsageError`](crate::error::UsageError) (exit `64`) on the conflict.
-fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), crate::error::UsageError> {
+fn check_global_project_exclusivity(global: bool, project_flag: bool) -> Result<(), crate::error::UsageError> {
     // `OCX_PROJECT=""` means unset to the loader, so it is no explicit selection here.
-    let explicit_project = view.project.is_some() || ocx_env::OCX_PROJECT.get().is_some();
-    if view.global && explicit_project {
+    let explicit_project = project_flag || ocx_env::OCX_PROJECT.get().is_some();
+    if global && explicit_project {
         return Err(crate::error::UsageError::new(
             "--global cannot be combined with an explicit --project / OCX_PROJECT selection",
         ));
@@ -1081,13 +1219,189 @@ fn check_global_project_exclusivity(view: &env::OcxConfigView) -> Result<(), cra
 /// # Errors
 ///
 /// [`UsageError`](crate::error::UsageError) (exit `64`) when both are set.
-fn check_frozen_remote_exclusivity(view: &env::OcxConfigView) -> Result<(), crate::error::UsageError> {
-    if view.frozen && view.remote {
+fn check_frozen_remote_exclusivity(frozen: bool, remote: bool) -> Result<(), crate::error::UsageError> {
+    if frozen && remote {
         return Err(crate::error::UsageError::new(
             "--frozen cannot be combined with --remote (OCX_FROZEN and OCX_REMOTE)",
         ));
     }
     Ok(())
+}
+
+/// Runs `run` over the policy inputs of one process: typed flags, the received state's layer
+/// (the header alone when the payload is unreadable) and the explicitly set `OCX_*` values.
+pub(super) fn with_policy_inputs<T>(
+    flags: &RootFlags,
+    no_consent_flag: bool,
+    inherited: &Inherited,
+    run: impl FnOnce(&PolicyInputs<'_>) -> T,
+) -> T {
+    let received = match inherited {
+        Inherited::Absent => None,
+        Inherited::Readable(state) => Some(PolicyLayer {
+            narrowing: state.narrowing,
+            home: state.home.clone(),
+            policy: state.policy.clone(),
+        }),
+        header_only @ Inherited::Unreadable { .. } => Some(PolicyLayer {
+            narrowing: header_only.narrowing(),
+            home: header_only.home().map(Path::to_path_buf),
+            policy: Default::default(),
+        }),
+    };
+    let ambient = PolicyLayer::from_ambient();
+    run(&PolicyInputs {
+        flags,
+        no_consent_flag,
+        received: received.as_ref(),
+        ambient: &ambient,
+    })
+}
+
+/// A boolean setting at its env tier: an explicitly set variable reads as ever (an invalid value still
+/// fails), otherwise the value the parent ocx passed down, otherwise off.
+fn bool_or_received(var: &'static ocx_env::EnvVar, received: Option<bool>) -> Result<bool, ocx_env::InvalidEnv> {
+    if var.get_os().is_some() {
+        var.bool_or(false)
+    } else {
+        Ok(received.unwrap_or(false))
+    }
+}
+
+/// `OCX_ALLOW_YANKED` at its env tier. Read from the received state directly, since the index-source
+/// builder runs apart from `try_init`'s resolved slot.
+fn allow_yanked_setting(inherited: &Inherited) -> Result<bool, ocx_env::InvalidEnv> {
+    bool_or_received(
+        &ocx_env::OCX_ALLOW_YANKED,
+        received_policy(inherited).and_then(|policy| policy.allow_yanked),
+    )
+}
+
+/// Install the policy a parent ocx passed down for the seams too far from `Context` to take it as a parameter.
+///
+/// Every path that reads the loader or the project walk calls this first, `Context`-free ones included
+/// (the hook, the shell start, completion); the first call wins. Process-global, so it does nothing under
+/// the seam and never in a unit-test binary, where tests craft states of their own.
+#[cfg_attr(test, allow(unused_variables))]
+pub(crate) fn install_received_policy(inherited: &Inherited) {
+    #[cfg(not(test))]
+    if !super::in_seam()
+        && let Some(policy) = received_policy(inherited)
+    {
+        ocx_config::exec_state::received::install(policy.clone());
+    }
+}
+
+/// The policy a parent ocx passed down; none when the state is absent or its payload unreadable.
+pub(super) fn received_policy(inherited: &Inherited) -> Option<&ocx_config::exec_state::Policy> {
+    match inherited {
+        Inherited::Readable(state) => Some(&state.policy),
+        Inherited::Absent | Inherited::Unreadable { .. } => None,
+    }
+}
+
+/// What the three seams that read an `OCX_*` list or directory today take as their env tier.
+struct SlotSeams {
+    insecure: Vec<String>,
+    mirrors: Vec<(String, ocx_config::mirror::MirrorConfig)>,
+    records_env: ocx_package_manager::record::RecordsOptions,
+}
+
+/// The env tier of the insecure-host, mirror and records seams from the resolved env slot.
+///
+/// The slot already holds the ambient variable where it is set and the received value otherwise, so a
+/// received value reaches a seam only as an env-tier entry: the seam's own SYSTEM locks clamp it.
+fn slot_seams(slot: &PolicyLayer) -> Result<SlotSeams, ocx_config::mirror::MirrorConfigError> {
+    Ok(SlotSeams {
+        insecure: ocx_config::insecure::parse_host_list(slot.policy.insecure_registries.as_deref()),
+        mirrors: ocx_config::mirror::parse_env_mirrors(slot.policy.mirrors.as_deref())?,
+        records_env: ocx_package_manager::record::RecordsOptions::from_values(
+            slot.policy.records_dir.clone(),
+            slot.policy.records_name.clone(),
+        ),
+    })
+}
+
+/// The `set_helper_env` pairs of a credential helper: a fixed state (header `2;n=credential_helper`,
+/// default payload), the memoised pin, and the legacy marker kept until 0.7. They override the ambient
+/// values the helper would otherwise inherit.
+fn helper_env_pairs(pin: Option<&Path>) -> Vec<(String, String)> {
+    let state = ExecState {
+        narrowing: Narrowing {
+            credential_helper: true,
+            ..Narrowing::default()
+        },
+        ..ExecState::default()
+    };
+    let name = |var: &'static ocx_env::EnvVar| var.declaration().name.to_owned();
+    let mut pairs = Vec::new();
+    if let Some(value) = ocx_config::exec_state::encode(&state).value {
+        pairs.push((name(&ocx_env::__OCX_ENV_STATE), value));
+    }
+    // The pair is always written: `set_helper_env` can only add to what the helper inherits, and an
+    // empty pin reads as unset, so an ambient pin never reaches it.
+    let pin = pin.map(|pin| pin.to_string_lossy().into_owned()).unwrap_or_default();
+    pairs.push((name(&ocx_env::OCX_BINARY_PIN), pin));
+    pairs.push((name(&ocx_env::__OCX_CREDENTIAL_HELPER), "1".to_owned()));
+    pairs
+}
+
+/// The one-line stderr warnings the received state earns: an unreadable state (the warning's one
+/// `Display`, also what a spawn site prints), and each relaxing field an explicit variable overrode.
+/// Fields are named, values never printed.
+fn state_notices(inherited: &Inherited, disagreements: &[Disagreement]) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Inherited::Unreadable { header, reason } = inherited {
+        lines.push(unreadable_notice(header.major, *reason));
+    }
+    for disagreement in disagreements {
+        lines.push(format!(
+            "ocx: {} is set and differs from the value the parent ocx passed down in its environment state; the variable wins",
+            field_variable(disagreement.field)
+        ));
+    }
+    lines
+}
+
+/// The one process-wide record that the unreadable-state warning went out, so a command that reads the
+/// state at init and again at a spawn says it once.
+static UNREADABLE_NOTICED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The unreadable-state warning line, the single wording shared by init and every spawn site.
+fn unreadable_notice(received_major: Option<u32>, reason: UnreadableReason) -> String {
+    format!(
+        "ocx: {}",
+        ProjectionWarning::InheritedUnreadable { received_major, reason }
+    )
+}
+
+/// The stderr lines a projection's warnings earn, each the warning's one `Display` behind `ocx: `.
+pub(crate) fn projection_notices(warnings: &[ProjectionWarning]) -> Vec<String> {
+    warnings.iter().map(|warning| format!("ocx: {warning}")).collect()
+}
+
+/// Prints [`projection_notices`] to stderr, the one place a spawn site reports its projection warnings.
+/// The unreadable-state warning prints once per process, whether init or the spawn gets there first.
+pub(crate) fn report_projection_warnings(warnings: &[ProjectionWarning]) {
+    for (warning, line) in warnings.iter().zip(projection_notices(warnings)) {
+        if matches!(warning, ProjectionWarning::InheritedUnreadable { .. })
+            && UNREADABLE_NOTICED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        eprintln!("{line}");
+    }
+}
+
+/// The environment variable a policy field is the received copy of.
+fn field_variable(field: &str) -> String {
+    match field {
+        "config_path" => "OCX_CONFIG".to_owned(),
+        "index_dir" => "OCX_INDEX".to_owned(),
+        "patch_snapshot_path" => "OCX_PATCH_SNAPSHOT".to_owned(),
+        "insecure_registries" => "OCX_INSECURE_REGISTRIES".to_owned(),
+        other => format!("OCX_{}", other.to_ascii_uppercase()),
+    }
 }
 
 /// One warning per in-window retired spelling that is set, from one scan of the environment.
@@ -1101,8 +1415,15 @@ fn retired_env_notices() -> Result<Vec<String>, crate::error::RetiredEnvError> {
 
     let (mut refused, mut notices) = (Vec::new(), Vec::new());
     for entry in ocx_env::retired_hits(&ocx_env::snapshot()) {
-        let (name, replacement) = (entry.name, entry.replacement.name);
+        let (name, replacement) = (entry.name, entry.replacement.name());
         match (entry.change, entry.status) {
+            // Never honoured and never fatal: the notice is the whole effect, and a removed row is inert.
+            (Change::Withdrawn, Status::Window { removal }) => {
+                notices.push(format!(
+                    "{name} is no longer read; pass {replacement} instead (the variable is removed in {removal})"
+                ));
+            }
+            (Change::Withdrawn, Status::Removed) => {}
             (Change::Polarity, _) | (_, Status::Removed) => refused.push(entry),
             (Change::Rename, Status::Window { removal }) => {
                 notices.push(format!(
@@ -1157,16 +1478,245 @@ mod tests {
     //! `--global` is a single root-level flag (peer of `--project`); the
     //! `--global` + `--project` *flag* pair is rejected by clap
     //! (`conflicts_with`). [`check_global_project_exclusivity`] closes the
-    //! env-sourced gaps clap cannot see (`OCX_GLOBAL` via the arg default,
-    //! or `OCX_PROJECT` which is not a clap arg). The `OCX_PROJECT` gap is
+    //! env-sourced gap clap cannot see (`OCX_PROJECT` is not a clap arg). That gap is
     //! exercised end-to-end by `test/tests/test_global_toolchain.py`
     //! (`test_env_global_with_env_project_conflict`). This test pins the
     //! `--project`-flag path, whose `||` short-circuits before any env read
     //! and is therefore deterministic.
-
     use super::*;
+    use ocx_config::exec_state::UnreadableReason;
     use ocx_exit::ClassifyExitCode;
     use ocx_exit::ExitCode;
+
+    #[test]
+    fn only_not_found_counts_as_a_missing_received_config() {
+        use std::io::{Error, ErrorKind};
+        assert!(is_not_found(Err(Error::from(ErrorKind::NotFound))));
+        assert!(!is_not_found(Err(Error::from(ErrorKind::PermissionDenied))));
+        assert!(!is_not_found(Ok(())));
+    }
+
+    // ── the env slot feeding the three seams ──
+
+    fn received_with(policy: ocx_config::exec_state::Policy) -> PolicyLayer {
+        PolicyLayer {
+            policy,
+            ..PolicyLayer::default()
+        }
+    }
+
+    /// The env slot of one process: no flags, the given received layer and the given ambient layer.
+    fn slot_of(received: &PolicyLayer, ambient: &PolicyLayer) -> (PolicyLayer, Vec<Disagreement>) {
+        PolicyInputs {
+            flags: &RootFlags::default(),
+            no_consent_flag: false,
+            received: Some(received),
+            ambient,
+        }
+        .env_slot()
+    }
+
+    fn system_registry(host: &str, insecure: bool) -> ocx_config::Config {
+        let mut entry = ocx_config::registry::RegistryConfig {
+            insecure: Some(insecure),
+            ..Default::default()
+        };
+        entry.lock_as_system();
+        ocx_config::Config {
+            registries: Some([(host.to_owned(), entry)].into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_system_insecure_false_clamps_a_received_host_list_naming_the_host() {
+        let received = received_with(ocx_config::exec_state::Policy {
+            insecure_registries: Some("locked.corp:5000,open.corp".into()),
+            ..Default::default()
+        });
+        let (slot, disagreements) = slot_of(&received, &PolicyLayer::default());
+        assert!(disagreements.is_empty());
+        let seams = slot_seams(&slot).expect("a plain host list parses");
+        let hosts = ocx_config::insecure::insecure_hosts(&system_registry("locked.corp:5000", false), &seams.insecure);
+        assert_eq!(hosts, vec!["open.corp".to_owned()]);
+    }
+
+    #[test]
+    fn a_locked_records_dir_clamps_a_received_records_dir() {
+        let received = received_with(ocx_config::exec_state::Policy {
+            records_dir: Some("/tmp/received".into()),
+            ..Default::default()
+        });
+        let (slot, _) = slot_of(&received, &PolicyLayer::default());
+        let seams = slot_seams(&slot).expect("records parse");
+        assert_eq!(seams.records_env.dir.as_deref(), Some(Path::new("/tmp/received")));
+
+        let mut system = ocx_package_manager::record::RecordsOptions {
+            dir: Some("/var/log/ocx".into()),
+            ..Default::default()
+        };
+        system.lock_as_system();
+        system.merge(seams.records_env);
+        assert_eq!(system.dir.as_deref(), Some(Path::new("/var/log/ocx")));
+    }
+
+    #[test]
+    fn received_mirrors_enter_only_when_the_ambient_variable_is_unset() {
+        let received = received_with(ocx_config::exec_state::Policy {
+            mirrors: Some(r#"{"ghcr.io":"https://received.corp"}"#.into()),
+            ..Default::default()
+        });
+        let entries = |ambient: &PolicyLayer| {
+            let (slot, _) = slot_of(&received, ambient);
+            slot_seams(&slot).expect("mirrors parse").mirrors
+        };
+        assert_eq!(
+            entries(&PolicyLayer::default())[0].1.registry.as_deref(),
+            Some("https://received.corp")
+        );
+
+        let ambient = received_with(ocx_config::exec_state::Policy {
+            mirrors: Some(r#"{"ghcr.io":"https://ambient.corp"}"#.into()),
+            ..Default::default()
+        });
+        let winning = entries(&ambient);
+        assert_eq!(winning.len(), 1);
+        assert_eq!(winning[0].1.registry.as_deref(), Some("https://ambient.corp"));
+    }
+
+    #[test]
+    fn a_disagreement_is_one_line_naming_the_variable_and_never_its_value() {
+        let received = received_with(ocx_config::exec_state::Policy {
+            index_dir: Some("/received-index".into()),
+            ..Default::default()
+        });
+        let ambient = received_with(ocx_config::exec_state::Policy {
+            index_dir: Some("/ambient-index".into()),
+            ..Default::default()
+        });
+        let (slot, disagreements) = slot_of(&received, &ambient);
+        assert_eq!(slot.policy.index_dir.as_deref(), Some(Path::new("/ambient-index")));
+        let lines = state_notices(&Inherited::Absent, &disagreements);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("ocx: OCX_INDEX "), "{lines:?}");
+        assert!(!lines[0].contains("index-dir") && !lines[0].contains("/received-index"));
+    }
+
+    #[test]
+    fn an_unreadable_state_earns_one_state_line() {
+        let inherited = Inherited::Unreadable {
+            header: Default::default(),
+            reason: UnreadableReason::OtherMajor,
+        };
+        let lines = state_notices(&inherited, &[]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("ocx:") && lines[0].to_lowercase().contains("state"));
+        assert!(state_notices(&Inherited::Absent, &[]).is_empty());
+    }
+
+    #[test]
+    fn projection_warnings_print_as_one_ocx_line_through_their_display() {
+        let warnings = [
+            ProjectionWarning::InheritedUnreadable {
+                received_major: None,
+                reason: UnreadableReason::HeaderInvalid,
+            },
+            ProjectionWarning::CannotIsolate,
+        ];
+        let all = projection_notices(&warnings);
+        assert_eq!(all.len(), 2, "{all:?}");
+        for (line, warning) in all.iter().zip(&warnings) {
+            assert_eq!(line, &format!("ocx: {warning}"));
+        }
+    }
+
+    /// Init and a spawn site word the unreadable state identically: both are the warning's `Display`.
+    #[test]
+    fn the_unreadable_state_has_one_wording_at_init_and_at_the_spawn() {
+        for major in [None, Some(9)] {
+            let inherited = Inherited::Unreadable {
+                header: ocx_config::exec_state::HeaderView {
+                    major,
+                    ..Default::default()
+                },
+                reason: UnreadableReason::OtherMajor,
+            };
+            let init = state_notices(&inherited, &[]);
+            let spawn = projection_notices(&[ProjectionWarning::InheritedUnreadable {
+                received_major: major,
+                reason: UnreadableReason::OtherMajor,
+            }]);
+            assert_eq!(init, spawn);
+            assert!(init[0].ends_with("unset __OCX_ENV_STATE to drop it"), "{init:?}");
+        }
+    }
+
+    #[test]
+    fn every_policy_field_names_an_ocx_variable() {
+        for (field, _) in ocx_config::exec_state::policy::field_classes() {
+            let name = field_variable(field);
+            assert!(
+                name.starts_with("OCX_") && name == name.to_ascii_uppercase(),
+                "{field} -> {name}"
+            );
+        }
+        assert_eq!(field_variable("config_path"), "OCX_CONFIG");
+        assert_eq!(field_variable("no_verify"), "OCX_NO_VERIFY");
+    }
+
+    #[test]
+    fn the_credential_helper_state_is_fixed_and_carries_the_pin() {
+        let pairs = helper_env_pairs(Some(Path::new("/pinned/ocx")));
+        let get = |var: &'static ocx_env::EnvVar| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == var.declaration().name)
+                .map(|(_, value)| value.as_str())
+        };
+        let state = get(&ocx_env::__OCX_ENV_STATE).expect("state pair");
+        let (header, _payload) = state.split_once('.').expect("a header ends at the first dot");
+        assert_eq!(
+            header, "2;n=credential_helper",
+            "exactly the helper narrowing: no home, no other name"
+        );
+        // The payload is the default state: nothing the ambient state carried survives into the helper.
+        let Inherited::Readable(decoded) = ocx_config::exec_state::decode(Some(std::ffi::OsStr::new(state))) else {
+            panic!("the helper state must decode as readable");
+        };
+        assert_eq!(decoded.home, None);
+        assert_eq!(decoded.policy, ocx_config::exec_state::Policy::default());
+        assert!(decoded.applied.is_empty(), "no applied records");
+        assert_eq!(
+            decoded,
+            ExecState {
+                narrowing: Narrowing {
+                    credential_helper: true,
+                    ..Narrowing::default()
+                },
+                ..ExecState::default()
+            }
+        );
+        assert_eq!(get(&ocx_env::OCX_BINARY_PIN), Some("/pinned/ocx"));
+        assert_eq!(get(&ocx_env::__OCX_CREDENTIAL_HELPER), Some("1"));
+        assert_eq!(pairs.len(), 3);
+    }
+
+    /// With no pin the pair is still written, empty: `set_helper_env` can only add to the inherited
+    /// environment, and an empty `OCX_BINARY_PIN` reads as unset where ocx reads it, so an ambient pin
+    /// never reaches the helper.
+    #[test]
+    fn without_a_pin_the_helper_environment_blanks_an_ambient_pin() {
+        let pairs = helper_env_pairs(None);
+        let pin: Vec<_> = pairs
+            .iter()
+            .filter(|(key, _)| key == ocx_env::OCX_BINARY_PIN.declaration().name)
+            .collect();
+        assert_eq!(pin.len(), 1, "the pin pair is always written: {pairs:?}");
+        assert_eq!(
+            pin[0].1, "",
+            "an empty value overrides whatever the helper would inherit"
+        );
+    }
 
     /// One `[[trust.policy]]`, enough to make `build_auto_verify` return
     /// `Some` — every field is optional at the serde layer.
@@ -1252,11 +1802,7 @@ mod tests {
 
     #[test]
     fn global_with_explicit_project_flag_is_usage_error() {
-        let mut view = ocx_config::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
-        view.global = true;
-        view.project = Some(std::path::PathBuf::from("/abs/explicit/ocx.toml"));
-
-        let err = check_global_project_exclusivity(&view)
+        let err = check_global_project_exclusivity(true, true)
             .expect_err("--global + explicit --project must be rejected (ADR §Decision 2)");
         assert_eq!(
             err.classify(),
@@ -1279,11 +1825,7 @@ mod tests {
         // clap rejects the `--frozen` + `--remote` flag pair; this guard closes
         // the env-sourced gap (OCX_FROZEN + OCX_REMOTE both via the arg
         // defaults). The conflict must classify to UsageError (64).
-        let mut view = ocx_config::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
-        view.frozen = true;
-        view.remote = true;
-
-        let err = check_frozen_remote_exclusivity(&view).expect_err("--frozen + --remote must be rejected");
+        let err = check_frozen_remote_exclusivity(true, true).expect_err("--frozen + --remote must be rejected");
         assert_eq!(
             err.classify(),
             Some(ExitCode::UsageError),
@@ -1299,10 +1841,8 @@ mod tests {
     fn frozen_without_remote_is_ok() {
         // Frozen alone (and frozen+offline, which collapses to offline upstream)
         // is a valid combination — the guard only rejects frozen+remote.
-        let mut view = ocx_config::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
-        view.frozen = true;
         assert!(
-            check_frozen_remote_exclusivity(&view).is_ok(),
+            check_frozen_remote_exclusivity(true, false).is_ok(),
             "--frozen without --remote must be accepted"
         );
     }
@@ -1930,11 +2470,9 @@ mod tests {
         // always emits `ChainMode::Offline` regardless of the `frozen` flag.
         // This mirrors the precedence comment in `try_init`:
         // "offline already won via the `None` arm — it produced no oci_index".
-        let mut view = ocx_config::env::OcxConfigView::new(std::path::PathBuf::from("/abs/ocx"));
-        view.frozen = true;
         // offline=true → oci_index=None; the guard must accept the combination.
         assert!(
-            check_frozen_remote_exclusivity(&view).is_ok(),
+            check_frozen_remote_exclusivity(true, false).is_ok(),
             "--frozen + --offline must pass the exclusivity guard"
         );
 
@@ -2109,9 +2647,148 @@ mod tests {
             ManagedConfigGate {
                 enforce_required: false,
                 onboarding: false,
+                tolerate_vanished_received_config: false,
             },
         )
         .await
+    }
+
+    /// The `__OCX_ENV_STATE` a parent ocx hands down with `policy`.
+    fn received_state(policy: ocx_config::exec_state::Policy) -> String {
+        ocx_config::exec_state::encode(&ExecState {
+            policy,
+            ..ExecState::default()
+        })
+        .value
+        .expect("a policy-only state encodes")
+    }
+
+    /// An offline `Context::try_init` over `home` in a process that received `policy` from its parent.
+    /// The environment is hermetic, so only the `ambient` variables are set.
+    async fn context_receiving(
+        env: &ocx_env::overrides::EnvLock,
+        home: &Path,
+        policy: ocx_config::exec_state::Policy,
+        ambient: &[(&'static ocx_env::EnvVar, &str)],
+    ) -> Context {
+        env.hermetic(home);
+        env.set(&ocx_env::__OCX_ENV_STATE, received_state(policy));
+        for (var, value) in ambient {
+            env.set(var, *value);
+        }
+        try_context_over_home(env, home, false)
+            .await
+            .expect("a context over the fixture home")
+    }
+
+    /// A SYSTEM `insecure = false` for a host clamps a list a parent ocx passed down in `try_init` itself,
+    /// not only in the seam (CWE-693); with no SYSTEM entry the same state keeps both hosts, so the clamp is
+    /// what removes one.
+    #[tokio::test]
+    async fn try_init_clamps_a_received_insecure_list_under_a_system_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let system = tempfile::tempdir().unwrap();
+        let system_config = system.path().join("config.toml");
+        std::fs::write(&system_config, "[registries.\"locked.corp:5000\"]\ninsecure = false\n").unwrap();
+        let received = || ocx_config::exec_state::Policy {
+            insecure_registries: Some("locked.corp:5000,open.corp".into()),
+            ..Default::default()
+        };
+
+        let env = ocx_env::overrides::lock();
+        let unlocked = context_receiving(&env, home.path(), received(), &[]).await;
+        assert_eq!(
+            unlocked.insecure_hosts(),
+            ["locked.corp:5000".to_owned(), "open.corp".to_owned()],
+            "control: with no SYSTEM entry both received hosts are insecure"
+        );
+
+        let locked = context_receiving(
+            &env,
+            home.path(),
+            received(),
+            &[(
+                &ocx_env::__OCX_TESTING_SYSTEM_CONFIG,
+                system_config.to_str().expect("utf-8"),
+            )],
+        )
+        .await;
+        assert_eq!(locked.insecure_hosts(), ["open.corp".to_owned()]);
+    }
+
+    /// Settings a parent passed down reach a child that has no variable of its own, through the settings
+    /// `try_init` reads itself.
+    #[tokio::test]
+    async fn try_init_applies_the_settings_a_parent_passed_down() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let parent_config = config_dir.path().join("parent.toml");
+        std::fs::write(&parent_config, "[registry]\ndefault = \"parent-config.example\"\n").unwrap();
+        let snapshot = config_dir.path().join("snapshot.json");
+
+        let env = ocx_env::overrides::lock();
+        let context = context_receiving(
+            &env,
+            home.path(),
+            ocx_config::exec_state::Policy {
+                config_path: Some(parent_config.clone()),
+                patch_snapshot_path: Some(snapshot.clone()),
+                no_verify: Some(true),
+                no_config: Some(true),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await;
+        assert_eq!(
+            context.config().resolved_default_registry(),
+            Some("parent-config.example"),
+            "the parent's --config reaches the child"
+        );
+        assert!(context.no_verify(), "the parent's no_verify reaches the child");
+        assert_eq!(
+            context.managed_config_env_override(),
+            None,
+            "no_config prunes the managed override"
+        );
+
+        let context = context_receiving(
+            &env,
+            home.path(),
+            ocx_config::exec_state::Policy {
+                default_registry: Some("parent-registry.example".into()),
+                managed_config: Some("registry.test/managed:v1".into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await;
+        assert_eq!(context.default_registry(), "parent-registry.example");
+        assert_eq!(context.managed_config_env_override(), Some("registry.test/managed:v1"));
+    }
+
+    /// An explicitly set variable beats what the parent passed down (relaxing fields), and an
+    /// explicit `OCX_NO_VERIFY=0` is not read as unset.
+    #[tokio::test]
+    async fn try_init_prefers_an_explicit_variable_over_what_a_parent_passed_down() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        let context = context_receiving(
+            &env,
+            home.path(),
+            ocx_config::exec_state::Policy {
+                default_registry: Some("parent-registry.example".into()),
+                no_verify: Some(true),
+                ..Default::default()
+            },
+            &[
+                (&ocx_env::OCX_DEFAULT_REGISTRY, "local-registry.example"),
+                (&ocx_env::OCX_NO_VERIFY, "0"),
+            ],
+        )
+        .await;
+        assert_eq!(context.default_registry(), "local-registry.example");
+        assert!(!context.no_verify());
     }
 
     /// An offline [`try_context_over_home`] and every warning it emitted, through whichever sink
@@ -2210,7 +2887,7 @@ mod tests {
             "the payload's root must never reach the local view"
         );
         assert!(
-            ocx_util::tls::sigstore_roots().is_empty(),
+            context.extra_roots_sigstore().is_empty(),
             "an unpinned managed root must not reach the Sigstore view"
         );
         // merged = 1 / local = 0 is what makes the recipe's view observable:
@@ -2242,7 +2919,7 @@ mod tests {
         assert_eq!(context.extra_roots_merged().len(), 1);
         assert_eq!(context.extra_roots_local().len(), 1);
         assert_eq!(
-            ocx_util::tls::sigstore_roots().der(),
+            context.extra_roots_sigstore().der(),
             context.extra_roots_merged().der(),
             "try_init must install the Sigstore view before any client is built"
         );
@@ -2291,7 +2968,7 @@ mod tests {
     ) -> ocx_env::Retired {
         ocx_env::Retired {
             name,
-            replacement,
+            replacement: ocx_env::Replacement::Env(replacement),
             change,
             status,
         }
@@ -2331,6 +3008,28 @@ mod tests {
         );
         assert!(!notices[0].contains(SECRET), "never the value: {}", notices[0]);
         assert_eq!(ocx_env::OCX_DEFAULT_REGISTRY.get().as_deref(), Some(SECRET));
+    }
+
+    #[test]
+    fn a_withdrawn_variable_prints_one_notice_naming_the_flag_and_is_never_honoured() {
+        let env = ocx_env::overrides::lock();
+        env.retire(retired_table(vec![ocx_env::Retired {
+            name: "OCX_SYNTHETIC_WITHDRAWN",
+            replacement: ocx_env::Replacement::Flag("--synthetic"),
+            change: ocx_env::Change::Withdrawn,
+            status: WINDOW,
+        }]));
+        env.set_raw("OCX_SYNTHETIC_WITHDRAWN", SECRET);
+
+        let notices = retired_env_notices().expect("a withdrawn spelling never exits");
+        assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
+        assert!(notices[0].contains("OCX_SYNTHETIC_WITHDRAWN") && notices[0].contains("--synthetic"));
+        assert!(!notices[0].contains(SECRET), "never the value: {}", notices[0]);
+        assert!(
+            notices[0].is_ascii() && !notices[0].contains('\n'),
+            "one ASCII line: {}",
+            notices[0]
+        );
     }
 
     #[test]

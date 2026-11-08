@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use super::error::RecordsError;
 use super::purl::{has_logical_identity, package_url};
+use crate::exec_env::ExecMode;
 use crate::tasks::resolve::AdmittedClaims;
-use ocx_config::env::OcxConfigView;
 use ocx_config::mirror::MirrorConfig;
 use ocx_oci::ssrf::allows_plain_http;
 use ocx_oci::{Architecture, Digest, OperatingSystem, PackageRef, PinnedPackageRef, Platform};
@@ -78,6 +78,10 @@ pub struct ExecutionRecord {
     /// not. `ocx exec -- bash …` picking up the *system* bash is a fact this
     /// record states out loud.
     pub executable: BTreeMap<String, String>,
+
+    /// How the child's environment related to the one the launching frame received.
+    #[serde(rename = "envMode")]
+    pub env_mode: EnvMode,
 
     /// What the launching frame was scoped to.
     pub scope: ScopeBlock,
@@ -155,6 +159,30 @@ pub enum FrameIdentity {
     // Never fabricate identity here: a truthful partial record beats a fabricated complete one.
     #[serde(rename = "degraded")]
     Degraded,
+}
+
+/// How the child's environment related to the calling one.
+///
+/// `layer` composes on top of it, `isolate` first reverts what ocx applied to it, `clean` starts empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvMode {
+    /// Composed on top of the calling environment.
+    Layer,
+    /// Every value ocx applied to the calling environment was reverted before composing.
+    Isolate,
+    /// Started from an empty environment holding only the composed variables.
+    Clean,
+}
+
+impl From<ExecMode> for EnvMode {
+    fn from(mode: ExecMode) -> Self {
+        match mode {
+            ExecMode::Layer => Self::Layer,
+            ExecMode::Isolate => Self::Isolate,
+            ExecMode::Clean => Self::Clean,
+        }
+    }
 }
 
 /// The process that runs the tool.
@@ -316,9 +344,6 @@ pub enum ScopeBlock {
         /// Packages layered on with `--with`, exactly as requested; omitted when none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         with: Vec<String>,
-        /// Whether `--stack` kept the parent project's environment under this one; omitted when not.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        stack: bool,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
@@ -494,6 +519,36 @@ pub struct ManagedConfigReference {
     pub digest: BTreeMap<String, String>,
 }
 
+/// The resolution policy a record states about the invocation that wrote it.
+#[derive(Debug, Clone)]
+pub struct RecordedConfig {
+    /// Absolute path to the running ocx executable.
+    pub self_exe: PathBuf,
+    pub offline: bool,
+    pub remote: bool,
+    pub frozen: bool,
+    /// Ambient `OCX_NO_VERIFY`; the `--no-verify` flag is a one-shot choice and not recorded.
+    pub no_verify: bool,
+    /// Per-host mirrors, the merged map before role parsing.
+    pub mirrors: Vec<(String, MirrorConfig)>,
+    /// The effective managed-config source (flag > env > seed).
+    pub managed_config_source: Option<String>,
+}
+
+impl RecordedConfig {
+    pub fn new(self_exe: impl Into<PathBuf>) -> Self {
+        Self {
+            self_exe: self_exe.into(),
+            offline: false,
+            remote: false,
+            frozen: false,
+            no_verify: false,
+            mirrors: Vec::new(),
+            managed_config_source: None,
+        }
+    }
+}
+
 /// Everything a launching frame hands the record builder.
 #[derive(Debug)]
 pub struct RecordInputs<'a> {
@@ -517,7 +572,7 @@ pub struct RecordInputs<'a> {
     pub argv: &'a [String],
 
     /// Resolution policy, feeding the `resolution` block.
-    pub config: &'a OcxConfigView,
+    pub config: &'a RecordedConfig,
 
     /// Every host this process may contact over plain HTTP, unfiltered: the record
     /// intersects it through `allows_plain_http` itself.
@@ -562,14 +617,16 @@ pub enum Scope {
         bindings: Vec<PackageBinding>,
         /// Packages layered on with `--with`, as requested; they have no binding.
         with: Vec<PackageRef>,
-        /// Whether `--stack` kept the parent project's environment under this one.
-        stack: bool,
+        /// How the child's environment related to the calling one.
+        env_mode: ExecMode,
     },
 
     /// `ocx package exec` — identifiers named on the command line.
     Package {
         /// Identifiers as requested.
         requested: Vec<PackageRef>,
+        /// How the child's environment related to the calling one.
+        env_mode: ExecMode,
     },
 
     /// `ocx launcher exec` — an entrypoint re-entry: no project context, a synthetic identifier.
@@ -612,6 +669,7 @@ impl ExecutionRecord {
             host: super::environment::host(),
             os: super::environment::operating_system(),
             executable: executable_block(inputs),
+            env_mode: env_mode_of(&inputs.scope),
             scope: scope_block(inputs),
             resolution: resolution_block(inputs),
             packages: descriptors(inputs),
@@ -652,6 +710,14 @@ fn frame_for(scope: &Scope, packages: &[Arc<InstallInfo>]) -> Frame {
     }
 }
 
+/// The mode the frame ran in; a launcher frame composes on the environment it was handed, so it layers.
+fn env_mode_of(scope: &Scope) -> EnvMode {
+    match scope {
+        Scope::Project { env_mode, .. } | Scope::Package { env_mode, .. } => (*env_mode).into(),
+        Scope::Launcher | Scope::LauncherShim { .. } => EnvMode::Layer,
+    }
+}
+
 fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
     match &inputs.scope {
         Scope::Project {
@@ -660,7 +726,6 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             declaration_digest,
             groups,
             with,
-            stack,
             ..
         } => ScopeBlock::Project {
             clean_env: inputs.clean_env,
@@ -671,9 +736,8 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             },
             groups: groups.clone(),
             with: with.iter().map(ToString::to_string).collect(),
-            stack: *stack,
         },
-        Scope::Package { requested } => ScopeBlock::Package {
+        Scope::Package { requested, .. } => ScopeBlock::Package {
             clean_env: inputs.clean_env,
             requested: requested.iter().map(ToString::to_string).collect(),
         },
@@ -1146,7 +1210,7 @@ mod tests {
         store_root: PathBuf,
         shim_root: PathBuf,
         argv: Vec<String>,
-        config: OcxConfigView,
+        config: RecordedConfig,
         insecure_registries: Vec<String>,
         platform: Option<Platform>,
         auto_installed: Vec<PackageRef>,
@@ -1163,7 +1227,7 @@ mod tests {
             let ninja = pinned("ocx/ninja", "index.ocx.sh", None, NINJA_HEX);
             let runtime = pinned("ocx/libstdcxx-runtime", "index.ocx.sh", None, DEPENDENCY_HEX);
 
-            let mut config = OcxConfigView::new("/home/ci/.ocx/bin/ocx");
+            let mut config = RecordedConfig::new("/home/ci/.ocx/bin/ocx");
             config.frozen = true;
             config.mirrors = vec![(
                 "ghcr.io".to_string(),
@@ -1224,7 +1288,7 @@ mod tests {
                 store_root: PathBuf::from("/home/ci/.ocx/packages"),
                 shim_root: PathBuf::from("/home/ci/.ocx/shims"),
                 argv: vec!["cmake".to_string()],
-                config: OcxConfigView::new("/opt/ocx/bin/ocx"),
+                config: RecordedConfig::new("/opt/ocx/bin/ocx"),
                 insecure_registries: Vec::new(),
                 platform: None,
                 auto_installed: Vec::new(),
@@ -1266,7 +1330,7 @@ mod tests {
                 package: pinned("ocx/cmake", "index.ocx.sh", None, LEAF_HEX),
             }],
             with: Vec::new(),
-            stack: false,
+            env_mode: ExecMode::Layer,
         }
     }
 
@@ -1560,6 +1624,7 @@ mod tests {
         );
         let descriptors = descriptors(&tagged.inputs(Scope::Package {
             requested: vec![PackageRef::parse("index.ocx.sh/ocx/cmake:3.28").expect("identifier")],
+            env_mode: ExecMode::Layer,
         }));
         assert_eq!(
             annotations_of(&descriptors, "cmake")
@@ -1840,7 +1905,10 @@ mod tests {
         assert_eq!(frame_for(&project_scope(), &[]).identity, FrameIdentity::Complete);
         assert!(frame_for(&project_scope(), &[]).identity_note.is_none());
 
-        let package = Scope::Package { requested: Vec::new() };
+        let package = Scope::Package {
+            requested: Vec::new(),
+            env_mode: ExecMode::Layer,
+        };
         assert_eq!(frame_for(&package, &[]).command, FrameCommand::PackageExec);
         assert_eq!(frame_for(&package, &[]).identity, FrameIdentity::Complete);
 
@@ -2319,7 +2387,10 @@ mod tests {
         // Package scope, so the frame *did* compose — the launcher frame omits
         // the key entirely and would pass this trivially.
         frame.config.mirrors = Vec::new();
-        let resolution = resolution_block(&frame.inputs(Scope::Package { requested: Vec::new() }));
+        let resolution = resolution_block(&frame.inputs(Scope::Package {
+            requested: Vec::new(),
+            env_mode: ExecMode::Layer,
+        }));
         assert_eq!(
             resolution.registries.as_deref(),
             Some([].as_slice()),
@@ -2368,18 +2439,33 @@ mod tests {
     }
 
     #[test]
-    fn scope_records_stack_only_when_it_was_requested() {
+    fn the_scope_block_has_no_stack_key() {
         let frame = Frame::project();
-        let serialized = |stack: bool| {
+        let block = serde_json::to_value(scope_block(&frame.inputs(project_scope()))).expect("scope block serializes");
+
+        assert!(block.get("stack").is_none(), "{block}");
+    }
+
+    #[test]
+    fn the_record_names_the_mode_its_scope_ran_in() {
+        let frame = Frame::project();
+        let in_mode = |mode: ExecMode| {
             let mut scope = project_scope();
-            if let Scope::Project { stack: slot, .. } = &mut scope {
-                *slot = stack;
+            if let Scope::Project { env_mode, .. } = &mut scope {
+                *env_mode = mode;
             }
-            serde_json::to_value(scope_block(&frame.inputs(scope))).expect("scope block serializes")
+            let record = ExecutionRecord::build(&frame.inputs(scope), Utc::now(), 1);
+            serde_json::to_value(record).expect("record serializes")["envMode"].clone()
         };
 
-        assert_eq!(serialized(true)["stack"], serde_json::Value::Bool(true));
-        assert!(serialized(false).get("stack").is_none());
+        assert_eq!(in_mode(ExecMode::Layer), "layer");
+        assert_eq!(in_mode(ExecMode::Isolate), "isolate");
+        assert_eq!(in_mode(ExecMode::Clean), "clean");
+        let launcher = ExecutionRecord::build(&Frame::launcher().inputs(Scope::Launcher), Utc::now(), 1);
+        assert_eq!(
+            serde_json::to_value(launcher).expect("record serializes")["envMode"],
+            "layer"
+        );
     }
 
     #[test]
@@ -2392,10 +2478,8 @@ mod tests {
                 lock,
                 groups,
                 with,
-                stack,
             } => {
                 assert!(with.is_empty());
-                assert!(!stack);
                 assert!(!clean_env);
                 assert_eq!(project_root, PathBuf::from("/scratch/job-88213"));
                 assert_eq!(lock.path, PathBuf::from("/scratch/job-88213/ocx.lock"));
@@ -2411,6 +2495,7 @@ mod tests {
         let requested = PackageRef::parse("internal.corp.example/solver:2024.3").expect("identifier");
         match scope_block(&frame.inputs(Scope::Package {
             requested: vec![requested],
+            env_mode: ExecMode::Layer,
         })) {
             ScopeBlock::Package { requested, .. } => {
                 assert_eq!(requested, vec!["internal.corp.example/solver:2024.3".to_string()]);
@@ -2459,6 +2544,7 @@ mod tests {
                 os_type: Some(OperatingSystem::Linux),
             },
             executable: executable_block(&inputs),
+            env_mode: env_mode_of(&inputs.scope),
             scope: scope_block(&inputs),
             resolution: resolution_block(&inputs),
             packages: descriptors(&inputs),
@@ -2530,6 +2616,7 @@ mod tests {
             "executable/sh.ocx.provenance",
             "executable/sh.ocx.kind",
             "executable/sh.ocx.package",
+            "envMode",
             "scope/tier",
             "scope/cleanEnv",
             "scope/projectRoot",

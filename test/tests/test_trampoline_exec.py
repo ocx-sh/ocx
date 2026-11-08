@@ -573,15 +573,14 @@ def test_item38_an_exported_ocx_project_does_not_override_the_baked_selector(
 ) -> None:
     """Item 38 / S-009: the body's ``unset`` is what keeps trampolines usable.
 
-    ``--project`` is baked, so an ambient ``OCX_GLOBAL`` or ``OCX_PROJECT``
-    would reach ``check_global_project_exclusivity`` as a second, conflicting
-    tier selector and refuse a flag the user never typed — for *every*
-    trampoline on that ``PATH``, from one exported variable. Both are exported
-    here, and ``OCX_PROJECT`` names a different real project so a body that
-    merely tolerated them would still be caught composing the wrong home.
+    ``--project`` is baked, so an ambient ``OCX_PROJECT`` would reach
+    ``check_global_project_exclusivity`` as a second, conflicting tier selector
+    — for *every* trampoline on that ``PATH``, from one exported variable. It
+    names a different real project here, so a body that merely tolerated it
+    would still be caught composing the wrong home.
 
     RED: drop ``unset OCX_GLOBAL OCX_PROJECT`` from ``unix_trampoline_body`` —
-    exit 64.
+    the exported project wins and its tool runs instead.
     """
     project = locked_project(ocx, tmp_path, label=f"s{uuid4().hex[:6]}")
     other = locked_project(ocx, tmp_path, label=f"o{uuid4().hex[:6]}")
@@ -589,7 +588,7 @@ def test_item38_an_exported_ocx_project_does_not_override_the_baked_selector(
     result = run_file(
         project.default_trampoline,
         cwd=tmp_path,
-        env={**ocx.env, "OCX_GLOBAL": "1", "OCX_PROJECT": str(other.directory)},
+        env={**ocx.env, "OCX_PROJECT": str(other.directory)},
     )
 
     assert result.returncode == EXIT_SUCCESS, (
@@ -599,6 +598,50 @@ def test_item38_an_exported_ocx_project_does_not_override_the_baked_selector(
         f"the baked project's tool must run, not the exported project's; got {result.stdout!r}"
     )
     assert other.default_package.marker not in result.stdout, result.stdout
+
+
+def test_item38_a_global_trampoline_under_an_exported_ocx_project_does_not_exit_64(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A baked ``--global`` and an exported ``OCX_PROJECT`` are two tier selectors; the body's ``unset`` resolves it.
+
+    ``--global`` with ``OCX_PROJECT`` set is a usage error (64) for any ocx. A
+    trampoline is run from whatever shell the user has, so one exported
+    ``OCX_PROJECT`` would make every global tool on ``PATH`` exit 64 for a flag
+    nobody typed. The selector is the one baked into the file, and ``OCX_GLOBAL``
+    is not exported here at all: it is withdrawn, so no case depends on it.
+
+    RED: drop ``OCX_PROJECT`` from the ``unset`` line of the trampoline body — exit 64.
+    """
+    label = uuid4().hex[:8]
+    package = make_package(
+        ocx,
+        f"t_{label}_gtramp",
+        "1.0.0",
+        tmp_path,
+        cascade=False,
+        bins=[f"gtramp{label}"],
+    )
+    added = run_in(ocx, tmp_path, "--global", "add", package.fq)
+    assert added.returncode == EXIT_SUCCESS, f"seeding the global tier; rc={added.returncode}\n{added.stderr}"
+    pulled = run_in(ocx, tmp_path, "--global", "pull")
+    assert pulled.returncode == EXIT_SUCCESS, f"rendering the global tier; rc={pulled.returncode}\n{pulled.stderr}"
+    trampoline = shell_bin(Path(ocx.env["OCX_HOME"]) / "toolchain") / trampoline_name(f"gtramp{label}")
+    assert trampoline.exists(), f"the global tier must render a trampoline at {trampoline}"
+    other = locked_project(ocx, tmp_path, label=f"o{label}")
+
+    result = run_file(
+        trampoline,
+        cwd=tmp_path,
+        env={**ocx.env, "OCX_PROJECT": str(other.directory)},
+    )
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"the baked --global is the only selector; rc={result.returncode}\n{result.stderr}"
+    )
+    assert package.marker in result.stdout, (
+        f"the global tool must run, not the exported project's; got {result.stdout!r}"
+    )
 
 
 def test_item38_a_tool_under_global_exec_sees_no_ocx_global_and_may_name_its_own_project(
@@ -611,7 +654,7 @@ def test_item38_a_tool_under_global_exec_sees_no_ocx_global_and_may_name_its_own
     ocx, so both observations come from the block ``ocx exec`` built; ``OCX_BINARY_PIN``,
     forwarded in the same pass, is asserted present so the absence is not vacuous.
 
-    RED: forward ``cfg.global.then_some("1")`` for ``OCX_GLOBAL`` in ``apply_ocx_config``.
+    RED: write ``OCX_GLOBAL`` into the child by hand in the spawn's environment.
     """
     label = uuid4().hex[:8]
     package = make_package(
@@ -668,7 +711,7 @@ def test_item38_a_tool_under_project_exec_sees_no_ocx_project(ocx: OcxRunner, tm
     ``OCX_BINARY_PIN``, forwarded in the same pass, is asserted present so the absence of
     ``OCX_PROJECT`` is not vacuous.
 
-    RED: forward ``cfg.project`` for ``OCX_PROJECT`` in ``apply_ocx_config``.
+    RED: write ``OCX_PROJECT`` into the child by hand in the spawn's environment.
     """
     label = uuid4().hex[:8]
     outer = tmp_path / f"outer-{label}"

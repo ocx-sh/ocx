@@ -16,7 +16,7 @@ mod retired;
 mod tests;
 mod vars;
 
-pub use retired::{Change, REMOVAL_RELEASE, RETIRED, Release, Retired, Status, retired_hits};
+pub use retired::{Change, REMOVAL_RELEASE, RETIRED, Release, Replacement, Retired, Status, retired_hits};
 pub use vars::*;
 
 /// One declared environment variable.
@@ -31,7 +31,8 @@ pub struct EnvVar {
     pub visibility: Visibility,
     /// Never formatted and never named with its value; read only through [`SecretVar`].
     pub secret: bool,
-    pub child: Child,
+    /// How the variable reaches a child process.
+    pub propagation: Propagation,
     pub reader: Reader,
 }
 
@@ -75,15 +76,23 @@ pub enum Visibility {
     Testing,
 }
 
-/// What a child process OCX spawns sees of the variable.
+/// How a variable travels to a child process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Child {
-    /// The ambient value passes through untouched.
-    Inherit,
-    /// Removed from a plugin-dispatched child and from every env `apply_ocx_config` writes; [`credential_keys`] lists them.
-    Scrub,
-    /// Written or cleared explicitly for a child: it gets the value this process resolved, never the inherited one.
-    Forward,
+pub enum Propagation {
+    /// Read by ocx, inherited untouched, never written by ocx.
+    UserInput,
+    /// A [`Propagation::UserInput`] that is never recorded in state; priors are `Withheld`.
+    SecretInput,
+    /// A [`Propagation::UserInput`] that the files `ocx self setup` generates may export.
+    SetupWritten,
+    /// `__OCX_ENV_STATE`: written by the projection, read by ocx and plugins.
+    State,
+    /// `OCX_BINARY_PIN`: written by the projection, read by generated files.
+    BinaryPin,
+    /// Plumbing for one direct child (hook bookkeeping, a helper marker): removed at every projected spawn.
+    HookLocal,
+    /// A `secret` that is removed at every spawn and never recorded.
+    Credential,
 }
 
 /// Whose code interprets the value.
@@ -324,8 +333,12 @@ pub fn snapshot() -> Vec<(OsString, OsString)> {
 
 /// The value of `var`, honouring the in-window [`Retired`] entries of `table` that replace it.
 fn lookup(var: &'static EnvVar, table: &'static [Retired]) -> Option<OsString> {
-    let in_window =
-        |entry: &&Retired| std::ptr::eq(entry.replacement, var) && matches!(entry.status, Status::Window { .. });
+    // A withdrawn spelling is never an alias, whatever it points at.
+    let in_window = |entry: &&Retired| {
+        entry.change != Change::Withdrawn
+            && entry.replacement.is_env(var)
+            && matches!(entry.status, Status::Window { .. })
+    };
     let current = raw(var.name);
     let value = match current {
         Some(value) if !value.is_empty() => value,
@@ -372,18 +385,27 @@ pub fn all() -> impl Iterator<Item = &'static EnvVar> {
     DECLARED.iter().copied()
 }
 
-/// The names a spawned child must not inherit: every [`Child::Scrub`] declaration.
+/// The names a spawned child must not inherit: every [`Propagation::Credential`] declaration.
 ///
 /// A name belongs here when holding its value is enough to act as the operator (a token, a
 /// passphrase, a private key); configuration and policy do not. `Command::envs` only adds, so a
 /// spawn site inheriting the ambient environment must remove each name itself.
 ///
-/// Adding one, in the same change: declare it `secret, child = Scrub` in `vars.rs`; if a sibling
+/// Adding one, in the same change: declare it `secret, propagation = Credential` in `vars.rs`; if a sibling
 /// stays inherited, say why on both declarations; add its row to the credential table in
 /// `.claude/rules/subsystem-cli.md`; and state in `website/src/content/docs/reference/environment.md`
 /// that it is never forwarded to child processes.
 pub fn credential_keys() -> impl Iterator<Item = &'static str> {
-    all().filter(|var| var.child == Child::Scrub).map(|var| var.name)
+    all()
+        .filter(|var| var.propagation == Propagation::Credential)
+        .map(|var| var.name)
+}
+
+/// Every name declared with `propagation`, patterns included verbatim.
+pub fn keys_with(propagation: Propagation) -> impl Iterator<Item = &'static str> {
+    all()
+        .filter(move |var| var.propagation == propagation)
+        .map(|var| var.name)
 }
 
 /// Process working directory, through the seam tests override.
@@ -445,55 +467,56 @@ pub fn is_reserved_ocx_key(key: &str) -> bool {
 /// ```
 ///
 /// Attributes follow the visibility in any order: `secret`, `on_invalid = Default|Error`,
-/// `child = Inherit|Scrub|Forward`, `reader = Ocx|Dependency("crate")`. A `Testing` entry is compiled only under
+/// `propagation = <Class>`, `reader = Ocx|Dependency("crate")`. A `Testing` entry is compiled only under
 /// `cfg(any(test, feature = "__testing"))`, resolved in the invoking crate, which must declare that feature.
 #[macro_export]
 macro_rules! env_vars {
     // One entry, its attributes not yet folded into the slots.
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] | secret $($rest:tt)*) => {
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | secret $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
-            [true] [$on_invalid] [$child] [$($reader)*] | $($rest)*);
+            [true] [$on_invalid] [$propagation] [$($reader)*] | $($rest)*);
     };
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] | on_invalid = $set:ident $($rest:tt)*) => {
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | on_invalid = $set:ident $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
-            [$secret] [$set] [$child] [$($reader)*] | $($rest)*);
+            [$secret] [$set] [$propagation] [$($reader)*] | $($rest)*);
     };
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] | child = $set:ident $($rest:tt)*) => {
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*]
+        | propagation = $set:ident $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
             [$secret] [$on_invalid] [$set] [$($reader)*] | $($rest)*);
     };
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*]
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*]
         | reader = $set:ident ($dependency:literal) $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
-            [$secret] [$on_invalid] [$child] [$set ($dependency)] | $($rest)*);
+            [$secret] [$on_invalid] [$propagation] [$set ($dependency)] | $($rest)*);
     };
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] | reader = $set:ident $($rest:tt)*) => {
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | reader = $set:ident $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
-            [$secret] [$on_invalid] [$child] [$set] | $($rest)*);
+            [$secret] [$on_invalid] [$propagation] [$set] | $($rest)*);
     };
     // Every attribute folded: emit the static.
     (@entry [$($cfg:tt)*] [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [false] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] |) => {
+        [false] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] |) => {
         $(#[doc = $doc])*
         #[cfg($($cfg)*)]
         pub static $name: $crate::EnvVar =
-            $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [false] [$on_invalid] [$child] [$($reader)*]);
+            $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [false] [$on_invalid] [$propagation] [$($reader)*]);
     };
     (@entry [$($cfg:tt)*] [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [true] [$on_invalid:ident] [$child:ident] [$($reader:tt)*] |) => {
+        [true] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] |) => {
         $(#[doc = $doc])*
         #[cfg($($cfg)*)]
         pub static $name: $crate::SecretVar = $crate::SecretVar::new(
-            $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [true] [$on_invalid] [$child] [$($reader)*]),
+            $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [true] [$on_invalid] [$propagation] [$($reader)*]),
         );
     };
     (@var [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
-        [$secret:ident] [$on_invalid:ident] [$child:ident] [$($reader:tt)*]) => {
+        [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*]) => {
         $crate::EnvVar {
             name: $crate::env_vars!(@name $name $($pattern)?),
             doc: $crate::env_vars!(@doc $($doc)*),
@@ -501,7 +524,7 @@ macro_rules! env_vars {
             on_invalid: $crate::OnInvalid::$on_invalid,
             visibility: $crate::Visibility::$vis,
             secret: $secret,
-            child: $crate::Child::$child,
+            propagation: $crate::Propagation::$propagation,
             reader: $crate::Reader::$($reader)*,
         }
     };
@@ -530,7 +553,7 @@ macro_rules! env_vars {
     ) => {
         $(
             $crate::env_vars!(@gate $vis [$($doc)*] $name [$($pattern)?] [$value $((&[$($choice),*]))?] $vis
-                [false] [Default] [Inherit] [Ocx] | $($key $(= $set $(($dependency))?)?)*);
+                [false] [Default] [Unclassified] [Ocx] | $($key $(= $set $(($dependency))?)?)*);
         )*
 
         /// Every declaration of this invocation; `Testing` ones only under `test` or `__testing`.

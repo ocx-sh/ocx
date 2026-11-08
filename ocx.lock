@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:fa258ca29c524ebbbd79577647342823ad876a9f0e3d5f9ab1e9de25cd838b38"
+declaration_hash = "sha256:91ccc7041493e487858c6710bd356c7b38fec1235e3392ecbb07c4cde22df046"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-10-26T02:07:04Z"
+generated_at = "2026-11-07T19:05:49Z"
 
 [[tool]]
 name = "actionlint"
@@ -288,6 +288,19 @@ repository = "ocx.sh/git-cliff/git-cliff"
 "linux/arm64" = "sha256:65eec3eda7db0168296dc1bd0d450d899d3e5570fa97a3122dce0ccca800e6f6"
 "windows/amd64" = "sha256:e94d7e09c040a25786a792971bf8284c8f8f8886bd78ab794688eaa719f76b26"
 "windows/arm64" = "sha256:638241beeb14fea7ccf60a8878a2b37b4a2774b609bbefa2b5ad0053e2693a69"
+
+[[tool]]
+name = "ocx-previous"
+group = "test"
+repository = "ocx.sh/ocx/cli"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:42e9fc9007aa1e70bde87005ae89edbce418b0a24b48efd4c9f9215774a11c56"
+"darwin/arm64" = "sha256:d9a5d3f92806762f11139bb3be69e154b4487a472d55f23e346274d44c704847"
+"linux/amd64" = "sha256:853a43059f4205e84dc2f9bb62210cbd93159268e1d8fe3a54837332e4936250"
+"linux/arm64" = "sha256:d8e1a580de62e284623da0182e3021ce8458276b2c10331f8e3ba061c458af54"
+"windows/amd64" = "sha256:f771f61a7d596a99dd518a95df56d86aa7bdbda5bd6d4992ae072101c61c368d"
+"windows/arm64" = "sha256:68a8425d23d519707723fda1c0ad6467302e4e453d5fdb42e190adb1aeb978aa"
 
 [[tool]]
 name = "zot"

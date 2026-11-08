@@ -16,6 +16,7 @@ Scenarios covered:
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -25,6 +26,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import exec_state
 from src.helpers import make_package_with_entrypoints
 from src.runner import OcxRunner
 
@@ -221,4 +223,69 @@ def test_launcher_hop_refuses_a_non_executable_dispatch_target(
     )
     assert f"bin{os.sep}hello" in completed.stderr, (
         f"stderr must name the package path of the offending file, got:\n{completed.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Layering at the launcher hop
+# ---------------------------------------------------------------------------
+
+
+def _dumped(stdout: str, key: str) -> str | None:
+    """The value of ``key`` in an ``env`` dump, or None when absent."""
+    prefix = f"{key}="
+    return next((line[len(prefix) :] for line in stdout.splitlines() if line.startswith(prefix)), None)
+
+
+def _state_dumped(stdout: str) -> dict:
+    state = exec_state.decode(_dumped(stdout, "__OCX_ENV_STATE"))
+    assert isinstance(state, dict), f"the child must receive a readable execution state; got {state!r}"
+    return state
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix launcher exec test")
+def test_launcher_reentry_layers_the_state_like_exec_does(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A launcher hands its child the state it received, layered, with the replay unchanged.
+
+    The same ``package exec`` runs ``env`` directly and through the package's
+    generated launcher. The launcher re-applies the received ``replay.env`` after
+    the package's own value, so the override wins on both paths, and what it
+    passes on keeps every record the outer frame wrote and the replay as it was.
+    """
+    var_name = f"T_{unique_repo.upper().replace('-', '_')}_LAYER"
+    pkg = make_package_with_entrypoints(
+        ocx,
+        unique_repo,
+        tmp_path,
+        entrypoints={"showenv": {"command": "env"}},
+        env=[
+            {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+            {"key": var_name, "type": "constant", "value": "package-value", "visibility": "public"},
+        ],
+    )
+    ocx.plain("package", "install", pkg.short)
+    override = f"{var_name}=flag-value"
+
+    direct = ocx.run("package", "exec", "--env", override, pkg.short, "--", "env", format=None, check=False)
+    hopped = ocx.run("package", "exec", "--env", override, pkg.short, "--", "showenv", format=None, check=False)
+    assert direct.returncode == 0, direct.stderr
+    assert hopped.returncode == 0, hopped.stderr
+
+    assert _dumped(direct.stdout, var_name) == "flag-value", direct.stdout
+    assert _dumped(hopped.stdout, var_name) == "flag-value", (
+        f"the received replay must be applied after the launcher's package env; got:\n{hopped.stdout}"
+    )
+
+    outer, inner = _state_dumped(direct.stdout), _state_dumped(hopped.stdout)
+    assert inner["replay"]["env"] == outer["replay"]["env"], (
+        f"the launcher passes the received replay on unchanged; {json.dumps(inner['replay'])}"
+    )
+    assert inner["replay"]["env"], "the --env override must be in the replay, or this proves nothing"
+    assert inner["inherited_scopes"] == outer["inherited_scopes"]
+    outer_keys = {(record["key"], record["kind"]) for record in outer["applied"]}
+    inner_keys = {(record["key"], record["kind"]) for record in inner["applied"]}
+    assert outer_keys <= inner_keys, (
+        f"the launcher layers on the received records and drops none; missing {sorted(outer_keys - inner_keys)}"
     )

@@ -4,16 +4,16 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_config::env;
+use ocx_config::exec_state::{Owner, Selection};
 use ocx_package::launch::LaunchIdentities;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_package_manager::exec_env::{self, ChildEnvInputs, ExecMode};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
 use ocx_util::child_process;
 
 use crate::{conventions::*, options};
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
-use ocx_shell::shell::reconcile;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Runs installed packages.
 ///
@@ -21,9 +21,8 @@ use ocx_shell::shell::reconcile;
 /// Packages are resolved through the index and auto-installed when missing.
 #[derive(Parser)]
 pub struct Exec {
-    /// Start with a clean environment containing only the package variables, instead of inheriting the current shell environment.
-    #[clap(long = "clean", default_value_t = false)]
-    clean: bool,
+    #[clap(flatten)]
+    mode: options::ExecModeOptions,
 
     /// Expose the package's full env, including its private (self-only)
     /// entries. Off by default: only public + interface entries are loaded
@@ -150,28 +149,36 @@ impl Exec {
                 &platform,
             )
             .await?;
-        // `entries` and `env_overrides` (forwarded over `OCX_ENV`) hold independent copies of the
+        // `entries` and `env_overrides` (replayed to a launcher re-entry) hold independent copies of the
         // overrides; reconcile both so a package's `list` separator reaches the forwarded copy.
         reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
-        let mut process_env = if self.clean {
-            env::Env::clean()
-        } else {
-            reconcile::inherited_env()
-        };
-        // A child cannot re-derive the flag tier of the record sink, so without this a launcher
-        // re-entry records elsewhere or nowhere and the entrypoint pair loses its inner half.
-        let mut forwarded_config = context.config_view().clone();
-        forwarded_config.records = records.forwarded();
-        // On this tier the `--env` overrides are the whole forwarded slice.
-        process_env.apply_child_env(
-            ChildEnv {
+        let mode = self.mode.mode();
+        // Written for the child from the root flags and the received state; the records sink is the one
+        // command flag added, because a launcher re-entry cannot re-derive it and would record elsewhere
+        // or nowhere, losing the entrypoint pair's inner half.
+        let mut written = context.written_policy(mode.write_mode()).clone();
+        let sink = records.forwarded();
+        written.policy.records_name = sink.dir.as_ref().and(sink.name);
+        written.policy.records_dir = sink.dir;
+        // On this tier the `--env` overrides are the whole replayed slice.
+        let child = exec_env::apply_child_env(
+            context.inherited(),
+            &ChildEnvInputs {
+                mode,
+                written: &written,
+                binary_pin: context.binary_pin(),
                 composed: &entries,
-                forwarded: &env_overrides,
+                composed_owner: Owner::Inherited,
+                composed_scope: None,
+                invocation: &[],
+                replay_env: &env_overrides,
                 identities: Some(&LaunchIdentities::from_infos(&install_infos)),
+                selection: Selection::FollowCwd,
             },
-            &forwarded_config,
         );
+        crate::app::report_projection_warnings(&child.warnings);
+        let process_env = child.env;
         let (command, _) = self
             .command
             .split_first()
@@ -189,15 +196,18 @@ impl Exec {
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),
                 argv: &self.command,
-                config: context.config_view(),
+                config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),
                 // Read once at `try_init`; no I/O on the exec path.
                 managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
                 patch_snapshot_digest: context.patch_snapshot_digest(),
                 platform: Some(&platform),
-                clean_env: self.clean,
+                clean_env: mode == ExecMode::Clean,
                 auto_installed: &auto_installed,
-                scope: Scope::Package { requested: identifiers },
+                scope: Scope::Package {
+                    requested: identifiers,
+                    env_mode: mode,
+                },
             },
             &records,
         )?;
@@ -222,5 +232,27 @@ impl Exec {
         );
 
         Ok(exit_code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(flags: &[&str]) -> Result<ExecMode, clap::Error> {
+        let argv = ["exec"]
+            .into_iter()
+            .chain(flags.iter().copied())
+            .chain(["node:20", "--", "true"]);
+        Exec::try_parse_from(argv).map(|exec| exec.mode.mode())
+    }
+
+    /// `ocx package exec` layers by default; `--isolate` and `--clean` each select theirs, never both.
+    #[test]
+    fn package_exec_selects_its_mode_from_the_flags() {
+        assert_eq!(mode(&[]).ok(), Some(ExecMode::Layer));
+        assert_eq!(mode(&["--isolate"]).ok(), Some(ExecMode::Isolate));
+        assert_eq!(mode(&["--clean"]).ok(), Some(ExecMode::Clean));
+        assert!(mode(&["--isolate", "--clean"]).is_err());
     }
 }

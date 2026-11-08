@@ -166,7 +166,7 @@ Three faults fail the whole composition with exit 65: a malformed template, a `r
 
 A project build must produce the same environment on every machine. If a project's environment were filled in from the global toolchain, a collaborator without the same `$OCX_HOME/ocx.toml` would resolve different packages. OCX therefore draws a hard boundary: global packages never compose into, supplement, or fall back into a project's resolved environment. The [user guide][ug-global-isolation] gives the reasoning and the comparison with other tools.
 
-The boundary applies without exception to two commands. [`ocx exec`][cmd-run] is the project-tier env-composition command: it reads `ocx.toml` and `ocx.lock` and never consults, merges or falls back to `$OCX_HOME/ocx.toml`. [`ocx package exec`][cmd-package-exec] is the OCI-tier command: it never reads any `ocx.toml` and takes OCI identifiers directly. Both are hermetic with respect to the global set, so an undeclared package is absent and never filled in.
+The boundary applies without exception to two commands. [`ocx exec`][cmd-run] is the project-tier env-composition command: it reads `ocx.toml` and `ocx.lock` and never consults, merges or falls back to `$OCX_HOME/ocx.toml`. [`ocx package exec`][cmd-package-exec] is the OCI-tier command: it never reads any `ocx.toml` and takes OCI identifiers directly. Neither fills in an undeclared package from the global set, so an undeclared package is absent.
 
 ### PATH precedence \{#strict-isolation-shell-hook\}
 
@@ -188,19 +188,33 @@ Every later shell re-sources the block with `ocx` possibly absent, and the direc
 
 All ten supported shells (bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell and Windows `cmd`) emit idempotent move-to-front output. The `cmd` form rebuilds `PATH` with `%VAR:search=%` substring deletion. It uses no `FOR /F` and no delayed expansion, so `!`-bearing paths stay intact. It matches segments case-insensitively, the way Windows `PATH` lookup does. Elvish needs the `str:` module (0.16+) and nushell the auto-list `PATH` conversion (0.101+).
 
-### Hermetic `ocx exec` \{#strict-isolation-exec\}
+### Layered `ocx exec` \{#strict-isolation-exec\}
 
 `ocx exec` reads exactly two files, `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the packages those files declare and no more. A package that is not in `ocx.toml` is not in the child environment, whatever is installed globally or on the parent shell's `PATH`.
 
 Naming a binding subset (`ocx exec cmake -- …`) narrows composition further. Only the named bindings are resolved to a host leaf and installed. A `-g` group selects the namespace for name resolution. It is not a mandate that every binding in it be available. An unrelated binding in scope with no leaf for the current host therefore does not block a narrowly-named run. Omit the names and the whole scope must resolve.
 
-By default `ocx exec` inherits the spawning shell's environment. It prepends the composed `PATH` entries and sets the other composed variables on top, so ambient parent-shell entries remain reachable after the project's. The default is not hermetic; pass `--clean` for an environment that drops the inherited one and exposes only the composed package set.
+`ocx exec` **layers** the composed environment over the caller's. It prepends the composed `PATH` entries and sets the other composed variables on top, so ambient entries stay reachable after the project's. The set of packages is closed; the surrounding environment is not.
 
-One part of the spawning shell's environment is not inherited: whatever [shell integration][in-depth-shell-integration] applied to it. An explicit `ocx exec` names the environment it wants. The toolchain the per-prompt reconciler folded into your shell is therefore taken back out first. The [`__OCX_ENV_STATE`][env-ocx-env-state] ledger is the revert set, the same set the reconciler itself would revert on leaving the directory. Your own variables and `PATH` entries are untouched; only what OCX put there is removed, and only where the value is still the one OCX wrote. Without shell integration there is no ledger and nothing is removed. The same applies to `ocx package exec`, `ocx package test` and `ocx patch test`.
+Two flags change what sits underneath the layer:
 
-### Hermetic `ocx package exec` \{#strict-isolation-package-exec\}
+| Flag | Starting environment |
+|---|---|
+| none | The caller's environment, unchanged |
+| `--isolate` | The caller's environment with what earlier ocx layers applied reverted first |
+| `--clean` | Empty, so only package-declared variables reach the child |
 
-`ocx package exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables of the resolved packages, and spawns the command with that environment. No `ocx.toml` is read, neither the project file nor the global file, so the operation is stateless with respect to project configuration.
+`--isolate --clean` is a usage error (exit 64), because `--clean` already drops everything `--isolate` would revert. The same flags exist on [`ocx shell`][cmd-shell], [`ocx package exec`][cmd-package-exec], [`ocx package test`][cmd-package-test] and `ocx patch test`.
+
+`--isolate` reverts only what ocx applied. The [`__OCX_ENV_STATE`][env-ocx-env-state] value records the applied values, and a value the user set before ocx touched the variable is restored, not removed. Your own variables and `PATH` entries stay. A value that no longer matches what ocx wrote is left alone. With no state in the environment there is nothing to revert.
+
+**Recorded values.** The state records every value ocx applied exactly as it composed it, whatever the variable is named. `--isolate` removes a variable only while it still holds the recorded value, so a value you changed or re-exported stays. The state is readable wherever the environment is (`/proc/<pid>/environ`, `ps e`, crash dumps), which is the same exposure the variable itself has. The four credentials ocx reads for its own signing and publishing, `OCX_IDENTITY_TOKEN`, `OCX_KEY_PASSWORD`, `OCX_SIGNING_KEY` and `OCX_ANNOUNCE_GIT_TOKEN`, are never recorded and never reach a child.
+
+An explicit `ocx exec` always composes what it was asked for, whatever is already loaded. Nesting the same project and group yields each value once, because composition is idempotent. A nested exec of another group layers that group on top.
+
+### `ocx package exec` \{#strict-isolation-package-exec\}
+
+`ocx package exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables of the resolved packages, and spawns the command with that environment. No `ocx.toml` is read, neither the project file nor the global file, so the operation is stateless with respect to project configuration. It layers over the caller's environment and accepts `--isolate` and `--clean` like `ocx exec`.
 
 ## Worked Example \{#worked-example\}
 
@@ -318,6 +332,7 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [devenv]: https://devenv.sh/
 [entry-points]: ./entry-points.md
 [cmd-package-exec]: ../reference/command-line/package-consuming.md#package-exec
+[cmd-shell]: ../reference/command-line/shell.md#shell
 [cmd-run]: ../reference/command-line/commands.md#exec
 [cmd-package-env]: ../reference/command-line/package-consuming.md#package-env
 [cmd-package-inspect]: ../reference/command-line/package-consuming.md#package-inspect

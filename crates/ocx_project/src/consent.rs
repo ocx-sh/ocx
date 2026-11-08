@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ProjectError, ProjectErrorKind};
 use crate::lock::ProjectLock;
+use ocx_config::exec_state::ScopeId;
 use ocx_config::shell::{ShellConsent, consent_path_matches};
 use ocx_oci::Repository;
 use ocx_shell::shell::coexistence::Observation;
-use ocx_shell::shell::reconcile::ScopeId;
 use ocx_store::file_structure::StateStore;
 use ocx_store::reference_manager::ReferenceManager;
 use ocx_util::time::Timestamp;
@@ -159,10 +159,10 @@ pub enum Reason {
     /// observed**. One row per observed tool.
     // Name the observed signal: a user staring at an `.envrc` guesses the wrong cause.
     YieldedTo(Observation),
-    /// The ledger's payload exceeded the 16 KiB cap and this scope was
+    /// The state's payload exceeded the cap and this scope was
     /// abandoned, its record lost rather than repaired.
-    // Read from the carrier's `over_cap` marker, never inferred from an absent carrier.
-    LedgerOverCap {
+    // Read from the carrier's truncation marker, never inferred from an absent carrier.
+    StateOverCap {
         /// The scope whose payload was dropped.
         scope: ScopeId,
     },
@@ -170,7 +170,7 @@ pub enum Reason {
     /// tag — **distinguishing** the first prompt of a shell (nothing applied,
     /// nothing to repair) from a corrupt carrier (a scope was applied and its
     /// record is gone).
-    LedgerUnreadable {
+    StateUnreadable {
         /// `true` for the ordinary first-prompt absence.
         first_prompt: bool,
     },

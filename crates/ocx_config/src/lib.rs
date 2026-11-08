@@ -7,6 +7,7 @@
 pub mod edit;
 pub mod env;
 pub mod error;
+pub mod exec_state;
 pub mod home;
 pub mod index;
 pub mod insecure;
@@ -21,6 +22,9 @@ pub mod registry;
 pub mod shell;
 pub mod tls;
 pub mod update;
+
+#[cfg(test)]
+mod ecosystem_api_pin;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -570,7 +574,16 @@ impl ToolchainRoot {
     ///
     /// As [`Self::resolve`].
     fn resolve_with_anchors(config: &Config, anchors: &ContainmentAnchors) -> Result<Option<Self>, ToolchainRootError> {
-        let Some((tier, declared)) = declared_root(config) else {
+        Self::resolve_received(config, anchors, exec_state::received::policy())
+    }
+
+    /// [`Self::resolve_with_anchors`] with the received policy named, so a test can supply one.
+    fn resolve_received(
+        config: &Config,
+        anchors: &ContainmentAnchors,
+        received: Option<&exec_state::Policy>,
+    ) -> Result<Option<Self>, ToolchainRootError> {
+        let Some((tier, declared)) = declared_root(config, received) else {
             return Ok(None);
         };
 
@@ -632,8 +645,9 @@ impl ToolchainRoot {
 
 /// The tier that declared a `toolchain_dir`, and what it declared.
 ///
-/// `config.toml` beats `OCX_TOOLCHAIN_DIR`; an empty value at either tier is absent, not invalid.
-fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
+/// `config.toml` beats the environment tier; an empty value at either tier is absent, not invalid.
+/// The environment tier is `OCX_TOOLCHAIN_DIR` when set, else the path the parent ocx passed down.
+fn declared_root(config: &Config, received: Option<&exec_state::Policy>) -> Option<(ToolchainRootTier, PathBuf)> {
     if let Some(declared) = config
         .toolchain_dir
         .as_ref()
@@ -642,9 +656,13 @@ fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
         return Some((ToolchainRootTier::ConfigFile, declared.clone()));
     }
     // Never `std::env::var`, or the test override seam is bypassed and these tests turn order-dependent.
-    ocx_env::OCX_TOOLCHAIN_DIR
-        .get()
-        .map(|value| (ToolchainRootTier::Environment, PathBuf::from(value)))
+    let env_value = match ocx_env::OCX_TOOLCHAIN_DIR.get_raw() {
+        Some(_) => ocx_env::OCX_TOOLCHAIN_DIR.get().map(PathBuf::from),
+        None => received
+            .and_then(|policy| policy.toolchain_dir.clone())
+            .filter(|dir| !dir.as_os_str().is_empty()),
+    };
+    env_value.map(|value| (ToolchainRootTier::Environment, value))
 }
 
 /// The two directories containment admits a root beneath, as declared (not canonicalised).
@@ -909,6 +927,14 @@ pub fn sandbox_or_skip() -> Option<tempfile::TempDir> {
         Ok(sandbox) => sandbox,
         Err(error) => return skip(format!("could not create a temporary directory: {error}")),
     };
+    // A group-writable umask (002) would make the anchor fail the ownership check the tests exercise.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = std::fs::set_permissions(sandbox.path(), std::fs::Permissions::from_mode(0o755)) {
+            return skip(format!("could not restrict {}: {error}", sandbox.path().display()));
+        }
+    }
     let canonical = match dunce::canonicalize(sandbox.path()) {
         Ok(canonical) => canonical,
         Err(error) => return skip(format!("could not canonicalise {}: {error}", sandbox.path().display())),
@@ -2043,6 +2069,7 @@ mod toolchain_root_tests {
 
         let target = sandbox.path().join("real");
         std::fs::create_dir(&target).expect("create the link target");
+        set_mode(&target, 0o755);
         let link = sandbox.path().join("tc");
         std::os::unix::fs::symlink(&target, &link).expect("create the internal symlink");
 
@@ -2069,6 +2096,7 @@ mod toolchain_root_tests {
         let Some(sandbox) = sandbox_or_skip() else { return };
         let real = sandbox.path().join("real-ocx-home");
         std::fs::create_dir(&real).expect("create the real anchor");
+        set_mode(&real, 0o755);
         let linked = sandbox.path().join("linked-ocx-home");
         std::os::unix::fs::symlink(&real, &linked).expect("symlink the anchor");
 
@@ -2202,6 +2230,39 @@ mod toolchain_root_tests {
             ToolchainRoot::resolve(&Config::default()).expect("an empty OCX_TOOLCHAIN_DIR is absent, not invalid"),
             None,
             "OCX_TOOLCHAIN_DIR= declares no root"
+        );
+    }
+
+    /// A received `toolchain_dir` is the environment tier when `OCX_TOOLCHAIN_DIR` is unset, so it
+    /// faces the same refusals; an explicitly set (even empty) ambient variable keeps the tier.
+    #[test]
+    fn a_received_toolchain_dir_is_the_environment_tier_only_when_the_variable_is_unset() {
+        let Some(sandbox) = sandbox_or_skip() else { return };
+        let env = anchored_env(sandbox.path());
+        let anchors = ContainmentAnchors::from_environment();
+        let received = exec_state::Policy {
+            toolchain_dir: Some(PathBuf::from("./relative-tc")),
+            ..exec_state::Policy::default()
+        };
+
+        let error = ToolchainRoot::resolve_received(&Config::default(), &anchors, Some(&received))
+            .expect_err("a relative received root is refused like the variable's own");
+        assert!(
+            matches!(
+                error,
+                ToolchainRootError::Relative {
+                    tier: ToolchainRootTier::Environment,
+                    ..
+                }
+            ),
+            "the received value takes the environment tier; got {error}"
+        );
+
+        env.set(&ocx_env::OCX_TOOLCHAIN_DIR, "");
+        assert_eq!(
+            ToolchainRoot::resolve_received(&Config::default(), &anchors, Some(&received))
+                .expect("an empty ambient variable counts as set and declares no root"),
+            None
         );
     }
 

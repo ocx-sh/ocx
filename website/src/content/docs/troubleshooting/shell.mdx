@@ -72,15 +72,17 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 This issue occurs when no consent grant covers the project, the lock outgrew its consent stamp, or a config tier turned the hook off. It also occurs when direnv or mise is live. [`ocx shell state`][cmd-shell-state] names which one.
 
-The hook is deliberately quiet and logs at debug. An absent ledger is the ordinary first-prompt case. An inert project prints one hint line at most. A yielded scope prints one info line. That is right for a path that runs at every prompt, and wrong when you are staring at a missing binary.
+The hook is deliberately quiet and logs at debug. An absent state is the ordinary first-prompt case. An inert project prints one hint line at most. A yielded scope prints one info line. That is right for a path that runs at every prompt, and wrong when you are staring at a missing binary.
 
-[`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything (no stamp, no ledger repair, no plan) and it exits `0` in every state it reports, including every flavor of "not active."
+[`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything (no stamp, no state repair, no plan) and it exits `0` in every state it reports, including every flavor of "not active."
 
 By default it answers the question you actually asked, in a handful of lines. It shows where `$OCX_HOME` is, which project is in effect, which toolchain home that resolves to and how it activates, and whether the integration is active.
 
 When it is not active, it says *why*, plus the one line that says what to do about it. The reason is one of an enumerated set.
 
-A consent stamp is missing, or a stamp is present but the lock outgrew it. The hook is disabled, and the report names the config tier that decided that. Another is a [yield to direnv or mise](#coexistence) naming the live signal it saw. It can also be a ledger reduced to a marker because it went over the size cap, or an `ocx.lock` that will not parse.
+A consent stamp is missing, or a stamp is present but the lock outgrew it. The hook is disabled, and the report names the config tier that decided that. Another is a [yield to direnv or mise](#coexistence) naming the live signal it saw. It can also be a state reduced to a marker because it went over the size cap, or an `ocx.lock` that will not parse.
+
+The report can also carry notes. A `received_config_missing` note means the config file a parent ocx passed down no longer exists, so the report was built without it. The note appears only when that path was actually skipped, so a `--config` flag or an `OCX_CONFIG` variable that overrode it leaves no note. In `--format json` it is `{"type":"received_config_missing","path":"…"}`. Restore the file or run from a clean shell.
 
 ```sh
 ocx shell state
@@ -129,7 +131,7 @@ Neither shape is a TOML syntax error. Without these rows a broken entry just sit
 
 **`--verbose` adds the evidence behind the answer.** It is the material for a support conversation rather than for an "is it working" question:
 
-- the decoded ledger, as fields rather than base64: what the ledger records as applied, per scope, and how many of the carrier's 16 KiB it takes
+- the decoded state, as fields rather than base64: what the state records as applied, per scope, and how many of the carrier's 16 KiB it takes
 - fingerprint status: the watch set OCX is comparing against, each member's size and mtime, and whether the fold still matches what is recorded
 - whether the priors needed to restore a constant on scope exit are still intact
 - the project's state key and whether a consent stamp exists for it
@@ -166,6 +168,8 @@ Exit code `0` covers every reportable state. The only non-zero exit is `74`, and
 
 **A project created where you already stand.** The prompt guard watches a set of files fixed when the hook was last emitted. It adds one live check: an `ocx.toml` in the current directory that was modified after the freshness stamp. So [`ocx init`][cmd-init], or a `git checkout` that brings a project in, reaches the very next prompt, and so does the [`ocx shell allow`][cmd-shell-allow] that consents to it.
 
+Deleting a watched file reverts too. When an `ocx.toml` or `ocx.lock` that existed at the last emission disappears, the next prompt in bash, zsh, fish and PowerShell reconciles and removes what the project applied. Elvish waits for the next `cd` or `ocx` command.
+
 A project file that appears in a *parent* directory waits for the next `cd`. A file that [`OCX_PROJECT`][env-ocx-project] names but that does not exist yet is picked up at the next prompt once it appears. Exporting or re-pointing `OCX_PROJECT` in a running shell takes effect at your next `cd`.
 
 ## Warning: direnv or mise is also hooked in this shell \{#coexistence\}
@@ -194,27 +198,52 @@ So a `.zshrc` that sources the ocx activation line before p10k's instant-prompt 
 The shell that `ocx shell` spawns reads its rc files (`.zshrc`, `.bashrc`, or a [mise][mise-security], [pyenv][pyenv] or [nvm][nvm] hook in them), and they can prepend their own directories to `PATH` after OCX composed the environment. Run the command with `ocx exec -- <cmd>` instead: it starts no shell and reads no rc file, so the composed `PATH` is the one the command sees.
 :::
 
-## Error: the shell's ledger is out of sync \{#repair\}
+## Error: the shell's state is out of sync \{#repair\}
 
 This issue occurs when a write landed inside the filesystem-timestamp granularity of OCX's change-detection window, or when the carrier itself looks corrupted.
 
-The repair gesture is `unset __OCX_ENV_STATE`. Clearing the variable makes the next prompt see an absent ledger. The reconciler already handles that state in full. It rebuilds the desired environment from the project files on disk and removes anything under `$OCX_HOME` it no longer recognizes. It leaves any other constant alone rather than guessing at it.
+The repair gesture is `unset __OCX_ENV_STATE`. Clearing the variable makes the next prompt see an absent state. The reconciler already handles that state in full. It rebuilds the desired environment from the project files on disk and removes anything under `$OCX_HOME` it no longer recognizes. It leaves any other constant alone rather than guessing at it.
 
-**Its cost, stated plainly.** Clearing the ledger destroys the recorded *priors*, the values OCX saw before it applied anything. If you had, say, a hand-set `JAVA_HOME` before entering a project, the priors remember that value.
+**Its cost, stated plainly.** Clearing the state destroys the recorded *priors*, the values OCX saw before it applied anything. If you had, say, a hand-set `JAVA_HOME` before entering a project, the priors remember that value.
 
 Leaving the project then restores it. After `unset __OCX_ENV_STATE`, that memory is gone: `JAVA_HOME` keeps whatever the project set for the rest of that shell's life, because nothing records what it was before. A brand-new shell is the clean floor whenever one is cheap to open, because it starts with no priors and has nothing to lose.
 
-The gesture is silent by construction. OCX cannot distinguish a deliberately cleared ledger from the ordinary absence on a shell's first prompt. That first-prompt case logs at debug by design. [`ocx shell state`](#diagnostics) is how you confirm the repair actually took.
+The gesture is silent by construction. OCX cannot distinguish a deliberately cleared state from the ordinary absence on a shell's first prompt. That first-prompt case logs at debug by design. [`ocx shell state`](#diagnostics) is how you confirm the repair actually took.
 
 **Elvish.** Elvish registers its reconcile on `$edit:before-readline` and cannot compare file mtimes, because `os:stat` in elvish 0.21 exposes no timestamps. Its guard has two terms: the private carrier [`__OCX_ENV_STATE`][env-ocx-env-state] being empty, and the current directory differing from the last reconciled one. The `ocx` wrapper clears the recorded directory after every `ocx` command run in that same shell, so the next prompt reconciles.
 
-Anything that changes by neither route waits for the next `cd` or the next `ocx` command in that shell. Examples are a hand edit of `ocx.toml` or `ocx.lock`, an `ocx add --global` in another terminal, a `git checkout` that swaps `ocx.lock`, a hand-edited config file, and `ocx self update` run elsewhere. The guard of bash, zsh, fish and PowerShell compares file mtimes directly, so they notice all of these at the very next prompt. An external `test -nt` would add a process spawn to every quiet prompt, which is the cost this design avoids.
+Anything that changes by neither route waits for the next `cd` or the next `ocx` command in that shell. Examples are a hand edit of `ocx.toml` or `ocx.lock`, an `ocx add --global` in another terminal, a `git checkout` that swaps `ocx.lock`, a hand-edited config file, and `ocx self update` run elsewhere. The guard of bash, zsh, fish and PowerShell compares file mtimes directly and also checks that each watched file still exists. They notice all of these, and a deleted `ocx.toml` or `ocx.lock`, at the very next prompt. An external `test -nt` would add a process spawn to every quiet prompt, which is the cost this design avoids.
 
 Elvish keeps one private variable, `__OCX_ENV_PWD`, because its activation stream reaches the shell through `eval`, whose assignments cannot be relied on to escape. It holds the shell's pid, its `$pwd`, the three direnv and mise yield sentinels and the two consent-grant variables, space-joined: `<pid> <pwd> <DIRENV_DIR> <MISE_SHELL> <__MISE_ORIG_PATH> <OCX_CONSENT_PATHS> <OCX_CONSENT_NAMESPACES>`. An unset variable contributes an empty field.
 
 The pid keeps a child elvish from reading its own first prompt as reconciled. The sentinel tail makes a [direnv or mise takeover](#coexistence), or exporting a consent variable in a running shell, reconcile at the next prompt like a `cd`. It is not a repair gesture.
 
 Whether a shell has already registered its hook is read off the registered closure's own source, scanned for a sentinel comment. A shell that replaces its process image with `exec elvish` therefore still registers correctly.
+
+**Size limit.** [`__OCX_ENV_STATE`][env-ocx-env-state] has a fixed size limit. When a write would exceed it, OCX drops records in a fixed order and tells you which rung it reached. The hook prints this notice on stderr:
+
+```
+ocx: this shell's environment state outgrew its size limit (N bytes) and was truncated: <rung>; values ocx applied earlier may stay when you leave their project
+ocx: this shell's environment state outgrew its size limit and was truncated: <rung>; values ocx applied earlier may stay when you leave their project
+```
+
+The first form is printed when this write caused the loss, and it names the size. The second is printed when the loss was carried in from an earlier write, which leaves no size to report.
+
+`ocx exec` prints a sibling warning when the state it exports for a child is truncated:
+
+```
+ocx: the execution state outgrew its size limit (N bytes) and was truncated: <rung>; a later --isolate cannot fully isolate; use --clean for a pristine environment
+```
+
+The rung says how much was lost, from least to most:
+
+| Rung | Meaning |
+|---|---|
+| the records inherited from outer frames were dropped | Only records from outer `ocx exec` frames are gone. |
+| every applied record was dropped | No record of what OCX applied survives. |
+| the whole payload was dropped | Nothing is left but the header: the narrowing flags and the home still reach the child. |
+
+Dropped records are the memory OCX uses to undo its changes. Leaving a project may then keep values OCX applied earlier, and `--isolate` cannot remove them. Open a new shell for a clean floor, or use `--clean` for one command.
 
 
 [mise-security]: https://mise.jdx.dev/

@@ -336,7 +336,7 @@ def test_package_exec_env_flag_survives_generated_entrypoint_launcher(
     A package that declares entrypoints resolves through its launcher, which
     re-enters `ocx launcher exec` — a process with no project context that
     rebuilds its env from scratch and re-applies the package's own entries on
-    top. Without `set_forwarded_env` on this command the override is silently
+    top. Without the override riding the recorded execution state, it is silently
     reverted at that hop.
 
     The override MUST target a key the package itself declares. A key the

@@ -161,7 +161,7 @@ cases = 1
 [[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 1053
+cases = 1037
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"
@@ -171,13 +171,13 @@ cases = 5
 [[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_isolated"
 crate = "ocx_package_manager"
-cases = 3
+cases = 4
 
 [[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_test"
 crate = "ocx_package_manager"
-cases = 1194
-skipped = 3
+cases = 1193
+skipped = 4
 ignored = 1
 
 [[target]]
@@ -254,6 +254,11 @@ crate = "ocx_sdkgen"
 cases = 48
 
 [[target]]
+label = "//crates/ocx_sdkgen:spawn_conformance"
+crate = "ocx_sdkgen"
+cases = 1
+
+[[target]]
 label = "//crates/ocx_sdkgen:sdk_rust"
 crate = "ocx_sdkgen"
 cases = 35
@@ -266,7 +271,7 @@ cases = 247
 [[target]]
 label = "//crates/ocx_shell:ocx_shell_test"
 crate = "ocx_shell"
-cases = 366
+cases = 330
 
 [[target]]
 label = "//crates/ocx_shim:ocx_shim_bin_test"

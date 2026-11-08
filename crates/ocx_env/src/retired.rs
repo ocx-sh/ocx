@@ -40,9 +40,33 @@ pub const REMOVAL_RELEASE: Release = Release {
 pub struct Retired {
     /// The old variable name; for a [`Change::ValueRename`], the name of its replacement.
     pub name: &'static str,
-    pub replacement: &'static EnvVar,
+    pub replacement: Replacement,
     pub change: Change,
     pub status: Status,
+}
+
+/// What replaces a retired spelling.
+#[derive(Debug, Clone, Copy)]
+pub enum Replacement {
+    /// Another variable.
+    Env(&'static EnvVar),
+    /// A command-line flag, spelled as typed (`--global`).
+    Flag(&'static str),
+}
+
+impl Replacement {
+    /// The spelling a notice names: the variable's name, or the flag as typed.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Env(var) => var.name,
+            Self::Flag(flag) => flag,
+        }
+    }
+
+    /// Whether this replacement is `var`.
+    pub(crate) fn is_env(&self, var: &EnvVar) -> bool {
+        matches!(self, Self::Env(replacement) if std::ptr::eq(*replacement, var))
+    }
 }
 
 /// What changed.
@@ -54,6 +78,11 @@ pub enum Change {
     ValueRename { old: &'static str, new: &'static str },
     /// The meaning inverted (`OCX_X` → `OCX_NO_X`); never honoured, or an old setting would flip a hardening switch.
     Polarity,
+    /// The variable is no longer read and the behaviour moved to a flag: never honoured, never refused.
+    ///
+    /// A set value prints one notice naming the replacement and the process carries on; unlike
+    /// [`Status::Removed`] it never exits, so a leaked environment keeps working.
+    Withdrawn,
 }
 
 /// Whether the old spelling still works.
@@ -69,7 +98,7 @@ pub enum Status {
 pub static RETIRED: &[Retired] = &[
     Retired {
         name: "OCX_NO_COMPLETIONS",
-        replacement: &crate::OCX_NO_COMPLETION,
+        replacement: Replacement::Env(&crate::OCX_NO_COMPLETION),
         change: Change::Rename,
         status: Status::Window {
             removal: REMOVAL_RELEASE,
@@ -77,8 +106,16 @@ pub static RETIRED: &[Retired] = &[
     },
     Retired {
         name: "OCX_LOG",
-        replacement: &crate::OCX_LOG_LEVEL,
+        replacement: Replacement::Env(&crate::OCX_LOG_LEVEL),
         change: Change::Rename,
+        status: Status::Window {
+            removal: REMOVAL_RELEASE,
+        },
+    },
+    Retired {
+        name: "OCX_GLOBAL",
+        replacement: Replacement::Flag("--global"),
+        change: Change::Withdrawn,
         status: Status::Window {
             removal: REMOVAL_RELEASE,
         },
@@ -107,7 +144,7 @@ fn hits(table: &'static [Retired], env: &[(OsString, OsString)]) -> Vec<&'static
                 *key == entry.name
                     && match entry.change {
                         Change::ValueRename { old, .. } => *value == old,
-                        Change::Rename | Change::Polarity => !value.is_empty(),
+                        Change::Rename | Change::Polarity | Change::Withdrawn => !value.is_empty(),
                     }
             })
         })
@@ -161,10 +198,33 @@ mod tests {
     fn rename(name: &'static str, status: Status) -> Retired {
         Retired {
             name,
-            replacement: &OCX_LOG_LEVEL,
+            replacement: Replacement::Env(&OCX_LOG_LEVEL),
             change: Change::Rename,
             status,
         }
+    }
+
+    #[test]
+    fn a_set_ocx_global_is_one_withdrawn_hit_naming_the_flag() {
+        let env = overrides::lock();
+        env.set(&crate::OCX_GLOBAL, "1");
+        let found = retired_hits(&crate::snapshot());
+        let global: Vec<_> = found.iter().filter(|entry| entry.name == "OCX_GLOBAL").collect();
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].change, Change::Withdrawn);
+        assert_eq!(global[0].replacement.name(), "--global");
+        assert_eq!(
+            global[0].status,
+            Status::Window {
+                removal: REMOVAL_RELEASE
+            }
+        );
+        env.remove(&crate::OCX_GLOBAL);
+        assert!(
+            retired_hits(&crate::snapshot())
+                .iter()
+                .all(|entry| entry.name != "OCX_GLOBAL")
+        );
     }
 
     #[test]
@@ -221,7 +281,7 @@ mod tests {
         assert_eq!(honoured_polarity(RETIRED), Vec::<&str>::new());
         let polarity = |name, status| Retired {
             name,
-            replacement: &OCX_LOG_LEVEL,
+            replacement: Replacement::Env(&OCX_LOG_LEVEL),
             change: Change::Polarity,
             status,
         };
@@ -254,7 +314,7 @@ mod tests {
             ),
             Retired {
                 name: OCX_LAZY_MODE.name,
-                replacement: &OCX_LAZY_MODE,
+                replacement: Replacement::Env(&OCX_LAZY_MODE),
                 change: Change::ValueRename {
                     old: "eager",
                     new: "always",
@@ -289,7 +349,7 @@ mod tests {
             ),
             Retired {
                 name: "OCX_GONE_QUIET",
-                replacement: &OCX_QUIET,
+                replacement: Replacement::Env(&OCX_QUIET),
                 change: Change::Rename,
                 status: Status::Removed,
             },
@@ -330,7 +390,7 @@ mod tests {
     fn an_in_window_value_rename_maps_the_old_spelling() {
         let retired = table(vec![Retired {
             name: OCX_LAZY_MODE.name,
-            replacement: &OCX_LAZY_MODE,
+            replacement: Replacement::Env(&OCX_LAZY_MODE),
             change: Change::ValueRename {
                 old: "eager",
                 new: "always",

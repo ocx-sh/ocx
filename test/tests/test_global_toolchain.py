@@ -391,76 +391,43 @@ def test_global_and_project_flags_conflict(
 
 
 # ---------------------------------------------------------------------------
-# 7b. B1: the env-sourced global selector (OCX_GLOBAL) + an explicit project
-#     selection is ALSO a hard usage error (exit 64) — no env bypass
+# 7b. An exported OCX_GLOBAL is withdrawn, so it conflicts with nothing
 # ---------------------------------------------------------------------------
 
 
-def test_env_global_with_explicit_project_flag_conflict(
+def _assert_ignored_with_one_notice(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 0, (
+        f"an exported OCX_GLOBAL is ignored and never exits 64; rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    notices = [line for line in result.stderr.splitlines() if "OCX_GLOBAL" in line]
+    assert len(notices) == 1 and "--global" in notices[0], (
+        f"expected exactly one notice naming --global, got {notices!r}"
+    )
+
+
+def test_env_global_with_explicit_project_flag_is_ignored(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Plan §"Living Design — Review-Fix Amendments" B1: the
-    ``--global``/``--project`` conflict fires on the **effective** selector,
-    not just a per-command ``--global`` flag.
-
-    ``OCX_GLOBAL=1 ocx <cmd> --project <file>`` (no per-command ``--global``
-    flag at all) selects the global tier via the env var while an explicit
-    ``--project`` is also given. Pre-B1 the env-sourced global selector
-    evaded the ``with_command_global`` seam (it only checked the per-command
-    flag), so the explicit project was silently ignored and the command did
-    NOT exit 64 (the review's exit-79-not-64 anomaly). B1 makes the conflict
-    check fire on ``(config_view.global || command_global) &&
-    has_explicit_project_selection()``.
-    """
+    """``OCX_GLOBAL=1`` plus ``--project <file>``: the variable is never honoured, so the explicit
+    project is used, one stderr notice names ``--global``, and the exit is not 64."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
 
-    result = _run_cmd(
-        ocx,
-        tmp_path,
-        "--project",
-        str(explicit),
-        "add",
-        fq,
-        extra_env={"OCX_GLOBAL": "1"},
-    )
-    assert result.returncode == EXIT_USAGE, (
-        f"OCX_GLOBAL=1 + explicit --project must exit {EXIT_USAGE} "
-        f"(UsageError) — the env-sourced global selector must not bypass the "
-        f"conflict seam (B1); rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
+    result = _run_cmd(ocx, tmp_path, "--project", str(explicit), "add", fq, extra_env={"OCX_GLOBAL": "1"})
+    _assert_ignored_with_one_notice(result)
 
 
-def test_env_global_with_env_project_conflict(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> None:
-    """Plan B1, env-only variant: ``OCX_PROJECT=<file> OCX_GLOBAL=1 ocx
-    <cmd>`` — both selectors sourced purely from the environment, no CLI
-    flags at all — must still exit 64. ``has_explicit_project_selection()``
-    counts a non-empty ``OCX_PROJECT`` as an explicit selection, so the
-    effective-selector conflict check (B1) must reject this exactly as it
-    rejects the flag form. Pre-B1 this slips through entirely (neither the
-    flag-only seam nor clap's top-level ``conflicts_with`` sees an env pair).
-    """
+def test_env_global_with_env_project_is_ignored(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """``OCX_PROJECT=<file> OCX_GLOBAL=1``, no flags: still ignored with one notice, not 64."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
 
-    result = _run_cmd(
-        ocx,
-        tmp_path,
-        "add",
-        fq,
-        extra_env={"OCX_GLOBAL": "1", "OCX_PROJECT": str(explicit)},
-    )
-    assert result.returncode == EXIT_USAGE, (
-        f"OCX_GLOBAL=1 + OCX_PROJECT=<file> must exit {EXIT_USAGE} "
-        f"(UsageError) on the effective selector (B1); "
-        f"rc={result.returncode}\nstderr:\n{result.stderr}"
-    )
+    result = _run_cmd(ocx, tmp_path, "add", fq, extra_env={"OCX_GLOBAL": "1", "OCX_PROJECT": str(explicit)})
+    _assert_ignored_with_one_notice(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,3 +1007,36 @@ def test_global_remove_leaves_user_selection_to_package_uninstall(
     assert not package_path.exists(), (
         f"clean must collect the package once nothing roots it: {package_path}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. grimoire#297: a leaked OCX_GLOBAL no longer selects the global toolchain
+# ---------------------------------------------------------------------------
+
+
+def test_exported_ocx_global_is_ignored_with_one_notice(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """grimoire#297: ``OCX_GLOBAL=1`` is withdrawn. The project the walk finds stays in
+    effect, one stderr notice names ``--global``, and the exit code is unchanged."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+
+    result = _run_cmd(
+        ocx,
+        project,
+        "--offline",
+        "--format",
+        "json",
+        "shell",
+        "state",
+        extra_env={"OCX_GLOBAL": "1", "OCX_CEILING_PATH": str(tmp_path)},
+    )
+
+    assert result.returncode == EXIT_SUCCESS, f"stderr:\n{result.stderr}"
+    assert Path(json.loads(result.stdout)["project_dir"]).resolve() == project.resolve(), (
+        "a leaked OCX_GLOBAL must not make $OCX_HOME the project"
+    )
+    notices = [line for line in result.stderr.splitlines() if "OCX_GLOBAL" in line]
+    assert len(notices) == 1 and "--global" in notices[0], f"stderr:\n{result.stderr}"

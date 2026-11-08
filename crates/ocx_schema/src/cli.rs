@@ -15,7 +15,7 @@ use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, Command};
 use ocx::command::contract::{self, ValueType};
 use ocx::command::deprecated::{self, RenamedCommand, RenamedFlag};
-use ocx_env::{Change, EnvValue, EnvVar, OnInvalid, Release, Retired, Status, Visibility};
+use ocx_env::{Change, EnvValue, EnvVar, OnInvalid, Propagation, Release, Retired, Status, Visibility};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -168,6 +168,9 @@ pub struct EnvSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
     pub secret: bool,
+    /// How the variable reaches a child process: `user_input`, `secret_input`, `setup_written`, `state`,
+    /// `binary_pin`, `hook_local` or `credential`.
+    pub propagation: String,
     /// What a value outside the grammar does: `default` falls back, `error` refuses.
     pub on_invalid: String,
 }
@@ -177,7 +180,7 @@ pub struct EnvSpec {
 pub struct RetiredSpec {
     pub name: String,
     pub replacement: String,
-    /// `rename`, `value_rename` or `polarity`.
+    /// `rename`, `value_rename`, `polarity` or `withdrawn`.
     pub change: String,
     /// `window` while the old spelling still works, `removed` once it is refused.
     pub status: String,
@@ -543,6 +546,16 @@ fn env_spec(var: &EnvVar, sources: &Sources) -> EnvSpec {
             .find(|(flagged, _)| std::ptr::eq(*flagged, var))
             .map(|(_, flag)| (*flag).to_owned()),
         secret: var.secret,
+        propagation: match var.propagation {
+            Propagation::UserInput => "user_input",
+            Propagation::SecretInput => "secret_input",
+            Propagation::SetupWritten => "setup_written",
+            Propagation::State => "state",
+            Propagation::BinaryPin => "binary_pin",
+            Propagation::HookLocal => "hook_local",
+            Propagation::Credential => "credential",
+        }
+        .to_owned(),
         on_invalid: match var.on_invalid {
             OnInvalid::Default => "default",
             OnInvalid::Error => "error",
@@ -558,11 +571,12 @@ fn retired_spec(retired: &Retired) -> RetiredSpec {
     };
     RetiredSpec {
         name: retired.name.to_owned(),
-        replacement: retired.replacement.name.to_owned(),
+        replacement: retired.replacement.name().to_owned(),
         change: match retired.change {
             Change::Rename => "rename",
             Change::ValueRename { .. } => "value_rename",
             Change::Polarity => "polarity",
+            Change::Withdrawn => "withdrawn",
         }
         .to_owned(),
         status: status.to_owned(),
@@ -1039,7 +1053,7 @@ fn collect_leaves(command: &Command, path: &mut Vec<String>, hidden: bool, out: 
 mod tests {
     use super::*;
     use clap::Arg;
-    use ocx_env::{Child, Reader};
+    use ocx_env::Reader;
 
     fn no_sources() -> Sources<'static> {
         Sources {
@@ -1356,7 +1370,7 @@ mod tests {
         on_invalid: OnInvalid::Default,
         visibility: Visibility::Public,
         secret: false,
-        child: Child::Inherit,
+        propagation: ocx_env::Propagation::UserInput,
         reader: Reader::Ocx,
     };
     static STRICT: EnvVar = EnvVar {
@@ -1384,7 +1398,7 @@ mod tests {
     fn a_retired_entry_reaches_the_export() {
         static WINDOW: &[Retired] = &[Retired {
             name: "OCX_OLD_EXAMPLE",
-            replacement: &LENIENT,
+            replacement: ocx_env::Replacement::Env(&LENIENT),
             change: Change::Rename,
             status: Status::Window {
                 removal: ocx_env::Release {
@@ -1396,7 +1410,7 @@ mod tests {
         }];
         static REMOVED: &[Retired] = &[Retired {
             name: "OCX_OLD_EXAMPLE",
-            replacement: &LENIENT,
+            replacement: ocx_env::Replacement::Env(&LENIENT),
             change: Change::Rename,
             status: Status::Removed,
         }];

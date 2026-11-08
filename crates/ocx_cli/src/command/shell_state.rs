@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+use ocx_config::exec_state::Inherited;
 use ocx_config::shell::ShellConsent;
 use ocx_config::shell::consent_entry_defect;
 use ocx_config::shell::consent_path_matches;
@@ -17,11 +18,13 @@ use ocx_config::shell::effective_consent;
 use ocx_package_manager::activation::{self, ProjectIdentity};
 use ocx_project::consent::{Decision, Reason};
 use ocx_shell::shell::coexistence;
-use ocx_shell::shell::reconcile::{self, Ledger};
+use ocx_shell::shell::reconcile;
 use ocx_util::fs::path::AbsolutePath;
 use ocx_util::size::ByteSize;
 
-use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember};
+use crate::api::data::shell_state::{
+    BinaryPinReport, EnvStateReport, HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember,
+};
 use crate::app::project_context::{self, ProjectContextError};
 use crate::options::hook::{Hook, Rung};
 
@@ -31,7 +34,7 @@ const PROJECT_FILE: &str = "ocx.toml";
 /// Report the shell integration's state, and why it is inert when it is.
 #[derive(Parser)]
 pub struct ShellState {
-    /// Add the diagnostics behind the answer - the decoded ledger, the
+    /// Add the diagnostics behind the answer - the decoded state, the
     /// fingerprint watch set and the hook ladder.
     ///
     /// Affects the plain rendering only. The structured report
@@ -72,7 +75,8 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
     let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
     let carrier_present = carrier.is_some();
     let carrier_bytes = ByteSize::from(carrier.as_deref().map_or(0, str::len) as u64);
-    let ledger = carrier.as_deref().and_then(Ledger::decode);
+    // Decoded once: the status, the inert reason, the fingerprint and the tiers read one value.
+    let inherited = Inherited::from_process_env();
 
     let hook = resolve_hook(context);
     let whitelist = effective_consent(context.config().shell.as_ref());
@@ -80,13 +84,10 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
     // One consent read for the whole snapshot, or the report can disagree with itself.
     let resolution = resolve_project(context, &whitelist).await;
     let project = resolution.project();
-    let mut yielded_to = project
+    // A scope an outer `ocx exec` composed is reported as `env_state.inherited_scopes`, not as a yield.
+    let yielded_to = project
         .map(|project| coexistence::detect(&project.identity.dir).observed)
         .unwrap_or_default();
-    if let Some(project) = project {
-        let exec_scope = activation::ExecScope::from_env().await;
-        yielded_to.extend(exec_scope.and_then(|scope| scope.observe(&project.identity.dir)));
-    }
 
     let mut notes = Vec::new();
     if let Resolution::Failed(detail) = &resolution {
@@ -101,32 +102,49 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         notes.extend(paths_grant_notes(&project.identity.dir, &project.decision, &whitelist));
     }
 
-    let inert_reason = inert_reason(&hook, &yielded_to, project, ledger.as_ref(), carrier_present);
+    let inert_reason = inert_reason(&hook, &yielded_to, project, &inherited);
 
+    let session = match &inherited {
+        Inherited::Readable(state) => Some(&state.session),
+        Inherited::Absent | Inherited::Unreadable { .. } => None,
+    };
     let paths = reconcile::watch_paths(
         context.file_structure(),
         project.map(|project| project.identity.config_path.as_path()),
         project.map(|project| project.identity.key.as_str()),
         // The carrier's recorded tiers when present, including a `--config` overlay this process lacks.
-        ledger
-            .as_ref()
-            .map(|ledger| ledger.tiers.as_slice())
+        session
+            .map(|session| session.tiers.as_slice())
             .filter(|tiers| !tiers.is_empty()),
     );
     let watch_set = watch_set(&paths).await;
     // The reconciler's own fold, so this compares with the per-prompt path's arithmetic.
-    let fingerprint_current = match ledger.as_ref().filter(|ledger| !ledger.fp.is_empty()) {
-        Some(ledger) => {
+    let fingerprint_current = match session.filter(|session| !session.fp.is_empty()) {
+        Some(session) => {
             // One `stat` per member, so off the runtime.
             let watch = paths.clone();
             let dir = project.map(|project| project.identity.dir.clone());
             let folded =
                 tokio::task::spawn_blocking(move || reconcile::current_fingerprint(&watch, dir.as_deref())).await?;
-            Some(ledger.fp == folded)
+            Some(session.fp == folded)
         }
         None => None,
     };
-    let priors = ShellStateReport::priors_for(ledger.as_ref());
+    // The path `Context` skipped because its file is gone; a `--config` or `OCX_CONFIG` that won skipped nothing.
+    if let Some(path) = context.skipped_received_config() {
+        notes.push(Note::ReceivedConfigMissing {
+            path: path.to_path_buf(),
+        });
+    }
+    let hook_active = hook.enabled != Some(false);
+    let (env_state, env_state_notes) = EnvStateReport::from_inherited(&inherited, hook_active);
+    notes.extend(env_state_notes);
+    let priors = ShellStateReport::priors_for(&env_state);
+    let pin = context.binary_pin().map(Path::to_path_buf);
+    let running = context.recorded_config().self_exe.clone();
+    let binary_pin =
+        tokio::task::spawn_blocking(move || BinaryPinReport::probe(pin.as_deref(), Some(&running))).await?;
+    notes.extend(binary_pin.note());
     let toolchain = toolchain_state(context, project).await?;
     notes.extend(toolchain.note);
 
@@ -141,7 +159,8 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         lock_refusal: project.and_then(|project| project.lock_refusal.clone()),
         carrier_present,
         carrier_bytes,
-        ledger,
+        env_state,
+        binary_pin,
         fingerprint_current,
         watch_set,
         project_dir: project.map(|project| project.identity.dir.clone()),
@@ -452,13 +471,12 @@ fn ascii_case_near_miss(entry: &Path, project_dir: &Path) -> bool {
     consent_path_matches(&folded(entry), &folded(project_dir))
 }
 
-/// The inertness reason by one ordered ladder, most-blocking first: hook, yield, consent, over-cap, carrier.
+/// The inertness reason by one ordered ladder, most-blocking first: hook, yield, consent, state.
 fn inert_reason(
     hook: &HookStatus,
     yielded_to: &[coexistence::Observation],
     project: Option<&ResolvedProject>,
-    ledger: Option<&Ledger>,
-    carrier_present: bool,
+    inherited: &Inherited,
 ) -> Option<Reason> {
     if hook.enabled == Some(false) {
         return Some(Reason::HookDisabled {
@@ -477,20 +495,14 @@ fn inert_reason(
         return Some(reason.clone());
     }
 
-    // Read from the marker the carrier carries, never inferred from an absent scope.
-    if let Some(scope) = ledger.and_then(|ledger| ledger.over_cap.first()) {
-        return Some(Reason::LedgerOverCap { scope: *scope });
+    // A truncated state is still readable: `Note::EnvStateTruncated` reports it, not an inert reason.
+    match inherited {
+        // An unset carrier is a first prompt; a present one that will not read is corrupt.
+        Inherited::Absent => Some(Reason::StateUnreadable { first_prompt: true }),
+        Inherited::Unreadable { .. } => Some(Reason::StateUnreadable { first_prompt: false }),
+        // Active, readable, no project scope yet: not a `Reason`; the renderer says "not yet".
+        Inherited::Readable(_) => None,
     }
-
-    if ledger.is_none() {
-        // An unset carrier is a first prompt; a present one that will not decode is corrupt.
-        return Some(Reason::LedgerUnreadable {
-            first_prompt: !carrier_present,
-        });
-    }
-
-    // Active, decoded, no project scope yet: not a `Reason`; the renderer says "not yet".
-    None
 }
 
 /// Render the fingerprint watch set as it stands now, absent candidates included: one appearing is a change.
@@ -521,9 +533,9 @@ async fn watch_set(paths: &[PathBuf]) -> Vec<WatchMember> {
 
 #[cfg(test)]
 mod tests {
+    use ocx_config::exec_state::{ExecState, HeaderView, Truncation, UnreadableReason};
     use ocx_project::consent::Grant;
     use ocx_shell::shell::coexistence::{Observation, Tool};
-    use ocx_shell::shell::reconcile::ScopeId;
 
     use super::*;
 
@@ -550,6 +562,17 @@ mod tests {
             rung: "auto".to_owned(),
             tier: None,
             enabled: None,
+        }
+    }
+
+    fn readable() -> Inherited {
+        Inherited::Readable(ExecState::default())
+    }
+
+    fn unreadable() -> Inherited {
+        Inherited::Unreadable {
+            header: HeaderView::default(),
+            reason: UnreadableReason::Json,
         }
     }
 
@@ -622,7 +645,7 @@ mod tests {
             lock_refusal: None,
         };
         assert_eq!(
-            inert_reason(&auto_hook(), &[], Some(&resolved), Some(&Ledger::empty()), true),
+            inert_reason(&auto_hook(), &[], Some(&resolved), &readable()),
             Some(refusal),
             "the reason this command prints must be the refusal the prompt actually acted on"
         );
@@ -637,7 +660,7 @@ mod tests {
             tier: Some("managed config".to_owned()),
             enabled: Some(false),
         };
-        let reason = inert_reason(&hook, &[direnv()], None, None, false);
+        let reason = inert_reason(&hook, &[direnv()], None, &Inherited::Absent);
         assert_eq!(
             reason,
             Some(Reason::HookDisabled {
@@ -647,32 +670,23 @@ mod tests {
         );
     }
 
-    /// A live yield outranks the ledger's own state.
+    /// A live yield outranks the state's own state.
     #[test]
-    fn c050_yield_outranks_the_ledger_state() {
-        let reason = inert_reason(&auto_hook(), &[direnv()], None, None, false);
+    fn c050_yield_outranks_the_state() {
+        let reason = inert_reason(&auto_hook(), &[direnv()], None, &Inherited::Absent);
         assert_eq!(reason, Some(Reason::YieldedTo(direnv())));
     }
 
-    /// The over-cap state is read from the marker on a
-    /// ledger that still decodes, not inferred from an absent carrier.
+    /// A truncated state still reads: the truncation is a note, never a reason of its own, and an
+    /// unreadable state is a different reason from an absent one.
     #[test]
-    fn c050_a001_over_cap_comes_from_the_marker_not_from_absence() {
-        let mut ledger = Ledger::empty();
-        ledger.over_cap = vec![ScopeId::Project];
-        let reason = inert_reason(&auto_hook(), &[], None, Some(&ledger), true);
-        assert_eq!(
-            reason,
-            Some(Reason::LedgerOverCap {
-                scope: ScopeId::Project
-            })
-        );
-
-        // The same absent-project shape *without* the marker is the other
-        // reason entirely — which is what "never inferred from an absent
-        // carrier" means.
-        let reason = inert_reason(&auto_hook(), &[], None, None, true);
-        assert_eq!(reason, Some(Reason::LedgerUnreadable { first_prompt: false }));
+    fn c050_a001_a_truncated_state_is_not_an_inert_reason() {
+        let state = ExecState {
+            truncated: Truncation::AllAppliedDropped,
+            ..ExecState::default()
+        };
+        let reason = inert_reason(&auto_hook(), &[], None, &Inherited::Readable(state));
+        assert_eq!(reason, None);
     }
 
     /// An unset carrier is the first prompt; a
@@ -680,21 +694,20 @@ mod tests {
     #[test]
     fn c050_c006_absent_and_corrupt_carriers_are_different_reasons() {
         assert_eq!(
-            inert_reason(&auto_hook(), &[], None, None, false),
-            Some(Reason::LedgerUnreadable { first_prompt: true })
+            inert_reason(&auto_hook(), &[], None, &Inherited::Absent),
+            Some(Reason::StateUnreadable { first_prompt: true })
         );
         assert_eq!(
-            inert_reason(&auto_hook(), &[], None, None, true),
-            Some(Reason::LedgerUnreadable { first_prompt: false })
+            inert_reason(&auto_hook(), &[], None, &unreadable()),
+            Some(Reason::StateUnreadable { first_prompt: false })
         );
     }
 
-    /// With a decodable ledger, no yield, an enabled hook and no
+    /// With a decodable state, no yield, an enabled hook and no
     /// project, there is nothing left to report: the shell is active.
     #[test]
     fn c050_a_healthy_shell_has_no_inert_reason() {
-        let ledger = Ledger::empty();
-        assert_eq!(inert_reason(&auto_hook(), &[], None, Some(&ledger), true), None);
+        assert_eq!(inert_reason(&auto_hook(), &[], None, &readable()), None);
     }
 
     fn resolved(dir: &str, decision: Decision) -> ResolvedProject {
@@ -711,20 +724,18 @@ mod tests {
         }
     }
 
-    /// A consented project whose scope the **decoded** ledger
+    /// A consented project whose scope the **decoded** state
     /// does not record is not an inertness reason at all.
     ///
-    /// It used to return `LedgerUnreadable { first_prompt: true }`, which made
+    /// It used to return `StateUnreadable { first_prompt: true }`, which made
     /// the report print "the carrier is unset" under `present: yes` /
     /// `decoded: yes`. The reason ladder enumerates exactly two carrier
     /// situations; this is a third, and the renderer says `active: not yet`.
     #[test]
-    fn c050_c006_a_decoded_ledger_without_the_project_scope_is_not_a_reason() {
+    fn c050_c006_a_decoded_state_without_the_project_scope_is_not_a_reason() {
         let project = resolved("/work/proj", Decision::Activate(Grant::Stamp));
-        let ledger = Ledger::empty();
-        assert!(ledger.scopes.project.is_none());
         assert_eq!(
-            inert_reason(&auto_hook(), &[], Some(&project), Some(&ledger), true),
+            inert_reason(&auto_hook(), &[], Some(&project), &readable()),
             None,
             "a decoded carrier must never be laundered through the absent-carrier reason"
         );

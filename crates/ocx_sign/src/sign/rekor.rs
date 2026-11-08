@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use ocx_oci::endpoint::BodyReadError;
+use ocx_oci::transport_policy::{Attempt, RetryBudget, RetryPolicy, run};
 use serde::{Deserialize, Serialize};
 use sigstore::rekor::models::log_entry::RekorInclusionProof;
 use url::Url;
@@ -162,7 +163,29 @@ impl RekorClient {
     }
 
     /// POST a proposed entry and decode the log's answer.
+    ///
+    /// A transient failure is retried on the shared ladder: the proposal bytes are fixed, so a repeat is idempotent,
+    /// and a log that is slow under load (Trillian queueing) answers the next attempt.
     async fn post_proposal(&self, body: Vec<u8>) -> Result<RekorEntry, SignErrorKind> {
+        let policy = RetryPolicy::default();
+        let budget = RetryBudget::new();
+        run(&policy, &budget, |index| {
+            let body = body.clone();
+            async move {
+                match self.post_once(body, index > 0).await {
+                    Err(SignErrorKind::TransparencyLogUnavailable) => Attempt::Retry {
+                        retry_after: None,
+                        terminal: Err(SignErrorKind::TransparencyLogUnavailable),
+                    },
+                    outcome => Attempt::Done(outcome),
+                }
+            }
+        })
+        .await
+    }
+
+    /// One POST. `retried` marks a repeat, where a 409 can be the earlier attempt's own entry landing late.
+    async fn post_once(&self, body: Vec<u8>, retried: bool) -> Result<RekorEntry, SignErrorKind> {
         let endpoint = self
             .url
             .join("api/v1/log/entries")
@@ -187,10 +210,47 @@ impl RekorClient {
             })?;
 
         let status = response.status();
+        if retried && status == reqwest::StatusCode::CONFLICT {
+            return self.existing_entry(&response).await;
+        }
         if !status.is_success() {
             return Err(classify_upload_status(status));
         }
+        Self::decode(response).await
+    }
 
+    /// Fetch the entry a 409 names, so an attempt that landed before its reply was lost still yields the SET.
+    async fn existing_entry(&self, conflict: &reqwest::Response) -> Result<RekorEntry, SignErrorKind> {
+        // Only the entry id is taken from `Location`; the host is always ours, never the response's.
+        let entry_id = conflict
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| location.trim_end_matches('/').rsplit('/').next())
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or(SignErrorKind::RekorSetMalformed)?;
+        let endpoint = self
+            .url
+            .join(&format!("api/v1/log/entries/{entry_id}"))
+            .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        let response = ocx_oci::endpoint::sigstore_http_client()
+            .get(endpoint)
+            .send()
+            .await
+            .map_err(|e| {
+                if ocx_oci::transport_policy::is_transient_transport_error(&e) {
+                    SignErrorKind::TransparencyLogUnavailable
+                } else {
+                    SignErrorKind::TransparencyLogUnreachable
+                }
+            })?;
+        if !response.status().is_success() {
+            return Err(classify_upload_status(response.status()));
+        }
+        Self::decode(response).await
+    }
+
+    async fn decode(response: reqwest::Response) -> Result<RekorEntry, SignErrorKind> {
         // Capped: nothing in the Rekor API bounds what the endpoint returns.
         let raw = ocx_oci::endpoint::read_body_capped(response)
             .await
@@ -519,5 +579,111 @@ mod tests {
             matches!(failure, Some(SignErrorKind::TransparencyLogUnavailable)),
             "got: {failure:?}"
         );
+    }
+
+    // ── retry of a transient failure ─────────────────────────────────────────
+
+    /// Serve `responses` in order, one per connection (the last repeats); returns the client and the request lines seen.
+    async fn client_on_script(responses: Vec<String>) -> (RekorClient, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the rekor stub");
+        let addr = listener.local_addr().expect("the rekor stub has an address");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        tokio::spawn(async move {
+            let mut served = 0_usize;
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 8192];
+                let read = socket.read(&mut scratch).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&scratch[..read]);
+                let line = head.lines().next().unwrap_or_default().to_owned();
+                recorded.lock().expect("request log lock").push(line);
+                let response = &responses[served.min(responses.len() - 1)];
+                served += 1;
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = RekorClient {
+            url: Url::parse(&format!("http://{addr}/")).expect("the rekor stub url parses"),
+        };
+        (client, seen)
+    }
+
+    fn http(status_line: &str, extra_headers: &str, body: &[u8]) -> String {
+        format!(
+            "HTTP/1.1 {status_line}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_and_the_next_answer_is_used() {
+        let (client, seen) = client_on_script(vec![
+            http("503 Service Unavailable", "", b""),
+            http("201 Created", "", &well_formed()),
+        ])
+        .await;
+        let entry = client
+            .post_proposal(b"{}".to_vec())
+            .await
+            .expect("the second attempt succeeds");
+        assert_eq!(entry.log_index, 42);
+        assert_eq!(seen.lock().expect("request log lock").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_persistent_transient_failure_stops_after_the_bounded_attempts() {
+        let (client, seen) = client_on_script(vec![http("503 Service Unavailable", "", b"")]).await;
+        let failure = client.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::TransparencyLogUnavailable)),
+            "got: {failure:?}"
+        );
+        assert_eq!(seen.lock().expect("request log lock").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_after_a_retry_yields_the_entry_the_first_attempt_landed() {
+        let (client, seen) = client_on_script(vec![
+            http("503 Service Unavailable", "", b""),
+            // The Location host is hostile: only the id may be taken from it.
+            http(
+                "409 Conflict",
+                "Location: http://127.0.0.1:9/api/v1/log/entries/24296fab\r\n",
+                b"{}",
+            ),
+            http("200 OK", "", &well_formed()),
+        ])
+        .await;
+        let entry = client
+            .post_proposal(b"{}".to_vec())
+            .await
+            .expect("the existing entry is fetched");
+        assert_eq!(entry.log_index, 42);
+        let requests = seen.lock().expect("request log lock").clone();
+        assert_eq!(requests.len(), 3, "got: {requests:?}");
+        assert!(
+            requests[2].starts_with("GET /api/v1/log/entries/24296fab "),
+            "got: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conflict_on_the_first_attempt_is_not_looked_up() {
+        let (client, seen) = client_on_script(vec![http(
+            "409 Conflict",
+            "Location: /api/v1/log/entries/24296fab\r\n",
+            b"{}",
+        )])
+        .await;
+        let failure = client.post_proposal(b"{}".to_vec()).await.err();
+        assert!(
+            matches!(failure, Some(SignErrorKind::RekorSetMalformed)),
+            "got: {failure:?}"
+        );
+        assert_eq!(seen.lock().expect("request log lock").len(), 1);
     }
 }

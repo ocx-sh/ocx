@@ -95,12 +95,6 @@ pub const PUBLIC: &[EnvVar] = &[
         secret: false,
     },
     EnvVar {
-        name: "OCX_ENV",
-        value: "json",
-        summary: "JSON envelope of the resolved project `[env]` entries plus `ocx exec --env` overrides,",
-        secret: false,
-    },
-    EnvVar {
         name: "OCX_EXTRA_CA_CERTS",
         value: "path_or_pem",
         summary: "Extra CA roots — a path or inline PEM (contains `-----BEGIN`); empty is unset.",
@@ -115,7 +109,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_GLOBAL",
         value: "bool",
-        summary: "Boolean — select the global toolchain (`$OCX_HOME/ocx.toml`). Mirrors `--global`.",
+        summary: "Withdrawn — no longer read; pass `--global` instead.",
         secret: false,
     },
     EnvVar {

@@ -9,18 +9,28 @@
   "pinned": false,
   "carrier_present": false,
   "carrier_bytes": 0,
+  "env_state": {
+    "status": "absent",
+    "major": 2,
+    "session_claimed": false
+  },
+  "binary_pin": {
+    "path": "/usr/local/bin/ocx",
+    "exists": true,
+    "matches_running": true
+  },
   "watch_set": [
     {
       "path": "/work/project/ocx.toml",
       "present": true,
       "size": 9007199254740991,
-      "modified_at": "2026-10-04T15:41:30Z"
+      "modified_at": "2026-11-07T02:59:08Z"
     },
     {
       "path": "/work/project/ocx.lock",
       "present": true,
       "size": 226,
-      "modified_at": "2026-10-04T15:41:31Z"
+      "modified_at": "2026-11-07T02:59:08Z"
     },
     {
       "path": "/home/conformance/.ocx/ocx.toml",
@@ -51,24 +61,24 @@
       "present": false
     },
     {
-      "path": "/home/conformance/.ocx/state/projects/d03e54d070c0f864/consent.json",
+      "path": "/home/conformance/.ocx/state/projects/9d8d7431057cbbb8/consent.json",
       "present": true,
-      "size": 182,
-      "modified_at": "2026-10-04T15:41:31Z"
+      "size": 117,
+      "modified_at": "2026-11-07T02:59:08Z"
     }
   ],
   "project_dir": "/work/project",
-  "project_key": "d03e54d070c0f864",
+  "project_key": "9d8d7431057cbbb8",
   "project_stamped": true,
   "grant": "stamp",
-  "stamp_written_at": "2026-10-04T15:41:31Z",
+  "stamp_written_at": "2026-11-07T02:59:08Z",
   "priors": [],
   "hook": {
     "rung": "auto"
   },
   "yielded_to": [],
   "inert_reason": {
-    "type": "ledger_unreadable",
+    "type": "state_unreadable",
     "first_prompt": true
   },
   "notes": []

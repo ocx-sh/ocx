@@ -89,7 +89,7 @@ impl ConfigLoader {
     /// # Errors
     /// Same as [`Self::load`].
     pub async fn load_with_local_view(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
-        let no_config = ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false);
+        let no_config = Self::no_config();
         let raw_env_config_file = ocx_env::OCX_CONFIG.get_raw().and_then(|value| value.into_string().ok());
         if raw_env_config_file.as_deref() == Some("") {
             log::debug!("OCX_CONFIG is set to empty string — skipped via escape hatch");
@@ -184,9 +184,38 @@ impl ConfigLoader {
         }
     }
 
+    /// `OCX_NO_CONFIG` at its env tier: the ambient variable, else what the parent ocx passed down.
+    fn no_config() -> bool {
+        Self::no_config_in(crate::exec_state::received::policy())
+    }
+
+    fn no_config_in(received: Option<&crate::exec_state::Policy>) -> bool {
+        crate::exec_state::received::relaxing_bool(&ocx_env::OCX_NO_CONFIG, received.and_then(|p| p.no_config))
+    }
+
+    /// `OCX_MANAGED_CONFIG` at its env tier: the ambient variable (empty is absent), else what the
+    /// parent ocx passed down. The `[managed]` section's system lock still clamps either.
+    fn managed_override() -> Option<String> {
+        Self::managed_override_in(crate::exec_state::received::policy())
+    }
+
+    fn managed_override_in(received: Option<&crate::exec_state::Policy>) -> Option<String> {
+        match ocx_env::OCX_MANAGED_CONFIG.get_raw() {
+            Some(_) => ocx_env::OCX_MANAGED_CONFIG.get(),
+            None => received
+                .and_then(|policy| policy.managed_config.clone())
+                .filter(|source| !source.is_empty()),
+        }
+    }
+
+    /// `OCX_NO_PROJECT` at its env tier (neutral: the received value leads).
+    fn no_project_in(received: Option<&crate::exec_state::Policy>) -> bool {
+        crate::exec_state::received::neutral_bool(&ocx_env::OCX_NO_PROJECT, received.and_then(|p| p.no_project))
+    }
+
     /// The managed snapshot's path, or `None` under `OCX_NO_CONFIG=1`.
     fn managed_snapshot_candidate() -> Option<PathBuf> {
-        if ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
+        if Self::no_config() {
             return None;
         }
         let ocx_home = crate::home::default_ocx_root()?;
@@ -209,10 +238,10 @@ impl ConfigLoader {
 
         // From `local_only`, overlay included, or an overlay-only seed arms `required` while its
         // payload never folds here.
-        let env_override = if ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
+        let env_override = if Self::no_config() {
             None
         } else {
-            ocx_env::OCX_MANAGED_CONFIG.get()
+            Self::managed_override()
         };
         // Shared with the `required` gate, or a locked source A plus `OCX_MANAGED_CONFIG=B` skips
         // the fold here while `required` reports A satisfied.
@@ -468,12 +497,20 @@ impl ConfigLoader {
         cwd: Option<&Path>,
         explicit: Option<&Path>,
     ) -> std::result::Result<Option<PathBuf>, crate::error::Error> {
+        Self::project_path_in(cwd, explicit, crate::exec_state::received::policy()).await
+    }
+
+    async fn project_path_in(
+        cwd: Option<&Path>,
+        explicit: Option<&Path>,
+        received: Option<&crate::exec_state::Policy>,
+    ) -> std::result::Result<Option<PathBuf>, crate::error::Error> {
         // Tiers 1–2: an explicit selection.
-        if let Some(path) = Self::explicit_project(explicit) {
+        if let Some(path) = Self::explicit_project_in(explicit, received) {
             return Self::resolve_explicit_project_path(&path).await;
         }
 
-        if ocx_env::OCX_NO_PROJECT.bool_or(false).unwrap_or(false) {
+        if Self::no_project_in(received) {
             return Ok(None);
         }
 
@@ -497,10 +534,14 @@ impl ConfigLoader {
     /// Lets a caller given `None` by [`Self::project_path`] name the directory it looked in.
     #[must_use]
     pub fn explicit_project(flag: Option<&Path>) -> Option<PathBuf> {
+        Self::explicit_project_in(flag, crate::exec_state::received::policy())
+    }
+
+    fn explicit_project_in(flag: Option<&Path>, received: Option<&crate::exec_state::Policy>) -> Option<PathBuf> {
         if let Some(path) = flag {
             return Some(path.to_path_buf());
         }
-        if ocx_env::OCX_NO_PROJECT.bool_or(false).unwrap_or(false) {
+        if Self::no_project_in(received) {
             return None;
         }
         let raw_env = ocx_env::OCX_PROJECT
@@ -577,7 +618,7 @@ impl ConfigLoader {
                 // Debug, not warn: a working directory under `$OCX_HOME` is ordinary.
                 Ok(meta) if meta.file_type().is_file() && ocx_home.as_deref() == Some(current) => {
                     log::debug!(
-                        "skipping global toolchain manifest {} during the CWD walk (reachable only via --global/OCX_GLOBAL)",
+                        "skipping global toolchain manifest {} during the CWD walk (reachable only via --global)",
                         candidate.display()
                     );
                 }
@@ -6555,5 +6596,75 @@ mod tests {
                 .join("from-file"),
             "the explicit file still beats the environment tier under OCX_NO_CONFIG=1"
         );
+    }
+
+    // ── received policy at the loader's env tier ───────────────
+
+    fn received_with(edit: impl FnOnce(&mut crate::exec_state::Policy)) -> crate::exec_state::Policy {
+        let mut policy = crate::exec_state::Policy::default();
+        edit(&mut policy);
+        policy
+    }
+
+    #[test]
+    fn received_no_config_applies_only_when_the_ambient_variable_is_unset() {
+        let env = ocx_env::overrides::lock();
+        let received = received_with(|p| p.no_config = Some(true));
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        assert!(
+            ConfigLoader::no_config_in(Some(&received)),
+            "a received hermetic flag must reach the loader"
+        );
+        env.set(&ocx_env::OCX_NO_CONFIG, "0");
+        assert!(
+            !ConfigLoader::no_config_in(Some(&received)),
+            "an explicit ambient 0 outranks a relaxing received value"
+        );
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        assert!(!ConfigLoader::no_config_in(None));
+    }
+
+    #[test]
+    fn received_managed_config_fills_only_an_unset_ambient_variable() {
+        let env = ocx_env::overrides::lock();
+        let received = received_with(|p| p.managed_config = Some("corp.example.com/ocx-config:v1".to_owned()));
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        assert_eq!(
+            ConfigLoader::managed_override_in(Some(&received)).as_deref(),
+            Some("corp.example.com/ocx-config:v1")
+        );
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "other.example.com/ocx-config:v2");
+        assert_eq!(
+            ConfigLoader::managed_override_in(Some(&received)).as_deref(),
+            Some("other.example.com/ocx-config:v2")
+        );
+        env.set(&ocx_env::OCX_MANAGED_CONFIG, "");
+        assert_eq!(
+            ConfigLoader::managed_override_in(Some(&received)),
+            None,
+            "an empty ambient OCX_MANAGED_CONFIG counts as set, so nothing is filled"
+        );
+    }
+
+    #[tokio::test]
+    async fn received_no_project_prunes_the_walk_but_not_the_flag() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_PROJECT);
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        env.remove(&ocx_env::OCX_CEILING_PATH);
+        let dir = TempDir::new().unwrap();
+        let manifest = dir.path().join("ocx.toml");
+        write_file(&manifest, "");
+        let received = received_with(|p| p.no_project = Some(true));
+
+        let walked = ConfigLoader::project_path_in(Some(dir.path()), None, Some(&received))
+            .await
+            .expect("a pruned walk is not an error");
+        assert_eq!(walked, None, "a received no_project must stop the CWD walk");
+
+        let flagged = ConfigLoader::project_path_in(Some(dir.path()), Some(&manifest), Some(&received))
+            .await
+            .expect("an explicit flag still resolves");
+        assert_eq!(flagged, Some(manifest), "no_project never prunes the explicit flag");
     }
 }

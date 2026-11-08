@@ -10,6 +10,8 @@ An operator may need to show, after the fact, which package digests composed a j
 
 Two sibling pages go deeper. [Records and SBOMs][records-sbom] explains the `pkg:oci` identity and how a record chains to an SBOM or attestation. [Launcher frames in records][records-frames] explains the extra records that entrypoint launchers, deferred packages and patch companions produce.
 
+A record also states how the child's environment related to the caller's, as `envMode`: `layer`, `isolate` or `clean`. An auditor reading a record learns whether the job saw the surrounding environment or only the composed one.
+
 ## Switching recording on {#execution-records-enable}
 
 Recording is off by default. Without a sink directory at any layer, OCX writes nothing and adds no I/O to the exec path. A sink directory is the only thing that turns recording on. It can come from four places, and the highest wins per field:

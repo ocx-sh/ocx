@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The typed three-way reconciliation planner: diffs desired (D) against current (C), scoped by
-//! the [`super::Ledger`] (L), and produces the [`Plan`] a shell arm renders.
+//! The typed reconciliation planner: diffs desired (D) against current (C), scoped by the
+//! execution state's session records, and produces the [`Plan`] a shell arm renders.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
@@ -10,19 +10,18 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::ledger::{Ledger, LedgerEntry, Prior, Priors};
-use super::{effective_separator, element_eq, element_norm, is_never_constant, key_eq, key_norm, os_to_string};
+use super::{effective_separator, element_eq, element_norm, is_never_constant, key_eq, key_norm};
 use ocx_config::env::Env;
+use ocx_config::exec_state::{
+    AppliedValue, ExecState, Owner, Prior as RecordedPrior, RecordedValue, RevertOutcome, Scope, SessionSource,
+    Truncation, ValueKind, revert,
+};
 use ocx_console::Theme;
 use ocx_package::metadata::env::apply::EnvEntriesExt;
 use ocx_package::metadata::env::entry::Entry;
 use ocx_package::metadata::env::list::DEFAULT_SEPARATOR;
 use ocx_package::metadata::env::modifier::ModifierKind;
 
-// Ledger shapes this module's own fixtures build. The carrier *format* —
-// envelope tag, base64, the cap — is `ledger.rs`'s, and is tested there.
-#[cfg(test)]
-use super::ledger::{Applied, LEDGER_VERSION, ProjectScope, ScopeId, Scopes};
 #[cfg(test)]
 use super::unquote;
 
@@ -33,13 +32,13 @@ pub const PLAN_VERSION: u8 = 1;
 
 /// The typed three-way diff a single prompt executes; it never contains shell text.
 ///
-/// Wire shape: `{"v":1,"sets":[…LedgerEntry-shaped…],"removes":[[key,element,sep|null],…],
+/// Wire shape: `{"v":1,"sets":[{key,value,type,separator?}…],"removes":[[key,element,sep|null],…],
 /// "restores":[[key,value|null],…]}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub v: u8,
     /// Apply: constants and list/path contributions.
-    // Serialized as `LedgerEntry`, which is what makes `type` the wire field name.
+    // Serialized as `SetWire`, which is what makes `type` the wire field name.
     #[serde(serialize_with = "serialize_sets")]
     pub sets: Vec<Entry>,
     /// Remove one element: `(key, element, separator)`; the separator names the kind (`None` path, `Some` list).
@@ -48,62 +47,54 @@ pub struct Plan {
     pub restores: Vec<(String, Option<String>)>,
 }
 
+/// One `sets` element as live shells decode it: `type`, not `kind`.
+///
+/// `separator` holds the **effective** separator, always present for `list` and omitted otherwise.
+#[derive(Serialize)]
+struct SetWire<'a> {
+    key: &'a str,
+    value: &'a str,
+    #[serde(rename = "type")]
+    kind: &'a ModifierKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    separator: Option<String>,
+}
+
 fn serialize_sets<S>(sets: &[Entry], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.collect_seq(sets.iter().map(LedgerEntry::from))
+    serializer.collect_seq(sets.iter().map(|entry| SetWire {
+        key: &entry.key,
+        value: &entry.value,
+        kind: &entry.kind,
+        separator: match entry.kind {
+            ModifierKind::List => Some(effective_separator(entry)),
+            ModifierKind::Path | ModifierKind::Constant => None,
+        },
+    }))
 }
 
-/// Diff desired against current, scoped by the ledger.
+/// The human-facing change summary for one prompt, or `None` when nothing changed: the keys this shell's own session records hold.
 ///
-/// Pure but for one `realpath` per owned prefix. `owned_prefixes` drives the lost-ledger repair,
-/// which removes every segment under them that D does not want.
-pub fn plan(desired: &[Entry], current: &Env, ledger: &Ledger, owned_prefixes: &[&Path]) -> Plan {
-    let emittable = emittable(desired);
-    // Keyed by `key_norm`, so a Windows `Path`/`PATH` pair is one slot.
-    let declared = declared_index(&emittable);
-    let contributed = contributed_elements(&emittable);
-    let recorded = recorded_index(ledger);
-
-    let mut plan = Plan {
-        v: PLAN_VERSION,
-        sets: apply_set(&emittable, &recorded, current),
-        removes: Vec::new(),
-        restores: Vec::new(),
-    };
-
-    let mut planned_removals: HashSet<RemovalIdentity> = HashSet::new();
-    for entry in ledger.applied_in_emission_order() {
-        match entry.kind {
-            ModifierKind::Path | ModifierKind::List => {
-                if let Some(removal) = retire_recorded_element(entry, &declared, &contributed) {
-                    push_removal(&mut plan.removes, &mut planned_removals, removal);
-                }
-            }
-            ModifierKind::Constant => {
-                if let Some(restore) = retire_recorded_constant(entry, &declared, current, ledger) {
-                    plan.restores.push(restore);
-                }
-            }
-        }
-    }
-
-    for removal in repair_owned_segments(&declared, &recorded, &contributed, current, owned_prefixes) {
-        push_removal(&mut plan.removes, &mut planned_removals, removal);
-    }
-
-    plan
+/// Inherited records are the outer frame's, so a key only they hold is neither added nor removed here.
+pub fn session_summary(plan: &Plan, previous: &ExecState, next: &ExecState, theme: &Theme) -> Option<String> {
+    marked_summary(
+        plan,
+        &session_keys(previous),
+        &session_keys(next),
+        switched_session_project(previous, next),
+        theme,
+    )
 }
 
-/// The human-facing change summary for one prompt, or `None` when nothing changed.
-///
-/// One `+KEY`/`~KEY`/`-KEY` token per touched variable, a delta against the ledger; a project
-/// switch appends the new project's directory name.
-pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> Option<String> {
-    let before = applied_keys(previous);
-    let after = applied_keys(next);
-
+fn marked_summary(
+    plan: &Plan,
+    before: &HashSet<String>,
+    after: &HashSet<String>,
+    switched: Option<String>,
+    theme: &Theme,
+) -> Option<String> {
     let mut marks: BTreeMap<String, String> = BTreeMap::new();
     let touched = plan
         .sets
@@ -129,7 +120,7 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
     }
     let tokens = marks.into_values().collect::<Vec<String>>().join(" ");
     let prefix = theme.aside("ocx:");
-    match switched_project(previous, next) {
+    match switched {
         Some(name) => Some(format!("{prefix} {tokens} {}", theme.aside(format!("({name})")))),
         None => Some(format!("{prefix} {tokens}")),
     }
@@ -150,60 +141,27 @@ fn ink(theme: &Theme, mark: char, key: &str) -> String {
     }
 }
 
-/// The new project's directory name, only when this prompt switched from one project to another.
+/// The new project's directory name, only when this prompt switched from one recorded project to another.
 ///
-/// Only the final component is rendered: the recorded directory is untrusted.
-fn switched_project(previous: &Ledger, next: &Ledger) -> Option<String> {
-    let entered = next.scopes.project.as_ref()?;
-    let left = previous.scopes.project.as_ref()?;
+/// The hint comes from received state, so the final component passes `display_safe` before it is printed.
+fn switched_session_project(previous: &ExecState, next: &ExecState) -> Option<String> {
+    let entered = next.session.project.as_ref()?;
+    let left = previous.session.project.as_ref()?;
     if left.dir == entered.dir {
         return None;
     }
-    Some(
-        entered
-            .dir
-            .file_name()
-            .unwrap_or(entered.dir.as_os_str())
-            .to_string_lossy()
-            .into_owned(),
-    )
+    let name = entered.dir.file_name().unwrap_or(entered.dir.as_os_str());
+    Some(ocx_config::exec_state::display_safe(&name.to_string_lossy()))
 }
 
-fn applied_keys(ledger: &Ledger) -> HashSet<String> {
-    ledger
-        .applied_in_emission_order()
-        .map(|entry| key_norm(&entry.key))
+/// The normalized keys of the records this shell's session owns.
+fn session_keys(state: &ExecState) -> HashSet<String> {
+    state
+        .applied
+        .iter()
+        .filter(|record| matches!(record.owner, Owner::Session { .. }))
+        .map(|record| key_norm(&record.key))
         .collect()
-}
-
-/// Capture the pre-apply values a later revert restores.
-///
-/// `current` must be the environment this scope is about to be applied to: post-global for the
-/// project scope, pre-global for the global one. A `previous` prior carries forward only while the
-/// live value is still what ocx wrote, so leaving never unsets a hand-set variable.
-pub fn capture_priors(applied: &[LedgerEntry], current: &Env, previous: Option<(&[LedgerEntry], &Priors)>) -> Priors {
-    let mut priors = Priors::new();
-    for entry in applied {
-        if !matches!(entry.kind, ModifierKind::Constant) {
-            continue;
-        }
-        let observed = current.get(&entry.key).map(os_to_string);
-        let carried = previous.and_then(|(previous_applied, previous_priors)| {
-            let recorded = previous_applied.iter().find(|candidate| {
-                key_eq(&candidate.key, &entry.key) && matches!(candidate.kind, ModifierKind::Constant)
-            })?;
-            let current_value = observed.as_deref()?;
-            element_eq(&recorded.value, current_value, &ModifierKind::Constant)
-                .then(|| previous_priors.get(&entry.key))?
-                .cloned()
-        });
-        let prior = carried.unwrap_or(match observed {
-            Some(value) => Prior::Value(value),
-            None => Prior::Unset,
-        });
-        priors.insert(entry.key.clone(), prior);
-    }
-    priors
 }
 
 /// The admission gate, warning once per refused key; without it the ledger records keys no arm can ever remove.
@@ -231,23 +189,20 @@ fn admits(entry: &Entry) -> Result<(), &'static str> {
     }
 }
 
-/// [`emittable`] without its logging, for the ledger builder; the ledger must record only what `plan` admits.
-pub fn emittable_entries(desired: &[Entry]) -> Vec<&Entry> {
+/// [`emittable`] without its logging, for callers that record what the planner admits.
+fn emittable_entries(desired: &[Entry]) -> Vec<&Entry> {
     desired.iter().filter(|entry| admits(entry).is_ok()).collect()
 }
 
 /// The entries whose application would change something, so a quiet prompt emits an empty plan.
 ///
 /// A constant compares against the ledger, not the live env, or it re-emits over a mid-session override.
-fn apply_set(emittable: &[&Entry], recorded: &BTreeMap<String, &LedgerEntry>, current: &Env) -> Vec<Entry> {
+fn apply_set(emittable: &[&Entry], constant_applied: impl Fn(&Entry) -> bool, current: &Env) -> Vec<Entry> {
     let settled = settled_keys(emittable, current);
     emittable
         .iter()
         .filter(|entry| match entry.kind {
-            ModifierKind::Constant => !recorded.get(&key_norm(&entry.key)).is_some_and(|previous| {
-                matches!(previous.kind, ModifierKind::Constant)
-                    && element_eq(&previous.value, &entry.value, &ModifierKind::Constant)
-            }),
+            ModifierKind::Constant => !constant_applied(entry),
             ModifierKind::Path | ModifierKind::List => !settled.contains(&key_norm(&entry.key)),
         })
         .map(|entry| (*entry).clone())
@@ -334,59 +289,12 @@ fn path_segment_eq(left: &Path, right: &Path) -> bool {
         }
 }
 
-/// Remove an element L records and D no longer wants; L's kind and separator decide only revert-set membership.
-fn retire_recorded_element(
-    entry: &LedgerEntry,
-    declared: &BTreeMap<String, &Entry>,
-    contributed: &HashSet<(String, String)>,
-) -> Option<(String, String, Option<String>)> {
-    let current = declared.get(&key_norm(&entry.key));
-    // D's kind, so this lookup normalises exactly as `contributed_elements` did.
-    let kind = current.map_or(&entry.kind, |declared| &declared.kind);
-    if contributed.contains(&(key_norm(&entry.key), element_norm(&entry.value, kind))) {
-        return None;
-    }
-    let separator = match current {
-        Some(current) => match current.kind {
-            ModifierKind::Constant => return None,
-            ModifierKind::Path => None,
-            ModifierKind::List => Some(effective_separator(current)),
-        },
-        None => match entry.kind {
-            ModifierKind::Path => None,
-            _ => Some(entry.separator.clone().unwrap_or_else(|| DEFAULT_SEPARATOR.to_owned())),
-        },
-    };
-    Some((entry.key.clone(), entry.value.clone(), separator))
-}
-
-/// Restore a constant L records and D no longer declares to its prior, only while the live value is
-/// still what ocx wrote; with no recorded prior it is left alone, never guess-unset.
-fn retire_recorded_constant(
-    entry: &LedgerEntry,
-    declared: &BTreeMap<String, &Entry>,
-    current: &Env,
-    ledger: &Ledger,
-) -> Option<(String, Option<String>)> {
-    if is_never_constant(&entry.key) || declared.contains_key(&key_norm(&entry.key)) {
-        return None;
-    }
-    let observed = current.get(&entry.key).map(os_to_string)?;
-    if !element_eq(&observed, &entry.value, &ModifierKind::Constant) {
-        return None;
-    }
-    match ledger.prior(&entry.key)? {
-        Prior::Unset => Some((entry.key.clone(), None)),
-        Prior::Value(value) => Some((entry.key.clone(), Some(value.clone()))),
-    }
-}
-
 /// The lost-ledger repair: remove every prefix-owned segment of C that D does not want.
 ///
 /// Subtractive, not move-to-front, or a digest bump leaves both the old and new `packages/…/bin` on `PATH`.
 fn repair_owned_segments(
     declared: &BTreeMap<String, &Entry>,
-    recorded: &BTreeMap<String, &LedgerEntry>,
+    recorded_path_keys: &[(String, &str)],
     contributed: &HashSet<(String, String)>,
     current: &Env,
     owned_prefixes: &[&Path],
@@ -397,9 +305,9 @@ fn repair_owned_segments(
             keys.insert((key_norm(&entry.key), entry.key.as_str()));
         }
     }
-    for entry in recorded.values() {
-        if matches!(entry.kind, ModifierKind::Path) && !declared.contains_key(&key_norm(&entry.key)) {
-            keys.insert((key_norm(&entry.key), entry.key.as_str()));
+    for (norm, key) in recorded_path_keys {
+        if !declared.contains_key(norm) {
+            keys.insert((norm.clone(), *key));
         }
     }
 
@@ -431,13 +339,6 @@ fn repair_owned_segments(
 fn declared_index<'a>(emittable: &[&'a Entry]) -> BTreeMap<String, &'a Entry> {
     // Later wins, so project's declaration of a key overrides global's.
     emittable.iter().map(|entry| (key_norm(&entry.key), *entry)).collect()
-}
-
-fn recorded_index(ledger: &Ledger) -> BTreeMap<String, &LedgerEntry> {
-    ledger
-        .applied_in_emission_order()
-        .map(|entry| (key_norm(&entry.key), entry))
-        .collect()
 }
 
 /// The elements D still wants, each normalised under its own kind.
@@ -492,6 +393,286 @@ fn is_owned(segment: &OsStr, owned: &[PathBuf]) -> bool {
     owned.iter().any(|prefix| segment.starts_with(prefix))
 }
 
+// -- The session planner: the hook over the inherited execution state -------------------------
+
+/// The scopes one prompt composes, after the inherited layer has been subtracted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Composition {
+    /// Compose the global tier.
+    pub global: bool,
+    /// Compose this project, by its dunce-canonical root.
+    pub project: Option<PathBuf>,
+}
+
+/// The hook's desired composition under `FollowCwd`.
+///
+/// The hook never composes a scope `inherited_scopes` already holds; it only adds missing ones.
+/// `project_root` is the root of the project the working directory resolves to, if any. It is
+/// compared dunce-canonical against the roots as the state wrote them; those are never resolved here.
+pub fn desired_composition(inherited_scopes: &[Scope], project_root: Option<&Path>) -> Composition {
+    let root = project_root.map(canonical_root);
+    let inside_inherited_project = root.as_ref().is_some_and(|root| {
+        inherited_scopes
+            .iter()
+            .any(|scope| matches!(scope, Scope::Project { root: held } if held == root))
+    });
+    if inside_inherited_project {
+        // The inherited layer stands, the global tier included.
+        return Composition::default();
+    }
+    Composition {
+        global: !inherited_scopes.contains(&Scope::Global),
+        project: root,
+    }
+}
+
+/// The canonical form of a project root as [`ExecState::add_scope`] stores it.
+///
+/// Asked of the state itself, so the planner and the writer share one spelling.
+fn canonical_root(root: &Path) -> PathBuf {
+    let mut probe = ExecState::default();
+    probe.add_scope(Scope::Project {
+        root: root.to_path_buf(),
+    });
+    match probe.inherited_scopes.pop() {
+        Some(Scope::Project { root }) => root,
+        _ => root.to_path_buf(),
+    }
+}
+
+/// Whether the hook may strip owned-prefix elements it has no record of.
+///
+/// Only after the writer dropped every applied record (rung 2) and only while no inherited scope
+/// is known: with one known, an unrecorded element may be an outer frame's. Never after rung 3, where
+/// an empty list proves nothing because the list was lost with the payload.
+pub fn may_repair_owned_prefixes(state: &ExecState) -> bool {
+    state.truncated == Truncation::AllAppliedDropped && state.inherited_scopes.is_empty()
+}
+
+/// Diff the desired composition against the live environment, scoped by the state's records.
+///
+/// The hook writes only session data: it retires `Session` `Composed` records alone, never an element
+/// an `Inherited` or `Invocation` record names, and never writes a key or element an `Invocation`
+/// record owns. The received home and policy play no part. `owned_prefixes` drives the repair of
+/// [`may_repair_owned_prefixes`].
+pub fn plan_session(desired: &[Entry], current: &Env, state: &ExecState, owned_prefixes: &[&Path]) -> Plan {
+    let emittable = emittable(desired);
+    let declared = declared_index(&emittable);
+    let contributed = contributed_elements(&emittable);
+    let guard = RecordGuard::new(&state.applied);
+
+    let writable: Vec<&Entry> = emittable
+        .iter()
+        .copied()
+        .filter(|entry| !guard.invocation_owns(entry))
+        .collect();
+    let composed: Vec<&AppliedValue> = state.applied.iter().filter(|record| is_composed(record)).collect();
+
+    let mut plan = Plan {
+        v: PLAN_VERSION,
+        sets: apply_set(&writable, |entry| session_constant_applied(&composed, entry), current),
+        removes: Vec::new(),
+        restores: Vec::new(),
+    };
+
+    // Reverse application order, so a layered constant unwinds to the value it shadowed.
+    let mut scratch = current.clone();
+    let mut planned_removals: HashSet<RemovalIdentity> = HashSet::new();
+    for record in composed.iter().rev() {
+        match record.kind {
+            ValueKind::Path | ValueKind::List => {
+                if let Some(removal) = retire_session_element(record, &declared, &contributed, &guard, &mut scratch) {
+                    push_removal(&mut plan.removes, &mut planned_removals, removal);
+                }
+            }
+            ValueKind::Constant => {
+                if let Some(restore) = retire_session_constant(record, &declared, &mut scratch) {
+                    plan.restores.push(restore);
+                }
+            }
+        }
+    }
+
+    if may_repair_owned_prefixes(state) {
+        let recorded_path_keys: Vec<(String, &str)> = composed
+            .iter()
+            .filter(|record| matches!(record.kind, ValueKind::Path))
+            .map(|record| (key_norm(&record.key), record.key.as_str()))
+            .collect();
+        let removals = repair_owned_segments(&declared, &recorded_path_keys, &contributed, current, owned_prefixes);
+        for removal in removals {
+            let identity = (key_norm(&removal.0), element_norm(&removal.1, &ModifierKind::Path));
+            if !guard.names(&identity) {
+                push_removal(&mut plan.removes, &mut planned_removals, removal);
+            }
+        }
+    }
+
+    plan
+}
+
+/// The entries of `desired` the hook may write: the emittable ones that no `Invocation` record owns.
+///
+/// What a record-writing caller must record, so a refresh never claims a key or element
+/// that `ocx shell --env` put there. [`plan_session`] applies the same filter to its sets.
+pub fn session_writable(desired: &[Entry], state: &ExecState) -> Vec<Entry> {
+    let guard = RecordGuard::new(&state.applied);
+    emittable_entries(desired)
+        .into_iter()
+        .filter(|entry| !guard.invocation_owns(entry))
+        .cloned()
+        .collect()
+}
+
+/// A record the hook owns: composed from `ocx.toml` groups or the global tier, refreshed every prompt.
+fn is_composed(record: &AppliedValue) -> bool {
+    matches!(
+        record.owner,
+        Owner::Session {
+            source: SessionSource::Composed,
+            ..
+        }
+    )
+}
+
+fn modifier_kind(kind: ValueKind) -> ModifierKind {
+    match kind {
+        ValueKind::Path => ModifierKind::Path,
+        ValueKind::List => ModifierKind::List,
+        ValueKind::Constant => ModifierKind::Constant,
+    }
+}
+
+/// The elements and keys records the hook does not own hold, which it must neither remove nor overwrite.
+struct RecordGuard {
+    /// `(key, element)` an `Inherited` or `Invocation` path or list record names.
+    named: HashSet<(String, String)>,
+    /// The same, for `Invocation` records alone.
+    invoked_elements: HashSet<(String, String)>,
+    /// Constant keys an `Invocation` record owns.
+    invoked_keys: HashSet<String>,
+}
+
+impl RecordGuard {
+    fn new(records: &[AppliedValue]) -> Self {
+        let mut guard = Self {
+            named: HashSet::new(),
+            invoked_elements: HashSet::new(),
+            invoked_keys: HashSet::new(),
+        };
+        for record in records {
+            let invoked = matches!(
+                record.owner,
+                Owner::Session {
+                    source: SessionSource::Invocation,
+                    ..
+                }
+            );
+            if !invoked && !matches!(record.owner, Owner::Inherited) {
+                continue;
+            }
+            match (&record.value, record.kind) {
+                (RecordedValue::Literal(element), ValueKind::Path | ValueKind::List) => {
+                    let identity = (
+                        key_norm(&record.key),
+                        element_norm(element, &modifier_kind(record.kind)),
+                    );
+                    if invoked {
+                        guard.invoked_elements.insert(identity.clone());
+                    }
+                    guard.named.insert(identity);
+                }
+                (_, ValueKind::Constant) if invoked => {
+                    guard.invoked_keys.insert(key_norm(&record.key));
+                }
+                _ => {}
+            }
+        }
+        guard
+    }
+
+    fn names(&self, identity: &(String, String)) -> bool {
+        self.named.contains(identity)
+    }
+
+    /// Whether writing `entry` would overwrite what an `Invocation` record owns.
+    fn invocation_owns(&self, entry: &Entry) -> bool {
+        match entry.kind {
+            ModifierKind::Constant => self.invoked_keys.contains(&key_norm(&entry.key)),
+            ModifierKind::Path | ModifierKind::List => self
+                .invoked_elements
+                .contains(&(key_norm(&entry.key), element_norm(&entry.value, &entry.kind))),
+        }
+    }
+}
+
+/// Whether `entry`, a constant, is already what a `Composed` record put in the environment.
+fn session_constant_applied(composed: &[&AppliedValue], entry: &Entry) -> bool {
+    // The newest record for the key: a later scope's value shadows an earlier one's, and writing the earlier
+    // one back is what leaving the later scope has to do.
+    composed
+        .iter()
+        .rfind(|record| matches!(record.kind, ValueKind::Constant) && key_eq(&record.key, &entry.key))
+        .is_some_and(|record| {
+            let RecordedValue::Literal(value) = &record.value;
+            element_eq(value, &entry.value, &ModifierKind::Constant)
+        })
+}
+
+/// Remove an element a `Composed` record holds and D no longer wants.
+///
+/// Whether the removal is still safe is [`revert`]'s answer, asked of `scratch`, which each
+/// reverted record also updates.
+fn retire_session_element(
+    record: &AppliedValue,
+    declared: &BTreeMap<String, &Entry>,
+    contributed: &HashSet<(String, String)>,
+    guard: &RecordGuard,
+    scratch: &mut Env,
+) -> Option<RemovalIdentity> {
+    let RecordedValue::Literal(element) = &record.value;
+    let norm = key_norm(&record.key);
+    let current = declared.get(&norm);
+    let kind = current.map_or_else(|| modifier_kind(record.kind), |declared| declared.kind.clone());
+    if contributed.contains(&(norm.clone(), element_norm(element, &kind))) {
+        return None;
+    }
+    if guard.names(&(norm, element_norm(element, &modifier_kind(record.kind)))) {
+        return None;
+    }
+    let separator = match current {
+        Some(current) => match current.kind {
+            ModifierKind::Constant => return None,
+            ModifierKind::Path => None,
+            ModifierKind::List => Some(effective_separator(current)),
+        },
+        None => match record.kind {
+            ValueKind::Path => None,
+            _ => Some(record.separator.clone().unwrap_or_else(|| DEFAULT_SEPARATOR.to_owned())),
+        },
+    };
+    matches!(revert(scratch, record), RevertOutcome::Reverted).then(|| (record.key.clone(), element.clone(), separator))
+}
+
+/// Restore a constant a `Composed` record holds and D no longer declares, to the prior it recorded.
+fn retire_session_constant(
+    record: &AppliedValue,
+    declared: &BTreeMap<String, &Entry>,
+    scratch: &mut Env,
+) -> Option<(String, Option<String>)> {
+    if is_never_constant(&record.key) || declared.contains_key(&key_norm(&record.key)) {
+        return None;
+    }
+    if !matches!(revert(scratch, record), RevertOutcome::Reverted) {
+        return None;
+    }
+    let restored = match &record.prior {
+        Some(RecordedPrior::Value(prior)) => Some(prior.clone()),
+        _ => None,
+    };
+    Some((record.key.clone(), restored))
+}
+
 /// A `PATH`-style fixture value spelled the way the platform joins one.
 ///
 /// A `:` literal is one opaque segment to `std::env::split_paths` on Windows,
@@ -508,44 +689,172 @@ fn joined(segments: &[&str]) -> String {
         .into_owned()
 }
 
+/// The session planner: which scopes the hook composes and which records it may touch.
 #[cfg(test)]
-mod tests {
+mod session_tests {
     use super::*;
 
-    fn entry(key: &str, value: &str, kind: ModifierKind, separator: Option<&str>) -> Entry {
-        Entry {
+    use ocx_config::exec_state::{
+        AppliedValue, Owner, Prior as RecordedPrior, ProjectScopeHint, RecordedValue, ScopeId,
+    };
+    use ocx_config::exec_state::{SessionSource, Truncation, ValueKind};
+
+    const OWNED: &str = "/home/u/.ocx";
+
+    fn p() -> PathBuf {
+        PathBuf::from("/work/p")
+    }
+
+    fn q() -> PathBuf {
+        PathBuf::from("/work/q")
+    }
+
+    fn project(root: PathBuf) -> Scope {
+        Scope::Project { root }
+    }
+
+    fn compose(inherited: &[Scope], cwd_project: Option<PathBuf>) -> Composition {
+        desired_composition(inherited, cwd_project.as_deref())
+    }
+
+    fn global_only() -> Composition {
+        Composition {
+            global: true,
+            project: None,
+        }
+    }
+
+    fn nothing() -> Composition {
+        Composition::default()
+    }
+
+    // -- The desired-composition table ------------------------------------------------
+
+    #[test]
+    fn inside_an_inherited_project_nothing_is_composed_global_included() {
+        assert_eq!(compose(&[project(p())], Some(p())), nothing());
+    }
+
+    #[test]
+    fn inside_an_inherited_project_with_global_inherited_too_composes_nothing() {
+        assert_eq!(compose(&[Scope::Global, project(p())], Some(p())), nothing());
+    }
+
+    #[test]
+    fn an_uninherited_project_composes_global_and_itself() {
+        assert_eq!(
+            compose(&[], Some(q())),
+            Composition {
+                global: true,
+                project: Some(q())
+            }
+        );
+    }
+
+    #[test]
+    fn an_uninherited_project_leaves_out_an_inherited_global() {
+        assert_eq!(
+            compose(&[Scope::Global], Some(q())),
+            Composition {
+                global: false,
+                project: Some(q())
+            }
+        );
+    }
+
+    #[test]
+    fn an_uninherited_project_layers_over_another_inherited_project() {
+        assert_eq!(
+            compose(&[project(p())], Some(q())),
+            Composition {
+                global: true,
+                project: Some(q())
+            }
+        );
+    }
+
+    #[test]
+    fn outside_every_project_the_global_tier_is_composed() {
+        assert_eq!(compose(&[], None), global_only());
+    }
+
+    #[test]
+    fn outside_every_project_an_inherited_global_is_not_composed_again() {
+        assert_eq!(compose(&[Scope::Global], None), nothing());
+    }
+
+    #[test]
+    fn outside_every_project_an_inherited_project_does_not_hide_the_global_tier() {
+        assert_eq!(compose(&[project(p())], None), global_only());
+    }
+
+    /// `PayloadDropped` loses the list with the payload, so an empty list re-applies every scope (C2 residual).
+    #[test]
+    fn an_empty_inherited_list_composes_every_scope() {
+        assert_eq!(
+            compose(&[], Some(p())),
+            Composition {
+                global: true,
+                project: Some(p())
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_spelling_of_an_inherited_root_is_the_same_project() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let real = std::fs::canonicalize(dir.path()).expect("the temporary directory resolves");
+        let link = real.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("a symlink to the project root");
+
+        assert_eq!(compose(&[project(real)], Some(link)), nothing());
+    }
+
+    // -- The hook writes only session data ---------------------------------------------
+
+    fn session(source: SessionSource) -> Owner {
+        Owner::Session {
+            scope: ScopeId::Project,
+            source,
+        }
+    }
+
+    fn composed() -> Owner {
+        session(SessionSource::Composed)
+    }
+
+    fn invocation() -> Owner {
+        session(SessionSource::Invocation)
+    }
+
+    fn record(key: &str, value: &str, kind: ValueKind, owner: Owner) -> AppliedValue {
+        AppliedValue {
             key: key.to_owned(),
-            value: value.to_owned(),
+            value: RecordedValue::Literal(value.to_owned()),
             kind,
-            separator: separator.map(str::to_owned),
+            separator: matches!(kind, ValueKind::List).then(|| ":".to_owned()),
+            pre_existing: false,
+            owner,
+            prior: None,
         }
     }
 
-    fn path_entry(key: &str, value: &str) -> Entry {
-        entry(key, value, ModifierKind::Path, None)
+    fn path_record(element: &str, owner: Owner) -> AppliedValue {
+        record("PATH", element, ValueKind::Path, owner)
     }
 
-    fn constant(key: &str, value: &str) -> Entry {
-        entry(key, value, ModifierKind::Constant, None)
+    fn constant_record(key: &str, value: &str, prior: RecordedPrior, owner: Owner) -> AppliedValue {
+        AppliedValue {
+            prior: Some(prior),
+            ..record(key, value, ValueKind::Constant, owner)
+        }
     }
 
-    fn project(applied: Applied, priors: Priors) -> ProjectScope {
-        ProjectScope {
-            key: "acme-1a2b".to_owned(),
-            dir: PathBuf::from("/p1"),
+    fn state_with(applied: Vec<AppliedValue>) -> ExecState {
+        ExecState {
             applied,
-            priors,
-        }
-    }
-
-    fn ledger_with_project(applied: Applied, priors: Priors) -> Ledger {
-        Ledger {
-            scopes: Scopes {
-                global: None,
-                global_priors: Priors::new(),
-                project: Some(project(applied, priors)),
-            },
-            ..Ledger::empty()
+            ..ExecState::default()
         }
     }
 
@@ -557,360 +866,649 @@ mod tests {
         env
     }
 
-    fn sep(value: &str) -> String {
-        value.to_owned()
+    fn live_path(segments: &[&str]) -> Env {
+        env_with(&[("PATH", &joined(segments))])
     }
 
-    /// Apply a [`Plan`] to an env the way the in-process path does, so a tier-1
-    /// assertion can be made against a resulting variable rather than against
-    /// the plan's own shape.
-    fn apply_in_process(env: &mut Env, plan: &Plan) {
-        for (key, element, separator) in &plan.removes {
-            let Some(existing) = env.get(key).map(std::ffi::OsString::from) else {
-                continue;
-            };
-            let updated = match separator {
-                None => ocx_util::path::remove_segment(&existing, OsStr::new(element.as_str())),
-                Some(separator) => {
-                    let existing = existing.to_string_lossy().into_owned();
-                    let kept: Vec<&str> = existing
-                        .split(separator.as_str())
-                        .filter(|part| !element_eq(part, element, &ModifierKind::List))
-                        .collect();
-                    std::ffi::OsString::from(kept.join(separator))
-                }
-            };
-            env.set(key.as_str(), updated);
+    fn owned() -> Vec<&'static Path> {
+        vec![Path::new(OWNED)]
+    }
+
+    fn plan_for(desired: &[Entry], current: &Env, state: &ExecState) -> Plan {
+        plan_session(desired, current, state, &owned())
+    }
+
+    fn removed_elements(plan: &Plan) -> Vec<&str> {
+        plan.removes.iter().map(|(_, element, _)| element.as_str()).collect()
+    }
+
+    fn path_entry(element: &str) -> Entry {
+        Entry {
+            key: "PATH".to_owned(),
+            value: element.to_owned(),
+            kind: ModifierKind::Path,
+            separator: None,
         }
-        for (key, value) in &plan.restores {
-            match value {
-                Some(value) => env.set(key.as_str(), value.as_str()),
-                None => env.remove(key),
-            }
+    }
+
+    fn constant_entry(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Constant,
+            separator: None,
         }
-        env.apply_entries(&plan.sets);
     }
 
-    fn path_segments(env: &Env) -> Vec<String> {
-        env.get("PATH")
-            .map(|value| {
-                std::env::split_paths(value)
-                    .map(|part| part.to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn is_quiet(plan: &Plan) -> bool {
+        plan.sets.is_empty() && plan.removes.is_empty() && plan.restores.is_empty()
     }
 
-    // -- C-001: LedgerEntry wire shape ------------------------------------
-
+    /// EC-LEDGER-009: a project switch retires the session's own layer before the new scope applies.
     #[test]
-    fn c001_wire_field_is_type_and_separator_is_omitted_when_none() {
-        let recorded = LedgerEntry::from(&path_entry("PATH", "/opt/bin"));
-        let json: serde_json::Value = serde_json::to_value(&recorded).expect("serialize");
-        let keys: Vec<&str> = json.as_object().expect("object").keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["key", "value", "type"]);
-        assert_eq!(json["type"], "path");
-    }
-
-    #[test]
-    fn c001_the_wrong_spelling_kind_fails_to_deserialize() {
-        let raw = r#"{"key":"PATH","value":"/a","kind":"path"}"#;
-        assert!(serde_json::from_str::<LedgerEntry>(raw).is_err());
-    }
-
-    #[test]
-    fn c001_a008_list_separator_is_always_some_and_defaults_to_a_space() {
-        let defaulted = LedgerEntry::from(&entry("GOFLAGS", "-mod=vendor", ModifierKind::List, None));
-        assert_eq!(defaulted.separator.as_deref(), Some(DEFAULT_SEPARATOR));
-        let declared = LedgerEntry::from(&entry("CLASSPATH", "/a.jar", ModifierKind::List, Some(":")));
-        assert_eq!(declared.separator.as_deref(), Some(":"));
-    }
-
-    #[test]
-    fn c001_a008_path_kind_separator_stays_none() {
-        assert!(LedgerEntry::from(&path_entry("PATH", "/opt/bin")).separator.is_none());
-        assert!(LedgerEntry::from(&constant("JAVA_HOME", "/jdk")).separator.is_none());
-    }
-
-    // -- C-003 / S-028: decode is total, every failure is "absent" ---------
-
-    // -- C-004 / A-01 / S-027: the over-cap marker -------------------------
-
-    #[test]
-    fn c004_a001_an_over_cap_scope_is_reconciled_exactly_as_an_absent_one() {
-        let marker = Ledger {
-            fp: "fp".to_owned(),
-            over_cap: vec![ScopeId::Project],
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("PATH", &joined(&["/home/u/.ocx/packages/old/bin", "/usr/bin"]))]);
-        let ocx_home = Path::new("/home/u/.ocx");
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/new/bin")];
-
-        let planned = plan(&desired, &current, &marker, &[ocx_home]);
-        assert_eq!(
-            planned.removes,
-            vec![("PATH".to_owned(), "/home/u/.ocx/packages/old/bin".to_owned(), None)]
-        );
-    }
-
-    // -- C-005 / S-042: the empty ledger -----------------------------------
-
-    #[test]
-    fn c005_s042_the_first_prompt_plans_against_an_empty_ledger_and_reverts_nothing() {
-        let empty = Ledger::empty();
-        assert_eq!(empty.v, LEDGER_VERSION);
-        assert!(empty.fp.is_empty());
-        assert!(empty.verdict.is_none());
-        assert!(empty.scopes.global.is_none() && empty.scopes.project.is_none());
-
-        let current = env_with(&[("PATH", "/usr/bin")]);
-        let desired = vec![
-            path_entry("PATH", "/home/u/.ocx/packages/new/bin"),
-            constant("JAVA_HOME", "/jdk"),
-        ];
-        let planned = plan(&desired, &current, &empty, &[Path::new("/home/u/.ocx")]);
-
-        assert!(planned.removes.is_empty());
-        assert!(planned.restores.is_empty());
-        assert_eq!(planned.sets.len(), 2);
-    }
-
-    // -- C-006 / S-021: degradation leaves constants alone ------------------
-
-    #[test]
-    fn c006_s021_a_lost_ledger_repairs_lists_subtractively_and_leaves_constants() {
-        let current = env_with(&[
-            ("PATH", &joined(&["/home/u/.ocx/packages/old/bin", "/usr/bin"])),
-            ("JAVA_HOME", "/home/u/.ocx/packages/old"),
+    fn only_session_composed_records_are_retired() {
+        let state = state_with(vec![
+            path_record("/outer/bin", Owner::Inherited),
+            path_record("/invoked/bin", invocation()),
+            path_record("/session/bin", composed()),
         ]);
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/new/bin")];
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
+        let current = live_path(&["/session/bin", "/invoked/bin", "/outer/bin"]);
 
-        assert!(planned.restores.is_empty(), "a repair never guess-unsets a constant");
-        assert_eq!(
-            planned.removes,
-            vec![("PATH".to_owned(), "/home/u/.ocx/packages/old/bin".to_owned(), None)]
-        );
-    }
+        let planned = plan_for(&[], &current, &state);
 
-    // -- C-007 / A-02 / A-03 / A-06: the forgery rules ---------------------
-
-    /// EC-LEDGER-007 — a forged `kind`: `PATH` claimed as a constant with an
-    /// attacker prior, in a shell where **no** scope declares `PATH`. Rule (b)
-    /// has no operand there, so A-02's producer rule is what closes it: ocx
-    /// never writes `PATH`/`PATHEXT` as constant-kind, so the claim is
-    /// inconsistent with its own producer and the restore never fires.
-    #[test]
-    fn c007b_a002_a_forged_path_constant_never_becomes_a_restore() {
-        let forged = ledger_with_project(
-            vec![LedgerEntry {
-                key: "PATH".to_owned(),
-                value: "/usr/bin".to_owned(),
-                kind: ModifierKind::Constant,
-                separator: None,
-            }],
-            Priors::from([("PATH".to_owned(), Prior::Value("/attacker/bin".to_owned()))]),
-        );
-        let current = env_with(&[("PATH", "/usr/bin")]);
-
-        let planned = plan(&[], &current, &forged, &[Path::new("/home/u/.ocx")]);
-        assert!(
-            planned.restores.is_empty(),
-            "PATH is never constant-kind on either direction"
-        );
-    }
-
-    #[test]
-    fn c007a_a003_a_forged_dir_still_reverts_the_recorded_scope() {
-        // `dir` is advisory: the caller has already left the scope (D no longer
-        // names JAVA_HOME), so the revert set is L-scoped regardless of what
-        // `dir` claims, and no path is ever built from it.
-        let mut ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/p1/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-        );
-        ledger.scopes.project.as_mut().expect("scope").dir = PathBuf::from("../../../etc");
-        let current = env_with(&[("JAVA_HOME", "/p1/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned()))]
-        );
-    }
-
-    /// EC-LEDGER-008 — the plan is invariant under both identity labels.
-    ///
-    /// **Not** the path-constructor guarantee its name used to claim. `plan`
-    /// reads neither `key` nor `dir` and builds no path from anything, so a
-    /// forged-`dir` assertion here is green in every state and could never red
-    /// on the code that does construct — that guard belongs beside the
-    /// constructor and lives in
-    /// `forged_dir_tests`.
-    ///
-    /// What this *can* pin, and does: a tripwire that reds the moment either
-    /// label starts selecting anything inside the planner.
-    #[test]
-    fn c007a_a003_the_identity_labels_never_select_anything_in_the_plan() {
-        let planned = |key: &str, dir: &str| {
-            let mut ledger = ledger_with_project(
-                vec![LedgerEntry::from(&constant("JAVA_HOME", "/p1/jdk"))],
-                Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-            );
-            let scope = ledger.scopes.project.as_mut().expect("scope");
-            scope.key = key.to_owned();
-            scope.dir = PathBuf::from(dir);
-            let current = env_with(&[("JAVA_HOME", "/p1/jdk"), ("PATH", "/home/u/.ocx/packages/old/bin")]);
-            serde_json::to_value(plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")])).expect("serialize")
-        };
-
-        let benign = planned("acme-1a2b", "/p1");
-        assert_eq!(
-            benign["restores"],
-            serde_json::json!([["JAVA_HOME", "/usr/lib/jvm"]]),
-            "the revert set is named by `applied`, never by the identity labels"
-        );
-        for forged in ["../../../../etc", "/etc/shadow", "..\\..\\windows", ""] {
-            assert_eq!(
-                planned(forged, forged),
-                benign,
-                "a carrier claiming key/dir {forged:?} must plan byte-identically"
-            );
-        }
-    }
-
-    /// EC-LEDGER-009 — the legitimate project switch. On **every** switch the
-    /// walk yields `/p2` while `dir` records `/p1`, so reading that mismatch as
-    /// "invalidate the scope" would discard the revert set and leak `/p1`'s
-    /// constant. A-03 reads it the other way: a mismatch means the scope has
-    /// been *left*, so its `applied` list **is** the revert set.
-    #[test]
-    fn c007a_a003_a_project_switch_reverts_before_the_new_scope_applies() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/p1/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/p1/jdk")]);
-        // The new scope declares a different variable, so JAVA_HOME is in L and
-        // not in D — exactly what leaving /p1 for /p2 looks like.
-        let desired = vec![constant("GRADLE_HOME", "/p2/gradle")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.restores, vec![("JAVA_HOME".to_owned(), None)]);
-        assert_eq!(planned.sets.len(), 1);
-        assert_eq!(planned.sets[0].key, "GRADLE_HOME");
-    }
-
-    #[test]
-    fn c007c_a006_the_documented_privilege_crossing_residual_is_pinned() {
-        // A-06: across a privilege boundary rule (c) IS an arbitrary-value
-        // primitive, because the revert set is L-scoped and never intersected
-        // with D. Asserted so a future narrowing reds this deliberately.
-        let forged = ledger_with_project(
-            vec![LedgerEntry::from(&constant("LD_PRELOAD", "/tmp/x.so"))],
-            Priors::from([("LD_PRELOAD".to_owned(), Prior::Value("/attacker/evil.so".to_owned()))]),
-        );
-        let current = env_with(&[("LD_PRELOAD", "/tmp/x.so")]);
-
-        let planned = plan(&[], &current, &forged, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.restores,
-            vec![("LD_PRELOAD".to_owned(), Some("/attacker/evil.so".to_owned()))]
-        );
-    }
-
-    #[test]
-    fn c007b_a_priors_restore_never_runs_for_a_key_d_declares_list_kind() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("GOFLAGS", "-mod=vendor"))],
-            Priors::from([("GOFLAGS".to_owned(), Prior::Value("/attacker".to_owned()))]),
-        );
-        let current = env_with(&[("GOFLAGS", "-mod=vendor")]);
-        let desired = vec![entry("GOFLAGS", "-tags=x", ModifierKind::List, Some(" "))];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
+        assert_eq!(removed_elements(&planned), vec!["/session/bin"]);
         assert!(planned.restores.is_empty());
     }
 
-    // -- C-008 / C-009 / S-024 / S-026: literal, raw, unescaped ------------
-
-    // -- C-010 / A-10: the emittability gate -------------------------------
-
-    /// EC-REC-006 — a key failing `is_valid_env_key` (`2FOO`, `A-B`) is dropped
-    /// **before** it can reach `Plan` or the ledger. Every emitter already
-    /// returns `None` for one, so without this gate L would name something no
-    /// arm can emit or remove and the revert path would carry it forever;
-    /// `L ⊆ emittable(D)` is the invariant it buys.
-    ///
-    /// EC-LIST-010 — and the same gate is where a path-kind value embedding the
-    /// platform separator dies. `export_path`'s precondition is a single
-    /// directory, so letting one through would insert two segments on apply and
-    /// remove neither on revert: permanent PATH pollution.
-    ///
-    /// A-10 puts a gate here **and** an independent one at the `[env]` parse
-    /// boundary (`project::env::parse_env_value`, `EnvPathSeparatorInValue`,
-    /// exit 65) — "independently" is the addendum's own word. Neither stands in
-    /// for the other: the parse-boundary refusal is what `ocx exec`/`ocx exec`
-    /// and the `--shell`/`direnv export` emitters see, and none of them reach
-    /// the reconciler; this gate is what a value arriving from anywhere else
-    /// meets, and it is what keeps `L ⊆ emittable(D)` true.
     #[test]
-    fn c010_a010_plan_drops_every_key_or_element_no_arm_can_emit() {
-        let current = env_with(&[("PATH", "/usr/bin")]);
-        let desired = vec![
-            path_entry("2FOO", "/opt/bin"),
-            path_entry("A-B", "/opt/bin"),
-            path_entry("PATH", &format!("/a{}/b", ocx_util::path::PATH_SEPARATOR)),
-            path_entry("LD_LIBRARY_PATH", ""),
-            entry("GOFLAGS", "", ModifierKind::List, Some(" ")),
-            entry("CFLAGS", "-O2\n-g", ModifierKind::List, Some(" ")),
-            path_entry("MANPATH", "/opt/man\r/etc"),
-            path_entry("PATH", "/opt/bin"),
-        ];
+    fn an_inherited_constant_is_never_restored() {
+        let state = state_with(vec![constant_record(
+            "JAVA_HOME",
+            "/jdk",
+            RecordedPrior::Unset,
+            Owner::Inherited,
+        )]);
 
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        let kept: Vec<(&str, &str)> = planned
-            .sets
-            .iter()
-            .map(|entry| (entry.key.as_str(), entry.value.as_str()))
-            .collect();
-        assert_eq!(kept, vec![("PATH", "/opt/bin")]);
+        let planned = plan_for(&[], &env_with(&[("JAVA_HOME", "/jdk")]), &state);
+
+        assert!(is_quiet(&planned), "{planned:?}");
     }
 
     #[test]
-    fn c010_a002_plan_refuses_a_constant_declaration_of_path() {
-        let current = env_with(&[("PATH", "/usr/bin")]);
-        let desired = vec![constant("PATH", "/attacker/bin"), constant("PATHEXT", ".EXE")];
+    fn an_invocation_constant_is_never_restored() {
+        let state = state_with(vec![constant_record(
+            "JAVA_HOME",
+            "/jdk",
+            RecordedPrior::Unset,
+            invocation(),
+        )]);
 
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        assert!(planned.sets.is_empty());
+        let planned = plan_for(&[], &env_with(&[("JAVA_HOME", "/jdk")]), &state);
+
+        assert!(is_quiet(&planned), "{planned:?}");
     }
 
     #[test]
-    fn c010_plan_reads_no_env_beyond_current() {
-        // Purity, asserted the only way a unit test can: an env that names
-        // nothing the process has must still produce the same plan.
+    fn a_composed_element_an_inherited_record_names_is_kept() {
+        let state = state_with(vec![
+            path_record("/shared/bin", Owner::Inherited),
+            path_record("/shared/bin", composed()),
+            path_record("/session/bin", composed()),
+        ]);
+        let current = live_path(&["/session/bin", "/shared/bin"]);
+
+        let planned = plan_for(&[], &current, &state);
+
+        assert_eq!(removed_elements(&planned), vec!["/session/bin"]);
+    }
+
+    #[test]
+    fn a_composed_element_an_invocation_record_names_is_kept() {
+        let state = state_with(vec![
+            path_record("/shared/bin", invocation()),
+            path_record("/shared/bin", composed()),
+        ]);
+
+        let planned = plan_for(&[], &live_path(&["/shared/bin"]), &state);
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_pre_existing_composed_element_is_kept() {
+        let state = state_with(vec![AppliedValue {
+            pre_existing: true,
+            ..path_record("/user/bin", composed())
+        }]);
+
+        let planned = plan_for(&[], &live_path(&["/user/bin"]), &state);
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_composed_element_the_desired_set_still_wants_stays() {
+        let state = state_with(vec![path_record("/session/bin", composed())]);
+
+        let planned = plan_for(&[path_entry("/session/bin")], &live_path(&["/session/bin"]), &state);
+
+        assert!(is_quiet(&planned), "{planned:?}");
+    }
+
+    /// EC-LIST-007: a list removal uses the record's own separator.
+    #[test]
+    fn a_list_element_is_removed_with_its_separator() {
+        let mut list = record("OCX_LIST", "a", ValueKind::List, composed());
+        list.separator = Some(",".to_owned());
+        let state = state_with(vec![list]);
+
+        let planned = plan_for(&[], &env_with(&[("OCX_LIST", "x,a")]), &state);
+
+        assert_eq!(
+            planned.removes,
+            vec![("OCX_LIST".to_owned(), "a".to_owned(), Some(",".to_owned()))]
+        );
+    }
+
+    /// EC-LEDGER-010: a recorded constant absent from the desired set is reverted, bounded by what it recorded.
+    #[test]
+    fn a_composed_constant_is_restored_to_its_prior() {
+        let state = state_with(vec![
+            constant_record("EDITOR", "ocx-edit", RecordedPrior::Value("vim".to_owned()), composed()),
+            constant_record("JAVA_HOME", "/jdk", RecordedPrior::Unset, composed()),
+        ]);
+        let current = env_with(&[("EDITOR", "ocx-edit"), ("JAVA_HOME", "/jdk")]);
+
+        let planned = plan_for(&[], &current, &state);
+
+        let mut restores = planned.restores.clone();
+        restores.sort();
+        assert_eq!(
+            restores,
+            vec![
+                ("EDITOR".to_owned(), Some("vim".to_owned())),
+                ("JAVA_HOME".to_owned(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_constant_changed_since_it_was_applied_is_left_alone() {
+        let state = state_with(vec![constant_record(
+            "EDITOR",
+            "ocx-edit",
+            RecordedPrior::Value("vim".to_owned()),
+            composed(),
+        )]);
+
+        let planned = plan_for(&[], &env_with(&[("EDITOR", "emacs")]), &state);
+
+        assert!(planned.restores.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_withheld_prior_is_never_restored() {
+        let state = state_with(vec![constant_record(
+            "EDITOR",
+            "ocx-edit",
+            RecordedPrior::Withheld,
+            composed(),
+        )]);
+
+        let planned = plan_for(&[], &env_with(&[("EDITOR", "ocx-edit")]), &state);
+
+        assert!(planned.restores.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_refresh_never_writes_an_element_an_invocation_record_owns() {
+        let state = state_with(vec![path_record("/invoked/bin", invocation())]);
+        let desired = [path_entry("/invoked/bin"), path_entry("/project/bin")];
+
+        let planned = plan_for(&desired, &live_path(&["/invoked/bin"]), &state);
+
+        let written: Vec<&str> = planned.sets.iter().map(|entry| entry.value.as_str()).collect();
+        assert_eq!(written, vec!["/project/bin"]);
+    }
+
+    #[test]
+    fn a_refresh_never_writes_a_key_an_invocation_record_owns() {
+        let state = state_with(vec![constant_record(
+            "MODE",
+            "invoked",
+            RecordedPrior::Unset,
+            invocation(),
+        )]);
+        let desired = [constant_entry("MODE", "project"), constant_entry("OTHER", "1")];
+
+        let planned = plan_for(&desired, &env_with(&[("MODE", "invoked")]), &state);
+
+        let written: Vec<&str> = planned.sets.iter().map(|entry| entry.key.as_str()).collect();
+        assert_eq!(written, vec!["OTHER"]);
+        assert!(planned.restores.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_settled_prompt_plans_nothing() {
+        let state = state_with(vec![
+            path_record("/session/bin", composed()),
+            constant_record("MODE", "project", RecordedPrior::Unset, composed()),
+        ]);
+        let desired = [path_entry("/session/bin"), constant_entry("MODE", "project")];
         let current = Env::clean();
-        let desired = vec![path_entry("PATH", "/opt/bin")];
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        assert!(planned.removes.is_empty());
-        assert_eq!(planned.sets.len(), 1);
+        let mut current = current;
+        current.set("PATH", joined(&["/session/bin"]));
+        current.set("MODE", "project");
+
+        let planned = plan_for(&desired, &current, &state);
+
+        assert!(is_quiet(&planned), "{planned:?}");
     }
 
-    // -- C-011 / A-23: the Plan wire shape ---------------------------------
+    #[test]
+    fn a_secret_named_constant_already_recorded_is_not_applied_again() {
+        let state = state_with(vec![constant_record(
+            "API_TOKEN",
+            "fixture-secret-value",
+            RecordedPrior::Unset,
+            composed(),
+        )]);
+        let same = [constant_entry("API_TOKEN", "fixture-secret-value")];
+        let rotated = [constant_entry("API_TOKEN", "another-secret-value")];
+        let live = env_with(&[("API_TOKEN", "fixture-secret-value")]);
+
+        assert!(plan_for(&same, &live, &state).sets.is_empty());
+        assert_eq!(plan_for(&rotated, &live, &state).sets.len(), 1);
+    }
+
+    /// A `PATH` constant record restores nothing, even where its value matches the live `PATH` byte for byte.
+    #[test]
+    fn a_session_constant_record_keyed_path_is_never_restored() {
+        let live = joined(&["/usr/bin", "/bin"]);
+        let state = state_with(vec![constant_record(
+            "PATH",
+            &live,
+            RecordedPrior::Value("/attacker-chosen-dir".to_owned()),
+            composed(),
+        )]);
+
+        let planned = plan_for(&[], &env_with(&[("PATH", &live)]), &state);
+
+        assert!(planned.restores.is_empty(), "{planned:?}");
+    }
+
+    /// A record whose value is not the live one restores nothing: the user's value stands.
+    #[test]
+    fn a_record_on_another_value_than_the_live_one_never_restores() {
+        let state = state_with(vec![constant_record(
+            "API_TOKEN",
+            "recorded-value",
+            RecordedPrior::Value("attacker-chosen-value".to_owned()),
+            composed(),
+        )]);
+
+        let planned = plan_for(&[], &env_with(&[("API_TOKEN", "fixture-secret-value")]), &state);
+
+        assert!(planned.restores.is_empty(), "{planned:?}");
+    }
+
+    /// `cd` into a project whose root is inherited: the hook's own global layer goes, the outer one stands.
+    #[test]
+    fn entering_an_inherited_project_retires_only_the_sessions_own_layer() {
+        let state = state_with(vec![
+            path_record("/outer/p/bin", Owner::Inherited),
+            path_record("/session/global/bin", composed()),
+        ]);
+        let current = live_path(&["/session/global/bin", "/outer/p/bin"]);
+
+        let planned = plan_for(&[], &current, &state);
+        let mut after = current.clone();
+        let mut after_path = after.get("PATH").map(std::ffi::OsString::from).expect("PATH is set");
+        for (_, element, _) in &planned.removes {
+            after_path = ocx_util::path::remove_segment(&after_path, OsStr::new(element));
+        }
+        after.set("PATH", after_path);
+
+        let remaining: Vec<String> = std::env::split_paths(after.get("PATH").expect("PATH is set"))
+            .map(|segment| segment.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(remaining, vec!["/outer/p/bin"]);
+    }
+
+    // -- Owned-prefix repair ------------------------------------------------------------
+
+    fn truncated(state: ExecState, truncation: Truncation) -> ExecState {
+        ExecState {
+            truncated: truncation,
+            ..state
+        }
+    }
+
+    fn stale_owned_path() -> Env {
+        live_path(&["/home/u/.ocx/packages/stale/bin", "/usr/bin"])
+    }
 
     #[test]
-    fn c011_a023_the_plan_json_carries_a_structural_v_and_ledger_entry_spelling() {
+    fn repair_strips_owned_segments_after_all_applied_dropped_with_no_inherited_scope() {
+        let state = truncated(ExecState::default(), Truncation::AllAppliedDropped);
+
+        let planned = plan_for(
+            &[path_entry("/home/u/.ocx/packages/fresh/bin")],
+            &stale_owned_path(),
+            &state,
+        );
+
+        assert_eq!(removed_elements(&planned), vec!["/home/u/.ocx/packages/stale/bin"]);
+    }
+
+    #[test]
+    fn repair_waits_while_an_inherited_scope_is_known() {
+        let mut state = truncated(ExecState::default(), Truncation::AllAppliedDropped);
+        state.inherited_scopes = vec![project(p())];
+
+        let planned = plan_for(
+            &[path_entry("/home/u/.ocx/packages/fresh/bin")],
+            &stale_owned_path(),
+            &state,
+        );
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn repair_never_runs_after_the_payload_was_dropped() {
+        let state = truncated(ExecState::default(), Truncation::PayloadDropped);
+
+        let planned = plan_for(
+            &[path_entry("/home/u/.ocx/packages/fresh/bin")],
+            &stale_owned_path(),
+            &state,
+        );
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn repair_never_runs_when_only_inherited_records_were_dropped() {
+        let state = truncated(ExecState::default(), Truncation::InheritedDropped);
+
+        let planned = plan_for(
+            &[path_entry("/home/u/.ocx/packages/fresh/bin")],
+            &stale_owned_path(),
+            &state,
+        );
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    /// EC-LIST-009: ownership is component-wise, so a directory that only shares a byte prefix survives.
+    #[test]
+    fn repair_keeps_a_lookalike_prefix_of_an_owned_directory() {
+        let state = truncated(ExecState::default(), Truncation::AllAppliedDropped);
+        let lookalike = format!("{OWNED}-backup/x/bin");
+        let current = live_path(&[lookalike.as_str(), "/home/u/.ocx/packages/stale/bin", "/usr/bin"]);
+
+        let planned = plan_for(&[path_entry("/home/u/.ocx/packages/fresh/bin")], &current, &state);
+
+        assert_eq!(removed_elements(&planned), vec!["/home/u/.ocx/packages/stale/bin"]);
+    }
+
+    /// EC-LIST-011: a symlinked `$OCX_HOME` owns its resolved spelling too, so a stale element spelled through it is repaired.
+    #[cfg(unix)]
+    #[test]
+    fn repair_strips_an_element_spelled_through_the_resolved_ocx_home() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let real = std::fs::canonicalize(dir.path())
+            .expect("the temporary directory resolves")
+            .join("real");
+        std::fs::create_dir(&real).expect("the real home");
+        let link = real.parent().expect("a parent").join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("a symlink to the real home");
+        let stale = real.join("packages/old/bin");
+        let state = truncated(ExecState::default(), Truncation::AllAppliedDropped);
+        let current = live_path(&[stale.to_str().expect("utf-8"), "/usr/bin"]);
+
+        let planned = plan_session(&[path_entry("/fresh/bin")], &current, &state, &[link.as_path()]);
+
+        assert_eq!(removed_elements(&planned), vec![stale.to_str().expect("utf-8")]);
+    }
+
+    /// An absent state is a fresh follow-cwd session: an unrecorded element is an outer frame's value.
+    #[test]
+    fn an_absent_state_repairs_nothing() {
+        let planned = plan_for(
+            &[path_entry("/home/u/.ocx/packages/fresh/bin")],
+            &stale_owned_path(),
+            &ExecState::default(),
+        );
+
+        assert!(planned.removes.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn repair_never_removes_an_element_an_inherited_record_names() {
+        let state = truncated(
+            state_with(vec![path_record("/home/u/.ocx/packages/outer/bin", Owner::Inherited)]),
+            Truncation::AllAppliedDropped,
+        );
+        let current = live_path(&[
+            "/home/u/.ocx/packages/outer/bin",
+            "/home/u/.ocx/packages/stale/bin",
+            "/usr/bin",
+        ]);
+
+        let planned = plan_for(&[path_entry("/home/u/.ocx/packages/fresh/bin")], &current, &state);
+
+        assert_eq!(removed_elements(&planned), vec!["/home/u/.ocx/packages/stale/bin"]);
+    }
+
+    #[test]
+    fn repair_keeps_what_the_desired_set_contributes() {
+        let state = truncated(ExecState::default(), Truncation::AllAppliedDropped);
+        let current = live_path(&["/home/u/.ocx/packages/fresh/bin", "/home/u/.ocx/packages/stale/bin"]);
+
+        let planned = plan_for(&[path_entry("/home/u/.ocx/packages/fresh/bin")], &current, &state);
+
+        assert_eq!(removed_elements(&planned), vec!["/home/u/.ocx/packages/stale/bin"]);
+    }
+
+    #[test]
+    fn the_gate_is_exactly_all_applied_dropped_with_no_inherited_scope() {
+        let allowed = |truncation, scopes: Vec<Scope>| {
+            let mut state = truncated(ExecState::default(), truncation);
+            state.inherited_scopes = scopes;
+            may_repair_owned_prefixes(&state)
+        };
+
+        assert!(allowed(Truncation::AllAppliedDropped, Vec::new()));
+        assert!(!allowed(Truncation::AllAppliedDropped, vec![Scope::Global]));
+        assert!(!allowed(Truncation::PayloadDropped, Vec::new()));
+        assert!(!allowed(Truncation::InheritedDropped, Vec::new()));
+        assert!(!allowed(Truncation::None, Vec::new()));
+    }
+
+    /// A hook shell carries `OCX_HOME` from setup's files; the received `h` plays no part.
+    #[test]
+    fn a_received_home_changes_nothing() {
+        let state = truncated(
+            state_with(vec![path_record("/session/bin", composed())]),
+            Truncation::AllAppliedDropped,
+        );
+        let hostile = ExecState {
+            home: Some(PathBuf::from("/home/u")),
+            ..state.clone()
+        };
+        let desired = [path_entry("/home/u/.ocx/packages/fresh/bin")];
+        let current = live_path(&["/session/bin", "/home/u/.ocx/packages/stale/bin"]);
+
+        let honest = plan_for(&desired, &current, &state);
+        let plan_with_home = plan_for(&desired, &current, &hostile);
+
+        assert_eq!(honest.removes, plan_with_home.removes);
+        assert_eq!(honest.restores, plan_with_home.restores);
+        assert_eq!(honest.sets.len(), plan_with_home.sets.len());
+    }
+
+    // -- the change summary over the execution state --------------------------------------------
+
+    fn summary_plan(desired: &[Entry], current: &Env, state: &ExecState) -> Plan {
+        plan_for(desired, current, state)
+    }
+
+    fn with_project_hint(mut state: ExecState, dir: &str) -> ExecState {
+        state.session.project = Some(ProjectScopeHint {
+            key: "0123456789abcdef".to_owned(),
+            dir: PathBuf::from(dir),
+        });
+        state
+    }
+
+    /// A session record the previous prompt held and this one does not is `-`; a new one is `+`.
+    #[test]
+    fn the_session_summary_marks_added_and_removed_session_keys() {
+        let previous = state_with(vec![constant_record(
+            "OLD_KEY",
+            "old",
+            RecordedPrior::Unset,
+            composed(),
+        )]);
+        let next = state_with(vec![constant_record(
+            "NEW_KEY",
+            "new",
+            RecordedPrior::Unset,
+            composed(),
+        )]);
+        let desired = [constant_entry("NEW_KEY", "new")];
+        let current = env_with(&[("OLD_KEY", "old")]);
+        let planned = summary_plan(&desired, &current, &previous);
+
+        let line = session_summary(&planned, &previous, &next, &Theme::new(false)).expect("a change is summarised");
+
+        assert_eq!(line, "ocx: +NEW_KEY -OLD_KEY");
+    }
+
+    /// An inherited record is the outer frame's: a key only it holds is new to this shell when the session sets it.
+    #[test]
+    fn the_session_summary_ignores_inherited_records() {
+        let previous = state_with(vec![constant_record(
+            "OUTER_KEY",
+            "outer",
+            RecordedPrior::Unset,
+            Owner::Inherited,
+        )]);
+        let next = state_with(vec![
+            constant_record("OUTER_KEY", "outer", RecordedPrior::Unset, Owner::Inherited),
+            constant_record("OUTER_KEY", "mine", RecordedPrior::Unset, composed()),
+        ]);
+        let current = env_with(&[("OUTER_KEY", "outer")]);
+        let planned = summary_plan(&[constant_entry("OUTER_KEY", "mine")], &current, &previous);
+        assert!(
+            !planned.sets.is_empty(),
+            "the fixture must set the key, or the mark below is vacuous"
+        );
+
+        let line = session_summary(&planned, &previous, &next, &Theme::new(false)).expect("a change is summarised");
+
+        assert_eq!(
+            line, "ocx: +OUTER_KEY",
+            "counting the inherited record would mark it '~'"
+        );
+    }
+
+    /// A switch to another project names it; the directory comes from the state, so control characters go.
+    #[test]
+    fn the_session_summary_names_the_project_it_switched_to_and_strips_the_state_text() {
+        let previous = with_project_hint(state_with(Vec::new()), "/work/one");
+        let next = with_project_hint(state_with(Vec::new()), "/work/two\u{1b}[31mred");
+        let desired = [constant_entry("KEY", "value")];
+        let planned = summary_plan(&desired, &env_with(&[]), &previous);
+
+        let line = session_summary(&planned, &previous, &next, &Theme::new(false)).expect("a change is summarised");
+
+        assert_eq!(line, "ocx: +KEY (two[31mred)");
+    }
+
+    // -- a shadowed constant is applied again once its shadow retires ---------------------------
+
+    fn scoped(scope: ScopeId) -> Owner {
+        Owner::Session {
+            scope,
+            source: SessionSource::Composed,
+        }
+    }
+
+    /// The project scope shadowed the global constant; leaving the project must write the global value back.
+    #[test]
+    fn leaving_a_project_that_shadowed_a_global_constant_writes_the_global_value_back() {
+        let state = state_with(vec![
+            constant_record("SHARED", "global", RecordedPrior::Unset, scoped(ScopeId::Global)),
+            constant_record(
+                "SHARED",
+                "project",
+                RecordedPrior::Value("global".to_owned()),
+                scoped(ScopeId::Project),
+            ),
+        ]);
+        let current = env_with(&[("SHARED", "project")]);
+
+        let plan = plan_for(&[constant_entry("SHARED", "global")], &current, &state);
+
+        assert_eq!(
+            plan.sets.iter().map(|entry| entry.value.as_str()).collect::<Vec<_>>(),
+            ["global"],
+            "the newest record for the key says `project`, so `global` is not applied"
+        );
+        assert!(
+            plan.restores.is_empty(),
+            "the key is still declared, so nothing is restored"
+        );
+    }
+
+    /// The control: when the newest record already holds the desired value nothing is written again.
+    #[test]
+    fn a_constant_the_newest_record_already_holds_is_not_written_again() {
+        let state = state_with(vec![
+            constant_record("SHARED", "global", RecordedPrior::Unset, scoped(ScopeId::Global)),
+            constant_record(
+                "SHARED",
+                "project",
+                RecordedPrior::Value("global".to_owned()),
+                scoped(ScopeId::Project),
+            ),
+        ]);
+        let current = env_with(&[("SHARED", "project")]);
+
+        let plan = plan_for(&[constant_entry("SHARED", "project")], &current, &state);
+
+        assert!(plan.sets.is_empty(), "got: {:?}", plan.sets);
+    }
+}
+
+/// The `Plan` wire shape and the comparison rules the planner shares.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    fn entry(key: &str, value: &str, kind: ModifierKind, separator: Option<&str>) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind,
+            separator: separator.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_plan_json_carries_a_structural_v_and_the_type_spelling() {
         let planned = Plan {
             v: PLAN_VERSION,
             sets: vec![
-                path_entry("PATH", "/opt/bin"),
+                entry("PATH", "/opt/bin", ModifierKind::Path, None),
                 entry("CFLAGS", "-O2", ModifierKind::List, None),
             ],
             removes: vec![
                 ("PATH".to_owned(), "/old/bin".to_owned(), None),
-                ("CFLAGS".to_owned(), "-g".to_owned(), Some(sep(" "))),
+                ("CFLAGS".to_owned(), "-g".to_owned(), Some(" ".to_owned())),
             ],
             restores: vec![
                 ("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned())),
@@ -930,215 +1528,9 @@ mod tests {
         assert_eq!(json["restores"][1], serde_json::json!(["GRADLE_HOME", null]));
     }
 
-    // -- C-012 / S-021: the repair gesture ---------------------------------
-
-    // -- C-013 / A-07: apply is routed per kind ----------------------------
-
-    /// EC-LIST-007 — the removal side mirrors the apply side for a list with no
-    /// declared separator, both while D still names the key and once D has gone
-    /// entirely. A-08 is what makes that possible: the ledger records the
-    /// **effective** separator at write time (asserted by
-    /// [`c001_a008_list_separator_is_always_some_and_defaults_to_a_space`]), so
-    /// `None` never has to be guessed back into one and stays reserved for
-    /// path-kind.
+    /// The settle compare is [`element_eq`]'s, applied per segment, not `==` on the raw whole value.
     #[test]
-    fn c013_a007_list_kind_keeps_the_whole_contribution_and_its_effective_separator() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&entry(
-                "GOFLAGS",
-                "-mod=vendor -tags=old",
-                ModifierKind::List,
-                None,
-            ))],
-            Priors::new(),
-        );
-        let current = env_with(&[("GOFLAGS", "-mod=vendor -tags=old")]);
-        let desired = vec![entry("GOFLAGS", "-mod=vendor -tags=new", ModifierKind::List, None)];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![(
-                "GOFLAGS".to_owned(),
-                "-mod=vendor -tags=old".to_owned(),
-                Some(sep(DEFAULT_SEPARATOR))
-            )],
-            "the contribution is opaque and rides its effective separator"
-        );
-
-        // Leaving the scope outright: D declares nothing, so the separator can
-        // only come from L's recorded *effective* value. A `None` here would
-        // mean the platform PATH separator, and the element would be
-        // permanently unremovable — joined on a space, split on `:`.
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![(
-                "GOFLAGS".to_owned(),
-                "-mod=vendor -tags=old".to_owned(),
-                Some(sep(DEFAULT_SEPARATOR))
-            )],
-            "with D gone, the removal still mirrors the apply side"
-        );
-    }
-
-    #[test]
-    fn c013_a008_a_non_default_separator_rides_the_removal() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&entry(
-                "CLASSPATH",
-                "/old.jar",
-                ModifierKind::List,
-                Some(":"),
-            ))],
-            Priors::new(),
-        );
-        let current = env_with(&[("CLASSPATH", "/old.jar")]);
-        let desired = vec![entry("CLASSPATH", "/new.jar", ModifierKind::List, Some(":"))];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.removes[0].2.as_deref(), Some(":"));
-    }
-
-    #[test]
-    fn c013_absence_is_not_an_error_when_the_element_is_already_gone() {
-        let ledger = ledger_with_project(vec![LedgerEntry::from(&path_entry("PATH", "/gone/bin"))], Priors::new());
-        let current = env_with(&[("PATH", "/usr/bin")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.removes.len(), 1, "a delete-if-found removal is still planned");
-    }
-
-    // -- C-015 rule 0: the path/list apply gate, the fixed point ------------
-
-    /// The property the whole per-prompt design rests on: applying a plan and
-    /// re-planning against the result yields **nothing**. Without it every
-    /// prompt re-runs the emitted `PATH` surgery forever
-    /// ([ocx-sh/ocx#342](https://github.com/ocx-sh/ocx/issues/342)).
-    #[test]
-    fn c015_rule0_a_second_pass_over_an_applied_plan_emits_nothing() {
-        let desired = vec![
-            path_entry("PATH", "/ocx/a/bin"),
-            path_entry("PATH", "/ocx/b/bin"),
-            entry("PERL5LIB", "/ocx/a/lib", ModifierKind::List, Some(":")),
-            constant("JAVA_HOME", "/ocx/jdk"),
-        ];
-        let mut current = env_with(&[("PATH", &joined(&["/usr/bin", "/bin"])), ("PERL5LIB", "/site/lib")]);
-        let owned = [Path::new("/ocx")];
-
-        let first = plan(&desired, &current, &Ledger::empty(), &owned);
-        assert_eq!(first.sets.len(), 4, "the first pass applies everything");
-        apply_in_process(&mut current, &first);
-        assert_eq!(
-            path_segments(&current),
-            vec!["/ocx/b/bin", "/ocx/a/bin", "/usr/bin", "/bin"]
-        );
-
-        // The ledger a real second prompt would carry.
-        let ledger = ledger_with_project(
-            desired.iter().map(LedgerEntry::from).collect(),
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        let second = plan(&desired, &current, &ledger, &owned);
-        assert!(
-            second.sets.is_empty() && second.removes.is_empty() && second.restores.is_empty(),
-            "a settled prompt must emit nothing, got {second:?}"
-        );
-    }
-
-    /// The red half of the pair above: a path key whose fold would move settles
-    /// nothing, so a genuine change still applies.
-    #[test]
-    fn c015_rule0_a_path_key_whose_fold_would_move_still_applies() {
-        let desired = vec![path_entry("PATH", "/ocx/a/bin"), path_entry("PATH", "/ocx/b/bin")];
-        let ledger = ledger_with_project(desired.iter().map(LedgerEntry::from).collect(), Priors::new());
-
-        // Emission order is a-then-b, so the settled head is b-then-a. Reversed
-        // here — the user's `PATH` edit — which the next prompt must repair.
-        let current = env_with(&[("PATH", &joined(&["/ocx/a/bin", "/ocx/b/bin", "/usr/bin"]))]);
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/ocx")]);
-        assert_eq!(planned.sets.len(), 2, "a moved head re-applies both entries");
-    }
-
-    /// Settling is per key: a `PATH` that is already folded does not silence a
-    /// sibling list key that is not.
-    #[test]
-    fn c015_rule0_settling_is_per_key_not_per_plan() {
-        let desired = vec![
-            path_entry("PATH", "/ocx/a/bin"),
-            entry("PERL5LIB", "/ocx/a/lib", ModifierKind::List, Some(":")),
-        ];
-        let ledger = ledger_with_project(desired.iter().map(LedgerEntry::from).collect(), Priors::new());
-        let current = env_with(&[
-            ("PATH", &joined(&["/ocx/a/bin", "/usr/bin"])),
-            ("PERL5LIB", "/site/lib"),
-        ]);
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/ocx")]);
-        let keys: Vec<&str> = planned.sets.iter().map(|entry| entry.key.as_str()).collect();
-        assert_eq!(keys, vec!["PERL5LIB"]);
-    }
-
-    /// Rule 1's operand is the ledger, never the live value: with an empty
-    /// ledger a constant is claimed even though C already equals D. This is the
-    /// *ledger* half of the pair — rule 0's constant exclusion is asserted by
-    /// `c015_rule0_a_constant_key_never_settles_from_the_live_environment`,
-    /// which needs a path/list candidate on the same key to reach the guard.
-    #[test]
-    fn c015_rule1_a_constant_compares_against_the_ledger_not_the_live_environment() {
-        let desired = vec![constant("JAVA_HOME", "/ocx/jdk")];
-        // The live value already equals D, but the ledger says ocx never wrote
-        // it — the user typed it. A-04's coincidence rule claims it once.
-        let current = env_with(&[("JAVA_HOME", "/ocx/jdk")]);
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/ocx")]);
-        assert_eq!(planned.sets.len(), 1);
-    }
-
-    /// Rule 0's constant exclusion, reached where it can actually run: a key
-    /// carrying **both** a list contribution and a constant, which `Env`'s own
-    /// `apply_entries_mixed_kinds_on_one_key_follow_vector_order` pins as a real
-    /// composition state. `current` is the exact sandwich the fold produces, so
-    /// without `settled_keys`' constant guard the key settles from the live
-    /// environment and both list entries vanish — the mid-session-override
-    /// clobber rule 1's ledger comparison exists to prevent.
-    ///
-    /// The guard is unreachable without a path/list candidate on the same key:
-    /// `settled_keys` returns early on an empty candidate set, which is why the
-    /// single-constant test above cannot assert this.
-    #[test]
-    fn c015_rule0_a_constant_key_never_settles_from_the_live_environment() {
-        let desired = vec![
-            entry("OPTS", "-first", ModifierKind::List, Some(" ")),
-            constant("OPTS", "-replaced"),
-            entry("OPTS", "-last", ModifierKind::List, Some(" ")),
-        ];
-        // What folding `desired` into this env produces, byte for byte: the
-        // constant clears what came before it, then `-last` appends. So the
-        // whole-value compare says "settled" and only the guard says otherwise.
-        let current = env_with(&[("OPTS", "-replaced -last")]);
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/ocx")]);
-        let values: Vec<&str> = planned.sets.iter().map(|entry| entry.value.as_str()).collect();
-        assert_eq!(
-            values,
-            vec!["-first", "-replaced", "-last"],
-            "a key any scope declares constant settles from the ledger, never from C"
-        );
-    }
-
-    /// The settle compare is [`element_eq`]'s, applied per segment — **not**
-    /// `==` on the raw whole value.
-    ///
-    /// Asserted on the operand pair Windows actually produces, so the rule is
-    /// checkable on every host: `apply_entries` re-joins segments that came
-    /// out of `std::env::split_paths`, which unquotes on Windows, so the folded
-    /// value is the unquoted spelling of a live value that still carries its
-    /// quotes. Under a byte-exact compare that key never settles and #342 stays
-    /// open there; under A-19's rule it settles, which is what the emitted pwsh
-    /// arm — retaining `$_` byte for byte — would actually do.
-    #[test]
-    fn c015_rule0_the_settle_compare_is_a019s_not_byte_exact() {
+    fn the_settle_compare_is_not_byte_exact() {
         let folded = std::ffi::OsString::from(["/ocx/a/bin", "/program files/x"].join(ocx_util::path::PATH_SEPARATOR));
         let live =
             std::ffi::OsString::from(["/ocx/a/bin", "\"/program files/x\""].join(ocx_util::path::PATH_SEPARATOR));
@@ -1148,8 +1540,6 @@ mod tests {
             "a retained segment that differs only by one quote pair is settled"
         );
 
-        // The red half: a segment that genuinely moved is never settled, and a
-        // list value keeps the byte-exact rule its opaque elements require (E5).
         let moved = std::ffi::OsString::from(["/program files/x", "/ocx/a/bin"].join(ocx_util::path::PATH_SEPARATOR));
         assert!(!value_settled(Some(&moved), Some(&live), &ModifierKind::Path));
         assert!(!value_settled(Some(&folded), Some(&live), &ModifierKind::List));
@@ -1157,586 +1547,8 @@ mod tests {
         assert!(value_settled(None, None, &ModifierKind::Path));
     }
 
-    /// The same defect end to end, on the platform that has it: a `PATH` whose
-    /// retained segment is quoted settles, so a second prompt emits nothing.
-    ///
-    /// Windows-only because the asymmetry is: `std::env::split_paths` strips the
-    /// quotes there and nowhere else. The rule the assertion rests on is
-    /// asserted on every host by
-    /// `c015_rule0_the_settle_compare_is_a019s_not_byte_exact`.
-    #[cfg(windows)]
     #[test]
-    fn c015_rule0_a_quoted_retained_segment_settles_on_windows() {
-        let desired = vec![path_entry("PATH", r"C:\ocx\a\bin")];
-        let ledger = ledger_with_project(desired.iter().map(LedgerEntry::from).collect(), Priors::new());
-        let live = [r"C:\ocx\a\bin", r#""C:\Program Files\x""#].join(ocx_util::path::PATH_SEPARATOR);
-        let current = env_with(&[("PATH", live.as_str())]);
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new(r"C:\ocx")]);
-        assert!(
-            planned.sets.is_empty(),
-            "the fold is already live; a quote pair on a retained segment is not a change, got {planned:?}"
-        );
-    }
-
-    // -- C-015 / A-05: constant apply and revert ---------------------------
-
-    #[test]
-    fn c015_rule1_an_unchanged_constant_is_not_re_set() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        // The user overrode it mid-session; D is unchanged, so ocx leaves C alone.
-        let current = env_with(&[("JAVA_HOME", "/my/own/jdk")]);
-        let desired = vec![constant("JAVA_HOME", "/jdk")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert!(planned.sets.is_empty());
-    }
-
-    #[test]
-    fn c015_rule1_a_changed_constant_is_set() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk17"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/jdk17")]);
-        let desired = vec![constant("JAVA_HOME", "/jdk21")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.sets.len(), 1);
-        assert_eq!(planned.sets[0].value, "/jdk21");
-    }
-
-    #[test]
-    fn c015_rule2_the_exit_guard_refuses_to_clobber_a_mid_session_override() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/my/own/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert!(planned.restores.is_empty());
-    }
-
-    /// EC-CONST-008 — the whole `export JAVA_HOME=` journey in one pass.
-    /// Capture reads set-ness, so a set-but-empty variable is `Value("")` and
-    /// never collapses into `Unset`; leaving therefore emits that arm's
-    /// `export_constant(key, "")` and never an `unset` — the difference a bash
-    /// `[ -z "${JAVA_HOME+x}" ]` sees. The cheapest place a `filter` or an
-    /// `unwrap_or_default` on the read side gets it wrong.
-    #[test]
-    fn c015_a005_a_set_but_empty_prior_restores_the_empty_value_and_never_unsets() {
-        let applied = vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk"))];
-        let priors = capture_priors(&applied, &env_with(&[("JAVA_HOME", "")]), None);
-        assert_eq!(
-            priors.get("JAVA_HOME"),
-            Some(&Prior::Value(String::new())),
-            "a set-but-empty variable captures as Value(\"\"), never as Unset"
-        );
-
-        let ledger = ledger_with_project(applied, priors);
-        let current = env_with(&[("JAVA_HOME", "/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.restores, vec![("JAVA_HOME".to_owned(), Some(String::new()))]);
-    }
-
-    #[test]
-    fn c015_a005_capture_reads_set_ness_never_truthiness() {
-        let applied = vec![
-            LedgerEntry::from(&constant("EMPTY_HOME", "/jdk")),
-            LedgerEntry::from(&constant("ABSENT_HOME", "/jdk")),
-        ];
-        let current = env_with(&[("EMPTY_HOME", "")]);
-
-        let priors = capture_priors(&applied, &current, None);
-        assert_eq!(priors.get("EMPTY_HOME"), Some(&Prior::Value(String::new())));
-        assert_eq!(priors.get("ABSENT_HOME"), Some(&Prior::Unset));
-    }
-
-    #[test]
-    fn c015_rule3_a_prior_is_re_captured_when_the_current_value_is_not_ours() {
-        let previous = project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk17"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        // The user set it by hand; the next compose must not later unset it.
-        let current = env_with(&[("JAVA_HOME", "/my/own/jdk")]);
-        let applied = vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk21"))];
-
-        let priors = capture_priors(
-            &applied,
-            &current,
-            Some((previous.applied.as_slice(), &previous.priors)),
-        );
-        assert_eq!(
-            priors.get("JAVA_HOME"),
-            Some(&Prior::Value("/my/own/jdk".to_owned())),
-            "rule 3: C != L.applied re-captures the prior"
-        );
-    }
-
-    #[test]
-    fn c015_rule3_a_prior_survives_a_recompose_that_did_not_change_the_value() {
-        let previous = project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk17"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/jdk17")]);
-        let applied = vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk17"))];
-
-        let priors = capture_priors(
-            &applied,
-            &current,
-            Some((previous.applied.as_slice(), &previous.priors)),
-        );
-        assert_eq!(priors.get("JAVA_HOME"), Some(&Prior::Value("/usr/lib/jvm".to_owned())));
-    }
-
-    /// EC-CONST-006 — re-capture and the coincidence rule compose, and the
-    /// composition is permanent: a prior that was `Unset` before the shell ever
-    /// entered the project becomes the value the user typed, so **leaving sets
-    /// it** rather than removing it. Pinned deliberately so nobody later
-    /// "fixes" the restore into an unset and reintroduces the clobber the rule
-    /// exists to prevent.
-    #[test]
-    fn c015_rule4_a_coincidence_is_claimed_silently_with_the_typed_value_as_prior() {
-        let previous = project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk17"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        // C != L, but the user typed exactly what D wants.
-        let current = env_with(&[("JAVA_HOME", "/jdk21")]);
-        let applied = vec![LedgerEntry::from(&constant("JAVA_HOME", "/jdk21"))];
-
-        let priors = capture_priors(
-            &applied,
-            &current,
-            Some((previous.applied.as_slice(), &previous.priors)),
-        );
-        assert_eq!(priors.get("JAVA_HOME"), Some(&Prior::Value("/jdk21".to_owned())));
-
-        let planned = plan(
-            &[],
-            &current,
-            &ledger_with_project(applied, priors),
-            &[Path::new("/home/u/.ocx")],
-        );
-        assert_eq!(
-            planned.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/jdk21".to_owned()))],
-            "leaving sets the coincidence value; it never unsets what the user typed"
-        );
-    }
-
-    #[test]
-    fn c015_only_constants_get_priors() {
-        let applied = vec![
-            LedgerEntry::from(&path_entry("PATH", "/opt/bin")),
-            LedgerEntry::from(&entry("CFLAGS", "-O2", ModifierKind::List, None)),
-        ];
-        assert!(capture_priors(&applied, &env_with(&[("PATH", "/usr/bin")]), None).is_empty());
-    }
-
-    #[test]
-    fn c015_c006_a_constant_with_no_recorded_prior_is_left_in_place() {
-        // "Restore its recorded prior" has no operand without one, and C-006
-        // forbids guess-unsetting a constant. Both prior maps are empty here -
-        // the shape an older carrier written before `global_priors` existed
-        // decodes to - so this is the retirement outcome.
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&constant("JAVA_HOME", "/global/jdk"))]),
-                global_priors: Priors::new(),
-                project: None,
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("JAVA_HOME", "/global/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert!(planned.restores.is_empty());
-    }
-
-    // -- C-016 / A-09: the retirement rule ---------------------------------
-
-    /// The named red state of §7.6's assigned fault injection: making the list
-    /// repair additive leaves the stale digest directory on PATH.
-    #[test]
-    fn c016_a_digest_bump_leaves_zero_stale_package_directories_on_path() {
-        let old = "/home/u/.ocx/packages/ghcr.io/acme/tool/aaaa/bin";
-        let new = "/home/u/.ocx/packages/ghcr.io/acme/tool/bbbb/bin";
-        let mut current = env_with(&[("PATH", &joined(&[old, "/usr/bin"]))]);
-        let desired = vec![path_entry("PATH", new)];
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        apply_in_process(&mut current, &planned);
-
-        let segments = path_segments(&current);
-        assert_eq!(
-            segments.iter().filter(|segment| segment.as_str() == old).count(),
-            0,
-            "the stale digest directory must not survive the repair"
-        );
-        assert_eq!(segments, vec![new.to_owned(), "/usr/bin".to_owned()]);
-    }
-
-    /// EC-LIST-009 — prefix ownership is `Path::starts_with` (component
-    /// boundary), never `str::starts_with`. A byte-prefix test claims
-    /// `/home/u/.ocx-backup/bin` as ocx's and deletes a foreign element: the
-    /// sibling-typosquat class the trust-whitelist research names for path
-    /// grants, reappearing inside the reconciler.
-    #[test]
-    fn c016_a009_ownership_is_component_wise_so_a_lookalike_prefix_survives() {
-        let mut current = env_with(&[(
-            "PATH",
-            &joined(&[
-                "/home/u/.ocx-backup/bin",
-                "/home/u/.ocxevil/bin",
-                "/home/u/.ocx/packages/old/bin",
-                "/usr/bin",
-            ]),
-        )]);
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/new/bin")];
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        apply_in_process(&mut current, &planned);
-
-        let segments = path_segments(&current);
-        assert!(segments.contains(&"/home/u/.ocx-backup/bin".to_owned()));
-        assert!(segments.contains(&"/home/u/.ocxevil/bin".to_owned()));
-        assert!(!segments.contains(&"/home/u/.ocx/packages/old/bin".to_owned()));
-    }
-
-    /// EC-LIST-011 — `$OCX_HOME` behind a symlink. The caller hands in the link,
-    /// the `PATH` element carries the resolved spelling, and the ledger is lost,
-    /// so the C-006 repair is the only thing that can retire ocx's own stale
-    /// directory. Against a single-spelling ownership test the segment is
-    /// foreign and survives
-    /// ([ocx-sh/ocx#350](https://github.com/ocx-sh/ocx/issues/350)).
-    #[test]
-    #[cfg(unix)]
-    fn c016_a009_a_symlinked_ocx_home_owns_its_resolved_spelling_too() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let real = tmp.path().join("ocx-real");
-        let link = tmp.path().join("ocx-link");
-        std::fs::create_dir_all(real.join("packages/old/bin")).expect("stale package directory");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink $OCX_HOME");
-
-        // From `canonicalize`, not from `real`: the tempdir root can itself be a
-        // link (macOS spells `/var` as `/private/var`), and the element has to
-        // carry the spelling a resolving writer would have produced.
-        let stale = std::fs::canonicalize(real.join("packages/old/bin")).expect("resolve");
-        let wanted = link.join("packages/new/bin");
-
-        let mut current = env_with(&[("PATH", &format!("{}:/usr/bin", stale.display()))]);
-        let desired = vec![path_entry("PATH", wanted.to_str().expect("utf-8 tempdir"))];
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[link.as_path()]);
-        apply_in_process(&mut current, &planned);
-
-        // Asserted as the whole list, not as a `!contains`: a negative alone
-        // also passes when the operand could never have matched.
-        assert_eq!(
-            path_segments(&current),
-            vec![wanted.to_string_lossy().into_owned(), "/usr/bin".to_owned()],
-            "a segment under the resolved $OCX_HOME is ocx's own and must be retired"
-        );
-    }
-
-    #[test]
-    fn c016_a009_the_removal_operand_is_the_segment_as_it_appears_in_current() {
-        // A trailing slash makes C's spelling differ from anything D or L knows;
-        // naming the observed segment verbatim is what makes the removal land.
-        let mut current = env_with(&[("PATH", &joined(&["/home/u/.ocx/packages/old/bin/", "/usr/bin"]))]);
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/new/bin")];
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        assert_eq!(planned.removes[0].1, "/home/u/.ocx/packages/old/bin/");
-
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            path_segments(&current)
-                .iter()
-                .filter(|segment| segment.starts_with("/home/u/.ocx/packages/old"))
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    fn c016_an_arbitrary_element_is_retired_only_where_the_ledger_records_it() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&path_entry("PATH", "/opt/project/bin"))],
-            Priors::new(),
-        );
-        let mut current = env_with(&[("PATH", &joined(&["/opt/project/bin", "/opt/foreign/bin", "/usr/bin"]))]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        apply_in_process(&mut current, &planned);
-
-        let segments = path_segments(&current);
-        assert!(!segments.contains(&"/opt/project/bin".to_owned()));
-        assert!(segments.contains(&"/opt/foreign/bin".to_owned()));
-    }
-
-    #[test]
-    fn c016_a_still_desired_element_is_never_retired() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&path_entry("PATH", "/opt/project/bin"))],
-            Priors::new(),
-        );
-        let current = env_with(&[("PATH", &joined(&["/opt/project/bin", "/usr/bin"]))]);
-        let desired = vec![path_entry("PATH", "/opt/project/bin")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert!(planned.removes.is_empty());
-    }
-
-    #[test]
-    fn c016_a_global_element_is_retired_mid_session_under_a_live_project() {
-        // `ocx remove --global foo` from another terminal: global's L entry
-        // survives, D no longer names it, the project scope is untouched.
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&path_entry(
-                    "PATH",
-                    "/home/u/.ocx/packages/global/bin",
-                ))]),
-                global_priors: Priors::new(),
-                project: Some(project(
-                    vec![LedgerEntry::from(&path_entry("PATH", "/home/u/.ocx/packages/proj/bin"))],
-                    Priors::new(),
-                )),
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[(
-            "PATH",
-            &joined(&[
-                "/home/u/.ocx/packages/proj/bin",
-                "/home/u/.ocx/packages/global/bin",
-                "/usr/bin",
-            ]),
-        )]);
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/proj/bin")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![("PATH".to_owned(), "/home/u/.ocx/packages/global/bin".to_owned(), None)]
-        );
-    }
-
-    /// C-014 — the separator is part of a removal's identity, so two removals
-    /// that agree on key and element but disagree on it are **two** removals.
-    ///
-    /// The two scopes disagreeing about a key's kind is the state
-    /// `plan_lines`' ordering rule already names. `None` is path-kind and
-    /// renders through the platform `PATH` splitter; `Some(",")` is list-kind
-    /// and renders through the flank-delimited fold. Neither emitted arm
-    /// removes what the other would, so collapsing them leaves one element
-    /// behind for the shell's whole life.
-    ///
-    /// Red state: drop `removal.2` from `push_removal`'s identity tuple (or
-    /// replace it with `None`) and `removes` comes back with one entry.
-    #[test]
-    fn c014_two_removals_differing_only_in_separator_are_not_one_removal() {
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&path_entry("TOOLOPTS", "/opt/x"))]),
-                global_priors: Priors::new(),
-                project: Some(project(
-                    vec![LedgerEntry::from(&entry(
-                        "TOOLOPTS",
-                        "/opt/x",
-                        ModifierKind::List,
-                        Some(","),
-                    ))],
-                    Priors::new(),
-                )),
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("TOOLOPTS", "/opt/x")]);
-
-        // D declares nothing, so each recorded entry retires under **its own**
-        // kind — which is the only place the separator can come from.
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![
-                ("TOOLOPTS".to_owned(), "/opt/x".to_owned(), None),
-                ("TOOLOPTS".to_owned(), "/opt/x".to_owned(), Some(sep(","))),
-            ],
-            "one element, two kinds, two emitter arms — and neither can stand in for the other"
-        );
-    }
-
-    // -- C-017: the revert set is L-scoped, never intersected with D --------
-
-    /// EC-LEDGER-010 — the superseded Validation tier-1 bullet said an L key
-    /// absent from D must be *discarded*; a test written to it would have
-    /// asserted the `JAVA_HOME` leak as correct. A-03 restates it: an L
-    /// constant absent from D is **reverted**, and the forgery bound is
-    /// D ∪ L, enforced by "an L entry may only undo itself".
-    #[test]
-    fn c017_a_constant_absent_from_d_is_reverted_not_discarded() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/p1/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-        );
-        let mut current = env_with(&[("JAVA_HOME", "/p1/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            current.get("JAVA_HOME").map(os_to_string).as_deref(),
-            Some("/usr/lib/jvm")
-        );
-    }
-
-    #[test]
-    fn c017_keys_outside_d_union_l_are_never_touched() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("JAVA_HOME", "/p1/jdk"))],
-            Priors::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/p1/jdk"), ("EDITOR", "vim"), ("SSH_AUTH_SOCK", "/tmp/s")]);
-        let desired = vec![constant("GRADLE_HOME", "/p1/gradle")];
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        let touched: BTreeSet<&str> = planned
-            .sets
-            .iter()
-            .map(|entry| entry.key.as_str())
-            .chain(planned.removes.iter().map(|(key, _, _)| key.as_str()))
-            .chain(planned.restores.iter().map(|(key, _)| key.as_str()))
-            .collect();
-        assert_eq!(touched, BTreeSet::from(["GRADLE_HOME", "JAVA_HOME"]));
-    }
-
-    // -- C-018 / A-07: scope order ------------------------------------------
-
-    /// EC-SCOPE-001 — emission order is global first, project second, asserted
-    /// as the **order of the emitted statements** and only then as the resolved
-    /// values: `composer.rs`'s inversion trap reaching a new consumer.
-    ///
-    /// EC-LIST-008 — and the resolved values are what show the apply rule is
-    /// per kind, not one sentence covering all three (A-07). Path-kind
-    /// prepends, so the later scope lands in front and project wins; list-kind
-    /// **appends**, so the later scope lands last and a first-wins consumer
-    /// would read global — "in front, in order" is wrong for lists and this is
-    /// where that reds.
-    #[test]
-    fn c018_a007_emission_order_is_global_first_project_second_for_all_kinds() {
-        let desired = vec![
-            path_entry("PATH", "/global/bin"),
-            entry("GOFLAGS", "-global", ModifierKind::List, None),
-            constant("JAVA_HOME", "/global/jdk"),
-            path_entry("PATH", "/project/bin"),
-            entry("GOFLAGS", "-project", ModifierKind::List, None),
-            constant("JAVA_HOME", "/project/jdk"),
-        ];
-        let mut current = env_with(&[("PATH", "/usr/bin")]);
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        let order: Vec<&str> = planned.sets.iter().map(|entry| entry.value.as_str()).collect();
-        assert_eq!(
-            order,
-            vec![
-                "/global/bin",
-                "-global",
-                "/global/jdk",
-                "/project/bin",
-                "-project",
-                "/project/jdk"
-            ]
-        );
-
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            path_segments(&current),
-            vec![
-                "/project/bin".to_owned(),
-                "/global/bin".to_owned(),
-                "/usr/bin".to_owned()
-            ],
-            "path-kind: each application prepends, so the later scope lands in front — project, then global"
-        );
-        assert_eq!(
-            current.get("GOFLAGS").map(os_to_string).as_deref(),
-            Some("-global -project"),
-            "list-kind: project last into a last-wins consumer"
-        );
-        assert_eq!(
-            current.get("JAVA_HOME").map(os_to_string).as_deref(),
-            Some("/project/jdk"),
-            "constant: later write wins"
-        );
-    }
-
-    #[test]
-    fn c018_prior_capture_after_globals_apply_holds_globals_value() {
-        // The caller applies global first; capture then sees global's value, so
-        // reverting the project restores global rather than tearing it down.
-        let after_global = env_with(&[("JAVA_HOME", "/global/jdk")]);
-        let priors = capture_priors(
-            &[LedgerEntry::from(&constant("JAVA_HOME", "/project/jdk"))],
-            &after_global,
-            None,
-        );
-        assert_eq!(priors.get("JAVA_HOME"), Some(&Prior::Value("/global/jdk".to_owned())));
-    }
-
-    // -- C-019 / C-021: fingerprint carriage and iteration order ------------
-
-    /// EC-REC-002 — the shim-slot contract, named as a contract rather than as
-    /// an outcome: a deferred root's `entrypoints/` must resolve ahead of
-    /// `bin/`, and `bin/` ahead of `shims/`. The reconciler is a new
-    /// `Vec<Entry>` consumer, and consumers prepend, so a reader who assumes
-    /// push order equals PATH order inverts it and makes the shim shadow the
-    /// real binaries.
-    #[test]
-    fn c021_entry_iteration_order_is_preserved_into_the_plan() {
-        // The composer's consumers prepend, so the last entry pushed is first
-        // in PATH; the reconciler must not reorder them on the way through.
-        let desired = vec![
-            path_entry("PATH", "/pkg/shims"),
-            path_entry("PATH", "/pkg/bin"),
-            path_entry("PATH", "/pkg/entrypoints"),
-        ];
-        let mut current = env_with(&[("PATH", "/usr/bin")]);
-
-        let planned = plan(&desired, &current, &Ledger::empty(), &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned
-                .sets
-                .iter()
-                .map(|entry| entry.value.as_str())
-                .collect::<Vec<_>>(),
-            vec!["/pkg/shims", "/pkg/bin", "/pkg/entrypoints"]
-        );
-
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            path_segments(&current),
-            vec![
-                "/pkg/entrypoints".to_owned(),
-                "/pkg/bin".to_owned(),
-                "/pkg/shims".to_owned(),
-                "/usr/bin".to_owned()
-            ]
-        );
-    }
-
-    // -- A-19: one comparison rule ------------------------------------------
-
-    #[test]
-    fn a019_a_quoted_segment_compares_equal_to_its_unquoted_spelling() {
+    fn a_quoted_segment_compares_equal_to_its_unquoted_spelling() {
         assert!(element_eq("\"/opt/bin\"", "/opt/bin", &ModifierKind::Path));
         assert!(element_eq("/opt/bin", "\"/opt/bin\"", &ModifierKind::Path));
         assert!(
@@ -1744,17 +1556,12 @@ mod tests {
             "only a surrounding pair is stripped"
         );
         assert_eq!(unquote("\""), "\"");
-        // E5 — the strip is A-19's, and A-19 is about PATH segments: a list
-        // element is opaque, so its quotes are part of the option.
         assert!(!element_eq("\"-Dx\"", "-Dx", &ModifierKind::List));
     }
 
-    /// The two comparison rules, asserted against `cfg!(windows)` rather than
-    /// behind a `#[cfg]` so **both** arms execute on every platform: the ASCII
-    /// fold is path-kind only, and a list element stays case-sensitive
-    /// everywhere because `-DFOO=1` and `-Dfoo=1` are different options.
+    /// Asserted against `cfg!(windows)` so both arms execute on every platform.
     #[test]
-    fn a019_e5_the_ascii_fold_is_path_kind_only() {
+    fn the_ascii_fold_is_path_kind_only() {
         assert_eq!(
             element_eq("/opt/Bin", "/opt/bin", &ModifierKind::Path),
             cfg!(windows),
@@ -1772,670 +1579,5 @@ mod tests {
             element_norm("-DFOO=1", &ModifierKind::List),
             element_norm("-Dfoo=1", &ModifierKind::List)
         );
-    }
-
-    /// EC-CONST-009 — the `C == L.applied` compare keys through the same
-    /// equality `EnvKey` uses: ASCII-case-insensitive on Windows, exact
-    /// elsewhere. Asserted against `cfg!(windows)` rather than behind a
-    /// `#[cfg]` so **both** arms execute on every platform — a case-sensitive
-    /// map makes the exit guard always false under pwsh's `$env:Path` spelling
-    /// and silently abandons every prior, while a case-insensitive one fuses
-    /// two genuinely distinct variables on Unix.
-    #[test]
-    fn a019_key_equality_follows_the_platform_and_so_does_the_exit_guard() {
-        assert!(key_eq("JAVA_HOME", "JAVA_HOME"));
-        assert_eq!(key_eq("Path", "PATH"), cfg!(windows));
-        assert_eq!(key_norm("Path") == key_norm("PATH"), cfg!(windows));
-        // A-02's reserved-key test rides the same equality.
-        assert_eq!(is_never_constant("Path"), cfg!(windows));
-
-        // The guard itself: L recorded the pwsh spelling while the shell
-        // reports the uppercase one. On Windows that is one variable and the
-        // prior is restored; on Unix they are two and nothing is touched.
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&constant("Java_Home", "/p1/jdk"))],
-            Priors::from([("Java_Home".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-        );
-        let current = env_with(&[("JAVA_HOME", "/p1/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        let expected = if cfg!(windows) {
-            vec![("Java_Home".to_owned(), Some("/usr/lib/jvm".to_owned()))]
-        } else {
-            Vec::new()
-        };
-        assert_eq!(planned.restores, expected);
-    }
-
-    // -- R1: the global scope records priors too -----------------------------
-
-    /// R1 — `ocx remove --global <pkg>` retires a global constant, and the
-    /// user's own value comes back.
-    ///
-    /// Before [`Scopes::global_priors`] existed there was no operand to restore
-    /// and ocx's value stayed in the shell for its whole life: C-006 forbids
-    /// guess-unsetting it, so leaving it was the only honest outcome *given the
-    /// ledger's shape* — and the shape was the bug.
-    ///
-    /// Red state: drop `global_priors` from the `Scopes` literal below (the
-    /// `Default` leaves it empty) and `restores` is empty again.
-    #[test]
-    fn r1_a_retired_global_constant_restores_the_users_own_value() {
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&constant("JAVA_HOME", "/global/jdk"))]),
-                global_priors: Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-                project: None,
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("JAVA_HOME", "/global/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned()))],
-            "the global scope's own prior is what a retired global constant reverts to"
-        );
-    }
-
-    /// R1's compounding half — the two-scope retirement, and the reason
-    /// [`Ledger::prior`] **chains** rather than preferring the project map.
-    ///
-    /// A project constant shadows a global one. The project's prior was captured
-    /// *after* global applied (C-018), so it holds **global's** value, not the
-    /// user's. When both scopes retire in the same prompt, restoring the project
-    /// prior verbatim writes back a value no scope declares any more and the
-    /// user's original is unrecoverable. The chain hop is what makes the answer
-    /// the user's own value.
-    ///
-    /// Red state: return the project prior unconditionally in `Ledger::prior`
-    /// and this restores `/global/jdk`.
-    #[test]
-    fn r1_two_scopes_retiring_together_restore_the_users_value_not_globals() {
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&constant("JAVA_HOME", "/global/jdk"))]),
-                global_priors: Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-                project: Some(project(
-                    vec![LedgerEntry::from(&constant("JAVA_HOME", "/project/jdk"))],
-                    Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/global/jdk".to_owned()))]),
-                )),
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("JAVA_HOME", "/project/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned()))],
-            "the project prior held global's value, so the revert hops to global's own prior"
-        );
-    }
-
-    /// The chain must not fire on a *coincidence*: where the project prior's
-    /// value merely happens to differ from what global recorded, the project
-    /// prior is the user's own and is restored verbatim.
-    ///
-    /// This is the guard that stops the hop from becoming "global always wins",
-    /// which would lose a genuine pre-project value on every two-scope
-    /// retirement where the scopes disagreed.
-    #[test]
-    fn r1_the_chain_hop_only_fires_when_the_project_prior_is_globals_value() {
-        let ledger = Ledger {
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry::from(&constant("JAVA_HOME", "/global/jdk"))]),
-                global_priors: Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm".to_owned()))]),
-                project: Some(project(
-                    vec![LedgerEntry::from(&constant("JAVA_HOME", "/project/jdk"))],
-                    // Not global's value: the user set this by hand mid-session,
-                    // after global had applied.
-                    Priors::from([("JAVA_HOME".to_owned(), Prior::Value("/opt/hand-rolled".to_owned()))]),
-                )),
-            },
-            ..Ledger::empty()
-        };
-        let current = env_with(&[("JAVA_HOME", "/project/jdk")]);
-
-        let planned = plan(&[], &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/opt/hand-rolled".to_owned()))],
-            "a project prior that is not global's recorded value is the user's own"
-        );
-    }
-
-    // -- E5: the comparison rule splits by kind ------------------------------
-
-    /// A list element is **opaque**: the quotes in `"-Dx"` are part of the
-    /// option, so a desired `-Dx` is a different element and the recorded one
-    /// still has to be retired. `shell.rs`'s `remove_list_element` and
-    /// `export_list` both match byte-exact, so a planner that unquotes first
-    /// suppresses the very removal the emitter was going to render — and
-    /// `export_list` then appends the second spelling beside the first.
-    #[test]
-    fn e5_a_quoted_list_element_is_not_the_same_element_as_its_bare_spelling() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&entry(
-                "CFLAGS",
-                "\"-Dx\"",
-                ModifierKind::List,
-                Some(" "),
-            ))],
-            Priors::new(),
-        );
-        let desired = vec![entry("CFLAGS", "-Dx", ModifierKind::List, Some(" "))];
-        let mut current = env_with(&[("CFLAGS", "\"-Dx\"")]);
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![("CFLAGS".to_owned(), "\"-Dx\"".to_owned(), Some(sep(" ")))],
-            "the recorded spelling is retired byte-exact"
-        );
-
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            current.get("CFLAGS").map(os_to_string).as_deref(),
-            Some("-Dx"),
-            "one element survives, not both spellings"
-        );
-    }
-
-    /// `-DFOO=1` and `-Dfoo=1` are different options on **every** platform, so
-    /// the recorded one is retired regardless of host. The ASCII fold belongs
-    /// to A-19's path-kind rule; applying it to a list element left `-DFOO=1`
-    /// in place on Windows while `export_list`'s ordinal `.Replace` appended
-    /// `-Dfoo=1` beside it, which is the unbounded growth `export_list`'s doc
-    /// says the ordinal calls exist to prevent.
-    #[test]
-    fn e5_a_list_element_comparison_is_case_sensitive_on_every_platform() {
-        let ledger = ledger_with_project(
-            vec![LedgerEntry::from(&entry(
-                "CFLAGS",
-                "-DFOO=1",
-                ModifierKind::List,
-                Some(" "),
-            ))],
-            Priors::new(),
-        );
-        let desired = vec![entry("CFLAGS", "-Dfoo=1", ModifierKind::List, Some(" "))];
-        let mut current = env_with(&[("CFLAGS", "-DFOO=1")]);
-
-        let planned = plan(&desired, &current, &ledger, &[Path::new("/home/u/.ocx")]);
-        assert_eq!(
-            planned.removes,
-            vec![("CFLAGS".to_owned(), "-DFOO=1".to_owned(), Some(sep(" ")))],
-            "case is significant in a list element on every platform"
-        );
-
-        apply_in_process(&mut current, &planned);
-        assert_eq!(
-            current.get("CFLAGS").map(os_to_string).as_deref(),
-            Some("-Dfoo=1"),
-            "one element survives, not both cases"
-        );
-    }
-
-    #[test]
-    fn a019_the_ledger_stores_what_was_written_never_the_normalised_form() {
-        let recorded = LedgerEntry::from(&path_entry("PATH", "\"/opt/Bin\""));
-        assert_eq!(
-            recorded.value, "\"/opt/Bin\"",
-            "storage is byte-exact; only comparison normalises"
-        );
-    }
-
-    // -- A-38: the carrier cap bounds only the ledger ------------------------
-}
-
-/// The per-prompt change summary: folded per variable, computed as a delta
-/// against the ledger.
-#[cfg(test)]
-mod summary_tests {
-    use super::*;
-
-    use crate::shell::Shell;
-
-    /// The uncoloured theme, so a summary assertion reads as the text a user
-    /// sees in a pipe, a file, or under `--color never`.
-    fn plain() -> Theme {
-        Theme::new(false)
-    }
-
-    /// The coloured theme — what an interactive terminal gets.
-    fn inked() -> Theme {
-        Theme::new(true)
-    }
-
-    fn path_entry(key: &str, value: &str) -> Entry {
-        Entry {
-            key: key.to_owned(),
-            value: value.to_owned(),
-            kind: ModifierKind::Path,
-            separator: None,
-        }
-    }
-
-    fn constant(key: &str, value: &str) -> Entry {
-        Entry {
-            key: key.to_owned(),
-            value: value.to_owned(),
-            kind: ModifierKind::Constant,
-            separator: None,
-        }
-    }
-
-    /// A ledger recording `applied` under the project scope.
-    fn recording(applied: &[Entry]) -> Ledger {
-        Ledger {
-            scopes: Scopes {
-                global: None,
-                global_priors: Priors::new(),
-                project: Some(ProjectScope {
-                    key: "acme-1a2b".to_owned(),
-                    dir: PathBuf::from("/p1"),
-                    applied: applied.iter().map(LedgerEntry::from).collect(),
-                    priors: Priors::new(),
-                }),
-            },
-            ..Ledger::empty()
-        }
-    }
-
-    /// A ledger recording `global` under the global scope only.
-    fn recording_global(global: &[Entry]) -> Ledger {
-        Ledger {
-            scopes: Scopes {
-                global: Some(global.iter().map(LedgerEntry::from).collect()),
-                global_priors: Priors::new(),
-                project: None,
-            },
-            ..Ledger::empty()
-        }
-    }
-
-    fn owned() -> Vec<&'static Path> {
-        vec![Path::new("/home/u/.ocx")]
-    }
-
-    fn env_with(pairs: &[(&str, &str)]) -> Env {
-        let mut env = Env::clean();
-        for (key, value) in pairs {
-            env.set(*key, *value);
-        }
-        env
-    }
-
-    /// The defect the owner reported: seven contributions to one `PATH` printed
-    /// `+PATH` seven times, because the line had one token per emitted
-    /// statement. One variable is one token however many statements touch it.
-    #[test]
-    fn a_variable_many_scopes_contribute_to_gets_exactly_one_token() {
-        let desired: Vec<Entry> = (0..7)
-            .map(|index| path_entry("PATH", &format!("/opt/t{index}/bin")))
-            .collect();
-        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
-        assert_eq!(
-            planned.sets.len(),
-            7,
-            "the fixture must emit seven statements, or folding proves nothing"
-        );
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
-            Some("ocx: +PATH"),
-            "seven contributions to one variable fold to one token"
-        );
-    }
-
-    /// An ocx-private `__OCX_*` key is applied but never shown.
-    #[test]
-    fn a_private_ocx_key_is_applied_but_left_out_of_the_summary() {
-        let private = constant("__OCX_LAUNCH_IDENTITIES", "{}");
-        let desired = vec![private.clone(), constant("JAVA_HOME", "/opt/jdk")];
-        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
-        assert!(
-            planned.sets.iter().any(|entry| entry.key == private.key),
-            "the fixture must emit the private key, or leaving it out proves nothing"
-        );
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
-            Some("ocx: +JAVA_HOME")
-        );
-        let alone = vec![private];
-        let planned = plan(&alone, &Env::clean(), &Ledger::empty(), &owned());
-        assert_eq!(summary(&planned, &Ledger::empty(), &recording(&alone), &plain()), None);
-    }
-
-    /// `+` — a variable no previous ledger recorded.
-    #[test]
-    fn a_variable_no_previous_ledger_recorded_is_marked_added() {
-        let desired = vec![constant("JAVA_HOME", "/opt/jdk")];
-        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
-            Some("ocx: +JAVA_HOME")
-        );
-    }
-
-    /// `~` — both ledgers record it and what ocx sets changed. The old line
-    /// printed `+JAVA_HOME` here: it read the applied set, not the delta.
-    #[test]
-    fn a_variable_both_ledgers_record_is_marked_changed() {
-        let before = vec![constant("JAVA_HOME", "/opt/jdk17")];
-        let after = vec![constant("JAVA_HOME", "/opt/jdk21")];
-        let previous = recording(&before);
-        let planned = plan(&after, &env_with(&[("JAVA_HOME", "/opt/jdk17")]), &previous, &owned());
-        assert!(!planned.sets.is_empty(), "the fixture must re-set the constant");
-
-        assert_eq!(
-            summary(&planned, &previous, &recording(&after), &plain()).as_deref(),
-            Some("ocx: ~JAVA_HOME")
-        );
-    }
-
-    /// `-` — the previous ledger recorded it and the next one does not. The old
-    /// line called a retired path element `~PATH`, which is the mark a *change*
-    /// carries.
-    #[test]
-    fn a_variable_the_next_ledger_stops_recording_is_marked_retired() {
-        let before = vec![path_entry("PATH", "/opt/gone/bin")];
-        let previous = recording(&before);
-        let planned = plan(&[], &env_with(&[("PATH", "/opt/gone/bin")]), &previous, &owned());
-        assert!(!planned.removes.is_empty(), "the fixture must retire the element");
-
-        assert_eq!(
-            summary(&planned, &previous, &Ledger::empty(), &plain()).as_deref(),
-            Some("ocx: -PATH")
-        );
-    }
-
-    /// The case that makes the *next* ledger load-bearing rather than
-    /// decorative: leaving a project retires its `PATH` contribution while the
-    /// global tier keeps setting `PATH`. The variable changed; it did not go
-    /// away, and `-PATH` would tell the reader it did.
-    #[test]
-    fn a_variable_one_scope_retires_but_another_still_sets_is_changed_not_retired() {
-        let global = vec![path_entry("PATH", "/home/u/.ocx/bin")];
-        let mut before = global.clone();
-        before.push(path_entry("PATH", "/p1/bin"));
-        let previous = recording(&before);
-        let current = env_with(&[("PATH", &joined(&["/home/u/.ocx/bin", "/p1/bin"]))]);
-        let planned = plan(&global, &current, &previous, &owned());
-        assert!(
-            !planned.removes.is_empty(),
-            "the fixture must retire the project element"
-        );
-
-        assert_eq!(
-            summary(&planned, &previous, &recording_global(&global), &plain()).as_deref(),
-            Some("ocx: ~PATH"),
-            "a variable another scope still sets changed; it was not retired"
-        );
-    }
-
-    /// The lost-ledger repair (C-006) produces **no token of its own**: it
-    /// retires an ocx-owned segment from a variable D still declares, so the
-    /// key is in `after` and the line reads `+PATH`.
-    ///
-    /// The key is in `after`, so this is the `(false, true)` arm. Its sibling
-    /// below reaches `+` from the other direction — a key neither ledger
-    /// records — and the two must not be read as one case: only this one has a
-    /// `removes` entry riding the token.
-    ///
-    /// Red state: give `plan` an owned prefix that does not cover the stale
-    /// segment (`/elsewhere`) and the repair stops firing, so `removes` empties
-    /// and the first assertion goes.
-    #[test]
-    fn the_lost_ledger_repair_rides_the_key_it_repairs() {
-        // `unset __OCX_ENV_STATE` with a stale ocx-owned segment still on PATH,
-        // and D declaring the current one.
-        let desired = vec![path_entry("PATH", "/home/u/.ocx/packages/new/bin")];
-        let current = env_with(&[("PATH", &joined(&["/home/u/.ocx/packages/old/bin", "/usr/bin"]))]);
-        let planned = plan(&desired, &current, &Ledger::empty(), &owned());
-        assert_eq!(
-            planned.removes,
-            vec![("PATH".to_owned(), "/home/u/.ocx/packages/old/bin".to_owned(), None)],
-            "the fixture must actually repair the stale segment, or the mark proves nothing"
-        );
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
-            Some("ocx: +PATH"),
-            "the repair rides the key's own token; it never earns a separate one"
-        );
-    }
-
-    /// **C-059 x RUL-92 — the mark for a key neither ledger records.**
-    ///
-    /// The two session `PATH` directories are contributed on every prompt that
-    /// composes a desired set and recorded in no ledger, so a prompt whose only
-    /// `PATH` contribution is
-    /// that block plans a `set` for a key that is in neither `before` nor
-    /// `after`. That is the `(false, false)` arm, and the honest mark is `+`:
-    /// ocx starts setting `PATH` here.
-    ///
-    /// The arm reached production marked `-`, behind a comment calling it
-    /// unreachable, because nothing asserted it — so a shell whose only
-    /// contribution was the session block would have been told `ocx: -PATH`,
-    /// "ocx stops setting PATH", on the very prompt that set it.
-    ///
-    /// Red state: `(false, false) => '-'` and the line reads `ocx: -PATH`.
-    #[test]
-    fn a_key_neither_ledger_records_is_started_not_retired() {
-        // The session block as `desired_entries` splices it: contributed by the
-        // desired set, absent from both ledgers.
-        let session = vec![path_entry("PATH", "/home/u/.ocx/toolchain/bin")];
-        let current = env_with(&[("PATH", "/usr/bin")]);
-        let planned = plan(&session, &current, &Ledger::empty(), &owned());
-        assert!(
-            planned.sets.iter().any(|entry| entry.key == "PATH"),
-            "the fixture must plan a PATH set, or the mark proves nothing"
-        );
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &Ledger::empty(), &plain()).as_deref(),
-            Some("ocx: +PATH"),
-            "a variable this prompt starts setting is `+`, whatever the ledgers decline to record"
-        );
-    }
-
-    /// A **switch** names the project now in effect; the marks alone cannot.
-    ///
-    /// The non-vacuity twin below is the reason this is not "always name the
-    /// project": entering from a project-free prompt is already unambiguous
-    /// from the `+` marks, and naming it there would put a suffix on the line
-    /// every first prompt in every project prints.
-    ///
-    /// Red state: drop the `left.dir == entered.dir` check and the second
-    /// assertion grows a `(p1)`; drop `switched_project` entirely and the first
-    /// loses its `(p2)`.
-    #[test]
-    fn a_project_switch_names_the_project_now_in_effect() {
-        let leaving = vec![path_entry("PATH", "/p1/bin")];
-        let arriving = vec![path_entry("PATH", "/p2/bin")];
-        let previous = recording(&leaving);
-        let current = env_with(&[("PATH", &joined(&["/p1/bin", "/usr/bin"]))]);
-        let planned = plan(&arriving, &current, &previous, &owned());
-
-        let mut next = recording(&arriving);
-        next.scopes.project.as_mut().expect("the fixture records a project").dir = PathBuf::from("/w/p2");
-        assert_eq!(
-            summary(&planned, &previous, &next, &plain()).as_deref(),
-            Some("ocx: ~PATH (p2)"),
-            "a bare `~PATH` does not say which project moved it"
-        );
-
-        // The twin: same plan, same next ledger, but the previous prompt was
-        // project-free. Nothing switched, so nothing is named.
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &next, &plain()).as_deref(),
-            Some("ocx: +PATH"),
-            "entering from a project-free prompt is not a switch"
-        );
-    }
-
-    /// One plan carrying all three marks at once: a variable this prompt
-    /// starts setting, one whose value moved, one it stops setting.
-    fn three_marked_summary(theme: &Theme) -> String {
-        let before = vec![constant("JAVA_HOME", "/opt/jdk17"), path_entry("PATH", "/opt/gone/bin")];
-        let after = vec![
-            constant("JAVA_HOME", "/opt/jdk21"),
-            constant("GRADLE_HOME", "/opt/gradle"),
-        ];
-        let previous = recording(&before);
-        let current = env_with(&[("JAVA_HOME", "/opt/jdk17"), ("PATH", "/opt/gone/bin")]);
-        let planned = plan(&after, &current, &previous, &owned());
-        assert!(
-            !planned.sets.is_empty() && !planned.removes.is_empty(),
-            "the fixture must both set and retire, or the marks prove nothing"
-        );
-        summary(&planned, &previous, &recording(&after), theme).expect("the fixture changes something")
-    }
-
-    /// Each mark is inked by what it means, and the ink comes from the theme
-    /// the rest of the CLI uses rather than a palette of this line's own.
-    ///
-    /// The parity half is the control: colour may add escapes and must change
-    /// nothing else, so a theme that painted the wrong token — or painted the
-    /// key without its mark — reds on the token assertions while the stripped
-    /// line still matches.
-    #[test]
-    fn the_summary_marks_are_inked_by_what_they_mean() {
-        let theme = inked();
-        let line = three_marked_summary(&theme);
-
-        assert_eq!(
-            console::strip_ansi_codes(&line),
-            three_marked_summary(&plain()),
-            "colour changed the text, not just the escapes"
-        );
-        for token in [theme.ok("+GRADLE_HOME"), theme.tag("~JAVA_HOME"), theme.alert("-PATH")] {
-            assert!(
-                line.contains(&token),
-                "{token:?} is not inked as its mark means: {line:?}"
-            );
-        }
-        assert!(
-            line.starts_with(&theme.aside("ocx:")),
-            "the prefix is chrome and is dimmed, so the marks are what a reader sees: {line:?}"
-        );
-    }
-
-    /// **The eval-safety half of the colour (A-21).** This line does not print
-    /// itself: it is handed to `Shell::emit_message`, which puts it inside that
-    /// arm's own quoted literal as a `printf` *argument*. An SGR sequence must
-    /// therefore survive nine escapers byte for byte and stay data on all of
-    /// them.
-    ///
-    /// Asserted as a parity, which is what makes it discriminating: stripping
-    /// the escapes from the emitted **coloured** statement must give back the
-    /// emitted **uncoloured** one. An escaper that mangled `\x1b` — doubled a
-    /// backslash in front of it, or rewrote it as text — leaves a residue
-    /// `strip_ansi_codes` cannot remove, and the two sides diverge. The
-    /// positive control rules out the other direction: without it, a theme that
-    /// painted nothing would satisfy the parity on every arm.
-    ///
-    /// `Batch` hosts no prompt hook and emits nothing, at either colour.
-    #[test]
-    fn the_inked_line_survives_every_arms_quoting() {
-        let coloured = three_marked_summary(&inked());
-        let bare = three_marked_summary(&plain());
-        let mut emitted = 0_usize;
-        for shell in [
-            Shell::Ash,
-            Shell::Ksh,
-            Shell::Dash,
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::PowerShell,
-            Shell::Elvish,
-            Shell::Nushell,
-            Shell::Batch,
-        ] {
-            let (Some(inked_line), Some(bare_line)) = (shell.emit_message(&coloured), shell.emit_message(&bare)) else {
-                assert!(
-                    matches!(shell, Shell::Batch),
-                    "{shell:?} emits a message for the bare line but not the coloured one"
-                );
-                continue;
-            };
-            emitted += 1;
-            assert!(
-                inked_line.contains('\u{1b}'),
-                "{shell:?}: the escaper dropped the SGR sequence, so the parity below proves nothing: {inked_line:?}"
-            );
-            assert_eq!(
-                console::strip_ansi_codes(&inked_line),
-                bare_line,
-                "{shell:?}: colour changed the emitted statement, not just the escapes"
-            );
-            assert!(
-                !inked_line.contains(['\n', '\r']),
-                "{shell:?}: the statement split itself across lines: {inked_line:?}"
-            );
-        }
-        assert_eq!(emitted, 9, "every hook-hosting arm must have been exercised");
-    }
-
-    /// Colour is a human-render concern and never reaches the machine channel:
-    /// nushell applies the `Plan` itself (C-048), and `--format json` prints
-    /// that document instead of any line built here.
-    #[test]
-    fn the_json_channel_never_carries_colour() {
-        let desired = vec![path_entry("PATH", "/opt/bin"), constant("JAVA_HOME", "/opt/jdk")];
-        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
-        let json = serde_json::to_string(&planned).expect("the plan serializes");
-        // The control, first: two negative assertions alone are satisfied by a
-        // `{}` document, so a plan that silently stopped carrying anything would
-        // read as "no colour reached the channel" rather than as a broken
-        // fixture.
-        assert!(
-            json.contains("PATH") && json.contains("JAVA_HOME"),
-            "the fixture must produce a non-trivial plan, or the negatives below prove nothing: {json}"
-        );
-        assert!(
-            !json.contains('\u{1b}') && !json.contains("\\u001b"),
-            "an escape sequence reached the applied-by-machine channel: {json}"
-        );
-        // And the summary — the only thing colour touches — is not in it.
-        assert!(
-            !json.contains("ocx:"),
-            "the plan document must carry no rendered line: {json}"
-        );
-    }
-
-    /// Tokens are sorted by key, so the line is the same on every prompt that
-    /// makes the same change — never the order the emitter happened to walk.
-    #[test]
-    fn tokens_are_sorted_by_key() {
-        let desired = vec![constant("ZULU", "z"), constant("ALPHA", "a"), constant("MIKE", "m")];
-        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
-
-        assert_eq!(
-            summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
-            Some("ocx: +ALPHA +MIKE +ZULU")
-        );
-    }
-
-    /// A prompt that changes nothing says nothing — decision 3's fixed point
-    /// reaches the summary too, not only the emitted statements.
-    #[test]
-    fn a_settled_prompt_produces_no_line() {
-        let desired = vec![path_entry("PATH", "/p1/bin"), constant("JAVA_HOME", "/opt/jdk")];
-        let previous = recording(&desired);
-        let current = env_with(&[("PATH", "/p1/bin"), ("JAVA_HOME", "/opt/jdk")]);
-        let planned = plan(&desired, &current, &previous, &owned());
-        assert!(
-            planned.sets.is_empty() && planned.removes.is_empty() && planned.restores.is_empty(),
-            "the fixture must settle, or the silence proves nothing: {planned:?}"
-        );
-
-        assert_eq!(summary(&planned, &previous, &recording(&desired), &plain()), None);
     }
 }

@@ -8,10 +8,12 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_config::env;
+use ocx_config::exec_state::{self, Owner, PinnedTier, ScopeId, Selection, SessionSource};
 use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::env::entry::Entry;
+use ocx_package_manager::EnvScope;
 use ocx_package_manager::composer::{ComposeOmission, ComposeRequest, Materialization};
+use ocx_package_manager::exec_env::{self, ChildEnvInputs, ExecMode};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{PackageBinding, RecordInputs, Scope};
 use ocx_project::{Origin, check_duplicate_selection, lazy_mode_for_tool, resolve_selected_tools, select_tool_set};
@@ -19,28 +21,22 @@ use ocx_project::{Origin, check_duplicate_selection, lazy_mode_for_tool, resolve
 use crate::app::CliRefusal;
 use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, ListSeparatorError, reconcile_list_separators};
-use ocx_shell::shell::reconcile;
+use ocx_package::metadata::env::apply::{ListSeparatorError, reconcile_list_separators};
 
 /// Run a command with the composed environment from the project toolchain.
 ///
 /// Composes the selected groups' bindings from `ocx.toml` + `ocx.lock` in group
 /// order, then binding name, and execs `ARGV` (after the mandatory `--`) with it.
-/// `--stack` keeps the environment an activated parent project put on the shell;
-/// `--with` packages layer after the project's tools and override a project tool
-/// of the same repository.
+/// The composition layers onto the calling environment; `--isolate` first reverts what
+/// ocx applied to it, `--clean` starts from nothing. `--with` packages layer after the
+/// project's tools and override a project tool of the same repository.
 #[derive(Parser, Clone)]
 pub struct ToolchainExec {
     #[clap(flatten)]
     pub groups: options::GroupSelection,
 
-    /// Start with a clean environment containing only the package
-    /// variables, instead of inheriting the current shell environment.
-    ///
-    /// With `--stack`, the toolchain an activated parent project put on the
-    /// shell is kept as well.
-    #[arg(long = "clean", default_value_t = false)]
-    pub clean: bool,
+    #[clap(flatten)]
+    pub mode: options::ExecModeOptions,
 
     #[clap(flatten)]
     pub env: options::EnvOverride,
@@ -67,9 +63,6 @@ pub struct ToolchainExec {
     #[clap(flatten)]
     pub with: options::With,
 
-    #[clap(flatten)]
-    pub stack: options::Stack,
-
     // `--consent` (the default) / `--no-consent`; clap renders the flattened struct's docs, not a `///` here.
     #[clap(flatten)]
     pub consent: options::Consent,
@@ -92,6 +85,15 @@ pub struct ToolchainExec {
     pub argv: Vec<String>,
 }
 
+/// Which command composes: what the child's execution state records about its composition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// `ocx exec`: the composition is inherited values, and the scope it came from is remembered.
+    Exec,
+    /// `ocx shell`: the composition is session values of a pinned selection the prompt hook refreshes.
+    Shell,
+}
+
 impl ToolchainExec {
     /// Execute the `ocx exec` command; the child's exit code is forwarded byte-for-byte.
     ///
@@ -100,6 +102,15 @@ impl ToolchainExec {
     /// Exit 64 for no `ocx.toml`, an unknown group, an unknown or ambiguous name, or an empty `-g`
     /// segment; 78 for an absent `ocx.lock`; 65 for a stale one.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        self.run(context, Frame::Exec).await
+    }
+
+    /// Execute `ocx shell`: the same composition, handed to the shell as a pinned session.
+    pub(super) async fn open_shell(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        self.run(context, Frame::Shell).await
+    }
+
+    async fn run(&self, context: crate::app::Context, frame: Frame) -> anyhow::Result<ExitCode> {
         // Strict isolation: only the in-effect project file composes, never a union of tiers.
 
         // ── Phase A: parse-time validation ───────────────────────────────
@@ -182,10 +193,17 @@ impl ToolchainExec {
         let auto_installed = composed.pulled;
         // Bound once: drives the parent resolve and is forwarded, so a launcher's re-entry honours the same opt-out.
         let no_patches = ctx.config.no_patches_repositories();
-        // Stages 4-6 (`[env]`, group `[env]`, `--env`), also forwarded over `OCX_ENV`, or a launcher's re-entry
-        // reverts them to the package entries.
-        let mut project_env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
-        project_env.extend(env_overrides);
+        // Stages 4-6 (`[env]`, group `[env]`, `--env`), also replayed through the execution state, or a
+        // launcher's re-entry reverts them to the package entries.
+        let stage_env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        let mut project_env = stage_env.clone();
+        project_env.extend(env_overrides.iter().cloned());
+        // A shell records `--env` as its own invocation values, so the hook keeps them across a refresh
+        // of the project layer; an exec composes them with the rest.
+        let (composed_env, cli_invocation) = match frame {
+            Frame::Exec => (project_env.clone(), Vec::new()),
+            Frame::Shell => (stage_env, env_overrides.clone()),
+        };
         // Derived here, so composition and the trampoline exclusion below agree on this project's tree.
         let toolchain = crate::app::project_context::toolchain_links(
             &context,
@@ -197,52 +215,102 @@ impl ToolchainExec {
         )
         .await?;
         let toolchain_home = toolchain.home.clone();
-        let scope = ocx_package_manager::EnvScope::Project {
+        let project_scope = |env: Vec<Entry>| EnvScope::Project {
             no_patches: no_patches.clone(),
-            env: project_env.clone(),
-            toolchain: Some(Box::new(toolchain)),
+            env,
+            toolchain: Some(Box::new(toolchain.clone())),
         };
         // Never the self view: dropping each package's own `entrypoints/` from PATH is a strictly worse toolchain.
         let (mut entries, _, _, admitted) = manager
-            .resolve_env_with_attribution(&install_infos, false, scope, &host)
+            .resolve_env_with_attribution(&install_infos, false, project_scope(composed_env.clone()), &host)
             .await?;
+
+        // A shell records `--with` packages as invocation values, so they are composed apart from the
+        // project's. The pass over everything above stays: it is what refuses a conflict between them.
+        let mut invocation: Vec<Entry> = Vec::new();
+        let with_roots = surviving_with_count(&omitted, &with_packages);
+        if frame == Frame::Shell && with_roots > 0 {
+            let (with_infos, project_infos) = install_infos.split_at(with_roots);
+            (entries, _, _, _) = manager
+                .resolve_env_with_attribution(project_infos, false, project_scope(composed_env), &host)
+                .await?;
+            let with_scope = EnvScope::Project {
+                no_patches: no_patches.clone(),
+                env: Vec::new(),
+                toolchain: None,
+            };
+            (invocation, _, _, _) = manager
+                .resolve_env_with_attribution(with_infos, false, with_scope, &host)
+                .await?;
+        }
+        invocation.extend(cli_invocation);
 
         // Together, or a forwarded project `GODEBUG` keeps `None`
         // and a re-entrant launcher folds it with `" "`, not `","`.
-        reconcile_run_entries(&mut entries, &mut project_env)?;
+        reconcile_run_entries(&mut entries, &mut invocation, &mut project_env)?;
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
-        let mut process_env = match (self.clean, self.stack.enabled()) {
-            (true, true) => reconcile::stacked_clean_env(),
-            (true, false) => env::Env::clean(),
-            (false, true) => reconcile::stacked_env(),
-            (false, false) => reconcile::inherited_env(),
-        };
-        let mut forwarded_config = context.config_view().clone();
-        if let Some(patches) = forwarded_config.patches.as_mut() {
-            patches.no_patches = no_patches;
-        }
-        // A child cannot re-derive the flag tier, so without this a launcher's re-entry records elsewhere or nowhere.
-        forwarded_config.records = records.forwarded();
-        // argv does not cross a spawn: a refusal inherits downward, and `--consent` never clears an inherited one.
-        forwarded_config.no_consent = self.consent.explicit() == Some(false);
-        // Only stages 4-6 are forwarded: the launcher re-derives the package entries itself.
-        process_env.apply_child_env(
-            ChildEnv {
-                composed: &entries,
-                forwarded: &project_env,
-                identities: Some(&LaunchIdentities::from_infos(&install_infos)),
-            },
-            &forwarded_config,
-        );
-        // The child's rc file must not re-apply the global or default set over what was just composed.
-        process_env.set(
-            ocx_env::__OCX_EXEC_SCOPE.declaration().name,
-            ctx.config_path.parent().unwrap_or(&ctx.config_path).as_os_str(),
-        );
-        // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
+        let mode = self.mode.mode();
+        // Written for the child, from what the root flags and the received state say. Two command flags no
+        // root flag carries are added: the records sink, which a launcher's re-entry cannot re-derive, and a
+        // refused consent, which `--consent` never clears downward.
+        let mut written = context.written_policy(mode.write_mode()).clone();
+        let sink = records.forwarded();
+        written.policy.records_name = sink.dir.as_ref().and(sink.name);
+        written.policy.records_dir = sink.dir;
+        written.narrowing.no_consent |= self.consent.explicit() == Some(false);
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
+        let (composed_owner, composed_scope, selection) = match frame {
+            Frame::Exec => (
+                Owner::Inherited,
+                Some(if context.global() {
+                    exec_state::Scope::Global
+                } else {
+                    exec_state::Scope::Project {
+                        root: project_root.clone(),
+                    }
+                }),
+                Selection::FollowCwd,
+            ),
+            Frame::Shell => {
+                let (scope, tier) = if context.global() {
+                    (ScopeId::Global, PinnedTier::Global)
+                } else {
+                    // Written canonical: the hook compares it against the received state's own spelling.
+                    let dir = dunce::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone());
+                    (ScopeId::Project, PinnedTier::Project { dir })
+                };
+                let with_names: Vec<String> = with_packages.iter().map(ToString::to_string).collect();
+                (
+                    Owner::Session {
+                        scope,
+                        source: SessionSource::Composed,
+                    },
+                    None,
+                    pinned_selection(tier, &expanded, &with_names, &env_overrides, self.pinned.pinned()),
+                )
+            }
+        };
+        // Only stages 4-6 are replayed: the launcher re-derives the package entries itself.
+        let child = exec_env::apply_child_env(
+            context.inherited(),
+            &ChildEnvInputs {
+                mode,
+                written: &written,
+                binary_pin: context.binary_pin(),
+                composed: &entries,
+                composed_owner,
+                composed_scope,
+                invocation: &invocation,
+                replay_env: &project_env,
+                identities: Some(&LaunchIdentities::from_infos(&install_infos).with_opt_out(&no_patches)),
+                selection,
+            },
+        );
+        crate::app::report_projection_warnings(&child.warnings);
+        let process_env = child.env;
+        // The lock's declaration hash is reused, not re-derived, keeping file I/O off the exec path.
         let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
         let root_identifiers: Vec<_> = install_infos.iter().map(|info| info.identifier().clone()).collect();
         let bindings = project_bindings(&resolved, &omitted, &with_packages, &root_identifiers);
@@ -272,12 +340,12 @@ impl ToolchainExec {
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),
                 argv: &self.argv,
-                config: context.config_view(),
+                config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),
                 managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
                 patch_snapshot_digest: context.patch_snapshot_digest(),
                 platform: Some(&host),
-                clean_env: self.clean,
+                clean_env: mode == ExecMode::Clean,
                 auto_installed: &auto_installed,
                 scope: Scope::Project {
                     root: project_root,
@@ -286,7 +354,7 @@ impl ToolchainExec {
                     groups: expanded,
                     bindings,
                     with: with_packages,
-                    stack: self.stack.enabled(),
+                    env_mode: mode,
                 },
             },
             &records,
@@ -295,6 +363,44 @@ impl ToolchainExec {
         // Diverges on success (`execvp` on Unix, spawn+wait+exit on Windows); only start-up failures return.
         Err(anyhow::Error::from(launch::exec(launch).await))
     }
+}
+
+/// How many `--with` packages survive as roots; they lead the roots, since they are requested first.
+fn surviving_with_count(omitted: &[ComposeOmission], with_packages: &[ocx_oci::PackageRef]) -> usize {
+    with_packages
+        .iter()
+        .filter(|package| !omitted.iter().any(|omission| omission.identifier == **package))
+        .count()
+}
+
+/// The selection `ocx shell` pins its child to: where it composed from and what it was asked for.
+///
+/// Names and keys are for display; the digest says whether two shells were opened with the same
+/// invocation. Every `--env` pair is hashed verbatim.
+fn pinned_selection(
+    tier: PinnedTier,
+    groups: &[String],
+    with_names: &[String],
+    env_overrides: &[Entry],
+    pinned_paths: Option<bool>,
+) -> Selection {
+    let mut identity = String::new();
+    for name in with_names {
+        identity.push_str("with\t");
+        identity.push_str(name);
+        identity.push('\n');
+    }
+    for entry in env_overrides {
+        identity.push_str(&format!("env\t{:?}\t{}\t{}\n", entry.kind, entry.key, entry.value));
+    }
+    Selection::Pinned(ocx_config::exec_state::Pinned {
+        tier,
+        groups: groups.to_vec(),
+        with_names: with_names.to_vec(),
+        env_keys: env_overrides.iter().map(|entry| entry.key.clone()).collect(),
+        invocation_digest: ocx_oci::Algorithm::Sha256.hash(identity).hex().to_owned(),
+        pinned_paths,
+    })
 }
 
 /// Pair each root package with the `ocx.toml` binding it was selected under.
@@ -307,10 +413,7 @@ fn project_bindings(
     with_packages: &[ocx_oci::PackageRef],
     roots: &[ocx_oci::PinnedPackageRef],
 ) -> Vec<PackageBinding> {
-    let surviving_with = with_packages
-        .iter()
-        .filter(|package| !omitted.iter().any(|omission| omission.identifier == **package))
-        .count();
+    let surviving_with = surviving_with_count(omitted, with_packages);
     resolved
         .iter()
         .filter(|tool| !omitted.iter().any(|omission| omission.identifier == tool.identifier))
@@ -326,13 +429,22 @@ fn project_bindings(
         .collect()
 }
 
-/// Settles `list` separators across the composed `entries` and the forwarded `project_env` in one pass.
+/// Settles `list` separators across the composed `entries`, the shell's `invocation` values and the forwarded `project_env` in one pass.
 ///
 /// # Errors
 ///
 /// [`ListSeparatorError`] for conflicting explicit separators on one key, or a separator that edges its value.
-fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), ListSeparatorError> {
-    reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
+fn reconcile_run_entries(
+    entries: &mut [Entry],
+    invocation: &mut [Entry],
+    project_env: &mut [Entry],
+) -> Result<(), ListSeparatorError> {
+    reconcile_list_separators(
+        entries
+            .iter_mut()
+            .chain(invocation.iter_mut())
+            .chain(project_env.iter_mut()),
+    )
 }
 
 /// The trampoline dirs the lookup `PATH` excludes, for both the project and global tree.
@@ -411,7 +523,7 @@ mod tests {
         let mut entries = vec![list_entry("GODEBUG", "gctrace=1", Some(","))];
         let mut project_env = vec![list_entry("GODEBUG", "madvdontneed=1", None)];
 
-        reconcile_run_entries(&mut entries, &mut project_env).expect("one explicit separator is agreement");
+        reconcile_run_entries(&mut entries, &mut [], &mut project_env).expect("one explicit separator is agreement");
 
         assert_eq!(
             project_env[0].separator.as_deref(),
@@ -428,7 +540,7 @@ mod tests {
         let mut entries = vec![list_entry("GODEBUG", "gctrace=1", Some(","))];
         let mut project_env = vec![list_entry("GODEBUG", "madvdontneed=1", Some(";"))];
 
-        let error = reconcile_run_entries(&mut entries, &mut project_env)
+        let error = reconcile_run_entries(&mut entries, &mut [], &mut project_env)
             .expect_err("conflicting explicit separators must not both apply");
         assert!(matches!(&error, ListSeparatorError::Conflict { key, .. } if key == "GODEBUG"));
     }
@@ -608,6 +720,31 @@ mod tests {
             result.is_err(),
             "`--self` was removed from `ocx exec`; clap must reject it"
         );
+    }
+
+    /// `--stack` is gone: layering is the default, so no flag asks for it.
+    #[test]
+    fn exec_rejects_the_removed_stack_flag() {
+        let result = ToolchainExec::try_parse_from(["exec", "--stack", "--", "echo", "hi"]);
+        assert!(
+            result.is_err(),
+            "`--stack` was removed from `ocx exec`; clap must reject it"
+        );
+    }
+
+    /// The mode grammar: layer by default, `--isolate` and `--clean` each select theirs, never both.
+    #[test]
+    fn exec_selects_its_mode_from_the_flags() {
+        use ocx_package_manager::exec_env::ExecMode;
+        let mode = |flags: &[&str]| {
+            let argv = ["exec"].into_iter().chain(flags.iter().copied()).chain(["--", "true"]);
+            ToolchainExec::try_parse_from(argv).map(|exec| exec.mode.mode())
+        };
+
+        assert_eq!(mode(&[]).ok(), Some(ExecMode::Layer));
+        assert_eq!(mode(&["--isolate"]).ok(), Some(ExecMode::Isolate));
+        assert_eq!(mode(&["--clean"]).ok(), Some(ExecMode::Clean));
+        assert!(mode(&["--isolate", "--clean"]).is_err());
     }
 
     // ── the exclusion set is derived, never joined ───────────────────────────
@@ -873,5 +1010,104 @@ mod tests {
             "C-068 is a three-way mapping, not one code with three names"
         );
         assert_eq!(unique, [64u8, 65, 78].into_iter().collect());
+    }
+
+    // ── shell: the pinned selection ──────────────────────────────────────────
+
+    fn constant(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ocx_package::metadata::env::modifier::ModifierKind::Constant,
+            separator: None,
+        }
+    }
+
+    fn pinned_of(selection: Selection) -> ocx_config::exec_state::Pinned {
+        match selection {
+            Selection::Pinned(pinned) => pinned,
+            Selection::FollowCwd => panic!("a shell pins its selection"),
+        }
+    }
+
+    fn project_tier() -> PinnedTier {
+        PinnedTier::Project {
+            dir: std::path::PathBuf::from("/work/project"),
+        }
+    }
+
+    #[test]
+    fn shell_selection_names_the_groups_with_names_and_env_keys() {
+        let pinned = pinned_of(pinned_selection(
+            project_tier(),
+            &["default".to_owned(), "ci".to_owned()],
+            &["ocx.sh/cmake:3".to_owned()],
+            &[constant("JAVA_HOME", "/opt/java"), constant("MODE", "fast")],
+            Some(true),
+        ));
+
+        assert_eq!(pinned.groups, ["default", "ci"]);
+        assert_eq!(pinned.with_names, ["ocx.sh/cmake:3"]);
+        assert_eq!(pinned.env_keys, ["JAVA_HOME", "MODE"]);
+        assert_eq!(pinned.pinned_paths, Some(true));
+        assert_eq!(pinned.tier, project_tier());
+        assert_eq!(pinned.invocation_digest.len(), 64);
+        assert!(pinned.invocation_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn shell_selection_never_holds_an_env_value() {
+        let selection = pinned_selection(
+            project_tier(),
+            &[],
+            &[],
+            &[constant("JAVA_HOME", "fixture-env-value")],
+            None,
+        );
+
+        let text = serde_json::to_string(&selection).expect("a selection serializes");
+        assert!(!text.contains("fixture-env-value"), "{text}");
+    }
+
+    #[test]
+    fn shell_selection_digest_follows_the_invocation() {
+        let digest = |with: &[&str], env: &[Entry]| {
+            let with: Vec<String> = with.iter().map(|name| (*name).to_owned()).collect();
+            pinned_of(pinned_selection(project_tier(), &[], &with, env, None)).invocation_digest
+        };
+
+        let base = digest(&["ocx.sh/cmake:3"], &[constant("A", "1")]);
+        assert_eq!(base, digest(&["ocx.sh/cmake:3"], &[constant("A", "1")]));
+        assert_ne!(base, digest(&["ocx.sh/cmake:4"], &[constant("A", "1")]));
+        assert_ne!(base, digest(&["ocx.sh/cmake:3"], &[constant("A", "2")]));
+        assert_ne!(base, digest(&["ocx.sh/cmake:3"], &[constant("B", "1")]));
+    }
+
+    #[test]
+    fn shell_selection_digest_hashes_a_formerly_secret_classed_value_verbatim() {
+        let digest = |value: &str| {
+            pinned_of(pinned_selection(
+                project_tier(),
+                &[],
+                &[],
+                &[constant("API_TOKEN", value)],
+                None,
+            ))
+            .invocation_digest
+        };
+
+        assert_ne!(digest("fixture-secret-one"), digest("fixture-secret-two"));
+        assert_eq!(digest("fixture-secret-one"), digest("fixture-secret-one"));
+    }
+
+    #[test]
+    fn surviving_with_count_skips_the_omitted_packages() {
+        let with = [
+            ocx_oci::PackageRef::new_registry("kept", "ocx.sh").clone_with_tag("1"),
+            ocx_oci::PackageRef::new_registry("gone", "ocx.sh").clone_with_tag("1"),
+        ];
+
+        assert_eq!(surviving_with_count(&[], &with), 2);
+        assert_eq!(surviving_with_count(&[omission("gone")], &with), 1);
     }
 }

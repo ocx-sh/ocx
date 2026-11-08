@@ -7,10 +7,11 @@
 //! wrapper owns that name, so a command substitution would re-enter it.
 //! Never suppress the deferred messages: they tell a user why a project is inert.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::Shell;
-use super::escape::{elvish_single_quoted, fish_single_quoted, posix_single_quoted, powershell_single_quoted};
+use super::escape::{elvish_single_quoted, fish_single_quoted, posix_single_quoted, powershell_literal};
+use super::reconcile::WatchSet;
 use ocx_config::shell::GRANT_SIGNALS;
 
 /// The temp-file template the emitted body hands `mktemp` for its stamp.
@@ -80,13 +81,14 @@ fn elvish_signal(keys: &[&str]) -> String {
 const POSIX_HOOK_CALL: &str = "if typeset -f __ocx_prompt_hook >/dev/null 2>&1; then __ocx_prompt_hook; fi";
 
 /// The PowerShell form of [`POSIX_HOOK_CALL`]; the check has its own name because calling `prompt` would print one.
-const PWSH_HOOK_CALL: &str = "if (Test-Path function:global:__ocxReconcile) { __ocxReconcile }";
+const PWSH_HOOK_CALL: &str =
+    "if ($ExecutionContext.SessionState.InvokeCommand.GetCommand('__ocxReconcile', 'Function')) { __ocxReconcile }";
 
 /// Emit the idempotent per-prompt hook registration for `shell`, or `None` where it has no hook point.
 ///
 /// `binary` is the resolved absolute path; a restricted shell (`rbash`) no-ops.
 /// Every "already registered?" probe stays scoped to the namespace it asks about, or the shell runs unhooked for life.
-pub fn registration(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Option<String> {
+pub fn registration(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
     #[cfg(any(test, feature = "__testing"))]
     inject_latency_fault();
     let binary = binary.to_string_lossy();
@@ -104,23 +106,20 @@ pub fn registration(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Opt
 /// Re-emit only the guarded function for `shell` with a **new** watch set, never the one-time setup.
 ///
 /// Without it a project entered mid-session is never watched. `None` where the guard has no watch-set term.
-pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &[PathBuf]) -> Option<String> {
+pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
     let binary = binary.to_string_lossy();
     match shell {
         Shell::Bash => Some(posix_redefinition(&binary, "bash", watch_paths)),
         Shell::Zsh => Some(posix_redefinition(&binary, "zsh", watch_paths)),
         Shell::Fish => Some(fish_hook_function(&fish_single_quoted(&binary), watch_paths)),
-        Shell::PowerShell => Some(power_shell_reconcile_function(
-            &powershell_single_quoted(&binary),
-            watch_paths,
-        )),
+        Shell::PowerShell => Some(power_shell_reconcile_function(&binary, watch_paths)),
         Shell::Elvish | Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => None,
     }
 }
 
 /// The bash/zsh form of [`redefinition`]; keeps the unreachable restricted-shell arm so every POSIX
 /// emit stands down in `rbash`.
-fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
+fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &WatchSet) -> String {
     let quoted = posix_single_quoted(binary);
     format!(
         "case $- in\n\
@@ -131,6 +130,43 @@ fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -
          esac",
         body = posix_hook_body(&quoted, shell_name, watch_paths)
     )
+}
+
+/// The emission that stands the hook down while `__OCX_ENV_STATE` is unreadable, or `None` for arms with no hook.
+///
+/// It copies the live value **by reference** into the shell's stood-down variable and re-emits the gate, whose first
+/// clause skips the hook while the state equals that copy. The value is never a literal in the emitted code, so a
+/// `'`, `$(...)` or newline in an inherited environment cannot run as the user. `unset __OCX_ENV_STATE` makes the two
+/// differ, which re-arms the hook.
+///
+/// Elvish and nushell cannot keep an unexported variable across prompts, so they hold the copy in the HookLocal
+/// [`ocx_env::__OCX_ENV_STOOD_DOWN`]. Elvish has no redefinable gate (its closure sits in a list), so it records the
+/// checkpoint instead, which quiets a pre-upgrade closure until the next `cd`; nushell's hook never runs the reconcile.
+pub fn stand_down(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
+    let copy = match shell {
+        Shell::Bash | Shell::Zsh => "__ocx_stood_down=\"${__OCX_ENV_STATE-}\"".to_owned(),
+        Shell::Fish => "set -g __ocx_stood_down \"$__OCX_ENV_STATE\"".to_owned(),
+        Shell::PowerShell => "$global:__ocxStoodDown = $env:__OCX_ENV_STATE".to_owned(),
+        Shell::Elvish => format!(
+            "set-env {stood} $E:{carrier}",
+            stood = ocx_env::__OCX_ENV_STOOD_DOWN.name,
+            carrier = ocx_env::__OCX_ENV_STATE.name
+        ),
+        Shell::Nushell => format!(
+            "$env.{stood} = ($env.{carrier}? | default \"\")",
+            stood = ocx_env::__OCX_ENV_STOOD_DOWN.name,
+            carrier = ocx_env::__OCX_ENV_STATE.name
+        ),
+        Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Batch => return None,
+    };
+    let tail = match shell {
+        Shell::Elvish => checkpoint(shell),
+        _ => redefinition(shell, binary, watch_paths),
+    };
+    Some(match tail {
+        Some(tail) => format!("{copy}\n{tail}"),
+        None => copy,
+    })
 }
 
 /// Testing-only latency fault for the shell-latency gate, in milliseconds from `__OCX_TESTING_LATENCY_INJECT_MS`.
@@ -188,6 +224,20 @@ pub fn checkpoint(shell: Shell) -> Option<String> {
     })
 }
 
+/// What [`ocx_env::__OCX_ENV_PWD`] holds after a successful reconcile: the shell's pid, its directory, then every
+/// signal variable's value, space-joined with an unset one empty.
+///
+/// The same fold the elvish checkpoint writes as shell code. Nushell cannot run shell code, so the binary computes
+/// it for the `Plan` and the shim's in-shell gate compares against the same fold.
+pub fn gate_value(pid: u32, pwd: &str, signal: impl Fn(&str) -> Option<String>) -> String {
+    let mut value = format!("{pid} {pwd}");
+    for key in YIELD_SIGNALS.iter().chain(&GRANT_SIGNALS) {
+        value.push(' ');
+        value.push_str(&signal(key).unwrap_or_default());
+    }
+    value
+}
+
 /// Emit the `ocx` wrapper function for `shell`, or `None` wherever [`registration`] is.
 ///
 /// A latency optimization, never the correctness floor. It must return the binary's own status,
@@ -205,7 +255,7 @@ pub fn wrapper(shell: Shell, binary: &Path) -> Option<String> {
 
 // ── POSIX arms (bash, zsh) ───────────────────────────────────────────────
 
-fn bash_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+fn bash_registration(binary: &str, watch_paths: &WatchSet) -> String {
     // `PROMPT_COMMAND` is probed apart from the function guard: an owner's overwrite drops our call
     // while the function stays defined.
     // ponytail: substring, not element equality, so a function named `…__ocx_prompt_hook…` suppresses it.
@@ -238,7 +288,7 @@ fn bash_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     )
 }
 
-fn zsh_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+fn zsh_registration(binary: &str, watch_paths: &WatchSet) -> String {
     // `add-zsh-hook` is duplicate-safe for `precmd` and `zshexit` alike, so no probe is needed.
     let quoted = posix_single_quoted(binary);
     let body = posix_hook_body(&quoted, "zsh", watch_paths);
@@ -259,7 +309,7 @@ fn zsh_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
     )
 }
 
-fn posix_hook_body(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
+fn posix_hook_body(quoted_binary: &str, shell_name: &str, watch_paths: &WatchSet) -> String {
     // `local __ocx_status=$?` must stay first, or the prompt's inherited `$?` is lost.
     format!(
         "__ocx_prompt_hook() {{\n\
@@ -271,20 +321,36 @@ fn posix_hook_body(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
     )
 }
 
-fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf]) -> String {
-    // Builtins only, so an unchanged prompt execs nothing; `-` defaults keep every read `set -u`-safe.
-    let newer: String = watch_paths
+/// The newer-than term of every member, each followed by its presence term where it has one.
+///
+/// A newer-than test is false for a vanished file, so a member present when `watch` was sampled also gates on
+/// staying present; an absent member carries none (it would reconcile every prompt). The term needs the path
+/// to round-trip as text: on a lossy literal it would name a file that never exists and fire every prompt.
+/// `terms` maps a quoted path to `(newer, presence)`.
+fn watch_terms(watch: &WatchSet, quote: fn(&str) -> String, terms: impl Fn(&str) -> (String, String)) -> String {
+    watch
         .iter()
-        .map(|path| {
-            format!(
-                " || [ '{path}' -nt \"${{__ocx_stamp-}}\" ]",
-                path = posix_single_quoted(&path.to_string_lossy())
-            )
+        .map(|(path, present)| {
+            let (newer, gone) = terms(&quote(&path.to_string_lossy()));
+            match path.to_str() {
+                Some(_) if present => format!("{newer}{gone}"),
+                _ => newer,
+            }
         })
-        .collect();
+        .collect()
+}
+
+fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &WatchSet) -> String {
+    // Builtins only, so an unchanged prompt execs nothing; `-` defaults keep every read `set -u`-safe.
+    let newer = watch_terms(watch_paths, posix_single_quoted, |quoted| {
+        (
+            format!(" || [ '{quoted}' -nt \"${{__ocx_stamp-}}\" ]"),
+            format!(" || [ ! -e '{quoted}' ]"),
+        )
+    });
     // The `$PWD` term makes `cd` reconcile: the baked watch paths are the previous project's.
     format!(
-        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ \"${{__ocx_grant-}}\" != \"{granted}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
+        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__ocx_stood_down-}}\" ] || [ \"${{__OCX_ENV_STATE-}}\" != \"${{__ocx_stood_down-}}\" ]; }} && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ \"${{__ocx_grant-}}\" != \"{granted}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
          {apply}\n\
          fi",
         yielded = posix_signal(&YIELD_SIGNALS),
@@ -297,7 +363,7 @@ fn posix_apply(quoted_binary: &str, shell_name: &str) -> String {
     // Stderr and status discarded, so a binary predating `--reconcile` breaks no prompt.
     // Never refresh the stamp here: a failed run must leave it stale so the next prompt retries.
     format!(
-        "eval \"$('{quoted_binary}' {OFFLINE} self activate --reconcile --shell={shell_name} 2>/dev/null)\" || true"
+        "eval \"$('{quoted_binary}' {OFFLINE} self activate --reconcile --shell={shell_name} --shell-pid $$ 2>/dev/null)\" || true"
     )
 }
 
@@ -321,7 +387,7 @@ fn posix_wrapper(binary: &str) -> String {
 
 // ── fish ─────────────────────────────────────────────────────────────────
 
-fn fish_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
+fn fish_registration(binary: &str, watch_paths: &WatchSet) -> String {
     let quoted = fish_single_quoted(binary);
     // A named `--on-event fish_exit` handler displaces no other module's.
     format!(
@@ -337,7 +403,7 @@ fn fish_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
 }
 
 /// The `__ocx_prompt_hook` function alone, shared by [`redefinition`] and [`fish_registration`] so they cannot drift.
-fn fish_hook_function(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
+fn fish_hook_function(quoted_binary: &str, watch_paths: &WatchSet) -> String {
     format!(
         "function __ocx_prompt_hook --on-event fish_prompt\n\
          set -l __ocx_status $status\n\
@@ -348,18 +414,15 @@ fn fish_hook_function(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
     )
 }
 
-fn fish_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
-    let newer: String = watch_paths
-        .iter()
-        .map(|path| {
-            format!(
-                "; or test '{path}' -nt \"$__ocx_stamp\"",
-                path = fish_single_quoted(&path.to_string_lossy())
-            )
-        })
-        .collect();
+fn fish_reconcile(quoted_binary: &str, watch_paths: &WatchSet) -> String {
+    let newer = watch_terms(watch_paths, fish_single_quoted, |quoted| {
+        (
+            format!("; or test '{quoted}' -nt \"$__ocx_stamp\""),
+            format!("; or not test -e '{quoted}'"),
+        )
+    });
     format!(
-        "if test -x '{quoted_binary}'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test \"$__ocx_grant\" != \"{granted}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; or test \"$PWD/{PROJECT_FILE}\" -nt \"$__ocx_stamp\"; end\n\
+        "if test -x '{quoted_binary}'; and begin; test -z \"$__ocx_stood_down\"; or test \"$__OCX_ENV_STATE\" != \"$__ocx_stood_down\"; end; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test \"$__ocx_grant\" != \"{granted}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; or test \"$PWD/{PROJECT_FILE}\" -nt \"$__ocx_stamp\"; end\n\
          {apply}\n\
          end",
         yielded = fish_signal(&YIELD_SIGNALS),
@@ -369,7 +432,9 @@ fn fish_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
 }
 
 fn fish_apply(quoted_binary: &str) -> String {
-    format!("'{quoted_binary}' {OFFLINE} self activate --reconcile --shell=fish 2>/dev/null | source")
+    format!(
+        "'{quoted_binary}' {OFFLINE} self activate --reconcile --shell=fish --shell-pid $fish_pid 2>/dev/null | source"
+    )
 }
 
 fn fish_wrapper(binary: &str) -> String {
@@ -388,11 +453,11 @@ fn fish_wrapper(binary: &str) -> String {
 
 // ── PowerShell ───────────────────────────────────────────────────────────
 
-fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
-    // `Continue` preferences in the hook's own scope plus the `catch`, so a hook error never fails a prompt.
-    // `Remove-Variable -Scope Local` restores them; reading the PS 5.1-absent preference throws under StrictMode.
-    // `$?` and `$LASTEXITCODE` are captured on entry and restored, `$?` by the final statement's outcome.
-    let quoted = powershell_single_quoted(binary);
+/// The hook runs with `Continue` preferences in its own scope plus the `catch`, so a hook error never
+/// fails a prompt. `Remove-Variable -Scope Local` restores them; reading the PS 5.1-absent preference
+/// throws under StrictMode. `$?` and `$LASTEXITCODE` are captured on entry and restored, `$?` by the
+/// final statement's outcome.
+fn power_shell_registration(binary: &str, watch_paths: &WatchSet) -> String {
     // Probe the live `prompt` body, not a marker variable a clobber leaves behind, so a clobber is re-wrapped.
     // `"$(…)"`, not `.ToString()`, which throws on `$null` under StrictMode.
     // ponytail: an owner that *wraps* ours makes a re-source re-wrap, so reconcile runs twice.
@@ -422,7 +487,7 @@ fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
          if ($__ocxOk) {{ $null = $true }} else {{ Write-Error -Message 'ocx' -ErrorAction Ignore }}\n\
          }}\n\
          }}",
-        function = power_shell_reconcile_function(&quoted, watch_paths),
+        function = power_shell_reconcile_function(binary, watch_paths),
         call = PWSH_HOOK_CALL
     )
 }
@@ -430,50 +495,50 @@ fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
 /// The `__ocxReconcile` function alone, for [`redefinition`].
 ///
 /// Never reseeds the `$global:` state, or the reset stamp makes the next prompt exec unconditionally.
-fn power_shell_reconcile_function(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
+fn power_shell_reconcile_function(binary: &str, watch_paths: &WatchSet) -> String {
     format!(
         "function global:__ocxReconcile {{\n\
          {check}\n\
          }}",
-        check = power_shell_reconcile(quoted_binary, watch_paths)
+        check = power_shell_reconcile(binary, watch_paths)
     )
 }
 
-fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
-    // An absent path reads as 1601-01-01 rather than throwing, so it counts once created.
-    let newer: String = watch_paths
-        .iter()
-        .map(|path| {
-            format!(
-                " -or [System.IO.File]::GetLastWriteTimeUtc('{path}') -gt $global:__ocxStamp",
-                path = powershell_single_quoted(&path.to_string_lossy())
-            )
-        })
-        .collect();
+fn power_shell_reconcile(binary: &str, watch_paths: &WatchSet) -> String {
+    let binary_literal = powershell_literal(binary);
+    // An absent path reads as 1601-01-01 rather than throwing, so it counts once created. The presence term uses
+    // .NET, not `Test-Path`, which rewrites `\` to `/` on Unix and reads a path holding one as absent.
+    // A member may be a directory (the install `bin`), so both probes.
+    let newer = watch_terms(watch_paths, powershell_literal, |literal| {
+        (
+            format!(" -or [System.IO.File]::GetLastWriteTimeUtc({literal}) -gt $global:__ocxStamp"),
+            format!(" -or -not ([System.IO.File]::Exists({literal}) -or [System.IO.Directory]::Exists({literal}))"),
+        )
+    });
     // `CurrentFileSystemLocation`, not `$PWD`: under `HKLM:` PS 5.1's `Combine` throws and kills the reconcile.
     // `[System.IO.Path]::Combine`, not `Join-Path`, which a user function could shadow.
     format!(
-        "if (Test-Path -LiteralPath '{quoted_binary}' -PathType Leaf) {{\n\
+        "if ([System.IO.File]::Exists({binary_literal}) -and -not (-not [string]::IsNullOrEmpty($ExecutionContext.SessionState.PSVariable.GetValue('__ocxStoodDown')) -and $env:__OCX_ENV_STATE -ceq $global:__ocxStoodDown)) {{\n\
          if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\" -or $global:__ocxGrant -ne \"{granted}\"{newer} -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, '{PROJECT_FILE}')) -gt $global:__ocxStamp) {{\n\
          {apply}\n\
          }}\n\
          }}",
         yielded = power_shell_signal(&YIELD_SIGNALS),
         granted = power_shell_signal(&GRANT_SIGNALS),
-        apply = power_shell_apply(quoted_binary)
+        apply = power_shell_apply(&binary_literal)
     )
 }
 
-fn power_shell_apply(quoted_binary: &str) -> String {
+fn power_shell_apply(binary_literal: &str) -> String {
     format!(
-        "& '{quoted_binary}' {OFFLINE} self activate --reconcile --shell=powershell 2>$null | Out-String | Invoke-Expression"
+        "& {binary_literal} {OFFLINE} self activate --reconcile --shell=powershell --shell-pid $PID 2>$null | Out-String | Invoke-Expression"
     )
 }
 
 fn power_shell_wrapper(binary: &str) -> String {
     // `$?` is replayed with `Write-Error -ErrorAction Ignore`, or it reads true after a failed `ocx`.
     // The `finally` reconciles even when the caller's `Stop` preferences make the call throw.
-    let quoted = powershell_single_quoted(binary);
+    let binary_literal = powershell_literal(binary);
     // Workaround for PowerShell/PowerShell#21208: the binder eats a function call's first bare `--`.
     // Re-insert it from `$MyInvocation.Line` (PS 5.1 has no `.Statement`), matching this call by column,
     // or a nested or `;`-joined `ocx` is taken for it; `-x:1` binds as two `$args`.
@@ -509,7 +574,7 @@ fn power_shell_wrapper(binary: &str) -> String {
          }}\n\
          }} catch {{ }}\n\
          try {{\n\
-         & '{quoted}' @__ocxArgs\n\
+         & {binary_literal} @__ocxArgs\n\
          $__ocxOk = $?\n\
          $__ocxSt = $LASTEXITCODE\n\
          }} finally {{\n\
@@ -567,11 +632,12 @@ fn elvish_already_registered(list: &str) -> String {
 fn elvish_hook_closure(quoted_binary: &str) -> String {
     format!(
         "{{|@{ELVISH_HOOK_MARKER}|\n\
-         if (or (==s $E:{carrier} '') (!=s $E:{ELVISH_PWD_KEY} {value})) {{\n\
-         try {{ eval ('{quoted_binary}' {OFFLINE} self activate --reconcile --shell=elvish 2>/dev/null | slurp) }} catch e {{ }}\n\
+         if (and (or (==s $E:{stood} '') (!=s $E:{carrier} $E:{stood})) (or (==s $E:{carrier} '') (!=s $E:{ELVISH_PWD_KEY} {value}))) {{\n\
+         try {{ eval ('{quoted_binary}' {OFFLINE} self activate --reconcile --shell=elvish --shell-pid (to-string $pid) 2>/dev/null | slurp) }} catch e {{ }}\n\
          }}\n\
          }}",
-        carrier = super::reconcile::CARRIER_KEY,
+        carrier = ocx_env::__OCX_ENV_STATE.name,
+        stood = ocx_env::__OCX_ENV_STOOD_DOWN.name,
         value = elvish_pwd_value(),
     )
 }
@@ -608,13 +674,18 @@ fn elvish_wrapper(binary: &str) -> String {
 mod tests {
     use super::*;
     use clap_builder::ValueEnum as _;
+    use std::path::PathBuf;
 
     fn binary() -> PathBuf {
         PathBuf::from("/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx")
     }
 
-    fn watch() -> Vec<PathBuf> {
-        vec![PathBuf::from("/w/ocx.toml"), PathBuf::from("/w/ocx.lock")]
+    fn watch() -> WatchSet {
+        sampled(&["/w/ocx.toml", "/w/ocx.lock"])
+    }
+
+    fn sampled(paths: &[&str]) -> WatchSet {
+        WatchSet::sample(paths.iter().map(PathBuf::from).collect())
     }
 
     /// What an arm's per-prompt guard is made of.
@@ -691,8 +762,8 @@ mod tests {
                  if [ -n \"${__ocx_stamp-}\" ] && [ -z \"$(trap -p EXIT 2>/dev/null)\" ]; then trap 'command rm -f \"${__ocx_stamp-}\" 2>/dev/null' EXIT; fi\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
-                 eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=bash 2>/dev/null)\" || true\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__ocx_stood_down-}\" ] || [ \"${__OCX_ENV_STATE-}\" != \"${__ocx_stood_down-}\" ]; } && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=bash --shell-pid $$ 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
                  }\n\
@@ -725,8 +796,8 @@ mod tests {
                  __ocx_stamp=\"$(command mktemp -t ocx-env-stamp.XXXXXXXX 2>/dev/null)\" || __ocx_stamp=''\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
-                 eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=zsh 2>/dev/null)\" || true\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__ocx_stood_down-}\" ] || [ \"${__OCX_ENV_STATE-}\" != \"${__ocx_stood_down-}\" ]; } && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=zsh --shell-pid $$ 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
                  }\n\
@@ -752,8 +823,8 @@ mod tests {
                  end\n\
                  function __ocx_prompt_hook --on-event fish_prompt\n\
                  set -l __ocx_status $status\n\
-                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test \"$__ocx_grant\" != \"$OCX_CONSENT_PATHS|$OCX_CONSENT_NAMESPACES\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; or test \"$PWD/ocx.toml\" -nt \"$__ocx_stamp\"; end\n\
-                 '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=fish 2>/dev/null | source\n\
+                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__ocx_stood_down\"; or test \"$__OCX_ENV_STATE\" != \"$__ocx_stood_down\"; end; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test \"$__ocx_grant\" != \"$OCX_CONSENT_PATHS|$OCX_CONSENT_NAMESPACES\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; or test \"$PWD/ocx.toml\" -nt \"$__ocx_stamp\"; end\n\
+                 '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=fish --shell-pid $fish_pid 2>/dev/null | source\n\
                  end\n\
                  return $__ocx_status\n\
                  end\n\
@@ -774,9 +845,9 @@ mod tests {
                  $global:__ocxYield = ''\n\
                  $global:__ocxGrant = ''\n\
                  function global:__ocxReconcile {\n\
-                 if (Test-Path -LiteralPath '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' -PathType Leaf) {\n\
+                 if ([System.IO.File]::Exists('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx') -and -not (-not [string]::IsNullOrEmpty($ExecutionContext.SessionState.PSVariable.GetValue('__ocxStoodDown')) -and $env:__OCX_ENV_STATE -ceq $global:__ocxStoodDown)) {\n\
                  if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"$($env:DIRENV_DIR)|$($env:MISE_SHELL)|$($env:__MISE_ORIG_PATH)\" -or $global:__ocxGrant -ne \"$($env:OCX_CONSENT_PATHS)|$($env:OCX_CONSENT_NAMESPACES)\" -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.toml') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.lock') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, 'ocx.toml')) -gt $global:__ocxStamp) {\n\
-                 & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=powershell 2>$null | Out-String | Invoke-Expression\n\
+                 & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=powershell --shell-pid $PID 2>$null | Out-String | Invoke-Expression\n\
                  }\n\
                  }\n\
                  }\n\
@@ -787,7 +858,7 @@ mod tests {
                  try {\n\
                  $ErrorActionPreference = 'Continue'\n\
                  $PSNativeCommandUseErrorActionPreference = $false\n\
-                 if (Test-Path function:global:__ocxReconcile) { __ocxReconcile }\n\
+                 if ($ExecutionContext.SessionState.InvokeCommand.GetCommand('__ocxReconcile', 'Function')) { __ocxReconcile }\n\
                  } finally {\n\
                  Remove-Variable -Name ErrorActionPreference,PSNativeCommandUseErrorActionPreference -Scope Local -ErrorAction SilentlyContinue\n\
                  }\n\
@@ -902,7 +973,7 @@ mod tests {
                  try {\n\
                  $ErrorActionPreference = 'Continue'\n\
                  $PSNativeCommandUseErrorActionPreference = $false\n\
-                 if (Test-Path function:global:__ocxReconcile) { __ocxReconcile }\n\
+                 if ($ExecutionContext.SessionState.InvokeCommand.GetCommand('__ocxReconcile', 'Function')) { __ocxReconcile }\n\
                  } catch { } finally {\n\
                  Remove-Variable -Name ErrorActionPreference,PSNativeCommandUseErrorActionPreference -Scope Local -ErrorAction SilentlyContinue\n\
                  }\n\
@@ -911,6 +982,33 @@ mod tests {
                  }\n\
                  }"
             )
+        );
+    }
+
+    #[test]
+    fn the_gate_value_folds_pid_directory_and_every_signal_like_the_elvish_checkpoint() {
+        let value = gate_value(4242, "/work/p", |key| {
+            (key == "DIRENV_DIR").then(|| "/work/p".to_owned())
+        });
+        let signals = YIELD_SIGNALS.len() + GRANT_SIGNALS.len();
+        let mut fields = value.split(' ');
+        assert_eq!(fields.next(), Some("4242"));
+        assert_eq!(fields.next(), Some("/work/p"));
+        let tail: Vec<&str> = fields.collect();
+        assert_eq!(
+            tail.len(),
+            signals,
+            "one field per signal, an unset one empty: {value:?}"
+        );
+        assert_eq!(tail[0], "/work/p", "DIRENV_DIR leads the yield signals: {value:?}");
+        assert!(
+            tail[1..].iter().all(|field| field.is_empty()),
+            "unset signals are empty: {value:?}"
+        );
+        assert_eq!(
+            elvish_pwd_value().matches("' '$E:").count(),
+            signals,
+            "the shell-code fold carries the same signals in the same order"
         );
     }
 
@@ -927,8 +1025,8 @@ mod tests {
                  if (==s (kind-of $__ocx_candidate) fn) { all $__ocx_candidate[arg-names] } })] \
                  ''__ocx-prompt-hook'')) {\n\
                  set edit:before-readline = [$@edit:before-readline {|@__ocx-prompt-hook|\n\
-                 if (or (==s $E:__OCX_ENV_STATE '''') (!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH'' ''$E:OCX_CONSENT_PATHS'' ''$E:OCX_CONSENT_NAMESPACES)) {\n\
-                 try { eval (''/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'' --offline self activate --reconcile --shell=elvish 2>/dev/null | slurp) } catch e { }\n\
+                 if (and (or (==s $E:__OCX_ENV_STOOD_DOWN '''') (!=s $E:__OCX_ENV_STATE $E:__OCX_ENV_STOOD_DOWN)) (or (==s $E:__OCX_ENV_STATE '''') (!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH'' ''$E:OCX_CONSENT_PATHS'' ''$E:OCX_CONSENT_NAMESPACES))) {\n\
+                 try { eval (''/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'' --offline self activate --reconcile --shell=elvish --shell-pid (to-string $pid) 2>/dev/null | slurp) } catch e { }\n\
                  }\n\
                  }]\n\
                  }' } catch e { }"
@@ -1027,7 +1125,7 @@ mod tests {
         for shell in hooked() {
             let text = registration(shell, &binary(), &watch()).unwrap_or_default();
             assert!(!text.is_empty(), "{shell} must register something");
-            for path in watch() {
+            for path in watch().paths() {
                 let literal = path.to_string_lossy().to_string();
                 match guard_kind(shell) {
                     GuardKind::WatchGuarded => assert!(
@@ -1211,8 +1309,8 @@ mod tests {
             let text = registration(shell, &binary(), &watch()).unwrap_or_default();
             assert_eq!(
                 text.matches("${__OCX_ENV_STATE-}").count(),
-                1,
-                "{shell} must read the carrier exactly once, default-expanded"
+                2,
+                "{shell} must read the carrier exactly twice (the stood-down clause and the empty test), default-expanded"
             );
             assert!(
                 !text.contains("${__OCX_ENV_STATE}") && !text.contains("$__OCX_ENV_STATE\""),
@@ -1584,7 +1682,7 @@ mod tests {
     fn every_watch_path_reaches_every_hooked_arm() {
         for shell in shells_where(GuardKind::WatchGuarded) {
             let text = registration(shell, &binary(), &watch()).unwrap_or_default();
-            for path in watch() {
+            for path in watch().paths() {
                 assert!(
                     text.contains(&path.to_string_lossy().to_string()),
                     "{shell} must carry {path:?}: {text}"
@@ -1697,7 +1795,7 @@ mod tests {
     #[test]
     fn an_empty_watch_set_still_emits_a_usable_guard() {
         for shell in hooked() {
-            let text = registration(shell, &binary(), &[]).unwrap_or_default();
+            let text = registration(shell, &binary(), &WatchSet::default()).unwrap_or_default();
             assert!(!text.is_empty(), "{shell} must still register");
             assert!(text.contains("--reconcile"), "{shell} must still reconcile: {text}");
         }
@@ -1707,7 +1805,7 @@ mod tests {
         // contract `every_arm_guards_the_way_its_kind_says_it_does` states, seen
         // from the other side.
         assert_eq!(
-            registration(Shell::Elvish, &binary(), &[]),
+            registration(Shell::Elvish, &binary(), &WatchSet::default()),
             registration(Shell::Elvish, &binary(), &watch()),
             "elvish's registration must not vary with a watch set it cannot read"
         );
@@ -1715,7 +1813,7 @@ mod tests {
         // a statement about all of them.
         for shell in shells_where(GuardKind::WatchGuarded) {
             assert_ne!(
-                registration(shell, &binary(), &[]),
+                registration(shell, &binary(), &WatchSet::default()),
                 registration(shell, &binary(), &watch()),
                 "{shell} is watch-guarded, so its emission must depend on the watch set"
             );
@@ -1726,13 +1824,8 @@ mod tests {
 
     /// A second watch set, disjoint from [`watch`], so "carries the new list"
     /// and "no longer carries the old" are two separate assertions.
-    fn regrown_watch() -> Vec<PathBuf> {
-        vec![
-            PathBuf::from("/w/ocx.toml"),
-            PathBuf::from("/w/ocx.lock"),
-            PathBuf::from("/w/sub/ocx.toml"),
-            PathBuf::from("/w/sub/ocx.lock"),
-        ]
+    fn regrown_watch() -> WatchSet {
+        sampled(&["/w/ocx.toml", "/w/ocx.lock", "/w/sub/ocx.toml", "/w/sub/ocx.lock"])
     }
 
     #[test]
@@ -1754,6 +1847,122 @@ mod tests {
         }
     }
 
+    /// Whether `text` carries a presence test: the file-exists spelling of the arm that wrote it.
+    fn is_presence_term(text: &str) -> bool {
+        text.contains("! -e") || text.contains("not test -e") || text.contains("-not ([System.IO.File]::Exists(")
+    }
+
+    /// `-nt` is false for a vanished file, so a member that exists when the gate is emitted also gates on
+    /// staying present; an absent member carries no such term (it would reconcile every prompt).
+    #[test]
+    fn a_present_member_gates_on_its_own_disappearance_and_an_absent_one_does_not() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let present = dir.path().join("ocx.toml");
+        std::fs::write(&present, b"[env]\n").expect("write");
+        let absent = dir.path().join("ocx.lock");
+        let watch = WatchSet::sample(vec![present.clone(), absent.clone()]);
+        for shell in shells_where(GuardKind::WatchGuarded) {
+            let text = redefinition(shell, &binary(), &watch).unwrap_or_default();
+            // By file name: a shell literal escapes the separators of a Windows path, so the full path never appears.
+            let line = |path: &std::path::Path| {
+                let name = path.file_name().expect("file name").to_string_lossy().into_owned();
+                text.lines()
+                    .flat_map(|line| line.split("||"))
+                    .flat_map(|part| part.split("; or "))
+                    .flat_map(|part| part.split(" -or "))
+                    .filter(|part| part.contains(&name))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            let present_terms = line(&present);
+            let absent_terms = line(&absent);
+            // The split above can match nothing after a reformat, which would pass both asserts vacuously.
+            assert!(
+                !present_terms.is_empty(),
+                "{shell}: the split found no term naming the member: {text}"
+            );
+            assert!(
+                present_terms.iter().any(|term| is_presence_term(term)),
+                "{shell}: a present member must gate on its disappearance: {present_terms:?}"
+            );
+            assert!(
+                !absent_terms.iter().any(|term| is_presence_term(term)),
+                "{shell}: an absent member must not gate on presence: {absent_terms:?}"
+            );
+        }
+    }
+
+    /// The gate is baked from the one presence sample: a member that vanishes after sampling still gets its
+    /// term, the same value the digest folded.
+    #[test]
+    fn the_gate_follows_the_sampled_presence_not_the_disk() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let member = dir.path().join("ocx.lock");
+        std::fs::write(&member, b"x").expect("write");
+        let snapshot = WatchSet::sample(vec![member.clone()]);
+        std::fs::remove_file(&member).expect("remove");
+        for shell in shells_where(GuardKind::WatchGuarded) {
+            let text = redefinition(shell, &binary(), &snapshot).unwrap_or_default();
+            assert!(
+                is_presence_term(&text),
+                "{shell}: the gate must carry the presence term the snapshot recorded: {text}"
+            );
+        }
+    }
+
+    /// A path that is not text cannot be written as a literal that names it, so its presence term would fire
+    /// on every prompt; the newer-than term stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_member_carries_no_presence_term() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // Presence is given, not stat'd: APFS refuses to create a non-UTF-8 name, but a watch path can still be one.
+        let member = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/p/ocx\xff.lock"));
+        let watch = WatchSet::with_presence(vec![(member, true)]);
+        for shell in shells_where(GuardKind::WatchGuarded) {
+            let text = redefinition(shell, &binary(), &watch).unwrap_or_default();
+            assert!(
+                !is_presence_term(&text),
+                "{shell}: a lossy literal must not become a presence term: {text}"
+            );
+            assert!(
+                text.contains("-nt") || text.contains("GetLastWriteTimeUtc"),
+                "{shell}: the newer-than term must remain: {text}"
+            );
+        }
+    }
+
+    /// Windows PowerShell decodes the hook text with the console code page, where some pages turn the UTF-8
+    /// continuation bytes 0x91..0x94 into typographic quotes the tokenizer reads as a quote. No byte of a
+    /// watch term may reach 0x80, whatever the path holds.
+    #[test]
+    fn a_non_ascii_watch_path_reaches_the_pwsh_gate_as_ascii_only() {
+        // U+0451 holds the UTF-8 byte 0x91, U+1F600 is above the BMP, U+2019 is itself a quote.
+        for name in [
+            "\u{0451}",
+            "Jos\u{00E9}",
+            "\u{1F600}",
+            "it\u{2019}s",
+            "a'b\u{0451}\u{1F600}",
+        ] {
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let member = dir.path().join(name).join("ocx.toml");
+            std::fs::create_dir_all(member.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&member, b"[env]\n").expect("write");
+            let watch = WatchSet::sample(vec![member]);
+            let gate = power_shell_reconcile("C:\\Users\\u\\ocx.exe", &watch);
+            assert!(
+                gate.is_ascii(),
+                "a non-ASCII byte reached the pwsh gate for {name:?}: {gate}"
+            );
+            assert!(
+                is_presence_term(&gate),
+                "the present member must still carry its presence term: {gate}"
+            );
+        }
+    }
+
     /// The whole point of the emission: the new members are in it and the
     /// retired ones are gone. A redefinition that merely *added* would leave a
     /// left project watched for the shell's whole life.
@@ -1761,7 +1970,7 @@ mod tests {
     fn a_redefinition_carries_the_new_watch_set_and_drops_the_old() {
         for shell in shells_where(GuardKind::WatchGuarded) {
             let text = redefinition(shell, &binary(), &regrown_watch()).unwrap_or_default();
-            for path in regrown_watch() {
+            for path in regrown_watch().paths() {
                 assert!(
                     text.contains(&*path.to_string_lossy()),
                     "{shell}: the redefinition must carry the new member {path:?}: {text}"
@@ -1849,6 +2058,170 @@ mod tests {
         }
     }
 
+    // ── session token ────────────────────────────────────────────
+
+    /// What follows `--shell-pid` in each arm: the shell's own pid variable, never `$BASHPID` (a subshell's) or a literal.
+    fn pid_expression(shell: Shell) -> &'static str {
+        match shell {
+            Shell::Bash | Shell::Zsh => "$$",
+            Shell::Fish => "$fish_pid",
+            Shell::PowerShell => "$PID",
+            Shell::Elvish => "(to-string $pid)",
+            Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Nushell | Shell::Batch => "",
+        }
+    }
+
+    #[test]
+    fn every_reconcile_call_passes_its_shells_own_pid() {
+        for shell in hooked() {
+            let mut emissions = vec![registration(shell, &binary(), &watch()).unwrap_or_default()];
+            emissions.extend(redefinition(shell, &binary(), &watch()));
+            for text in emissions {
+                let calls: Vec<&str> = text.matches("self activate --reconcile").collect();
+                assert!(!calls.is_empty(), "{shell}: no reconcile call to inspect: {text}");
+                let expected = format!("--shell-pid {}", pid_expression(shell));
+                for (index, _) in text.match_indices("self activate --reconcile") {
+                    let tail = &text[index..];
+                    let call = tail.lines().next().unwrap_or_default();
+                    assert!(
+                        call.contains(&expected),
+                        "{shell}: the reconcile call must carry `{expected}`: {call}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── stand-down ───────────────────────────────────────────────
+
+    /// The hostile value the acceptance rows use, as bytes an emitted line must never carry.
+    const HOSTILE: &str = "1.x'; touch pwned-quote; echo '$(touch pwned-sub)`touch pwned-tick`\ntouch pwned-newline";
+
+    #[test]
+    fn stand_down_copies_the_state_by_reference_exactly() {
+        let copy = |shell| {
+            stand_down(shell, &binary(), &watch())
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(copy(Shell::Bash), "__ocx_stood_down=\"${__OCX_ENV_STATE-}\"");
+        assert_eq!(copy(Shell::Zsh), "__ocx_stood_down=\"${__OCX_ENV_STATE-}\"");
+        assert_eq!(copy(Shell::Fish), "set -g __ocx_stood_down \"$__OCX_ENV_STATE\"");
+        assert_eq!(copy(Shell::PowerShell), "$global:__ocxStoodDown = $env:__OCX_ENV_STATE");
+        assert_eq!(copy(Shell::Elvish), "set-env __OCX_ENV_STOOD_DOWN $E:__OCX_ENV_STATE");
+        assert_eq!(
+            copy(Shell::Nushell),
+            "$env.__OCX_ENV_STOOD_DOWN = ($env.__OCX_ENV_STATE? | default \"\")"
+        );
+    }
+
+    #[test]
+    fn exactly_the_hooked_arms_and_nushell_can_stand_down() {
+        for shell in Shell::value_variants() {
+            let emitted = stand_down(*shell, &binary(), &watch());
+            let expected = guard_kind(*shell) != GuardKind::None || *shell == Shell::Nushell;
+            assert_eq!(emitted.is_some(), expected, "{shell}: {emitted:?}");
+        }
+    }
+
+    /// Elvish and nushell cannot keep an unexported variable across prompts, so only they use the HookLocal name.
+    #[test]
+    fn only_elvish_and_nushell_keep_the_copy_in_the_hook_local_variable() {
+        for shell in Shell::value_variants() {
+            let Some(text) = stand_down(*shell, &binary(), &watch()) else {
+                continue;
+            };
+            let hook_local = text.contains(ocx_env::__OCX_ENV_STOOD_DOWN.name);
+            assert_eq!(
+                hook_local,
+                matches!(shell, Shell::Elvish | Shell::Nushell),
+                "{shell}: {text}"
+            );
+        }
+    }
+
+    /// Row 1 of the gate: skip only while a copy exists and the state still equals it, with no exec on the skip path.
+    #[test]
+    fn every_gate_skips_first_while_the_state_equals_the_stood_down_copy() {
+        let expected = |shell| match shell {
+            Shell::Bash | Shell::Zsh => {
+                "{ [ -z \"${__ocx_stood_down-}\" ] || [ \"${__OCX_ENV_STATE-}\" != \"${__ocx_stood_down-}\" ]; } && { [ -z \"${__OCX_ENV_STATE-}\""
+            }
+            Shell::Fish => {
+                "begin; test -z \"$__ocx_stood_down\"; or test \"$__OCX_ENV_STATE\" != \"$__ocx_stood_down\"; end; and begin; test -z \"$__OCX_ENV_STATE\""
+            }
+            Shell::PowerShell => {
+                "-not (-not [string]::IsNullOrEmpty($ExecutionContext.SessionState.PSVariable.GetValue('__ocxStoodDown')) -and $env:__OCX_ENV_STATE -ceq $global:__ocxStoodDown)"
+            }
+            Shell::Elvish => {
+                "(and (or (==s $E:__OCX_ENV_STOOD_DOWN '''') (!=s $E:__OCX_ENV_STATE $E:__OCX_ENV_STOOD_DOWN)) (or (==s $E:__OCX_ENV_STATE ''''"
+            }
+            _ => "",
+        };
+        for shell in hooked() {
+            let mut emissions = vec![registration(shell, &binary(), &watch()).unwrap_or_default()];
+            emissions.extend(redefinition(shell, &binary(), &watch()));
+            for text in emissions {
+                let clause = expected(shell);
+                assert_eq!(
+                    text.matches(clause).count(),
+                    1,
+                    "{shell}: exactly one stood-down clause: {text}"
+                );
+                let at = text.find(clause);
+                assert!(
+                    at.is_some(),
+                    "{shell}: the gate must open with the stood-down clause `{clause}`: {text}"
+                );
+                let before = &text[..at.unwrap_or_default()];
+                assert!(
+                    !before.contains("self activate"),
+                    "{shell}: the stood-down clause must come before any binary call: {text}"
+                );
+            }
+        }
+    }
+
+    /// The emitted lines reference the state; none carries a byte of it, wherever the process environment holds one.
+    #[test]
+    fn a_stand_down_emission_is_independent_of_the_inherited_value() {
+        let lock = ocx_env::overrides::lock();
+        let baseline: Vec<(Shell, Option<String>)> = Shell::value_variants()
+            .iter()
+            .map(|shell| (*shell, stand_down(*shell, &binary(), &watch())))
+            .collect();
+        lock.set(&ocx_env::__OCX_ENV_STATE, HOSTILE);
+        for (shell, before) in baseline {
+            let after = stand_down(shell, &binary(), &watch());
+            assert_eq!(
+                after, before,
+                "{shell}: the emission must not depend on the inherited value"
+            );
+            let can_stand_down = guard_kind(shell) != GuardKind::None || shell == Shell::Nushell;
+            assert_eq!(after.is_some(), can_stand_down, "{shell}: {after:?}");
+            let Some(text) = after else { continue };
+            for piece in ["pwned", "touch", "1.x", "$(touch"] {
+                assert!(!text.contains(piece), "{shell}: the emission embeds {piece:?}: {text}");
+            }
+            assert!(text.to_ascii_lowercase().contains("stood"), "{shell}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_stand_down_re_emits_the_gate_the_registration_bakes() {
+        for shell in shells_where(GuardKind::WatchGuarded) {
+            let text = stand_down(shell, &binary(), &watch()).unwrap_or_default();
+            let redefined = redefinition(shell, &binary(), &watch()).unwrap_or_default();
+            assert!(
+                text.contains(&redefined),
+                "{shell}: the stand-down must carry the full redefinition: {text}"
+            );
+        }
+    }
+
     // ── A-21: no diagnostic is emitted on the startup path ───────────────
 
     #[test]
@@ -1880,7 +2253,7 @@ mod tests {
     #[test]
     fn a_quote_in_a_path_is_escaped_per_arm() {
         let nasty = PathBuf::from("/home/it's work/bin/ocx");
-        let watch = [PathBuf::from("/home/it's work/ocx.toml")];
+        let watch = sampled(&["/home/it's work/ocx.toml"]);
         let bash = registration(Shell::Bash, &nasty, &watch).unwrap_or_default();
         assert!(bash.contains("'/home/it'\\''s work/bin/ocx'"), "{bash}");
         assert!(bash.contains("'/home/it'\\''s work/ocx.toml'"), "{bash}");
@@ -1903,6 +2276,37 @@ mod tests {
             elvish_wrapper.contains("''/home/it''''s work/bin/ocx''"),
             "{elvish_wrapper}"
         );
+    }
+
+    /// `Test-Path` globs `[`/`]` and rewrites `\` on Unix, so no PowerShell text written here may use it.
+    #[test]
+    fn no_powershell_hook_text_uses_test_path() {
+        let binary = PathBuf::from("/home/[x]/bin/ocx");
+        let watch = sampled(&["/home/[x]/ocx.toml"]);
+        let reg = registration(Shell::PowerShell, &binary, &watch).expect("PowerShell has a registration");
+        let wrapper = wrapper(Shell::PowerShell, &binary).expect("PowerShell has a wrapper");
+        for text in [&reg, &wrapper] {
+            assert!(!text.contains("Test-Path"), "{text}");
+        }
+        assert!(reg.contains("[System.IO.File]::Exists('/home/[x]/bin/ocx')"), "{reg}");
+    }
+
+    #[test]
+    fn a_non_ascii_path_reaches_every_powershell_term_as_chars() {
+        let cjk = PathBuf::from("/home/\u{4E2D}\u{6587}/bin/ocx");
+        let watch = sampled(&["/home/\u{4E2D}\u{6587}/ocx.toml"]);
+        let literal = "('/home/'+[char]0x4E2D+[char]0x6587+'/bin/ocx')";
+        let reg = registration(Shell::PowerShell, &cjk, &watch).expect("PowerShell has a registration");
+        assert!(reg.is_ascii(), "{reg}");
+        assert!(reg.contains(&format!("[System.IO.File]::Exists({literal})")), "{reg}");
+        assert!(reg.contains(&format!("& {literal} --offline")), "{reg}");
+        assert!(
+            reg.contains("GetLastWriteTimeUtc(('/home/'+[char]0x4E2D+[char]0x6587+'/ocx.toml'))"),
+            "{reg}"
+        );
+        let wrapper = wrapper(Shell::PowerShell, &cjk).expect("PowerShell has a wrapper");
+        assert!(wrapper.is_ascii(), "{wrapper}");
+        assert!(wrapper.contains(&format!("& {literal} @__ocxArgs")), "{wrapper}");
     }
 
     #[test]
@@ -1968,6 +2372,8 @@ fn absence_may_skip(name: &str) -> bool {
 /// alone, so a red cannot be mistaken for a rig that stopped working.
 #[cfg(all(test, unix))]
 mod live_shell_tests {
+    use std::path::PathBuf;
+
     #[expect(
         clippy::disallowed_types,
         reason = "test-only live-shell harness proving the per-prompt hook fires"
@@ -2020,7 +2426,7 @@ mod live_shell_tests {
             .args(head)
             .arg(body)
             .env("XDG_CONFIG_HOME", config.path())
-            .env_remove(super::super::reconcile::CARRIER_KEY)
+            .env_remove(ocx_env::__OCX_ENV_STATE.name)
             .env_remove(ELVISH_PWD_KEY)
             .output()
         {
@@ -2054,7 +2460,7 @@ mod live_shell_tests {
         _home: tempfile::TempDir,
         binary: PathBuf,
         counter: PathBuf,
-        watch: Vec<PathBuf>,
+        watch: WatchSet,
         alpha: PathBuf,
         beta: PathBuf,
     }
@@ -2085,8 +2491,9 @@ mod live_shell_tests {
         // One watch member, written before the registration takes its stamp, so
         // it is always older than the stamp and no `-nt` term can account for a
         // firing. Only `$PWD` can.
-        let watch = vec![home.path().join("ocx.lock")];
-        std::fs::write(&watch[0], "version = 3\n").expect("write the watch member");
+        let member = home.path().join("ocx.lock");
+        std::fs::write(&member, "version = 3\n").expect("write the watch member");
+        let watch = WatchSet::sample(vec![member]);
 
         let alpha = home.path().join("alpha");
         let beta = home.path().join("beta");
@@ -2314,7 +2721,7 @@ mod live_shell_tests {
             let registration = registration(
                 shell,
                 Path::new("/nonexistent/ocx"),
-                &[PathBuf::from("/nonexistent/ocx.lock")],
+                &WatchSet::sample(vec![std::path::PathBuf::from("/nonexistent/ocx.lock")]),
             )
             .expect("a hook arm");
             // Printing the path is the only way to learn which name `mktemp`
@@ -2338,6 +2745,75 @@ mod live_shell_tests {
             !exercised.is_empty(),
             "no interpreter was available, so nothing about the stamp's lifetime was proven"
         );
+    }
+
+    /// One real bash and zsh with a hostile unreadable state: the emission copies it by reference, runs none of
+    /// it, the next prompts skip, and `unset` re-arms.
+    ///
+    /// Red states: embedding the value as a literal in the copy creates the `pwned-*` files; dropping the gate's
+    /// stood-down clause makes the counts `1 2 3` instead of `1 1 1 2`.
+    #[test]
+    fn a_stood_down_posix_hook_runs_no_injected_code_skips_and_rearms_on_unset() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut exercised = 0;
+        for argv in [["bash", "-c"], ["zsh", "-c"]] {
+            let shell = Shell::from_live_argv(&argv);
+            let home = tempfile::TempDir::new().expect("tempdir");
+            let counter = home.path().join("fired");
+            std::fs::write(&counter, "").expect("seed the counter");
+            let hostile_file = home.path().join("hostile");
+            let hostile = format!(
+                "1.x'; touch {dir}/pwned-quote; echo '$(touch {dir}/pwned-sub)`touch {dir}/pwned-tick`\ntouch {dir}/pwned-newline",
+                dir = home.path().display()
+            );
+            std::fs::write(&hostile_file, &hostile).expect("write the hostile value");
+            let binary = home.path().join("ocx");
+            let member = home.path().join("ocx.lock");
+            std::fs::write(&member, "version = 3\n").expect("write the watch member");
+            let watch = WatchSet::sample(vec![member]);
+            let emission = stand_down(shell, &binary, &watch).expect("a hook arm");
+            std::fs::write(
+                &binary,
+                format!(
+                    "#!/bin/sh\necho fired >> '{counter}'\ncat <<'__OCX_EOF'\n{emission}\n__OCX_EOF\n",
+                    counter = counter.display()
+                ),
+            )
+            .expect("write the fake ocx");
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod the fake ocx");
+
+            let registration = registration(shell, &binary, &watch).expect("a hook arm");
+            let script = format!(
+                "{registration}\n\
+                 count() {{ grep -c fired '{counter}'; }}\n\
+                 export __OCX_ENV_STATE=\"$(cat '{hostile_file}')\"\n\
+                 __ocx_prompt_hook >/dev/null 2>&1; one=$(count)\n\
+                 __ocx_prompt_hook >/dev/null 2>&1; two=$(count)\n\
+                 __ocx_prompt_hook >/dev/null 2>&1; three=$(count)\n\
+                 same=no; [ \"$__ocx_stood_down\" = \"$__OCX_ENV_STATE\" ] && same=yes\n\
+                 unset __OCX_ENV_STATE\n\
+                 __ocx_prompt_hook >/dev/null 2>&1; four=$(count)\n\
+                 printf '%s %s %s %s %s' \"$one\" \"$two\" \"$three\" \"$same\" \"$four\"",
+                counter = counter.display(),
+                hostile_file = hostile_file.display(),
+            );
+            let Some(observed) = run(&argv, &script) else {
+                continue;
+            };
+            exercised += 1;
+            assert_eq!(
+                observed, "1 1 1 yes 2",
+                "{argv:?}: one call stands down, later prompts skip, the copy equals the state byte for byte, and unset re-arms"
+            );
+            for name in ["pwned-quote", "pwned-sub", "pwned-tick", "pwned-newline"] {
+                assert!(
+                    !home.path().join(name).exists(),
+                    "{argv:?}: the inherited value ran as code and created {name}"
+                );
+            }
+        }
+        assert!(exercised > 0, "no interpreter was available, so nothing was proven");
     }
 
     /// Re-sourcing the activation registers the hook exactly once (#347).
@@ -2502,7 +2978,7 @@ mod live_shell_tests {
             let statement = shell.emit_message(SUMMARY).expect("every hooked arm emits a message");
             let home = tempfile::TempDir::new().expect("tempdir");
             let binary = fake_reconcile(home.path(), &statement);
-            let registration = registration(shell, &binary, &[]).expect("a hook arm");
+            let registration = registration(shell, &binary, &WatchSet::default()).expect("a hook arm");
             // `2>&1 >/dev/null`, in that order: the shell's stderr is dup'd onto
             // the pipe first, then its stdout is dropped. What the runner reads
             // back is therefore exactly what a user would see on a prompt.
@@ -2531,7 +3007,8 @@ mod live_shell_tests {
                 std::fs::set_permissions(&control_binary, std::fs::Permissions::from_mode(0o755))
                     .expect("chmod the control ocx");
             }
-            let control_registration = super::registration(shell, &control_binary, &[]).expect("a hook arm");
+            let control_registration =
+                super::registration(shell, &control_binary, &WatchSet::default()).expect("a hook arm");
             let control_script = format!("{control_registration}\n__ocx_prompt_hook 2>&1 >/dev/null\ntrue");
             let control = run(&argv, &control_script).expect("the interpreter ran a moment ago");
             assert!(
@@ -2639,6 +3116,8 @@ mod live_shell_tests {
 /// it runs.
 #[cfg(test)]
 mod live_power_shell_wrapper_tests {
+    use std::path::PathBuf;
+
     #[expect(
         clippy::disallowed_types,
         reason = "test-only live-shell harness proving the per-prompt hook fires"
@@ -2811,8 +3290,8 @@ mod live_power_shell_wrapper_tests {
         let wrapper = wrapper(Shell::PowerShell, &echo).expect("pwsh has a wrapper");
 
         let mut script = format!(
-            "{wrapper}\n$echo = '{echo}'\n$v = 'VAL'; $arr = @('p', 'q'); $h = @('s1', 's2')\n",
-            echo = powershell_single_quoted(&echo.to_string_lossy())
+            "{wrapper}\n$echo = {echo}\n$v = 'VAL'; $arr = @('p', 'q'); $h = @('s1', 's2')\n",
+            echo = powershell_literal(&echo.to_string_lossy())
         );
         for (name, wrapped, oracle) in CASES {
             script.push_str(&format!(
@@ -2843,6 +3322,52 @@ mod live_power_shell_wrapper_tests {
                 assert_eq!(
                     wrapped, oracle,
                     "{interpreter}: `{name}` reached the program differently through the wrapper"
+                );
+            }
+        }
+    }
+
+    /// Evaluating the ASCII literal in a real interpreter yields the original UTF-16 code units, for
+    /// quotes, a BMP char whose UTF-8 holds 0x91 and an astral char alike.
+    #[test]
+    fn the_pwsh_ascii_literal_evaluates_back_to_the_original_text() {
+        let values = [
+            "plain",
+            "it's",
+            "\u{2018}x\u{201B}",
+            "\u{0451}",
+            "Jos\u{00E9}\\x",
+            "\u{1F600}a",
+        ];
+        let mut script = String::new();
+        for (index, value) in values.iter().enumerate() {
+            script.push_str(&format!(
+                "$v = {}\nWrite-Output ('@@ {index}')\nWrite-Output (($v.ToCharArray() | ForEach-Object {{ '{{0:X4}}' -f [int]$_ }}) -join ' ')\n",
+                powershell_literal(value)
+            ));
+        }
+        assert!(script.is_ascii(), "the case script must reach the interpreter as ASCII");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for interpreter in ["pwsh", "powershell"] {
+            let Some(stdout) = run(interpreter, dir.path(), &script) else {
+                assert!(
+                    absence_may_skip(interpreter),
+                    "{interpreter} is absent, so the ASCII literal was not evaluated \
+                     (__OCX_TESTING_REQUIRE_LIVE_SHELLS names it); install it"
+                );
+                continue;
+            };
+            let sections = sections(&stdout);
+            for (index, value) in values.iter().enumerate() {
+                let expected = value
+                    .encode_utf16()
+                    .map(|unit| format!("{unit:04X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_eq!(
+                    sections[&index.to_string()].trim(),
+                    expected,
+                    "{interpreter}: {value:?} did not round-trip"
                 );
             }
         }

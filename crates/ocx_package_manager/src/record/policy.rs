@@ -41,11 +41,10 @@ impl RecordingPolicy {
         &self.name
     }
 
-    /// The two fields a child ocx cannot re-derive, in the shape
-    /// [`OcxConfigView`](ocx_config::env::OcxConfigView) forwards.
+    /// The two fields a child ocx cannot re-derive, in the shape the execution state carries them.
     ///
-    /// `Env::apply_ocx_config` is set-or-remove, so without these a child of a CLI-flagged frame records elsewhere
-    /// or nowhere; `required` and `system_locked` come from the config chain the child re-reads itself.
+    /// Without these a child of a CLI-flagged frame records elsewhere or nowhere; `required` and
+    /// `system_locked` come from the config chain the child re-reads itself.
     pub fn forwarded(&self) -> RecordsOptions {
         RecordsOptions {
             dir: self.dir.clone(),

@@ -57,12 +57,17 @@ from src.helpers import PROJECT_ROOT
 # Scope
 # ---------------------------------------------------------------------------
 
-_EXCLUDED_PATHS: tuple[str, ...] = (".claude/artifacts",)
-"""Repo-relative subtrees pruned. Exactly one, and it earns its place.
+_EXCLUDED_PATHS: tuple[str, ...] = (".claude/artifacts", ".agents", ".serena")
+"""Repo-relative subtrees pruned. Three, and each earns its place.
 
 ``.claude/artifacts`` holds historical records -- plans and analyses that quote
 the command lines of the day -- which must not be rewritten to match today's
 grammar.  They are *tracked*, so nothing else drops them.
+
+``.agents`` (discussions, goals, retro reports, docs-baseline ledgers) and
+``.serena`` (agent memories) are the same kind of tracked working record: notes
+written on the day, quoting the spellings of the day, that no one maintains
+against the current grammar.
 
 The other four exclusions C-062 named (``website/dist``,
 ``.claude/state``, ``.tmp``, ``out``) are gitignored build output and scratch,
@@ -166,11 +171,61 @@ def renamed_env_spellings() -> tuple[tuple[str, str], ...]:
 ENV_DECLARATIONS: frozenset[Path] = frozenset(
     {
         PROJECT_ROOT / "crates" / "ocx_env" / "src" / "retired.rs",
+        PROJECT_ROOT / "crates" / "ocx_env" / "src" / "vars.rs",
         PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json",
+        PROJECT_ROOT / "crates" / "ocx_schema" / "contract" / "conformance" / "spawn" / "cases.json",
+        PROJECT_ROOT / "crates" / "ocx_sdkgen" / "tests" / "golden" / "rust" / "env.rs",
+        PROJECT_ROOT / "website" / "src" / "content" / "docs" / "reference" / "environment.md",
         PROJECT_ROOT / "AGENTS.md",
+        PROJECT_ROOT / "test" / "lint" / "test_deprecated_spellings.py",
     }
 )
-"""Files that name an old environment spelling to declare the rename, not to use it."""
+"""Files that name an old environment spelling to declare the rename, not to use it.
+
+Beyond the registry rows, these are the generated reference page and SDK table rendered from
+them, and the spawn conformance case that fixes which inherited variables pass through to the child.
+"""
+
+ENV_FROZEN_BODIES: dict[str, frozenset[Path]] = {
+    "OCX_GLOBAL": frozenset(
+        {
+            PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "launcher" / "body.rs",
+            PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "tasks" / "render_toolchain.rs",
+            PROJECT_ROOT / "crates" / "ocx_shim" / "src" / "main.rs",
+            PROJECT_ROOT / "crates" / "ocx_shim" / "src" / "core.rs",
+            PROJECT_ROOT / "crates" / "ocx_config" / "src" / "env.rs",
+            PROJECT_ROOT / "crates" / "ocx_package" / "src" / "metadata" / "env" / "apply.rs",
+            PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "launcher" / "env_tests.rs",
+            PROJECT_ROOT / "test" / "tests" / "test_toolchain_cli.py",
+            PROJECT_ROOT / "test" / "tests" / "data" / "exec_env" / "v0.6.5" / "trampoline.sh.in",
+            PROJECT_ROOT / "website" / "src" / "content" / "docs" / "explanation" / "toolchain-activation.md",
+        }
+    ),
+}
+"""Per spelling, the files that keep it on purpose.
+
+Published trampoline bodies are frozen, and the Windows shim strips the withdrawn
+``OCX_GLOBAL`` from the environment it hands a child, so both must keep naming it. The
+config, metadata and launcher tests and the acceptance fixture build those frozen
+bodies byte for byte (the v0.6.5 trampoline is a verbatim copy of the published one), and the
+toolchain-activation page prints one.
+"""
+
+ENV_IGNORED_PROOFS: dict[str, tuple[Path, ...]] = {
+    "OCX_GLOBAL": (
+        PROJECT_ROOT / "test" / "tests" / "test_global_toolchain.py",
+        PROJECT_ROOT / "test" / "tests" / "test_project_config_home_walk.py",
+        PROJECT_ROOT / "test" / "tests" / "test_trampoline_exec.py",
+        PROJECT_ROOT / "test" / "tests" / "test_hardening_input.py",
+        PROJECT_ROOT / "crates" / "ocx_cli" / "src" / "app" / "context_options.rs",
+    ),
+}
+"""Per withdrawn spelling, the tests that export it to prove it is ignored.
+
+A withdrawn variable selects nothing, so the only way to show that is to set it and watch
+nothing happen. The first entry is also the sweep's positive control for the spelling,
+standing in for :data:`ENV_WINDOW_TEST`, which an honoured-and-warned rename uses.
+"""
 
 ENV_WINDOW_TEST: Path = PROJECT_ROOT / "test" / "tests" / "test_env_contract.py"
 """The acceptance module that sets every old environment spelling for real.
@@ -466,13 +521,45 @@ def rename_hits_in_text(text: str, old: str, *, argv_applies: bool) -> list[tupl
     drives it against authored text, so its red state stays reachable after the
     tree is clean.
     """
+    return _rename_hits_in_folded(_fold(text), old, argv_applies=argv_applies)
+
+
+class FoldedLine(NamedTuple):
+    """One logical line: its number, its text and the text without backticked spans."""
+
+    number: int
+    line: str
+    bare: str
+
+
+def _fold(text: str) -> list[FoldedLine]:
+    """``text`` as :class:`FoldedLine` entries.
+
+    The fold is the expensive part of a rename sweep and does not depend on the
+    spelling, so :func:`find_invocations` does it once per file, not once per
+    spelling that file mentions. A line without a backtick has no span to remove.
+    """
+    return [
+        FoldedLine(number, line, _BACKTICKED_RE.sub("", line) if "`" in line else line)
+        for number, line in _logical_lines(text)
+    ]
+
+
+def _rename_hits_in_folded(
+    folded: list[FoldedLine], old: str, *, argv_applies: bool
+) -> list[tuple[int, str]]:
     spelled, argv = _rename_renderings(old)
-    hits: list[tuple[int, str]] = []
-    for number, line in _logical_lines(text):
-        bare = _BACKTICKED_RE.sub("", line)
-        if spelled.search(bare) or (argv_applies and argv is not None and argv.search(bare)):
-            hits.append((number, line))
-    return hits
+    # Every rendering spells each word of the old spelling, so a line missing
+    # one is no hit; the substring test is what keeps the regexes off the rest.
+    words = old.split()
+    rarest = max(words, key=len)
+    return [
+        (entry.number, entry.line)
+        for entry in folded
+        if rarest in entry.bare
+        and all(word in entry.bare for word in words)
+        and (spelled.search(entry.bare) or (argv_applies and argv is not None and argv.search(entry.bare)))
+    ]
 
 
 class Hit(NamedTuple):
@@ -501,6 +588,7 @@ def find_invocations() -> list[Hit]:
                 Hit(_DEPRECATED_FLAG, path, number, line)
                 for number, line in hits_in_text(text, argv_applies=argv_applies)
             )
+        folded: list[FoldedLine] | None = None
         for old, _new in renamed:
             # Cheap pre-filter, exactly as the flag half has: the expensive part
             # is the per-line fold, and most files carry the spelling nowhere.
@@ -511,9 +599,11 @@ def find_invocations() -> list[Hit]:
             # sweep's own day-one red state is what surfaced it.
             if not all(word in text for word in old.split()):
                 continue
+            if folded is None:
+                folded = _fold(text)
             hits.extend(
                 Hit(old, path, number, line)
-                for number, line in rename_hits_in_text(text, old, argv_applies=argv_applies)
+                for number, line in _rename_hits_in_folded(folded, old, argv_applies=argv_applies)
             )
     return hits
 
@@ -663,7 +753,14 @@ def test_no_renamed_environment_spelling_survives_outside_its_declarations() -> 
     renamed = dict(renamed_env_spellings())
     hits = find_env_spellings()
 
-    stray = [hit for hit in hits if hit.path not in ENV_DECLARATIONS and hit.path != ENV_WINDOW_TEST]
+    stray = [
+        hit
+        for hit in hits
+        if hit.path not in ENV_DECLARATIONS
+        and hit.path != ENV_WINDOW_TEST
+        and hit.path not in ENV_FROZEN_BODIES.get(hit.spelling, frozenset())
+        and hit.path not in ENV_IGNORED_PROOFS.get(hit.spelling, ())
+    ]
     assert stray == [], (
         "these lines name an environment spelling this deprecation window renames; use the new name:\n"
         + "\n".join(
@@ -674,8 +771,9 @@ def test_no_renamed_environment_spelling_survives_outside_its_declarations() -> 
     )
 
     for old in renamed:
-        assert any(hit.spelling == old and hit.path == ENV_WINDOW_TEST for hit in hits), (
-            f"{ENV_WINDOW_TEST.relative_to(PROJECT_ROOT)} no longer sets the renamed `{old}`, so this "
+        control = ENV_IGNORED_PROOFS[old][0] if old in ENV_IGNORED_PROOFS else ENV_WINDOW_TEST
+        assert any(hit.spelling == old and hit.path == control for hit in hits), (
+            f"{control.relative_to(PROJECT_ROOT)} no longer sets the renamed `{old}`, so this "
             "sweep cannot tell a complete sweep from one that never ran. Restore its window test."
         )
 

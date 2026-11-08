@@ -12,7 +12,7 @@ _SKIPPED = [
     "clap_env_feature_is_off_in_the_release_build",
     "crate_map_toml_matches_rust_table",
     "deps_direction",
-    "dynamic_read_ratchet",
+    "dynamic_reference_ratchet",
     "env_ban_is_wired_for_cargo_and_bazel",
     "every_boundary_needle_names_something_live",
     "every_derived_classification_type_is_registered_or_reached",

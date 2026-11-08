@@ -7,9 +7,10 @@
     python3 scripts/accept_floor.py --junit target/accept/junit     # test:accept:floor, merged shards
 
 Sums testcases, skips and xfails over every `*.xml` under `--junit`; fails on a failure or error, on
-fewer cases than `test/SUITE_FLOOR`, and on more skips / xfails than `test/SKIP_CEILING` /
-`test/XFAIL_CEILING`. No report is red: reading nothing is not a clean suite. A shard holds a subset,
-so the floor is judged over the merged directory. `conformance_floor.py --junit` is a separate call.
+fewer cases than `SUITE_FLOOR`, on more skips / xfails than `SKIP_CEILING` /
+`XFAIL_CEILING` (read from `--limits-dir`, default `test/`), and on either ceiling more than `CEILING_SLACK` above its measured count. No
+report is red: reading nothing is not a clean suite. A shard holds a subset, so the floor is judged
+over the merged directory. `conformance_floor.py --junit` is a separate call.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIMIT_FILES = ("SUITE_FLOOR", "SKIP_CEILING", "XFAIL_CEILING")
+# How far a skip / xfail ceiling may sit above the measured count: room for one flaky skip, not for a
+# guessed bump that would let the next regressions in unseen.
+CEILING_SLACK = 2
 
 
 def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
@@ -39,6 +43,14 @@ def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
 
     def limit(name: str) -> int:
         return int((limits_dir / name).read_text(encoding="utf-8").strip())
+
+    def where(name: str) -> str:
+        # Name the file actually read: a profile under `test/limits/` carries its own ceilings.
+        path = limits_dir / name
+        try:
+            return path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            return f"{limits_dir.name}/{name}"
 
     cases = skipped = xfailed = bad = 0
     for report in reports:
@@ -67,11 +79,17 @@ def run(junit: Path, limits_dir: Path, expect_shards: int = 0) -> int:
     if bad:
         problems.append(f"{bad} failed or errored case(s)")
     if cases < limit("SUITE_FLOOR"):
-        problems.append(f"{cases} cases ran, test/SUITE_FLOOR is {limit('SUITE_FLOOR')} — the suite shrank")
+        problems.append(f"{cases} cases ran, {where('SUITE_FLOOR')} is {limit('SUITE_FLOOR')} — the suite shrank")
     if skipped > limit("SKIP_CEILING"):
-        problems.append(f"{skipped} skipped exceeds test/SKIP_CEILING ({limit('SKIP_CEILING')})")
+        problems.append(f"{skipped} skipped exceeds {where('SKIP_CEILING')} ({limit('SKIP_CEILING')})")
     if xfailed > limit("XFAIL_CEILING"):
-        problems.append(f"{xfailed} xfailed exceeds test/XFAIL_CEILING ({limit('XFAIL_CEILING')})")
+        problems.append(f"{xfailed} xfailed exceeds {where('XFAIL_CEILING')} ({limit('XFAIL_CEILING')})")
+    for name, measured in (("SKIP_CEILING", skipped), ("XFAIL_CEILING", xfailed)):
+        if limit(name) > measured + CEILING_SLACK:
+            problems.append(
+                f"{where(name)} ({limit(name)}) sits above the {measured} measured by more than {CEILING_SLACK} "
+                f"— lower it to {measured}"
+            )
     if problems:
         print("accept floor: " + "; ".join(problems), file=sys.stderr)
         return 1

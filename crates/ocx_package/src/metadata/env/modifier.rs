@@ -63,9 +63,9 @@ impl<'de> Deserialize<'de> for Modifier {
 /// How a declared value combines with the variable's existing value.
 // The doc line above is the schema's `ModifierKind` description verbatim, so it
 // stays a user sentence. `JsonSchema` lets schemas `$ref` one vocabulary.
-// `Deserialize` serves the reconciler's `LedgerEntry` (`type` field, read from
-// `__OCX_ENV_STATE` each prompt): an unknown `type` fails the whole
-// `Ledger::decode`, so a ledger degrades to absent, never to a partial record.
+// `Deserialize` serves the execution state's entries (`type` field, read from
+// `__OCX_ENV_STATE` each prompt): an unknown `type` fails the whole state
+// decode, so a state degrades to absent, never to a partial record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModifierKind {

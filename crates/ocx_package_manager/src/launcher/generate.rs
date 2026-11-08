@@ -79,6 +79,96 @@ pub async fn generate(
     Ok(())
 }
 
+/// The value of `OCX_BINARY_PIN` for children of the running ocx.
+///
+/// The installed path through `current` only when it is the binary running now and (Unix) the
+/// chain from `$OCX_HOME` to it is owned by the effective uid or root and not group- or
+/// world-writable; otherwise the running binary exactly. `None` when the running binary is
+/// unknown; never an empty path (Windows `IF DEFINED` reads an empty value as set).
+pub fn binary_pin_value(file_structure: &FileStructure, running: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(unix)]
+    let chain_is_safe = |link: &Path, binary: &Path| {
+        // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
+        let euid = unsafe { libc::geteuid() };
+        unix_chain_is_safe(file_structure.root(), link, binary, euid, &native_owner_and_mode)
+    };
+    // The residual (a principal who can write `$OCX_HOME` can already replace package content) is named in `adr_exec_env_model.md` § Pin value function.
+    #[cfg(not(unix))]
+    let chain_is_safe = |_: &Path, _: &Path| true;
+    pin_value(file_structure, running?, &chain_is_safe)
+}
+
+fn pin_value(
+    file_structure: &FileStructure,
+    running: &Path,
+    chain_is_safe: &dyn Fn(&Path, &Path) -> bool,
+) -> Option<PathBuf> {
+    if running.as_os_str().is_empty() {
+        return None;
+    }
+    let installed = file_structure
+        .ocx_install_bin_path()
+        .join(if cfg!(windows) { "ocx.exe" } else { "ocx" });
+    let pinned_to_installed = match (dunce::canonicalize(running), dunce::canonicalize(&installed)) {
+        (Ok(running_real), Ok(installed_real)) if running_real == installed_real => {
+            // `<current>/content/bin/ocx`: the `current` link is three levels up.
+            installed
+                .ancestors()
+                .nth(3)
+                .is_some_and(|link| chain_is_safe(link, &installed_real))
+        }
+        _ => false,
+    };
+    Some(if pinned_to_installed {
+        installed
+    } else {
+        running.to_path_buf()
+    })
+}
+
+/// Owner and permission bits of `path` itself (a symlink is not followed): the injectable probe.
+#[cfg(unix)]
+type OwnerAndMode<'a> = &'a dyn Fn(&Path) -> Option<(u32, u32)>;
+
+#[cfg(unix)]
+fn native_owner_and_mode(path: &Path) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|m| (m.uid(), m.mode()))
+}
+
+/// Whether the `current` link, the resolved binary and every directory from `root` down to
+/// both belong to `euid` or root, and the binary and directories are not group- or
+/// world-writable. A link's own mode is meaningless (0777 on Linux), so only its owner counts.
+/// Any path the probe cannot read, or outside `root`, fails the check.
+#[cfg(unix)]
+fn unix_chain_is_safe(root: &Path, link: &Path, binary: &Path, euid: u32, probe: OwnerAndMode<'_>) -> bool {
+    let owned = |uid: u32| uid == euid || uid == 0;
+    let owned_and_closed = |path: &Path| probe(path).is_some_and(|(uid, mode)| owned(uid) && mode & 0o022 == 0);
+
+    if !probe(link).is_some_and(|(uid, _)| owned(uid)) || !owned_and_closed(binary) {
+        return false;
+    }
+    let Ok(real_root) = dunce::canonicalize(root) else {
+        return false;
+    };
+    [(link, root), (binary, real_root.as_path())]
+        .into_iter()
+        .all(|(leaf, top)| {
+            if !leaf.starts_with(top) {
+                return false;
+            }
+            for dir in leaf.ancestors().skip(1) {
+                if !owned_and_closed(dir) {
+                    return false;
+                }
+                if dir == top {
+                    break;
+                }
+            }
+            true
+        })
+}
+
 /// Resolves the absolute `ocx` a rendered trampoline re-enters through: the install tree's
 /// binary (it floats across `ocx self update`), else [`std::env::current_exe`], else `None`
 /// (`adr_toolchain_activation.md` § "Rationale from code: launcher trampolines").
@@ -835,5 +925,225 @@ mod tests {
             std::env::current_exe().expect("the test binary has a path"),
             "…so the ladder must drop to the running binary instead"
         );
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use std::path::{Path, PathBuf};
+
+    use ocx_store::file_structure::FileStructure;
+
+    use super::*;
+
+    struct Installed {
+        _tmp: tempfile::TempDir,
+        fs: FileStructure,
+        /// `<current>/content/bin/ocx`, the path the pin names.
+        installed: PathBuf,
+        /// The binary as the package store holds it.
+        real_binary: PathBuf,
+        link: PathBuf,
+    }
+
+    /// An install tree where `current` points at a package holding an `ocx` binary.
+    fn installed_tree() -> Installed {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap().join("home");
+        let fs = FileStructure::with_root(root.clone());
+        let installed = fs
+            .ocx_install_bin_path()
+            .join(if cfg!(windows) { "ocx.exe" } else { "ocx" });
+        let link = installed.ancestors().nth(3).unwrap().to_path_buf();
+        let pkg = root.join("packages").join("pkg");
+        let real_binary = pkg.join("content").join("bin").join(installed.file_name().unwrap());
+        std::fs::create_dir_all(real_binary.parent().unwrap()).unwrap();
+        std::fs::write(&real_binary, b"").unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        ocx_util::fs::symlink::create(&pkg, &link).unwrap();
+        #[cfg(unix)]
+        close_permissions(&root);
+        Installed {
+            _tmp: tmp,
+            fs,
+            installed,
+            real_binary,
+            link,
+        }
+    }
+
+    /// The test must not depend on the host umask (a user-private-group umask of 002 would open every directory).
+    #[cfg(unix)]
+    fn close_permissions(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                close_permissions(&path);
+            }
+            if !meta.file_type().is_symlink() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn none_running_gives_none() {
+        let t = installed_tree();
+        assert_eq!(binary_pin_value(&t.fs, None), None);
+    }
+
+    #[test]
+    fn empty_running_never_gives_an_empty_pin() {
+        let t = installed_tree();
+        assert_eq!(binary_pin_value(&t.fs, Some(Path::new(""))), None);
+    }
+
+    #[test]
+    fn running_the_installed_binary_pins_the_stable_installed_path() {
+        let t = installed_tree();
+        // Running through the store path, as `current_exe` reports after the link resolves.
+        assert_eq!(binary_pin_value(&t.fs, Some(&t.real_binary)), Some(t.installed.clone()));
+        assert_eq!(binary_pin_value(&t.fs, Some(&t.installed)), Some(t.installed));
+    }
+
+    #[test]
+    fn a_different_build_pins_exactly_the_running_path() {
+        let t = installed_tree();
+        let other = t.fs.root().parent().unwrap().join("dev-build").join("ocx");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"").unwrap();
+        assert_eq!(binary_pin_value(&t.fs, Some(&other)), Some(other));
+    }
+
+    #[test]
+    fn a_running_path_that_cannot_be_canonicalized_is_kept_exactly() {
+        let t = installed_tree();
+        let missing = PathBuf::from("/definitely/not/here/ocx");
+        assert_eq!(binary_pin_value(&t.fs, Some(&missing)), Some(missing));
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::*;
+
+        fn euid() -> u32 {
+            // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
+            unsafe { libc::geteuid() }
+        }
+
+        /// The real probe, except `foreign` reads as owned by someone who is neither root nor us.
+        fn pin_with_foreign_owner(t: &Installed, foreign: &Path) -> Option<PathBuf> {
+            let probe = |path: &Path| {
+                native_owner_and_mode(path).map(|(uid, mode)| {
+                    if path == foreign {
+                        (euid() + 1, mode)
+                    } else {
+                        (uid, mode)
+                    }
+                })
+            };
+            let safe = |link: &Path, binary: &Path| unix_chain_is_safe(t.fs.root(), link, binary, euid(), &probe);
+            pin_value(&t.fs, &t.real_binary, &safe)
+        }
+
+        #[test]
+        fn the_unmodified_tree_passes_the_injected_probe() {
+            let t = installed_tree();
+            assert_eq!(
+                pin_with_foreign_owner(&t, Path::new("/nowhere")),
+                Some(t.installed.clone())
+            );
+        }
+
+        #[test]
+        fn a_foreign_owned_current_link_falls_back_to_running() {
+            let t = installed_tree();
+            assert_eq!(pin_with_foreign_owner(&t, &t.link), Some(t.real_binary.clone()));
+        }
+
+        #[test]
+        fn a_foreign_owned_binary_falls_back_to_running() {
+            let t = installed_tree();
+            assert_eq!(pin_with_foreign_owner(&t, &t.real_binary), Some(t.real_binary.clone()));
+        }
+
+        #[test]
+        fn a_foreign_owned_middle_directory_falls_back_to_running() {
+            let t = installed_tree();
+            let packages_dir = t.fs.root().join("packages").join("pkg").join("content");
+            assert_eq!(pin_with_foreign_owner(&t, &packages_dir), Some(t.real_binary.clone()));
+        }
+
+        #[test]
+        fn a_foreign_owned_directory_above_the_link_falls_back_to_running() {
+            let t = installed_tree();
+            let above_link = t.link.parent().unwrap().to_path_buf();
+            assert_eq!(pin_with_foreign_owner(&t, &above_link), Some(t.real_binary.clone()));
+        }
+
+        #[test]
+        fn root_owned_entries_count_as_trusted() {
+            let t = installed_tree();
+            let probe = |path: &Path| native_owner_and_mode(path).map(|(_, mode)| (0, mode));
+            // A euid that owns nothing: only the root owner rule can make this pass.
+            assert!(unix_chain_is_safe(
+                t.fs.root(),
+                &t.link,
+                &dunce::canonicalize(&t.real_binary).unwrap(),
+                euid() + 1,
+                &probe
+            ));
+        }
+
+        #[test]
+        fn a_group_writable_parent_of_current_falls_back_to_running() {
+            let t = installed_tree();
+            let parent = t.link.parent().unwrap();
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+            assert_eq!(
+                binary_pin_value(&t.fs, Some(&t.real_binary)),
+                Some(t.real_binary.clone())
+            );
+        }
+
+        #[test]
+        fn a_world_writable_binary_falls_back_to_running() {
+            let t = installed_tree();
+            std::fs::set_permissions(&t.real_binary, std::fs::Permissions::from_mode(0o757)).unwrap();
+            assert_eq!(
+                binary_pin_value(&t.fs, Some(&t.real_binary)),
+                Some(t.real_binary.clone())
+            );
+        }
+
+        #[test]
+        fn a_path_outside_the_home_fails_the_chain() {
+            let t = installed_tree();
+            let outside = tempfile::tempdir().unwrap();
+            let binary = outside.path().join("ocx");
+            std::fs::write(&binary, b"").unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!unix_chain_is_safe(
+                t.fs.root(),
+                &t.link,
+                &dunce::canonicalize(&binary).unwrap(),
+                euid(),
+                &native_owner_and_mode
+            ));
+        }
+    }
+
+    /// The `current` link is a junction on Windows; the canonical installed path must equal `current_exe`'s.
+    #[cfg(windows)]
+    #[test]
+    fn windows_junction_install_pins_the_installed_path() {
+        let t = installed_tree();
+        assert_eq!(binary_pin_value(&t.fs, Some(&t.real_binary)), Some(t.installed.clone()));
+        assert_eq!(binary_pin_value(&t.fs, Some(&t.installed)), Some(t.installed));
     }
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Runs one `ocx` process: a scrubbed environment, no shell, bounded output and cancellation.
+//! Runs one `ocx` process: the caller's environment plus the binary pin, no shell, bounded output and cancellation.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -39,30 +39,24 @@ pub fn parent_environment() -> Vec<(OsString, OsString)> {
     std::env::vars_os().collect()
 }
 
-/// `parent` without any `OCX_*` or `__OCX_*` variable, then `caller`'s pairs, then `OCX_BINARY_PIN` naming `binary`.
+/// `parent` as it is, then `caller`'s pairs, then `OCX_BINARY_PIN` naming `binary`.
 ///
-/// A variable of the caller's own `ocx` setup (credentials, trust, home) must not steer a child it did not ask
-/// about, so the inherited ones go and only the explicit ones stay.
+/// Nothing is removed from the parent: the caller sets up its own environment. A caller key replaces the parent
+/// entry of exactly the same key. The pin is written last and replaces an entry of that name in any letter case,
+/// so a Windows `ocx_binary_pin` never rides along beside it.
 pub fn child_environment(
     parent: impl IntoIterator<Item = (OsString, OsString)>,
     caller: &[(OsString, OsString)],
     binary: &Path,
 ) -> Vec<(OsString, OsString)> {
-    let mut environment: Vec<_> = parent.into_iter().filter(|(key, _)| !is_ocx_variable(key)).collect();
+    let mut environment: Vec<_> = parent.into_iter().collect();
     for (key, value) in caller {
         environment.retain(|(existing, _)| existing != key);
         environment.push((key.clone(), value.clone()));
     }
-    environment.retain(|(key, _)| key != "OCX_BINARY_PIN");
+    environment.retain(|(key, _)| !key.eq_ignore_ascii_case("OCX_BINARY_PIN"));
     environment.push((OsString::from("OCX_BINARY_PIN"), binary.as_os_str().to_owned()));
     environment
-}
-
-fn is_ocx_variable(key: &OsStr) -> bool {
-    key.to_str().is_some_and(|name| {
-        let name = name.to_ascii_uppercase();
-        name.starts_with("OCX_") || name.starts_with("__OCX_")
-    })
 }
 
 /// Runs `binary` with `invocation` and the given environment, waiting for it under `limits` and `cancel`.

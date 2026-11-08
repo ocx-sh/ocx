@@ -1,0 +1,140 @@
+{
+  "description": "What a generated SDK passes to the ocx it spawns. The SDK strips nothing: the child is the parent environment, then the caller's pairs (a caller key replaces the parent entry of exactly the same key), then OCX_BINARY_PIN written last, replacing any entry of that name in any letter case. Each case: parent (the SDK process environment), caller (pairs the caller passed explicitly), binary (the absolute path the SDK runs), child (the expected child environment, compared without regard to order). Pairs are [key, value]. Spec: adr_ocx_interface_contract.md, SDK contract, spawn amendment of 2026-11-07 and its D-45 amendment.",
+  "cases": [
+    {
+      "name": "plain_parent_is_inherited_and_pin_is_added",
+      "parent": [["PATH", "/usr/bin"], ["HOME", "/home/user"]],
+      "caller": [],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["PATH", "/usr/bin"], ["HOME", "/home/user"], ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    },
+    {
+      "name": "env_state_passes_through",
+      "parent": [["PATH", "/usr/bin"], ["__OCX_ENV_STATE", "state-value"]],
+      "caller": [],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["PATH", "/usr/bin"], ["__OCX_ENV_STATE", "state-value"], ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    },
+    {
+      "name": "inherited_ocx_variables_pass_through",
+      "parent": [
+        ["PATH", "/usr/bin"],
+        ["OCX_HOME", "/home/user/.ocx"],
+        ["OCX_CONFIG", "/etc/ocx.toml"],
+        ["OCX_PROJECT", "/work/project"],
+        ["OCX_GLOBAL", "1"],
+        ["__OCX_CREDENTIAL_HELPER", "1"],
+        ["__OCX_ENV_STATE", "state-value"]
+      ],
+      "caller": [],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [
+        ["PATH", "/usr/bin"],
+        ["OCX_HOME", "/home/user/.ocx"],
+        ["OCX_CONFIG", "/etc/ocx.toml"],
+        ["OCX_PROJECT", "/work/project"],
+        ["OCX_GLOBAL", "1"],
+        ["__OCX_CREDENTIAL_HELPER", "1"],
+        ["__OCX_ENV_STATE", "state-value"],
+        ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]
+      ]
+    },
+    {
+      "name": "mixed_case_ocx_keys_pass_through",
+      "parent": [
+        ["Path", "C:\\Windows"],
+        ["Ocx_Home", "C:\\Users\\user\\.ocx"],
+        ["ocx_offline", "1"],
+        ["__Ocx_Env_State", "state-value"]
+      ],
+      "caller": [],
+      "binary": "C:\\ocx\\ocx.exe",
+      "child": [
+        ["Path", "C:\\Windows"],
+        ["Ocx_Home", "C:\\Users\\user\\.ocx"],
+        ["ocx_offline", "1"],
+        ["__Ocx_Env_State", "state-value"],
+        ["OCX_BINARY_PIN", "C:\\ocx\\ocx.exe"]
+      ]
+    },
+    {
+      "name": "mixed_case_pin_is_replaced_not_duplicated",
+      "parent": [
+        ["Path", "C:\\Windows"],
+        ["Ocx_Home", "C:\\Users\\user\\.ocx"],
+        ["ocx_offline", "1"],
+        ["__Ocx_Env_State", "state-value"],
+        ["ocx_binary_pin", "C:\\old\\ocx.exe"]
+      ],
+      "caller": [],
+      "binary": "C:\\ocx\\ocx.exe",
+      "child": [
+        ["Path", "C:\\Windows"],
+        ["Ocx_Home", "C:\\Users\\user\\.ocx"],
+        ["ocx_offline", "1"],
+        ["__Ocx_Env_State", "state-value"],
+        ["OCX_BINARY_PIN", "C:\\ocx\\ocx.exe"]
+      ]
+    },
+    {
+      "name": "mixed_case_caller_pin_is_replaced_not_duplicated",
+      "parent": [["Path", "C:\\Windows"]],
+      "caller": [["Ocx_Binary_Pin", "C:\\caller\\ocx.exe"]],
+      "binary": "C:\\ocx\\ocx.exe",
+      "child": [["Path", "C:\\Windows"], ["OCX_BINARY_PIN", "C:\\ocx\\ocx.exe"]]
+    },
+    {
+      "name": "names_that_only_resemble_the_pin_are_kept",
+      "parent": [["OCX_BINARY_PIN_OLD", "kept"], ["XOCX_BINARY_PIN", "kept"], ["OCX_BINARY", "kept"]],
+      "caller": [],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [
+        ["OCX_BINARY_PIN_OLD", "kept"],
+        ["XOCX_BINARY_PIN", "kept"],
+        ["OCX_BINARY", "kept"],
+        ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]
+      ]
+    },
+    {
+      "name": "caller_pairs_are_added",
+      "parent": [["PATH", "/usr/bin"]],
+      "caller": [["OCX_HOME", "/srv/ocx"], ["OCX_OFFLINE", "1"], ["TOOL_FLAG", "on"]],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [
+        ["PATH", "/usr/bin"],
+        ["OCX_HOME", "/srv/ocx"],
+        ["OCX_OFFLINE", "1"],
+        ["TOOL_FLAG", "on"],
+        ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]
+      ]
+    },
+    {
+      "name": "caller_pair_replaces_the_inherited_one",
+      "parent": [["OCX_HOME", "/home/user/.ocx"], ["EDITOR", "vi"]],
+      "caller": [["OCX_HOME", "/srv/ocx"], ["EDITOR", "ed"]],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["EDITOR", "ed"], ["OCX_HOME", "/srv/ocx"], ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    },
+    {
+      "name": "caller_env_state_replaces_the_inherited_one",
+      "parent": [["__OCX_ENV_STATE", "inherited-state"]],
+      "caller": [["__OCX_ENV_STATE", "explicit-state"]],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["__OCX_ENV_STATE", "explicit-state"], ["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    },
+    {
+      "name": "pin_is_the_sdk_binary_whatever_the_parent_or_caller_say",
+      "parent": [["OCX_BINARY_PIN", "/somewhere/else/ocx"]],
+      "caller": [["OCX_BINARY_PIN", "/caller/ocx"]],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    },
+    {
+      "name": "empty_parent",
+      "parent": [],
+      "caller": [],
+      "binary": "/opt/ocx/bin/ocx",
+      "child": [["OCX_BINARY_PIN", "/opt/ocx/bin/ocx"]]
+    }
+  ]
+}

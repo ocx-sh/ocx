@@ -7,9 +7,11 @@ title: "ocx shell"
 
 Open your shell inside the project environment.
 
-Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it: `-g` selects groups, `--with` adds packages not in `ocx.toml`, `--stack` keeps the active environment underneath. `exit` returns to the shell you came from.
+Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it: `-g` selects groups, `--with` adds packages not in `ocx.toml`. The composition layers onto the calling environment; `--isolate` first reverts what ocx applied to it, `--clean` starts from nothing.
 
-The subcommands generate shell completions, grant or revoke a project's shell activation, and report the state of the per-prompt integration. Login activation is `$OCX_HOME/env.sh`.
+The shell stays tied to its project: its hook refreshes that layer when `ocx.toml` or `ocx.lock` change, and `cd` elsewhere applies nothing. `exit` returns to the parent shell.
+
+The subcommands generate completions, grant or revoke activation and report per-prompt state. Login activation is `$OCX_HOME/env.sh`.
 
 ```text
 ocx shell [OPTIONS]
@@ -18,13 +20,14 @@ ocx shell <COMMAND>
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
-| `--stack` |  | Layer this project onto the active environment instead of replacing it |
 | `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
 ## `ocx shell allow` {#shell-allow}
@@ -92,7 +95,7 @@ ocx shell revoke [PATH]
 
 Report the shell integration's state, and why it is inert when it is.
 
-Prints the decoded `__OCX_ENV_STATE` ledger as fields. They show what each scope applied, whether the watch-set fingerprint still matches, and whether the project scope's constant priors are intact.
+Prints the decoded `__OCX_ENV_STATE` as fields. They show what each scope applied, whether the watch-set fingerprint still matches, and whether the project scope's constant priors are intact.
 
 Above all they show the enumerated reason the shell is not active.
 
@@ -112,17 +115,17 @@ The source set drifted from the stamp; the report names the new sources. Run `oc
 
 There is no consent stamp and no matching grant. Run `ocx shell allow`.
 
-The ledger exceeded its cap. Declare less environment in the abandoned scope.
+The state exceeded its cap. Declare less environment in the abandoned scope.
 
-The ledger is absent. In a shell `ocx self setup` wired, that is the first prompt and none is needed; the next prompt applies it.
+The state is absent. In a shell `ocx self setup` wired, that is the first prompt and none is needed; the next prompt applies it.
 
 If setup never wired this shell, run `ocx self setup` and start a new shell.
 
-The ledger is present but corrupt. Start a new shell, or run `unset __OCX_ENV_STATE`.
+The state is present but corrupt. Start a new shell, or run `unset __OCX_ENV_STATE`.
 
-A consented project the ledger does not yet show reports `active: not yet`, and applies at the next prompt. If its lock is absent or stale, it reports `active: no`, names the refusal and points at `ocx lock`.
+A consented project the state does not yet show reports `active: not yet`, and applies at the next prompt. If its lock is absent or stale, it reports `active: no`, names the refusal and points at `ocx lock`.
 
-Read-only: it never writes a consent stamp, never repairs the ledger and never emits a plan. The repair gesture is `unset __OCX_ENV_STATE` (which destroys the priors, so a new shell is the cleaner floor); this command is how you check it worked.
+Read-only: it never writes a consent stamp, never repairs the state and never emits a plan. The repair gesture is `unset __OCX_ENV_STATE` (which destroys the priors, so a new shell is the cleaner floor); this command is how you check it worked.
 
 The output is diagnostics for a human to read and is never valid shell source. It is deliberately not interchangeable with `ocx self activate`.
 
@@ -148,4 +151,4 @@ ocx shell state [OPTIONS]
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--verbose`, `-v` |  | Add the diagnostics behind the answer - the decoded ledger, the fingerprint watch set and the hook ladder |
+| `--verbose`, `-v` |  | Add the diagnostics behind the answer - the decoded state, the fingerprint watch set and the hook ladder |

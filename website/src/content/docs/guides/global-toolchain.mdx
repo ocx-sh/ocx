@@ -174,13 +174,13 @@ These are OCI-tier operations. They work on identifiers directly and never read 
 
 ## Strict isolation, the hard boundary \{#global-toolchain-isolation\}
 
-The global toolchain is a **shell convenience tier only**. Project builds are hermetic. The project toolchain wins by PATH precedence when you `cd` into a project, and `ocx exec` never consults the global file without `--global`.
+The global toolchain is a **shell convenience tier only**. A project's resolved set is closed. The project toolchain wins by PATH precedence when you `cd` into a project, and `ocx exec` never consults the global file without `--global`.
 
 :::note[Why hard isolation, not gap-fill?]
 [Volta][volta] pioneered this model for Node.js tooling. The alternative fills in packages the project does not declare from the global set, and [mise][mise] and [asdf][asdf] do this. It opens the reproducibility hole that OCX is designed to avoid. A collaborator without the same `$OCX_HOME/ocx.toml` gets different resolved packages. Volta puts its side of the trade this way: "Volta covers its tracks … your npm/Yarn scripts never see what's in your toolchain."
 :::
 
-Two commands are always hermetic regardless of context:
+Two commands never compose the global file regardless of context:
 
 \<\<\< @/_scripts/user-guide/isolation.sh\{sh\}
 

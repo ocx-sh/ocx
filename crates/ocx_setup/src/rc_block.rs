@@ -415,7 +415,7 @@ if ?(test -f $_ocx_home/env.elv) {
 }"#;
     const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
 $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
-if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
+if ([System.IO.File]::Exists($_ocxEnv)) { . $_ocxEnv }"#;
 
     // ── canonical_hash ──────────────────────────────────────────────
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+# ocx-toolchain-trampoline
+unset OCX_GLOBAL OCX_PROJECT
+__ocx_binary='@OCX@'
+exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '@PROJECT@' exec -- "${0##*/}" "$@"

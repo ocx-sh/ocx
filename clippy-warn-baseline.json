@@ -32,7 +32,6 @@
   "crates/ocx_script/src/host.rs::unreachable_pub": 1,
   "crates/ocx_shell/src/ci/github_flavor.rs::unreachable_pub": 1,
   "crates/ocx_shell/src/ci/gitlab_flavor.rs::unreachable_pub": 1,
-  "crates/ocx_shell/src/shell/reconcile/ledger.rs::unreachable_pub": 1,
   "crates/ocx_sign/src/sign/oidc_ambient.rs::unreachable_pub": 1,
   "crates/ocx_sign/src/sign/oidc_ambient_inline.rs::unreachable_pub": 1,
   "crates/ocx_sign/src/sign/oidc_browser.rs::unreachable_pub": 2,

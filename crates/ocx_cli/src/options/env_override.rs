@@ -281,8 +281,8 @@ mod tests {
 
     /// X1 on the pass-through arm: the reserved namespace is refused by name,
     /// before the ambient lookup — so `--env OCX_OFFLINE` is exit 64 whether or
-    /// not this shell happens to export it. The forwarded config set travels
-    /// through `apply_ocx_config`; a user allowlist is never the way in.
+    /// not this shell happens to export it. The policy a child receives travels
+    /// through the execution state; a user allowlist is never the way in.
     #[test]
     fn env_override_rejects_a_reserved_bare_name() {
         let guard = ocx_env::overrides::lock();

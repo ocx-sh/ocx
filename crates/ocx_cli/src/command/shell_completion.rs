@@ -43,6 +43,7 @@ pub struct ShellCompletion {
 
 impl ShellCompletion {
     pub async fn execute(&self, options: &ContextOptions) -> anyhow::Result<ExitCode> {
+        crate::app::install_received_policy(&ocx_config::exec_state::Inherited::from_process_env());
         if self.if_enabled && !self.completions_enabled(options).await {
             log::debug!("completions are disabled for this session; emitting no script");
             return Ok(ExitCode::SUCCESS);

@@ -362,6 +362,30 @@ def test_mutation_commands_reject_dry_run(
 
 
 # ---------------------------------------------------------------------------
+# The exec mode grammar
+# ---------------------------------------------------------------------------
+
+
+def test_exec_refuses_stack_and_the_isolate_clean_pair(ocx: OcxRunner, tmp_path: Path) -> None:
+    """`--stack` is gone and `--isolate` conflicts with `--clean`: both are clap rejections (64).
+
+    The positive control is `--isolate` alone, which parses: it passes the parser and
+    reaches the lock (78) instead of being a usage error.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, '[tools]\nx = "example.com/x:1.0.0"\n')
+
+    for argv in (["exec", "--stack", "--", "true"], ["exec", "--isolate", "--clean", "--", "true"]):
+        result = _run(ocx, project, *argv)
+        assert result.returncode == EXIT_USAGE, (
+            f"`ocx {' '.join(argv)}` must be a usage error; got {result.returncode}\n{result.stderr}"
+        )
+    control = _run(ocx, project, "exec", "--isolate", "--", "true")
+    assert control.returncode != EXIT_USAGE, f"the control: `--isolate` alone must parse:\n{control.stderr}"
+
+
+# ---------------------------------------------------------------------------
 # C-055 — `--pinned` / `--no-pinned`
 # ---------------------------------------------------------------------------
 
@@ -465,6 +489,9 @@ def test_shell_state_reports_a_relocated_home_under_toolchain_dir(
     home = Path(ocx.env["OCX_HOME"])
     root = home / "toolchains"
     root.mkdir(parents=True, exist_ok=True)
+    # The managed-directory guard refuses a group- or world-writable root; mkdir honors the host umask
+    # (002 on a typical desktop), so pin the mode the guard accepts.
+    root.chmod(0o755)
     (home / "config.toml").write_text(f'toolchain_dir = "{root.as_posix()}"\n')
 
     project = tmp_path / "proj"
@@ -1060,19 +1087,18 @@ def test_exec_no_consent_reaches_a_nested_ocx(
     """``ocx exec --no-consent`` declines for the ocx its child launches too.
 
     A ``--no-consent`` lives in argv, which no child process ever sees, so the
-    only channel to a nested frame is ``OCX_NO_CONSENT`` on the child
-    environment. Without that forward the explicit gesture would carry *less*
-    far than the ambient variable already does — failing open on a security
-    control (ocx-sh/ocx#400).
+    only channel to a nested frame is the ``no_consent`` narrowing in the
+    execution state on the child environment. Without it the explicit gesture
+    would carry *less* far than the ambient variable already does — failing open
+    on a security control (ocx-sh/ocx#400).
 
     The nested ocx targets a **second** project, so its stamp lands under a
     different key than the outer ``exec``'s. That is what makes the control arm
     below name the inner frame specifically: the outer command cannot write the
     second stamp.
 
-    Red state: delete the ``cfg.no_consent ||`` half of the
-    ``OCX_NO_CONSENT`` block in ``Env::apply_ocx_config`` — the last arm then
-    finds the inner frame's stamp.
+    Red state: stop writing ``narrowing.no_consent`` for the flag in
+    ``ToolchainExec::execute`` — the last arm then finds the inner frame's stamp.
     """
     outer, _ = _unconsented_project(ocx, tmp_path, "proj_outer")
     inner, _ = _unconsented_project(ocx, tmp_path, "proj_inner")

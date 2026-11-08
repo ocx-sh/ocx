@@ -42,7 +42,7 @@ def test_dropping_a_shard_reds_the_suite_floor(tmp_path: Path, capsys: pytest.Ca
     _four_shards(tmp_path)
     (tmp_path / "junit" / "shard-3-of-4.xml").unlink()
     assert _run(tmp_path) == 1
-    assert "6 cases ran, test/SUITE_FLOOR is 8" in capsys.readouterr().err
+    assert "6 cases ran, limits/SUITE_FLOOR is 8" in capsys.readouterr().err
 
 
 def test_one_failure_reds(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -63,7 +63,7 @@ def test_skip_over_ceiling_reds_but_xfail_is_counted_apart(tmp_path: Path, capsy
     skips = '<testcase name="s1"><skipped/></testcase><testcase name="s2"><skipped/></testcase>'
     _shard(tmp_path, "shard-3-of-4", 2, skips)
     assert _run(tmp_path) == 1
-    assert "2 skipped exceeds test/SKIP_CEILING (1)" in capsys.readouterr().err
+    assert "2 skipped exceeds limits/SKIP_CEILING (1)" in capsys.readouterr().err
     xf = '<testcase name="x1"><skipped type="pytest.xfail"/></testcase>'
     _shard(tmp_path, "shard-3-of-4", 2, xf)
     assert _run(tmp_path) == 0
@@ -77,7 +77,7 @@ def test_xfail_over_ceiling_reds_and_is_not_counted_as_a_skip(
     _shard(tmp_path, "shard-3-of-4", 2, xfails)
     assert _run(tmp_path, xfail=1) == 1
     err = capsys.readouterr().err
-    assert "2 xfailed exceeds test/XFAIL_CEILING (1)" in err
+    assert "2 xfailed exceeds limits/XFAIL_CEILING (1)" in err
     assert "skipped exceeds" not in err
 
 
@@ -134,3 +134,54 @@ def test_one_missing_limit_file_reds_with_the_counts_though_the_others_exist(
     err = capsys.readouterr().err
     assert str(limits / "XFAIL_CEILING") in err and str(limits / "SUITE_FLOOR") not in err
     assert "8 cases, 0 skipped" in err
+
+
+def _skips(n: int, kind: str = "") -> str:
+    mark = f'<skipped type="{kind}"/>' if kind else "<skipped/>"
+    return "".join(f'<testcase name="m{i}">{mark}</testcase>' for i in range(n))
+
+
+def test_skip_ceiling_loose_by_more_than_the_slack_reds_and_prints_the_measured_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _four_shards(tmp_path)
+    _shard(tmp_path, "shard-3-of-4", 2, _skips(2))
+    assert _run(tmp_path, skip=5) == 1
+    assert "limits/SKIP_CEILING (5) sits above the 2 measured" in capsys.readouterr().err
+
+
+def test_skip_ceiling_loose_by_exactly_the_slack_is_green(tmp_path: Path) -> None:
+    _four_shards(tmp_path)
+    _shard(tmp_path, "shard-3-of-4", 2, _skips(2))
+    assert _run(tmp_path, skip=4) == 0
+
+
+def test_xfail_ceiling_loose_by_more_than_the_slack_reds_and_prints_the_measured_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _four_shards(tmp_path)
+    _shard(tmp_path, "shard-3-of-4", 2, _skips(1, "pytest.xfail"))
+    assert _run(tmp_path, xfail=4) == 1
+    assert "limits/XFAIL_CEILING (4) sits above the 1 measured" in capsys.readouterr().err
+    assert _run(tmp_path, xfail=3) == 0
+
+
+def test_a_profile_ceiling_above_the_measured_zero_reds_naming_its_own_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The macOS smoke selection skips nothing; its profile once carried the Windows ceiling of 3."""
+    _shard(tmp_path, "shard-0-of-1", 8)
+    assert floor.run(tmp_path / "junit", _limits(tmp_path, skip=3, xfail=0)) == 1
+    assert "limits/SKIP_CEILING (3) sits above the 0 measured" in capsys.readouterr().err
+    assert floor.run(tmp_path / "junit", _limits(tmp_path, skip=0, xfail=0)) == 0
+
+
+def test_the_message_names_the_repo_path_of_a_committed_profile(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _shard(tmp_path, "shard-0-of-1", 30)
+    assert floor.run(tmp_path / "junit", floor.REPO_ROOT / "test" / "limits" / "macos-smoke") == 0
+    capsys.readouterr()
+    _shard(tmp_path, "shard-1-of-1", 0, _skips(3))
+    assert floor.run(tmp_path / "junit", floor.REPO_ROOT / "test" / "limits" / "macos-smoke") == 1
+    assert "3 skipped exceeds test/limits/macos-smoke/SKIP_CEILING (0)" in capsys.readouterr().err

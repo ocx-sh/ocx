@@ -57,12 +57,11 @@ Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project file in effect
 
 Mutually exclusive with `--project`. Applies to this invocation only: a child ocx process selects its own tier.
 
-Equivalent env var: `OCX_GLOBAL`. The global toolchain never composes into project resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
+The global toolchain never composes into project resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
 
 Before the subcommand `-g` means `--global`; after it, `-g` means `--group`. Nothing selects the global toolchain implicitly.
 
 - Short: `-g`
-- Environment: [`OCX_GLOBAL`](../environment.md#ocx-global)
 
 ## `--index` {#arg-index}
 

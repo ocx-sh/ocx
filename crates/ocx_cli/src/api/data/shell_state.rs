@@ -8,11 +8,15 @@
 
 use std::path::{Path, PathBuf};
 
+use ocx_config::exec_state::policy::{FieldClass, field_classes};
+use ocx_config::exec_state::{
+    AppliedValue, ExecState, Inherited, MAJOR, MAX_ENCODED, Narrowing, Owner, Pinned, PinnedTier, Policy, Prior,
+    RecordedValue, Scope, ScopeId, Selection, SessionSource, Truncation, UnreadableReason, ValueKind, display_safe,
+};
 use ocx_console::{DataInterface, Theme, human_bytes, human_instant, human_time};
 use ocx_project::activate::ActivateMode;
 use ocx_project::consent::{Grant, Reason};
 use ocx_shell::shell::coexistence::Observation;
-use ocx_shell::shell::reconcile::{CARRIER_KEY, Ledger, LedgerEntry, MAX_CARRIER_BYTES, Prior, ScopeId, Verdict};
 use ocx_util::fs::path::AbsolutePath;
 use ocx_util::size::ByteSize;
 use ocx_util::time::Timestamp;
@@ -36,6 +40,16 @@ fn quoted(text: &str) -> String {
 
 fn quoted_path(path: &Path) -> String {
     quoted(&path.display().to_string())
+}
+
+/// A state-derived string for stdout: the strip set removed first, then quoted for a human.
+// The state is inherited input; `quoted` alone would print a bidi or U+0080-U+009F control it does not escape.
+fn state_text(text: &str) -> String {
+    quoted(&display_safe(text))
+}
+
+fn state_path(path: &Path) -> String {
+    state_text(&path.display().to_string())
 }
 
 /// [`human_bytes`] over a `u64`; a size past `i64::MAX` renders as `unknown`.
@@ -158,6 +172,43 @@ pub enum Note {
         /// The parse failure, rendered for a human.
         detail: String,
     },
+    /// `__OCX_ENV_STATE` is set and cannot be read, so its payload is ignored.
+    EnvStateUnreadable {
+        /// The major this ocx reads.
+        major: u32,
+        /// The major the header carries, when the header parsed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        found_major: Option<u32>,
+        /// Why the value was refused, as a stable slug.
+        reason: String,
+        /// The record or payload field that failed validation; present for `invalid` only.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// The state is unreadable and the shell's hook skips every prompt until the value changes.
+    EnvStateStoodDown,
+    /// The state dropped data to fit the size cap.
+    EnvStateTruncated {
+        /// What was dropped.
+        truncated: TruncationReport,
+    },
+    /// The inherited state carries settings that relax a protection.
+    RelaxingPolicy {
+        /// The relaxing settings that are set, sorted.
+        names: Vec<String>,
+    },
+    /// The pinned `ocx` binary named by `OCX_BINARY_PIN` does not exist.
+    BinaryPinMissing {
+        /// The pinned path.
+        path: PathBuf,
+    },
+    /// The inherited state names a `config_path` whose file no longer exists, so this report was built without it.
+    ///
+    /// An ordinary command treats a missing config path as an error; the report is a finding instead.
+    ReceivedConfigMissing {
+        /// The config path the parent ocx recorded.
+        path: PathBuf,
+    },
 }
 
 /// How much of the report the plain rendering carries; `--format json` always gets all of it.
@@ -165,13 +216,13 @@ pub enum Note {
 pub enum Detail {
     /// Home, project, verdict and, when inert, the reason and its fix.
     Answer,
-    /// The answer plus its evidence: ledger, watch set, state key and stamp, hook ladder.
+    /// The answer plus its evidence: execution state, binary pin, watch set, state key and stamp, hook ladder.
     Diagnostics,
 }
 
 /// What `ocx shell state` reports: all derived, none of it mutating.
 ///
-/// Read-only: it never writes a stamp, repairs a ledger or emits a plan.
+/// Read-only: it never writes a stamp, repairs the state or emits a plan.
 /// Repair is `unset __OCX_ENV_STATE` or a new shell.
 // Never a stamp writer: a stamp written here would consent to the project it diagnoses.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -229,7 +280,7 @@ pub struct ShellStateReport {
     ///
     /// Set when consent activates over a lock composition refuses, such as a
     /// `paths` grant over an unreadable or stale lock. Every prompt then exits 65
-    /// and the scope never reaches the ledger.
+    /// and the scope never reaches the state.
     // The only field telling this state apart from a genuine first prompt.
     // `LockCurrency`'s `Display`; not a `Reason` arm, since the consent predicate did not refuse.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -246,19 +297,16 @@ pub struct ShellStateReport {
     /// The carrier's encoded length in bytes, measured against the carrier cap.
     pub carrier_bytes: ByteSize,
 
-    /// The decoded ledger, **rendered as fields, never as base64**.
+    /// The decoded execution state, **rendered as fields, never as base64**.
     ///
-    /// Schema `v` and the payload; absent when the carrier is absent or fails to
-    /// decode. Carries what is applied per scope (`global` and `project`
-    /// separately), the recorded prior of each constant the project scope owns
-    /// (the one datum nothing can reconstruct) and, through `over_cap`, the
-    /// abandoned-scope marker.
-    // Published through its own report shape: the carrier's spelling is a persisted format live shells decode.
-    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ledger_report")]
-    #[schemars(with = "Option<LedgerReport>")]
-    pub ledger: Option<Ledger>,
+    /// Reported in every state: an absent, unreadable or truncated value is a finding, not an error.
+    // Published through its own report shape: the carrier's spelling is a wire format live shells decode.
+    pub env_state: EnvStateReport,
 
-    /// Whether the ledger's recorded `fp` still matches the watch set on disk now.
+    /// The `ocx` binary generated launchers re-enter, and whether it is still there.
+    pub binary_pin: BinaryPinReport,
+
+    /// Whether the state's recorded `fp` still matches the watch set on disk now.
     ///
     /// Absent when there is no recorded fingerprint to compare against, **and**
     /// when no fold is available to compare with.
@@ -295,7 +343,7 @@ pub struct ShellStateReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stamp_written_at: Option<Timestamp>,
 
-    /// Prior intactness for each constant the ledger's project scope owns.
+    /// Prior intactness for each constant the project scope owns.
     pub priors: Vec<PriorStatus>,
 
     /// The hook's enablement and the rung that decided it.
@@ -318,19 +366,20 @@ pub struct ShellStateReport {
 }
 
 impl ShellStateReport {
-    /// Prior intactness for each constant the ledger's project scope owns.
+    /// Prior intactness for each constant the project scope owns.
     #[must_use]
-    pub fn priors_for(ledger: Option<&Ledger>) -> Vec<PriorStatus> {
-        let Some(project) = ledger.and_then(|ledger| ledger.scopes.project.as_ref()) else {
-            return Vec::new();
-        };
-        project
+    pub fn priors_for(env_state: &EnvStateReport) -> Vec<PriorStatus> {
+        env_state
             .applied
             .iter()
-            .filter(|entry| matches!(entry.kind, ocx_package::metadata::env::modifier::ModifierKind::Constant))
-            .map(|entry| PriorStatus {
-                key: entry.key.clone(),
-                intact: project.priors.contains_key(&entry.key),
+            .filter(|record| {
+                record.owner == OwnerReport::Session
+                    && record.scope == Some(ScopeIdReport::Project)
+                    && record.kind == ValueKindReport::Constant
+            })
+            .map(|record| PriorStatus {
+                key: record.key.clone(),
+                intact: record.prior.is_some(),
             })
             .collect()
     }
@@ -344,7 +393,8 @@ impl ShellStateReport {
         self.activation_lines(theme, &mut out);
         if detail == Detail::Diagnostics {
             out.push(String::new());
-            self.ledger_lines(theme, &mut out);
+            self.env_state_lines(theme, &mut out);
+            self.binary_pin_lines(theme, &mut out);
             self.fingerprint_lines(theme, &mut out);
             self.hook_lines(theme, &mut out);
         }
@@ -391,13 +441,23 @@ impl ShellStateReport {
         out.push(theme.field("  ", "activate", self.activate.to_string()));
         out.push(theme.field("  ", "pinned", if self.pinned { "yes" } else { "no" }));
 
+        out.push(format!(
+            "{} {}",
+            theme.label("env state:"),
+            match self.env_state.status {
+                EnvStateStatus::Unreadable => theme.alert(self.env_state.status.as_str()),
+                status => status.as_str().to_owned(),
+            }
+        ));
+
         out.push(String::new());
     }
 
-    /// The decoded ledger, as fields — never as the base64 the carrier holds.
-    fn ledger_lines(&self, theme: &Theme, out: &mut Vec<String>) {
-        out.push(theme.label("ledger:"));
-        out.push(theme.field("  ", "carrier", quoted(CARRIER_KEY)));
+    /// The decoded execution state, as fields - never as the base64 the carrier holds.
+    fn env_state_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        let state = &self.env_state;
+        out.push(theme.label("execution state:"));
+        out.push(theme.field("  ", "carrier", quoted(ocx_env::__OCX_ENV_STATE.name)));
         out.push(theme.field("  ", "present", if self.carrier_present { "yes" } else { "no" }));
         out.push(theme.field(
             "  ",
@@ -405,99 +465,156 @@ impl ShellStateReport {
             format!(
                 "{} {}",
                 self.carrier_bytes.get(),
-                theme.note(format!("of {MAX_CARRIER_BYTES}"))
+                theme.note(format!("of {MAX_ENCODED}"))
             ),
         ));
-
-        let Some(ledger) = self.ledger.as_ref() else {
-            out.push(theme.field(
-                "  ",
-                "decoded",
-                format!(
-                    "no {}",
-                    theme.note(if self.carrier_present {
-                        "(truncated, or an unrecognised envelope tag)"
-                    } else {
-                        "(the carrier is unset)"
-                    })
-                ),
-            ));
+        out.push(theme.field(
+            "  ",
+            "status",
+            format!(
+                "{} {}",
+                state.status.as_str(),
+                theme.note(match state.status {
+                    EnvStateStatus::Absent => "(the carrier is unset)",
+                    EnvStateStatus::Readable => "(decoded)",
+                    EnvStateStatus::Unreadable => "(the payload is ignored; the header is still honoured)",
+                })
+            ),
+        ));
+        if state.status == EnvStateStatus::Absent {
             out.push(String::new());
             return;
-        };
-
-        out.push(theme.field("  ", "decoded", "yes"));
-        out.push(theme.field("  ", "envelope", "1"));
-        out.push(theme.field("  ", "schema v", ledger.v.to_string()));
-        out.push(theme.field("  ", "fingerprint", quoted(&ledger.fp)));
+        }
+        out.push(theme.field("  ", "major", state.major.to_string()));
+        if let Some(minor) = state.minor {
+            out.push(theme.field("  ", "minor", minor.to_string()));
+        }
+        if let Some(found) = state.found_major {
+            out.push(theme.field("  ", "found major", found.to_string()));
+        }
+        let narrowing = state.narrowing.as_deref().unwrap_or_default();
         out.push(theme.field(
             "  ",
-            "verdict",
-            match ledger.verdict {
-                Some(Verdict::Inert) => "inert",
-                Some(Verdict::NoProject) => "no project",
-                Some(Verdict::Activate) => "activate",
-                None => "none recorded",
-            },
-        ));
-        out.push(theme.field(
-            "  ",
-            "over cap",
-            if ledger.over_cap.is_empty() {
+            "narrowing",
+            if narrowing.is_empty() {
                 "none".to_owned()
             } else {
-                theme.alert(
-                    ledger
-                        .over_cap
-                        .iter()
-                        .map(|scope| scope.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
+                narrowing
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             },
         ));
-
-        out.push(theme.field("  ", "applied, global scope", ""));
-        match ledger.scopes.global.as_ref() {
-            Some(applied) if !applied.is_empty() => push_entries(theme, out, applied),
-            Some(_) => out.push("    - nothing".to_owned()),
-            None => out.push("    - no record".to_owned()),
+        if let Some(home) = state.home.as_deref() {
+            out.push(theme.field("  ", "home", state_path(home)));
         }
-
-        out.push(theme.field("  ", "applied, project scope", ""));
-        match ledger.scopes.project.as_ref() {
-            Some(project) => {
-                out.push(theme.field("    ", "key", quoted(&project.key)));
-                out.push(theme.field("    ", "dir", quoted_path(&project.dir)));
-                if project.applied.is_empty() {
-                    out.push("    - nothing".to_owned());
-                } else {
-                    push_entries(theme, out, &project.applied);
-                }
-                out.push(theme.field("    ", "priors", ""));
-                if self.priors.is_empty() {
-                    out.push("      - no constants owned".to_owned());
-                }
-                for prior in &self.priors {
-                    let recorded = match project.priors.get(&prior.key) {
-                        Some(Prior::Unset) => "was unset".to_owned(),
-                        Some(Prior::Value(value)) => format!("was {}", quoted(value)),
-                        None => "lost".to_owned(),
-                    };
-                    out.push(format!(
-                        "      - {} {} {}",
-                        quoted(&prior.key),
-                        if prior.intact {
-                            theme.ok("intact")
-                        } else {
-                            theme.alert("MISSING")
-                        },
-                        theme.note(format!("({recorded})"))
-                    ));
-                }
+        if let Some(truncated) = state.truncated {
+            out.push(theme.field("  ", "truncated", theme.alert(truncated.as_str())));
+        }
+        if state.status == EnvStateStatus::Unreadable {
+            out.push(String::new());
+            return;
+        }
+        out.push(theme.field(
+            "  ",
+            "session claimed",
+            if state.session_claimed { "yes" } else { "no" },
+        ));
+        if let Some(policy) = state.policy.as_ref() {
+            out.push(theme.field("  ", "policy", ""));
+            let set = policy.set_values();
+            if set.is_empty() {
+                out.push("    - none set".to_owned());
             }
-            None => out.push("    - no record".to_owned()),
+            for (name, value) in set {
+                out.push(format!("    - {name} {}", state_text(&value)));
+            }
         }
+        if !state.relaxing_policy.is_empty() {
+            out.push(theme.field("  ", "relaxing policy", theme.alert(state.relaxing_policy.join(", "))));
+        }
+        out.push(theme.field("  ", "inherited scopes", ""));
+        if state.inherited_scopes.is_empty() {
+            out.push("    - none".to_owned());
+        }
+        for scope in &state.inherited_scopes {
+            match scope {
+                ScopeReport::Global => out.push("    - global".to_owned()),
+                ScopeReport::Project { root } => out.push(format!("    - project {}", state_path(root))),
+            }
+        }
+        out.push(theme.field("  ", "applied", ""));
+        if state.applied.is_empty() {
+            out.push("    - nothing".to_owned());
+        }
+        for record in &state.applied {
+            let separator = record.separator.as_deref().map_or_else(String::new, |sep| {
+                format!(" {}", theme.note(format!("sep {}", state_text(sep))))
+            });
+            let value = state_text(&record.value);
+            let pre_existing = if record.pre_existing { " (pre-existing)" } else { "" };
+            out.push(format!(
+                "    - {} {} {value}{separator}{pre_existing} {}",
+                state_text(&record.key),
+                theme.note(record.kind.as_str()),
+                theme.note(format!("({})", record.owner_description())),
+            ));
+        }
+        if let Some(replay) = state.replay.as_ref() {
+            out.push(theme.field(
+                "  ",
+                "replay",
+                format!(
+                    "{} env, {} launch identities",
+                    replay.env_count, replay.launch_identity_count
+                ),
+            ));
+        }
+        if let Some(selection) = state.selection.as_ref() {
+            out.push(theme.field("  ", "selection", ""));
+            selection.push_lines(theme, out);
+        }
+        out.push(theme.field("  ", "priors", ""));
+        if self.priors.is_empty() {
+            out.push("    - no constants owned".to_owned());
+        }
+        for prior in &self.priors {
+            let recorded = state
+                .applied
+                .iter()
+                .find(|record| record.key == prior.key && record.prior.is_some())
+                .and_then(|record| record.prior.as_ref())
+                .map_or_else(|| "lost".to_owned(), PriorReport::description);
+            out.push(format!(
+                "    - {} {} {}",
+                state_text(&prior.key),
+                if prior.intact {
+                    theme.ok("intact")
+                } else {
+                    theme.alert("MISSING")
+                },
+                theme.note(format!("({recorded})"))
+            ));
+        }
+        out.push(String::new());
+    }
+
+    /// The pinned `ocx` binary generated launchers re-enter.
+    fn binary_pin_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        let pin = &self.binary_pin;
+        out.push(theme.label("binary pin:"));
+        out.push(theme.field(
+            "  ",
+            "path",
+            pin.path.as_deref().map_or_else(|| "none".to_owned(), state_path),
+        ));
+        out.push(theme.field("  ", "exists", if pin.exists { "yes" } else { "no" }));
+        out.push(theme.field(
+            "  ",
+            "matches running binary",
+            if pin.matches_running { "yes" } else { "no" },
+        ));
         out.push(String::new());
     }
 
@@ -556,12 +673,16 @@ impl ShellStateReport {
         out.push(String::new());
     }
 
-    /// Whether a consented project scope awaits its first apply; false on an undecoded or over-cap ledger.
+    /// Whether a consented project scope awaits its first apply; false on an unreadable, absent or truncated state.
     fn project_scope_pending(&self) -> bool {
-        let Some(ledger) = self.ledger.as_ref() else {
-            return false;
-        };
-        self.project_dir.is_some() && ledger.scopes.project.is_none() && !ledger.over_cap.contains(&ScopeId::Project)
+        let state = &self.env_state;
+        self.project_dir.is_some()
+            && state.status == EnvStateStatus::Readable
+            && state.truncated.is_none()
+            && !state
+                .applied
+                .iter()
+                .any(|record| record.owner == OwnerReport::Session && record.scope == Some(ScopeIdReport::Project))
     }
 
     /// Whether a reachable project file could not be resolved; no [`Reason`] covers
@@ -596,7 +717,7 @@ impl ShellStateReport {
                 );
             }
             None if self.project_scope_pending() => match self.lock_refusal.as_deref() {
-                // Composition refuses, so the scope never reaches the ledger and "not yet" would never come true.
+                // Composition refuses, so the scope never reaches the state and "not yet" would never come true.
                 Some(refusal) => {
                     out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
                     out.push(format!("{} {refusal}", theme.alert("reason:")));
@@ -680,6 +801,64 @@ impl ShellStateReport {
                     out.push(
                         "  repair the manifest - until it parses, activate and pinned fall to their floors".to_owned(),
                     );
+                }
+                Note::EnvStateUnreadable {
+                    major,
+                    found_major,
+                    reason,
+                    field,
+                } => {
+                    out.push(format!(
+                        "{} the execution state cannot be read, so its payload is ignored",
+                        theme.label("note:")
+                    ));
+                    out.push(theme.field("  ", "reads major", major.to_string()));
+                    if let Some(found) = found_major {
+                        out.push(theme.field("  ", "found major", found.to_string()));
+                    }
+                    out.push(theme.field("  ", "reason", state_text(reason)));
+                    if let Some(field) = field {
+                        out.push(theme.field("  ", "field", state_text(field)));
+                    }
+                    out.push("  start a new shell, or unset __OCX_ENV_STATE; the header is still honoured".to_owned());
+                }
+                Note::EnvStateStoodDown => {
+                    out.push(format!(
+                        "{} the hook stood down on an unreadable state and skips every prompt",
+                        theme.label("note:")
+                    ));
+                    out.push("  to re-arm it, start a new shell or unset __OCX_ENV_STATE".to_owned());
+                }
+                Note::EnvStateTruncated { truncated } => {
+                    out.push(format!(
+                        "{} the execution state dropped data to fit its size cap",
+                        theme.label("note:")
+                    ));
+                    out.push(theme.field("  ", "dropped", truncated.as_str()));
+                    out.push("  declare less environment, or run the command from a clean shell".to_owned());
+                }
+                Note::RelaxingPolicy { names } => {
+                    out.push(format!(
+                        "{} the inherited state relaxes protections",
+                        theme.label("note:")
+                    ));
+                    for name in names {
+                        out.push(format!("    - {}", state_text(name)));
+                    }
+                    out.push("  run from a clean shell if the parent did not intend this".to_owned());
+                }
+                Note::BinaryPinMissing { path } => {
+                    out.push(format!("{} the pinned ocx binary does not exist", theme.label("note:")));
+                    out.push(theme.field("  ", "path", state_path(path)));
+                    out.push("  launchers cannot re-enter ocx; run `ocx self setup` to restore it".to_owned());
+                }
+                Note::ReceivedConfigMissing { path } => {
+                    out.push(format!(
+                        "{} the config file the parent ocx passed down does not exist",
+                        theme.label("note:")
+                    ));
+                    out.push(theme.field("  ", "path", state_path(path)));
+                    out.push("  it was skipped; restore the file or run from a clean shell".to_owned());
                 }
             }
         }
@@ -805,17 +984,21 @@ impl ShellStateReport {
                     "none needed here - OCX yields for as long as that tool is live in this shell",
                 );
             }
-            Reason::LedgerOverCap { scope } => {
-                headline(out, "the ledger exceeded its cap and a scope was abandoned");
-                out.push(theme.field("  ", "abandoned scope", scope.as_str()));
+            Reason::StateOverCap { scope } => {
+                headline(out, "the execution state exceeded its cap and a scope was abandoned");
+                let scope = match scope {
+                    ScopeId::Global => "global",
+                    ScopeId::Project => "project",
+                };
+                out.push(theme.field("  ", "abandoned scope", scope));
                 out.push("  read from the over_cap marker the carrier still holds".to_owned());
                 push_fix(
                     theme,
                     out,
-                    "declare less environment in this scope; its ledger payload does not fit the cap",
+                    "declare less environment in this scope; its state payload does not fit the cap",
                 );
             }
-            Reason::LedgerUnreadable { first_prompt } => {
+            Reason::StateUnreadable { first_prompt } => {
                 if *first_prompt {
                     if self.shell_integration_installed {
                         headline(out, "nothing has been applied in this shell yet");
@@ -847,21 +1030,6 @@ impl ShellStateReport {
                 push_fix(theme, out, "run `ocx lock` here");
             }
         }
-    }
-}
-
-/// One ledger entry per line, behind the fixed `- ` marker so no carrier byte starts a line.
-fn push_entries(theme: &Theme, out: &mut Vec<String>, applied: &[LedgerEntry]) {
-    for entry in applied {
-        let separator = entry.separator.as_deref().map_or_else(String::new, |sep| {
-            format!(" {}", theme.note(format!("sep {}", quoted(sep))))
-        });
-        out.push(format!(
-            "    - {} {} {}{separator}",
-            quoted(&entry.key),
-            theme.note(entry.kind.to_string()),
-            quoted(&entry.value)
-        ));
     }
 }
 
@@ -927,104 +1095,288 @@ impl schemars::JsonSchema for VerboseShellState {
     }
 }
 
-// ── The ledger as the report publishes it ──
-// Mirrors of the carrier types: the carrier spells an entry's kind `type` and a prior as an
-// externally tagged enum, and changing those spellings breaks every live shell's decode.
+// ── The execution state as the report publishes it ──
+// Mirrors of the wire types: the carrier spells them for live shells to decode, and the report
+// spells them for programs, so neither may follow the other's attribute changes.
 
-fn ledger_report<S: serde::Serializer>(ledger: &Option<Ledger>, serializer: S) -> Result<S::Ok, S::Error> {
-    ledger.as_ref().map(LedgerReport::from).serialize(serializer)
-}
-
-/// The decoded `__OCX_ENV_STATE` payload.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "Ledger")]
-struct LedgerReport {
-    /// Schema version of the payload shape.
-    v: u8,
-    /// Watch-set fingerprint; the cached verdict expires when it changes.
-    fp: String,
-    /// The cached negative verdict: `inert` or `no_project`, never `activate`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    verdict: Option<VerdictReport>,
-    /// The config-tier paths in effect at compose time; omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tiers: Vec<PathBuf>,
-    /// Digest of the ordered watch-path list baked into the shell's gate; omitted when empty.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    ws: String,
-    /// Digest of the deferred diagnostics the previous prompt printed; omitted when empty.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    messages_fp: String,
-    /// Scopes the carrier size cap dropped; omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    over_cap: Vec<ScopeId>,
-    /// What each scope applied.
-    scopes: ScopesReport,
-}
-
-/// The two scope slots.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "Scopes")]
-struct ScopesReport {
-    /// The global toolchain tier's applied entries; absent when the tier applied nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    global: Option<Vec<LedgerEntryReport>>,
-    /// Pre-apply values for the global scope's constants, keyed by variable; omitted when empty.
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    global_priors: std::collections::BTreeMap<String, PriorReport>,
-    /// The resolved project tier; absent when none applied.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project: Option<ProjectScopeReport>,
-}
-
-/// The project scope's record.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "ProjectScope")]
-struct ProjectScopeReport {
-    /// The project key derived from the canonical project directory.
-    key: String,
-    /// The canonical project directory, an advisory label.
-    dir: PathBuf,
-    /// What this scope applied, in emission order.
-    applied: Vec<LedgerEntryReport>,
-    /// Pre-apply values for this scope's constants, keyed by variable.
-    priors: std::collections::BTreeMap<String, PriorReport>,
-}
-
-/// One environment binding the reconciler applied, recorded literally.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "LedgerEntry")]
-struct LedgerEntryReport {
-    /// Environment-variable name.
-    key: String,
-    /// The exact string ocx wrote, byte for byte.
-    value: String,
-    /// How the value combines.
-    kind: ocx_package::metadata::env::modifier::ModifierKind,
-    /// The effective list separator; present only for a `list` entry.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    separator: Option<String>,
-}
-
-/// A cached activation verdict; a change to the watch set expires it.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "Verdict")]
+/// Whether `__OCX_ENV_STATE` is set, and whether it could be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-enum VerdictReport {
-    /// Activate the project; ocx never caches it, so a carrier holding it was not written by ocx.
-    Activate,
-    /// Consent refused activation for the project in effect.
-    Inert,
-    /// No project resolved from the working directory; entering one expires it.
-    NoProject,
+pub enum EnvStateStatus {
+    /// The variable is unset or empty.
+    Absent,
+    /// The value decoded; its fields follow.
+    Readable,
+    /// The value is set and could not be read; only the header fields follow.
+    Unreadable,
 }
 
-impl From<Verdict> for VerdictReport {
-    fn from(verdict: Verdict) -> Self {
-        match verdict {
-            Verdict::Activate => Self::Activate,
-            Verdict::Inert => Self::Inert,
-            Verdict::NoProject => Self::NoProject,
+impl EnvStateStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Readable => "readable",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+/// A narrowing the header carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NarrowingName {
+    /// No network.
+    Offline,
+    /// No index refresh.
+    Frozen,
+    /// No consent stamp is written.
+    NoConsent,
+    /// A credential helper child; implies offline.
+    CredentialHelper,
+}
+
+impl NarrowingName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::Frozen => "frozen",
+            Self::NoConsent => "no_consent",
+            Self::CredentialHelper => "credential_helper",
+        }
+    }
+}
+
+/// What the encoder dropped to fit the size cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationReport {
+    /// Records received from an outer frame were dropped.
+    InheritedDropped,
+    /// Every applied record was dropped.
+    AllAppliedDropped,
+    /// The whole payload was dropped; only the header remains.
+    PayloadDropped,
+}
+
+impl TruncationReport {
+    fn from_wire(truncation: Truncation) -> Option<Self> {
+        match truncation {
+            Truncation::None => None,
+            Truncation::InheritedDropped => Some(Self::InheritedDropped),
+            Truncation::AllAppliedDropped => Some(Self::AllAppliedDropped),
+            Truncation::PayloadDropped => Some(Self::PayloadDropped),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InheritedDropped => "inherited_dropped",
+            Self::AllAppliedDropped => "all_applied_dropped",
+            Self::PayloadDropped => "payload_dropped",
+        }
+    }
+}
+
+/// The inherited settings that are set; same names as the state's `policy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct PolicyReport {
+    /// `OCX_REMOTE`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<bool>,
+    /// `OCX_NO_PROJECT`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_project: Option<bool>,
+    /// `OCX_NO_CONFIG_REFRESH`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_config_refresh: Option<bool>,
+    /// `OCX_NO_UPDATE_CHECK`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_update_check: Option<bool>,
+    /// `OCX_CONFIG`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub config_path: Option<PathBuf>,
+    /// `OCX_NO_CONFIG`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_config: Option<bool>,
+    /// `OCX_INDEX`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub index_dir: Option<PathBuf>,
+    /// `OCX_TOOLCHAIN_DIR`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub toolchain_dir: Option<PathBuf>,
+    /// `OCX_MIRRORS`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<String>,
+    /// `OCX_PATCHES`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patches: Option<String>,
+    /// `OCX_PATCH_SNAPSHOT`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub patch_snapshot_path: Option<PathBuf>,
+    /// `OCX_MANAGED_CONFIG`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_config: Option<String>,
+    /// `OCX_NO_VERIFY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_verify: Option<bool>,
+    /// `OCX_RECORDS_DIR`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub records_dir: Option<PathBuf>,
+    /// `OCX_RECORDS_NAME`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub records_name: Option<String>,
+    /// `OCX_ALLOW_YANKED`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_yanked: Option<bool>,
+    /// `OCX_DEFAULT_REGISTRY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_registry: Option<String>,
+    /// `OCX_INSECURE_REGISTRIES`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insecure_registries: Option<String>,
+}
+
+impl PolicyReport {
+    fn from_wire(policy: &Policy) -> Self {
+        // No `..`: a new `Policy` field must be reported here or this stops compiling.
+        let Policy {
+            remote,
+            no_project,
+            no_config_refresh,
+            no_update_check,
+            config_path,
+            no_config,
+            index_dir,
+            toolchain_dir,
+            mirrors,
+            patches,
+            patch_snapshot_path,
+            managed_config,
+            no_verify,
+            records_dir,
+            records_name,
+            allow_yanked,
+            default_registry,
+            insecure_registries,
+        } = policy.clone();
+        Self {
+            remote,
+            no_project,
+            no_config_refresh,
+            no_update_check,
+            config_path,
+            no_config,
+            index_dir,
+            toolchain_dir,
+            mirrors,
+            patches,
+            patch_snapshot_path,
+            managed_config,
+            no_verify,
+            records_dir,
+            records_name,
+            allow_yanked,
+            default_registry,
+            insecure_registries,
+        }
+    }
+
+    /// Each set field with its value spelled for a human, in declaration order.
+    fn set_values(&self) -> Vec<(&'static str, String)> {
+        let flag = |value: Option<bool>| value.map(|value| value.to_string());
+        let path = |value: &Option<PathBuf>| value.as_ref().map(|value| value.display().to_string());
+        [
+            ("remote", flag(self.remote)),
+            ("no_project", flag(self.no_project)),
+            ("no_config_refresh", flag(self.no_config_refresh)),
+            ("no_update_check", flag(self.no_update_check)),
+            ("config_path", path(&self.config_path)),
+            ("no_config", flag(self.no_config)),
+            ("index_dir", path(&self.index_dir)),
+            ("toolchain_dir", path(&self.toolchain_dir)),
+            ("mirrors", self.mirrors.clone()),
+            ("patches", self.patches.clone()),
+            ("patch_snapshot_path", path(&self.patch_snapshot_path)),
+            ("managed_config", self.managed_config.clone()),
+            ("no_verify", flag(self.no_verify)),
+            ("records_dir", path(&self.records_dir)),
+            ("records_name", self.records_name.clone()),
+            ("allow_yanked", flag(self.allow_yanked)),
+            ("default_registry", self.default_registry.clone()),
+            ("insecure_registries", self.insecure_registries.clone()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect()
+    }
+}
+
+/// A scope an outer frame composed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScopeReport {
+    /// The global toolchain tier.
+    Global,
+    /// A project, by the root it was composed from.
+    Project {
+        /// The project directory as the state recorded it.
+        root: PathBuf,
+    },
+}
+
+/// Who applied a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerReport {
+    /// A shell instance of this session.
+    Session,
+    /// An outer frame; this process only inherits it.
+    Inherited,
+}
+
+/// The scope a session record belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeIdReport {
+    /// The global toolchain tier.
+    Global,
+    /// The project in effect.
+    Project,
+}
+
+/// Where a session record came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceReport {
+    /// From `ocx.toml` groups or the global tier; refreshed each prompt.
+    Composed,
+    /// From `ocx shell --with` or `--env`; removed, never refreshed.
+    Invocation,
+}
+
+/// How an applied value combines with the variable's existing value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueKindReport {
+    /// A path-list element, prepended.
+    Path,
+    /// A list element joined by a separator.
+    List,
+    /// The whole value.
+    Constant,
+}
+
+impl ValueKindReport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::List => "list",
+            Self::Constant => "constant",
         }
     }
 }
@@ -1032,10 +1384,9 @@ impl From<Verdict> for VerdictReport {
 /// What a variable held before ocx set it.
 ///
 /// A set-but-empty variable is `value` with an empty string, never `unset`.
-#[derive(Serialize, schemars::JsonSchema)]
-#[schemars(rename = "Prior")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum PriorReport {
+pub enum PriorReport {
     /// The variable did not exist; reverting removes it.
     Unset,
     /// The variable held a value; reverting restores it.
@@ -1043,68 +1394,430 @@ enum PriorReport {
         /// The exact string the variable held.
         value: String,
     },
+    /// The prior was not UTF-8; it is never restored.
+    Withheld,
 }
 
-impl From<&Ledger> for LedgerReport {
-    fn from(ledger: &Ledger) -> Self {
-        Self {
-            v: ledger.v,
-            fp: ledger.fp.clone(),
-            verdict: ledger.verdict.map(VerdictReport::from),
-            tiers: ledger.tiers.clone(),
-            ws: ledger.ws.clone(),
-            messages_fp: ledger.messages_fp.clone(),
-            over_cap: ledger.over_cap.clone(),
-            scopes: ScopesReport {
-                global: ledger.scopes.global.as_deref().map(entries_report),
-                global_priors: priors_report(&ledger.scopes.global_priors),
-                project: ledger.scopes.project.as_ref().map(|project| ProjectScopeReport {
-                    key: project.key.clone(),
-                    dir: project.dir.clone(),
-                    applied: entries_report(&project.applied),
-                    priors: priors_report(&project.priors),
-                }),
-            },
+impl PriorReport {
+    fn description(&self) -> String {
+        match self {
+            Self::Unset => "was unset".to_owned(),
+            Self::Value { value } => format!("was {}", state_text(value)),
+            Self::Withheld => "withheld".to_owned(),
         }
     }
 }
 
-fn entries_report(entries: &[LedgerEntry]) -> Vec<LedgerEntryReport> {
-    entries
-        .iter()
-        .map(|entry| LedgerEntryReport {
-            key: entry.key.clone(),
-            value: entry.value.clone(),
-            kind: entry.kind.clone(),
-            separator: entry.separator.clone(),
-        })
-        .collect()
+/// One value ocx applied to an environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct AppliedReport {
+    /// Environment-variable name.
+    pub key: String,
+    /// The exact string ocx wrote.
+    pub value: String,
+    /// How the value combines.
+    pub kind: ValueKindReport,
+    /// The effective list separator; present only for a `list` record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// The element was already present and was only moved; reverting keeps it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pre_existing: bool,
+    /// Who applied it.
+    pub owner: OwnerReport,
+    /// The scope of a session record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeIdReport>,
+    /// The origin of a session record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceReport>,
+    /// What a constant held before; absent for a path or list record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior: Option<PriorReport>,
 }
 
-fn priors_report(
-    priors: &std::collections::BTreeMap<String, Prior>,
-) -> std::collections::BTreeMap<String, PriorReport> {
-    priors
-        .iter()
-        .map(|(key, prior)| {
-            let prior = match prior {
+impl AppliedReport {
+    fn from_wire(record: &AppliedValue) -> Self {
+        let (owner, scope, source) = match &record.owner {
+            Owner::Session { scope, source } => (
+                OwnerReport::Session,
+                Some(match scope {
+                    ScopeId::Global => ScopeIdReport::Global,
+                    ScopeId::Project => ScopeIdReport::Project,
+                }),
+                Some(match source {
+                    SessionSource::Composed => SourceReport::Composed,
+                    SessionSource::Invocation => SourceReport::Invocation,
+                }),
+            ),
+            Owner::Inherited => (OwnerReport::Inherited, None, None),
+        };
+        let RecordedValue::Literal(value) = &record.value;
+        Self {
+            key: record.key.clone(),
+            value: value.clone(),
+            kind: match record.kind {
+                ValueKind::Path => ValueKindReport::Path,
+                ValueKind::List => ValueKindReport::List,
+                ValueKind::Constant => ValueKindReport::Constant,
+            },
+            separator: record.separator.clone(),
+            pre_existing: record.pre_existing,
+            owner,
+            scope,
+            source,
+            prior: record.prior.as_ref().map(|prior| match prior {
                 Prior::Unset => PriorReport::Unset,
                 Prior::Value(value) => PriorReport::Value { value: value.clone() },
-            };
-            (key.clone(), prior)
-        })
-        .collect()
+                Prior::Withheld => PriorReport::Withheld,
+            }),
+        }
+    }
+
+    fn owner_description(&self) -> String {
+        match (self.owner, self.scope, self.source) {
+            (OwnerReport::Session, Some(scope), Some(source)) => {
+                format!(
+                    "session {} {}",
+                    match scope {
+                        ScopeIdReport::Global => "global",
+                        ScopeIdReport::Project => "project",
+                    },
+                    match source {
+                        SourceReport::Composed => "composed",
+                        SourceReport::Invocation => "invocation",
+                    }
+                )
+            }
+            (OwnerReport::Session, ..) => "session".to_owned(),
+            (OwnerReport::Inherited, ..) => "inherited".to_owned(),
+        }
+    }
+}
+
+/// How many replay records the state carries; the records themselves are not published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct ReplayCounts {
+    /// Environment values launchers re-apply.
+    pub env_count: usize,
+    /// Package identities launchers match patch rules by.
+    pub launch_identity_count: usize,
+}
+
+/// What the invocation that wrote the state selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SelectionReport {
+    /// Follow the working directory; nothing is pinned.
+    FollowCwd,
+    /// Pinned to a project's groups.
+    PinnedProject {
+        /// The project directory as the state recorded it.
+        #[schemars(with = "AbsolutePath")]
+        project_dir: PathBuf,
+        /// The pinned groups.
+        groups: Vec<String>,
+        /// `--with` identifiers as typed.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        with_names: Vec<String>,
+        /// `--env` keys; never their values.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        env_keys: Vec<String>,
+    },
+    /// Pinned to the global toolchain's groups.
+    PinnedGlobal {
+        /// The pinned groups.
+        groups: Vec<String>,
+    },
+}
+
+impl SelectionReport {
+    fn from_wire(selection: &Selection) -> Self {
+        match selection {
+            Selection::FollowCwd => Self::FollowCwd,
+            Selection::Pinned(Pinned {
+                tier,
+                groups,
+                with_names,
+                env_keys,
+                ..
+            }) => match tier {
+                PinnedTier::Project { dir } => Self::PinnedProject {
+                    project_dir: dir.clone(),
+                    groups: groups.clone(),
+                    with_names: with_names.clone(),
+                    env_keys: env_keys.clone(),
+                },
+                PinnedTier::Global => Self::PinnedGlobal { groups: groups.clone() },
+            },
+        }
+    }
+
+    fn push_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        let list = |names: &[String]| {
+            if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.iter().map(|name| state_text(name)).collect::<Vec<_>>().join(", ")
+            }
+        };
+        match self {
+            Self::FollowCwd => out.push("    - follows the working directory".to_owned()),
+            Self::PinnedProject {
+                project_dir,
+                groups,
+                with_names,
+                env_keys,
+            } => {
+                out.push(theme.field("    ", "pinned project", state_path(project_dir)));
+                out.push(theme.field("    ", "groups", list(groups)));
+                out.push(theme.field("    ", "with", list(with_names)));
+                out.push(theme.field("    ", "env keys", list(env_keys)));
+            }
+            Self::PinnedGlobal { groups } => {
+                out.push("    - pinned to the global toolchain".to_owned());
+                out.push(theme.field("    ", "groups", list(groups)));
+            }
+        }
+    }
+}
+
+/// The decoded `__OCX_ENV_STATE`: what a parent handed this process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct EnvStateReport {
+    /// Whether the value is unset, readable or unreadable.
+    pub status: EnvStateStatus,
+    /// The major version this ocx reads.
+    pub major: u32,
+    /// The minor version the state was written with; present when readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minor: Option<u32>,
+    /// The major the header carries; present when unreadable and the header parsed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_major: Option<u32>,
+    /// The narrowings the header carries; present when readable or unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrowing: Option<Vec<NarrowingName>>,
+    /// The `OCX_HOME` the header carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub home: Option<PathBuf>,
+    /// What was dropped to fit the size cap; omitted when nothing was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<TruncationReport>,
+    /// The inherited settings that are set; present when readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyReport>,
+    /// The set settings that relax a protection, plus `home`, sorted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub relaxing_policy: Vec<String>,
+    /// Whether a shell instance claimed the session; the token itself is not published.
+    pub session_claimed: bool,
+    /// Scopes an outer frame composed, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inherited_scopes: Vec<ScopeReport>,
+    /// What was applied, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedReport>,
+    /// Counts of the records launchers replay; present when readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayCounts>,
+    /// What the writing invocation selected; present when readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionReport>,
+}
+
+impl EnvStateReport {
+    /// The report for what this process received, and the notes it owes.
+    ///
+    /// `hook_active` is whether the shell's per-prompt hook runs here: an unreadable state stands that
+    /// hook down, and the stood-down copy lives only in the shell.
+    #[must_use]
+    pub fn from_inherited(inherited: &Inherited, hook_active: bool) -> (Self, Vec<Note>) {
+        let mut notes = Vec::new();
+        let report = match inherited {
+            Inherited::Absent => Self::empty(EnvStateStatus::Absent),
+            Inherited::Unreadable { header, reason } => {
+                let (slug, field) = unreadable_slug(*reason);
+                notes.push(Note::EnvStateUnreadable {
+                    major: MAJOR,
+                    found_major: header.major,
+                    reason: slug.to_owned(),
+                    field: field.map(str::to_owned),
+                });
+                if hook_active {
+                    notes.push(Note::EnvStateStoodDown);
+                }
+                Self {
+                    found_major: header.major,
+                    narrowing: Some(narrowing_names(header.narrowing)),
+                    home: header.home.clone(),
+                    ..Self::empty(EnvStateStatus::Unreadable)
+                }
+            }
+            Inherited::Readable(state) => {
+                let report = Self::from_state(state);
+                if let Some(truncated) = report.truncated {
+                    notes.push(Note::EnvStateTruncated { truncated });
+                }
+                if !report.relaxing_policy.is_empty() {
+                    notes.push(Note::RelaxingPolicy {
+                        names: report.relaxing_policy.clone(),
+                    });
+                }
+                report
+            }
+        };
+        (report, notes)
+    }
+
+    fn empty(status: EnvStateStatus) -> Self {
+        Self {
+            status,
+            major: MAJOR,
+            minor: None,
+            found_major: None,
+            narrowing: None,
+            home: None,
+            truncated: None,
+            policy: None,
+            relaxing_policy: Vec::new(),
+            session_claimed: false,
+            inherited_scopes: Vec::new(),
+            applied: Vec::new(),
+            replay: None,
+            selection: None,
+        }
+    }
+
+    fn from_state(state: &ExecState) -> Self {
+        let policy = PolicyReport::from_wire(&state.policy);
+        let mut relaxing_policy: Vec<String> = field_classes()
+            .into_iter()
+            .filter(|(_, class)| *class == FieldClass::Relaxing)
+            .map(|(name, _)| name)
+            .filter(|name| match *name {
+                "home" => state.home.is_some(),
+                name => policy.set_values().iter().any(|(set, _)| *set == name),
+            })
+            .map(str::to_owned)
+            .collect();
+        relaxing_policy.sort();
+        Self {
+            minor: Some(state.minor),
+            narrowing: Some(narrowing_names(state.narrowing)),
+            home: state.home.clone(),
+            truncated: TruncationReport::from_wire(state.truncated),
+            policy: Some(policy),
+            relaxing_policy,
+            session_claimed: state.session.token.is_some(),
+            inherited_scopes: state
+                .inherited_scopes
+                .iter()
+                .map(|scope| match scope {
+                    Scope::Global => ScopeReport::Global,
+                    Scope::Project { root } => ScopeReport::Project { root: root.clone() },
+                })
+                .collect(),
+            applied: state.applied.iter().map(AppliedReport::from_wire).collect(),
+            replay: Some(ReplayCounts {
+                env_count: state.replay.env.len(),
+                launch_identity_count: state.replay.launch_identities.len(),
+            }),
+            selection: Some(SelectionReport::from_wire(&state.selection)),
+            ..Self::empty(EnvStateStatus::Readable)
+        }
+    }
+}
+
+fn narrowing_names(narrowing: Narrowing) -> Vec<NarrowingName> {
+    let Narrowing {
+        offline,
+        frozen,
+        no_consent,
+        credential_helper,
+    } = narrowing;
+    [
+        (offline, NarrowingName::Offline),
+        (frozen, NarrowingName::Frozen),
+        (no_consent, NarrowingName::NoConsent),
+        (credential_helper, NarrowingName::CredentialHelper),
+    ]
+    .into_iter()
+    .filter_map(|(set, name)| set.then_some(name))
+    .collect()
+}
+
+/// A stable slug per refusal, and the failing field for `invalid`.
+fn unreadable_slug(reason: UnreadableReason) -> (&'static str, Option<&'static str>) {
+    match reason {
+        UnreadableReason::HeaderInvalid => ("header_invalid", None),
+        UnreadableReason::OtherMajor => ("other_major", None),
+        UnreadableReason::TooLong => ("too_long", None),
+        UnreadableReason::NotUtf8 => ("not_utf8", None),
+        UnreadableReason::Base64 => ("base64", None),
+        UnreadableReason::Inflate => ("inflate", None),
+        UnreadableReason::InflateLimit => ("inflate_limit", None),
+        UnreadableReason::TrailingBytes => ("trailing_bytes", None),
+        UnreadableReason::Json => ("json", None),
+        UnreadableReason::RecordLimit => ("record_limit", None),
+        UnreadableReason::TierLimit => ("tier_limit", None),
+        UnreadableReason::ScopeLimit => ("scope_limit", None),
+        UnreadableReason::Invalid { field } => ("invalid", Some(field)),
+    }
+}
+
+/// The `ocx` binary generated launchers re-enter (`OCX_BINARY_PIN`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct BinaryPinReport {
+    /// The pinned path; absent when no pin is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Whether the pinned path exists.
+    pub exists: bool,
+    /// Whether the pinned path and the running binary canonicalise to one file.
+    pub matches_running: bool,
+}
+
+impl BinaryPinReport {
+    /// Stats the pin and compares it with the running binary. Blocking: call it off the runtime.
+    #[must_use]
+    pub fn probe(path: Option<&Path>, running: Option<&Path>) -> Self {
+        // An unreadable pin reads as missing: the report must not fail on the thing it diagnoses.
+        let exists = path.is_some_and(Path::exists);
+        let matches_running = match (path, running) {
+            (Some(path), Some(running)) => matches!(
+                (dunce::canonicalize(path), dunce::canonicalize(running)),
+                (Ok(pinned), Ok(running)) if pinned == running
+            ),
+            _ => false,
+        };
+        Self {
+            path: path.map(Path::to_path_buf),
+            exists,
+            matches_running,
+        }
+    }
+
+    /// [`Note::BinaryPinMissing`] when a pin is set and nothing is there.
+    #[must_use]
+    pub fn note(&self) -> Option<Note> {
+        match (&self.path, self.exists) {
+            (Some(path), false) => Some(Note::BinaryPinMissing { path: path.clone() }),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
+    use ocx_config::exec_state::ScopeId as AbandonedScope;
+    use ocx_config::exec_state::{AppliedValue, HeaderView, SessionToken};
     use ocx_console::Theme;
-    use ocx_package::metadata::env::modifier::ModifierKind;
     use ocx_shell::shell::Shell;
     use ocx_shell::shell::coexistence::Tool;
-    use ocx_shell::shell::reconcile::{ProjectScope, Scopes};
 
     use super::*;
 
@@ -1331,92 +2044,171 @@ mod tests {
         }
     }
 
-    fn ledger_with_project() -> Ledger {
-        Ledger {
-            v: 1,
-            tiers: Vec::new(),
-            fp: "a1b2c3d4".to_owned(),
-            ws: "0f1e2d3c4b5a6978".to_owned(),
-            verdict: None,
-            messages_fp: String::new(),
-            over_cap: Vec::new(),
-            scopes: Scopes {
-                global: Some(vec![LedgerEntry {
-                    key: "OCX_HOME".to_owned(),
-                    value: "/home/u/.ocx".to_owned(),
-                    kind: ModifierKind::Constant,
-                    separator: None,
-                }]),
-                global_priors: Default::default(),
-                project: Some(ProjectScope {
-                    key: "0123456789abcdef".to_owned(),
-                    dir: PathBuf::from("/work/proj"),
-                    applied: vec![
-                        LedgerEntry {
-                            key: "JAVA_HOME".to_owned(),
-                            value: "/work/proj/.ocx/jdk".to_owned(),
-                            kind: ModifierKind::Constant,
-                            separator: None,
-                        },
-                        LedgerEntry {
-                            key: "MAVEN_OPTS".to_owned(),
-                            value: "-Xmx1g".to_owned(),
-                            kind: ModifierKind::Constant,
-                            separator: None,
-                        },
-                        LedgerEntry {
-                            key: "PATH".to_owned(),
-                            value: "/work/proj/.ocx/bin".to_owned(),
-                            kind: ModifierKind::Path,
-                            separator: None,
-                        },
-                    ],
-                    priors: BTreeMap::from([("JAVA_HOME".to_owned(), Prior::Unset)]),
-                }),
-            },
+    fn session(scope: ScopeId, source: SessionSource) -> Owner {
+        Owner::Session { scope, source }
+    }
+
+    fn record(key: &str, value: &str, kind: ValueKind, owner: Owner, prior: Option<Prior>) -> AppliedValue {
+        AppliedValue {
+            key: key.to_owned(),
+            value: RecordedValue::Literal(value.to_owned()),
+            kind,
+            separator: None,
+            pre_existing: false,
+            owner,
+            prior,
         }
     }
 
-    /// The published ledger spells an entry's kind `kind`, a prior as a `type`-tagged object and a
-    /// verdict in snake_case, whatever the carrier spells them; live shells decode the carrier's own.
+    /// A readable state with a global record and a project scope holding two constants (one with a
+    /// recorded prior, one without) and a path.
+    fn state_with_project() -> ExecState {
+        let global = session(ScopeId::Global, SessionSource::Composed);
+        let project = session(ScopeId::Project, SessionSource::Composed);
+        ExecState {
+            applied: vec![
+                record(
+                    "OCX_HOME",
+                    "/home/u/.ocx",
+                    ValueKind::Constant,
+                    global,
+                    Some(Prior::Unset),
+                ),
+                record(
+                    "JAVA_HOME",
+                    "/work/proj/.ocx/jdk",
+                    ValueKind::Constant,
+                    project.clone(),
+                    Some(Prior::Unset),
+                ),
+                record("MAVEN_OPTS", "-Xmx1g", ValueKind::Constant, project.clone(), None),
+                record("PATH", "/work/proj/.ocx/bin", ValueKind::Path, project, None),
+            ],
+            ..ExecState::default()
+        }
+    }
+
+    fn readable(state: ExecState) -> EnvStateReport {
+        EnvStateReport::from_inherited(&Inherited::Readable(state), false).0
+    }
+
+    /// Replaces the report's state and re-derives the priors from it, as the command does.
+    fn set_state(report: &mut ShellStateReport, state: ExecState) {
+        report.env_state = readable(state);
+        report.priors = ShellStateReport::priors_for(&report.env_state);
+    }
+
+    /// The state with every project-scope record removed: consent holds and nothing was applied yet.
+    fn without_project_scope(report: &mut ShellStateReport) {
+        let mut state = state_with_project();
+        state.applied.retain(|record| {
+            !matches!(
+                record.owner,
+                Owner::Session {
+                    scope: ScopeId::Project,
+                    ..
+                }
+            )
+        });
+        set_state(report, state);
+    }
+
+    /// The encoder dropped every applied record to fit the cap: the project scope was abandoned.
+    fn over_cap_state(report: &mut ShellStateReport) {
+        let state = ExecState {
+            truncated: Truncation::AllAppliedDropped,
+            ..ExecState::default()
+        };
+        set_state(report, state);
+    }
+
+    /// No state at all, as on a shell's first prompt.
+    fn without_state(report: &mut ShellStateReport) {
+        report.env_state = EnvStateReport::from_inherited(&Inherited::Absent, false).0;
+        report.priors = Vec::new();
+    }
+
+    /// A set value the parent could not have written, as an unreadable state.
+    fn unreadable_state(report: &mut ShellStateReport) {
+        let header = HeaderView {
+            major: Some(MAJOR + 1),
+            ..HeaderView::default()
+        };
+        report.env_state = EnvStateReport::from_inherited(
+            &Inherited::Unreadable {
+                header,
+                reason: UnreadableReason::OtherMajor,
+            },
+            false,
+        )
+        .0;
+        report.priors = Vec::new();
+    }
+
+    /// The published report spells a record's kind `kind`, a prior as a `type`-tagged object, and a
+    /// value verbatim, whatever the carrier spells them.
     #[test]
-    fn published_ledger_spells_kind_tagged_priors_and_snake_case_verdict() {
+    fn published_state_spells_kind_tagged_priors_and_verbatim_values() {
         let mut report = base(None);
-        let ledger = report.ledger.as_mut().expect("the fixture carries a ledger");
-        ledger.verdict = Some(Verdict::NoProject);
-        let project = ledger
-            .scopes
-            .project
-            .as_mut()
-            .expect("the fixture carries a project scope");
-        project.applied = vec![LedgerEntry {
-            key: "CFLAGS".to_owned(),
-            value: "-O2".to_owned(),
-            kind: ModifierKind::List,
-            separator: Some(" ".to_owned()),
-        }];
-        project.priors = BTreeMap::from([
-            ("CFLAGS".to_owned(), Prior::Value("-g".to_owned())),
-            ("JAVA_HOME".to_owned(), Prior::Unset),
-        ]);
+        let mut state = state_with_project();
+        state.applied = vec![
+            AppliedValue {
+                separator: Some(" ".to_owned()),
+                pre_existing: true,
+                ..record(
+                    "CFLAGS",
+                    "-O2",
+                    ValueKind::List,
+                    session(ScopeId::Project, SessionSource::Invocation),
+                    None,
+                )
+            },
+            record(
+                "GITHUB_TOKEN",
+                "tok-sentinel",
+                ValueKind::Constant,
+                session(ScopeId::Project, SessionSource::Composed),
+                Some(Prior::Withheld),
+            ),
+            record("JAVA_HOME", "/opt/jdk", ValueKind::Constant, Owner::Inherited, None),
+            record(
+                "EMPTY",
+                "x",
+                ValueKind::Constant,
+                session(ScopeId::Global, SessionSource::Composed),
+                Some(Prior::Value("-g".to_owned())),
+            ),
+        ];
+        set_state(&mut report, state);
 
         let json = serde_json::to_value(&report).expect("the report serializes");
-        let ledger = &json["ledger"];
+        let applied = &json["env_state"]["applied"];
         assert_eq!(
-            ledger["scopes"]["project"]["applied"][0],
-            serde_json::json!({"key": "CFLAGS", "value": "-O2", "kind": "list", "separator": " "}),
-            "an applied entry carries `kind` and no `type`"
+            applied[0],
+            serde_json::json!({
+                "key": "CFLAGS", "value": "-O2", "kind": "list", "separator": " ", "pre_existing": true,
+                "owner": "session", "scope": "project", "source": "invocation"
+            }),
+            "an applied record carries `kind` and no `type`"
         );
         assert_eq!(
-            ledger["scopes"]["project"]["priors"],
-            serde_json::json!({"CFLAGS": {"type": "value", "value": "-g"}, "JAVA_HOME": {"type": "unset"}})
+            applied[1],
+            serde_json::json!({
+                "key": "GITHUB_TOKEN", "value": "tok-sentinel", "kind": "constant",
+                "owner": "session", "scope": "project", "source": "composed", "prior": {"type": "withheld"}
+            }),
+            "a record carries its value verbatim and no `withheld` field"
         );
-        assert_eq!(ledger["verdict"], "no_project");
+        assert_eq!(
+            applied[2],
+            serde_json::json!({"key": "JAVA_HOME", "value": "/opt/jdk", "kind": "constant", "owner": "inherited"})
+        );
+        assert_eq!(applied[3]["prior"], serde_json::json!({"type": "value", "value": "-g"}));
     }
 
     fn base(reason: Option<Reason>) -> ShellStateReport {
-        let ledger = ledger_with_project();
-        let priors = ShellStateReport::priors_for(Some(&ledger));
+        let env_state = readable(state_with_project());
+        let priors = ShellStateReport::priors_for(&env_state);
         // An active project was granted by *something*, an inert one by
         // nothing — so the grant tracks the reason rather than being a third
         // independent knob a fixture could set incoherently. This is what puts
@@ -1438,7 +2230,14 @@ mod tests {
             lock_refusal: None,
             carrier_present: true,
             carrier_bytes: ByteSize::from(412),
-            ledger: Some(ledger),
+            env_state,
+            binary_pin: BinaryPinReport {
+                path: Some(PathBuf::from(
+                    "/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx",
+                )),
+                exists: true,
+                matches_running: true,
+            },
             fingerprint_current: None,
             watch_set: vec![
                 WatchMember {
@@ -1566,42 +2365,32 @@ mod tests {
         yielded_both.yielded_to = vec![direnv, mise];
         arms.push(("yielded_both", yielded_both));
 
-        let mut over_cap = base(Some(Reason::LedgerOverCap {
-            scope: ScopeId::Project,
+        let mut over_cap = base(Some(Reason::StateOverCap {
+            scope: AbandonedScope::Project,
         }));
-        if let Some(ledger) = over_cap.ledger.as_mut() {
-            ledger.over_cap = vec![ScopeId::Project];
-            ledger.scopes.project = None;
-        }
-        over_cap.priors = ShellStateReport::priors_for(over_cap.ledger.as_ref());
-        arms.push(("ledger_over_cap", over_cap));
+        over_cap_state(&mut over_cap);
+        arms.push(("state_over_cap", over_cap));
 
-        let mut absent = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
+        let mut absent = base(Some(Reason::StateUnreadable { first_prompt: true }));
         absent.carrier_present = false;
         absent.carrier_bytes = ByteSize::from(0);
-        absent.ledger = None;
-        absent.priors = Vec::new();
+        without_state(&mut absent);
         arms.push(("ledger_absent_first_prompt", absent));
 
-        let mut never_set_up = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
+        let mut never_set_up = base(Some(Reason::StateUnreadable { first_prompt: true }));
         never_set_up.shell_integration_installed = false;
         never_set_up.carrier_present = false;
         never_set_up.carrier_bytes = ByteSize::from(0);
-        never_set_up.ledger = None;
-        never_set_up.priors = Vec::new();
+        without_state(&mut never_set_up);
         arms.push(("ledger_absent_setup_never_ran", never_set_up));
 
         let mut lock_refused = base(None);
         lock_refused.lock_refusal = Some("ocx.lock is stale (it does not match ocx.toml); run `ocx lock`".to_owned());
-        if let Some(ledger) = lock_refused.ledger.as_mut() {
-            ledger.scopes.project = None;
-        }
-        lock_refused.priors = ShellStateReport::priors_for(lock_refused.ledger.as_ref());
+        without_project_scope(&mut lock_refused);
         arms.push(("lock_refuses_composition", lock_refused));
 
-        let mut corrupt = base(Some(Reason::LedgerUnreadable { first_prompt: false }));
-        corrupt.ledger = None;
-        corrupt.priors = Vec::new();
+        let mut corrupt = base(Some(Reason::StateUnreadable { first_prompt: false }));
+        without_state(&mut corrupt);
         arms.push(("ledger_corrupt", corrupt));
 
         arms.push(("lock_unavailable", base(Some(Reason::LockUnavailable))));
@@ -1660,11 +2449,69 @@ mod tests {
         // holds no project scope, so the report says "not yet" rather than
         // borrowing the absent-carrier sentence.
         let mut pending = base(None);
-        if let Some(ledger) = pending.ledger.as_mut() {
-            ledger.scopes.project = None;
-        }
-        pending.priors = ShellStateReport::priors_for(pending.ledger.as_ref());
+        without_project_scope(&mut pending);
         arms.push(("project_scope_pending", pending));
+
+        // The five notes the execution state owes, each through the constructor the command calls.
+        let mut unreadable = base(Some(Reason::StateUnreadable { first_prompt: false }));
+        let (env_state, notes) = EnvStateReport::from_inherited(
+            &Inherited::Unreadable {
+                header: HeaderView {
+                    major: Some(MAJOR + 1),
+                    home: Some(PathBuf::from("/h\nexport OCX_EVIL=5")),
+                    ..HeaderView::default()
+                },
+                reason: UnreadableReason::Invalid { field: "applied.key" },
+            },
+            true,
+        );
+        unreadable.env_state = env_state;
+        unreadable.notes = notes;
+        arms.push(("note_env_state_unreadable_and_stood_down", unreadable));
+
+        let mut truncated = base(None);
+        let (env_state, notes) = EnvStateReport::from_inherited(
+            &Inherited::Readable(ExecState {
+                truncated: Truncation::InheritedDropped,
+                ..state_with_project()
+            }),
+            true,
+        );
+        truncated.env_state = env_state;
+        truncated.notes = notes;
+        arms.push(("note_env_state_truncated", truncated));
+
+        let mut relaxing = base(None);
+        let (env_state, notes) = EnvStateReport::from_inherited(
+            &Inherited::Readable(ExecState {
+                policy: Policy {
+                    no_verify: Some(true),
+                    mirrors: Some("a=b\nexport OCX_EVIL=6".to_owned()),
+                    ..Policy::default()
+                },
+                home: Some(PathBuf::from("/home/u/.ocx")),
+                ..state_with_project()
+            }),
+            true,
+        );
+        relaxing.env_state = env_state;
+        relaxing.notes = notes;
+        arms.push(("note_relaxing_policy", relaxing));
+
+        let mut pin_missing = base(None);
+        pin_missing.binary_pin = BinaryPinReport {
+            path: Some(PathBuf::from("/h/.ocx/ocx\nexport OCX_EVIL=7")),
+            exists: false,
+            matches_running: false,
+        };
+        pin_missing.notes = pin_missing.binary_pin.note().into_iter().collect();
+        arms.push(("note_binary_pin_missing", pin_missing));
+
+        let mut config_missing = base(None);
+        config_missing.notes = vec![Note::ReceivedConfigMissing {
+            path: PathBuf::from("/h/.ocx/config.toml\nexport OCX_EVIL=8"),
+        }];
+        arms.push(("note_received_config_missing", config_missing));
 
         arms
     }
@@ -1684,8 +2531,8 @@ mod tests {
             Reason::UncorroboratedNamespace { .. } => "uncorroborated_namespace",
             Reason::HookDisabled { .. } => "hook_disabled",
             Reason::YieldedTo(_) => "yielded_to",
-            Reason::LedgerOverCap { .. } => "ledger_over_cap",
-            Reason::LedgerUnreadable { .. } => "ledger_unreadable",
+            Reason::StateOverCap { .. } => "state_over_cap",
+            Reason::StateUnreadable { .. } => "state_unreadable",
             Reason::LockUnavailable => "lock_unavailable",
         }
     }
@@ -1699,6 +2546,12 @@ mod tests {
             Note::PathsNearMiss { .. } => "paths_near_miss",
             Note::PathsDefect { .. } => "paths_defect",
             Note::ToolchainManifestUnparsed { .. } => "toolchain_manifest_unparsed",
+            Note::EnvStateUnreadable { .. } => "env_state_unreadable",
+            Note::EnvStateStoodDown => "env_state_stood_down",
+            Note::EnvStateTruncated { .. } => "env_state_truncated",
+            Note::RelaxingPolicy { .. } => "relaxing_policy",
+            Note::BinaryPinMissing { .. } => "binary_pin_missing",
+            Note::ReceivedConfigMissing { .. } => "received_config_missing",
         }
     }
 
@@ -1725,8 +2578,8 @@ mod tests {
                 "uncorroborated_namespace",
                 "hook_disabled",
                 "yielded_to",
-                "ledger_over_cap",
-                "ledger_unreadable",
+                "state_over_cap",
+                "state_unreadable",
                 "lock_unavailable",
             ]),
             "every Reason variant must be exercised by an arm in `every_arm()`"
@@ -1746,16 +2599,22 @@ mod tests {
                 "paths_near_miss",
                 "paths_defect",
                 "toolchain_manifest_unparsed",
+                "env_state_unreadable",
+                "env_state_stood_down",
+                "env_state_truncated",
+                "relaxing_policy",
+                "binary_pin_missing",
+                "received_config_missing",
             ]),
             "every Note variant must be exercised by an arm in `every_arm()`"
         );
 
-        // `LedgerUnreadable` is two contractual situations behind one variant
+        // `StateUnreadable` is two contractual situations behind one variant
         // (C-006), so the tag set alone would not prove both are covered.
         let first_prompt: BTreeSet<bool> = arms
             .iter()
             .filter_map(|(_, report)| match report.inert_reason.as_ref() {
-                Some(Reason::LedgerUnreadable { first_prompt }) => Some(*first_prompt),
+                Some(Reason::StateUnreadable { first_prompt }) => Some(*first_prompt),
                 _ => None,
             })
             .collect();
@@ -1815,16 +2674,19 @@ mod tests {
     #[test]
     fn c007_c050_a_forged_carrier_cannot_inject_a_line() {
         let mut report = base(None);
-        if let Some(project) = report.ledger.as_mut().and_then(|l| l.scopes.project.as_mut()) {
-            project.applied.push(LedgerEntry {
-                key: "$env.EVIL".to_owned(),
-                value: "x\nexport OCX_EVIL=1\n".to_owned(),
-                kind: ModifierKind::Constant,
-                separator: None,
-            });
-            project.dir = PathBuf::from("/work\nexport OCX_EVIL=2");
-        }
-        report.priors = ShellStateReport::priors_for(report.ledger.as_ref());
+        let mut state = state_with_project();
+        state.applied.push(record(
+            "$env.EVIL",
+            "x\nexport OCX_EVIL=1\n",
+            ValueKind::Constant,
+            session(ScopeId::Project, SessionSource::Composed),
+            Some(Prior::Value("y\nexport OCX_EVIL=3".to_owned())),
+        ));
+        state.inherited_scopes.push(Scope::Project {
+            root: PathBuf::from("/work\nexport OCX_EVIL=2"),
+        });
+        state.home = Some(PathBuf::from("/h\nexport OCX_EVIL=4"));
+        set_state(&mut report, state);
         assert_never_eval_able("forged_carrier", &report);
     }
 
@@ -1912,34 +2774,28 @@ mod tests {
     /// marker the carrier still carries, never inferred from an absent one.
     #[test]
     fn c050_a001_over_cap_is_read_from_the_marker() {
-        let mut report = base(Some(Reason::LedgerOverCap {
-            scope: ScopeId::Project,
+        let mut report = base(Some(Reason::StateOverCap {
+            scope: AbandonedScope::Project,
         }));
-        if let Some(ledger) = report.ledger.as_mut() {
-            ledger.over_cap = vec![ScopeId::Project];
-            ledger.scopes.project = None;
-        }
-        report.priors = ShellStateReport::priors_for(report.ledger.as_ref());
+        over_cap_state(&mut report);
         let text = diagnostics(&report);
-        assert!(text.contains("over cap: project"), "{text}");
+        assert!(text.contains("truncated: all_applied_dropped"), "{text}");
         assert!(text.contains("abandoned scope: project"), "{text}");
-        // The carrier is still decodable — that is the whole point of A-01.
-        assert!(text.contains("decoded: yes"), "{text}");
+        // The state is still decodable - the cap drops records, not the header.
+        assert!(text.contains("status: readable"), "{text}");
     }
 
     /// C-050 reason 6 + C-006 — an absent carrier (first prompt) and a corrupt
     /// one are **different** reasons, not one.
     #[test]
     fn c050_c006_absent_and_corrupt_ledgers_read_differently() {
-        let mut absent = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
+        let mut absent = base(Some(Reason::StateUnreadable { first_prompt: true }));
         absent.carrier_present = false;
-        absent.ledger = None;
-        absent.priors = Vec::new();
+        without_state(&mut absent);
         let absent_text = diagnostics(&absent);
 
-        let mut corrupt = base(Some(Reason::LedgerUnreadable { first_prompt: false }));
-        corrupt.ledger = None;
-        corrupt.priors = Vec::new();
+        let mut corrupt = base(Some(Reason::StateUnreadable { first_prompt: false }));
+        without_state(&mut corrupt);
         let corrupt_text = diagnostics(&corrupt);
 
         assert!(
@@ -1951,10 +2807,7 @@ mod tests {
             corrupt_text.contains("a scope was applied and its record is gone"),
             "{corrupt_text}"
         );
-        assert!(
-            corrupt_text.contains("truncated, or an unrecognised envelope tag"),
-            "{corrupt_text}"
-        );
+        assert!(absent_text.contains("status: absent"), "{absent_text}");
         assert_ne!(absent_text, corrupt_text);
     }
 
@@ -1976,11 +2829,10 @@ mod tests {
     /// EC-REC-007 — the renderer half of the setup-never-run split.
     #[test]
     fn f090_an_unset_carrier_on_an_unwired_shell_names_setup_not_convergence() {
-        let mut never_set_up = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
+        let mut never_set_up = base(Some(Reason::StateUnreadable { first_prompt: true }));
         never_set_up.shell_integration_installed = false;
         never_set_up.carrier_present = false;
-        never_set_up.ledger = None;
-        never_set_up.priors = Vec::new();
+        without_state(&mut never_set_up);
         let unwired = diagnostics(&never_set_up);
 
         assert!(
@@ -1997,10 +2849,9 @@ mod tests {
             "the fix that can never come true must not survive: {unwired}"
         );
 
-        let mut wired = base(Some(Reason::LedgerUnreadable { first_prompt: true }));
+        let mut wired = base(Some(Reason::StateUnreadable { first_prompt: true }));
         wired.carrier_present = false;
-        wired.ledger = None;
-        wired.priors = Vec::new();
+        without_state(&mut wired);
         let converging = diagnostics(&wired);
 
         assert!(
@@ -2033,10 +2884,7 @@ mod tests {
 
         let mut refused = base(None);
         refused.lock_refusal = Some(refusal.to_owned());
-        if let Some(ledger) = refused.ledger.as_mut() {
-            ledger.scopes.project = None;
-        }
-        refused.priors = ShellStateReport::priors_for(refused.ledger.as_ref());
+        without_project_scope(&mut refused);
         assert!(
             refused.project_scope_pending(),
             "the fixture must reach the pending arm, or this asserts nothing about it"
@@ -2054,10 +2902,7 @@ mod tests {
         );
 
         let mut pending = base(None);
-        if let Some(ledger) = pending.ledger.as_mut() {
-            ledger.scopes.project = None;
-        }
-        pending.priors = ShellStateReport::priors_for(pending.ledger.as_ref());
+        without_project_scope(&mut pending);
         let pending_text = diagnostics(&pending);
 
         assert!(
@@ -2124,7 +2969,7 @@ mod tests {
     #[test]
     fn a038_the_env_block_boundary_is_reported_as_the_os_limit() {
         let text = diagnostics(&base(None));
-        assert!(text.contains(&format!("of {MAX_CARRIER_BYTES}")), "{text}");
+        assert!(text.contains(&format!("of {MAX_ENCODED}")), "{text}");
         // The cap is reported; the *explanation* of what it does and does not
         // bound is documentation and lives on the docs page. A status line
         // that carries a paragraph is the thing this rendering removed, so the
@@ -2135,22 +2980,30 @@ mod tests {
         );
     }
 
-    /// C-050 — the ledger renders as **fields**, never as the base64 the
-    /// carrier holds, and the two scopes are reported separately.
+    /// The state renders as **fields**, never as the base64 the carrier holds, and each record names
+    /// its owner.
     #[test]
-    fn c050_the_ledger_renders_as_fields_and_scopes_are_separate() {
-        let ledger = ledger_with_project();
-        let encoded = ledger.encode().expect("the fixture ledger encodes");
+    fn c050_the_state_renders_as_fields_and_records_name_their_owner() {
+        let encoded = ocx_config::exec_state::encode(&state_with_project())
+            .value
+            .expect("the fixture state encodes");
         let report = base(None);
         let text = diagnostics(&report);
 
         assert!(!text.contains(&encoded), "the report must not carry the base64 carrier");
-        assert!(text.contains("schema v: 1"), "{text}");
-        assert!(text.contains("envelope: 1"), "{text}");
-        assert!(text.contains("applied, global scope:"), "{text}");
-        assert!(text.contains("applied, project scope:"), "{text}");
-        assert!(text.contains("JAVA_HOME constant"), "{text}");
-        assert!(text.contains("PATH path"), "{text}");
+        assert!(text.contains("status: readable"), "{text}");
+        assert!(text.contains("major: 2"), "{text}");
+        assert!(
+            text.contains("OCX_HOME constant /home/u/.ocx (session global composed)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("JAVA_HOME constant /work/proj/.ocx/jdk (session project composed)"),
+            "{text}"
+        );
+        assert!(text.contains("PATH path /work/proj/.ocx/bin"), "{text}");
+        assert!(text.contains("replay: 0 env, 0 launch identities"), "{text}");
+        assert!(text.contains("follows the working directory"), "{text}");
     }
 
     /// C-050 — `priors` intactness is reported per constant the project scope
@@ -2240,15 +3093,12 @@ mod tests {
     #[test]
     fn c050_c006_a_decoded_ledger_is_never_reported_as_an_unset_carrier() {
         let mut pending = base(None);
-        if let Some(ledger) = pending.ledger.as_mut() {
-            ledger.scopes.project = None;
-        }
-        pending.priors = ShellStateReport::priors_for(pending.ledger.as_ref());
+        without_project_scope(&mut pending);
         assert!(pending.project_scope_pending());
 
         let text = diagnostics(&pending);
         assert!(text.contains("present: yes"), "{text}");
-        assert!(text.contains("decoded: yes"), "{text}");
+        assert!(text.contains("status: readable"), "{text}");
         assert!(text.contains("active: not yet"), "{text}");
         assert!(
             text.contains("the project scope is consented and not yet applied"),
@@ -2261,10 +3111,10 @@ mod tests {
         assert!(!text.contains("active: yes"), "{text}");
 
         // And the state is not claimed when the carrier never decoded — that is
-        // `LedgerUnreadable`'s business, not this one's.
+        // `StateUnreadable`'s business, not this one's.
         let mut absent = base(None);
         absent.carrier_present = false;
-        absent.ledger = None;
+        without_state(&mut absent);
         assert!(!absent.project_scope_pending());
     }
 
@@ -2391,21 +3241,22 @@ mod tests {
                 "the default rendering must carry {lead:?}: {default:#?}"
             );
         }
-        // Twelve before C-056, fifteen after, sixteen after G-1: the resolved
+        // Seventeen lines, counting the execution-state status: the resolved
         // toolchain home, the launcher directory and the two effective settings
         // are four lines the *answer* owes a user (a home a `toolchain_dir`
         // relocated is named nowhere else in the report, and the directory to
         // export is not one join from it), so the budget moves by exactly what
         // each contract added and by nothing else.
         assert!(
-            default.len() <= 16,
+            default.len() <= 17,
             "the default rendering is the answer, not the state dump; got {} lines: {default:#?}",
             default.len()
         );
 
         // Each section the default drops, and the evidence rows inside them.
         for section in [
-            "ledger:",
+            "execution state:",
+            "binary pin:",
             "fingerprint:",
             "hook:",
             "  watch set:",
@@ -2428,14 +3279,11 @@ mod tests {
             .iter()
             .position(|line| line.starts_with("reason: "))
             .expect("the verbose rendering carries the reason");
-        let ledger_at = verbose
+        let state_at = verbose
             .iter()
-            .position(|line| line == "ledger:")
-            .expect("the verbose rendering carries the ledger");
-        assert!(
-            reason_at < ledger_at,
-            "the answer must lead at both tiers: {verbose:#?}"
-        );
+            .position(|line| line == "execution state:")
+            .expect("the verbose rendering carries the execution state");
+        assert!(reason_at < state_at, "the answer must lead at both tiers: {verbose:#?}");
     }
 
     /// Every enumerated reason ends with the one line that says what to do —
@@ -2536,16 +3384,18 @@ mod tests {
             "carrier:",
             "present:",
             "bytes:",
-            "decoded:",
-            "envelope:",
-            "schema v:",
-            "fingerprint:",
-            "verdict:",
-            "over cap:",
-            "applied, global scope:",
-            "applied, project scope:",
-            "dir:",
+            "status:",
+            "major:",
+            "narrowing:",
+            "session claimed:",
+            "inherited scopes:",
+            "applied:",
+            "replay:",
+            "selection:",
             "priors:",
+            "path:",
+            "exists:",
+            "matches running binary:",
             "matches watch set:",
             "watch set:",
             "enabled:",
@@ -2585,7 +3435,8 @@ mod tests {
 
         // Every field the default *rendering* drops is still in the document.
         for key in [
-            "ledger",
+            "env_state",
+            "binary_pin",
             "watch_set",
             "carrier_present",
             "carrier_bytes",
@@ -2600,7 +3451,11 @@ mod tests {
                 "the structured report must carry `{key}`: {bare}"
             );
         }
-        assert!(!bare["ledger"].is_null(), "the ledger must be a payload, not a null");
+        assert!(
+            bare.get("ledger").is_none(),
+            "the retired ledger field must not reappear: {bare}"
+        );
+        assert!(bare["env_state"].is_object(), "the state must be a payload, not a null");
         assert!(
             bare["watch_set"].as_array().is_some_and(|set| !set.is_empty()),
             "the watch set must survive into the structured report: {bare}"
@@ -2987,5 +3842,324 @@ mod tests {
         );
         assert_never_eval_able("hostile toolchain home", &report);
         assert_not_interchangeable_with_activate("hostile toolchain home", &report);
+    }
+
+    // ── The execution state and the binary pin ────
+
+    fn json_of(report: &ShellStateReport) -> serde_json::Value {
+        serde_json::to_value(report).expect("the report serializes")
+    }
+
+    /// A readable state with every optional field populated.
+    fn full_state() -> ExecState {
+        ExecState {
+            narrowing: Narrowing {
+                offline: true,
+                ..Narrowing::default()
+            },
+            home: Some(PathBuf::from("/home/u/.ocx")),
+            minor: 3,
+            policy: Policy {
+                no_verify: Some(true),
+                remote: Some(true),
+                ..Policy::default()
+            },
+            inherited_scopes: vec![
+                Scope::Global,
+                Scope::Project {
+                    root: PathBuf::from("/work/lib"),
+                },
+            ],
+            selection: Selection::Pinned(Pinned {
+                tier: PinnedTier::Project {
+                    dir: PathBuf::from("/work/app"),
+                },
+                groups: vec!["default".to_owned()],
+                with_names: Vec::new(),
+                env_keys: vec!["CC".to_owned()],
+                invocation_digest: "0".repeat(64),
+                pinned_paths: None,
+            }),
+            session: ocx_config::exec_state::SessionCache {
+                token: Some(SessionToken { pid: 7, started: None }),
+                ..Default::default()
+            },
+            truncated: Truncation::InheritedDropped,
+            ..state_with_project()
+        }
+    }
+
+    #[test]
+    fn c029_a_readable_state_reports_every_field() {
+        let mut report = base(None);
+        set_state(&mut report, full_state());
+        let state = json_of(&report)["env_state"].clone();
+
+        assert_eq!(state["status"], "readable");
+        assert_eq!(state["major"], 2);
+        assert_eq!(state["minor"], 3);
+        assert_eq!(state["narrowing"], serde_json::json!(["offline"]));
+        assert_eq!(state["home"], "/home/u/.ocx");
+        assert_eq!(state["truncated"], "inherited_dropped");
+        assert_eq!(state["policy"], serde_json::json!({"remote": true, "no_verify": true}));
+        assert_eq!(state["relaxing_policy"], serde_json::json!(["home", "no_verify"]));
+        assert_eq!(state["session_claimed"], true);
+        assert_eq!(
+            state["inherited_scopes"],
+            serde_json::json!([{"type": "global"}, {"type": "project", "root": "/work/lib"}])
+        );
+        assert_eq!(state["applied"].as_array().map(Vec::len), Some(4));
+        assert_eq!(
+            state["replay"],
+            serde_json::json!({"env_count": 0, "launch_identity_count": 0})
+        );
+        assert_eq!(
+            state["selection"],
+            serde_json::json!({
+                "type": "pinned_project", "project_dir": "/work/app", "groups": ["default"], "env_keys": ["CC"]
+            })
+        );
+        assert!(
+            state.get("found_major").is_none(),
+            "found_major is for unreadable states: {state}"
+        );
+    }
+
+    #[test]
+    fn c029_an_absent_state_reports_only_its_status() {
+        let mut report = base(Some(Reason::StateUnreadable { first_prompt: true }));
+        without_state(&mut report);
+        assert_eq!(
+            json_of(&report)["env_state"],
+            serde_json::json!({"status": "absent", "major": 2, "session_claimed": false})
+        );
+    }
+
+    #[test]
+    fn c029_an_unreadable_state_keeps_the_header_and_names_the_refusal() {
+        let (env_state, notes) = EnvStateReport::from_inherited(
+            &Inherited::Unreadable {
+                header: HeaderView {
+                    major: Some(3),
+                    narrowing: Narrowing {
+                        frozen: true,
+                        ..Narrowing::default()
+                    },
+                    home: Some(PathBuf::from("/h")),
+                },
+                reason: UnreadableReason::OtherMajor,
+            },
+            true,
+        );
+        let state = serde_json::to_value(&env_state).expect("serializes");
+        assert_eq!(
+            state,
+            serde_json::json!({
+                "status": "unreadable", "major": 2, "found_major": 3, "narrowing": ["frozen"],
+                "home": "/h", "session_claimed": false
+            })
+        );
+        assert_eq!(
+            notes,
+            vec![
+                Note::EnvStateUnreadable {
+                    major: 2,
+                    found_major: Some(3),
+                    reason: "other_major".to_owned(),
+                    field: None
+                },
+                Note::EnvStateStoodDown
+            ]
+        );
+        let (_, without_hook) = EnvStateReport::from_inherited(
+            &Inherited::Unreadable {
+                header: HeaderView::default(),
+                reason: UnreadableReason::Json,
+            },
+            false,
+        );
+        assert_eq!(
+            without_hook.len(),
+            1,
+            "the stood-down note needs an active hook: {without_hook:?}"
+        );
+    }
+
+    #[test]
+    fn c029_the_notes_are_tagged_and_exit_stays_zero_by_construction() {
+        let (_, notes) = EnvStateReport::from_inherited(&Inherited::Readable(full_state()), false);
+        let json = serde_json::to_value(&notes).expect("serializes");
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"type": "env_state_truncated", "truncated": "inherited_dropped"},
+                {"type": "relaxing_policy", "names": ["home", "no_verify"]}
+            ])
+        );
+        let missing = BinaryPinReport {
+            path: Some(PathBuf::from("/gone/ocx")),
+            exists: false,
+            matches_running: false,
+        };
+        assert_eq!(
+            serde_json::to_value(missing.note()).expect("serializes"),
+            serde_json::json!({"type": "binary_pin_missing", "path": "/gone/ocx"})
+        );
+        let (_, clean) = EnvStateReport::from_inherited(&Inherited::Readable(state_with_project()), false);
+        assert!(clean.is_empty(), "nothing relaxing or truncated, no note: {clean:?}");
+    }
+
+    /// `relaxing_policy` reads the set fields through `field_classes`, so a relaxing field the
+    /// report forgets to list is a silent omission; populating every field proves none is.
+    #[test]
+    fn c029_every_relaxing_field_is_reported_when_set() {
+        let policy = PolicyReport {
+            remote: Some(true),
+            no_project: Some(true),
+            no_config_refresh: Some(true),
+            no_update_check: Some(true),
+            config_path: Some(PathBuf::from("/c")),
+            no_config: Some(true),
+            index_dir: Some(PathBuf::from("/i")),
+            toolchain_dir: Some(PathBuf::from("/t")),
+            mirrors: Some("m".to_owned()),
+            patches: Some("p".to_owned()),
+            patch_snapshot_path: Some(PathBuf::from("/s")),
+            managed_config: Some("g".to_owned()),
+            no_verify: Some(true),
+            records_dir: Some(PathBuf::from("/r")),
+            records_name: Some("n".to_owned()),
+            allow_yanked: Some(true),
+            default_registry: Some("d".to_owned()),
+            insecure_registries: Some("x".to_owned()),
+        };
+        let set: Vec<&str> = policy.set_values().into_iter().map(|(name, _)| name).collect();
+        for (name, class) in field_classes() {
+            if name != "home" {
+                assert!(set.contains(&name), "`{name}` ({class:?}) is missing from the report");
+            }
+        }
+    }
+
+    #[test]
+    fn c029_the_binary_pin_reports_path_existence_and_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pinned = dir.path().join("ocx");
+        std::fs::write(&pinned, b"").expect("write");
+        let other = dir.path().join("other");
+        std::fs::write(&other, b"").expect("write");
+
+        let same = BinaryPinReport::probe(Some(&pinned), Some(&pinned));
+        assert!(same.exists && same.matches_running);
+        let different = BinaryPinReport::probe(Some(&pinned), Some(&other));
+        assert!(different.exists && !different.matches_running);
+        let missing = BinaryPinReport::probe(Some(&dir.path().join("gone")), Some(&pinned));
+        assert!(!missing.exists && !missing.matches_running);
+        assert!(matches!(missing.note(), Some(Note::BinaryPinMissing { .. })));
+        let unset = BinaryPinReport::probe(None, Some(&pinned));
+        assert_eq!(
+            serde_json::to_value(&unset).expect("serializes"),
+            serde_json::json!({"exists": false, "matches_running": false}),
+            "an unset pin omits `path`"
+        );
+        assert!(unset.note().is_none(), "no pin set is not a missing pin");
+    }
+
+    /// The strip set (ASCII controls, DEL, U+0080-U+009F including U+009B, the bidi controls) never reaches stdout from a
+    /// state-derived string, at either tier. Red state: drop `display_safe` from `state_text` and every
+    /// assertion below fails.
+    #[test]
+    fn c029_state_derived_strings_never_reach_stdout_with_a_control_character() {
+        let hostile = |label: &str| format!("/{label}\u{1b}[31m\u{9b}31m\u{202e}rtl\u{2066}iso");
+        let mut state = state_with_project();
+        state.inherited_scopes.push(Scope::Project {
+            root: PathBuf::from(hostile("scope")),
+        });
+        state.applied.push(record(
+            "HOSTILE",
+            &hostile("literal"),
+            ValueKind::Constant,
+            Owner::Inherited,
+            None,
+        ));
+        state.selection = Selection::Pinned(Pinned {
+            tier: PinnedTier::Project {
+                dir: PathBuf::from(hostile("pinned")),
+            },
+            groups: vec![hostile("group")],
+            with_names: Vec::new(),
+            env_keys: Vec::new(),
+            invocation_digest: "0".repeat(64),
+            pinned_paths: None,
+        });
+        let mut report = base(None);
+        set_state(&mut report, state);
+        report.binary_pin = BinaryPinReport {
+            path: Some(PathBuf::from(hostile("pin"))),
+            exists: false,
+            matches_running: false,
+        };
+        report.notes = report.binary_pin.note().into_iter().collect();
+
+        for (tier, lines) in [
+            ("answer", report.lines(&plain_theme(), Detail::Answer)),
+            ("diagnostics", report.lines(&plain_theme(), Detail::Diagnostics)),
+        ] {
+            let text = lines.join("\n");
+            // `quoted` would escape these to a backslash form; the contract is that they are gone.
+            assert!(
+                !text.contains("\\u{"),
+                "{tier}: an escaped control character was printed:\n{text}"
+            );
+            for stripped in ['\u{1b}', '\u{9b}', '\u{202e}', '\u{2066}'] {
+                assert!(
+                    !text.contains(stripped),
+                    "{tier}: U+{:04X} reached stdout:\n{text:?}",
+                    stripped as u32
+                );
+            }
+        }
+        let verbose = report.lines(&plain_theme(), Detail::Diagnostics).join("\n");
+        assert!(
+            verbose.contains("scope"),
+            "the sanitised root is still shown: {verbose}"
+        );
+        assert!(
+            verbose.contains("literal"),
+            "the sanitised literal is still shown: {verbose}"
+        );
+        assert!(
+            verbose.contains("pinned"),
+            "the sanitised pinned dir is still shown: {verbose}"
+        );
+    }
+
+    #[test]
+    fn c029_the_default_rendering_prints_the_status_and_each_note_with_its_fix() {
+        let mut report = base(None);
+        unreadable_state(&mut report);
+        report.notes = EnvStateReport::from_inherited(
+            &Inherited::Unreadable {
+                header: HeaderView::default(),
+                reason: UnreadableReason::Base64,
+            },
+            true,
+        )
+        .1;
+        let text = answer(&report);
+        assert!(text.contains("env state: unreadable"), "{text}");
+        assert!(text.contains("reason: base64"), "{text}");
+        assert!(text.contains("unset __OCX_ENV_STATE"), "{text}");
+        assert!(text.contains("stood down"), "{text}");
+    }
+
+    #[test]
+    fn c029_the_ledger_field_is_gone() {
+        let json = json_of(&base(None));
+        assert!(json.get("ledger").is_none(), "{json}");
+        assert!(
+            json["binary_pin"]["matches_running"].as_bool().unwrap_or(false),
+            "{json}"
+        );
     }
 }

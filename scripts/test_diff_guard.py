@@ -2426,6 +2426,16 @@ def _hook_state_problems(tree: ast.Module, admitted_stores: set[int]) -> list[st
         and ast.unparse(stmt.value.func).startswith("pytest.StashKey")
         for t in stmt.targets if isinstance(t, ast.Name)
     }
+    # An xdist worker's report to its controller: one scalar under one key of
+    # `<config>.workeroutput`, which feeds no verdict and no collection.
+    worker_reports = {
+        id(t)
+        for stmt in ast.walk(tree)
+        if isinstance(stmt, ast.Assign) and not _carries(stmt.value, store_roots)
+        for t in stmt.targets
+        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Attribute) and t.value.attr == "workeroutput"
+        and isinstance(t.slice, ast.Constant) and t.slice.value == "cpu_seconds"
+    }
     problems: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Global, ast.Nonlocal)):
@@ -2436,10 +2446,10 @@ def _hook_state_problems(tree: ast.Module, admitted_stores: set[int]) -> list[st
                 and isinstance(node.value, ast.Attribute) and node.value.attr == "stash"
                 and isinstance(node.slice, ast.Name) and node.slice.id in stash_keys
             )
-            if _carries(node.value, store_roots) and id(node) not in admitted_stores and not own_stash:
+            if _carries(node.value, store_roots) and id(node) not in admitted_stores and not own_stash and id(node) not in worker_reports:
                 problems.append(
                     f"line {node.lineno}: writes `{ast.unparse(node)}` — a hook object is read-only to a lint "
-                    "conftest (only `session.exitstatus = <failing>` and its own stash key are written)"
+                    "conftest (only `session.exitstatus = <failing>`, its own stash key and `workeroutput['cpu_seconds']` are written)"
                 )
         if isinstance(node, ast.Attribute) and node.attr in _HOOK_REGISTRATION_ATTRS:
             problems.append(f"line {node.lineno}: `{ast.unparse(node)}` registers hooks under another name")
@@ -4282,6 +4292,19 @@ SELF_TEST_CASES: list[Case] = [
         "test/lint/conftest.py": _LINT_CONFTEST_C008.replace(
             "session.exitstatus = 1", "session.exitstatus = pytest.ExitCode.TESTS_FAILED"
         ),
+    }, tiered=True),
+    Case("c007b_lint_conftest_worker_cpu_report_ok", False, {
+        # An xdist worker reporting its CPU seconds to the controller.
+        "test/lint/conftest.py": _LINT_CONFTEST_C008
+        + "\n\ndef pytest_unconfigure(config):\n    config.workeroutput[\"cpu_seconds\"] = time.process_time()\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_workeroutput_other_key_refused", True, {
+        "test/lint/conftest.py": _LINT_CONFTEST_C008
+        + "\n\ndef pytest_unconfigure(config):\n    config.workeroutput[\"exitstatus\"] = 0\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_workeroutput_hook_object_value_refused", True, {
+        "test/lint/conftest.py": _LINT_CONFTEST_C008
+        + "\n\ndef pytest_unconfigure(config):\n    config.workeroutput[\"cpu_seconds\"] = config\n",
     }, tiered=True),
     Case("c007b_lint_conftest_sessionfinish_passes_session_refused", True, {
         # L1 re-check probe N1: flips a verdict rather than a collection.

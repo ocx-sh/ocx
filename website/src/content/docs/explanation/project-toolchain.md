@@ -212,14 +212,14 @@ For scripted environments and CI, call [`ocx exec`][cmd-run] directly. It compos
 
 ## Global toolchain {#global-toolchain}
 
-A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) holds packages that should be available in every shell — `ripgrep`, `cmake`, `shellcheck` — without being part of any specific project. This is the global toolchain tier, activated explicitly via the [`--global`][cmd-global-flag] flag or the [`OCX_GLOBAL`][env-ocx-global] environment variable.
+A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) holds packages that should be available in every shell (`ripgrep`, `cmake`, `shellcheck`) without being part of any specific project. This is the global toolchain tier, activated explicitly via the [`--global`][cmd-global-flag] flag.
 
-The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. The global toolchain is **never discovered implicitly** — the CWD walk does not activate it. Pass `--global` or set `OCX_GLOBAL`.
+The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. The global toolchain is **never discovered implicitly**. The CWD walk does not activate it. Pass `--global`.
 
-A working directory that is itself under `$OCX_HOME` is project-free, not global. The CWD walk explicitly skips an `ocx.toml` candidate sitting at `$OCX_HOME`'s own directory rather than treating it as the nearest project file. It continues walking upward, so a `$OCX_HOME` nested inside a real project does not hide that project from a deeper working directory. A project-tier command run directly inside `$OCX_HOME` exits 64 ("no `ocx.toml` found") rather than silently adopting the global manifest; reach it only through `--global`/`OCX_GLOBAL` as above. The comparison is lexical: a `$OCX_HOME` reached through a symlink is not recognised — the same limitation the CWD walk's other boundary checks share.
+A working directory that is itself under `$OCX_HOME` is project-free, not global. The CWD walk explicitly skips an `ocx.toml` candidate sitting at `$OCX_HOME`'s own directory rather than treating it as the nearest project file. It continues walking upward, so a `$OCX_HOME` nested inside a real project does not hide that project from a deeper working directory. A project-tier command run directly inside `$OCX_HOME` exits 64 ("no `ocx.toml` found") rather than silently adopting the global manifest. Reach it only through `--global` as above. The comparison is lexical: a `$OCX_HOME` reached through a symlink is not recognised, the same limitation the CWD walk's other boundary checks share.
 
 :::caution[Global and project binaries are isolated by PATH precedence]
-`ocx exec` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global binaries remain on `PATH` (there is no strip). Project-declared binaries are **prepended** by the active hook, so they shadow any same-named global binaries. See [Strict isolation][env-composition-strict-isolation] for the full model.
+`ocx exec` never consults the global toolchain during project-tier resolution. Global binaries remain on `PATH` (there is no strip). Project-declared binaries are **prepended** by the active hook, so they shadow any same-named global binaries. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
 
 For managing global packages day-to-day, see [Keep everyday packages available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].
@@ -283,7 +283,6 @@ What is not yet shipped is a signed build attestation describing how each packag
 [cmd-package-install]: ../reference/command-line/package-consuming.md#package-install
 [config-trust]: ../reference/configuration.md#keys-trust
 [env-ocx-home]: ../reference/environment.md#ocx-home
-[env-ocx-global]: ../reference/environment.md#ocx-global
 [env-no-project]: ../reference/environment.md#ocx-no-project
 [project-toml]: #toml
 [project-lock]: #lock

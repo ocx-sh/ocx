@@ -30,8 +30,15 @@ impl std::fmt::Display for SkipReason {
 ///
 /// Order: kill switch, CI, offline, stderr not a terminal. A notice nobody reads must not cost
 /// a registry round trip, and CI must never see one.
-pub(crate) fn skip_reason(kill_switch: &'static ocx_env::EnvVar, offline: bool) -> Option<SkipReason> {
-    if kill_switch.bool_or(false).unwrap_or(false) {
+///
+/// `received` is the kill switch's value the parent ocx passed down: it applies only while the
+/// variable itself is unset, so an explicit `0` still re-enables the check.
+pub(crate) fn skip_reason(
+    kill_switch: &'static ocx_env::EnvVar,
+    received: Option<bool>,
+    offline: bool,
+) -> Option<SkipReason> {
+    if ocx_config::exec_state::received::relaxing_bool(kill_switch, received) {
         return Some(SkipReason::KillSwitch(kill_switch.name));
     }
     if ocx_env::CI.bool_or(false).unwrap_or(false) {
@@ -57,7 +64,10 @@ mod tests {
         let guard = ocx_env::overrides::lock();
         guard.set(SWITCH, "1");
         guard.set(&ocx_env::CI, "1");
-        assert_eq!(skip_reason(SWITCH, true), Some(SkipReason::KillSwitch(SWITCH.name)));
+        assert_eq!(
+            skip_reason(SWITCH, None, true),
+            Some(SkipReason::KillSwitch(SWITCH.name))
+        );
     }
 
     #[test]
@@ -65,7 +75,7 @@ mod tests {
         let guard = ocx_env::overrides::lock();
         guard.remove(SWITCH);
         guard.set(&ocx_env::CI, "1");
-        assert_eq!(skip_reason(SWITCH, true), Some(SkipReason::Ci));
+        assert_eq!(skip_reason(SWITCH, None, true), Some(SkipReason::Ci));
     }
 
     #[test]
@@ -73,7 +83,25 @@ mod tests {
         let guard = ocx_env::overrides::lock();
         guard.remove(SWITCH);
         guard.remove(&ocx_env::CI);
-        assert_eq!(skip_reason(SWITCH, true), Some(SkipReason::Offline));
+        assert_eq!(skip_reason(SWITCH, None, true), Some(SkipReason::Offline));
+    }
+
+    #[test]
+    fn a_received_kill_switch_skips_only_while_the_variable_is_unset() {
+        let guard = ocx_env::overrides::lock();
+        guard.remove(SWITCH);
+        guard.remove(&ocx_env::CI);
+        assert_eq!(
+            skip_reason(SWITCH, Some(true), false),
+            Some(SkipReason::KillSwitch(SWITCH.name)),
+            "a received kill switch must reach the child"
+        );
+        guard.set(SWITCH, "0");
+        assert_ne!(
+            skip_reason(SWITCH, Some(true), false),
+            Some(SkipReason::KillSwitch(SWITCH.name)),
+            "an explicit ambient 0 outranks the relaxing received value"
+        );
     }
 
     #[test]
@@ -81,6 +109,6 @@ mod tests {
         let guard = ocx_env::overrides::lock();
         guard.set(SWITCH, "0");
         guard.set(&ocx_env::CI, "1");
-        assert_eq!(skip_reason(SWITCH, false), Some(SkipReason::Ci));
+        assert_eq!(skip_reason(SWITCH, None, false), Some(SkipReason::Ci));
     }
 }

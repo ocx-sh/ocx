@@ -13,12 +13,14 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_config::env;
+use ocx_config::exec_state::{Owner, Selection};
 use ocx_oci::{PackageRef, PinnedPackageRef};
 use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::BinaryName;
 use ocx_package_manager::Arrival;
 use ocx_package_manager::EnvScope;
 use ocx_package_manager::error::{PackageErrorKind, ShimClaim};
+use ocx_package_manager::exec_env::{self, ChildEnvInputs, ExecMode};
 use ocx_package_manager::launch;
 use ocx_package_manager::launch::Launch;
 use ocx_package_manager::record::{RecordInputs, Scope};
@@ -26,7 +28,7 @@ use ocx_project::ProjectConfig;
 use ocx_project::lazy;
 
 use crate::options::LazyReport;
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
+use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Entry point from a generated shim. Validates the invoked name, materializes
 /// the package, then execs the resolved target.
@@ -89,16 +91,24 @@ impl LauncherShim {
         // As in `ocx exec`: contributors disagreeing on a key's separator fail, not fold silently.
         reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
-        let mut process_env = env::Env::new();
-        // No forwarded payload: a shim runs from a bare `PATH` lookup, never under `ocx exec`.
-        process_env.apply_child_env(
-            ChildEnv {
+        // No replay: a shim runs from a bare `PATH` lookup, never under `ocx exec`.
+        let child = exec_env::apply_child_env(
+            context.inherited(),
+            &ChildEnvInputs {
+                mode: ExecMode::Layer,
+                written: context.written_policy(ExecMode::Layer.write_mode()),
+                binary_pin: context.binary_pin(),
                 composed: &entries,
-                forwarded: &[],
+                composed_owner: Owner::Inherited,
+                composed_scope: None,
+                invocation: &[],
+                replay_env: &[],
                 identities: Some(&LaunchIdentities::from_infos(&packages)),
+                selection: Selection::FollowCwd,
             },
-            context.config_view(),
         );
+        crate::app::report_projection_warnings(&child.warnings);
+        let mut process_env = child.env;
 
         // Strip the shim `bin/` first, or an unshipped claimed name resolves back here and `execvp(2)`
         // re-enters forever at 100% CPU. `prepare_lazy` cannot catch that claim: no content exists yet.
@@ -125,7 +135,7 @@ impl LauncherShim {
                 store_root: context.file_structure().packages.root(),
                 shim_root: context.file_structure().shims.root(),
                 argv: &self.argv,
-                config: context.config_view(),
+                config: context.recorded_config(),
                 insecure_registries: context.insecure_hosts(),
                 // Read and identity-gated once at `try_init`; no I/O here.
                 managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),

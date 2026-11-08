@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import exec_state
 from src.helpers import make_package, write_ocx_toml
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
@@ -371,3 +372,63 @@ def test_ocx_auth_variables_win_over_a_credential_helper(
 
     assert overridden.returncode == EXIT_SUCCESS, f"pull with {sorted(variables)} failed: {describe(overridden)}"
     assert overridden_calls == [], f"an OCX_AUTH variable must keep the helper unasked; got {overridden_calls}"
+
+
+#: Logs, per ``get``, the header of the state and the binary pin the helper was started with.
+STATE_PROBE_SCRIPT = """#!/bin/sh
+case "$1" in
+get)
+    server=$(cat)
+    printf '%s|%s\\n' "${__OCX_ENV_STATE%%.*}" "$OCX_BINARY_PIN" >> "$OCX_TEST_HELPER_STATE_LOG"
+    printf '{"ServerURL":"%s","Username":"u","Secret":"s"}\\n' "$server"
+    ;;
+list) echo '{}' ;;
+*) cat > /dev/null ;;
+esac
+"""
+
+
+def test_a_credential_helper_gets_the_fixed_state_not_the_ambient_one(
+    ocx: OcxRunner, target_registry: str, tmp_path: Path
+) -> None:
+    """The helper sees header ``2;n=credential_helper`` and the memoised pin.
+
+    The outer ocx runs under an ambient major-3 state and a bogus ``OCX_BINARY_PIN``; neither may
+    reach the helper, which the credential-helper library spawns with the ambient environment plus
+    the pairs ocx set for it.
+    """
+    label = uuid4().hex[:8]
+    dependency = publish_dependency(ocx, target_registry, tmp_path, label)
+    reference = dependency["identifier"].split("@")[0]
+
+    helper_dir = tmp_path / "helper-bin"
+    helper_dir.mkdir()
+    helper = helper_dir / HELPER_BIN
+    helper.write_text(STATE_PROBE_SCRIPT)
+    helper.chmod(helper.stat().st_mode | stat.S_IEXEC)
+    home = tmp_path / "home-state"
+    home.mkdir()
+    state_log = tmp_path / "state.log"
+    env = armed_env(
+        ocx,
+        target_registry,
+        arm_credential_helper(tmp_path, target_registry),
+        tmp_path / "helper.log",
+        helper_dir,
+        OCX_HOME=str(home),
+        OCX_TEST_HELPER_STATE_LOG=str(state_log),
+        OCX_BINARY_PIN="/bogus/ambient/ocx",
+        __OCX_ENV_STATE=exec_state.encode(exec_state.default_state(), major=3),
+    )
+
+    pulled = run_bounded(ocx, tmp_path, "package", "pull", reference, env=env)
+
+    assert pulled.returncode == EXIT_SUCCESS, f"pull failed: {describe(pulled)}"
+    seen = state_log.read_text().splitlines() if state_log.exists() else []
+    assert seen, f"the helper was never asked; nothing to check: {describe(pulled)}"
+    for line in seen:
+        header, _, pin = line.partition("|")
+        assert header == "2;n=credential_helper", f"the helper must get the fixed header; got {header!r}"
+        assert os.path.realpath(pin) == os.path.realpath(ocx.binary), (
+            f"the helper must get the memoised pin, not the ambient one; got {pin!r}"
+        )

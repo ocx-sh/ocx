@@ -14,7 +14,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -98,6 +98,8 @@ SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
 _WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
 
 
+_WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
+
 #: Host-wide lock serializing compose bring-up across concurrent sessions.
 #: Outside any worktree: two worktrees are exactly the case it exists for.
 _COMPOSE_LOCK = Path.home() / ".cache" / "ocx-compose.lock"
@@ -156,30 +158,66 @@ def _stack_is_already_running() -> bool:
     return set(declared) <= set(running.stdout.split())
 
 
+def _stack_is_current(inspect_json: str, exists: Callable[[str], bool]) -> bool:
+    """True unless a container's compose working dir or a bind source is gone.
+
+    ``inspect_json`` is the output of ``docker inspect`` over the stack's
+    containers. A stack started from a since-deleted worktree still reports
+    ``running`` with dead mounts, so liveness alone cannot tell it from ours.
+    A stack from another worktree that still exists is live and shared, so it
+    is left alone: recreating it would cut that session off mid-run.
+    """
+    containers = json.loads(inspect_json)
+    if not containers:
+        return False
+    for container in containers:
+        labels = container.get("Config", {}).get("Labels") or {}
+        working_dir = labels.get(_WORKING_DIR_LABEL)
+        if working_dir is None or not exists(working_dir):
+            return False
+        for mount in container.get("Mounts") or []:
+            if mount.get("Type") == "bind" and not exists(mount["Source"]):
+                return False
+    return True
+
+
+def _stack_container_ids() -> list[str]:
+    """Ids of the profile's containers in any state; empty when compose cannot say."""
+    listed = _compose("ps", "-a", "-q", *(_profile_services() or []))
+    return listed.stdout.split() if listed.returncode == 0 else []
+
+
+def _existing_stack_is_current() -> bool:
+    ids = _stack_container_ids()
+    if not ids:
+        return True  # nothing exists to be stale
+    inspected = subprocess.run(
+        ["docker", "inspect", *ids], capture_output=True, text=True, check=False
+    )
+    if inspected.returncode != 0:
+        return True  # inconclusive: the readiness probe decides, `down` would not
+    return _stack_is_current(inspected.stdout, os.path.exists)
+
+
 def start_sigstore_stack(timeout: float = 300.0) -> None:
     """Bring up the `sigstore` compose profile and block until it answers.
 
-    Readiness is delegated to ``sigstore/wait-for-stack.py`` rather than
-    reimplemented here. That script is also what the self-hosting documentation
-    hands an operator, so a second copy of the endpoint list is the one that
-    would go stale — and it is the copy the suite would be trusting.
+    Readiness is delegated to ``sigstore/wait-for-stack.py``, which is also what
+    the self-hosting documentation hands an operator; a second copy of the
+    endpoint list would be the one that goes stale.
 
-    Two guards make this safe to call from concurrent sessions, which is the
-    normal case whenever more than one worktree runs the suite:
+    Three guards make this safe to call from concurrent sessions:
 
     * **Skip when it is already up.** Every worktree resolves the same compose
-      project name (``test``), but their bind-mount paths differ, so the config
-      hash differs and an ``up -d`` from one worktree *recreates* the other's
-      containers — mid-suite, as connection-refused on every port. Not issuing
-      the command at all is what removes that; the lock alone cannot, because
-      the recreation is legal work correctly serialized.
+      project name (``test``) with different bind-mount paths, so an ``up -d``
+      from one worktree *recreates* the other's containers mid-suite, as
+      connection-refused on every port. The lock alone cannot prevent that.
+    * **Recreate a dead one.** A stack whose compose working directory, or
+      whose bind sources, are gone, is brought down and up again.
     * **Serialize the rest.** Two simultaneous ``up -d`` calls race on creating
-      the same container and one loses outright (``dex exited (2)``,
-      ``No such container: <hash>_test-registry-1``).
+      the same container and one loses outright (``dex exited (2)``).
 
-    The readiness wait stays outside the lock: it is a read-only poll, and
-    holding an exclusive lock across a 300s timeout would serialize sessions
-    that have nothing left to contend over.
+    The readiness wait stays outside the lock: it is a read-only poll.
     """
     skip_without_docker("the Sigstore stack")
     _bring_up_serialized()
@@ -199,7 +237,10 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
 def _bring_up_serialized() -> None:
     """Check-then-``up`` under an exclusive host lock, so the two are atomic."""
     with _compose_lock():
-        if not _stack_is_already_running():
+        current = _existing_stack_is_current()
+        if not current:
+            _compose("down", "--remove-orphans", *(_profile_services() or []))
+        if not (current and _stack_is_already_running()):
             _require_up(_compose("up", "-d", *(_profile_services() or [])))
 
 

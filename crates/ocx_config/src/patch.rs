@@ -176,8 +176,9 @@ pub fn expand_patch_path(template: &str, registry_host: &str, repository: &str) 
     }
 }
 
-/// Serialises a [`ResolvedPatchConfig`] into the [`ocx_env::OCX_PATCHES`] JSON; `None`
-/// for `None`, so [`crate::env::Env::apply_ocx_config`] removes an inherited value.
+/// Serialises a [`ResolvedPatchConfig`] into the [`ocx_env::OCX_PATCHES`] JSON, the fixture the
+/// reader tests parse back; `None` for `None`.
+#[cfg(test)]
 pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<String> {
     let config = patches?;
     // The field names are the `OCX_PATCHES` wire format a child ocx of another version reads.
@@ -205,7 +206,21 @@ pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<St
 /// companion env: [`PatchConfigError::MalformedEnvJson`] or
 /// [`PatchConfigError::MissingRegistryField`].
 pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigError> {
-    let Some(raw) = ocx_env::OCX_PATCHES.get() else {
+    patches_from_env_in(crate::exec_state::received::policy())
+}
+
+/// [`patches_from_env`] with the received policy named: the variable when set (empty is absent),
+/// else the value the parent ocx passed down.
+fn patches_from_env_in(
+    received: Option<&crate::exec_state::Policy>,
+) -> Result<Option<ResolvedPatchConfig>, PatchConfigError> {
+    let raw = match ocx_env::OCX_PATCHES.get_raw() {
+        Some(_) => ocx_env::OCX_PATCHES.get(),
+        None => received
+            .and_then(|policy| policy.patches.clone())
+            .filter(|value| !value.is_empty()),
+    };
+    let Some(raw) = raw else {
         return Ok(None);
     };
     let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
@@ -1006,6 +1021,41 @@ mod tests {
         );
     }
 
+    /// A received `patches` value is the env tier only when `OCX_PATCHES` is unset, and is parsed with
+    /// the same strictness: a malformed one is an error, never dropped.
+    #[test]
+    fn a_received_patches_value_fills_an_unset_variable_and_yields_to_a_set_one() {
+        let env_guard = ocx_env::overrides::lock();
+        let received = crate::exec_state::Policy {
+            patches: Some(r#"{"registry":"corp.example.com/patches"}"#.to_owned()),
+            ..crate::exec_state::Policy::default()
+        };
+        env_guard.remove(&ocx_env::OCX_PATCHES);
+        let filled = patches_from_env_in(Some(&received))
+            .expect("a well-formed received value parses")
+            .expect("a received registry resolves");
+        assert_eq!(filled.registry, "corp.example.com/patches");
+
+        env_guard.set(&ocx_env::OCX_PATCHES, "");
+        assert!(
+            patches_from_env_in(Some(&received)).expect("empty is absent").is_none(),
+            "an empty ambient OCX_PATCHES counts as set, so the received value is not used"
+        );
+
+        env_guard.remove(&ocx_env::OCX_PATCHES);
+        let malformed = crate::exec_state::Policy {
+            patches: Some("not json {{{".to_owned()),
+            ..crate::exec_state::Policy::default()
+        };
+        assert!(
+            matches!(
+                patches_from_env_in(Some(&malformed)),
+                Err(PatchConfigError::MalformedEnvJson { .. })
+            ),
+            "a malformed received value is an error"
+        );
+    }
+
     /// `patches_from_env` returns `Ok(None)` when `OCX_PATCHES` is absent.
     ///
     /// Traces: stub manifest — "returns `Ok(None)` when absent/empty".
@@ -1073,9 +1123,6 @@ mod tests {
     /// OCX_PATCHES round-trip: `encode_patches` → set env → `patches_from_env`
     /// yields the same `ResolvedPatchConfig`.
     ///
-    /// Traces: Phase 1 — "OCX_PATCHES round-trip: an OcxConfigView carrying
-    /// resolved patches -> apply_ocx_config sets OCX_PATCHES to JSON -> parsing
-    /// OCX_PATCHES back yields the same resolved patches".
     #[test]
     fn ocx_patches_round_trip_via_encode_and_parse() {
         let env_guard = ocx_env::overrides::lock();

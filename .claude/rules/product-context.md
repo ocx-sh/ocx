@@ -59,7 +59,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 1. **Backend-first** — JSON output, composable commands, clean exit codes, made for machine consumption
 2. **Offline-first** — local index never auto-update; populated index + cached object = zero network
 3. **Content-addressed** — Nix-like dedup and immutability without Nix-like complexity
-4. **Clean-env execution** — `ocx exec` run with package-declared vars only, no ambient PATH pollution
+4. **Composable execution** — `ocx exec` layers package-declared vars over the caller's environment; `--clean` runs with package-declared vars only.
 5. **Zero infrastructure cost** — BYO OCI registry; no Homebrew tap, no Artifactory license
 6. **Language-agnostic** — single standalone binary, no runtime deps, distribute any pre-built binary
 7. **Private-first** — registry auth first-class, internal tools easy as public ones
@@ -70,7 +70,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 |---|---|---|
 | 1 | Built on OCI — zero infra cost | Reuse existing registry, no new servers |
 | 2 | Content-addressed with dedup | Nix-like efficiency without Nix complexity |
-| 3 | Clean environment execution | CI/CD reproducibility, no "works on my machine" |
+| 3 | Composable environment execution | Layered over the caller's environment by default, so tools compose; `--clean` gives CI/CD reproducibility, no "works on my machine" |
 | 4 | Offline-first indexing | Deterministic builds without network fragility |
 | 5 | Backend-first design | Machine-consumable output for Actions/Bazel/scripts |
 | 6 | Language-agnostic, toolchain-free | One binary install any binary |
@@ -88,7 +88,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | Cross-platform | macOS+Linux | Linux only | Manual | Plugin-based | Linux+macOS | Any | **Any** |
 | Private binaries | Workaround | Own repo | Tokens | No | Binary cache | Registry auth | **Any OCI registry** |
 | Version switching | Partial | No | No | Yes | Yes | No | **Yes** |
-| Clean env exec | No | No | No | PATH only | Shell | No | **Yes** |
+| Composable / clean env exec | No | No | No | PATH only | Shell | No | **Yes (layered by default, clean on request)** |
 | Content-addressed | No | No | No | No | Yes | Registry-side | **Yes (local + remote)** |
 | Publish workflow | Formula PR | Package build | Upload | N/A | Derivation | oras push | **ocx package push** |
 | Learning curve | Low | Low | Low | Low | Very High | Low | **Low** |
@@ -119,7 +119,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 ```bash
 ocx install cmake:3.28              # Fetch + install (auto-detect platform)
 ocx install cmake:3.28 --select     # Also set as "current"
-ocx exec cmake:3.28 -- cmake --version   # Run with clean environment
+ocx exec cmake:3.28 -- cmake --version   # Layer onto the caller's environment (--clean: package vars only)
 ocx env cmake:3.28                  # Print resolved environment variables
 ocx select cmake:3.28               # Set "current" to this version
 ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish

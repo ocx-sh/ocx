@@ -166,7 +166,7 @@ pub(super) async fn resolve_override_token(
             .context("failed to read identity token from stdin")?;
         return Ok(Some(Zeroizing::new(buf.trim().to_string())));
     }
-    // Credential exemption: not forwarded via OcxConfigView. See subsystem-cli.md.
+    // Credential exemption: never passed down to a child ocx. See subsystem-cli.md.
     if let Some(token) = ocx_env::OCX_IDENTITY_TOKEN.get() {
         return Ok(Some(Zeroizing::new(token.into_inner())));
     }

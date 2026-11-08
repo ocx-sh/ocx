@@ -5316,7 +5316,7 @@
         },
         "lock_refusal": {
           "type": "string",
-          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the ledger."
+          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the state."
         },
         "carrier_present": {
           "type": "boolean",
@@ -5326,13 +5326,17 @@
           "$ref": "#/$defs/ByteSize",
           "description": "The carrier's encoded length in bytes, measured against the carrier cap."
         },
-        "ledger": {
-          "description": "The decoded ledger, **rendered as fields, never as base64**.\n\nSchema `v` and the payload; absent when the carrier is absent or fails to\ndecode. Carries what is applied per scope (`global` and `project`\nseparately), the recorded prior of each constant the project scope owns\n(the one datum nothing can reconstruct) and, through `over_cap`, the\nabandoned-scope marker.",
-          "$ref": "#/$defs/Ledger"
+        "env_state": {
+          "$ref": "#/$defs/EnvStateReport",
+          "description": "The decoded execution state, **rendered as fields, never as base64**.\n\nReported in every state: an absent, unreadable or truncated value is a finding, not an error."
+        },
+        "binary_pin": {
+          "$ref": "#/$defs/BinaryPinReport",
+          "description": "The `ocx` binary generated launchers re-enter, and whether it is still there."
         },
         "fingerprint_current": {
           "type": "boolean",
-          "description": "Whether the ledger's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
+          "description": "Whether the state's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
         },
         "watch_set": {
           "type": "array",
@@ -5366,7 +5370,7 @@
           "items": {
             "$ref": "#/$defs/PriorStatus"
           },
-          "description": "Prior intactness for each constant the ledger's project scope owns."
+          "description": "Prior intactness for each constant the project scope owns."
         },
         "hook": {
           "$ref": "#/$defs/HookStatus",
@@ -5401,6 +5405,8 @@
         "pinned",
         "carrier_present",
         "carrier_bytes",
+        "env_state",
+        "binary_pin",
         "watch_set",
         "project_stamped",
         "priors",
@@ -5408,7 +5414,7 @@
         "yielded_to",
         "notes"
       ],
-      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs a ledger or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
+      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs the state or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
     },
     "ActivateMode": {
       "description": "How a rendered toolchain home reaches a shell's environment.\n\nWire values are `\"env\"`, `\"bin\"` and `\"none\"`; any other `ocx.toml` value\nis a parse error (exit 78), never a silent default.",
@@ -5428,115 +5434,282 @@
         }
       ]
     },
-    "Ledger": {
+    "EnvStateReport": {
       "type": "object",
       "properties": {
-        "v": {
+        "status": {
+          "$ref": "#/$defs/EnvStateStatus",
+          "description": "Whether the value is unset, readable or unreadable."
+        },
+        "major": {
           "type": "integer",
-          "format": "uint8",
+          "format": "uint32",
           "minimum": 0,
-          "maximum": 255,
-          "description": "Schema version of the payload shape."
+          "description": "The major version this ocx reads."
         },
-        "fp": {
-          "type": "string",
-          "description": "Watch-set fingerprint; the cached verdict expires when it changes."
+        "minor": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The minor version the state was written with; present when readable."
         },
-        "verdict": {
-          "description": "The cached negative verdict: `inert` or `no_project`, never `activate`.",
-          "$ref": "#/$defs/Verdict"
+        "found_major": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The major the header carries; present when unreadable and the header parsed."
         },
-        "tiers": {
+        "narrowing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NarrowingName"
+          },
+          "description": "The narrowings the header carries; present when readable or unreadable."
+        },
+        "home": {
+          "description": "The `OCX_HOME` the header carries.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "truncated": {
+          "description": "What was dropped to fit the size cap; omitted when nothing was.",
+          "$ref": "#/$defs/TruncationReport"
+        },
+        "policy": {
+          "description": "The inherited settings that are set; present when readable.",
+          "$ref": "#/$defs/PolicyReport"
+        },
+        "relaxing_policy": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "The config-tier paths in effect at compose time; omitted when empty."
+          "description": "The set settings that relax a protection, plus `home`, sorted."
         },
-        "ws": {
-          "type": "string",
-          "description": "Digest of the ordered watch-path list baked into the shell's gate; omitted when empty."
+        "session_claimed": {
+          "type": "boolean",
+          "description": "Whether a shell instance claimed the session; the token itself is not published."
         },
-        "messages_fp": {
-          "type": "string",
-          "description": "Digest of the deferred diagnostics the previous prompt printed; omitted when empty."
-        },
-        "over_cap": {
+        "inherited_scopes": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ScopeId"
+            "$ref": "#/$defs/ScopeReport"
           },
-          "description": "Scopes the carrier size cap dropped; omitted when empty."
+          "description": "Scopes an outer frame composed, oldest first."
         },
-        "scopes": {
-          "$ref": "#/$defs/Scopes",
-          "description": "What each scope applied."
+        "applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AppliedReport"
+          },
+          "description": "What was applied, oldest first."
+        },
+        "replay": {
+          "description": "Counts of the records launchers replay; present when readable.",
+          "$ref": "#/$defs/ReplayCounts"
+        },
+        "selection": {
+          "description": "What the writing invocation selected; present when readable.",
+          "$ref": "#/$defs/SelectionReport"
         }
       },
       "required": [
-        "v",
-        "fp",
-        "scopes"
+        "status",
+        "major",
+        "session_claimed"
       ],
-      "description": "The decoded `__OCX_ENV_STATE` payload."
+      "description": "The decoded `__OCX_ENV_STATE`: what a parent handed this process."
     },
-    "Verdict": {
-      "description": "A cached activation verdict; a change to the watch set expires it.",
+    "EnvStateStatus": {
+      "description": "Whether `__OCX_ENV_STATE` is set, and whether it could be read.",
       "type": "string",
       "x-ocx-enum": [
         {
-          "value": "activate",
-          "description": "Activate the project; ocx never caches it, so a carrier holding it was not written by ocx."
+          "value": "absent",
+          "description": "The variable is unset or empty."
         },
         {
-          "value": "inert",
-          "description": "Consent refused activation for the project in effect."
+          "value": "readable",
+          "description": "The value decoded; its fields follow."
         },
         {
-          "value": "no_project",
-          "description": "No project resolved from the working directory; entering one expires it."
+          "value": "unreadable",
+          "description": "The value is set and could not be read; only the header fields follow."
         }
       ]
     },
-    "ScopeId": {
-      "description": "Which scope a ledger datum belongs to: `global` or `project`.\n\nExactly two slots. A project nested inside a project does not layer; the inner\none *replaces* the outer, so moving between them is a switch.",
+    "NarrowingName": {
+      "description": "A narrowing the header carries.",
       "type": "string",
       "x-ocx-enum": [
         {
-          "value": "global",
-          "description": "The `--global` toolchain tier."
+          "value": "offline",
+          "description": "No network."
         },
         {
-          "value": "project",
-          "description": "The project resolved by the CWD walk."
+          "value": "frozen",
+          "description": "No index refresh."
+        },
+        {
+          "value": "no_consent",
+          "description": "No consent stamp is written."
+        },
+        {
+          "value": "credential_helper",
+          "description": "A credential helper child; implies offline."
         }
       ]
     },
-    "Scopes": {
+    "TruncationReport": {
+      "description": "What the encoder dropped to fit the size cap.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "inherited_dropped",
+          "description": "Records received from an outer frame were dropped."
+        },
+        {
+          "value": "all_applied_dropped",
+          "description": "Every applied record was dropped."
+        },
+        {
+          "value": "payload_dropped",
+          "description": "The whole payload was dropped; only the header remains."
+        }
+      ]
+    },
+    "PolicyReport": {
       "type": "object",
       "properties": {
-        "global": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/LedgerEntry"
-          },
-          "description": "The global toolchain tier's applied entries; absent when the tier applied nothing."
+        "remote": {
+          "type": "boolean",
+          "description": "`OCX_REMOTE`."
         },
-        "global_priors": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/Prior"
-          },
-          "description": "Pre-apply values for the global scope's constants, keyed by variable; omitted when empty."
+        "no_project": {
+          "type": "boolean",
+          "description": "`OCX_NO_PROJECT`."
         },
-        "project": {
-          "description": "The resolved project tier; absent when none applied.",
-          "$ref": "#/$defs/ProjectScope"
+        "no_config_refresh": {
+          "type": "boolean",
+          "description": "`OCX_NO_CONFIG_REFRESH`."
+        },
+        "no_update_check": {
+          "type": "boolean",
+          "description": "`OCX_NO_UPDATE_CHECK`."
+        },
+        "config_path": {
+          "description": "`OCX_CONFIG`.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "no_config": {
+          "type": "boolean",
+          "description": "`OCX_NO_CONFIG`."
+        },
+        "index_dir": {
+          "description": "`OCX_INDEX`.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "toolchain_dir": {
+          "description": "`OCX_TOOLCHAIN_DIR`.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "mirrors": {
+          "type": "string",
+          "description": "`OCX_MIRRORS`."
+        },
+        "patches": {
+          "type": "string",
+          "description": "`OCX_PATCHES`."
+        },
+        "patch_snapshot_path": {
+          "description": "`OCX_PATCH_SNAPSHOT`.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "managed_config": {
+          "type": "string",
+          "description": "`OCX_MANAGED_CONFIG`."
+        },
+        "no_verify": {
+          "type": "boolean",
+          "description": "`OCX_NO_VERIFY`."
+        },
+        "records_dir": {
+          "description": "`OCX_RECORDS_DIR`.",
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "records_name": {
+          "type": "string",
+          "description": "`OCX_RECORDS_NAME`."
+        },
+        "allow_yanked": {
+          "type": "boolean",
+          "description": "`OCX_ALLOW_YANKED`."
+        },
+        "default_registry": {
+          "type": "string",
+          "description": "`OCX_DEFAULT_REGISTRY`."
+        },
+        "insecure_registries": {
+          "type": "string",
+          "description": "`OCX_INSECURE_REGISTRIES`."
         }
       },
-      "description": "The two scope slots."
+      "description": "The inherited settings that are set; same names as the state's `policy`."
     },
-    "LedgerEntry": {
+    "ScopeReport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "global"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "description": "The global toolchain tier."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "project"
+            },
+            "root": {
+              "type": "string",
+              "description": "The project directory as the state recorded it."
+            }
+          },
+          "required": [
+            "type",
+            "root"
+          ],
+          "description": "A project, by the root it was composed from."
+        },
+        {
+          "x-ocx-unknown-variant": true,
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "not": {
+                "enum": [
+                  "global",
+                  "project"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "A scope an outer frame composed."
+    },
+    "AppliedReport": {
       "type": "object",
       "properties": {
         "key": {
@@ -5545,25 +5718,106 @@
         },
         "value": {
           "type": "string",
-          "description": "The exact string ocx wrote, byte for byte."
+          "description": "The exact string ocx wrote."
         },
         "kind": {
-          "$ref": "#/$defs/ModifierKind",
+          "$ref": "#/$defs/ValueKindReport",
           "description": "How the value combines."
         },
         "separator": {
           "type": "string",
-          "description": "The effective list separator; present only for a `list` entry."
+          "description": "The effective list separator; present only for a `list` record."
+        },
+        "pre_existing": {
+          "type": "boolean",
+          "description": "The element was already present and was only moved; reverting keeps it."
+        },
+        "owner": {
+          "$ref": "#/$defs/OwnerReport",
+          "description": "Who applied it."
+        },
+        "scope": {
+          "description": "The scope of a session record.",
+          "$ref": "#/$defs/ScopeIdReport"
+        },
+        "source": {
+          "description": "The origin of a session record.",
+          "$ref": "#/$defs/SourceReport"
+        },
+        "prior": {
+          "description": "What a constant held before; absent for a path or list record.",
+          "$ref": "#/$defs/PriorReport"
         }
       },
       "required": [
         "key",
         "value",
-        "kind"
+        "kind",
+        "owner"
       ],
-      "description": "One environment binding the reconciler applied, recorded literally."
+      "description": "One value ocx applied to an environment."
     },
-    "Prior": {
+    "ValueKindReport": {
+      "description": "How an applied value combines with the variable's existing value.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "path",
+          "description": "A path-list element, prepended."
+        },
+        {
+          "value": "list",
+          "description": "A list element joined by a separator."
+        },
+        {
+          "value": "constant",
+          "description": "The whole value."
+        }
+      ]
+    },
+    "OwnerReport": {
+      "description": "Who applied a record.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "session",
+          "description": "A shell instance of this session."
+        },
+        {
+          "value": "inherited",
+          "description": "An outer frame; this process only inherits it."
+        }
+      ]
+    },
+    "ScopeIdReport": {
+      "description": "The scope a session record belongs to.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "global",
+          "description": "The global toolchain tier."
+        },
+        {
+          "value": "project",
+          "description": "The project in effect."
+        }
+      ]
+    },
+    "SourceReport": {
+      "description": "Where a session record came from.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "composed",
+          "description": "From `ocx.toml` groups or the global tier; refreshed each prompt."
+        },
+        {
+          "value": "invocation",
+          "description": "From `ocx shell --with` or `--env`; removed, never refreshed."
+        }
+      ]
+    },
+    "PriorReport": {
       "oneOf": [
         {
           "type": "object",
@@ -5597,6 +5851,19 @@
           "description": "The variable held a value; reverting restores it."
         },
         {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "withheld"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "description": "The prior was not UTF-8; it is never restored."
+        },
+        {
           "x-ocx-unknown-variant": true,
           "type": "object",
           "required": [
@@ -5608,7 +5875,8 @@
               "not": {
                 "enum": [
                   "unset",
-                  "value"
+                  "value",
+                  "withheld"
                 ]
               }
             }
@@ -5617,39 +5885,147 @@
       ],
       "description": "What a variable held before ocx set it.\n\nA set-but-empty variable is `value` with an empty string, never `unset`."
     },
-    "ProjectScope": {
+    "ReplayCounts": {
       "type": "object",
       "properties": {
-        "key": {
-          "type": "string",
-          "description": "The project key derived from the canonical project directory."
+        "env_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Environment values launchers re-apply."
         },
-        "dir": {
-          "type": "string",
-          "description": "The canonical project directory, an advisory label."
-        },
-        "applied": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/LedgerEntry"
-          },
-          "description": "What this scope applied, in emission order."
-        },
-        "priors": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/Prior"
-          },
-          "description": "Pre-apply values for this scope's constants, keyed by variable."
+        "launch_identity_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Package identities launchers match patch rules by."
         }
       },
       "required": [
-        "key",
-        "dir",
-        "applied",
-        "priors"
+        "env_count",
+        "launch_identity_count"
       ],
-      "description": "The project scope's record."
+      "description": "How many replay records the state carries; the records themselves are not published."
+    },
+    "SelectionReport": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "follow_cwd"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "description": "Follow the working directory; nothing is pinned."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pinned_project"
+            },
+            "project_dir": {
+              "$ref": "#/$defs/AbsolutePath",
+              "description": "The project directory as the state recorded it."
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The pinned groups."
+            },
+            "with_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "`--with` identifiers as typed."
+            },
+            "env_keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "`--env` keys; never their values."
+            }
+          },
+          "required": [
+            "type",
+            "project_dir",
+            "groups"
+          ],
+          "description": "Pinned to a project's groups."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pinned_global"
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The pinned groups."
+            }
+          },
+          "required": [
+            "type",
+            "groups"
+          ],
+          "description": "Pinned to the global toolchain's groups."
+        },
+        {
+          "x-ocx-unknown-variant": true,
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "not": {
+                "enum": [
+                  "follow_cwd",
+                  "pinned_project",
+                  "pinned_global"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "What the invocation that wrote the state selected."
+    },
+    "BinaryPinReport": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The pinned path; absent when no pin is set."
+        },
+        "exists": {
+          "type": "boolean",
+          "description": "Whether the pinned path exists."
+        },
+        "matches_running": {
+          "type": "boolean",
+          "description": "Whether the pinned path and the running binary canonicalise to one file."
+        }
+      },
+      "required": [
+        "exists",
+        "matches_running"
+      ],
+      "description": "The `ocx` binary generated launchers re-enter (`OCX_BINARY_PIN`)."
     },
     "WatchMember": {
       "type": "object",
@@ -5763,10 +6139,6 @@
         {
           "value": "mise",
           "description": "Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present."
-        },
-        {
-          "value": "ocx_exec",
-          "description": "An enclosing `ocx exec` composed this shell's environment for the resolved project\n(`__OCX_EXEC_SCOPE` names that project's directory). Not part of [`detect`]: exec is hermetic,\nso the per-prompt hook applies neither the project nor the global toolchain while the cwd\nstays in that project, and reconciles again once it leaves."
         }
       ]
     },
@@ -5903,7 +6275,7 @@
           "properties": {
             "type": {
               "type": "string",
-              "const": "ledger_over_cap"
+              "const": "state_over_cap"
             },
             "scope": {
               "$ref": "#/$defs/ScopeId",
@@ -5914,14 +6286,14 @@
             "type",
             "scope"
           ],
-          "description": "The ledger's payload exceeded the 16 KiB cap and this scope was\nabandoned, its record lost rather than repaired."
+          "description": "The state's payload exceeded the cap and this scope was\nabandoned, its record lost rather than repaired."
         },
         {
           "type": "object",
           "properties": {
             "type": {
               "type": "string",
-              "const": "ledger_unreadable"
+              "const": "state_unreadable"
             },
             "first_prompt": {
               "type": "boolean",
@@ -5963,8 +6335,8 @@
                   "uncorroborated_namespace",
                   "hook_disabled",
                   "yielded_to",
-                  "ledger_over_cap",
-                  "ledger_unreadable",
+                  "state_over_cap",
+                  "state_unreadable",
                   "lock_unavailable"
                 ]
               }
@@ -5973,6 +6345,20 @@
         }
       ],
       "description": "Why a shell is not active — the enumerated set `ocx shell state` renders."
+    },
+    "ScopeId": {
+      "description": "A session record's scope.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "global",
+          "description": "The global toolchain tier."
+        },
+        {
+          "value": "project",
+          "description": "The project in effect."
+        }
+      ]
     },
     "Note": {
       "oneOf": [
@@ -6105,6 +6491,129 @@
           "description": "The `ocx.toml` that answers for the reported scope exists but will not parse.\n\nIts `activate` / `pinned` are then absent and the ladder answered from\n`OCX_TOOLCHAIN_*` and then the floors, so a typo'd `activate = \"nnone\"`\nfails **open**, to `env`, the most-composing mode."
         },
         {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "env_state_unreadable"
+            },
+            "major": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The major this ocx reads."
+            },
+            "found_major": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The major the header carries, when the header parsed."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why the value was refused, as a stable slug."
+            },
+            "field": {
+              "type": "string",
+              "description": "The record or payload field that failed validation; present for `invalid` only."
+            }
+          },
+          "required": [
+            "type",
+            "major",
+            "reason"
+          ],
+          "description": "`__OCX_ENV_STATE` is set and cannot be read, so its payload is ignored."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "env_state_stood_down"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "description": "The state is unreadable and the shell's hook skips every prompt until the value changes."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "env_state_truncated"
+            },
+            "truncated": {
+              "$ref": "#/$defs/TruncationReport",
+              "description": "What was dropped."
+            }
+          },
+          "required": [
+            "type",
+            "truncated"
+          ],
+          "description": "The state dropped data to fit the size cap."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "relaxing_policy"
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The relaxing settings that are set, sorted."
+            }
+          },
+          "required": [
+            "type",
+            "names"
+          ],
+          "description": "The inherited state carries settings that relax a protection."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "binary_pin_missing"
+            },
+            "path": {
+              "type": "string",
+              "description": "The pinned path."
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "description": "The pinned `ocx` binary named by `OCX_BINARY_PIN` does not exist."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "received_config_missing"
+            },
+            "path": {
+              "type": "string",
+              "description": "The config path the parent ocx recorded."
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "description": "The inherited state names a `config_path` whose file no longer exists, so this report was built without it.\n\nAn ordinary command treats a missing config path as an error; the report is a finding instead."
+        },
+        {
           "x-ocx-unknown-variant": true,
           "type": "object",
           "required": [
@@ -6120,7 +6629,13 @@
                   "project_unresolved",
                   "paths_near_miss",
                   "paths_defect",
-                  "toolchain_manifest_unparsed"
+                  "toolchain_manifest_unparsed",
+                  "env_state_unreadable",
+                  "env_state_stood_down",
+                  "env_state_truncated",
+                  "relaxing_policy",
+                  "binary_pin_missing",
+                  "received_config_missing"
                 ]
               }
             }
@@ -6162,7 +6677,7 @@
         },
         "lock_refusal": {
           "type": "string",
-          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the ledger."
+          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the state."
         },
         "carrier_present": {
           "type": "boolean",
@@ -6172,13 +6687,17 @@
           "$ref": "#/$defs/ByteSize",
           "description": "The carrier's encoded length in bytes, measured against the carrier cap."
         },
-        "ledger": {
-          "description": "The decoded ledger, **rendered as fields, never as base64**.\n\nSchema `v` and the payload; absent when the carrier is absent or fails to\ndecode. Carries what is applied per scope (`global` and `project`\nseparately), the recorded prior of each constant the project scope owns\n(the one datum nothing can reconstruct) and, through `over_cap`, the\nabandoned-scope marker.",
-          "$ref": "#/$defs/Ledger"
+        "env_state": {
+          "$ref": "#/$defs/EnvStateReport",
+          "description": "The decoded execution state, **rendered as fields, never as base64**.\n\nReported in every state: an absent, unreadable or truncated value is a finding, not an error."
+        },
+        "binary_pin": {
+          "$ref": "#/$defs/BinaryPinReport",
+          "description": "The `ocx` binary generated launchers re-enter, and whether it is still there."
         },
         "fingerprint_current": {
           "type": "boolean",
-          "description": "Whether the ledger's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
+          "description": "Whether the state's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
         },
         "watch_set": {
           "type": "array",
@@ -6212,7 +6731,7 @@
           "items": {
             "$ref": "#/$defs/PriorStatus"
           },
-          "description": "Prior intactness for each constant the ledger's project scope owns."
+          "description": "Prior intactness for each constant the project scope owns."
         },
         "hook": {
           "$ref": "#/$defs/HookStatus",
@@ -6247,6 +6766,8 @@
         "pinned",
         "carrier_present",
         "carrier_bytes",
+        "env_state",
+        "binary_pin",
         "watch_set",
         "project_stamped",
         "priors",
@@ -6254,7 +6775,7 @@
         "yielded_to",
         "notes"
       ],
-      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs a ledger or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
+      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs the state or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
     },
     "StatusReport": {
       "type": "object",
@@ -8784,7 +9305,7 @@
         },
         "lock_refusal": {
           "type": "string",
-          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the ledger."
+          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the state."
         },
         "carrier_present": {
           "type": "boolean",
@@ -8794,13 +9315,17 @@
           "$ref": "#/$defs/ByteSize",
           "description": "The carrier's encoded length in bytes, measured against the carrier cap."
         },
-        "ledger": {
-          "description": "The decoded ledger, **rendered as fields, never as base64**.\n\nSchema `v` and the payload; absent when the carrier is absent or fails to\ndecode. Carries what is applied per scope (`global` and `project`\nseparately), the recorded prior of each constant the project scope owns\n(the one datum nothing can reconstruct) and, through `over_cap`, the\nabandoned-scope marker.",
-          "$ref": "#/$defs/Ledger"
+        "env_state": {
+          "$ref": "#/$defs/EnvStateReport",
+          "description": "The decoded execution state, **rendered as fields, never as base64**.\n\nReported in every state: an absent, unreadable or truncated value is a finding, not an error."
+        },
+        "binary_pin": {
+          "$ref": "#/$defs/BinaryPinReport",
+          "description": "The `ocx` binary generated launchers re-enter, and whether it is still there."
         },
         "fingerprint_current": {
           "type": "boolean",
-          "description": "Whether the ledger's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
+          "description": "Whether the state's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
         },
         "watch_set": {
           "type": "array",
@@ -8834,7 +9359,7 @@
           "items": {
             "$ref": "#/$defs/PriorStatus"
           },
-          "description": "Prior intactness for each constant the ledger's project scope owns."
+          "description": "Prior intactness for each constant the project scope owns."
         },
         "hook": {
           "$ref": "#/$defs/HookStatus",
@@ -8870,6 +9395,8 @@
         "pinned",
         "carrier_present",
         "carrier_bytes",
+        "env_state",
+        "binary_pin",
         "watch_set",
         "project_stamped",
         "priors",
@@ -8877,7 +9404,7 @@
         "yielded_to",
         "notes"
       ],
-      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs a ledger or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
+      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs the state or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
     },
     "VerboseShellStateRoot": {
       "type": "object",
@@ -8917,7 +9444,7 @@
         },
         "lock_refusal": {
           "type": "string",
-          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the ledger."
+          "description": "Why the project's `ocx.lock` refuses composition, when it does, as text.\n\nSet when consent activates over a lock composition refuses, such as a\n`paths` grant over an unreadable or stale lock. Every prompt then exits 65\nand the scope never reaches the state."
         },
         "carrier_present": {
           "type": "boolean",
@@ -8927,13 +9454,17 @@
           "$ref": "#/$defs/ByteSize",
           "description": "The carrier's encoded length in bytes, measured against the carrier cap."
         },
-        "ledger": {
-          "description": "The decoded ledger, **rendered as fields, never as base64**.\n\nSchema `v` and the payload; absent when the carrier is absent or fails to\ndecode. Carries what is applied per scope (`global` and `project`\nseparately), the recorded prior of each constant the project scope owns\n(the one datum nothing can reconstruct) and, through `over_cap`, the\nabandoned-scope marker.",
-          "$ref": "#/$defs/Ledger"
+        "env_state": {
+          "$ref": "#/$defs/EnvStateReport",
+          "description": "The decoded execution state, **rendered as fields, never as base64**.\n\nReported in every state: an absent, unreadable or truncated value is a finding, not an error."
+        },
+        "binary_pin": {
+          "$ref": "#/$defs/BinaryPinReport",
+          "description": "The `ocx` binary generated launchers re-enter, and whether it is still there."
         },
         "fingerprint_current": {
           "type": "boolean",
-          "description": "Whether the ledger's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
+          "description": "Whether the state's recorded `fp` still matches the watch set on disk now.\n\nAbsent when there is no recorded fingerprint to compare against, **and**\nwhen no fold is available to compare with."
         },
         "watch_set": {
           "type": "array",
@@ -8967,7 +9498,7 @@
           "items": {
             "$ref": "#/$defs/PriorStatus"
           },
-          "description": "Prior intactness for each constant the ledger's project scope owns."
+          "description": "Prior intactness for each constant the project scope owns."
         },
         "hook": {
           "$ref": "#/$defs/HookStatus",
@@ -9003,6 +9534,8 @@
         "pinned",
         "carrier_present",
         "carrier_bytes",
+        "env_state",
+        "binary_pin",
         "watch_set",
         "project_stamped",
         "priors",
@@ -9010,7 +9543,7 @@
         "yielded_to",
         "notes"
       ],
-      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs a ledger or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
+      "description": "What `ocx shell state` reports: all derived, none of it mutating.\n\nRead-only: it never writes a stamp, repairs the state or emits a plan.\nRepair is `unset __OCX_ENV_STATE` or a new shell."
     },
     "SignatureReportRoot": {
       "type": "object",

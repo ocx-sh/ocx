@@ -133,6 +133,8 @@ impl ToolchainEnv {
         let shell = resolve_shell_arg(self.shell)?;
         // Early, so a bare-`--ci` autodetect failure beats the slow entry resolution.
         let ci = resolve_ci_arg(self.ci)?;
+        // `--ci` wins over `--shell` at emit, so only a bare `--shell` writes into the running shell.
+        let destination = export_destination(ci.is_none() && shell.is_some());
 
         let target = platform_or_default(self.platform.platform.clone());
 
@@ -154,10 +156,11 @@ impl ToolchainEnv {
                 &env_overrides,
                 self.pinned.pinned(),
                 &with,
+                Some(destination),
             )
             .await
             {
-                Ok(Some((entries, patch_start, provenance, claims))) => (entries, patch_start, provenance, claims),
+                Ok(Some((entries, patch_start, provenance, claims, _))) => (entries, patch_start, provenance, claims),
                 Ok(None) => (Vec::new(), 0, Vec::new(), AdmittedClaims::default()),
                 Err(error) => return Err(error),
             }
@@ -222,10 +225,7 @@ impl ToolchainEnv {
             let (mut entries, patch_start, provenance, attribution) = composing
                 .resolve_env_with_attribution(&infos, false, scope, &target)
                 .await?;
-            let inherited = ocx_env::__OCX_LAUNCH_IDENTITIES
-                .get_raw()
-                .and_then(|v| v.into_string().ok());
-            entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
+            entries.extend(manager.exec_state_entry(&infos, &no_patches, context.inherited(), destination));
             (entries, patch_start, provenance, attribution)
         };
 
@@ -328,13 +328,22 @@ pub(crate) async fn resolve_global_pinned_env(
     groups: &[String],
     env_overrides: &[Entry],
     pinned_cli: Option<bool>,
-) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
+) -> anyhow::Result<Option<GlobalComposition>> {
     let no_with = GlobalWith {
         packages: &[],
         lazy_mode: None,
         install: false,
     };
-    resolve_global_env(context, target, groups, env_overrides, pinned_cli, &no_with).await
+    resolve_global_env(context, target, groups, env_overrides, pinned_cli, &no_with, None).await
+}
+
+/// Where an `env` export goes: the running shell for a bare `--shell`, otherwise a later process.
+pub(crate) fn export_destination(running_shell: bool) -> ocx_package_manager::ExportDestination {
+    if running_shell {
+        ocx_package_manager::ExportDestination::RunningShell
+    } else {
+        ocx_package_manager::ExportDestination::Persisted
+    }
 }
 
 /// The `--with` packages `ocx --global env` layers beneath the global toolchain, as `ocx --global exec` does.
@@ -345,6 +354,16 @@ struct GlobalWith<'a> {
     install: bool,
 }
 
+/// The global tier's composition: entries, where the patch overlay starts, its provenance, the admitted
+/// claims, and the names its packages were composed under (`None` without a patch tier).
+pub(crate) type GlobalComposition = (
+    Vec<Entry>,
+    usize,
+    Vec<PatchProvenance>,
+    AdmittedClaims,
+    Option<ocx_package::launch::LaunchIdentities>,
+);
+
 /// [`resolve_global_pinned_env`] plus the `--with` packages, which are composed before the lock's tools so a global tool wins a name clash.
 async fn resolve_global_env(
     context: &crate::app::Context,
@@ -353,7 +372,8 @@ async fn resolve_global_env(
     env_overrides: &[Entry],
     pinned_cli: Option<bool>,
     with: &GlobalWith<'_>,
-) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
+    export: Option<ocx_package_manager::ExportDestination>,
+) -> anyhow::Result<Option<GlobalComposition>> {
     let home = context.file_structure().root();
     let global_config = ocx_project::ProjectConfig::global_manifest_path(home);
     let global_lock_path = lock_path_for(&global_config);
@@ -465,11 +485,11 @@ async fn resolve_global_env(
     let (mut entries, patch_start, provenance, attribution) = manager
         .resolve_env_with_attribution(&infos, false, scope, target)
         .await?;
-    let inherited = ocx_env::__OCX_LAUNCH_IDENTITIES
-        .get_raw()
-        .and_then(|v| v.into_string().ok());
-    entries.extend(manager.launch_identity_entry(&infos, &no_patches, inherited.as_deref()));
-    Ok(Some((entries, patch_start, provenance, attribution)))
+    if let Some(destination) = export {
+        entries.extend(manager.exec_state_entry(&infos, &no_patches, context.inherited(), destination));
+    }
+    let identities = manager.launch_identities(&infos, &no_patches);
+    Ok(Some((entries, patch_start, provenance, attribution, identities)))
 }
 
 /// Resolve raw `-g` values to the global tier's tool groups: empty is `default`, `all` adds every lock group.
@@ -695,6 +715,7 @@ mod tests {
             ManagedConfigGate {
                 enforce_required: false,
                 onboarding: false,
+                tolerate_vanished_received_config: false,
             },
         )
         .await

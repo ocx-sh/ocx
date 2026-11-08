@@ -610,6 +610,66 @@ def test_u15_env_overlay_reserved_key_rejected(
     )
 
 
+@pytest.mark.parametrize("key", ["__OCX_ENV_STATE", "OCX_BINARY_PIN"])
+def test_s017_env_overlay_refuses_the_state_and_the_pin(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    key: str,
+) -> None:
+    """``ocx.run(env={"__OCX_ENV_STATE": ...})`` is refused like any reserved key.
+
+    The state is what a child ocx decodes to learn what it inherited, and the pin names
+    the binary launchers re-enter; a script overriding either would redirect both.
+    The child must not even start, so no marker file appears in the scratch root.
+    """
+    bundle, meta, pkg = script_test_package
+    smoke = _write_script(
+        tmp_path,
+        "state-overlay.star",
+        f'ocx.run("shtool", "--version", env={{"{key}": "forged-value"}})\n',
+    )
+
+    result = _run_script(ocx, bundle, meta, pkg, script=smoke)
+
+    assert result.returncode == 1, (
+        f"S-017: an env overlay naming {key} must exit 1 (Failed), got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert key in result.stderr + result.stdout, (
+        f"S-017: the refusal must name the reserved key {key}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_s017_env_read_of_the_state_is_refused(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``ocx.env("__OCX_ENV_STATE")`` reads as unset, though the host holds the state.
+
+    The caller's own state rides into the composed base env, so the host does hold one;
+    the script must see ``None``, as it does for the pin and the credential keys.
+    """
+    bundle, meta, pkg = script_test_package
+    smoke = _write_script(
+        tmp_path,
+        "state-read.star",
+        'expect.true(ocx.env("__OCX_ENV_STATE") == None, msg="the state must read as unset")\n'
+        'expect.true(ocx.env("OCX_BINARY_PIN") == None, msg="the pin must read as unset")\n',
+    )
+
+    result = _run_script(ocx, bundle, meta, pkg, script=smoke)
+
+    assert result.returncode == 0, (
+        f"S-017: reserved reads must return None; got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
 def test_u16_env_overlay_non_reserved_and_resolution_invariance(
     script_test_package: tuple[Path, Path, PackageInfo],
     ocx: OcxRunner,

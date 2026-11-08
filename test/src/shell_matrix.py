@@ -25,12 +25,15 @@ The session model is the point. A test builds one script that runs in **one**
 shell process and calls ``ocx self activate --reconcile`` between ``cd``s — the
 same thing the emitted prompt hook does — so the ``__OCX_ENV_STATE`` carrier
 propagates the way it does in a real session rather than being threaded by the
-test. Nushell is the exception: it has no string ``eval`` (A-24), so its snippets
-must go through :func:`eval_snippet`, one prompt per process.
+test. Nushell has no string ``eval``: its :func:`prompt` applies the JSON plan with the
+applier the shipped ``env.nu`` carries, and a pre-captured stream goes through :func:`eval_snippet`.
 """
 
 from __future__ import annotations
 
+import atexit
+import base64
+import functools
 import hashlib
 import json
 import os
@@ -39,7 +42,9 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,6 +62,43 @@ _MARK = "@@"
 # module stays stdlib-only; `test_shell_reconcile.py` asserts it against the
 # binary's own `ocx shell state` output, so a rename cannot go unnoticed.
 CARRIER = "__OCX_ENV_STATE"
+
+# The carrier's wire format: `header "." payload`, payload = base64url-nopad(zlib(compact JSON)).
+# `src/exec_state.py` is the full codec; this is the reader the shell zoo can import, because the
+# zoo mounts this file and not `src/`. A test that needs to *craft* a value uses the full codec.
+CARRIER_MAJOR = 2
+
+
+def decode_carrier(value: str) -> dict:
+    """The payload of a readable ``__OCX_ENV_STATE`` value, or a failure naming the step that broke.
+
+    Reads the current major only. Raising rather than returning ``None`` keeps a test that decodes
+    a value it expected to be readable from passing on an empty dict.
+    """
+    head, dot, payload = value.partition(".")
+    assert dot, f"no header separator in {value[:24]!r}"
+    major = head.split(";", 1)[0]
+    assert major == str(CARRIER_MAJOR), f"carrier major {major!r}, this suite reads {CARRIER_MAJOR}: {value[:24]!r}"
+    assert payload, "the payload is empty: the rung-3 marker, not a state"
+    raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    state = json.loads(zlib.decompress(raw))
+    assert isinstance(state, dict), f"carrier payload is {type(state).__name__}, not an object"
+    return state
+
+
+def incompressible_text(index: int, length: int) -> str:
+    """``length`` hex characters that zlib cannot shrink, distinct per ``index``.
+
+    The carrier is compressed before it is measured against the cap, so a fixture that wants an
+    over-cap state needs values the compressor cannot fold; repeated padding folds to a few bytes.
+    """
+    out = ""
+    block = hashlib.sha256(f"incompressible-{index}".encode()).hexdigest()
+    while len(out) < length:
+        out += block
+        block = hashlib.sha256(block.encode()).hexdigest()
+    return out[:length]
+
 
 # A clean, minimal base PATH. Every *project* bin dir is deliberately absent, so
 # "the reconciler put it there" is never vacuous. The two session directories
@@ -148,7 +190,7 @@ class Arm:
 
     evaluates_strings: bool = True
     """Whether the arm can ``eval`` a *string* produced at run time. False for
-    nushell (A-24), which therefore cannot host a multi-prompt session."""
+    nushell, which therefore cannot host a multi-prompt session."""
 
 
 ARMS: dict[str, Arm] = {
@@ -175,6 +217,33 @@ SESSION_SHELLS: tuple[str, ...] = tuple(name for name in ALL_SHELLS if ARMS[name
 # ---------------------------------------------------------------------------
 # Binary + environment
 # ---------------------------------------------------------------------------
+
+
+# One private copy of each seeded binary per process, hard-linked into every test's
+# install root: a debug binary is hundreds of megabytes, so a copy per test fills the disk.
+_SHARED_BINARIES: dict[Path, Path] = {}
+
+
+def seed_binary(source: Path, destination: Path) -> None:
+    """Place `source` at `destination` as an executable without a fresh copy per call.
+
+    Falls back to a copy where a link is impossible (another filesystem).
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.unlink(missing_ok=True)
+    shared = _SHARED_BINARIES.get(source)
+    if shared is None or not shared.exists():
+        directory = Path(tempfile.mkdtemp(prefix="ocx-seed-binary-"))
+        atexit.register(shutil.rmtree, directory, ignore_errors=True)
+        shared = directory / source.name
+        shutil.copy2(source, shared)
+        shared.chmod(0o755)
+        _SHARED_BINARIES[source] = shared
+    try:
+        os.link(shared, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    destination.chmod(0o755)
 
 
 def ocx_binary() -> Path | None:
@@ -513,6 +582,38 @@ def cd_to(shell: str, path: Path | str) -> str:
     return f"cd {literal}"
 
 
+@functools.cache
+def shipped_nu_plan_apply() -> str:
+    """The plan applier ``ocx self setup`` writes into ``env.nu``, read from the binary under test.
+
+    One line, ending in the ``removes`` loop; it reads the plan from ``$_ocx_plan``. Taken from the
+    file the binary writes rather than restated here, so a change to the shipped applier is
+    exercised by every nushell row and cannot drift from a copy in this module.
+    """
+    ocx = ocx_binary()
+    assert ocx is not None, "no ocx binary under test, so there is no env.nu to read the applier from"
+    scratch = Path(tempfile.mkdtemp(prefix="ocx-nu-applier-"))
+    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    ocx_home = scratch / ".ocx"
+    # The offline `self setup` resolves `already_present` only when a candidate is seeded.
+    seed_binary(ocx, ocx_home / "symlinks/ocx.sh/ocx/cli/current/content/bin" / ocx.name)
+    env = clean_env(scratch, "/bin/sh", ocx_home=ocx_home, SHELL="/usr/bin/nu")
+    done = subprocess.run(
+        [str(ocx), "--offline", "self", "setup"],
+        capture_output=True,
+        check=False,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert done.returncode == 0, f"self setup must succeed to write env.nu; stderr:\n{done.stderr}"
+    env_nu = (ocx_home / "env.nu").read_text(encoding="utf-8")
+    for line in env_nu.splitlines():
+        if line.lstrip().startswith("if ($_ocx_plan.v? | default 0)"):
+            return line.strip()
+    raise AssertionError(f"env.nu carries no plan applier line:\n{env_nu}")
+
+
 def prompt(shell: str, *, extra: str = "") -> str:
     """One simulated prompt: run the reconciler and evaluate what it emits.
 
@@ -520,6 +621,11 @@ def prompt(shell: str, *, extra: str = "") -> str:
     where it wants. ``extra`` appends flags to the ocx invocation.
     """
     args = f"--offline self activate --reconcile --shell={shell} {extra}".strip()
+    if shell == "nushell":
+        # Nushell has no string eval: the plan comes back as JSON and the applier
+        # is the one the shipped `env.nu` runs, so a row exercises the shipped code.
+        json_args = f"--offline --format json self activate --reconcile --shell=nushell {extra}".strip()
+        return f"let _ocx_plan = (^$__ocx_exe {json_args} | from json)\n{shipped_nu_plan_apply()}"
     if shell == "pwsh":
         return (
             f"$__ocx_out = (& $__ocx_exe {args} | Out-String)\n"
@@ -534,10 +640,6 @@ def prompt(shell: str, *, extra: str = "") -> str:
         return (
             f"var __ocx_out = ((external $__ocx_exe) {args} | slurp)\n"
             "if (not-eq $__ocx_out '') { eval $__ocx_out }"
-        )
-    if shell == "nushell":
-        raise AssertionError(
-            "nushell has no string eval (A-24): drive it through eval_snippet, one prompt per process"
         )
     return f'eval "$("$__ocx_exe" {args})"'
 
@@ -760,6 +862,7 @@ def pty_session(
     cwd: Path,
     env: dict[str, str],
     timeout: int = 120,
+    controlling_tty: bool = False,
 ) -> str:
     """Run ``command`` on a real pty and return the whole transcript.
 
@@ -817,6 +920,11 @@ def pty_session(
         env=env,
         close_fds=True,
         start_new_session=True,
+        # fish refuses an interactive start with no controlling terminal ("No TTY for interactive
+        # shell") and then reads nothing. Opt-in: a fish login session passes without one and breaks with one.
+        # The helper spawns from a single-threaded test process; TIOCSCTTY in the child is the only
+        # way to hand it a controlling terminal, which no Popen argument expresses.
+        preexec_fn=(lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0)) if controlling_tty else None,  # noqa: PLW1509
     )
     os.close(slave)
     collected = bytearray()

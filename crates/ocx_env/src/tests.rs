@@ -228,3 +228,35 @@ fn set_raw_refuses_a_declared_name() {
 fn remove_raw_refuses_a_declared_name() {
     overrides::lock().remove_raw("OCX_HOME");
 }
+
+#[test]
+fn a_withdrawn_row_is_never_honoured_and_never_refuses() {
+    static ROW: &[Retired] = &[Retired {
+        name: "OCX_SYNTHETIC_WITHDRAWN",
+        replacement: Replacement::Flag("--synthetic"),
+        change: Change::Withdrawn,
+        status: Status::Window {
+            removal: REMOVAL_RELEASE,
+        },
+    }];
+    // A second row aims a Withdrawn spelling at a real variable: still not read through it.
+    static AIMED: &[Retired] = &[Retired {
+        name: "OCX_SYNTHETIC_WITHDRAWN",
+        replacement: Replacement::Env(&OCX_QUIET),
+        change: Change::Withdrawn,
+        status: Status::Window {
+            removal: REMOVAL_RELEASE,
+        },
+    }];
+    let env = overrides::lock();
+    env.remove(&OCX_QUIET);
+    env.set_raw("OCX_SYNTHETIC_WITHDRAWN", "1");
+
+    env.retire(ROW);
+    let hits = retired_hits(&snapshot());
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].replacement.name(), "--synthetic");
+
+    env.retire(AIMED);
+    assert_eq!(OCX_QUIET.get(), None, "a Withdrawn spelling is not an alias");
+}

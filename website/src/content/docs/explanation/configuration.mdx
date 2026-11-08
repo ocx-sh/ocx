@@ -172,7 +172,9 @@ OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
 
 Like `OCX_NO_CONFIG`, it exists only as an environment variable. A `--no-project` flag would add surface without solving a new problem, since CI already injects policy through the environment.
 
-OCX forwards `OCX_NO_PROJECT` to every subprocess it spawns. Generated launchers and nested `ocx exec` calls therefore skip project discovery too, instead of adopting a project the parent deliberately had none of. The one exception is the example above. When the invocation also carries an explicit `--project`, OCX forwards the path and not the variable. A child reads the prune before it reads `OCX_PROJECT` and would discard the path.
+The received value reaches children through [`__OCX_ENV_STATE`][env-ocx-env-state]. Generated launchers and nested `ocx exec` calls therefore skip project discovery too, instead of adopting a project the parent deliberately had none of. Under `--clean` the variable itself is absent and the state carries the prune.
+
+The one exception is the example above. When the invocation also carries an explicit `--project`, the state carries the path and not the prune. A child would otherwise read the prune before `OCX_PROJECT` and discard the path.
 
 ## Worked Examples \{#examples\}
 
@@ -278,6 +280,7 @@ For scripts, CI pipelines and programmatic tools, include the registry in every 
 [env-ref]: ../reference/environment.md
 [env-ocx-toolchain-activate]: ../reference/environment.md#ocx-toolchain-activate
 [env-ocx-toolchain-pinned]: ../reference/environment.md#ocx-toolchain-pinned
+[env-ocx-env-state]: ../reference/environment.md#ocx-env-state
 [env-ocx-toolchain-dir]: ../reference/environment.md#ocx-toolchain_dir
 [env-ocx-lazy-mode]: ../reference/environment.md#ocx-lazy-mode
 [env-ocx-lazy-report]: ../reference/environment.md#ocx-lazy-report

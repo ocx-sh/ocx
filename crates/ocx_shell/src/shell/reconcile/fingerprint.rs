@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The watch-set fingerprint compared against [`super::Ledger::fp`] to decide whether the environment is stale.
+//! The watch-set fingerprint compared against [`SessionCache::fp`](ocx_config::exec_state::SessionCache::fp) to decide whether the environment is stale.
 
 use std::path::{Path, PathBuf};
 
-/// Fold the watch set into the ledger's `fp`, the **only** definition of what makes an environment stale.
+/// Fold the watch set into the session cache's `fp`, the **only** definition of what makes an environment stale.
 ///
 /// Blocking: one `stat` per member.
 pub fn fingerprint(
@@ -64,16 +64,59 @@ pub fn current_fingerprint(watch_paths: &[PathBuf], project_dir: Option<&Path>) 
     )
 }
 
-/// The **membership** digest of the ordered watch-path list, recorded in [`Ledger::ws`](super::Ledger::ws).
+/// The watch set with each member's presence sampled **once**.
 ///
-/// It moves only when the list does, which is when the gate baked into the hook body is out of date.
+/// The membership digest and the baked gate both read presence from this one snapshot; sampling twice lets a
+/// file that vanishes between the samples bake a gate that disagrees with the digest recorded beside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchSet {
+    members: Vec<(PathBuf, bool)>,
+}
+
+impl WatchSet {
+    /// Stat every member once. Blocking: call it from `spawn_blocking` on the async runtime.
+    #[must_use]
+    pub fn sample(paths: Vec<PathBuf>) -> Self {
+        let members = paths
+            .into_iter()
+            .map(|path| {
+                let present = path.exists();
+                (path, present)
+            })
+            .collect();
+        Self { members }
+    }
+
+    /// A snapshot with presence given rather than stat'd, for paths a filesystem cannot hold (macOS rejects
+    /// non-UTF-8 names).
+    #[cfg(test)]
+    pub(crate) fn with_presence(members: Vec<(PathBuf, bool)>) -> Self {
+        Self { members }
+    }
+
+    /// The member paths, in order, for the content fold.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.members.iter().map(|(path, _)| path.as_path())
+    }
+
+    /// Each member with the presence recorded at sampling.
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, bool)> {
+        self.members.iter().map(|(path, present)| (path.as_path(), *present))
+    }
+}
+
+/// The **membership** digest of the ordered watch-path list, recorded in [`SessionCache::ws`](ocx_config::exec_state::SessionCache::ws).
+///
+/// It moves when the list does or when a member appears or vanishes (the gate bakes a presence term per
+/// existing member), which is when the gate baked into the hook body is out of date. Content is not folded.
 #[must_use]
-pub fn watch_set_fingerprint(watch_paths: &[PathBuf]) -> String {
+pub fn watch_set_fingerprint(watch: &WatchSet) -> String {
     use sha2::Digest as _;
 
     let mut hasher = sha2::Sha256::new();
-    for path in watch_paths {
+    for (path, present) in watch.iter() {
         fold(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
+        fold(&mut hasher, "present", &[u8::from(present)]);
     }
     hex::encode(hasher.finalize())[..16].to_owned()
 }
@@ -86,6 +129,24 @@ pub fn watch_paths(
     project_config: Option<&Path>,
     project_key: Option<&str>,
     recorded_tiers: Option<&[PathBuf]>,
+) -> Vec<PathBuf> {
+    watch_paths_in(
+        file_structure,
+        project_config,
+        project_key,
+        recorded_tiers,
+        ocx_config::exec_state::received::policy(),
+    )
+}
+
+/// [`watch_paths`] with the received policy named: `OCX_NO_CONFIG` at its env tier decides which
+/// tiers the loader read, so it decides which the set derives.
+fn watch_paths_in(
+    file_structure: &ocx_store::file_structure::FileStructure,
+    project_config: Option<&Path>,
+    project_key: Option<&str>,
+    recorded_tiers: Option<&[PathBuf]>,
+    received: Option<&ocx_config::exec_state::Policy>,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(9);
 
@@ -111,7 +172,11 @@ pub fn watch_paths(
         None => {
             // Unconditional, as in the loader: `OCX_NO_CONFIG` does not prune the system tier's locked sections.
             paths.push(ocx_config::loader::ConfigLoader::system_path());
-            if !ocx_env::OCX_NO_CONFIG.bool_or(false).unwrap_or(false) {
+            let no_config = ocx_config::exec_state::received::relaxing_bool(
+                &ocx_env::OCX_NO_CONFIG,
+                received.and_then(|policy| policy.no_config),
+            );
+            if !no_config {
                 paths.extend(ocx_config::loader::ConfigLoader::user_path());
                 paths.extend(ocx_config::loader::ConfigLoader::home_path());
             }
@@ -395,12 +460,8 @@ mod watch_set_fingerprint_tests {
     /// only signal that says the shell's baked gate is out of date (#347).
     #[test]
     fn a_changed_membership_changes_the_digest() {
-        let before = [PathBuf::from("/w/ocx.toml"), PathBuf::from("/w/ocx.lock")];
-        let after = [
-            PathBuf::from("/w/ocx.toml"),
-            PathBuf::from("/w/ocx.lock"),
-            PathBuf::from("/w/sub/ocx.toml"),
-        ];
+        let before = sampled(&["/w/ocx.toml", "/w/ocx.lock"]);
+        let after = sampled(&["/w/ocx.toml", "/w/ocx.lock", "/w/sub/ocx.toml"]);
 
         assert_ne!(
             watch_set_fingerprint(&before),
@@ -409,7 +470,7 @@ mod watch_set_fingerprint_tests {
         );
         // Built again from scratch rather than cloned: the digest has to depend
         // on the paths, not on the identity of the slice it was handed.
-        let same_members = [PathBuf::from("/w/ocx.toml"), PathBuf::from("/w/ocx.lock")];
+        let same_members = sampled(&["/w/ocx.toml", "/w/ocx.lock"]);
         assert_eq!(
             watch_set_fingerprint(&before),
             watch_set_fingerprint(&same_members),
@@ -422,10 +483,29 @@ mod watch_set_fingerprint_tests {
     /// gates and the comparison has to say so.
     #[test]
     fn order_is_part_of_the_membership() {
-        let one = [PathBuf::from("/w/a"), PathBuf::from("/w/b")];
-        let other = [PathBuf::from("/w/b"), PathBuf::from("/w/a")];
+        let one = sampled(&["/w/a", "/w/b"]);
+        let other = sampled(&["/w/b", "/w/a"]);
 
         assert_ne!(watch_set_fingerprint(&one), watch_set_fingerprint(&other));
+    }
+
+    /// A member that appears or vanishes changes the digest: the gate bakes a presence term per existing member.
+    #[test]
+    fn a_member_appearing_or_vanishing_changes_the_digest() {
+        let directory = tempfile::tempdir().expect("a temp dir");
+        let member = directory.path().join("ocx.lock");
+
+        let absent = watch_set_fingerprint(&WatchSet::sample(vec![member.clone()]));
+        std::fs::write(&member, b"x").expect("write");
+        let present = watch_set_fingerprint(&WatchSet::sample(vec![member.clone()]));
+        std::fs::remove_file(&member).expect("remove");
+
+        assert_ne!(absent, present, "appearing must move the digest");
+        assert_eq!(
+            absent,
+            watch_set_fingerprint(&WatchSet::sample(vec![member])),
+            "vanishing must move it back"
+        );
     }
 
     /// It folds **names only**. A member whose content moves is
@@ -439,9 +519,9 @@ mod watch_set_fingerprint_tests {
         std::fs::write(&member, b"one").expect("write");
         let watch = [member.clone()];
 
-        let before = watch_set_fingerprint(&watch);
+        let before = watch_set_fingerprint(&WatchSet::sample(watch.to_vec()));
         std::fs::write(&member, b"a different length entirely").expect("rewrite");
-        let after = watch_set_fingerprint(&watch);
+        let after = watch_set_fingerprint(&WatchSet::sample(watch.to_vec()));
 
         assert_eq!(before, after, "content is `fingerprint`'s job, never this one");
         // …and the pairing that proves the sentence above is not vacuous: the
@@ -460,9 +540,40 @@ mod watch_set_fingerprint_tests {
     /// no `stat` is reached at all, which is why this is free on the hot path.
     #[test]
     fn an_absent_member_still_folds() {
-        let absent = [PathBuf::from("/definitely/not/here/ocx.toml")];
+        let absent = sampled(&["/definitely/not/here/ocx.toml"]);
         assert_eq!(watch_set_fingerprint(&absent).len(), 16);
-        assert_ne!(watch_set_fingerprint(&absent), watch_set_fingerprint(&[]));
+        assert_ne!(
+            watch_set_fingerprint(&absent),
+            watch_set_fingerprint(&WatchSet::default())
+        );
+    }
+
+    /// Presence is read once, at sampling: a member that vanishes afterwards still folds as it was seen, so
+    /// the digest and a gate baked from the same snapshot cannot disagree.
+    #[test]
+    fn presence_is_the_snapshot_not_the_disk() {
+        let directory = tempfile::tempdir().expect("a temp dir");
+        let member = directory.path().join("ocx.lock");
+        std::fs::write(&member, b"x").expect("write");
+        let snapshot = WatchSet::sample(vec![member.clone()]);
+        let seen = watch_set_fingerprint(&snapshot);
+
+        std::fs::remove_file(&member).expect("remove");
+
+        assert_eq!(
+            seen,
+            watch_set_fingerprint(&snapshot),
+            "the digest must come from the sampled presence, not a second stat"
+        );
+        assert_ne!(
+            seen,
+            watch_set_fingerprint(&WatchSet::sample(vec![member])),
+            "a fresh sample after the removal must differ, or the pairing above proves nothing"
+        );
+    }
+
+    fn sampled(paths: &[&str]) -> WatchSet {
+        WatchSet::sample(paths.iter().map(PathBuf::from).collect())
     }
 }
 
@@ -581,6 +692,38 @@ mod watch_path_tests {
     ///
     /// Red state: put `dir.join("ocx.toml")` back and the first assertion
     /// fails.
+    #[test]
+    fn watch_paths_follow_a_received_no_config_when_the_variable_is_unset() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_CONFIG);
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
+        let received = ocx_config::exec_state::Policy {
+            no_config: Some(true),
+            ..Default::default()
+        };
+        let hermetic = watch_paths_in(&file_structure, None, None, None, Some(&received));
+        let open = watch_paths_in(&file_structure, None, None, None, None);
+        let pruned: Vec<PathBuf> = ocx_config::loader::ConfigLoader::user_path()
+            .into_iter()
+            .chain(ocx_config::loader::ConfigLoader::home_path())
+            .collect();
+        assert!(!pruned.is_empty(), "the control needs a tier that no_config prunes");
+        for path in pruned {
+            assert!(
+                open.contains(&path),
+                "control: {} is watched without no_config",
+                path.display()
+            );
+            assert!(
+                !hermetic.contains(&path),
+                "a received no_config prunes {} from the load, so from the watch set",
+                path.display()
+            );
+        }
+    }
+
+    /// EC-SCOPE-010: the watch set names the resolved project file, so an `OCX_PROJECT` with another filename reconciles on edit.
     #[test]
     fn watch_paths_name_the_resolved_project_file_not_a_hardcoded_ocx_toml() {
         let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));

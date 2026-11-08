@@ -64,6 +64,7 @@ from uuid import uuid4
 import pytest
 
 from src import shell_matrix as matrix
+from src.exec_state import default_state, encode
 from src.helpers import make_package, write_ocx_toml
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
@@ -1084,23 +1085,19 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     over every other project's trampolines. Both a sibling's directory and the
     root itself are planted on ``PATH`` and must survive — while this project's
     own stale segment, which *is* under its own home, is removed.
+
+    The repair removes only for a session whose records the writer dropped at
+    rung 2 with no inherited scope (``adr_exec_env_model.md`` "Owned-prefix
+    repair"), so the session starts from a state marked ``all_applied_dropped``;
+    the control run without it keeps the stale segment, proving the mark arms it.
     """
-    # Under the arena's `$HOME`, not under `tmp_path`: C-017 refuses a root that
-    # is a descendant of neither `$HOME` nor `$OCX_HOME`, and the shell runs with
-    # the arena's home. `$OCX_HOME` is not an option — it is already an owned
-    # prefix, so every planted segment below would be owned for the wrong reason
-    # and the row would pass while proving nothing.
-    #
-    # The runner has to be moved onto that home as well, and this is the whole
-    # reason the line exists: C-017 is evaluated against the **process** `$HOME`,
-    # and `OcxRunner.env` carries the real host one. Every `ocx` this row runs
-    # outside a shell — `package create`, `lock`, `pull`, `shell state` — is
-    # therefore judged against `/home/<user>`, so the row passed only while
-    # pytest's basetemp happened to sit under it. Measured: with
-    # `--basetemp=/tmp/…` the first `ocx package create` exits 78 naming this
-    # very root, and with the assignment below it passes from either basetemp.
+    # Under the arena's `$HOME`, not `tmp_path` or `$OCX_HOME` (already owned, so
+    # the row would prove nothing): C-017 refuses a root under neither. The
+    # runner moves onto that home too: C-017 judges the process `$HOME`, else
+    # `package create` exits 78 under `--basetemp=/tmp/…`.
     root = arena.home / "toolchain-root"
     root.mkdir()
+    root.chmod(0o755)
     ocx.env["HOME"] = str(arena.home)
     write_toolchain_dir_config(ocx, root)
 
@@ -1116,16 +1113,24 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     stale = _real(shell_bin(home))
     planted = os.pathsep.join([str(root), str(shell_bin(sibling_home)), stale])
 
-    result = _session(
-        arena,
-        matrix.cd_to(SHELL, project.directory),
-        matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
-        cwd=project.directory,
-        extra_env={"OCX_TOOLCHAIN_ACTIVATE": "env"},
-        path=planted,
-    )
-    segments = _segments(result)
+    def session_segments(extra_env: dict[str, str]) -> list[str]:
+        return _segments(
+            _session(
+                arena,
+                matrix.cd_to(SHELL, project.directory),
+                matrix.prompt(SHELL),
+                matrix.probe(SHELL, "path", "PATH"),
+                cwd=project.directory,
+                extra_env={"OCX_TOOLCHAIN_ACTIVATE": "env", **extra_env},
+                path=planted,
+            )
+        )
+
+    control = session_segments({})
+    assert stale in control, f"a fresh session has no authority to repair an unrecorded segment: {control}"
+
+    armed = encode({**default_state(), "truncated": "all_applied_dropped"})
+    segments = session_segments({"__OCX_ENV_STATE": armed})
     assert _real(root) in segments, (
         f"the bare `toolchain_dir` root holds other projects' homes and may never be owned: {segments}"
     )

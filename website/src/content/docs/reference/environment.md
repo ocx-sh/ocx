@@ -112,7 +112,8 @@ launcher runs the binary that installed the package. Unset, launchers fall back 
 `$PATH`-resolved `ocx`; set it by hand only to pin a specific binary.
 
 The Windows `.exe` shim treats a defined but empty value as defined, the Unix launcher's
-`${OCX_BINARY_PIN:-ocx}` as unset.
+`${OCX_BINARY_PIN:-ocx}` as unset. The value is the installed `ocx` path when the running
+binary is that one and the path is safely owned, else the running binary; never empty.
 
 - Visibility: public
 - Value: `path`
@@ -184,19 +185,6 @@ empty value clears an inherited setting rather than travelling onward.
 - Value: `string`
 - See: [Configure ocx](../guides/configure-ocx.mdx)
 
-## `OCX_ENV` {#ocx-env}
-
-JSON envelope of the resolved project `[env]` entries plus `ocx exec --env` overrides, or a launcher re-entry silently reverts them.
-
-Decode fails closed on the whole envelope (reserved key, unknown `kind`): a forged entry
-can set a value, so the leniency of `OCX_PATCHES` must not be copied.
-
-Keys starting `OCX_` or `__OCX_` are refused in `ocx.toml` `[env]` (exit 78) and in `--env` (exit 64).
-
-- Visibility: public
-- Value: `json`
-- See: [Environments](../explanation/environments.mdx)
-
 ## `OCX_EXTRA_CA_CERTS` {#ocx-extra-ca-certs}
 
 Extra CA roots — a path or inline PEM (contains `-----BEGIN`); empty is unset.
@@ -229,29 +217,25 @@ are unaffected. The flag takes precedence; combining with `OCX_REMOTE` is a usag
 
 ## `OCX_GLOBAL` {#ocx-global}
 
-Boolean — select the global toolchain (`$OCX_HOME/ocx.toml`). Mirrors `--global`.
+Withdrawn — no longer read; pass `--global` instead.
 
-Toolchain-tier commands (`add`, `remove`, `lock`, `update`, `pull`, `exec`, `env`) target
-`$OCX_HOME/ocx.toml` instead of a discovered project, with no implicit home-tier fallback
-otherwise. Setting it together with `OCX_PROJECT` is a usage error (exit 64).
+A set value is never honoured. Each process prints one notice naming `--global` and carries on, so a leaked environment keeps working.
 
-The global toolchain never composes into project-tier resolution, and `ocx exec` never sees
-global packages. A child ocx, a launcher re-entry included, does not inherit it and can take
-`--project`.
+The name stays declared until 0.7 only as the target of that notice.
 
 - Visibility: public
 - Value: `bool`
-- Flag: [`--global`](./command-line/index.md#global-flag)
 
 ## `OCX_HOME` {#ocx-home}
 
 The OCX data root — `$OCX_HOME`, else `~/.ocx`.
 
 Forwarded set-always as the resolved root, or an `ocx exec --clean` child (no `HOME`)
-resolves another root and misses the package the parent just materialized.
+resolves another root and misses the package the parent just materialized. The files
+`ocx self setup` writes may export it.
 
 The project walk skips an `ocx.toml` sitting exactly here. That file is the global
-toolchain manifest, reached only through `--global` or `OCX_GLOBAL`, never by upward discovery.
+toolchain manifest, reached only through `--global`, never by upward discovery.
 
 - Visibility: public
 - Value: `path`
@@ -602,8 +586,7 @@ this variable, the CWD walk; `OCX_NO_PROJECT` prunes the last two.
 A path that does not exist exits 79, a directory with no `ocx.toml` exits 64, an unreadable
 one exits 74. Empty is unset.
 
-Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`. A child ocx, a
-launcher re-entry included, does not inherit it and discovers its own project.
+Explicit paths follow symlinks; the CWD walk rejects a symlinked `ocx.toml`.
 
 - Visibility: public
 - Value: `path`
@@ -791,7 +774,7 @@ Variables OCX writes and reads for its own plumbing. Do not set them by hand unl
 
 ## `__OCX_CREDENTIAL_HELPER` {#ocx-credential-helper}
 
-Set by ocx on every credential helper it starts; an ocx running under it never downloads.
+Set by ocx on every credential helper it starts until 0.7; an ocx running under it never downloads.
 
 A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that
 ocx would install the package the outer ocx is still pulling and wait on its lock. Under the
@@ -812,41 +795,27 @@ space-joined; never set it by hand.
 
 ## `__OCX_ENV_STATE` {#ocx-env-state}
 
-The per-prompt reconciler's private ledger of what it last applied to the shell.
+The execution state: what ocx last applied to the shell, and the policy a parent ocx passed down.
 
-The ledger that tells a value ocx wrote from one you typed. Crossing into the interactive shell makes it a user-facing contract despite the private name.
+The transport state: it tells a value ocx wrote from one you typed, and a child ocx reads it to see what the shell applied. Crossing into the interactive shell makes it a user-facing contract despite the private name.
 
-`unset __OCX_ENV_STATE` (`unset-env` in elvish) repairs a stale or corrupted shell, at the cost of the reconciler's memory of what it may restore.
+`unset __OCX_ENV_STATE` (`unset-env` in elvish) means forget: the next prompt starts over and leaves the applied values in place.
 
-Reserved: a package cannot declare it and `--env` cannot set it.
-
-- Visibility: plumbing
-- Value: `string`
-
-## `__OCX_EXEC_SCOPE` {#ocx-exec-scope}
-
-Set by `ocx exec` in the child it composes: the project directory the environment came from.
-
-While present, `ocx self activate` and its per-prompt `--reconcile` arm leave the
-environment alone, so an interactive shell started by `ocx exec -g <group>` keeps the
-groups it was given instead of the global and default sets its rc file would apply.
+A reader refuses any applied record on a credential key or an `OCX_AUTH_*` key, because reverting a
+forged record would drop your credential. Reserved: a package cannot declare it and `--env` cannot set it.
 
 - Visibility: plumbing
 - Value: `string`
 
-## `__OCX_LAUNCH_IDENTITIES` {#ocx-launch-identities}
+## `__OCX_ENV_STOOD_DOWN` {#ocx-env-stood-down}
 
-JSON map from a content digest to the `registry/repository[:tag]` names one composition resolved it under; read by `ocx launcher exec` to match targeted patch rules.
+A hook-local copy of a stood-down `__OCX_ENV_STATE`, never transported.
 
-Written by ocx only while a `[patches]` tier is in effect; reserved, so `[env]` and
-`--env` cannot set it. Never forwarded explicitly, or a launcher nested under another
-launcher loses the outer composition's names.
-
-The per-prompt `ocx:` summary line never lists it, nor any other `__OCX_*` key.
+Kept by a shell hook that cannot hold an unexported variable across prompts (elvish); removed at
+every projected spawn, so it never reaches a child. Never set it by hand.
 
 - Visibility: plumbing
-- Value: `json`
-- See: [Execution records](../explanation/execution-records.md)
+- Value: `string`
 
 ## External {#external}
 

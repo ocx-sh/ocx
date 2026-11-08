@@ -81,7 +81,7 @@ impl Upgrade {
         if context.is_offline() {
             return Err(ocx_package_manager::Error::OfflineMode.into());
         }
-        if context.config_view().frozen {
+        if context.frozen() {
             return Err(policy_blocked("ocx upgrade").into());
         }
         let selected = select_touched(guard.config(), &self.groups, &self.names)?;

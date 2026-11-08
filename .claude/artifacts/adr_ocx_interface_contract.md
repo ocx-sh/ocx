@@ -345,7 +345,21 @@ Each type has one `JsonSchema` impl with a fixed `schema_name` and `schema_id`.
 - Handshake over `ocx --format json version`; minimum `ocx` = the contract release recorded in the generated `contract` table; a command whose own version or any output root version differs is **refused before spawning**.
 - Commands with a `report_then_fail` mode return an outcome carrying both the typed report and the exit code.
 - Argv: every flag value as one `--long=value` token; a positional starting with `-` is refused unless the grammar marks it `allow_hyphen_values`; trailing operands go after `--` where the grammar declares a terminator or `last`; secret-on-stdin flags take a bytes parameter, never argv.
-- Spawn: absolute binary resolved once (explicit path, then `OCX_BINARY_PIN`, then `PATH`; Windows resolves `ocx.exe` only); `OCX_*`/`__OCX_*` removed from the child env unless passed through explicitly; stdin closed by default; bounded output; cancellation interrupts, then kills after a grace period. The handshake is a compatibility check, not a trust boundary.
+- Spawn: absolute binary resolved once (explicit path, then `OCX_BINARY_PIN`, then `PATH`; Windows resolves `ocx.exe` only); the child env is the parent's with the caller's explicit pairs and `OCX_BINARY_PIN` added, nothing removed (amendment 2026-11-07, D-45); stdin closed by default; bounded output; cancellation interrupts, then kills after a grace period. The handshake is a compatibility check, not a trust boundary.
+
+**Amendment 2026-11-07 (plan `plan_exec_env_model.md`, pipeline SDK; `adr_exec_env_model.md` § C12, plan decisions D-02 and D-14).** The spawn rule above is now an exact, fixture-checked spec. The child environment is built from the parent snapshot, the caller's explicit pairs and the binary the SDK runs:
+
+| Rule | Spec |
+|---|---|
+| Inherited `OCX_*` and `__OCX_*` | Passed through unchanged, like every other parent variable. The caller is responsible for its environment; an explicit `ocx exec` composes what it was asked for whatever `__OCX_ENV_STATE` it inherits (D-45, superseding the strip of D-02) |
+| Caller pairs | Applied after the parent. A caller key replaces a parent entry of exactly the same key |
+| `OCX_BINARY_PIN` | The only public `OCX_*` the SDK writes: the absolute path of the binary it runs, written last, replacing an inherited or caller entry of that name in any letter case (a Windows `ocx_binary_pin` is replaced, never duplicated), never empty |
+| Everything else | Inherited unchanged, in the parent's order, nothing removed |
+| Reading received narrowing | Optional: an SDK may parse the frozen header grammar of the state without decoding its payload |
+
+**Amendment 2026-11-07 (D-45, supersedes the strip of D-02/D-43).** The SDK removes nothing from the caller's environment; the table above is the amended rule, and `inherited_ocx_variables_pass_through` replaces the former strip case in the fixture.
+
+The fixture is `crates/ocx_schema/contract/conformance/spawn/cases.json` (parent environment, caller pairs, binary, expected child environment, compared without regard to order). It has no `expect.json`, so the report corpus walk skips it (D-14). The generated Rust spawner is run over every case by `crates/ocx_sdkgen/tests/spawn_conformance.rs`; a sibling SDK implements the same table and runs the same file.
 
 ### Don't-own assessment
 
@@ -564,3 +578,5 @@ Counts: 94 findings, 47 after merging duplicates. A 86 (generator ownership leav
 | 2026-10-03 | Architect (Opus) | Validation fixes: B1 strict mirror decode + per-root V20; W1–W9; S1–S10; Accepted |
 | 2026-10-03 | hex-plan (Opus) | Plan-review amendments: roots 56 → 54 (nested-only `PackageInspect`/`PackageDescription`); `waivers/<area>.toml`; gate target always built, live case guarded by the baseline lint; byte lint never deleted, inert once the gate is live |
 | 2026-10-04 | hex-execute (Opus) | § Go/no-go outcome: phase 2 goes with Option D; oasdiff not adopted; criterion (a) partially met (mirror deferred per plan D-17); open question 1 and the Don't-own rows updated |
+| 2026-11-07 | hex-execute (Sonnet) | SDK spawn contract amendment: exact child-environment spec (`__OCX_ENV_STATE` stripped, user `OCX_*` stripped, pin written last) and the `conformance/spawn/cases.json` fixture (plan_exec_env_model, SDK) |
+| 2026-11-07 | hex-execute (Sonnet) | D-45 amendment: the SDK strips nothing; child = parent, caller pairs, `OCX_BINARY_PIN` last; corpus and generated Rust spawner follow (plan_exec_env_model, A2 SATS) |

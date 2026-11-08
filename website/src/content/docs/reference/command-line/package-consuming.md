@@ -104,9 +104,10 @@ ocx package exec [OPTIONS] <PACKAGES>... <COMMAND>...
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--candidate` |  | Resolve the content path via the installed candidate symlink (`~/.ocx/symlinks/<registry>/<repo>/candidates/<tag>`) |
-| `--clean` |  | Start with a clean environment containing only the package variables, instead of inheriting the current shell environment |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables |
 | `--current` |  | Resolve the content path via the current-selected symlink (`~/.ocx/symlinks/<registry>/<repo>/current`) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
+| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--link` | `PATH` | Resolve the content path via a link written by `ocx package install --link <PATH>` |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |

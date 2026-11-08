@@ -43,6 +43,10 @@
         "type": "string"
       }
     },
+    "envMode": {
+      "description": "How the child's environment related to the one the launching frame received.",
+      "$ref": "#/$defs/EnvMode"
+    },
     "scope": {
       "description": "What the launching frame was scoped to.",
       "$ref": "#/$defs/ScopeBlock"
@@ -69,6 +73,7 @@
     "host",
     "os",
     "executable",
+    "envMode",
     "scope",
     "resolution",
     "packages"
@@ -239,6 +244,26 @@
         }
       }
     },
+    "EnvMode": {
+      "description": "How the child's environment related to the calling one.\n\n`layer` composes on top of it, `isolate` first reverts what ocx applied to it, `clean` starts empty.",
+      "oneOf": [
+        {
+          "description": "Composed on top of the calling environment.",
+          "type": "string",
+          "const": "layer"
+        },
+        {
+          "description": "Every value ocx applied to the calling environment was reverted before composing.",
+          "type": "string",
+          "const": "isolate"
+        },
+        {
+          "description": "Started from an empty environment holding only the composed variables.",
+          "type": "string",
+          "const": "clean"
+        }
+      ]
+    },
     "ScopeBlock": {
       "description": "The record's `scope` block.\n\nInternally tagged on `tier`, matching the three-way union of the published\nshape. The launcher variant carries nothing else: a launcher re-entry has no\nproject context and did not compose the environment itself.",
       "oneOf": [
@@ -275,10 +300,6 @@
               "items": {
                 "type": "string"
               }
-            },
-            "stack": {
-              "description": "Whether `--stack` kept the parent project's environment under this one; omitted when not.",
-              "type": "boolean"
             }
           },
           "required": [

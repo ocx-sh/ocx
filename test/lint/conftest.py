@@ -1,4 +1,4 @@
-"""Admission for the lint tier (plan_test_speed_tiers.md C-008, ADR C-LINT).
+"""Admission for the lint tier (see adr_test_speed_tiers.md).
 
 `test/lint/` holds the structural sweeps: tests that read the tree (sources,
 docs, the acceptance modules themselves) and judge it. They sit outside the
@@ -6,8 +6,7 @@ Bazel acceptance graph on purpose — a sweep's input is every sibling module,
 so a cached verdict over it is stale the moment any sibling changes — and run
 uncached through `task test:lint:structure` instead. That is only cheap and
 only honest while nothing here reaches the binary under test, a registry or
-the task runner, so this file makes each of those routes an error rather than
-a convention:
+the task runner, so this file makes each of those routes an error:
 
 * a test whose fixture closure names a registry- or binary-backed fixture
   errors at setup (`FORBIDDEN_FIXTURES`; the closure, so a helper fixture that
@@ -18,16 +17,18 @@ a convention:
   `test/bin/`, or is `task`, raises before anything spawns — at import time,
   from a fixture of any scope, and through `from subprocess import Popen`
   alike. `git` and `sys.executable` stay open, which is what a sweep needs;
-* the session is budgeted: above `OCX_LINT_BUDGET_SECONDS` (default 30) wall
-  clock it fails, whatever the tests said (S-015).
+* the session is budgeted in CPU seconds: above `OCX_LINT_BUDGET_SECONDS` the
+  summed user+sys time of the controller and every xdist worker fails it,
+  whatever the tests said. Wall time only backs that up, at 5x the budget: a
+  loaded host stretches the clock, not the cost.
 
-`test_lint_tier_guards.py` shows each route red and each control green by
-running this very module as a plugin of a `pytester` session.
+`test_lint_tier_guards.py` shows each route red and each control green.
 """
 
 from __future__ import annotations
 
 import os
+import resource
 import shlex
 import shutil
 import subprocess
@@ -53,12 +54,28 @@ FORBIDDEN_FIXTURES = frozenset(
 TEST_BIN = (Path(__file__).resolve().parents[1] / "bin").resolve()
 FORBIDDEN_PROGRAMS = frozenset({"task", "task.exe"})
 BUDGET_ENV = "OCX_LINT_BUDGET_SECONDS"
-DEFAULT_BUDGET_SECONDS = 30.0
+# Three `-n auto` runs spent 77.1, 77.5 and 87.7 CPU seconds; 1.5x the largest, rounded up to 10.
+DEFAULT_BUDGET_SECONDS = 140.0
+WALL_BACKSTOP_FACTOR = 5
 
-# (start, budget) per session. The budget is read at the start, not the end:
-# a `pytester` run inside a lint test sets it with `monkeypatch`, and the value
-# the session began under is the one it is judged by.
-_CLOCK = pytest.StashKey[tuple[float, float]]()
+# (start wall, start CPU, budget) per session. The budget is read at the
+# start, not the end: a `pytester` run inside a lint test sets it with
+# `monkeypatch`, and the value the session began under is the one it is
+# judged by.
+_CLOCK = pytest.StashKey[tuple[float, float, float]]()
+# CPU seconds each finished xdist worker reported, summed by the controller.
+_WORKER_CPU_SECONDS: list[float] = []
+
+
+def _cpu_seconds() -> float:
+    """User plus system CPU seconds this process has spent. A seam for the guard tests."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return usage.ru_utime + usage.ru_stime
+
+
+def _wall_seconds() -> float:
+    """Monotonic wall clock. A seam for the guard tests."""
+    return time.monotonic()
 
 
 class LintTierViolation(Exception):
@@ -122,8 +139,9 @@ def forbidden_route(args, *, env=None, cwd=None, shell=False, executable=None) -
 def pytest_sessionstart(session: pytest.Session) -> None:
     # A registry fixture resolved here would skip rather than start one.
     os.environ.setdefault("OCX_TESTS_NO_REGISTRY", "1")
+    _WORKER_CPU_SECONDS.clear()
     budget = float(os.environ.get(BUDGET_ENV, DEFAULT_BUDGET_SECONDS))
-    session.config.stash[_CLOCK] = (time.monotonic(), budget)
+    session.config.stash[_CLOCK] = (_wall_seconds(), _cpu_seconds(), budget)
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -173,18 +191,43 @@ def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureR
         raise LintTierViolation(f"lint tier admits no fixture: {fixturedef.argname} ({request.node.nodeid})")
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error) -> None:
+    """Collect an xdist worker's CPU seconds (controller side)."""
+    if not hasattr(node, "workeroutput"):
+        return
+    reported = node.workeroutput.get("cpu_seconds")
+    if reported is not None:
+        _WORKER_CPU_SECONDS.append(float(reported))
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     clock = session.config.stash.get(_CLOCK, None)
     if clock is None:
         return
-    started, budget = clock
-    elapsed = time.monotonic() - started
-    over = elapsed > budget
-    line = f"lint tier: {elapsed:.1f} s wall clock, budget {budget:g} s ({BUDGET_ENV})"
+    started_wall, started_cpu, budget = clock
+    own_cpu = _cpu_seconds() - started_cpu
+    if hasattr(session.config, "workeroutput"):
+        # An xdist worker: report to the controller, which judges the sum.
+        session.config.workeroutput["cpu_seconds"] = float(own_cpu)
+        return
+    cpu = own_cpu + sum(_WORKER_CPU_SECONDS)
+    wall = _wall_seconds() - started_wall
+    backstop = budget * WALL_BACKSTOP_FACTOR
+    over_cpu = cpu > budget
+    over_wall = wall > backstop
+    line = (
+        f"lint tier: {cpu:.1f} CPU s, budget {budget:g} s ({BUDGET_ENV}); "
+        f"wall {wall:.1f} s, backstop {backstop:g} s"
+    )
+    if over_cpu:
+        line += " — CPU OVER BUDGET"
+    if over_wall:
+        line += " — wall OVER BUDGET"
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if reporter is not None:
-        reporter.write_sep("-", line + (" — OVER BUDGET" if over else ""), red=over, bold=over)
+        reporter.write_sep("-", line, red=over_cpu or over_wall, bold=over_cpu or over_wall)
     # Only a clean session is turned red: an interrupted or errored run keeps
     # the status that says what actually went wrong.
-    if over and session.exitstatus == pytest.ExitCode.OK:
+    if (over_cpu or over_wall) and session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED

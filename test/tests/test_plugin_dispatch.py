@@ -8,6 +8,7 @@ Implementation is complete — all 10 tests pass against the production binary.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -62,6 +63,33 @@ def plugin_bin_dir(tmp_path: Path) -> Path:
             script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
         )
 
+    return tmp_path
+
+
+@pytest.fixture()
+def reporter_bin_dir(tmp_path: Path) -> Path:
+    """Stage ``ocx-reporter``: prints what reached it, then runs its own ``ocx`` child.
+
+    Output: ``SET:<name>`` for each probed variable that is set (never its value), then
+    ``ocx --format json shell state`` of the child ocx on one line behind ``STATE:``.
+    The child is the pinned binary, as a real plugin's would be.
+    """
+    body = textwrap.dedent(
+        r"""
+        #!/usr/bin/env bash
+        for name in OCX_OFFLINE OCX_FROZEN OCX_REMOTE OCX_BINARY_PIN OCX_TOOLCHAIN_DIR \
+                    OCX_IDENTITY_TOKEN OCX_KEY_PASSWORD OCX_SIGNING_KEY OCX_ANNOUNCE_GIT_TOKEN \
+                    OCX_ANNOUNCE_TOKEN; do
+            if [ -n "${!name+x}" ]; then echo "SET:$name"; fi
+        done
+        echo "HEADER:${__OCX_ENV_STATE%%.*}"
+        state=$("${OCX_BINARY_PIN:-ocx}" --format json shell state) || exit 3
+        echo "STATE:$(printf '%s' "$state" | tr -d '\n')"
+        """
+    ).lstrip("\n")
+    script_path = tmp_path / "ocx-reporter"
+    script_path.write_text(body)
+    script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return tmp_path
 
 
@@ -165,11 +193,10 @@ def test_unknown_subcommand_execs_plugin(
 def test_env_forwarded_to_plugin(
     ocx: OcxRunner, plugin_bin_dir: Path
 ) -> None:
-    """``ocx --offline fixture`` forwards ``OCX_OFFLINE=true`` + ``OCX_HOME`` to plugin env.
+    """``ocx --offline fixture``: ``OCX_HOME`` and ``OCX_BINARY_PIN`` reach the plugin; ``OCX_OFFLINE`` does not.
 
-    ADR decision 3 (env forward via Env::apply_ocx_config).  OCX_OFFLINE must
-    be non-empty/true; OCX_HOME must equal the test-isolated OCX_HOME value.
-    OCX_BINARY_PIN must be set non-empty (always set by apply_ocx_config).
+    The narrowing travels in the inherited execution state (see
+    ``test_plugins_own_ocx_child_honours_the_dispatching_parents_narrowing``), not as a public variable.
     """
     ocx_home_val = str(ocx.ocx_home)
     result = _run_ocx(
@@ -186,55 +213,22 @@ def test_env_forwarded_to_plugin(
         (line for line in result.stdout.splitlines() if line.startswith("ENV:")), ""
     )
     assert env_line, f"expected ENV: line in stdout; got {result.stdout!r}"
-    # OCX_OFFLINE must be forwarded and truthy
-    assert "OCX_OFFLINE=true" in env_line or "OCX_OFFLINE=1" in env_line, (
-        f"expected OCX_OFFLINE=true or OCX_OFFLINE=1 in ENV line; got {env_line!r}"
-    )
-    # OCX_HOME must be forwarded with the correct value
-    assert f"OCX_HOME={ocx_home_val}" in env_line, (
-        f"expected OCX_HOME={ocx_home_val!r} in ENV line; got {env_line!r}"
-    )
-    # OCX_BINARY_PIN must be set non-empty — apply_ocx_config always sets it so
-    # nested ocx invocations inside the plugin pin to the same binary.
-    assert "OCX_BINARY_PIN=" in env_line, (
-        f"expected OCX_BINARY_PIN key in ENV line; got {env_line!r}"
-    )
-    # Extract value after OCX_BINARY_PIN= and verify it is non-empty
-    binary_pin_part = next(
-        (part for part in env_line.split("|") if part.startswith("OCX_BINARY_PIN=")), ""
-    )
-    binary_pin_val = binary_pin_part.removeprefix("OCX_BINARY_PIN=")
-    assert binary_pin_val, (
-        f"expected OCX_BINARY_PIN to be non-empty; got {binary_pin_part!r} in {env_line!r}"
-    )
+    parts = dict(part.split("=", 1) for part in env_line.removeprefix("ENV:").split("|"))
+    assert parts["OCX_OFFLINE"] == "", f"OCX_OFFLINE must not be written for the plugin; got {env_line!r}"
+    assert parts["OCX_HOME"] == ocx_home_val, f"expected OCX_HOME={ocx_home_val!r}; got {env_line!r}"
+    # Nested ocx invocations inside the plugin pin to the dispatching binary.
+    assert parts["OCX_BINARY_PIN"], f"expected a non-empty OCX_BINARY_PIN; got {env_line!r}"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
-def test_remote_env_forwarded_to_plugin(
-    ocx: OcxRunner, plugin_bin_dir: Path
+def test_remote_flag_reaches_the_plugins_ocx_child(
+    ocx: OcxRunner, reporter_bin_dir: Path
 ) -> None:
-    """``ocx --remote fixture`` forwards ``OCX_REMOTE=true`` to plugin env.
-
-    Verifies that resolution-affecting flags forwarded by apply_ocx_config
-    reach the child plugin process (TC F1 — OCX_REMOTE coverage).
-    """
-    result = _run_ocx(
-        ocx,
-        "--remote",
-        "fixture",
-        extra_path_dir=plugin_bin_dir,
-    )
-    assert result.returncode == 0, (
-        f"expected exit 0 from plugin, got {result.returncode}\n"
-        f"stderr: {result.stderr!r}"
-    )
-    env_line = next(
-        (line for line in result.stdout.splitlines() if line.startswith("ENV:")), ""
-    )
-    assert env_line, f"expected ENV: line in stdout; got {result.stdout!r}"
-    assert "OCX_REMOTE=true" in env_line or "OCX_REMOTE=1" in env_line, (
-        f"expected OCX_REMOTE=true or OCX_REMOTE=1 in ENV line; got {env_line!r}"
-    )
+    """``ocx --remote reporter``: the plugin's ocx child sees ``remote`` in the received policy."""
+    result = _run_ocx(ocx, "--remote", "reporter", extra_path_dir=reporter_bin_dir, extra_env={"OCX_NO_PROJECT": "1"})
+    set_names, _, report = _report(result)
+    assert "OCX_REMOTE" not in set_names, f"OCX_REMOTE must not be written for the plugin: {set_names}"
+    assert report["env_state"]["policy"]["remote"] is True, report["env_state"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
@@ -599,3 +593,57 @@ def test_plugin_never_inherits_a_credential_variable(
     assert secret.strip() not in result.stdout, (
         "the key material itself must not appear anywhere in the plugin's output"
     )
+
+
+def _report(result: subprocess.CompletedProcess[str]) -> tuple[set[str], str, dict]:
+    """(probed variables that were set, the received header, the child's ``shell state`` report)."""
+    assert result.returncode == 0, f"plugin failed: {result.returncode}\nstderr: {result.stderr!r}"
+    set_names = {line.removeprefix("SET:") for line in result.stdout.splitlines() if line.startswith("SET:")}
+    header = next(line.removeprefix("HEADER:") for line in result.stdout.splitlines() if line.startswith("HEADER:"))
+    state = next(line.removeprefix("STATE:") for line in result.stdout.splitlines() if line.startswith("STATE:"))
+    return set_names, header, json.loads(state)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
+def test_plugin_receives_ambient_input_but_no_credentials(ocx: OcxRunner, reporter_bin_dir: Path) -> None:
+    """Ambient ``OCX_TOOLCHAIN_DIR`` and ``OCX_ANNOUNCE_TOKEN`` reach a plugin; bearer credentials do not."""
+    toolchain = ocx.ocx_home / "toolchain-fixture"
+    toolchain.mkdir(mode=0o700)
+    result = _run_ocx(
+        ocx,
+        "reporter",
+        extra_path_dir=reporter_bin_dir,
+        extra_env={
+            "OCX_NO_PROJECT": "1",
+            "OCX_TOOLCHAIN_DIR": str(toolchain),
+            "OCX_ANNOUNCE_TOKEN": "fixture-secret-value",
+            "OCX_IDENTITY_TOKEN": "fixture-secret-value",
+            "OCX_KEY_PASSWORD": "fixture-secret-value",
+            "OCX_SIGNING_KEY": "fixture-secret-value",
+            "OCX_ANNOUNCE_GIT_TOKEN": "fixture-secret-value",
+        },
+    )
+    set_names, _, _ = _report(result)
+    assert {"OCX_TOOLCHAIN_DIR", "OCX_ANNOUNCE_TOKEN"} <= set_names, f"inherited input missing: {set_names}"
+    leaked = set_names & {"OCX_IDENTITY_TOKEN", "OCX_KEY_PASSWORD", "OCX_SIGNING_KEY", "OCX_ANNOUNCE_GIT_TOKEN"}
+    assert not leaked, f"credentials reached the plugin: {leaked}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
+@pytest.mark.parametrize("flag", ["--offline", "--frozen"])
+def test_plugins_own_ocx_child_honours_the_dispatching_parents_narrowing(
+    ocx: OcxRunner, reporter_bin_dir: Path, flag: str
+) -> None:
+    """``ocx --offline|--frozen <plugin>``: the plugin's ocx child reports it through the inherited state.
+
+    The narrowing travels in ``__OCX_ENV_STATE``'s header; the public ``OCX_OFFLINE`` / ``OCX_FROZEN``
+    are not written for the plugin.
+    """
+    name = flag.removeprefix("--")
+    result = _run_ocx(ocx, flag, "reporter", extra_path_dir=reporter_bin_dir, extra_env={"OCX_NO_PROJECT": "1"})
+    set_names, header, report = _report(result)
+    assert not {"OCX_OFFLINE", "OCX_FROZEN", "OCX_REMOTE"} & set_names, f"public switches written: {set_names}"
+    assert name in header, f"the plugin's header must name {name}: {header!r}"
+    env_state = report["env_state"]
+    assert env_state["status"] == "readable", env_state
+    assert name in env_state["narrowing"], f"the child ocx does not report {name}: {env_state}"

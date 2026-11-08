@@ -14,6 +14,7 @@ Usage: ./wait-for-stack.py [--timeout SECONDS] [--quiet]
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -58,6 +59,35 @@ def probe(url: str) -> bool:
         return False
 
 
+def probe_ct(url: str) -> bool:
+    """The CT log has its roots loaded *and* its write path routes.
+
+    `get-roots` alone answers from static config. An empty `add-chain` is
+    rejected with 400 only after the request reached the log's handler, so a
+    log that serves GETs but cannot take a submission fails here, not as a 500
+    inside Fulcio's signing call.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            if not (200 <= r.status < 300 and json.load(r).get("certificates")):
+                return False
+        post = urllib.request.Request(
+            url.replace("get-roots", "add-chain"),
+            data=b'{"chain":[]}',
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(post, timeout=3)
+        return False  # an empty chain must never be accepted
+    except urllib.error.HTTPError as e:
+        return e.code == 400
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return False
+
+
+#: Services whose readiness needs more than a 2xx on a GET.
+PROBES = {"sigstore-ct": probe_ct}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--timeout", type=float, default=180.0)
@@ -77,7 +107,7 @@ def main() -> int:
     while time.monotonic() - started < args.timeout:
         pending = {}
         for name, url, why in checks:
-            if probe(url):
+            if PROBES.get(name, probe)(url):
                 if name not in ready:
                     ready[name] = time.monotonic() - started
                     if not args.quiet:

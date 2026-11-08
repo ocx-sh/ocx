@@ -276,7 +276,15 @@ pub async fn record_activation_consent_over(
     consent: Option<bool>,
 ) {
     // An invalid value suppresses: context init already refused it, and a typo must never stamp consent.
-    if !consent.unwrap_or_else(|| !ocx_env::OCX_NO_CONSENT.bool_or(false).unwrap_or(true)) {
+    // A parent's `no_consent` narrowing suppresses too: a child's `OCX_NO_CONSENT=0` cannot undo it, and
+    // a typed `--consent` still answers first.
+    let suppressed_by_env = || {
+        ocx_env::OCX_NO_CONSENT.bool_or(false).unwrap_or(true)
+            || ocx_config::exec_state::Inherited::from_process_env()
+                .narrowing()
+                .no_consent
+    };
+    if !consent.unwrap_or_else(|| !suppressed_by_env()) {
         log::debug!(
             "Shell-activation consent was not recorded for '{}': suppressed by --no-consent or OCX_NO_CONSENT",
             config_path.display()
@@ -518,6 +526,53 @@ mod tests {
     use ocx_project::ToolSource;
 
     use super::*;
+
+    /// Records consent for a fresh project over a fixture `$OCX_HOME` and reports whether a stamp landed.
+    async fn consent_stamped_under(
+        env: &ocx_env::overrides::EnvLock,
+        state: Option<&str>,
+        ambient: Option<&str>,
+    ) -> bool {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let config = project.path().join("ocx.toml");
+        std::fs::write(&config, "").expect("config");
+        env.hermetic(home.path());
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().expect("utf-8"));
+        match state {
+            Some(state) => env.set(&ocx_env::__OCX_ENV_STATE, state),
+            None => env.remove(&ocx_env::__OCX_ENV_STATE),
+        }
+        match ambient {
+            Some(value) => env.set(&ocx_env::OCX_NO_CONSENT, value),
+            None => env.remove(&ocx_env::OCX_NO_CONSENT),
+        }
+        record_activation_consent_over(&config, Default::default(), None).await;
+        let key = ocx_store::reference_manager::ReferenceManager::name_for_path(
+            &ocx_project::consent::canonical_project_dir(&config).expect("canonical dir"),
+        );
+        ocx_store::file_structure::StateStore::new(home.path().join("state"))
+            .consent_stamp_file(&key)
+            .exists()
+    }
+
+    /// A received `no_consent` narrowing outlives a child's `OCX_NO_CONSENT=0` (the control: no state stamps).
+    #[tokio::test]
+    async fn a_received_no_consent_narrowing_suppresses_the_stamp() {
+        let env = ocx_env::overrides::lock();
+        assert!(
+            consent_stamped_under(&env, None, None).await,
+            "control: with no narrowing the stamp lands, so the assertions below can fail"
+        );
+        assert!(
+            !consent_stamped_under(&env, Some("2;n=no_consent."), None).await,
+            "a received no_consent narrowing suppresses the stamp"
+        );
+        assert!(
+            !consent_stamped_under(&env, Some("2;n=no_consent."), Some("0")).await,
+            "an ambient OCX_NO_CONSENT=0 cannot undo the received narrowing"
+        );
+    }
 
     /// Reds on: a project-context slug, delegated or walked, naming another cause than the exit
     /// code does.

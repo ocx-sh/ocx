@@ -7,7 +7,7 @@ How OCX assembles environment variables and selects the active toolchain tier. T
 
 ## Strict Isolation {#strict-isolation}
 
-Global packages never compose into, supplement, or fall back into a project's resolved environment. Both env-composition commands are hermetic with respect to the global toolchain: an undeclared package is absent and never filled in.
+Global packages never compose into, supplement, or fall back into a project's resolved environment. Both env-composition commands compose only the packages they were asked for: an undeclared package is never filled in from the global toolchain.
 
 | Command | Tier | Reads |
 |---|---|---|
@@ -34,21 +34,25 @@ Every `PATH` prepend OCX emits is idempotent with move-to-front semantics: a dir
 
 See [Idempotent re-application][env-strict-isolation-idempotent].
 
-### Hermetic `ocx exec` {#strict-isolation-exec}
+### Layered `ocx exec` {#strict-isolation-exec}
 
-`ocx exec` reads exactly two files, `ocx.toml` and its sibling `ocx.lock`, and composes only the packages they declare. By default it inherits the spawning shell's environment, prepends the composed `PATH` entries and sets the other composed variables on top.
+`ocx exec` reads exactly two files, `ocx.toml` and its sibling `ocx.lock`, and composes only the packages they declare. It layers them over the caller's environment, prepending the composed `PATH` entries and setting the other composed variables on top.
 
-- `--clean`: drops the inherited environment
+- Default: the caller's environment, unchanged underneath the layer
+- `--isolate`: reverts what earlier ocx layers applied before composing, and your own pre-existing values stay
+- `--clean`: starts from an empty environment, so only package-declared variables reach the child
+- `--isolate --clean`: a usage error (exit 64)
+- Explicit exec: always composes what it was asked for, whatever is already loaded. The same project and group nested yields each value once, and another group layers on top
 - Named bindings: `ocx exec cmake -- …` resolves only the named bindings to a host leaf. Omit the names and the whole scope must resolve
 - `-g GROUP`: selects the namespace for name resolution, not a mandate that every binding in it be available
-- Shell integration: whatever the per-prompt reconciler applied to the spawning shell is reverted first, using the [`__OCX_ENV_STATE`][env-ocx-env-state] ledger. Your own variables and `PATH` entries are untouched. Without shell integration nothing is removed
-- Same revert: `ocx package exec`, `ocx package test` and `ocx patch test`
+- Revert source: `--isolate` reads the applied values recorded in [`__OCX_ENV_STATE`][env-ocx-env-state]. A value that no longer matches what ocx wrote is left alone, and with no state there is nothing to revert
+- Same flags: `ocx shell`, `ocx package exec`, `ocx package test` and `ocx patch test`
 
-See [Hermetic `ocx exec`][env-strict-isolation-exec].
+See [Layered `ocx exec`][env-strict-isolation-exec].
 
-### Hermetic `ocx package exec` {#strict-isolation-package-exec}
+### `ocx package exec` {#strict-isolation-package-exec}
 
-`ocx package exec` takes one or more OCI identifiers, resolves each, composes the declared environment variables of the resolved packages and spawns the command with that environment. No `ocx.toml` is read, neither the project file nor the global file.
+`ocx package exec` takes one or more OCI identifiers, resolves each, composes the declared environment variables of the resolved packages over the caller's environment and spawns the command. No `ocx.toml` is read, neither the project file nor the global file, and it accepts `--isolate` and `--clean` as `ocx exec` does.
 
 ## Patch Opt-Out Scope {#patch-opt-out-scope}
 
@@ -56,9 +60,9 @@ A project's [`no-patches`][config-patches-no-patches] opt-out is read from `ocx.
 
 | Invocation | Honors the opt-out | How |
 |---|---|---|
-| [`ocx exec`][cmd-run] | Yes | Forwards the opted-out bases' canonical `registry/repository` keys in [`OCX_PATCHES`][env-ocx-patches] and the names it resolved in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities] |
-| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the per-prompt reconciler mark the opted-out package in `__OCX_LAUNCH_IDENTITIES` |
-| Launcher re-entered from those chains | Yes | Matches the opt-out against the forwarded names |
+| [`ocx exec`][cmd-run] | Yes | Marks the opted-out packages in the names it records in [`__OCX_ENV_STATE`][env-ocx-env-state] |
+| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the per-prompt reconciler mark the opted-out package in the names carried by [`__OCX_ENV_STATE`][env-ocx-env-state] |
+| Launcher re-entered from those chains | Yes | Reads the mark from the inherited state |
 | Launcher run by absolute path or through [`ocx package exec`][cmd-package-exec] | No | Decodes no forwarded opt-out and composes the companion overlay as if `no-patches` were never set |
 
 See [Per-package opt-out][patches-no-patches-guide].
@@ -70,7 +74,7 @@ OCX has two toolchain tiers, and selection is always explicit: there is no impli
 | Tier | How to activate | File |
 |------|----------------|------|
 | Project | CWD walk finds `ocx.toml`; or `--project <path>`; or [`OCX_PROJECT`][env-ocx-project] | nearest `ocx.toml` ancestor |
-| Global | `--global` flag; or [`OCX_GLOBAL`][env-ocx-global] | `$OCX_HOME/ocx.toml` |
+| Global | `--global` flag | `$OCX_HOME/ocx.toml` |
 
 - CWD walk: stops at the first `ocx.toml` it meets. A nested project replaces the enclosing one, and two project files never layer
 - No home-tier discovery: a walk that finds nothing means no project tier is active, and the global toolchain is active only when requested
@@ -250,7 +254,7 @@ See [Project and group `[env]`][in-depth-project-env].
 
 | Stage | Source | Notes |
 |---|---|---|
-| 1 (lowest) | Ambient inherited env | Minus the shell reconciler's own contribution ([above](#strict-isolation-exec)); skipped entirely under [`--clean`][cmd-run] |
+| 1 (lowest) | Ambient inherited env | The caller's environment; minus what earlier ocx layers applied under `--isolate`, and skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — each companion var on the surfaces of the package it matched; applied after all package env, before stages 4-6 |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
@@ -271,8 +275,8 @@ See [Project and group `[env]`][in-depth-project-env].
 | Package (OCI) | [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx package test`][cmd-package-test], [`ocx patch test`][cmd-patch-test] | `--self` selects the visibility surface |
 
 - Export and execution agree: `ocx env --env X` composes stages 1 to 6 exactly as `ocx exec --env X` does, and [`ocx package env`][cmd-package-env] pairs with [`ocx package exec`][cmd-package-exec] the same way
-- `--clean`: controls only stage 1, what the child inherits from the parent shell. Package env values come from `ocx.lock` and the resolved digests alone, with or without it
-- Forwarded under `--clean`: `OCX_HOME` and `OCX_BINARY_PIN` always, and every other resolution-affecting `OCX_*` setting whenever this invocation resolved one, including [`OCX_DEFAULT_REGISTRY`][env-default-registry], [`OCX_INSECURE_REGISTRIES`][env-insecure-registries], [`OCX_NO_PROJECT`][env-no-project] and [`OCX_NO_CONFIG_REFRESH`][env-no-config-refresh]
+- `--clean`, `--isolate`: control only stage 1, what the child inherits from the parent shell. Package env values come from `ocx.lock` and the resolved digests alone, with or without it
+- Forwarded under `--clean`: [`__OCX_ENV_STATE`][env-ocx-env-state] and [`OCX_BINARY_PIN`][env-ocx-binary-pin] always, written afresh from this invocation's settings. They carry the resolution-affecting settings, including the root flags and the home
 - Project `[env]`: excluded from the lock's `declaration_hash`, and it has no visibility axis because a project is never a dependency of anything
 - `--self`: package vocabulary, absent from the project tier
 
@@ -298,11 +302,9 @@ See [Project and group `[env]`][in-depth-project-env].
 [arg-pinned-degrade]: ../explanation/toolchain-activation.md
 
 <!-- environment -->
-[env-ocx-global]: ./environment.md#ocx-global
 [env-ocx-project]: ./environment.md#ocx-project
-[env-ocx-patches]: ./environment.md#ocx-patches
-[env-ocx-launch-identities]: ./environment.md#ocx-launch-identities
 [env-ocx-env-state]: ./environment.md#ocx-env-state
+[env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
 [env-default-registry]: ./environment.md#ocx-default-registry
 [env-insecure-registries]: ./environment.md#ocx-insecure-registries
 [env-no-project]: ./environment.md#ocx-no-project

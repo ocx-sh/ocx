@@ -35,9 +35,10 @@ impl ConfigTestArgs {
         // The plain-HTTP set comes from the CANDIDATE's own `[registries]`
         // entries unioned with this machine's env — a payload that declares
         // `insecure = true` for its own mirror host must pass its own gate.
-        let insecure_hosts =
-            ocx_config::insecure::insecure_hosts(&preview.effective, &ocx_config::env::insecure_registries());
-        ocx_config::mirror::resolve_mirror_map(&preview.effective, ocx_config::env::mirrors()?, &insecure_hosts)?;
+        let env_insecure = ocx_config::insecure::parse_host_list(ocx_env::OCX_INSECURE_REGISTRIES.get().as_deref());
+        let insecure_hosts = ocx_config::insecure::insecure_hosts(&preview.effective, &env_insecure);
+        let env_mirrors = ocx_config::mirror::parse_env_mirrors(ocx_env::OCX_MIRRORS.get().as_deref())?;
+        ocx_config::mirror::resolve_mirror_map(&preview.effective, env_mirrors, &insecure_hosts)?;
         // Reported, not just consumed: a `[registries.<name>]` key that is not
         // an exact `host[:port]` grants nothing and fails much later as an
         // opaque TLS error, so the one command whose job is previewing a
@@ -94,6 +95,9 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
 
     const PATCHES_ENV: &str =
         r#"{"registry":"env.example.com/patches","path_template":"{registry}/{repository}","required":true}"#;
+
+    /// Stack for the thread a seam run executes on; see [`Fixture::config_test`].
+    const SEAM_STACK_BYTES: usize = 16 * 1024 * 1024;
 
     struct Outcome {
         code: ExitCode,
@@ -158,9 +162,25 @@ tD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4=
             }
             argv.extend(["config".into(), "test".into(), candidate.as_os_str().to_owned()]);
             let (mut out, mut err) = (Vec::new(), Vec::new());
-            // Boxed: the whole CLI's future is large in a debug build, and nested
-            // under a test's own future it overflows libtest's 2 MiB thread stack.
-            let code = Box::pin(run(&argv, &environment, &mut out, &mut err)).await;
+            // The debug-build frames of the clap command tree and the config loader add up past
+            // libtest's 2 MiB thread stack (the production main thread has 8 MiB, and release frames
+            // are a fraction of these), so the run gets a thread whose stack is sized for them. Boxing
+            // the future moves only its state to the heap, not the frames polling it.
+            let code = std::thread::scope(|scope| {
+                std::thread::Builder::new()
+                    .name("config-test-seam".into())
+                    .stack_size(SEAM_STACK_BYTES)
+                    .spawn_scoped(scope, || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("a current-thread runtime builds")
+                            .block_on(run(&argv, &environment, &mut out, &mut err))
+                    })
+                    .expect("the seam thread spawns")
+                    .join()
+                    .expect("the seam run does not panic")
+            });
             Outcome {
                 code,
                 out: String::from_utf8(out).expect("stdout is UTF-8"),

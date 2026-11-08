@@ -107,7 +107,7 @@ impl ConfigUpdateArgs {
                 digest: snapshot.map(|snapshot| snapshot.digest.clone()),
                 fetched_at: snapshot.and_then(|snapshot| parse_timestamp(&snapshot.fetched_at)),
                 policy: Some(resolved.refresh.to_string()),
-                kill_switches: active_kill_switches(),
+                kill_switches: active_kill_switches(&context.env_slot().0.policy),
                 drift: None,
                 tag: snapshot.and_then(|snapshot| snapshot.tag.clone()),
                 pause_ends_at: parse_timestamp(&pause.paused_until),
@@ -178,7 +178,7 @@ impl ConfigUpdateArgs {
             digest,
             fetched_at: None,
             policy: Some(resolved.refresh.to_string()),
-            kill_switches: active_kill_switches(),
+            kill_switches: active_kill_switches(&context.env_slot().0.policy),
             drift: None,
             tag: target.source.tag().map(str::to_string),
             pause_ends_at,
@@ -214,7 +214,7 @@ async fn execute_check(
         digest,
         fetched_at,
         policy: Some(policy),
-        kill_switches: active_kill_switches(),
+        kill_switches: active_kill_switches(&context.env_slot().0.policy),
         drift,
         tag,
         pause_ends_at: pause.as_ref().and_then(|pause| parse_timestamp(&pause.paused_until)),
@@ -246,10 +246,17 @@ fn derive_check_status(
 }
 
 /// The active kill switches relevant to the managed-config tier.
-fn active_kill_switches() -> Vec<String> {
+///
+/// `slot` is the resolved env tier: an explicitly set variable, else what the parent ocx passed down.
+fn active_kill_switches(slot: &ocx_config::exec_state::Policy) -> Vec<String> {
+    use ocx_config::exec_state::received::relaxing_bool;
+
     let mut switches = Vec::new();
-    for var in [&ocx_env::OCX_NO_CONFIG_REFRESH, &ocx_env::OCX_NO_CONFIG] {
-        if var.bool_or(false).unwrap_or(false) {
+    for (var, received) in [
+        (&ocx_env::OCX_NO_CONFIG_REFRESH, slot.no_config_refresh),
+        (&ocx_env::OCX_NO_CONFIG, slot.no_config),
+    ] {
+        if relaxing_bool(var, received) {
             switches.push(var.name.to_owned());
         }
     }
@@ -260,8 +267,26 @@ fn active_kill_switches() -> Vec<String> {
 mod tests {
     use ocx_oci::Digest;
 
-    use super::{derive_check_status, parse_pause_duration};
+    use super::{active_kill_switches, derive_check_status, parse_pause_duration};
     use crate::api::data::config_update::ConfigUpdateStatus;
+
+    #[test]
+    fn received_kill_switches_are_reported_until_the_variable_says_otherwise() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_CONFIG_REFRESH);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        let slot = ocx_config::exec_state::Policy {
+            no_config_refresh: Some(true),
+            no_config: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            active_kill_switches(&slot),
+            vec!["OCX_NO_CONFIG_REFRESH".to_owned(), "OCX_NO_CONFIG".to_owned()]
+        );
+        env.set(&ocx_env::OCX_NO_CONFIG_REFRESH, "0");
+        assert_eq!(active_kill_switches(&slot), vec!["OCX_NO_CONFIG".to_owned()]);
+    }
 
     fn digest(seed: char) -> Digest {
         Digest::Sha256(seed.to_string().repeat(64))

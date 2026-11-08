@@ -411,21 +411,28 @@ def test_managed_payload_carrying_an_unknown_refresh_posture_still_applies(
 # ---------------------------------------------------------------------------
 
 
-def test_clean_child_keeps_the_kill_switch_and_drops_the_update_preferences(
+def test_clean_child_drops_the_update_variables_and_a_nested_ocx_honours_the_kill_switch(
     ocx: OcxRunner, published_package
 ) -> None:
-    """`OCX_NO_UPDATE_CHECK` reaches a `--clean` child; the three personal
-    preferences set on the parent do not.
+    """No `OCX_*` update variable reaches a `--clean` child; the kill switch
+    reaches a nested ocx there as received policy in `__OCX_ENV_STATE`.
 
-    The kill switch showing up in the same child is the control that the probe
-    sees a real environment: only the preferences are absent, not everything.
+    `adr_exec_env_model.md` "What a child receives": only the state and the
+    binary pin cross to a descendant; ambient `OCX_*` is written into the state
+    under Clean (`no_update_check` is a relaxing policy field), so the raw
+    variable is gone from the child. The nested run logs the kill switch's skip
+    line; the same run without the switch does not, and the probe's `unset`
+    shows the preferences are dropped, not hidden.
     """
     ocx.plain("package", "install", published_package.short)
+    needle = "Update check skipped: OCX_NO_UPDATE_CHECK is set"
     probe = (
         'printf "kill=%s self=%s toolchain=%s interval=%s" '
         '"${OCX_NO_UPDATE_CHECK-unset}" "${OCX_SELF_UPDATE-unset}" '
         '"${OCX_TOOLCHAIN_UPDATE-unset}" "${OCX_UPDATE_CHECK_INTERVAL-unset}"'
     )
+    nested = f'{shlex.quote(str(ocx.binary))} --log-level debug package install nonexistent_clean_child_pkg:0 2>&1'
+    script = f"{probe}; echo; {nested}"
     parent = {
         "OCX_NO_UPDATE_CHECK": "1",
         "OCX_SELF_UPDATE": "apply",
@@ -433,20 +440,24 @@ def test_clean_child_keeps_the_kill_switch_and_drops_the_update_preferences(
         "OCX_UPDATE_CHECK_INTERVAL": "6h",
     }
     result = ocx.plain(
-        "package", "exec", "--clean", published_package.short, "--", "/bin/sh", "-c", probe,
+        "package", "exec", "--clean", published_package.short, "--", "/bin/sh", "-c", script,
         env_overrides=parent,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "kill=1 self=unset toolchain=unset interval=unset", (
-        f"only the kill switch may reach a --clean child; got {result.stdout!r}"
+    # The nested install of a package that does not exist exits non-zero by design.
+    first_line = result.stdout.splitlines()[0]
+    assert first_line == "kill=unset self=unset toolchain=unset interval=unset", (
+        f"a --clean child holds no update variable; got {first_line!r}"
+    )
+    assert needle in result.stdout, (
+        f"the nested ocx must honour the kill switch received in the state; got {result.stdout!r}"
     )
 
-    unset = ocx.plain(
-        "package", "exec", "--clean", published_package.short, "--", "/bin/sh", "-c", probe, check=False
+    control = ocx.plain(
+        "package", "exec", "--clean", published_package.short, "--", "/bin/sh", "-c", script, check=False
     )
-    assert unset.stdout == "kill=unset self=unset toolchain=unset interval=unset", (
-        f"forwarding must not invent a kill switch the parent did not set; got {unset.stdout!r}"
+    assert needle not in control.stdout, (
+        f"forwarding must not invent a kill switch the parent did not set; got {control.stdout!r}"
     )
 
 

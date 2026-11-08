@@ -152,7 +152,6 @@ fork_not_ready	Failure	The fork did not become ready in time
 fork_owner_mismatch	Failure	The fork is owned by another account than expected
 fork_parent_absent	Failure	The fork reports no parent
 fork_parent_mismatch	Failure	The fork's parent is not the expected upstream
-forwarded_env_invalid	DataError	The OCX_ENV value a parent ocx forwarded is malformed
 frozen_refused	PolicyBlocked	The verb discovers new digests, which frozen mode forbids
 fulcio_bad_request	ConfigError	The certificate authority rejected the signing request
 fulcio_unavailable	TempFail	The certificate authority is unreachable or overloaded
@@ -221,7 +220,6 @@ key_reference_invalid	UsageError	A key reference could not be parsed
 key_reference_invalid	UsageError	A key reference could not be parsed
 key_unreadable	IoError	A signing or verification key could not be read from its location
 key_unreadable	IoError	A signing or verification key could not be read from its location
-launch_identities_invalid	ConfigError	The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
 launch_spawn_failed	Failure	The resolved command could not be started
 launcher_path_not_utf8	DataError	A path baked into a generated launcher is not valid UTF-8
 launcher_unsafe_character	DataError	A value baked into a generated launcher contains an unsafe character

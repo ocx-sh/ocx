@@ -675,7 +675,6 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
     ),
     ("OCX_CONSENT_PATHS", "Shell consent", "../explanation/shell-consent.mdx"),
     ("OCX_DEFAULT_REGISTRY", "Configure ocx", "../guides/configure-ocx.mdx"),
-    ("OCX_ENV", "Environments", "../explanation/environments.mdx"),
     ("OCX_EXTRA_CA_CERTS", "Proxy and CA", "../integration/proxy-and-ca.md"),
     ("OCX_HOME", "Storage", "../explanation/storage.mdx"),
     (
@@ -689,11 +688,6 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
         "../guides/corporate-mirror.mdx",
     ),
     ("OCX_KEY_PASSWORD", "Sign a release", "../publishing/sign-a-release.md"),
-    (
-        "__OCX_LAUNCH_IDENTITIES",
-        "Execution records",
-        "../explanation/execution-records.md",
-    ),
     (
         "OCX_LAZY_MODE",
         "Deferred packages",

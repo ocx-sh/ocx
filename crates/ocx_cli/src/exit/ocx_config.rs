@@ -7,7 +7,6 @@ use ocx_config::ToolchainRootError;
 use ocx_config::edit::EditError;
 use ocx_config::env::CommandResolutionError;
 use ocx_config::tls::TlsError;
-use ocx_package::metadata::env::apply::ForwardedEnvError;
 use ocx_package::metadata::env::apply::ListSeparatorError;
 use ocx_package_manager::managed_config::ManagedConfigPublishError;
 
@@ -288,68 +287,6 @@ mod tests {
     }
 
     // ── moved from ocx_config::loader with the impl ──
-
-    // ── moved from ocx_config::env with the impl ──
-
-    /// Every decode failure exits 65 (`DataError`) — the payload is input data
-    /// that failed validation, not a config-file fault and not a usage error.
-    ///
-    /// Per variant rather than on one sample. The impl is a blanket answer with
-    /// no match, so a later variant routed differently must red here; asserting
-    /// one variant would pass whatever the rest did. Restores the coverage the
-    /// classification relocation dropped — the body this test carried in
-    /// `ocx_config::env` was emptied to `{}` when the impl left that crate.
-    #[test]
-    fn forwarded_env_error_classifies_as_data_error() {
-        let malformed = serde_json::from_str::<serde_json::Value>("not json {{{").expect_err("invalid JSON");
-        let variants = [
-            ForwardedEnvError::MalformedJson { source: malformed },
-            ForwardedEnvError::MissingEntries,
-            ForwardedEnvError::InvalidEntry { index: 0 },
-            ForwardedEnvError::UnknownKind {
-                key: "CI".to_owned(),
-                found: "append".to_owned(),
-            },
-            ForwardedEnvError::InvalidKey { key: "A\nB".to_owned() },
-            ForwardedEnvError::ReservedKey {
-                key: "OCX_OFFLINE".to_owned(),
-            },
-            ForwardedEnvError::MissingSeparator {
-                key: "GODEBUG".to_owned(),
-            },
-            ForwardedEnvError::InvalidSeparator {
-                key: "GODEBUG".to_owned(),
-                separator: "=".to_owned(),
-            },
-            ForwardedEnvError::SeparatorEdgedValue {
-                key: "GODEBUG".to_owned(),
-                separator: ",".to_owned(),
-                value: ",gctrace=1".to_owned(),
-            },
-        ];
-        for error in &variants {
-            assert_eq!(
-                error.classify(),
-                Some(ExitCode::DataError),
-                "every OCX_ENV decode failure is 65; {error} was not"
-            );
-        }
-    }
-
-    /// A malformed `__OCX_LAUNCH_IDENTITIES` exits as a malformed `OCX_PATCHES` does.
-    #[test]
-    fn launch_identity_error_classifies_as_a_malformed_patch_tier() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::__OCX_LAUNCH_IDENTITIES, "not json {{{");
-        let identity_error = ocx_package::launch::LaunchIdentities::from_env().expect_err("malformed");
-        guard.set(&ocx_env::OCX_PATCHES, "not json {{{");
-        let patches_error = ocx_config::patch::patches_from_env().expect_err("malformed");
-
-        let identity_code = crate::exit::classify_error(&identity_error);
-        let patches_code = crate::exit::classify_error(&patches_error);
-        assert_eq!(identity_code, ExitCode::ConfigError);
-        assert_eq!(identity_code, patches_code);
-    }
 
     /// A separator disagreement between two contributors to one key is exit
     /// **65** — a declaration that cannot be honoured as written, the same

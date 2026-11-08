@@ -13,7 +13,11 @@ use super::{Context, background_check};
 /// `check_managed_config_refresh` unless its `refresh` posture is
 /// [`ocx_config::refresh::RefreshPolicy::Manual`].
 pub async fn check_for_managed_config_refresh(ctx: &Context) {
-    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_CONFIG_REFRESH, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(
+        &ocx_env::OCX_NO_CONFIG_REFRESH,
+        ctx.env_slot().0.policy.no_config_refresh,
+        ctx.is_offline(),
+    ) {
         log::debug!("Managed-config refresh skipped: {reason}");
         return;
     }

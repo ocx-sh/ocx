@@ -9,6 +9,7 @@ package(default_visibility = ["//crates:__subpackages__"])
 
 _SKIPPED = [
     "activation::one_install_bin_derivation::only_the_store_derives_the_install_bin_directory",
+    "launch::firewall_tests::every_child_spawn_is_pinned_to_the_projection",
     "launch::firewall_tests::no_process_spawn_outside_launch",
     "launcher::generate::tests::a_relative_candidate_is_never_bakeable_even_when_it_exists",
 ]

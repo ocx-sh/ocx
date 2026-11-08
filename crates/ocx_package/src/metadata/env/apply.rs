@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Applying resolved [`Entry`] vectors to a process [`Env`], and the
-//! `OCX_ENV` forwarding envelope that carries the caller-contributed tail
-//! across a launcher hop.
+//! Applying resolved [`Entry`] vectors to a process [`Env`].
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -11,30 +9,13 @@ use std::ffi::OsStr;
 use super::entry::Entry;
 use super::list;
 use super::modifier::ModifierKind;
-use crate::launch::LaunchIdentities;
-use ocx_config::env::{Env, EnvKey, OcxConfigView};
-use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
-
-/// The two entry slices [`EnvEntriesExt::apply_child_env`] needs, named so they cannot transpose.
-pub struct ChildEnv<'a> {
-    /// The full composed environment the child process runs with.
-    pub composed: &'a [Entry],
-    /// Only the caller-contributed tail (project/group `[env]`, `--env`); a
-    /// launcher re-entry re-derives the package part, so forwarding it would apply it twice.
-    pub forwarded: &'a [Entry],
-    /// The names this composition resolved each package under, for a launcher's patch
-    /// matching; `None` keeps whatever the process inherited.
-    pub identities: Option<&'a LaunchIdentities>,
-}
+use ocx_config::env::{Env, EnvKey};
+use ocx_config::exec_state::{ComposedValue, ValueKind};
 
 /// Folding resolved [`Entry`] vectors onto an [`Env`].
 pub trait EnvEntriesExt {
     /// Applies resolved environment entries to this environment.
     fn apply_entries(&mut self, entries: &[Entry]);
-
-    /// Builds the environment for a child process from the composed entries,
-    /// the running ocx's resolution-affecting config and the forwarded payload.
-    fn apply_child_env(&mut self, env: ChildEnv<'_>, config: &OcxConfigView);
 }
 
 impl EnvEntriesExt for Env {
@@ -61,37 +42,6 @@ impl EnvEntriesExt for Env {
                 }
             }
         }
-    }
-
-    /// Builds a child process's environment: composed entries, the running
-    /// ocx's config, then the forwarded payload.
-    ///
-    /// Every compose-then-spawn command must go through here, or a launcher
-    /// re-entry silently reverts the caller's overrides.
-    fn apply_child_env(&mut self, env: ChildEnv<'_>, config: &OcxConfigView) {
-        self.apply_entries(env.composed);
-        // Set-or-removes every `OCX_*` key it knows, so no ambient export or entry beats this ocx's parsed config.
-        self.apply_ocx_config(config);
-        // After `apply_ocx_config`, which strips `OCX_ENV`, or the payload is deleted.
-        set_forwarded_env(self, env.forwarded);
-        // Only under a `[patches]` tier, so a host without one sees no new variable.
-        if config.patches.is_some()
-            && let Some(identities) = env.identities
-        {
-            match identities.encode() {
-                Some(json) => self.set(ocx_env::__OCX_LAUNCH_IDENTITIES.name, json),
-                None => self.remove(ocx_env::__OCX_LAUNCH_IDENTITIES.name),
-            }
-        }
-    }
-}
-
-/// Writes the forwarded payload as [`ocx_env::OCX_ENV`] for a launcher re-entry;
-/// an empty slice leaves the key absent.
-fn set_forwarded_env(env: &mut Env, entries: &[Entry]) {
-    match encode_forwarded_env(entries) {
-        Some(json) => env.set(ocx_env::OCX_ENV.name, json),
-        None => env.remove(ocx_env::OCX_ENV.name),
     }
 }
 
@@ -188,197 +138,25 @@ pub fn reconcile_list_separators<'a>(
     Ok(())
 }
 
-/// Failure modes of decoding the forwarded [`ocx_env::OCX_ENV`] payload.
-///
-/// Each rejects the whole envelope: a partially applied payload matches neither
-/// what the parent composed nor what the user declared.
-#[derive(Debug, thiserror::Error, ocx_exit::Classify)]
-#[non_exhaustive]
-#[exit(
-    DataError,
-    slug = "forwarded_env_invalid",
-    summary = "The OCX_ENV value a parent ocx forwarded is malformed"
-)]
-pub enum ForwardedEnvError {
-    /// The value was present but not valid JSON.
-    #[error("malformed OCX_ENV env value")]
-    MalformedJson {
-        #[source]
-        source: serde_json::Error,
-    },
-
-    /// The mandatory `entries` sentinel is absent or not an array.
-    #[error("OCX_ENV 'entries' field is absent or not an array")]
-    MissingEntries,
-
-    /// An array element is not an object carrying string `key`, `value` and
-    /// `type` fields.
-    #[error("OCX_ENV entry at index {index} is not an object with string 'key', 'value' and 'type'")]
-    InvalidEntry {
-        /// Zero-based position in the `entries` array.
-        index: usize,
-    },
-
-    /// An entry's `type` is not a recognized modifier; never lenient, since a
-    /// misread modifier sets a value with the wrong combination semantics.
-    #[error("OCX_ENV entry '{key}' has unrecognized modifier type '{found}'")]
-    UnknownKind {
-        /// The entry's env-var name.
-        key: String,
-        /// The unrecognized `type` value as received.
-        found: String,
-    },
-
-    /// An entry's key fails [`is_valid_env_key`].
-    #[error("OCX_ENV entry '{key}' is not a valid environment variable name")]
-    InvalidKey {
-        /// The offending env-var name.
-        key: String,
-    },
-
-    /// An entry's key is reserved ([`is_reserved_ocx_key`]).
-    #[error("OCX_ENV entry '{key}' is reserved; OCX_* and __OCX_* keys cannot be forwarded")]
-    ReservedKey {
-        /// The offending env-var name.
-        key: String,
-    },
-
-    /// A `list` entry has no separator; never defaulted, since the parent always
-    /// writes one and a guessed space would re-join a comma list.
-    #[error("OCX_ENV entry '{key}' is a list without a separator")]
-    MissingSeparator {
-        /// The entry's env-var name.
-        key: String,
-    },
-
-    /// A `list` entry's separator fails [`list::separator_is_valid`].
-    #[error("OCX_ENV entry '{key}' has unusable list separator {separator:?}")]
-    InvalidSeparator {
-        /// The entry's env-var name.
-        key: String,
-        /// The unusable separator as received.
-        separator: String,
-    },
-
-    /// A `list` entry's value starts or ends with its own separator.
-    #[error("OCX_ENV entry '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
-    SeparatorEdgedValue {
-        key: String,
-        separator: String,
-        value: String,
-    },
-}
-
-/// Serializes entries into the [`ocx_env::OCX_ENV`] envelope; `None` for an empty slice.
-fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
-    if entries.is_empty() {
-        return None;
-    }
-    let array: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|entry| {
-            let mut object = serde_json::json!({
-                "key":   entry.key,
-                "value": entry.value,
-                "type":  entry.kind.to_string(),
-            });
-            // Defaulted here, never on the far side: the decoder refuses a missing separator.
-            if entry.kind == ModifierKind::List
-                && let Some(fields) = object.as_object_mut()
-            {
-                let separator = entry.separator.as_deref().unwrap_or(list::DEFAULT_SEPARATOR);
-                fields.insert(
-                    "separator".to_string(),
-                    serde_json::Value::String(separator.to_string()),
-                );
-            }
-            object
-        })
-        .collect();
-    match serde_json::to_string(&serde_json::json!({ "entries": array })) {
-        Ok(json) => Some(json),
-        Err(error) => {
-            log::warn!("failed to encode OCX_ENV: {error}");
-            None
+impl From<ModifierKind> for ValueKind {
+    fn from(kind: ModifierKind) -> Self {
+        match kind {
+            ModifierKind::Path => Self::Path,
+            ModifierKind::List => Self::List,
+            ModifierKind::Constant => Self::Constant,
         }
     }
 }
 
-/// Parses [`ocx_env::OCX_ENV`] back into the forwarded entries; absent or empty yields none.
-///
-/// The payload is untrusted: the reserved-key gate keeps a forged `OCX_*` key
-/// out of a grandchild ocx, since [`Env::apply_ocx_config`] overwrites only keys it knows.
-///
-/// # Errors
-///
-/// [`ForwardedEnvError`] for any malformed entry.
-pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
-    let Some(raw) = ocx_env::OCX_ENV.get() else {
-        return Ok(Vec::new());
-    };
-    let envelope = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
-        .map_err(|source| ForwardedEnvError::MalformedJson { source })?;
-
-    let array = envelope
-        .get("entries")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(ForwardedEnvError::MissingEntries)?;
-
-    let mut out = Vec::with_capacity(array.len());
-    for (index, element) in array.iter().enumerate() {
-        let Some(object) = element.as_object() else {
-            return Err(ForwardedEnvError::InvalidEntry { index });
-        };
-        let (Some(key), Some(value), Some(kind)) = (
-            object.get("key").and_then(serde_json::Value::as_str),
-            object.get("value").and_then(serde_json::Value::as_str),
-            object.get("type").and_then(serde_json::Value::as_str),
-        ) else {
-            return Err(ForwardedEnvError::InvalidEntry { index });
-        };
-        if !is_valid_env_key(key) {
-            return Err(ForwardedEnvError::InvalidKey { key: key.to_string() });
+impl From<&Entry> for ComposedValue {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+            kind: entry.kind.clone().into(),
+            separator: entry.separator.clone(),
         }
-        if is_reserved_ocx_key(key) {
-            return Err(ForwardedEnvError::ReservedKey { key: key.to_string() });
-        }
-        let kind = kind
-            .parse::<ModifierKind>()
-            .map_err(|error| ForwardedEnvError::UnknownKind {
-                key: key.to_string(),
-                found: error.found,
-            })?;
-
-        let separator = if kind == ModifierKind::List {
-            let Some(separator) = object.get("separator").and_then(serde_json::Value::as_str) else {
-                return Err(ForwardedEnvError::MissingSeparator { key: key.to_string() });
-            };
-            if !list::separator_is_valid(separator) {
-                return Err(ForwardedEnvError::InvalidSeparator {
-                    key: key.to_string(),
-                    separator: separator.to_string(),
-                });
-            }
-            if list::is_separator_edged(value, separator) {
-                return Err(ForwardedEnvError::SeparatorEdgedValue {
-                    key: key.to_string(),
-                    separator: separator.to_string(),
-                    value: value.to_string(),
-                });
-            }
-            Some(separator.to_string())
-        } else {
-            None
-        };
-
-        out.push(Entry {
-            key: key.to_string(),
-            value: value.to_string(),
-            kind,
-            separator,
-        });
     }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -435,392 +213,13 @@ mod tests {
         }
     }
 
-    // ── OCX_ENV forwarding (R1 / R1a) ────────────────────────────────────
-
-    fn entry(
-        key: &str,
-        value: &str,
-        kind: crate::metadata::env::modifier::ModifierKind,
-    ) -> crate::metadata::env::entry::Entry {
-        crate::metadata::env::entry::Entry {
-            key: key.to_string(),
-            value: value.to_string(),
-            kind,
-            separator: None,
-        }
-    }
-
-    /// A list entry carrying its separator, for the forwarding round-trip.
+    /// A list entry carrying its separator.
     fn list_entry(key: &str, value: &str, separator: &str) -> crate::metadata::env::entry::Entry {
         crate::metadata::env::entry::Entry {
             key: key.to_string(),
             value: value.to_string(),
             kind: crate::metadata::env::modifier::ModifierKind::List,
             separator: Some(separator.to_string()),
-        }
-    }
-
-    /// The forwarded payload survives encode → env → decode with both modifier
-    /// kinds and vector order intact. Order IS precedence, so it is part of the
-    /// contract, not an implementation detail.
-    #[test]
-    fn forwarded_env_round_trips_both_kinds_in_order() {
-        use crate::metadata::env::modifier::ModifierKind;
-
-        let guard = ocx_env::overrides::lock();
-        let original = vec![
-            entry("CI", "1", ModifierKind::Constant),
-            entry("PATH", "/project/node_modules/.bin", ModifierKind::Path),
-            entry("RUSTFLAGS", "-C target-cpu=native", ModifierKind::Constant),
-        ];
-
-        let mut child = Env::clean();
-        set_forwarded_env(&mut child, &original);
-        let encoded = child
-            .get(ocx_env::OCX_ENV.name)
-            .expect("a non-empty payload must set OCX_ENV")
-            .to_str()
-            .expect("OCX_ENV must be valid UTF-8")
-            .to_string();
-        guard.set(&ocx_env::OCX_ENV, encoded);
-
-        let parsed = forwarded_env().expect("a self-encoded payload must decode");
-        assert_eq!(parsed.len(), original.len());
-        for (got, want) in parsed.iter().zip(&original) {
-            assert_eq!(got.key, want.key);
-            assert_eq!(got.value, want.value);
-            assert_eq!(got.kind, want.kind, "modifier kind must survive the round-trip");
-        }
-    }
-
-    // ── W-7: `list` entries survive the launcher hop ─────────────────────
-
-    /// A comma list must reach the far side of the launcher hop with its
-    /// separator intact. Losing it would silently re-join the value with
-    /// spaces, and `GODEBUG` ignores settings it cannot parse.
-    #[test]
-    fn forwarded_env_round_trips_a_list_entry_with_its_separator() {
-        let guard = ocx_env::overrides::lock();
-        let original = vec![
-            list_entry("GODEBUG", "gctrace=1", ","),
-            list_entry("JDK_JAVA_OPTIONS", "-ea", " "),
-        ];
-
-        let mut child = Env::clean();
-        set_forwarded_env(&mut child, &original);
-        let encoded = child
-            .get(ocx_env::OCX_ENV.name)
-            .expect("a non-empty payload must set OCX_ENV")
-            .to_str()
-            .expect("OCX_ENV must be valid UTF-8")
-            .to_string();
-        guard.set(&ocx_env::OCX_ENV, encoded);
-
-        let parsed = forwarded_env().expect("a self-encoded list payload must decode");
-        assert_eq!(parsed.len(), original.len());
-        for (got, want) in parsed.iter().zip(&original) {
-            assert_eq!(got.key, want.key);
-            assert_eq!(got.value, want.value);
-            assert_eq!(got.kind, want.kind);
-            assert_eq!(got.separator, want.separator, "the separator must survive the hop");
-        }
-    }
-
-    /// A list entry nobody established a separator for is forwarded with the
-    /// *effective* one, not with the field omitted. The human surfaces let an
-    /// author omit it, the decoder refuses a list without one, and the parent
-    /// is the last process that knows what "omitted" resolved to — without
-    /// this, `GODEBUG = { type = "list", value = "x" }` in `ocx.toml` would
-    /// exit 65 the moment `ocx exec` went through an entrypoint launcher.
-    #[test]
-    fn forwarded_env_fills_in_the_effective_separator_for_a_list_without_one() {
-        use crate::metadata::env::{entry::Entry, modifier::ModifierKind};
-
-        let guard = ocx_env::overrides::lock();
-        let mut child = Env::clean();
-        set_forwarded_env(
-            &mut child,
-            &[Entry {
-                key: "JDK_JAVA_OPTIONS".to_string(),
-                value: "-ea".to_string(),
-                kind: ModifierKind::List,
-                separator: None,
-            }],
-        );
-        let encoded = child
-            .get(ocx_env::OCX_ENV.name)
-            .expect("payload present")
-            .to_str()
-            .expect("UTF-8")
-            .to_string();
-        guard.set(&ocx_env::OCX_ENV, encoded);
-
-        let parsed = forwarded_env().expect("a separator-less list entry must still decode");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(
-            parsed[0].separator.as_deref(),
-            Some(crate::metadata::env::list::DEFAULT_SEPARATOR)
-        );
-    }
-
-    /// Only list entries carry the field — a constant has no separator to
-    /// resolve, and writing one would invite a decoder to act on it.
-    #[test]
-    fn forwarded_env_omits_the_separator_for_non_list_entries() {
-        use crate::metadata::env::modifier::ModifierKind;
-
-        let mut child = Env::clean();
-        set_forwarded_env(&mut child, &[entry("CI", "1", ModifierKind::Constant)]);
-        let encoded = child
-            .get(ocx_env::OCX_ENV.name)
-            .expect("payload present")
-            .to_str()
-            .expect("UTF-8")
-            .to_string();
-        assert!(
-            !encoded.contains("separator"),
-            "a constant entry must not carry a separator field; got: {encoded}"
-        );
-    }
-
-    /// A `list` entry without its separator fails the whole payload closed.
-    /// Defaulting here would re-join a comma list with spaces on the child
-    /// side, which is the silent wrong environment the envelope exists to
-    /// prevent.
-    #[test]
-    fn forwarded_env_rejects_a_list_entry_without_a_separator() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"GODEBUG","value":"gctrace=1","type":"list"}]}"#,
-        );
-        let error = forwarded_env().expect_err("a list without a separator must not decode");
-        assert!(
-            matches!(&error, ForwardedEnvError::MissingSeparator { key } if key == "GODEBUG"),
-            "expected MissingSeparator naming the key; got: {error}"
-        );
-    }
-
-    /// An unusable separator is refused rather than folded with: an empty one
-    /// degrades the flank match to a bare substring scan.
-    #[test]
-    fn forwarded_env_rejects_an_unusable_list_separator() {
-        let guard = ocx_env::overrides::lock();
-        for separator in ["", "="] {
-            guard.set(
-                &ocx_env::OCX_ENV,
-                format!(r#"{{"entries":[{{"key":"OPTS","value":"-ea","type":"list","separator":"{separator}"}}]}}"#),
-            );
-            let error = forwarded_env().expect_err("an unusable separator must not decode");
-            assert!(
-                matches!(&error, ForwardedEnvError::InvalidSeparator { key, .. } if key == "OPTS"),
-                "expected InvalidSeparator naming the key; got: {error}"
-            );
-        }
-    }
-
-    /// The decoded values are already resolved, so the separator-edge check
-    /// `EnvResolver` runs post-resolution applies here verbatim.
-    #[test]
-    fn forwarded_env_rejects_a_separator_edged_list_value() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"GODEBUG","value":",gctrace=1","type":"list","separator":","}]}"#,
-        );
-        let error = forwarded_env().expect_err("an edged value must not decode");
-        assert!(
-            matches!(&error, ForwardedEnvError::SeparatorEdgedValue { key, .. } if key == "GODEBUG"),
-            "expected SeparatorEdgedValue naming the key; got: {error}"
-        );
-    }
-
-    /// An empty payload removes the key rather than writing an empty envelope,
-    /// and an absent key decodes to an empty vector — a launcher invoked
-    /// directly (no `ocx exec` parent) is the normal no-payload case.
-    #[test]
-    fn forwarded_env_empty_payload_removes_key_and_decodes_empty() {
-        let guard = ocx_env::overrides::lock();
-
-        let mut child = Env::clean();
-        child.set(
-            ocx_env::OCX_ENV.name,
-            r#"{"entries":[{"key":"STALE","value":"1","type":"constant"}]}"#,
-        );
-        set_forwarded_env(&mut child, &[]);
-        assert!(
-            child.get(ocx_env::OCX_ENV.name).is_none(),
-            "an empty payload must remove OCX_ENV, not write an empty envelope"
-        );
-
-        guard.remove(&ocx_env::OCX_ENV);
-        assert!(forwarded_env().expect("absent OCX_ENV is not an error").is_empty());
-        guard.set(&ocx_env::OCX_ENV, "");
-        assert!(forwarded_env().expect("empty OCX_ENV is not an error").is_empty());
-    }
-
-    /// Malformed JSON is a hard error, never a silent empty decode.
-    #[test]
-    fn forwarded_env_rejects_malformed_json() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::OCX_ENV, "not json {{{");
-        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MalformedJson { .. })));
-    }
-
-    /// The `entries` sentinel is mandatory: valid JSON without it was not
-    /// produced by our encoder, so it is corrupted or injected.
-    #[test]
-    fn forwarded_env_rejects_missing_entries_sentinel() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"env":[{"key":"CI","value":"1","type":"constant"}]}"#,
-        );
-        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
-        // Present but not an array is the same fault.
-        guard.set(&ocx_env::OCX_ENV, r#"{"entries":"CI=1"}"#);
-        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::MissingEntries)));
-    }
-
-    /// An unrecognized modifier `kind` is a hard error — the one place
-    /// `OCX_PATCHES`' defaulting leniency must NOT be copied. A misread kind
-    /// would replace where it should prepend and produce a wrong environment
-    /// with no signal.
-    #[test]
-    fn forwarded_env_rejects_unknown_modifier_kind() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"CI","value":"1","type":"append"}]}"#,
-        );
-        let error = forwarded_env().expect_err("an unknown modifier type must not decode");
-        assert!(
-            matches!(&error, ForwardedEnvError::UnknownKind { key, found } if key == "CI" && found == "append"),
-            "expected UnknownKind naming the key and the value; got: {error}"
-        );
-        // An absent `type` is equally refused — never defaulted to constant.
-        guard.set(&ocx_env::OCX_ENV, r#"{"entries":[{"key":"CI","value":"1"}]}"#);
-        assert!(matches!(
-            forwarded_env(),
-            Err(ForwardedEnvError::InvalidEntry { index: 0 })
-        ));
-        // `kind` is NOT an accepted alias: it is the `EntrySource` discriminant
-        // on the JSON env surface, so accepting both spellings here would be
-        // two vocabularies for one concept.
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"CI","value":"1","kind":"constant"}]}"#,
-        );
-        assert!(matches!(
-            forwarded_env(),
-            Err(ForwardedEnvError::InvalidEntry { index: 0 })
-        ));
-    }
-
-    /// A reserved key fails the WHOLE payload closed. Filtering the bad entry
-    /// and keeping the rest would let an attacker shape the surviving set.
-    #[test]
-    fn forwarded_env_reserved_key_fails_the_whole_payload_closed() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"CI","value":"1","type":"constant"},
-                          {"key":"OCX_DEFAULT_REGISTRY","value":"evil.example.com","type":"constant"}]}"#,
-        );
-        let error = forwarded_env().expect_err("a reserved key must reject the payload");
-        assert!(
-            matches!(&error, ForwardedEnvError::ReservedKey { key } if key == "OCX_DEFAULT_REGISTRY"),
-            "expected ReservedKey naming the offender; got: {error}"
-        );
-
-        // `__OCX_*` is gated identically.
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"__OCX_TESTING_INSTALL_BINARY","value":"/tmp/x","type":"constant"}]}"#,
-        );
-        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::ReservedKey { .. })));
-    }
-
-    /// A key outside the POSIX name grammar is refused by the same shared
-    /// validator the shell emitters and CI flavors use.
-    #[test]
-    fn forwarded_env_rejects_invalid_key_grammar() {
-        let guard = ocx_env::overrides::lock();
-        guard.set(
-            &ocx_env::OCX_ENV,
-            r#"{"entries":[{"key":"A\nB","value":"1","type":"constant"}]}"#,
-        );
-        assert!(matches!(forwarded_env(), Err(ForwardedEnvError::InvalidKey { .. })));
-    }
-
-    fn patched_view() -> OcxConfigView {
-        let mut view = OcxConfigView::new("/abs/ocx");
-        view.patches = Some(ocx_config::patch::ResolvedPatchConfig {
-            system_required: false,
-            no_patches: std::collections::BTreeSet::new(),
-            registry: "corp.example.com/patches".to_string(),
-            path_template: "{registry}/{repository}".to_string(),
-            required: true,
-        });
-        view
-    }
-
-    const IDENTITIES: &str = r#"{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"names":["ocx.sh/plantuml:1"]}}"#;
-
-    fn identities() -> crate::launch::LaunchIdentities {
-        let guard = ocx_env::overrides::lock();
-        guard.set(&ocx_env::__OCX_LAUNCH_IDENTITIES, IDENTITIES);
-        crate::launch::LaunchIdentities::from_env().unwrap().unwrap()
-    }
-
-    fn child_env_with(identities: Option<&crate::launch::LaunchIdentities>, view: &OcxConfigView) -> Env {
-        let mut child = Env::clean();
-        child.set(ocx_env::__OCX_LAUNCH_IDENTITIES.name, "inherited");
-        child.apply_child_env(
-            ChildEnv {
-                composed: &[],
-                forwarded: &[],
-                identities,
-            },
-            view,
-        );
-        child
-    }
-
-    /// Under a `[patches]` tier the composing parent's map replaces an inherited one.
-    #[test]
-    fn apply_child_env_writes_launch_identities_under_a_patch_tier() {
-        let identities = identities();
-        let child = child_env_with(Some(&identities), &patched_view());
-        assert_eq!(
-            child
-                .get(ocx_env::__OCX_LAUNCH_IDENTITIES.name)
-                .and_then(|value| value.to_str()),
-            Some(IDENTITIES)
-        );
-    }
-
-    /// An empty map clears the inherited one: the parent is authoritative for its child tree.
-    #[test]
-    fn apply_child_env_clears_inherited_identities_for_an_empty_map() {
-        let child = child_env_with(Some(&crate::launch::LaunchIdentities::default()), &patched_view());
-        assert!(child.get(ocx_env::__OCX_LAUNCH_IDENTITIES.name).is_none());
-    }
-
-    /// No `[patches]` tier means no change, and `None` keeps a nested launch's inherited map.
-    #[test]
-    fn apply_child_env_leaves_launch_identities_alone_without_a_tier_or_a_map() {
-        let identities = identities();
-        for child in [
-            child_env_with(Some(&identities), &OcxConfigView::new("/abs/ocx")),
-            child_env_with(None, &patched_view()),
-        ] {
-            assert_eq!(
-                child
-                    .get(ocx_env::__OCX_LAUNCH_IDENTITIES.name)
-                    .and_then(|value| value.to_str()),
-                Some("inherited")
-            );
         }
     }
 
@@ -1527,5 +926,41 @@ mod tests {
             "the refusal must name the trampoline it found; got {}",
             path.display()
         );
+    }
+
+    fn sample_entry(kind: ModifierKind, separator: Option<&str>) -> Entry {
+        Entry {
+            key: "KEY".to_owned(),
+            value: "value".to_owned(),
+            kind,
+            separator: separator.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn modifier_kind_maps_to_value_kind() {
+        assert_eq!(ValueKind::from(ModifierKind::Path), ValueKind::Path);
+        assert_eq!(ValueKind::from(ModifierKind::List), ValueKind::List);
+        assert_eq!(ValueKind::from(ModifierKind::Constant), ValueKind::Constant);
+    }
+
+    #[test]
+    fn entry_converts_to_composed_value_for_each_kind() {
+        for (kind, separator, expected) in [
+            (ModifierKind::Path, None, ValueKind::Path),
+            (ModifierKind::List, Some(","), ValueKind::List),
+            (ModifierKind::Constant, None, ValueKind::Constant),
+        ] {
+            let composed = ComposedValue::from(&sample_entry(kind, separator));
+            assert_eq!(
+                composed,
+                ComposedValue {
+                    key: "KEY".to_owned(),
+                    value: "value".to_owned(),
+                    kind: expected,
+                    separator: separator.map(str::to_owned),
+                }
+            );
+        }
     }
 }

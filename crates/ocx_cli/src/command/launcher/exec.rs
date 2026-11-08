@@ -6,18 +6,22 @@
 //! Generated launchers call `ocx launcher exec '<pkg-root>' -- "$(basename "$0")" "$@"`. The two
 //! subcommand names and that positional shape are the whole launcher ABI: installed launchers bake it.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::error::UsageError;
 use clap::Parser;
-use ocx_config::env;
+use ocx_config::exec_state::{IdentityRecord, Inherited, Owner, ReplayPayload, Selection, ValueKind};
 use ocx_package::install_info::InstallInfo;
 use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::Metadata;
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, forwarded_env, reconcile_list_separators};
+use ocx_package::metadata::env::apply::reconcile_list_separators;
+use ocx_package::metadata::env::entry::Entry;
+use ocx_package::metadata::env::modifier::ModifierKind;
 use ocx_package::metadata::template::{TemplateResolver, Usage};
 use ocx_package_manager::AdmittedClaims;
+use ocx_package_manager::exec_env::{self, ChildEnvInputs, ExecMode};
 use ocx_package_manager::launch::{self, ExemptionReason, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
 use ocx_store::file_structure::{PackageDir, read_digest_file};
@@ -59,16 +63,17 @@ impl LauncherExec {
         };
         let package_dir = PackageDir::with_root(validated);
 
-        // Read only under a `[patches]` tier, the one case a composing parent writes it. With no name
-        // for this digest the launcher keeps a synthetic id, where only catch-all rules match.
-        let identities = match context.config_view().patches {
-            Some(_) => Some(
-                LaunchIdentities::from_env()
-                    .map_err(anyhow::Error::new)?
-                    .unwrap_or_default(),
-            ),
-            None => None,
+        // The identities a composing parent recorded for its launchers, read from the received state only
+        // under a `[patches]` tier. With no name for this digest the launcher keeps a synthetic id, where
+        // only catch-all rules match.
+        let received_identities: &[IdentityRecord] = match context.inherited() {
+            Inherited::Readable(state) => &state.replay.launch_identities,
+            Inherited::Absent | Inherited::Unreadable { .. } => &[],
         };
+        let identities = context
+            .manager()
+            .patches()
+            .map(|_| LaunchIdentities::from_replay(received_identities));
         let names = match &identities {
             Some(identities) => {
                 let digest = read_digest_file(&package_dir.digest_file())
@@ -87,15 +92,15 @@ impl LauncherExec {
             .install_info_from_package_root(package_dir.root(), &names)
             .await?;
         // Scoped to this re-entry, never grafted onto the global manager tier, so it cannot leak into
-        // nested `ocx` commands. An exported environment carries its opt-out on the identities.
-        let mut no_patches = ocx_config::patch::patches_from_env()
-            .map_err(anyhow::Error::new)?
-            .map(|forwarded| forwarded.no_patches)
+        // nested `ocx` commands. Only a record for a package this launcher composes counts: a record of an
+        // outer frame, or a forged one, for another digest must not skip this package's patches.
+        let no_patches = identities
+            .as_ref()
+            .map(|_| opted_out_repositories(received_identities, &composed_digests(&info)))
             .unwrap_or_default();
-        no_patches.extend(identities.iter().flat_map(LaunchIdentities::opted_out_repositories));
-        // The parent's `[env]` and `--env` via `OCX_ENV`: without them the package's own entries would
-        // silently revert the project's overrides. Fails closed on the whole payload, never one entry.
-        let project_env = forwarded_env().map_err(anyhow::Error::new)?;
+        // The parent's `[env]` and `--env`, replayed after the package's own entries: without them the
+        // package would silently revert the project's overrides.
+        let replayed = replay_entries(context.inherited());
         let packages = [std::sync::Arc::new(info)];
         // The attribution-keeping variant: the record names who claimed each `PATH` executable and every
         // patch companion, and this call is the only place either exists.
@@ -107,7 +112,7 @@ impl LauncherExec {
                     // Opt-out keys match the forwarded launch identities; a launch with none falls back
                     // to the synthetic id, where only `*` rules apply.
                     no_patches,
-                    env: project_env.clone(),
+                    env: replayed.clone(),
                     // No link lane: a `<group>/<entry>` link could compose a different package than the
                     // digest-pinned one this trampoline was written for.
                     toolchain: None,
@@ -163,10 +168,9 @@ impl LauncherExec {
                 packages: &packages,
                 admitted: &admitted,
             },
-            ChildEnv {
+            Composition {
                 composed: &entries,
-                forwarded: &project_env,
-                identities: None,
+                replayed: &replayed,
             },
             command,
             &argv,
@@ -184,6 +188,14 @@ struct Resolved<'a> {
     packages: &'a [std::sync::Arc<InstallInfo>],
     /// Which package claimed each executable name on `PATH`, and the patch companions overlaid.
     admitted: &'a AdmittedClaims,
+}
+
+/// What this frame composed and what it replays to the next one.
+struct Composition<'a> {
+    /// The package env followed by the replayed overrides, as resolved.
+    composed: &'a [Entry],
+    /// The received `replay.env`, passed on unchanged.
+    replayed: &'a [Entry],
 }
 
 /// What this launch records, decided once in [`LauncherExec::execute`].
@@ -206,16 +218,32 @@ struct Recording {
 async fn run_with_env(
     context: &crate::app::Context,
     resolved: Resolved<'_>,
-    child_env: ChildEnv<'_>,
+    composition: Composition<'_>,
     command: &str,
     argv: &[String],
     recording: Recording,
 ) -> anyhow::Result<ExitCode> {
     let Resolved { packages, admitted } = resolved;
-    let mut process_env = env::Env::new();
-    // Re-emits `OCX_ENV` after the package entries, or a nested launcher's package value beats the
-    // project override at the second hop. No separator reconcile: the `OCX_ENV` decode gate refuses one.
-    process_env.apply_child_env(child_env, context.config_view());
+    // The replayed overrides sit last in `composed`, so they beat the package's own values here, and
+    // they travel on in the state so a nested launcher applies them again after its package env. The
+    // received identities ride along with the carried state, as this layer composes none of its own.
+    let child = exec_env::apply_child_env(
+        context.inherited(),
+        &ChildEnvInputs {
+            mode: ExecMode::Layer,
+            written: context.written_policy(ExecMode::Layer.write_mode()),
+            binary_pin: context.binary_pin(),
+            composed: composition.composed,
+            composed_owner: Owner::Inherited,
+            composed_scope: None,
+            invocation: &[],
+            replay_env: composition.replayed,
+            identities: None,
+            selection: Selection::FollowCwd,
+        },
+    );
+    crate::app::report_projection_warnings(&child.warnings);
+    let process_env = child.env;
     // Resolved once for record and launch, or the record could name the wrong binary. A plain
     // `resolve_command` would let a host copy shadow the package's launcher. No PATHEXT edit: the
     // Windows launcher is a native `<name>.exe`.
@@ -245,7 +273,7 @@ async fn run_with_env(
             store_root: context.file_structure().packages.root(),
             shim_root: context.file_structure().shims.root(),
             argv,
-            config: context.config_view(),
+            config: context.recorded_config(),
             insecure_registries: context.insecure_hosts(),
             // Read and identity-gated once at `try_init`; no I/O on the exec path.
             managed_config_digest: context.managed_config_snapshot().map(|snapshot| &snapshot.digest),
@@ -261,6 +289,60 @@ async fn run_with_env(
     )?;
 
     Err(anyhow::Error::from(launch::exec(launch).await))
+}
+
+/// The received `replay.env` as entries in application order.
+///
+/// A state that did not decode replays nothing at all.
+fn replay_entries(inherited: &Inherited) -> Vec<Entry> {
+    let Inherited::Readable(state) = inherited else {
+        return Vec::new();
+    };
+    state
+        .replay
+        .env
+        .iter()
+        .map(|record| {
+            let ReplayPayload::Literal(value) = &record.value;
+            Entry {
+                key: record.key.clone(),
+                value: value.clone(),
+                kind: match record.kind {
+                    ValueKind::Path => ModifierKind::Path,
+                    ValueKind::List => ModifierKind::List,
+                    ValueKind::Constant => ModifierKind::Constant,
+                },
+                separator: record.separator.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The digests of the package this launcher composes and of its dependencies.
+fn composed_digests(info: &InstallInfo) -> BTreeSet<String> {
+    std::iter::once(info.identifier())
+        .chain(
+            info.resolved()
+                .dependencies
+                .iter()
+                .map(|dependency| &dependency.identifier),
+        )
+        .map(|identifier| identifier.digest().to_string())
+        .collect()
+}
+
+/// The `registry/repository` of every package among `digests` that a record marks opted out.
+///
+/// Keyed to the record's digest, not to a repository name: a repository can sit in several frames under
+/// different digests, and one frame's opt-out must not skip another frame's patches.
+fn opted_out_repositories(records: &[IdentityRecord], digests: &BTreeSet<String>) -> BTreeSet<String> {
+    records
+        .iter()
+        .filter(|record| record.no_patches && digests.contains(&record.digest))
+        .flat_map(|record| record.names.iter())
+        .filter_map(|name| ocx_oci::PackageRef::parse(name).ok())
+        .map(|name| format!("{}/{}", name.registry(), name.repository()))
+        .collect()
 }
 
 /// Package roots a launcher's baked `pkg-root` may resolve inside: the install store and the
@@ -350,6 +432,43 @@ mod tests {
         std::fs::create_dir_all(&pkg_dir).unwrap();
         std::fs::write(pkg_dir.join("metadata.json"), b"{}").unwrap();
         (base_dir, pkg_dir)
+    }
+
+    const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn identity(digest: &str, name: &str, no_patches: bool) -> IdentityRecord {
+        IdentityRecord {
+            digest: digest.to_owned(),
+            names: vec![name.to_owned()],
+            owner: Owner::Inherited,
+            no_patches,
+        }
+    }
+
+    /// A record of an outer frame (or a forged one) for the same repository under another digest must not
+    /// opt this launcher's package out of patches.
+    #[test]
+    fn an_opt_out_of_another_digest_does_not_skip_this_packages_patches() {
+        let records = [
+            identity(DIGEST_A, "ocx.sh/tool:1", false),
+            identity(DIGEST_B, "ocx.sh/tool:2", true),
+        ];
+        let mine = BTreeSet::from([DIGEST_A.to_owned()]);
+        assert!(opted_out_repositories(&records, &mine).is_empty());
+    }
+
+    #[test]
+    fn an_opt_out_of_this_digest_or_its_dependencies_is_kept() {
+        let records = [
+            identity(DIGEST_A, "ocx.sh/tool:1", true),
+            identity(DIGEST_B, "ocx.sh/dep:2", true),
+        ];
+        let closure = BTreeSet::from([DIGEST_A.to_owned(), DIGEST_B.to_owned()]);
+        assert_eq!(
+            opted_out_repositories(&records, &closure),
+            BTreeSet::from(["ocx.sh/tool".to_owned(), "ocx.sh/dep".to_owned()])
+        );
     }
 
     // ── C-018: the pkg-root allow-list, bound across both crates ─────────────
