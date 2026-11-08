@@ -360,8 +360,7 @@ pub struct ResolvedMirrors {
     pub registry: BTreeMap<String, ParsedMirror>,
     /// Index-role endpoints by upstream host, for the index client.
     pub index: BTreeMap<String, ParsedMirror>,
-    /// The merged, unparsed entries, forwarded via
-    /// [`OcxConfigView::mirrors`](crate::env::OcxConfigView::mirrors) so a child re-validates them.
+    /// The merged, unparsed entries, as the execution record states them.
     pub merged: BTreeMap<String, MirrorConfig>,
 }
 
@@ -411,6 +410,30 @@ pub fn resolve_mirror_map(
     })
 }
 
+/// Parses the JSON object spelled by `OCX_MIRRORS`, or by the copy a parent ocx handed down in its
+/// execution state, into `(host, MirrorConfig)` pairs; absent or empty is an empty list.
+///
+/// A broken value is a hard error: degrading it would route reads to the blocked origin.
+///
+/// # Errors
+///
+/// [`MirrorConfigError::MalformedEnvJson`] for invalid JSON; [`MirrorConfigError::InvalidShape`] /
+/// [`MirrorConfigError::NonStringRoleValue`] for an unrecognized per-host value.
+pub fn parse_env_mirrors(raw: Option<&str>) -> Result<Vec<(String, MirrorConfig)>, MirrorConfigError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(raw).map_err(|source| MirrorConfigError::MalformedEnvJson { source })?;
+    let mut result = Vec::with_capacity(map.len());
+    for (host, value) in map {
+        if let Some(config) = parse_mirror_value(&host, &value)? {
+            result.push((host, config));
+        }
+    }
+    Ok(result)
+}
+
 /// Parses one role `url` for `upstream` and enforces the plain-HTTP gate (CWE-319).
 fn resolve_mirror_role(
     upstream: &str,
@@ -433,6 +456,49 @@ fn resolve_mirror_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(url: &str) -> MirrorConfig {
+        MirrorConfig {
+            registry: Some(url.to_owned()),
+            index: Some(url.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn env_mirrors_parse_to_pairs_and_absent_is_empty() {
+        assert!(parse_env_mirrors(None).expect("absent").is_empty());
+        let parsed = parse_env_mirrors(Some(r#"{"ghcr.io":"https://m.corp"}"#)).expect("valid");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "ghcr.io");
+        assert_eq!(parsed[0].1.registry.as_deref(), Some("https://m.corp"));
+        assert!(matches!(
+            parse_env_mirrors(Some("not json")),
+            Err(MirrorConfigError::MalformedEnvJson { .. })
+        ));
+    }
+
+    /// Entries a parent ocx handed down are env-tier entries: they replace a config host whole and
+    /// go through the same plain-HTTP gate.
+    #[test]
+    fn received_mirrors_replace_the_config_host_and_meet_the_plain_http_gate() {
+        let config = crate::Config {
+            mirrors: Some([("ghcr.io".to_owned(), entry("https://config.corp"))].into()),
+            ..Default::default()
+        };
+        let received = parse_env_mirrors(Some(r#"{"ghcr.io":"https://received.corp"}"#)).expect("valid");
+        let resolved = resolve_mirror_map(&config, received, &[]).expect("https mirror");
+        assert_eq!(
+            resolved.merged["ghcr.io"].registry.as_deref(),
+            Some("https://received.corp")
+        );
+
+        let plain = parse_env_mirrors(Some(r#"{"ghcr.io":"http://plain.corp:5000"}"#)).expect("valid");
+        assert!(matches!(
+            resolve_mirror_map(&config, plain, &[]),
+            Err(MirrorConfigError::PlainHttpMirrorNotAllowed { .. })
+        ));
+    }
 
     #[test]
     fn a_mirror_url_with_userinfo_is_refused_without_echoing_it() {
@@ -857,7 +923,7 @@ mod tests {
     // `parse_mirror_value` is generic over `MirrorValueShape`, fed
     // `toml::Value` from a `[mirrors]` TOML table entry
     // ([`deserialize_mirrors_table`]) and `serde_json::Value` from a
-    // forwarded `OCX_MIRRORS` JSON per-host value ([`crate::env::mirrors`]) —
+    // forwarded `OCX_MIRRORS` JSON per-host value ([`parse_env_mirrors`]) —
     // one shared branch backing both. Every case below is exercised through
     // BOTH concrete value types to prove the branch logic does not diverge
     // between them (the whole point of the hand-rolled, value-first shape).

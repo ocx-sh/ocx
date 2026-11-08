@@ -93,6 +93,10 @@ jobs:
           cp test/tests/test_shell_activation.py "$work/"
           cp test/tests/test_shell_reconcile.py "$work/"
           cp test/src/shell_matrix.py "$work/"
+          # The activation matrix reads its elvish hook from `data/` beside it,
+          # the same layout the shell-zoo container mounts.
+          mkdir -p "$work/data"
+          cp test/tests/data/elvish_hook_main.elv "$work/data/"
           cd "$work"
           OCX_ACTIVATION_BINARY="$ocx" \
             uv run --no-project --with pytest -- \

@@ -26,7 +26,7 @@ impl IndexUpdate {
 
         // Before any fetch: moving pins is what `--frozen` exists to stop. The only frozen gate here;
         // `exactly_one_frozen_gate` fails a second one.
-        if context.config_view().frozen {
+        if context.frozen() {
             return Err(index_common::policy_blocked("`ocx index update`").into());
         }
 
@@ -112,9 +112,9 @@ mod tests {
             "one --frozen gate, ahead of the refresh"
         );
         assert_eq!(
-            body.matches("context.config_view()").count(),
+            body.matches("context.frozen()").count(),
             1,
-            "the policy view is read once, by that gate"
+            "the frozen policy is read once, by that gate"
         );
     }
 

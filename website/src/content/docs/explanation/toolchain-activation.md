@@ -102,7 +102,7 @@ The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/acti
 [mise][mise-shims] ships both shapes and names them the same way round. `mise activate` recomposes the environment on every prompt, and `mise activate --shims` puts one shim directory on `PATH` instead. By contrast, [rustup][rustup-proxies] only ever ships the second, where `~/.cargo/bin/cargo` is a proxy that forwards to whichever toolchain is active. `env` and `bin` are those two positions, chosen per toolchain rather than once per install.
 :::
 
-The whole body is five lines, and what it bakes is the entire story:
+The whole body is short, and what it bakes is the entire story:
 
 ```sh
 #!/bin/sh
@@ -112,7 +112,7 @@ __ocx_binary='/home/dana/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'
 exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '/home/dana/work/api' exec -- "${0##*/}" "$@"
 ```
 
-Two values are baked and nothing else: the home selector (`--project <root>`, or a bare `--global` for the global tier) and the absolute path to `ocx`. No tool path, no digest, no environment. On Windows the same selector rides a one-line `<name>.exec` sidecar beside a native `<name>.exe`, carrying either the absolute project root or the literal `global`.
+The `unset` line scrubs a stale selector that an older ocx earlier in the chain would still read; the current ocx ignores `OCX_GLOBAL`. Two values are baked and nothing else: the home selector (`--project <root>`, or a bare `--global` for the global tier) and the absolute path to `ocx`. No tool path, no digest, no environment. The exec it runs layers over the environment the caller already has, like any explicit [`ocx exec`][cmd-run]. On Windows the same selector rides a one-line `<name>.exec` sidecar beside a native `<name>.exe`, carrying either the absolute project root or the literal `global`.
 
 Two consequences follow directly. A config edit takes effect with no re-render: change `[env]`, add a binding, flip [`pinned`][config-pinned], and the next invocation composes against the new file. The trampoline body is byte-identical either way. And there is no baked value that can drift. The lock decides at call time which package a name resolves to, not what the renderer saw.
 

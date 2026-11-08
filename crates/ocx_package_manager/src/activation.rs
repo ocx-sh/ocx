@@ -5,7 +5,7 @@
 //! and the consent gate that fronts it.
 //!
 //! The order is normative: resolve the global tier, evaluate consent, compose only what consent
-//! authorized, diff against the live environment, record the ledger. Not under `ocx_shell`: that
+//! authorized, diff against the live environment, record the state. Not under `ocx_shell`: that
 //! closes a `use` cycle.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,14 +14,16 @@ use std::path::{Path, PathBuf};
 use crate::tasks::render_toolchain::HealOutcome;
 use ocx_config::Config;
 use ocx_config::env::Env;
+use ocx_config::exec_state::{self, ExecState, Owner, PinnedTier, Selection, SessionCache, SessionToken};
 use ocx_config::shell::{ShellConsent, effective_consent};
+use ocx_package::launch::LaunchIdentities;
 use ocx_package::metadata::env::apply::{EnvEntriesExt, ListSeparatorError, reconcile_list_separators};
 use ocx_package::metadata::env::entry::Entry;
 use ocx_package::metadata::env::modifier::ModifierKind;
 use ocx_project::consent::{self, ConsentStamp, Decision};
 use ocx_project::{LockCurrency, ProjectLock, lock::lock_path_for};
 use ocx_shell::shell::coexistence;
-use ocx_shell::shell::reconcile::{self, Ledger, LedgerEntry, Plan, ProjectScope, Scopes, Verdict};
+use ocx_shell::shell::reconcile::{self, Plan};
 use ocx_store::file_structure;
 
 /// What one per-prompt session can fail with.
@@ -63,7 +65,7 @@ impl From<ocx_project::Error> for SessionError {
     }
 }
 
-/// The project the CWD walk resolved, and the two labels the ledger records.
+/// The project the CWD walk resolved, and the two labels the state records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectIdentity {
     /// The resolved `ocx.toml`.
@@ -116,6 +118,8 @@ impl ProjectIdentity {
 pub struct SessionInput<'a> {
     /// The global toolchain tier's entries, resolved by the caller.
     pub global: Vec<Entry>,
+    /// The names the global tier composed its packages under, for their launchers; `None` without a patch tier.
+    pub global_identities: Option<LaunchIdentities>,
     /// The offline-capable manager the project composition runs against.
     pub manager: &'a crate::PackageManager,
     /// The local index the manager's offline view is taken over.
@@ -129,7 +133,17 @@ pub struct SessionInput<'a> {
     /// The host platform the lock's per-platform digests resolve under.
     pub target: &'a ocx_oci::Platform,
     /// The project the CWD walk resolved, or `None` for a project-free prompt.
+    ///
+    /// Under a pinned selection: the project the pinned tier names, from [`pinned_identity`].
     pub project: Option<&'a ProjectIdentity>,
+    /// The scopes this prompt composes; read before any consent or `ocx.toml` work, so a scope the
+    /// composition omits costs nothing and can fail nothing.
+    pub composition: reconcile::Composition,
+    /// The `ocx.toml` groups the project composes; empty means the default group.
+    pub groups: Vec<String>,
+    /// Whether the shell is pinned: the project composes as `env` whatever its `activate` mode says,
+    /// and no coexisting tool makes the hook yield.
+    pub pinned: bool,
 }
 
 /// The session-level `PATH` directories, in desired-vector order — the reverse of `PATH` order,
@@ -165,31 +179,42 @@ impl SessionPath {
     }
 
     /// The three directories as `PATH` entries, in desired-vector order.
-    // A non-UTF-8 directory is skipped: a lossy rendering names another directory, added while the real one is removed each prompt.
     pub(crate) fn entries(&self) -> Vec<Entry> {
-        [
-            Some(&self.install_bin),
-            Some(&self.global_bin),
-            self.project_bin.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|directory| match directory.to_str() {
-            Some(value) => Some(Entry {
-                key: "PATH".to_owned(),
-                value: value.to_owned(),
-                kind: ModifierKind::Path,
-                separator: None,
-            }),
-            None => {
-                log::debug!(
-                    "Session PATH directory '{}' is not valid UTF-8 and was not emitted",
-                    directory.display()
-                );
-                None
-            }
-        })
-        .collect()
+        let mut entries = self.persistent_entries();
+        entries.extend(self.project_entry());
+        entries
+    }
+
+    /// The installed `ocx` and global trampoline directories: desired at every prompt, so never retired.
+    fn persistent_entries(&self) -> Vec<Entry> {
+        [&self.install_bin, &self.global_bin]
+            .into_iter()
+            .filter_map(|directory| path_entry(directory))
+            .collect()
+    }
+
+    /// The project's trampoline directory, the one session directory that comes and goes with the project.
+    fn project_entry(&self) -> Option<Entry> {
+        self.project_bin.as_deref().and_then(path_entry)
+    }
+}
+
+// A non-UTF-8 directory is skipped: a lossy rendering names another directory, added while the real one is removed each prompt.
+fn path_entry(directory: &Path) -> Option<Entry> {
+    match directory.to_str() {
+        Some(value) => Some(Entry {
+            key: "PATH".to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Path,
+            separator: None,
+        }),
+        None => {
+            log::debug!(
+                "Session PATH directory '{}' is not valid UTF-8 and was not emitted",
+                directory.display()
+            );
+            None
+        }
     }
 }
 
@@ -198,11 +223,21 @@ impl SessionPath {
 pub struct Outcome {
     /// The session-level `PATH` directories, desired on every arm.
     pub session: SessionPath,
+    /// Whether this prompt re-asserts `session` at the front of `PATH`.
+    ///
+    /// `false` when the prompt composes nothing (the project and the global tier are both inherited):
+    /// moving the directories then would put the global trampolines ahead of what the outer
+    /// `ocx exec` composed, which is the displacement the old exec yield existed to prevent.
+    pub session_enforced: bool,
 
     /// The global toolchain tier's entries, applied first.
     pub global: Vec<Entry>,
     /// The project tier's entries — empty when inert or yielded.
     pub project: Vec<Entry>,
+    /// The names the global tier's packages were composed under; recorded, never exported.
+    pub global_identities: Option<LaunchIdentities>,
+    /// The names the project tier's packages were composed under; recorded, never exported.
+    pub project_identities: Option<LaunchIdentities>,
 
     /// The second owned prefix: the consented, in-scope project's toolchain home; `None` otherwise.
     // Owned prefixes delete live `PATH` segments: never the bare `toolchain_dir` (other projects' homes) or an unconsented project.
@@ -210,7 +245,7 @@ pub struct Outcome {
 
     /// The project slot to record, or `None` to retire it.
     pub slot: Option<ProjectIdentity>,
-    /// Whether the CWD walk resolved a project at all; only `false` is cacheable as [`Verdict::NoProject`].
+    /// Whether the CWD walk resolved a project at all; only `false` is cacheable as [`exec_state::Verdict::NoProject`].
     pub resolved: bool,
     /// Whether the resolved project was refused by consent.
     pub inert: bool,
@@ -350,42 +385,20 @@ pub fn yield_messages(yielded: &coexistence::Yield) -> Vec<String> {
                 coexistence::Tool::Mise => {
                     format!("ocx: mise manages this directory ({signal}); applying the global toolchain only")
                 }
-                // Exec is hermetic: neither the project nor the global toolchain is layered on top of it.
-                coexistence::Tool::OcxExec => {
-                    format!("ocx: an enclosing `ocx exec` owns this environment ({signal})")
-                }
             }
         })
         .collect()
 }
 
-/// The enclosing `ocx exec` scope: `__OCX_EXEC_SCOPE` and the canonical form the project compare needs.
-///
-/// The one derivation behind both the per-prompt yield and `ocx shell state`'s report.
-#[derive(Debug, Clone)]
-pub struct ExecScope {
-    marker: String,
-    canonical: PathBuf,
-}
-
-impl ExecScope {
-    /// The scope the environment names, or `None` outside `ocx exec` or when the marked directory is gone.
-    pub async fn from_env() -> Option<Self> {
-        let marker = ocx_env::__OCX_EXEC_SCOPE.get_raw().and_then(|v| v.into_string().ok())?;
-        let canonical = tokio::fs::canonicalize(&marker).await.ok()?;
-        Some(Self { marker, canonical })
-    }
-
-    /// The observation when this scope is the one `project_dir` (already canonical) belongs to.
-    pub fn observe(&self, project_dir: &Path) -> Option<coexistence::Observation> {
-        coexistence::exec_scope(&self.marker, &self.canonical, project_dir)
-    }
-}
-
-/// Whether this prompt can answer from `stat`s alone.
-// Only negative verdicts: caching `Activate` would make the ledger a consent input.
-pub fn is_stat_only(ledger: &Ledger, fingerprint: &str) -> bool {
-    ledger.fp == fingerprint && matches!(ledger.verdict, Some(Verdict::Inert | Verdict::NoProject))
+/// Whether this prompt can answer from `stat`s alone, over the execution state.
+// Only negative verdicts: caching `Activate` would make the state a consent input.
+#[must_use]
+pub fn state_is_stat_only(state: &ExecState, fingerprint: &str) -> bool {
+    state.session.fp == fingerprint
+        && matches!(
+            state.session.verdict,
+            Some(exec_state::Verdict::Inert | exec_state::Verdict::NoProject)
+        )
 }
 
 /// The project-file `[env]` channel, gated on the clause that granted: the entries to apply, and
@@ -404,8 +417,17 @@ pub fn authorized_project_env(
     (Vec::new(), withheld)
 }
 
+/// The groups a project composes: the requested ones, or the default group when none are.
+fn composed_groups(requested: &[String]) -> Vec<String> {
+    if requested.is_empty() {
+        vec![ocx_project::DEFAULT_GROUP.to_owned()]
+    } else {
+        requested.to_vec()
+    }
+}
+
 /// Compose the consenting project's toolchain env, and report whether its own `[env]` was withheld.
-// Never `load_project_with_lock`: it re-reads `ocx.lock` and honours `OCX_GLOBAL`, so composition could diverge from what consent decided.
+// Never `load_project_with_lock`: it re-reads `ocx.lock` and resolves the global tier itself, so composition could diverge from what consent decided.
 async fn project_entries(
     input: &SessionInput<'_>,
     consent: ConsentProof,
@@ -414,11 +436,11 @@ async fn project_entries(
     lock: ProjectLock,
     // The vetted home from `owned_project_home`, never a second `project_home` call: its `Err` would no-op the hook in every project.
     home: Option<file_structure::ToolchainHome>,
-) -> Result<(Vec<Entry>, bool), SessionError> {
+) -> Result<(Vec<Entry>, bool, Option<LaunchIdentities>), SessionError> {
     use crate::composer::{ComposeRequest, Materialization};
-    use ocx_project::{DEFAULT_GROUP, compose_tool_set};
+    use ocx_project::compose_tool_set;
 
-    let groups = vec![DEFAULT_GROUP.to_owned()];
+    let groups = composed_groups(&input.groups);
     let tools = compose_tool_set(config, Some(&lock), &groups, &[], input.target)?;
 
     // `LocalOnly`: a prompt must never block on the network.
@@ -454,33 +476,9 @@ async fn project_entries(
         .resolve_env_with_attribution(&roots.roots, false, scope, input.target)
         .await?;
     reconcile_list_separators(entries.iter_mut())?;
-    // The global tier's map is folded in by the caller, the one place both scopes are known.
-    entries.extend(manager.launch_identity_entry(&roots.roots, &no_patches, None));
-    Ok((entries, env_withheld))
-}
-
-/// Folds the global tier's launch identities into the project's entry, which replaces the global
-/// one on the shell: without the fold, a global tool's launcher loses its name inside the project.
-fn fold_global_launch_identities(global: &[Entry], project: &mut [Entry]) {
-    use ocx_package::launch::LaunchIdentities;
-
-    let key = ocx_env::__OCX_LAUNCH_IDENTITIES.name;
-    let Some(global_value) = global.iter().rev().find(|entry| entry.key == key) else {
-        return;
-    };
-    let Some(project_entry) = project.iter_mut().find(|entry| entry.key == key) else {
-        return;
-    };
-    match LaunchIdentities::decode(&project_entry.value) {
-        Ok(mut own) => {
-            own.inherit(&global_value.value);
-            if let Some(value) = own.encode() {
-                project_entry.value = value;
-            }
-        }
-        // This process's own encoding; the project's map alone still names its tools.
-        Err(error) => log::debug!("launch identities were not merged: {error}"),
-    }
+    // The global tier's names are folded in by `next_state`, the one place both scopes are known.
+    let identities = manager.launch_identities(&roots.roots, &no_patches);
+    Ok((entries, env_withheld, identities))
 }
 
 /// Compose both scopes and decide the project slot.
@@ -495,9 +493,20 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
     let mut outcome = Outcome {
         // Above every `return`, or an arm drops these and the repair deletes `ocx self setup`'s registration.
         session: SessionPath::new(input.file_structure),
+        session_enforced: input.composition != reconcile::Composition::default(),
         // Always consented (the user's own file): no consent gate may withhold or clear it.
-        global: input.global.clone(),
+        global: if input.composition.global {
+            input.global.clone()
+        } else {
+            Vec::new()
+        },
         project: Vec::new(),
+        global_identities: input
+            .composition
+            .global
+            .then(|| input.global_identities.clone())
+            .flatten(),
+        project_identities: None,
         owned_home: None,
         slot: None,
         resolved: input.project.is_some(),
@@ -511,15 +520,19 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
         outcome.messages.push(format!("ocx: {reason}"));
     }
 
-    let Some(project) = input.project else {
+    // Before consent and before any file is opened: a scope the composition omits is never evaluated.
+    let Some(project) = input.project.filter(|_| input.composition.project.is_some()) else {
         return Ok(outcome);
     };
 
+    // A pinned shell ignores the working directory, so what manages that directory has no say.
     // A yield leaves `slot` at `None`, so the retirement rule retires the project's recorded entries.
-    let yielded = coexistence::detect(&project.dir);
-    if !yielded.observed.is_empty() {
-        outcome.messages.extend(yield_messages(&yielded));
-        return Ok(outcome);
+    if !input.pinned {
+        let yielded = coexistence::detect(&project.dir);
+        if !yielded.observed.is_empty() {
+            outcome.messages.extend(yield_messages(&yielded));
+            return Ok(outcome);
+        }
     }
 
     let whitelist = effective_consent(shell_config);
@@ -565,7 +578,13 @@ async fn project_contribution(
     let home = owned_project_home(input, project, outcome).await;
     outcome.owned_home = home.as_ref().map(|home| home.root().to_path_buf());
 
-    match activate_mode(&config) {
+    // `ocx shell` composes the environment; a `bin` or `none` mode only shapes the per-prompt hook.
+    let mode = if input.pinned {
+        ActivateMode::Env
+    } else {
+        activate_mode(&config)
+    };
+    match mode {
         ActivateMode::None => {}
 
         ActivateMode::Bin => {
@@ -583,9 +602,10 @@ async fn project_contribution(
 
         ActivateMode::Env => {
             let lock = current_lock(lock, &config, lock_path)?;
-            let (mut entries, env_withheld) = project_entries(input, consent, project, &config, lock, home).await?;
-            fold_global_launch_identities(&outcome.global, &mut entries);
+            let (entries, env_withheld, identities) =
+                project_entries(input, consent, project, &config, lock, home).await?;
             outcome.project = entries;
+            outcome.project_identities = identities;
             if env_withheld {
                 outcome.messages.push(format!(
                     "ocx: {dir}: its [env] is not applied - a namespaces grant covers packages only; run `ocx pull` \
@@ -832,22 +852,171 @@ pub(crate) async fn bin_mode_entry(
     Ok(Some(home.bin()))
 }
 
-/// The union `desired` set: `global ++ session ++ project`.
+// -- The session token: which shell process owns the session records -------------
+
+/// The shell process the hook runs for: its pid, and its start time where ocx can read one cheaply.
 ///
-/// The session block must sit between the tiers: moved either way, a global tool shadows a project one.
-pub fn desired_entries(outcome: &Outcome) -> Vec<Entry> {
-    let mut desired = outcome.global.clone();
-    desired.extend(outcome.session.entries());
-    desired.extend(outcome.project.iter().cloned());
-    desired
+/// `None` in place of a [`ShellProcess`] is token-less mode, the hook of an older emission or an
+/// older `env.nu` shim that passes no `--shell-pid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellProcess {
+    pid: u32,
+    started: Option<u64>,
 }
 
-/// Diff `outcome` against the live environment, scoped by the previous ledger.
-pub fn plan_for(previous: &Ledger, outcome: &Outcome, owned: &[&Path], current: &Env) -> Plan {
-    reconcile::plan(&desired_entries(outcome), current, previous, owned)
+impl ShellProcess {
+    /// A shell whose start time is already known, or known to be unreadable.
+    #[must_use]
+    pub fn new(pid: u32, started: Option<u64>) -> Self {
+        Self { pid, started }
+    }
+
+    /// The shell `pid` names, with its start time read where the platform allows.
+    pub async fn resolve(pid: u32) -> Self {
+        Self::new(pid, process_start_time(pid).await)
+    }
+
+    /// The identity this shell writes into `session.token` when it claims the session.
+    #[must_use]
+    pub fn token(&self) -> SessionToken {
+        SessionToken {
+            pid: self.pid,
+            started: self.started,
+        }
+    }
 }
 
-/// The digest [`Ledger::messages_fp`] records for one prompt's diagnostics; empty for none.
+/// How the recorded token stands against the shell running the hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenStanding {
+    /// No shell claimed the session yet.
+    Unclaimed,
+    /// This shell's token, or any token while the hook runs token-less.
+    Own,
+    /// Another shell instance's token: a tmux or IDE snapshot, a nested shell, a reused pid.
+    Foreign,
+}
+
+/// What [`claim_session`] did to the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The session is this shell's already, or the hook is token-less and found nothing to claim.
+    Held,
+    /// An unclaimed state; this shell wrote its token.
+    Claimed,
+    /// Session records found under `FollowCwd` with no claim: retagged inherited, then claimed.
+    RetaggedUnclaimed,
+    /// Another shell's token: its records retagged inherited, the cache reset, this shell's token written.
+    RetaggedForeign,
+}
+
+/// Classify `recorded` against `shell`.
+///
+/// A token without `started` is foreign whenever this shell's start time is readable, since a
+/// start-less token cannot tell a reused pid from the original. Where no start time is readable
+/// the pid alone decides, and a reused pid then passes for this shell (a named residual).
+#[must_use]
+pub fn token_standing(recorded: Option<&SessionToken>, shell: Option<&ShellProcess>) -> TokenStanding {
+    let Some(recorded) = recorded else {
+        return TokenStanding::Unclaimed;
+    };
+    let Some(shell) = shell else {
+        return TokenStanding::Own;
+    };
+    if recorded.pid != shell.pid {
+        return TokenStanding::Foreign;
+    }
+    match (recorded.started, shell.started) {
+        (Some(recorded), Some(own)) if recorded == own => TokenStanding::Own,
+        (Some(_), Some(_)) | (None, Some(_)) => TokenStanding::Foreign,
+        (_, None) => TokenStanding::Own,
+    }
+}
+
+/// Whether any record or identity record is session-owned.
+fn holds_session_records(state: &ExecState) -> bool {
+    let is_session = |owner: &Owner| matches!(owner, Owner::Session { .. });
+    state.applied.iter().any(|record| is_session(&record.owner))
+        || state
+            .replay
+            .launch_identities
+            .iter()
+            .any(|record| is_session(&record.owner))
+}
+
+/// Settle who owns the session before the hook composes anything.
+///
+/// A foreign token retags every session record and identity inherited, resets the session cache,
+/// sets the selection to `FollowCwd` and claims. An unclaimed `FollowCwd` state holding session
+/// records retags them before the claim: only `ocx shell` writes them, always `Pinned`, so under
+/// `FollowCwd` with no claim they are foreign or forged. An unclaimed `Pinned` state is claimed as it
+/// stands. A token-less hook (`shell` is `None`) never claims, never retags and never finds a token foreign.
+pub fn claim_session(state: &mut ExecState, shell: Option<&ShellProcess>) -> Claim {
+    match token_standing(state.session.token.as_ref(), shell) {
+        TokenStanding::Own => Claim::Held,
+        TokenStanding::Foreign => {
+            // Retag reads the selection and the project hint, so it runs before either is reset.
+            state.retag_sessions();
+            state.selection = Selection::FollowCwd;
+            state.session = SessionCache {
+                token: shell.map(ShellProcess::token),
+                ..SessionCache::default()
+            };
+            Claim::RetaggedForeign
+        }
+        TokenStanding::Unclaimed => {
+            // A token-less hook never claims, so an unclaimed state would be retagged on every prompt.
+            let retag =
+                shell.is_some() && matches!(state.selection, Selection::FollowCwd) && holds_session_records(state);
+            if retag {
+                state.retag_sessions();
+            }
+            state.session.token = shell.map(ShellProcess::token);
+            match (retag, shell) {
+                (true, _) => Claim::RetaggedUnclaimed,
+                (false, Some(_)) => Claim::Claimed,
+                (false, None) => Claim::Held,
+            }
+        }
+    }
+}
+
+/// The hook's desired composition under `FollowCwd` for the project the working directory resolved.
+///
+/// Subtracts what `inherited_scopes` already holds; `Pinned` sessions recompose their tier's
+/// consented groups instead and never ask this.
+#[must_use]
+pub fn follow_cwd_composition(state: &ExecState, project: Option<&ProjectIdentity>) -> reconcile::Composition {
+    reconcile::desired_composition(&state.inherited_scopes, project.map(|identity| identity.dir.as_path()))
+}
+
+/// The start time of process `pid` in clock ticks since boot: field 22 of `/proc/<pid>/stat`.
+///
+/// `None` when the file is unreadable or malformed.
+#[cfg(target_os = "linux")]
+pub async fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = tokio::fs::read(format!("/proc/{pid}/stat")).await.ok()?;
+    parse_proc_start_time(&String::from_utf8_lossy(&stat))
+}
+
+/// No cheap reader on this platform: the pid alone identifies the shell.
+#[cfg(not(target_os = "linux"))]
+pub async fn process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Field 22 of a `/proc/<pid>/stat` line.
+///
+/// The command name (field 2) is parenthesised and may hold spaces and parentheses, so the fields
+/// are counted from the last `)`: a hostile name cannot shift them.
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_start_time(stat: &str) -> Option<u64> {
+    let after_name = &stat[stat.rfind(')')? + 1..];
+    // Field 3 (the state) is the first one after the name, so field 22 is the 20th.
+    after_name.split_ascii_whitespace().nth(19)?.parse().ok()
+}
+
+/// The digest [`exec_state::Session::messages_fp`] records for one prompt's diagnostics; empty for none.
 // Length-prefixed, or `["ab", "c"]` and `["a", "bc"]` digest alike.
 fn messages_fingerprint(messages: &[String]) -> String {
     use sha2::Digest as _;
@@ -863,92 +1032,477 @@ fn messages_fingerprint(messages: &[String]) -> String {
     hex::encode(hasher.finalize())[..16].to_owned()
 }
 
-/// Carry `previous` forward verbatim, recording `messages` as announced.
-// Not `next_ledger`: a fresh ledger drops the project scope this refusal path keeps, leaving nothing to revert.
-pub fn announcing(previous: &Ledger, messages: &[String]) -> Ledger {
-    Ledger {
-        messages_fp: messages_fingerprint(messages),
-        ..previous.clone()
+// -- The pinned selection, and the execution state the hook records --------------------------
+
+/// The project a pinned project tier names, probed without opening any file.
+///
+/// The directory comes from the received state, so it is untrusted: consent has to run before
+/// `ocx.toml` is parsed, and consent itself reads `ocx.lock`. One `lstat` pair therefore refuses
+/// anything that is not a regular file, a FIFO or a symlink included, before either is opened.
+/// `None` means the layer cannot be refreshed and stays as it is.
+pub async fn pinned_identity(tier: &PinnedTier) -> Option<ProjectIdentity> {
+    let PinnedTier::Project { dir } = tier else {
+        return None;
+    };
+    // Joined onto a relative `dir`, `ocx.toml` would name a file under the hook's working directory.
+    if !dir.is_absolute() {
+        return None;
+    }
+    let config = dir.join("ocx.toml");
+    let regular = |metadata: &std::fs::Metadata| metadata.file_type().is_file();
+    if !tokio::fs::symlink_metadata(&config).await.is_ok_and(|m| regular(&m)) {
+        return None;
+    }
+    // An absent lock is consent's own business (a `paths` grant reaches it); only a non-file is refused.
+    match tokio::fs::symlink_metadata(lock_path_for(&config)).await {
+        Ok(metadata) if !regular(&metadata) => return None,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        Ok(_) | Err(_) => {}
+    }
+    ProjectIdentity::resolve(config).await.ok()
+}
+
+/// The notice owed when a pinned project tier's `ocx.toml` is gone; `None` while it is there.
+///
+/// The layer stays either way. `NotFound` only: a config that exists but cannot be read is another
+/// condition and keeps its silence.
+pub async fn vanished_pin_notice(tier: &PinnedTier) -> Option<String> {
+    let PinnedTier::Project { dir } = tier else {
+        return None;
+    };
+    if !dir.is_absolute() {
+        return None;
+    }
+    match tokio::fs::symlink_metadata(dir.join("ocx.toml")).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(format!(
+            "ocx: pinned project {} no longer has an ocx.toml; keeping its layer",
+            printable(&dir.to_string_lossy())
+        )),
+        _ => None,
     }
 }
 
-/// Build the ledger the next prompt will plan against; `current` is the live shell before global applies.
-pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, current: &Env) -> Ledger {
-    // Emittable only: recording what `plan` drops claims a key ocx can never remove.
-    let desired_global: Vec<_> = reconcile::emittable_entries(&outcome.global)
-        .into_iter()
-        .cloned()
+/// What a pinned selection composes: its own tier, never the working directory's scope.
+#[must_use]
+pub fn pinned_composition(tier: &PinnedTier, identity: Option<&ProjectIdentity>) -> reconcile::Composition {
+    match tier {
+        PinnedTier::Global => reconcile::Composition {
+            global: true,
+            project: None,
+        },
+        PinnedTier::Project { .. } => reconcile::Composition {
+            global: false,
+            project: identity.map(|identity| identity.dir.clone()),
+        },
+    }
+}
+
+/// The groups a pinned selection recomposes; none recorded means the default group.
+#[must_use]
+pub fn pinned_groups(pinned: &exec_state::Pinned) -> Vec<String> {
+    composed_groups(&pinned.groups)
+}
+
+/// The project config the watch set stats: only a project this prompt composes.
+///
+/// An inherited project is a snapshot, so an edit to its files must change nothing.
+#[must_use]
+pub fn watched_config<'a>(
+    composition: &reconcile::Composition,
+    project: Option<&'a ProjectIdentity>,
+) -> Option<&'a Path> {
+    composition.project.as_ref()?;
+    project.map(|identity| identity.config_path.as_path())
+}
+
+/// A state-derived string made safe and ASCII for a notice line.
+#[must_use]
+pub fn printable(text: &str) -> String {
+    exec_state::display_safe(text)
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect()
+}
+
+/// The one-line notice a pinned shell prints when the working directory enters another project.
+///
+/// `None` when the working directory is outside every project or inside the pinned one. The line
+/// names the pinned selection and the project left unapplied, so a repeat in the same place is
+/// the same line and is shown once through the messages digest.
+#[must_use]
+pub fn pinned_cd_notice(
+    pinned: &exec_state::Pinned,
+    pinned_project: Option<&ProjectIdentity>,
+    cwd_project: Option<&ProjectIdentity>,
+) -> Option<String> {
+    let cwd = cwd_project?;
+    let label = match &pinned.tier {
+        PinnedTier::Global => "the global toolchain".to_owned(),
+        PinnedTier::Project { dir } => {
+            let own = pinned_project.map_or(dir.as_path(), |identity| identity.dir.as_path());
+            if own == cwd.dir {
+                return None;
+            }
+            format!("the project at {}", printable(&own.to_string_lossy()))
+        }
+    };
+    Some(format!(
+        "ocx: this shell is pinned to {label}; the project at {} is not applied",
+        printable(&cwd.dir.to_string_lossy())
+    ))
+}
+
+/// The notice for a state that lost records to the size limit; `None` when nothing was lost.
+///
+/// `encoded_len` is the size of the value this write exported, `None` when the notice reports a loss
+/// the received state already carried.
+#[must_use]
+pub fn truncation_notice(truncated: exec_state::Truncation, encoded_len: Option<usize>) -> Option<String> {
+    if truncated == exec_state::Truncation::None {
+        return None;
+    }
+    let size = encoded_len.map_or_else(String::new, |len| format!(" ({len} bytes)"));
+    Some(format!(
+        "ocx: this shell's environment state outgrew its size limit{size} and was truncated: {}; \
+         values ocx applied earlier may stay when you leave their project",
+        crate::exec_env::truncation_words(truncated)
+    ))
+}
+
+/// The encoded `__OCX_ENV_STATE` value and the notice owed when writing it dropped records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateWrite {
+    /// The value to export; `None` removes the variable.
+    pub value: Option<String>,
+    /// Set when this write truncated beyond what the state already carried.
+    pub notice: Option<String>,
+}
+
+/// Encode the state the hook leaves behind, through the codec's overflow ladder.
+#[must_use]
+pub fn write_state(state: &ExecState) -> StateWrite {
+    let encoded = exec_state::encode(state);
+    let notice = (encoded.truncated > state.truncated)
+        .then(|| truncation_notice(encoded.truncated, Some(encoded.value.as_ref().map_or(0, String::len))))
+        .flatten();
+    StateWrite {
+        value: encoded.value,
+        notice,
+    }
+}
+
+/// Whether `messages` are the ones the previous prompt already announced.
+#[must_use]
+pub fn already_announced(state: &ExecState, messages: &[String]) -> bool {
+    !messages.is_empty() && state.session.messages_fp == messages_fingerprint(messages)
+}
+
+/// Carry `previous` forward verbatim, recording `messages` as announced.
+// Not `next_state`: it would retire the scopes a refused prompt must keep.
+#[must_use]
+pub fn announced(previous: &ExecState, messages: &[String]) -> ExecState {
+    let mut next = previous.clone();
+    next.session.messages_fp = messages_fingerprint(messages);
+    next
+}
+
+/// Whether this prompt leaves a pinned project's recorded layer alone.
+///
+/// A pinned project that was not composed (refused by consent, unreadable, or not identifiable)
+/// keeps its spawn-time layer: nothing is removed and nothing is rewritten.
+#[must_use]
+pub fn keeps_pinned_layer(selection: &Selection, outcome: &Outcome) -> bool {
+    matches!(
+        selection,
+        Selection::Pinned(exec_state::Pinned {
+            tier: PinnedTier::Project { .. },
+            ..
+        })
+    ) && outcome.slot.is_none()
+}
+
+/// The scope a `Composed` session owner refreshes; `None` for every other owner.
+fn composed_scope(owner: &Owner) -> Option<exec_state::ScopeId> {
+    match owner {
+        Owner::Session {
+            scope,
+            source: exec_state::SessionSource::Composed,
+        } => Some(*scope),
+        _ => None,
+    }
+}
+
+/// The union `desired` set the state planner diffs: `global ++ session ++ project`.
+pub fn session_desired(outcome: &Outcome) -> Vec<Entry> {
+    let mut desired = outcome.global.clone();
+    if outcome.session_enforced {
+        desired.extend(outcome.session.entries());
+    }
+    desired.extend(outcome.project.iter().cloned());
+    desired
+}
+
+/// Diff `outcome` against the live environment, scoped by the state's records.
+pub fn plan_for_state(state: &ExecState, outcome: &Outcome, owned: &[&Path], current: &Env) -> Plan {
+    let desired = session_desired(outcome);
+    if !keeps_pinned_layer(&state.selection, outcome) {
+        return reconcile::plan_session(&desired, current, state, owned);
+    }
+    // Shielded as inherited, the kept layer is neither retired nor claimed by the diff.
+    let mut shielded = state.clone();
+    for record in &mut shielded.applied {
+        if composed_scope(&record.owner) == Some(exec_state::ScopeId::Project) {
+            record.owner = Owner::Inherited;
+        }
+    }
+    reconcile::plan_session(&desired, current, &shielded, owned)
+}
+
+/// The state the next prompt reads: `previous` with the session records rebuilt from `outcome`.
+///
+/// Only `Composed` records of the scopes this prompt composed are replaced. Inherited and
+/// `Invocation` records, the header, the policy, the replay env and the inherited scopes pass
+/// through untouched. `current` is the live shell before this prompt's plan is applied.
+#[must_use]
+pub fn next_state(previous: &ExecState, outcome: &Outcome, current: &Env, fingerprint: &str) -> ExecState {
+    use exec_state::{ProjectScopeHint, ScopeId};
+
+    let kept = keeps_pinned_layer(&previous.selection, outcome);
+    let rebuilt = |owner: &Owner| composed_scope(owner).is_some_and(|scope| scope == ScopeId::Global || !kept);
+
+    let mut next = previous.clone();
+    next.applied.retain(|record| !rebuilt(&record.owner));
+    next.replay.launch_identities.retain(|record| !rebuilt(&record.owner));
+
+    // Each scope's priors are read from the environment the one before it left.
+    let mut scratch = current.clone();
+    let global = reconcile::session_writable(&outcome.global, previous);
+    next.applied
+        .extend(session_records(ScopeId::Global, &global, previous, &mut scratch));
+    scratch.apply_entries(&outcome.session.persistent_entries());
+    if !kept {
+        // The trampoline directory is recorded as the project's first element, so leaving `bin` mode or
+        // the project retires it like any other element instead of waiting on the owned-prefix repair.
+        let mut project: Vec<Entry> = outcome.session.project_entry().into_iter().collect();
+        project.extend(outcome.project.iter().cloned());
+        let project = reconcile::session_writable(&project, previous);
+        next.applied
+            .extend(session_records(ScopeId::Project, &project, previous, &mut scratch));
+        next.replay
+            .launch_identities
+            .extend(identity_records(outcome.project_identities.as_ref(), ScopeId::Project));
+    }
+    // The project's own entry wins a digest both scopes name, as the innermost export does.
+    let held: BTreeSet<String> = next
+        .replay
+        .launch_identities
+        .iter()
+        .filter(|record| composed_scope(&record.owner) == Some(ScopeId::Project))
+        .map(|record| record.digest.clone())
         .collect();
-    let global: Vec<LedgerEntry> = desired_global.iter().map(LedgerEntry::from).collect();
-    // Against `current`, the only place the user's own value is visible, or a dropped global constant is never restored.
-    let global_priors = reconcile::capture_priors(
-        &global,
-        current,
-        previous
-            .scopes
-            .global
-            .as_deref()
-            .map(|applied| (applied, &previous.scopes.global_priors)),
+    next.replay.launch_identities.extend(
+        identity_records(outcome.global_identities.as_ref(), ScopeId::Global)
+            .into_iter()
+            .filter(|record| !held.contains(&record.digest)),
     );
 
-    let project = outcome.slot.as_ref().map(|slot| {
-        let desired: Vec<_> = reconcile::emittable_entries(&outcome.project)
-            .into_iter()
-            .cloned()
-            .collect();
-        let applied: Vec<LedgerEntry> = desired.iter().map(LedgerEntry::from).collect();
-        // Project priors are captured after global applies; built only when a `Constant` reads it.
-        let after_global = applied
-            .iter()
-            .any(|entry| matches!(entry.kind, ModifierKind::Constant))
-            .then(|| {
-                let mut env = current.clone();
-                env.apply_entries(&desired_global);
-                env
-            });
-        ProjectScope {
+    next.session.fp = fingerprint.to_owned();
+    next.session.messages_fp = messages_fingerprint(&outcome.messages);
+    // Never cache `Activate` (a consent input) or a yield (its sentinel is not fingerprinted).
+    next.session.verdict = match (outcome.inert, outcome.resolved) {
+        (true, _) => Some(exec_state::Verdict::Inert),
+        (false, false) => Some(exec_state::Verdict::NoProject),
+        (false, true) => None,
+    };
+    // Written with the records it describes, so the hint never outlives the project's layer.
+    if !kept {
+        next.session.project = outcome.slot.as_ref().map(|slot| ProjectScopeHint {
             key: slot.key.clone(),
             dir: slot.dir.clone(),
-            priors: reconcile::capture_priors(
-                &applied,
-                after_global.as_ref().unwrap_or(current),
-                previous
-                    .scopes
-                    .project
-                    .as_ref()
-                    .map(|scope| (scope.applied.as_slice(), &scope.priors)),
-            ),
-            applied,
-        }
-    });
+        });
+    }
+    next
+}
 
-    Ledger {
-        v: previous.v,
-        fp: fingerprint.to_owned(),
-        // Carried: only the hook redefinition moves the shell's gate; deriving it hides a stale gate forever.
-        ws: previous.ws.clone(),
-        // Carried: this process cannot see the shell-start `--config` overlay.
-        tiers: previous.tiers.clone(),
-        messages_fp: messages_fingerprint(&outcome.messages),
-        // Never cache `Activate` (a consent input) or a yield (its sentinel is not fingerprinted).
-        verdict: match (outcome.inert, outcome.resolved) {
-            (true, _) => Some(Verdict::Inert),
-            (false, false) => Some(Verdict::NoProject),
-            (false, true) => None,
-        },
-        // Never carried: `encode` derives it, and a seeded one reports `LedgerOverCap` for a healthy shell.
-        over_cap: Vec::new(),
-        scopes: Scopes {
-            global: Some(global),
-            global_priors,
-            project,
-        },
+/// The session identity records of the names a scope composed its packages under, if any.
+fn identity_records(
+    identities: Option<&LaunchIdentities>,
+    scope: exec_state::ScopeId,
+) -> Vec<exec_state::IdentityRecord> {
+    identities
+        .map(|identities| {
+            identities.to_records(Owner::Session {
+                scope,
+                source: exec_state::SessionSource::Composed,
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// The `Composed` records for `entries`, applied in order to `scratch`.
+///
+/// A record `previous` already holds for the same value is carried over unchanged, so a refresh never
+/// forgets what a key looked like before ocx first touched it.
+fn session_records(
+    scope: exec_state::ScopeId,
+    entries: &[Entry],
+    previous: &ExecState,
+    scratch: &mut Env,
+) -> Vec<exec_state::AppliedValue> {
+    let owner = Owner::Session {
+        scope,
+        source: exec_state::SessionSource::Composed,
+    };
+    let earlier: Vec<&exec_state::AppliedValue> =
+        previous.applied.iter().filter(|record| record.owner == owner).collect();
+    let mut records: Vec<exec_state::AppliedValue> = Vec::new();
+    for entry in entries {
+        let value = exec_state::ComposedValue::from(entry);
+        if let Some(record) = session_record(scratch, &value, &owner, &earlier) {
+            fold_record(&mut records, record);
+        }
+        scratch.apply_entries(std::slice::from_ref(entry));
+    }
+    records
+}
+
+/// Adds `record`, folding a repeat of the same key: an element once, a constant newest-wins over the
+/// oldest prior.
+fn fold_record(records: &mut Vec<exec_state::AppliedValue>, mut record: exec_state::AppliedValue) {
+    use exec_state::ValueKind;
+
+    let same = |other: &exec_state::AppliedValue| other.kind == record.kind && same_key(&other.key, &record.key);
+    match record.kind {
+        ValueKind::Constant => {
+            if let Some(at) = records.iter().position(same) {
+                record.prior = records.remove(at).prior;
+            }
+        }
+        ValueKind::Path | ValueKind::List => {
+            if records.iter().any(|other| same(other) && other.value == record.value) {
+                return;
+            }
+        }
+    }
+    records.push(record);
+}
+
+fn same_key(left: &str, right: &str) -> bool {
+    ocx_config::env::EnvKey::new(left) == ocx_config::env::EnvKey::new(right)
+}
+
+/// Whether the secret rule forbids any record for `key`: a credential or an `OCX_AUTH_*` key.
+fn is_never_recorded(key: &str) -> bool {
+    const AUTH_PREFIX: &str = "OCX_AUTH_";
+    ocx_env::keys_with(ocx_env::Propagation::Credential).any(|credential| credential.eq_ignore_ascii_case(key))
+        || key
+            .get(..AUTH_PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(AUTH_PREFIX))
+}
+
+/// The record of one applied value, or `None` when it must not be recorded.
+fn session_record(
+    start: &Env,
+    value: &exec_state::ComposedValue,
+    owner: &Owner,
+    earlier: &[&exec_state::AppliedValue],
+) -> Option<exec_state::AppliedValue> {
+    use exec_state::{Prior, RecordedValue, ValueKind};
+
+    if is_never_recorded(&value.key) {
+        return None;
+    }
+    let record = |recorded: RecordedValue, pre_existing: bool, separator: Option<String>, prior: Option<Prior>| {
+        exec_state::AppliedValue {
+            key: value.key.clone(),
+            value: recorded,
+            kind: value.kind,
+            separator,
+            pre_existing,
+            owner: owner.clone(),
+            prior,
+        }
+    };
+    let held_before = |recorded: &RecordedValue| {
+        earlier
+            .iter()
+            .find(|other| other.kind == value.kind && same_key(&other.key, &value.key) && &other.value == recorded)
+            .map(|other| (*other).clone())
+    };
+    match value.kind {
+        ValueKind::Path | ValueKind::List if value.value.is_empty() => None,
+        ValueKind::Path => {
+            let recorded = RecordedValue::Literal(value.value.clone());
+            let present = start.get(&value.key).is_some_and(|existing| {
+                let remaining = ocx_util::path::remove_segment(existing, std::ffi::OsStr::new(&value.value));
+                let segments = |text: &std::ffi::OsStr| {
+                    std::env::split_paths(text)
+                        .filter(|segment| !segment.as_os_str().is_empty())
+                        .count()
+                };
+                segments(&remaining) != segments(existing)
+            });
+            Some(held_before(&recorded).unwrap_or_else(|| record(recorded, present, None, None)))
+        }
+        ValueKind::List => {
+            let recorded = RecordedValue::Literal(value.value.clone());
+            let separator = value
+                .separator
+                .as_deref()
+                .filter(|separator| !separator.is_empty())
+                .unwrap_or(ocx_package::metadata::env::list::DEFAULT_SEPARATOR);
+            let present = start.get(&value.key).is_some_and(|existing| {
+                format!("{separator}{}{separator}", existing.to_string_lossy())
+                    .contains(&format!("{separator}{}{separator}", value.value))
+            });
+            Some(held_before(&recorded).unwrap_or_else(|| record(recorded, present, Some(separator.to_owned()), None)))
+        }
+        // A constant `PATH` record would make the state unreadable.
+        ValueKind::Constant if same_key(&value.key, "PATH") || same_key(&value.key, "PATHEXT") => None,
+        ValueKind::Constant => {
+            let recorded = RecordedValue::Literal(value.value.clone());
+            let live = start.get(&value.key);
+            let own_value_is_live = |old: &exec_state::AppliedValue| {
+                let RecordedValue::Literal(text) = &old.value;
+                live.is_some_and(|live| live == std::ffi::OsStr::new(text))
+            };
+            let older = earlier
+                .iter()
+                .find(|other| other.kind == ValueKind::Constant && same_key(&other.key, &value.key));
+            // The prior survives only while the live value is still what ocx wrote.
+            let carried = older.filter(|old| own_value_is_live(old));
+            if let Some(old) = carried
+                && old.value == recorded
+            {
+                return Some((*old).clone());
+            }
+            let prior = match carried {
+                Some(old) => old.prior.clone(),
+                None => Some(match live {
+                    None => Prior::Unset,
+                    Some(existing) => match existing.to_str() {
+                        Some(existing) => Prior::Value(existing.to_owned()),
+                        None => Prior::Withheld,
+                    },
+                }),
+            };
+            Some(record(recorded, false, None, prior))
+        }
     }
 }
 
 /// Whether a revert must retain the recorded scope: `recorded_dir` is an ancestor-or-self of the CWD
 /// and its `ocx.toml` is still a regular file. Blocking; revert path only.
 pub fn walk_is_indeterminate(recorded_dir: Option<&Path>, cwd: Option<&Path>) -> bool {
+    walk_is_indeterminate_in(recorded_dir, cwd, ocx_config::exec_state::received::policy())
+}
+
+/// [`walk_is_indeterminate`] with the received policy named: `OCX_NO_PROJECT` at its env tier.
+fn walk_is_indeterminate_in(
+    recorded_dir: Option<&Path>,
+    cwd: Option<&Path>,
+    received: Option<&ocx_config::exec_state::Policy>,
+) -> bool {
     let Some(recorded_dir) = recorded_dir else {
         return false;
     };
@@ -956,7 +1510,10 @@ pub fn walk_is_indeterminate(recorded_dir: Option<&Path>, cwd: Option<&Path>) ->
     if !recorded_dir.is_absolute() {
         return false;
     }
-    if matches!(ocx_env::OCX_NO_PROJECT.bool_or(false), Ok(true)) {
+    if ocx_config::exec_state::received::neutral_bool(
+        &ocx_env::OCX_NO_PROJECT,
+        received.and_then(|policy| policy.no_project),
+    ) {
         return false;
     }
     let Some(cwd) = cwd else {
@@ -1076,7 +1633,31 @@ mod identity_tests {
 mod forged_dir_tests {
     use std::path::Path;
 
-    use super::walk_is_indeterminate;
+    use super::{walk_is_indeterminate, walk_is_indeterminate_in};
+
+    /// A received `no_project` stops the revert path from retaining a scope the walk would no longer
+    /// find; the twin without it retains.
+    #[test]
+    fn a_received_no_project_ends_the_retention_of_a_recorded_scope() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_NO_PROJECT);
+        #[cfg(windows)]
+        let honest = Path::new(r"C:\work\acme");
+        #[cfg(not(windows))]
+        let honest = Path::new("/work/acme");
+        let received = ocx_config::exec_state::Policy {
+            no_project: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            walk_is_indeterminate_in(Some(honest), None, None),
+            "control: an unreadable CWD retains an honest recorded scope"
+        );
+        assert!(
+            !walk_is_indeterminate_in(Some(honest), None, Some(&received)),
+            "a received no_project means no walk finds the project, so nothing is retained"
+        );
+    }
 
     /// A recorded `dir` that is not absolute is refused before it can be
     /// joined onto.
@@ -1368,12 +1949,12 @@ mod session_path_tests {
     use std::path::{Path, PathBuf};
 
     use ocx_config::env::Env;
+    use ocx_config::exec_state::{ExecState, Truncation};
     use ocx_package::metadata::env::apply::EnvEntriesExt;
     use ocx_package::metadata::env::entry::Entry;
     use ocx_package::metadata::env::modifier::ModifierKind;
-    use ocx_shell::shell::reconcile::Ledger;
 
-    use super::{Outcome, ProjectIdentity, SessionPath, desired_entries, next_ledger, plan_for};
+    use super::{Outcome, ProjectIdentity, SessionPath, next_state, plan_for_state, session_desired};
 
     const OCX_HOME: &str = "/tmp/ocx-home";
     const PROJECT_DIR: &str = "/work/acme";
@@ -1425,8 +2006,11 @@ mod session_path_tests {
     fn outcome(session: SessionPath, global: Vec<Entry>, project: Vec<Entry>, owned_home: Option<PathBuf>) -> Outcome {
         Outcome {
             session,
+            session_enforced: true,
             global,
             project,
+            global_identities: None,
+            project_identities: None,
             owned_home,
             resolved: true,
             slot: Some(identity()),
@@ -1474,7 +2058,7 @@ mod session_path_tests {
     /// `repair_owned_segments` examines at all), against a live `PATH` that
     /// carries both session directories.
     ///
-    /// Red state — today's `goat`: `desired_entries` returns
+    /// Red state — today's `goat`: `session_desired` returns
     /// `global ++ project` and never splices [`Outcome::session`], so both
     /// directories are owned, uncontributed, and removed.
     #[test]
@@ -1495,9 +2079,9 @@ mod session_path_tests {
         // sharpest one — the session pair survives even here.
         let global = vec![path_entry(&format!("{OCX_HOME}/packages/aa/bb/content/bin"))];
         let applied = outcome(session(), global, Vec::new(), Some(PathBuf::from(PROJECT_HOME)));
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
+        let state = next_state(&ExecState::default(), &applied, &Env::clean(), "fp-1");
 
-        let plan = plan_for(&ledger, &applied, &[Path::new(OCX_HOME)], &current);
+        let plan = plan_for_state(&state, &applied, &[Path::new(OCX_HOME)], &current);
 
         let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
         assert!(
@@ -1513,14 +2097,14 @@ mod session_path_tests {
 
     /// And the survival is not passive: the desired set *contributes*
     /// both directories, so a shell that lost them (a `PATH` overwritten by a
-    /// login script, the lost-ledger case) gets them back.
+    /// login script, the lost-state case) gets them back.
     ///
     /// Red state: make [`SessionPath::entries`] emit only what the mode
-    /// selected, or drop the splice from `desired_entries`.
+    /// selected, or drop the splice from `session_desired`.
     #[test]
     fn c059_a_path_that_lost_both_session_directories_gets_them_back() {
         let applied = outcome(session(), Vec::new(), Vec::new(), Some(PathBuf::from(PROJECT_HOME)));
-        let path = resulting_path(&[Path::new("/usr/bin")], &desired_entries(&applied));
+        let path = resulting_path(&[Path::new("/usr/bin")], &session_desired(&applied));
 
         position(&path, &install_bin());
         position(&path, &global_bin());
@@ -1606,7 +2190,7 @@ mod session_path_tests {
             Some(PathBuf::from(PROJECT_HOME)),
         );
 
-        let path = resulting_path(&[Path::new("/usr/bin")], &desired_entries(&applied));
+        let path = resulting_path(&[Path::new("/usr/bin")], &session_desired(&applied));
 
         let composed_project = position(&path, Path::new(&project_tool));
         let install = position(&path, &install_bin());
@@ -1642,7 +2226,7 @@ mod session_path_tests {
             Some(PathBuf::from(PROJECT_HOME)),
         );
 
-        let path = resulting_path(&[Path::new("/usr/bin")], &desired_entries(&applied));
+        let path = resulting_path(&[Path::new("/usr/bin")], &session_desired(&applied));
         assert!(
             position(&path, &project_bin()) < position(&path, Path::new(&global_tool)),
             "RUL-87: a global `cmake` must not win over the project's `cmake` trampoline; got {path:#?}"
@@ -1667,7 +2251,7 @@ mod session_path_tests {
     /// assertion: `bin` composes nothing *and* keeps the global toolchain
     /// reachable through its trampolines.
     ///
-    /// Red state: return `Vec::new()` for `next_ledger`'s `global` — the record
+    /// Red state: return `Vec::new()` for `next_state`'s global records — the record
     /// this plan consumes — and both retirements vanish.
     #[test]
     fn d3_leaving_global_env_mode_retires_the_element_and_restores_the_constant() {
@@ -1675,7 +2259,7 @@ mod session_path_tests {
         let ocx_jdk = format!("{OCX_HOME}/packages/gg/jdk/content");
 
         // The shell before ocx ever composed — the only place the user's own
-        // `JAVA_HOME` is still visible, which is what `next_ledger` captures.
+        // `JAVA_HOME` is still visible, which is what `next_state` captures.
         let mut before = Env::clean();
         before.set("PATH", "/usr/bin");
         before.set("JAVA_HOME", "/usr/lib/jvm");
@@ -1696,17 +2280,17 @@ mod session_path_tests {
             Vec::new(),
             None,
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &was_env, &before);
+        let state = next_state(&ExecState::default(), &was_env, &before, "fp-1");
 
         // The shell as that prompt left it.
         let mut current = before.clone();
-        current.apply_entries(&desired_entries(&was_env));
+        current.apply_entries(&session_desired(&was_env));
 
         // This prompt: `$OCX_HOME/ocx.toml` now states `activate = "bin"`, so
         // `global_prompt_entries` returns an empty vector — and the session pair stays in every
         // mode.
         let now_bin = outcome(session(), Vec::new(), Vec::new(), None);
-        let plan = plan_for(&ledger, &now_bin, &[Path::new(OCX_HOME)], &current);
+        let plan = plan_for_state(&state, &now_bin, &[Path::new(OCX_HOME)], &current);
 
         assert_eq!(
             plan.removes,
@@ -1745,99 +2329,14 @@ mod session_path_tests {
         );
     }
 
-    // ── Launch identities ─────────────────────
-
-    const DIGEST_GLOBAL: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const DIGEST_PROJECT: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    fn identities_entry(value: String) -> Entry {
-        Entry {
-            key: ocx_env::__OCX_LAUNCH_IDENTITIES.name.to_owned(),
-            value,
-            kind: ModifierKind::Constant,
-            separator: None,
-        }
-    }
-
-    /// The project's map replaces the global one on the shell, so it must carry both.
-    #[test]
-    fn the_project_launch_identities_keep_the_global_tools_names() {
-        let global = vec![identities_entry(format!(
-            r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}},"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#
-        ))];
-        let mut project = vec![
-            path_entry("/work/acme/bin"),
-            identities_entry(format!(
-                r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}}}}"#
-            )),
-        ];
-
-        super::fold_global_launch_identities(&global, &mut project);
-
-        assert_eq!(
-            project[1].value,
-            format!(
-                r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}},"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}}}}"#
-            ),
-            "the project's own entry, and its opt-out, win for a digest both scopes name"
-        );
-    }
-
-    /// The project scope owns its launch identities: leaving it unsets the key with no global
-    /// tier, and sets the global map back with one.
-    #[test]
-    fn leaving_the_project_retires_its_launch_identities() {
-        let global_value = format!(r#"{{"{DIGEST_GLOBAL}":{{"names":["ocx.sh/jre:21"]}}}}"#);
-        let project_value = format!(r#"{{"{DIGEST_PROJECT}":{{"names":["ocx.sh/plantuml:1"]}}}}"#);
-        let key = ocx_env::__OCX_LAUNCH_IDENTITIES.name.to_owned();
-
-        for global in [Vec::new(), vec![identities_entry(global_value.clone())]] {
-            let mut before = Env::clean();
-            before.set("PATH", "/usr/bin");
-
-            let inside = outcome(
-                session(),
-                global.clone(),
-                vec![identities_entry(project_value.clone())],
-                None,
-            );
-            let ledger = next_ledger(&Ledger::empty(), "fp-1", &inside, &before);
-            let mut current = before.clone();
-            current.apply_entries(&desired_entries(&inside));
-            assert_eq!(current.get(&key), Some(std::ffi::OsStr::new(&project_value)));
-
-            let mut outside = outcome(session(), global.clone(), Vec::new(), None);
-            outside.slot = None;
-            outside.resolved = false;
-            let plan = plan_for(&ledger, &outside, &[Path::new(OCX_HOME)], &current);
-
-            let set: Vec<&str> = plan
-                .sets
-                .iter()
-                .filter(|entry| entry.key == key)
-                .map(|entry| entry.value.as_str())
-                .collect();
-            if global.is_empty() {
-                assert_eq!(
-                    plan.restores,
-                    vec![(key.clone(), None)],
-                    "no global map: the key is unset"
-                );
-                assert!(set.is_empty());
-            } else {
-                assert!(plan.restores.is_empty());
-                assert_eq!(set, [global_value.as_str()], "the global map replaces the project's");
-            }
-        }
-    }
-
     // ── The deletion authority's scope ─────────────────────
 
     /// `owned_prefixes` is `$OCX_HOME` **plus** the
     /// consented, in-scope project's own home — and the second prefix is what
-    /// makes leaving `bin` mode subtractive at all: the project's home sits
-    /// under the project directory, not under `$OCX_HOME`, so without it a
-    /// stale `<home>/bin` stays on `PATH` for the shell's whole life.
+    /// lets the repair reach a stale `<home>/bin` at all: the project's home sits
+    /// under the project directory, not under `$OCX_HOME`. The repair runs only
+    /// after an all-applied-dropped truncation with no inherited scope,
+    /// which these tests state by setting it on the recorded state.
     ///
     /// Red state: assemble `owned` from `$OCX_HOME` alone (today's `goat`),
     /// and the removal disappears.
@@ -1861,22 +2360,108 @@ mod session_path_tests {
             Vec::new(),
             Some(PathBuf::from(PROJECT_HOME)),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &was_bin, &Env::clean());
+        let mut state = next_state(&ExecState::default(), &was_bin, &Env::clean(), "fp-1");
+        // Rung 2 drops every applied record along with marking the loss.
+        state.applied.clear();
+        state.truncated = Truncation::AllAppliedDropped;
         let now_none = outcome(session(), Vec::new(), Vec::new(), Some(PathBuf::from(PROJECT_HOME)));
 
         let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
-        let plan = plan_for(&ledger, &now_none, &owned, &current);
+        let plan = plan_for_state(&state, &now_none, &owned, &current);
         let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
         assert!(
             removed.contains(&project_bin().to_string_lossy().as_ref()),
             "C-063: with the home owned, a `<home>/bin` no arm contributes is removed; got {removed:#?}"
         );
 
-        let narrow = plan_for(&ledger, &now_none, &[Path::new(OCX_HOME)], &current);
+        let narrow = plan_for_state(&state, &now_none, &[Path::new(OCX_HOME)], &current);
         assert!(
             narrow.removes.is_empty(),
             "the two operands must genuinely differ, or the assertion above is vacuous; got {:#?}",
             narrow.removes
+        );
+    }
+
+    /// A shell leaving `bin` mode, or the project, withdraws `<home>/bin` by the record that put it
+    /// there: the state is intact (`truncated` stays `None`), so no owned-prefix repair is in play.
+    #[test]
+    fn leaving_bin_mode_or_the_project_withdraws_the_trampoline_dir_by_its_record() {
+        let mut current = Env::clean();
+        current.set(
+            "PATH",
+            std::env::join_paths([project_bin().as_os_str(), std::ffi::OsStr::new("/usr/bin")]).expect("joins"),
+        );
+        let was_bin = outcome(
+            SessionPath {
+                global_bin: global_bin(),
+                project_bin: Some(project_bin()),
+                install_bin: install_bin(),
+            },
+            Vec::new(),
+            Vec::new(),
+            Some(PathBuf::from(PROJECT_HOME)),
+        );
+        let state = next_state(&ExecState::default(), &was_bin, &Env::clean(), "fp-1");
+        assert_eq!(
+            state.truncated,
+            Truncation::None,
+            "the repair gate stays shut for an intact state"
+        );
+
+        let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
+        let mut project_free = outcome(session(), Vec::new(), Vec::new(), None);
+        project_free.resolved = false;
+        project_free.slot = None;
+        let now_none = outcome(session(), Vec::new(), Vec::new(), Some(PathBuf::from(PROJECT_HOME)));
+        for (label, next) in [("bin to none", now_none), ("leaving the project", project_free)] {
+            let plan = plan_for_state(&state, &next, &owned, &current);
+            let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
+            assert_eq!(
+                removed,
+                [project_bin().to_string_lossy().into_owned()],
+                "{label}: the trampoline dir leaves PATH by its record, and nothing else does"
+            );
+        }
+
+        // Still `bin` mode: the dir is desired, so the record retires nothing.
+        let plan = plan_for_state(&state, &was_bin, &owned, &current);
+        assert!(
+            plan.removes.is_empty(),
+            "a held `bin` mode removes nothing: {:#?}",
+            plan.removes
+        );
+    }
+
+    /// A prompt that composes nothing leaves the session directories where an outer `ocx exec` put
+    /// them: moving them to the front would displace the project entries it composed ahead of them.
+    #[test]
+    fn a_prompt_that_composes_nothing_does_not_reorder_the_session_directories() {
+        let mut current = Env::clean();
+        current.set(
+            "PATH",
+            std::env::join_paths([
+                Path::new("/exec/composed/bin"),
+                &global_bin(),
+                &install_bin(),
+                Path::new("/usr/bin"),
+            ])
+            .expect("joins"),
+        );
+        let mut standing = outcome(session(), Vec::new(), Vec::new(), None);
+        standing.slot = None;
+        let owned: Vec<&Path> = vec![Path::new(OCX_HOME)];
+
+        let plan = plan_for_state(&ExecState::default(), &standing, &owned, &current);
+        assert!(
+            !plan.sets.is_empty(),
+            "control: an enforcing prompt does move the session directories to the front"
+        );
+
+        standing.session_enforced = false;
+        let plan = plan_for_state(&ExecState::default(), &standing, &owned, &current);
+        assert!(
+            plan.sets.is_empty() && plan.removes.is_empty(),
+            "a prompt that composes nothing changes nothing: {plan:#?}"
         );
     }
 
@@ -1942,11 +2527,14 @@ mod session_path_tests {
             Vec::new(),
             Some(root.clone()),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &was_bin, &Env::clean());
+        let mut state = next_state(&ExecState::default(), &was_bin, &Env::clean(), "fp-1");
+        // Rung 2 drops every applied record along with marking the loss.
+        state.applied.clear();
+        state.truncated = Truncation::AllAppliedDropped;
         let now_none = outcome(session(), Vec::new(), Vec::new(), Some(root.clone()));
 
         let owned: Vec<&Path> = vec![Path::new(OCX_HOME), root.as_path()];
-        let plan = plan_for(&ledger, &now_none, &owned, &current);
+        let plan = plan_for_state(&state, &now_none, &owned, &current);
         let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
         assert!(
             removed.contains(&physical.to_string_lossy().as_ref()),
@@ -1954,7 +2542,7 @@ mod session_path_tests {
              cannot reach; got {removed:#?}"
         );
 
-        let narrow = plan_for(&ledger, &now_none, &[Path::new(OCX_HOME)], &current);
+        let narrow = plan_for_state(&state, &now_none, &[Path::new(OCX_HOME)], &current);
         assert!(
             narrow.removes.is_empty(),
             "the two operands must genuinely differ, or the assertion above is vacuous; got {:#?}",
@@ -1974,7 +2562,7 @@ mod session_path_tests {
     /// discriminating — a reconcile that examined nothing satisfies it too, and
     /// the positive half rules that out.
     ///
-    /// Red state: pass the configured root to `plan_for` in place of the
+    /// Red state: pass the configured root to `plan_for_state` in place of the
     /// resolved home, and the sibling's segment is removed with it.
     #[test]
     fn c063_owning_the_home_never_reaches_a_sibling_projects_home() {
@@ -2005,10 +2593,13 @@ mod session_path_tests {
             Vec::new(),
             Some(mine.clone()),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &was_bin, &Env::clean());
+        let mut state = next_state(&ExecState::default(), &was_bin, &Env::clean(), "fp-1");
+        // Rung 2 drops every applied record along with marking the loss.
+        state.applied.clear();
+        state.truncated = Truncation::AllAppliedDropped;
         let now_none = outcome(session(), Vec::new(), Vec::new(), Some(mine.clone()));
 
-        let plan = plan_for(&ledger, &now_none, &[Path::new(OCX_HOME), mine.as_path()], &current);
+        let plan = plan_for_state(&state, &now_none, &[Path::new(OCX_HOME), mine.as_path()], &current);
         let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
         assert!(
             removed.contains(&mine.join("bin").to_string_lossy().as_ref()),
@@ -2064,11 +2655,11 @@ mod session_path_tests {
             (NoneMode, Bin),
         ] {
             let before = outcome_for(from);
-            let ledger = next_ledger(&Ledger::empty(), "fp-1", &before, &Env::clean());
+            let state = next_state(&ExecState::default(), &before, &Env::clean(), "fp-1");
             let after = outcome_for(to);
 
             // The `PATH` a shell genuinely holds in the `from` mode, spelled
-            // from the contract rather than folded from `desired_entries` — a
+            // from the contract rather than folded from `session_desired` — a
             // seed derived from the thing under test cannot red when that
             // thing drops the session pair.
             let mut live: Vec<PathBuf> = vec![install_bin()];
@@ -2083,7 +2674,7 @@ mod session_path_tests {
             );
 
             let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
-            let plan = plan_for(&ledger, &after, &owned, &current);
+            let plan = plan_for_state(&state, &after, &owned, &current);
             let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
             for kept in [install_bin(), global_bin()] {
                 assert!(
@@ -2093,32 +2684,6 @@ mod session_path_tests {
                 );
             }
         }
-    }
-
-    /// `bin → none`. The project's trampoline directory is
-    /// withdrawn, which only works because the home is an owned prefix.
-    ///
-    /// Red state: leave `Outcome::owned_home` at `None` (today's `goat`) and
-    /// the segment stays on `PATH` forever.
-    #[test]
-    fn c063_leaving_bin_mode_withdraws_the_projects_trampoline_directory() {
-        use ocx_project::activate::ActivateMode::{Bin, None as NoneMode};
-
-        let before = outcome_for(Bin);
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &before, &Env::clean());
-        let mut current = Env::clean();
-        current.set(
-            "PATH",
-            std::env::join_paths([project_bin().as_os_str(), std::ffi::OsStr::new("/usr/bin")]).expect("joins"),
-        );
-
-        let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
-        let plan = plan_for(&ledger, &outcome_for(NoneMode), &owned, &current);
-        let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
-        assert!(
-            removed.contains(&project_bin().to_string_lossy().as_ref()),
-            "C-063: `bin → none` withdraws `<home>/bin`; got removes {removed:#?}"
-        );
     }
 
     /// `none → bin`. The project's trampoline directory arrives
@@ -2133,7 +2698,7 @@ mod session_path_tests {
         use ocx_project::activate::ActivateMode::{Bin, None as NoneMode};
 
         let before = outcome_for(NoneMode);
-        let path_before = resulting_path(&[Path::new("/usr/bin")], &desired_entries(&before));
+        let path_before = resulting_path(&[Path::new("/usr/bin")], &session_desired(&before));
         assert!(
             !path_before
                 .iter()
@@ -2141,7 +2706,7 @@ mod session_path_tests {
             "`none` mode must not put the trampoline directory on PATH; got {path_before:#?}"
         );
 
-        let path_after = resulting_path(&[Path::new("/usr/bin")], &desired_entries(&outcome_for(Bin)));
+        let path_after = resulting_path(&[Path::new("/usr/bin")], &session_desired(&outcome_for(Bin)));
         let install = position(&path_after, &install_bin());
         let project = position(&path_after, &project_bin());
         let global = position(&path_after, &global_bin());
@@ -2853,6 +3418,7 @@ mod bin_mode_entry_tests {
         fn input<'a>(&'a self, file_structure: &'a FileStructure, global: &'a [Entry]) -> SessionInput<'a> {
             SessionInput {
                 global: global.to_vec(),
+                global_identities: None,
                 manager: &self.manager,
                 local_index: &self.local_index,
                 concurrency: Concurrency::Unbounded,
@@ -2860,6 +3426,9 @@ mod bin_mode_entry_tests {
                 config: &self.config,
                 target: &self.target,
                 project: None,
+                composition: ocx_shell::shell::reconcile::Composition::default(),
+                groups: Vec::new(),
+                pinned: false,
             }
         }
     }
@@ -3605,7 +4174,7 @@ mod session_composition_tests {
         BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ToolchainHome,
     };
 
-    use super::{ProjectIdentity, SessionInput, desired_entries, session};
+    use super::{ProjectIdentity, SessionInput, session, session_desired};
 
     const REGISTRY: &str = "ocx.sh";
     const DIGEST: &str = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -3796,6 +4365,7 @@ mod session_composition_tests {
         ) -> SessionInput<'a> {
             SessionInput {
                 global: global.to_vec(),
+                global_identities: None,
                 manager: &self.manager,
                 local_index: &self.local_index,
                 concurrency: Concurrency::Unbounded,
@@ -3803,6 +4373,12 @@ mod session_composition_tests {
                 config: &self.config,
                 target: &self.target,
                 project,
+                composition: ocx_shell::shell::reconcile::Composition {
+                    global: true,
+                    project: project.map(|identity| identity.dir.clone()),
+                },
+                groups: Vec::new(),
+                pinned: false,
             }
         }
     }
@@ -3848,10 +4424,89 @@ mod session_composition_tests {
             outcome.messages
         );
 
-        let path = resulting_path(&desired_entries(&outcome));
+        let path = resulting_path(&session_desired(&outcome));
         assert!(
             position(&path, &arena.home.bin()) < position(&path, Path::new(&global_tool)),
             "RUL-87: the project's trampolines must outrank the global tier's tools; got {path:#?}"
+        );
+    }
+
+    /// A scope the composition omits costs nothing: an unconsented project the composition does not
+    /// name is neither refused nor announced, because consent is never asked.
+    ///
+    /// The twin names the project and gets the refusal, so the first half is not an empty answer by accident.
+    ///
+    /// Red state: evaluate consent before reading the composition and the omitted project is refused too.
+    #[tokio::test]
+    async fn a_project_the_composition_omits_is_not_evaluated() {
+        let arena = Arena::new("env").await;
+        let project = ProjectIdentity::resolve(arena.dir.join("ocx.toml"))
+            .await
+            .expect("the fixture project resolves");
+        let prompt = Prompt::new(&arena.file_structure, None);
+
+        let mut omitted = prompt.input(&arena.file_structure, &[], Some(&project));
+        omitted.composition.project = None;
+        let skipped = session(omitted).await.expect("an omitted project is not an error");
+        assert!(!skipped.inert && skipped.messages.is_empty() && skipped.slot.is_none());
+
+        let refused = session(prompt.input(&arena.file_structure, &[], Some(&project)))
+            .await
+            .expect("a refusal is an outcome");
+        assert!(refused.inert, "the twin: with the project named, consent refuses it");
+    }
+
+    /// The global tier is composed only when the composition names it.
+    ///
+    /// Red state: copy `input.global` regardless and an inherited global tier is composed again.
+    #[tokio::test]
+    async fn the_global_tier_is_composed_only_when_the_composition_names_it() {
+        let arena = Arena::new("env").await;
+        let prompt = Prompt::new(&arena.file_structure, None);
+        let global = vec![path_entry("/g/bin")];
+
+        let mut inherited = prompt.input(&arena.file_structure, &global, None);
+        inherited.composition.global = false;
+        assert!(session(inherited).await.expect("composes").global.is_empty());
+        let named = prompt.input(&arena.file_structure, &global, None);
+        assert_eq!(session(named).await.expect("composes").global.len(), 1);
+    }
+
+    /// A pinned shell composes its project as `env` whatever `activate` says.
+    ///
+    /// Red state: read the mode ladder for a pinned project and a `bin` project yields no env entries.
+    #[tokio::test]
+    async fn a_pinned_project_composes_as_env_whatever_its_activate_mode() {
+        let arena = Arena::new("bin").await;
+        let project = ProjectIdentity::resolve(arena.dir.join("ocx.toml"))
+            .await
+            .expect("the fixture project resolves");
+        let prompt = Prompt::new(&arena.file_structure, Some(&arena.dir));
+
+        let following = session(prompt.input(&arena.file_structure, &[], Some(&project)))
+            .await
+            .expect("bin mode composes");
+        assert!(
+            following
+                .messages
+                .iter()
+                .any(|message| message.contains("has not been rendered")),
+            "the control: a followed bin-mode project reports the missing render: {:#?}",
+            following.messages
+        );
+
+        let mut pinned = prompt.input(&arena.file_structure, &[], Some(&project));
+        pinned.pinned = true;
+        let composed = session(pinned).await.expect("a pinned project composes as env");
+        assert!(composed.slot.is_some());
+        assert!(composed.session.project_bin.is_none());
+        assert!(
+            composed
+                .messages
+                .iter()
+                .all(|message| !message.contains("has not been rendered")),
+            "{:#?}",
+            composed.messages
         );
     }
 
@@ -3892,7 +4547,7 @@ mod session_composition_tests {
             "C-063: with no project there is no second owned prefix to widen to"
         );
 
-        let path = resulting_path(&desired_entries(&outcome));
+        let path = resulting_path(&session_desired(&outcome));
         let install = position(&path, &outcome.session.install_bin);
         let global_bin = position(&path, &outcome.session.global_bin);
         assert!(
@@ -3957,13 +4612,13 @@ mod session_composition_tests {
         if let Some(home) = outcome.owned_home.as_deref() {
             owned.push(home);
         }
-        let ledger = super::next_ledger(
-            &ocx_shell::shell::reconcile::Ledger::empty(),
-            "fp-1",
+        let state = super::next_state(
+            &ocx_config::exec_state::ExecState::default(),
             &outcome,
             &Env::clean(),
+            "fp-1",
         );
-        let plan = super::plan_for(&ledger, &outcome, &owned, &current);
+        let plan = super::plan_for_state(&state, &outcome, &owned, &current);
 
         let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
         assert!(
@@ -4037,7 +4692,7 @@ mod session_composition_tests {
         );
 
         // The session pair is unaffected: it is minted above every arm.
-        let path = resulting_path(&desired_entries(&outcome));
+        let path = resulting_path(&session_desired(&outcome));
         position(&path, &outcome.session.install_bin);
         position(&path, &outcome.session.global_bin);
     }
@@ -4070,5 +4725,1310 @@ mod current_lock_tests {
             matches!(result, Err(SessionError::Lock(ocx_project::LockCurrency::Stale { .. }))),
             "{result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_token_tests {
+    use std::path::{Path, PathBuf};
+
+    use ocx_config::exec_state::{
+        AppliedValue, ExecState, IdentityRecord, Owner, Pinned, PinnedTier, ProjectScopeHint, RecordedValue, Scope,
+        ScopeId, Selection, SessionCache, SessionSource, SessionToken, ValueKind,
+    };
+
+    use super::{
+        Claim, ProjectIdentity, ShellProcess, TokenStanding, claim_session, follow_cwd_composition,
+        parse_proc_start_time, process_start_time, token_standing,
+    };
+
+    const OWN_PID: u32 = 4242;
+    const OTHER_PID: u32 = 777;
+
+    fn token(pid: u32, started: Option<u64>) -> SessionToken {
+        SessionToken { pid, started }
+    }
+
+    fn shell(started: Option<u64>) -> ShellProcess {
+        ShellProcess::new(OWN_PID, started)
+    }
+
+    fn record(key: &str, owner: Owner) -> AppliedValue {
+        AppliedValue {
+            key: key.to_owned(),
+            value: RecordedValue::Literal("v".to_owned()),
+            kind: ValueKind::Constant,
+            separator: None,
+            pre_existing: false,
+            owner,
+            prior: None,
+        }
+    }
+
+    fn session_owner(scope: ScopeId) -> Owner {
+        Owner::Session {
+            scope,
+            source: SessionSource::Composed,
+        }
+    }
+
+    fn pinned_to(dir: &Path) -> Selection {
+        Selection::Pinned(Pinned {
+            tier: PinnedTier::Project { dir: dir.to_path_buf() },
+            groups: Vec::new(),
+            with_names: Vec::new(),
+            env_keys: Vec::new(),
+            invocation_digest: "0".repeat(64),
+            pinned_paths: None,
+        })
+    }
+
+    /// A state holding one project and one global session record plus one session identity record.
+    fn state_with_session_records(token: Option<SessionToken>, project: &Path) -> ExecState {
+        let mut state = ExecState::default();
+        state.applied.push(record("OCXS_G", session_owner(ScopeId::Global)));
+        state.applied.push(record("OCXS_P", session_owner(ScopeId::Project)));
+        state.applied.push(record("OCXS_OUTER", Owner::Inherited));
+        state.replay.launch_identities.push(IdentityRecord {
+            digest: format!("sha256:{}", "a".repeat(64)),
+            names: vec!["ocx.sh/tool:1".to_owned()],
+            owner: session_owner(ScopeId::Project),
+            no_patches: false,
+        });
+        state.session = SessionCache {
+            token,
+            fp: "stale-fingerprint".to_owned(),
+            ws: "stale-watch".to_owned(),
+            project: Some(ProjectScopeHint {
+                key: "0123456789abcdef".to_owned(),
+                dir: project.to_path_buf(),
+            }),
+            ..SessionCache::default()
+        };
+        state
+    }
+
+    fn session_owned(state: &ExecState) -> usize {
+        state
+            .applied
+            .iter()
+            .map(|record| &record.owner)
+            .chain(state.replay.launch_identities.iter().map(|record| &record.owner))
+            .filter(|owner| matches!(owner, Owner::Session { .. }))
+            .count()
+    }
+
+    // -- token_standing ---------------------------------------------------------------------
+
+    /// An absent token is unclaimed whatever the shell can tell.
+    ///
+    /// Red state: treat an absent token as the shell's own and a first prompt never claims.
+    #[test]
+    fn an_absent_token_is_unclaimed() {
+        assert_eq!(token_standing(None, Some(&shell(Some(9)))), TokenStanding::Unclaimed);
+        assert_eq!(token_standing(None, None), TokenStanding::Unclaimed);
+    }
+
+    /// The same pid with the same start time is this shell: re-sourcing the rc file or
+    /// `exec $SHELL` keeps it.
+    ///
+    /// Red state: compare the pid alone and a reused pid inherits another shell's session.
+    #[test]
+    fn the_same_pid_and_start_time_is_this_shell() {
+        let standing = token_standing(Some(&token(OWN_PID, Some(9))), Some(&shell(Some(9))));
+        assert_eq!(standing, TokenStanding::Own);
+    }
+
+    /// A tmux pane, an IDE terminal or a nested shell is another process.
+    ///
+    /// Red state: ignore the pid and every inherited session looks like this shell's.
+    #[test]
+    fn another_pid_is_foreign() {
+        let standing = token_standing(Some(&token(OTHER_PID, Some(9))), Some(&shell(Some(9))));
+        assert_eq!(standing, TokenStanding::Foreign);
+        let pid_only = token_standing(Some(&token(OTHER_PID, None)), Some(&shell(None)));
+        assert_eq!(
+            pid_only,
+            TokenStanding::Foreign,
+            "the pid decides when no start time is readable"
+        );
+    }
+
+    /// A reused pid carries a different start time.
+    ///
+    /// Red state: drop the start-time comparison and pid reuse passes for this shell.
+    #[test]
+    fn the_same_pid_with_another_start_time_is_foreign() {
+        let standing = token_standing(Some(&token(OWN_PID, Some(8))), Some(&shell(Some(9))));
+        assert_eq!(standing, TokenStanding::Foreign);
+    }
+
+    /// A start-less token cannot tell a reused pid from the original, so where this shell's
+    /// start time is readable it is foreign.
+    ///
+    /// Red state: accept the start-less token on a pid match and a forged `{pid}` token claims the shell.
+    #[test]
+    fn a_token_without_a_start_time_is_foreign_where_this_shells_is_readable() {
+        let standing = token_standing(Some(&token(OWN_PID, None)), Some(&shell(Some(9))));
+        assert_eq!(standing, TokenStanding::Foreign);
+    }
+
+    /// Where no start time is readable, the pid alone decides, whatever the token holds.
+    ///
+    /// Red state: require a start time on both sides and a shell on a platform without a reader
+    /// treats its own token as foreign every prompt.
+    #[test]
+    fn the_pid_alone_decides_where_this_shells_start_time_is_unreadable() {
+        for recorded in [None, Some(9)] {
+            let standing = token_standing(Some(&token(OWN_PID, recorded)), Some(&shell(None)));
+            assert_eq!(standing, TokenStanding::Own, "recorded start time {recorded:?}");
+        }
+    }
+
+    /// A token-less hook never finds a token foreign.
+    ///
+    /// Red state: classify against a zero pid and every claimed state looks foreign to an old hook.
+    #[test]
+    fn a_token_less_hook_treats_any_token_as_its_own() {
+        let standing = token_standing(Some(&token(OTHER_PID, Some(1))), None);
+        assert_eq!(standing, TokenStanding::Own);
+    }
+
+    // -- claim_session ----------------------------------------------------------------------
+
+    /// A new follow-cwd session claims the token.
+    ///
+    /// Red state: leave the token unclaimed and the next prompt retags the shell's own records.
+    #[test]
+    fn a_fresh_state_is_claimed_with_this_shells_token() {
+        let mut state = ExecState::default();
+        let claim = claim_session(&mut state, Some(&shell(Some(9))));
+        assert_eq!(claim, Claim::Claimed);
+        assert_eq!(state.session.token, Some(token(OWN_PID, Some(9))));
+    }
+
+    /// This shell's own session is left exactly as it is.
+    ///
+    /// Red state: retag on every prompt and a shell strands its own layer.
+    #[test]
+    fn this_shells_own_token_keeps_its_records() {
+        let mut state = state_with_session_records(Some(token(OWN_PID, Some(9))), Path::new("/work/p"));
+        let before = state.clone();
+        let claim = claim_session(&mut state, Some(&shell(Some(9))));
+        assert_eq!(claim, Claim::Held);
+        assert_eq!(state, before);
+    }
+
+    /// A foreign token: every session record and identity becomes inherited, their
+    /// scopes enter `inherited_scopes`, the cache resets, the selection is `FollowCwd`, the shell claims.
+    ///
+    /// Red state: skip the retag and this shell reverts the other shell's layer; skip the selection
+    /// reset and a tmux pane inside `ocx shell` stays pinned.
+    #[test]
+    fn a_foreign_token_retags_everything_resets_the_cache_and_claims() {
+        let project = PathBuf::from("/work/p");
+        let mut state = state_with_session_records(Some(token(OTHER_PID, Some(1))), &project);
+        state.selection = pinned_to(&project);
+
+        let claim = claim_session(&mut state, Some(&shell(Some(9))));
+
+        assert_eq!(claim, Claim::RetaggedForeign);
+        assert_eq!(session_owned(&state), 0, "no record stays session-owned");
+        assert!(state.applied.iter().all(|record| record.owner == Owner::Inherited));
+        assert!(
+            state
+                .replay
+                .launch_identities
+                .iter()
+                .all(|record| record.owner == Owner::Inherited)
+        );
+        assert!(state.inherited_scopes.contains(&Scope::Global));
+        assert!(
+            state
+                .inherited_scopes
+                .contains(&Scope::Project { root: project.clone() }),
+            "the pinned project enters as an inherited scope: {:?}",
+            state.inherited_scopes
+        );
+        assert_eq!(state.selection, Selection::FollowCwd);
+        assert_eq!(state.session.token, Some(token(OWN_PID, Some(9))));
+        assert!(
+            state.session.fp.is_empty() && state.session.ws.is_empty(),
+            "the cache is reset"
+        );
+        assert!(state.session.project.is_none());
+    }
+
+    /// Unclaimed `FollowCwd` with session records: retag before the claim.
+    ///
+    /// Red state: claim without retagging and a forged state hands its Session records to this shell.
+    #[test]
+    fn an_unclaimed_follow_cwd_state_with_session_records_is_retagged_before_the_claim() {
+        let project = PathBuf::from("/work/p");
+        let mut state = state_with_session_records(None, &project);
+        state.session.project = Some(ProjectScopeHint {
+            key: "0123456789abcdef".to_owned(),
+            dir: project.clone(),
+        });
+
+        let claim = claim_session(&mut state, Some(&shell(Some(9))));
+
+        assert_eq!(claim, Claim::RetaggedUnclaimed);
+        assert_eq!(session_owned(&state), 0);
+        assert!(state.inherited_scopes.contains(&Scope::Project { root: project }));
+        assert!(state.inherited_scopes.contains(&Scope::Global));
+        assert_eq!(state.session.token, Some(token(OWN_PID, Some(9))));
+        assert_eq!(state.selection, Selection::FollowCwd);
+    }
+
+    /// An unclaimed `Pinned` state is the entered shell: claimed as it stands.
+    ///
+    /// Red state: retag regardless of selection and `ocx shell` loses its own layer on the first prompt.
+    #[test]
+    fn an_unclaimed_pinned_state_is_claimed_without_a_retag() {
+        let project = PathBuf::from("/work/p");
+        let mut state = state_with_session_records(None, &project);
+        state.selection = pinned_to(&project);
+        let owned_before = session_owned(&state);
+
+        let claim = claim_session(&mut state, Some(&shell(Some(9))));
+
+        assert_eq!(claim, Claim::Claimed);
+        assert_eq!(
+            session_owned(&state),
+            owned_before,
+            "the pinned shell keeps its records"
+        );
+        assert!(state.inherited_scopes.is_empty());
+        assert!(matches!(state.selection, Selection::Pinned(_)));
+        assert_eq!(state.session.token, Some(token(OWN_PID, Some(9))));
+    }
+
+    /// A token-less hook never claims, and finds nothing to claim in a fresh state.
+    ///
+    /// Red state: write a zero-pid token and every later prompt of a token-bearing hook sees a foreign shell.
+    #[test]
+    fn a_token_less_hook_never_claims() {
+        let mut state = ExecState::default();
+        assert_eq!(claim_session(&mut state, None), Claim::Held);
+        assert_eq!(state.session.token, None);
+    }
+
+    /// Token-less: Session records under a claimed token are its own, retagged by nothing.
+    ///
+    /// Red state: treat a claimed token as foreign when no pid was passed.
+    #[test]
+    fn a_token_less_hook_reconciles_a_claimed_sessions_records_as_its_own() {
+        let mut state = state_with_session_records(Some(token(OTHER_PID, Some(1))), Path::new("/work/p"));
+        let before = state.clone();
+        assert_eq!(claim_session(&mut state, None), Claim::Held);
+        assert_eq!(state, before);
+    }
+
+    /// A token-less hook over an unclaimed `FollowCwd` state keeps its session records.
+    ///
+    /// A token-less hook cannot claim, so an unclaimed state stays unclaimed forever; retagging would
+    /// strand a legacy emission's own records on every prompt. A token-bearing hook still retags.
+    ///
+    /// Red state: retag without asking whether the hook holds a token and the records go inherited.
+    #[test]
+    fn a_token_less_hook_over_an_unclaimed_follow_cwd_state_keeps_its_records() {
+        let mut state = state_with_session_records(None, Path::new("/work/p"));
+        let owned_before = session_owned(&state);
+        assert!(owned_before > 0, "the fixture must hold session records");
+
+        assert_eq!(claim_session(&mut state, None), Claim::Held);
+
+        assert_eq!(session_owned(&state), owned_before, "nothing is retagged");
+        assert!(state.inherited_scopes.is_empty(), "no scope enters as inherited");
+        assert_eq!(state.session.token, None, "token-less never claims");
+
+        let mut claimed = state_with_session_records(None, Path::new("/work/p"));
+        assert_eq!(
+            claim_session(&mut claimed, Some(&shell(Some(9)))),
+            Claim::RetaggedUnclaimed,
+            "the twin: a token-bearing hook over the same state retags"
+        );
+    }
+
+    // -- the /proc reader -------------------------------------------------------------------
+
+    /// A `/proc/<pid>/stat` line: `fields_after_name` holds fields 3 through 52.
+    fn stat_line(name: &str, start_time: u64) -> String {
+        stat_line_with(name, &start_time.to_string())
+    }
+
+    fn stat_line_with(name: &str, start_field: &str) -> String {
+        let mut fields: Vec<String> = (3..=52).map(|field| field.to_string()).collect();
+        fields[0] = "S".to_owned();
+        fields[22 - 3] = start_field.to_owned();
+        format!("1234 ({name}) {}", fields.join(" "))
+    }
+
+    /// Field 22 is the start time.
+    ///
+    /// Red state: index from the start of the line and the pid or state is read instead.
+    #[test]
+    fn the_start_time_is_field_22_of_the_stat_line() {
+        assert_eq!(parse_proc_start_time(&stat_line("bash", 987_654)), Some(987_654));
+    }
+
+    /// A command name holding spaces and parentheses cannot shift the fields.
+    ///
+    /// Red state: split the whole line on whitespace and a name like `a) S 1 (b` moves field 22.
+    #[test]
+    fn a_hostile_command_name_cannot_shift_the_fields() {
+        let line = stat_line("a) S 1 (b c) 5 (d", 31_337);
+        assert_eq!(parse_proc_start_time(&line), Some(31_337));
+    }
+
+    /// A malformed or truncated line yields no start time rather than a wrong one.
+    ///
+    /// Red state: default a missing field to zero and every unreadable shell claims start time 0.
+    #[test]
+    fn a_malformed_stat_line_has_no_start_time() {
+        assert_eq!(parse_proc_start_time(""), None);
+        assert_eq!(parse_proc_start_time("1234 bash S 1 2 3"), None);
+        assert_eq!(parse_proc_start_time("1234 (bash) S 1 2 3"), None);
+        assert_eq!(parse_proc_start_time(&stat_line_with("bash", "twenty-two")), None);
+    }
+
+    /// Linux reads this process's own start time, stably; a pid that cannot exist has none.
+    ///
+    /// Red state: return `None` unconditionally on Linux and the start-less rule never has a start to compare.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_reads_a_start_time_for_a_live_process_and_none_for_a_dead_pid() {
+        let own = std::process::id();
+        let first = process_start_time(own).await.expect("this process has a start time");
+        assert_eq!(process_start_time(own).await, Some(first), "stable across reads");
+        assert_eq!(process_start_time(u32::MAX).await, None);
+    }
+
+    /// Off Linux there is no reader, so the pid alone identifies the shell.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn other_platforms_have_no_start_time() {
+        assert_eq!(process_start_time(std::process::id()).await, None);
+    }
+
+    // -- the desired composition ------------------------------------------------------------
+
+    fn identity(dir: &Path) -> ProjectIdentity {
+        ProjectIdentity {
+            config_path: dir.join("ocx.toml"),
+            dir: dir.to_path_buf(),
+            key: "0123456789abcdef".to_owned(),
+        }
+    }
+
+    /// Inside an inherited project nothing is composed, the global tier included.
+    ///
+    /// Red state: ignore `inherited_scopes` and the hook reloads the layer an outer `ocx exec` froze.
+    #[test]
+    fn inside_an_inherited_project_nothing_is_desired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dunce::canonicalize(dir.path()).expect("canonical");
+        let mut state = ExecState::default();
+        state.add_scope(Scope::Project { root: root.clone() });
+        state.add_scope(Scope::Global);
+
+        let desired = follow_cwd_composition(&state, Some(&identity(&root)));
+
+        assert!(!desired.global && desired.project.is_none(), "{desired:?}");
+    }
+
+    /// An uninherited project Q brings the global tier (unless inherited) and Q.
+    ///
+    /// Red state: drop the global tier when any scope is inherited.
+    #[test]
+    fn an_uninherited_project_adds_global_unless_inherited_and_itself() {
+        let inherited = tempfile::tempdir().expect("tempdir");
+        let other = tempfile::tempdir().expect("tempdir");
+        let other_root = dunce::canonicalize(other.path()).expect("canonical");
+        let mut state = ExecState::default();
+        state.add_scope(Scope::Project {
+            root: dunce::canonicalize(inherited.path()).expect("canonical"),
+        });
+
+        let desired = follow_cwd_composition(&state, Some(&identity(&other_root)));
+        assert!(desired.global);
+        assert_eq!(desired.project, Some(other_root.clone()));
+
+        state.add_scope(Scope::Global);
+        let desired = follow_cwd_composition(&state, Some(&identity(&other_root)));
+        assert!(!desired.global, "an inherited global tier is not composed again");
+        assert_eq!(desired.project, Some(other_root));
+    }
+
+    /// Outside every project: the global tier, unless inherited.
+    ///
+    /// Red state: always compose global and a hook shell under `ocx exec -g x` doubles its layer.
+    #[test]
+    fn outside_a_project_the_global_tier_is_desired_unless_inherited() {
+        let mut state = ExecState::default();
+        let desired = follow_cwd_composition(&state, None);
+        assert!(desired.global && desired.project.is_none());
+
+        state.add_scope(Scope::Global);
+        let desired = follow_cwd_composition(&state, None);
+        assert!(!desired.global && desired.project.is_none());
+    }
+}
+
+/// What the hook records about a prompt: the session records, the pinned selection and the notices.
+#[cfg(test)]
+mod hook_state_tests {
+    use std::path::{Path, PathBuf};
+
+    use ocx_config::env::Env;
+    use ocx_config::exec_state::{
+        AppliedValue, ExecState, IdentityRecord, Owner, Pinned, PinnedTier, Prior, ProjectScopeHint, RecordedValue,
+        ScopeId, Selection, SessionSource, Truncation, ValueKind,
+    };
+    use ocx_package::launch::LaunchIdentities;
+    use ocx_package::metadata::env::entry::Entry;
+    use ocx_package::metadata::env::modifier::ModifierKind;
+
+    use super::{
+        Outcome, ProjectIdentity, SessionPath, already_announced, announced, keeps_pinned_layer, next_state,
+        pinned_cd_notice, pinned_composition, pinned_groups, pinned_identity, plan_for_state, truncation_notice,
+        vanished_pin_notice, watched_config, write_state,
+    };
+
+    const KEY: &str = "0123456789abcdef";
+    const DIGEST_GLOBAL: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_PROJECT: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn constant(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Constant,
+            separator: None,
+        }
+    }
+
+    fn path(value: &str) -> Entry {
+        Entry {
+            key: "PATH".to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Path,
+            separator: None,
+        }
+    }
+
+    /// Identities for `(digest, name, no_patches)` triples, built the way a replay record rebuilds them.
+    fn identities(triples: &[(&str, &str, bool)]) -> LaunchIdentities {
+        let records: Vec<IdentityRecord> = triples
+            .iter()
+            .map(|(digest, name, no_patches)| IdentityRecord {
+                digest: (*digest).to_owned(),
+                names: vec![(*name).to_owned()],
+                owner: Owner::Inherited,
+                no_patches: *no_patches,
+            })
+            .collect();
+        LaunchIdentities::from_replay(&records)
+    }
+
+    fn identity(dir: &str) -> ProjectIdentity {
+        let dir = PathBuf::from(dir);
+        ProjectIdentity {
+            config_path: dir.join("ocx.toml"),
+            dir,
+            key: KEY.to_owned(),
+        }
+    }
+
+    fn outcome(global: Vec<Entry>, project: Vec<Entry>, slot: Option<ProjectIdentity>) -> Outcome {
+        Outcome {
+            session_enforced: true,
+            session: SessionPath {
+                install_bin: PathBuf::from("/ocx/install/bin"),
+                global_bin: PathBuf::from("/ocx/toolchain/active/bin"),
+                project_bin: None,
+            },
+            global,
+            project,
+            global_identities: None,
+            project_identities: None,
+            owned_home: None,
+            resolved: slot.is_some(),
+            inert: false,
+            slot,
+            messages: Vec::new(),
+        }
+    }
+
+    fn owner(scope: ScopeId, source: SessionSource) -> Owner {
+        Owner::Session { scope, source }
+    }
+
+    fn composed(scope: ScopeId) -> Owner {
+        owner(scope, SessionSource::Composed)
+    }
+
+    fn record(key: &str, value: &str, kind: ValueKind, owner: Owner) -> AppliedValue {
+        AppliedValue {
+            key: key.to_owned(),
+            value: RecordedValue::Literal(value.to_owned()),
+            kind,
+            separator: None,
+            pre_existing: false,
+            owner,
+            prior: (kind == ValueKind::Constant).then_some(Prior::Unset),
+        }
+    }
+
+    fn records<'a>(state: &'a ExecState, key: &str) -> Vec<&'a AppliedValue> {
+        state.applied.iter().filter(|record| record.key == key).collect()
+    }
+
+    fn env_with(pairs: &[(&str, &str)]) -> Env {
+        let mut env = Env::clean();
+        for (key, value) in pairs {
+            env.set(*key, *value);
+        }
+        env
+    }
+
+    /// A `PATH` value in the platform's separator: `:` on Unix, `;` on Windows.
+    fn search_path(segments: &[&str]) -> String {
+        std::env::join_paths(segments)
+            .expect("fixture segments hold no separator")
+            .into_string()
+            .expect("fixture segments are utf-8")
+    }
+
+    fn pinned(dir: &str) -> Pinned {
+        Pinned {
+            tier: PinnedTier::Project {
+                dir: PathBuf::from(dir),
+            },
+            groups: vec!["default".to_owned()],
+            with_names: Vec::new(),
+            env_keys: Vec::new(),
+            invocation_digest: "0".repeat(64),
+            pinned_paths: None,
+        }
+    }
+
+    // -- next_state ---------------------------------------------------------------------------
+
+    /// Each composed scope is recorded under its own `Session` owner, with the prior it displaced and the
+    /// project hint written beside the records it describes.
+    ///
+    /// Red state: file the project's records under the global scope, or omit the hint.
+    #[test]
+    fn each_composed_scope_is_recorded_under_its_own_session_owner() {
+        let outcome = outcome(
+            vec![constant("OCXS_G", "g")],
+            vec![path("/w/acme/bin"), constant("OCXS_P", "p")],
+            Some(identity("/w/acme")),
+        );
+        let current = env_with(&[("PATH", "/usr/bin"), ("OCXS_P", "old")]);
+
+        let state = next_state(&ExecState::default(), &outcome, &current, "fp-1");
+
+        let global = records(&state, "OCXS_G");
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].owner, composed(ScopeId::Global));
+        assert_eq!(global[0].prior, Some(Prior::Unset));
+        let project = records(&state, "OCXS_P");
+        assert_eq!(project[0].owner, composed(ScopeId::Project));
+        assert_eq!(project[0].prior, Some(Prior::Value("old".to_owned())));
+        let element = records(&state, "PATH");
+        assert_eq!(element.len(), 1, "the session PATH directories are not recorded");
+        assert_eq!(element[0].value, RecordedValue::Literal("/w/acme/bin".to_owned()));
+        assert!(!element[0].pre_existing);
+        assert_eq!(
+            state.session.project,
+            Some(ProjectScopeHint {
+                key: KEY.to_owned(),
+                dir: PathBuf::from("/w/acme"),
+            })
+        );
+        assert_eq!(state.session.fp, "fp-1");
+    }
+
+    /// A constant refreshed while its live value is still ocx's keeps the prior it displaced the first time.
+    ///
+    /// Red state: take the prior from the live value on every refresh and `leave` restores ocx's own value.
+    #[test]
+    fn a_refresh_keeps_the_prior_while_the_live_value_is_still_ocxs() {
+        let mut previous = ExecState::default();
+        let mut held = record("OCXS_P", "p", ValueKind::Constant, composed(ScopeId::Project));
+        held.prior = Some(Prior::Value("orig".to_owned()));
+        previous.applied.push(held);
+        let outcome = outcome(
+            Vec::new(),
+            vec![constant("OCXS_P", "refreshed")],
+            Some(identity("/w/acme")),
+        );
+
+        let live = next_state(&previous, &outcome, &env_with(&[("OCXS_P", "p")]), "fp");
+        assert_eq!(
+            records(&live, "OCXS_P")[0].prior,
+            Some(Prior::Value("orig".to_owned())),
+            "the live value is still what ocx wrote"
+        );
+
+        let edited = next_state(&previous, &outcome, &env_with(&[("OCXS_P", "by-hand")]), "fp");
+        assert_eq!(
+            records(&edited, "OCXS_P")[0].prior,
+            Some(Prior::Value("by-hand".to_owned())),
+            "a value the user changed is the new prior"
+        );
+    }
+
+    /// A record whose value is unchanged is carried over as it stands, `pre_existing` included.
+    ///
+    /// Red state: recompute it against the live `PATH`, which now holds the element ocx itself added.
+    #[test]
+    fn an_unchanged_composed_record_is_carried_over_verbatim() {
+        let mut previous = ExecState::default();
+        previous.applied.push(record(
+            "PATH",
+            "/w/acme/bin",
+            ValueKind::Path,
+            composed(ScopeId::Project),
+        ));
+        let outcome = outcome(Vec::new(), vec![path("/w/acme/bin")], Some(identity("/w/acme")));
+
+        let state = next_state(
+            &previous,
+            &outcome,
+            &env_with(&[("PATH", &search_path(&["/w/acme/bin", "/usr/bin"]))]),
+            "fp",
+        );
+
+        assert_eq!(state.applied, previous.applied);
+    }
+
+    /// An `Invocation` record survives a refresh untouched and keeps the key to itself.
+    ///
+    /// Red state: record the composed value over it, or let the plan set the key.
+    #[test]
+    fn an_invocation_record_survives_a_refresh_and_blocks_a_composed_record_of_its_key() {
+        let mut previous = ExecState::default();
+        previous.applied.push(record(
+            "OCXS_INV",
+            "from-invocation",
+            ValueKind::Constant,
+            owner(ScopeId::Project, SessionSource::Invocation),
+        ));
+        previous.applied.push(record(
+            "OCXS_COMPOSED",
+            "one",
+            ValueKind::Constant,
+            composed(ScopeId::Project),
+        ));
+        let outcome = outcome(
+            Vec::new(),
+            vec![
+                constant("OCXS_COMPOSED", "two"),
+                constant("OCXS_INV", "edited-in-project"),
+            ],
+            Some(identity("/w/acme")),
+        );
+        let current = env_with(&[("OCXS_COMPOSED", "one"), ("OCXS_INV", "from-invocation")]);
+
+        let plan = plan_for_state(&previous, &outcome, &[], &current);
+        let state = next_state(&previous, &outcome, &current, "fp");
+
+        let keys: Vec<&str> = plan.sets.iter().map(|entry| entry.key.as_str()).collect();
+        assert!(
+            keys.contains(&"OCXS_COMPOSED"),
+            "the composed key follows the edit: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"OCXS_INV"),
+            "the invocation key is never written: {keys:?}"
+        );
+        let kept = records(&state, "OCXS_INV");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].owner, owner(ScopeId::Project, SessionSource::Invocation));
+        assert_eq!(kept[0].value, RecordedValue::Literal("from-invocation".to_owned()));
+        assert_eq!(
+            records(&state, "OCXS_COMPOSED")[0].value,
+            RecordedValue::Literal("two".to_owned())
+        );
+    }
+
+    /// The hook writes session data only: inherited records, scopes, policy and replay pass through.
+    ///
+    /// Red state: rebuild `applied` from scratch and the inherited layer vanishes.
+    #[test]
+    fn inherited_records_and_replay_pass_through_untouched() {
+        let mut previous = ExecState::default();
+        previous
+            .applied
+            .push(record("OUTER", "o", ValueKind::Constant, Owner::Inherited));
+        previous.inherited_scopes.push(ocx_config::exec_state::Scope::Global);
+        previous.policy.remote = Some(false);
+        previous.truncated = Truncation::InheritedDropped;
+        let outcome = outcome(Vec::new(), Vec::new(), None);
+
+        let state = next_state(&previous, &outcome, &Env::clean(), "fp");
+
+        assert_eq!(state.applied, previous.applied);
+        assert_eq!(state.inherited_scopes, previous.inherited_scopes);
+        assert_eq!(state.policy, previous.policy);
+        assert_eq!(state.truncated, previous.truncated);
+        assert_eq!(state.replay, previous.replay);
+    }
+
+    /// A secret-named constant is recorded verbatim, and a credential key not at all.
+    ///
+    /// Red state: drop the literal of a token-named variable from the state, or record a credential key.
+    #[test]
+    fn secret_named_values_are_recorded_verbatim_and_credentials_not_at_all() {
+        let outcome = outcome(
+            Vec::new(),
+            vec![
+                constant("API_TOKEN", "fixture-secret-value"),
+                constant("OCX_AUTH_USER", "fixture-user"),
+            ],
+            Some(identity("/w/acme")),
+        );
+
+        let state = next_state(&ExecState::default(), &outcome, &Env::clean(), "fp");
+
+        let secret = records(&state, "API_TOKEN");
+        assert_eq!(secret.len(), 1);
+        assert_eq!(
+            secret[0].value,
+            RecordedValue::Literal("fixture-secret-value".to_owned())
+        );
+        assert!(records(&state, "OCX_AUTH_USER").is_empty());
+    }
+
+    /// Leaving the project drops its records and its hint, and the global scope's stay.
+    ///
+    /// Red state: keep the project hint after its records are gone.
+    #[test]
+    fn leaving_the_project_drops_its_records_and_hint_and_keeps_the_global_scope() {
+        let mut previous = ExecState::default();
+        previous
+            .applied
+            .push(record("OCXS_G", "g", ValueKind::Constant, composed(ScopeId::Global)));
+        previous
+            .applied
+            .push(record("OCXS_P", "p", ValueKind::Constant, composed(ScopeId::Project)));
+        previous.session.project = Some(ProjectScopeHint {
+            key: KEY.to_owned(),
+            dir: PathBuf::from("/w/acme"),
+        });
+        let outcome = outcome(vec![constant("OCXS_G", "g")], Vec::new(), None);
+
+        let state = next_state(
+            &previous,
+            &outcome,
+            &env_with(&[("OCXS_G", "g"), ("OCXS_P", "p")]),
+            "fp",
+        );
+
+        assert_eq!(records(&state, "OCXS_G").len(), 1);
+        assert!(records(&state, "OCXS_P").is_empty());
+        assert_eq!(state.session.project, None);
+    }
+
+    // -- the pinned layer ---------------------------------------------------------------------
+
+    fn pinned_state(dir: &str) -> ExecState {
+        let mut state = ExecState {
+            selection: Selection::Pinned(pinned(dir)),
+            ..ExecState::default()
+        };
+        state
+            .applied
+            .push(record("OCXS_P", "p", ValueKind::Constant, composed(ScopeId::Project)));
+        state
+            .applied
+            .push(record("PATH", "/w/p/binP", ValueKind::Path, composed(ScopeId::Project)));
+        state.session.project = Some(ProjectScopeHint {
+            key: KEY.to_owned(),
+            dir: PathBuf::from(dir),
+        });
+        state
+    }
+
+    /// A pinned project that was not composed keeps its layer: no removal, no restore, no rewrite.
+    ///
+    /// The twin retires the same records under `FollowCwd`, so the first half is not an empty plan by accident.
+    ///
+    /// Red state: plan against the records as they stand and the unconsented layer is stripped.
+    #[test]
+    fn a_pinned_project_that_was_not_composed_keeps_its_layer() {
+        let current = env_with(&[("PATH", &search_path(&["/w/p/binP", "/usr/bin"])), ("OCXS_P", "p")]);
+        let mut refused = outcome(Vec::new(), Vec::new(), None);
+        refused.resolved = true;
+        refused.inert = true;
+
+        let pinned_state = pinned_state("/w/p");
+        let plan = plan_for_state(&pinned_state, &refused, &[], &current);
+        let state = next_state(&pinned_state, &refused, &current, "fp");
+
+        assert!(plan.removes.is_empty() && plan.restores.is_empty(), "{plan:?}");
+        assert_eq!(state.applied, pinned_state.applied);
+        assert_eq!(state.session.project, pinned_state.session.project);
+
+        let mut following = pinned_state.clone();
+        following.selection = Selection::FollowCwd;
+        let retired = plan_for_state(&following, &refused, &[], &current);
+        assert!(
+            !retired.removes.is_empty() && !retired.restores.is_empty(),
+            "the twin: a follow-cwd shell leaves the project and retires its layer: {retired:?}"
+        );
+    }
+
+    /// A pinned project whose `ocx.toml` is gone owes one notice naming the directory; the layer stays.
+    ///
+    /// Red state: return `None` for a missing config and the shell loses its project silently.
+    #[tokio::test]
+    async fn a_pinned_project_without_an_ocx_toml_owes_the_vanished_notice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tier = PinnedTier::Project {
+            dir: dir.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            vanished_pin_notice(&tier).await,
+            Some(format!(
+                "ocx: pinned project {} no longer has an ocx.toml; keeping its layer",
+                super::printable(&dir.path().to_string_lossy())
+            ))
+        );
+
+        std::fs::write(dir.path().join("ocx.toml"), "").expect("write ocx.toml");
+        assert_eq!(vanished_pin_notice(&tier).await, None, "a present config owes nothing");
+
+        let gone = PinnedTier::Project {
+            dir: dir.path().join("deleted"),
+        };
+        assert!(
+            vanished_pin_notice(&gone).await.is_some(),
+            "a deleted directory owes it too"
+        );
+        assert_eq!(vanished_pin_notice(&PinnedTier::Global).await, None);
+    }
+
+    /// Only a pinned project tier without a composed slot keeps its layer.
+    #[test]
+    fn only_a_pinned_project_without_a_slot_keeps_its_layer() {
+        let none = outcome(Vec::new(), Vec::new(), None);
+        let some = outcome(Vec::new(), Vec::new(), Some(identity("/w/p")));
+        let pinned_project = Selection::Pinned(pinned("/w/p"));
+        let mut global = pinned("/w/p");
+        global.tier = PinnedTier::Global;
+
+        assert!(keeps_pinned_layer(&pinned_project, &none));
+        assert!(!keeps_pinned_layer(&pinned_project, &some));
+        assert!(!keeps_pinned_layer(&Selection::Pinned(global), &none));
+        assert!(!keeps_pinned_layer(&Selection::FollowCwd, &none));
+    }
+
+    // -- launch identities --------------------------------------------------------------------
+
+    fn identity_records<'a>(state: &'a ExecState, digest: &str) -> Vec<&'a IdentityRecord> {
+        state
+            .replay
+            .launch_identities
+            .iter()
+            .filter(|record| record.digest == digest)
+            .collect()
+    }
+
+    /// The project's record wins a digest both scopes name, and a global-only digest keeps its own.
+    ///
+    /// Red state: record both scopes' entries and the global names are merged into the project's package.
+    #[test]
+    fn the_project_identity_record_wins_a_digest_both_scopes_name() {
+        let global = identities(&[
+            (DIGEST_GLOBAL, "ocx.sh/jre:21", false),
+            (DIGEST_PROJECT, "ocx.sh/plantuml:1", false),
+        ]);
+        let project = identities(&[(DIGEST_PROJECT, "ocx.sh/plantuml:1", true)]);
+        let mut outcome = outcome(Vec::new(), Vec::new(), Some(identity("/w/acme")));
+        outcome.global_identities = Some(global);
+        outcome.project_identities = Some(project);
+
+        let state = next_state(&ExecState::default(), &outcome, &Env::clean(), "fp");
+
+        let shared = identity_records(&state, DIGEST_PROJECT);
+        assert_eq!(shared.len(), 1, "one record for the digest both scopes name");
+        assert_eq!(shared[0].owner, composed(ScopeId::Project));
+        assert!(shared[0].no_patches, "the project's opt-out wins");
+        let only_global = identity_records(&state, DIGEST_GLOBAL);
+        assert_eq!(only_global.len(), 1);
+        assert_eq!(only_global[0].owner, composed(ScopeId::Global));
+    }
+
+    /// Leaving the project retires its identity records.
+    #[test]
+    fn leaving_the_project_retires_its_identity_records() {
+        let mut inside = outcome(Vec::new(), Vec::new(), Some(identity("/w/acme")));
+        inside.project_identities = Some(identities(&[(DIGEST_PROJECT, "ocx.sh/plantuml:1", false)]));
+        let state = next_state(&ExecState::default(), &inside, &Env::clean(), "fp");
+        assert_eq!(identity_records(&state, DIGEST_PROJECT).len(), 1);
+
+        let outside = outcome(Vec::new(), Vec::new(), None);
+        let left = next_state(&state, &outside, &Env::clean(), "fp");
+        assert!(identity_records(&left, DIGEST_PROJECT).is_empty());
+    }
+
+    // -- the pinned probe and composition -----------------------------------------------------
+
+    /// A regular `ocx.toml` and an absent `ocx.lock` identify the project; the answer is canonical.
+    #[tokio::test]
+    async fn a_pinned_project_with_regular_files_is_identified_canonically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
+
+        let found = pinned_identity(&PinnedTier::Project { dir: canonical.clone() })
+            .await
+            .expect("a regular ocx.toml identifies the project");
+
+        assert_eq!(found.dir, canonical);
+        assert_eq!(found.config_path, canonical.join("ocx.toml"));
+    }
+
+    /// Nothing that is not a regular file is identified, and nothing is opened to find out.
+    ///
+    /// Red state: let `ocx.lock` through when it is a directory and consent opens it.
+    #[tokio::test]
+    async fn a_pinned_project_is_not_identified_unless_both_files_are_regular() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        let tier = |path: &Path| PinnedTier::Project {
+            dir: path.to_path_buf(),
+        };
+
+        assert!(pinned_identity(&tier(&canonical)).await.is_none(), "no ocx.toml");
+        assert!(pinned_identity(&PinnedTier::Global).await.is_none());
+        assert!(pinned_identity(&tier(Path::new("relative/dir"))).await.is_none());
+
+        std::fs::write(canonical.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
+        assert!(pinned_identity(&tier(&canonical)).await.is_some(), "the control");
+
+        std::fs::create_dir(canonical.join("ocx.lock")).expect("mkdir ocx.lock");
+        assert!(
+            pinned_identity(&tier(&canonical)).await.is_none(),
+            "a lock that is not a regular file"
+        );
+    }
+
+    /// A symlinked `ocx.toml` is refused, as the working-directory walk refuses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_pinned_ocx_toml_is_not_identified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("real.toml"), "[tools]\n").expect("write");
+        std::os::unix::fs::symlink(canonical.join("real.toml"), canonical.join("ocx.toml")).expect("symlink");
+
+        let found = pinned_identity(&PinnedTier::Project { dir: canonical }).await;
+
+        assert!(found.is_none());
+    }
+
+    /// A symlinked `ocx.lock` beside a regular `ocx.toml` is refused: consent would open its target.
+    ///
+    /// Red state: probe the lock with `metadata`, which follows the symlink to a regular file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pinned_ocx_lock_that_is_a_symlink_is_not_identified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
+        std::fs::write(canonical.join("real.lock"), "").expect("write the symlink target");
+        std::os::unix::fs::symlink(canonical.join("real.lock"), canonical.join("ocx.lock")).expect("symlink");
+
+        let found = pinned_identity(&PinnedTier::Project { dir: canonical }).await;
+
+        assert!(found.is_none(), "{found:?}");
+    }
+
+    /// A FIFO `ocx.lock` beside a regular `ocx.toml` is refused: consent opening it would block the prompt.
+    ///
+    /// Red state: refuse only a directory lock, and the FIFO passes the probe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pinned_ocx_lock_that_is_a_fifo_is_not_identified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
+        ocx_test_support::fifo::mkfifo(&canonical.join("ocx.lock"));
+
+        let found = pinned_identity(&PinnedTier::Project { dir: canonical }).await;
+
+        assert!(found.is_none(), "{found:?}");
+    }
+
+    /// A FIFO `ocx.toml` is refused by `lstat` alone; opening it would block the prompt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pinned_ocx_toml_that_is_a_fifo_is_not_identified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        ocx_test_support::fifo::mkfifo(&canonical.join("ocx.toml"));
+
+        let found = pinned_identity(&PinnedTier::Project { dir: canonical }).await;
+
+        assert!(found.is_none());
+    }
+
+    /// A relative pinned dir is refused even where it resolves, from the working directory, to a real project.
+    ///
+    /// Red state: drop the `is_absolute` test, and the state names a project under the hook's own cwd.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relative_pinned_dir_is_not_identified_even_where_it_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dunce::canonicalize(dir.path()).expect("canonicalize");
+        std::fs::write(canonical.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
+        let cwd = dunce::canonicalize(std::env::current_dir().expect("cwd")).expect("canonicalize cwd");
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(canonical.strip_prefix("/").expect("an absolute tempdir"));
+        assert!(
+            relative.is_relative() && relative.join("ocx.toml").is_file(),
+            "fixture: {relative:?} must reach the project from the cwd"
+        );
+
+        let found = pinned_identity(&PinnedTier::Project { dir: relative }).await;
+
+        assert!(found.is_none(), "{found:?}");
+    }
+
+    /// A pinned project tier composes its project alone; the global tier composes itself alone.
+    #[test]
+    fn a_pinned_selection_composes_its_own_tier_only() {
+        let project = identity("/w/p");
+        let tier = PinnedTier::Project {
+            dir: PathBuf::from("/w/p"),
+        };
+        let composition = pinned_composition(&tier, Some(&project));
+        assert!(!composition.global);
+        assert_eq!(composition.project, Some(PathBuf::from("/w/p")));
+        assert_eq!(pinned_composition(&tier, None), Default::default());
+        let global = pinned_composition(&PinnedTier::Global, None);
+        assert!(global.global && global.project.is_none());
+    }
+
+    #[test]
+    fn a_pinned_selection_without_groups_composes_the_default_group() {
+        let mut selection = pinned("/w/p");
+        assert_eq!(pinned_groups(&selection), ["default"]);
+        selection.groups = vec!["ci".to_owned(), "docs".to_owned()];
+        assert_eq!(pinned_groups(&selection), ["ci", "docs"]);
+        selection.groups.clear();
+        assert_eq!(pinned_groups(&selection), ["default"]);
+    }
+
+    /// The groups a project composes are the requested ones; none requested is the default group.
+    ///
+    /// Red state: ignore the request and a pinned `ci` shell refreshes the default group.
+    #[test]
+    fn a_project_composes_the_requested_groups_or_the_default() {
+        assert_eq!(super::composed_groups(&[]), ["default"]);
+        assert_eq!(super::composed_groups(&["ci".to_owned()]), ["ci"]);
+    }
+
+    /// An inherited project's files stay out of the watch set; a composed project's go in.
+    #[test]
+    fn only_a_composed_projects_config_is_watched() {
+        let project = identity("/w/p");
+        let composed = ocx_shell::shell::reconcile::Composition {
+            global: true,
+            project: Some(PathBuf::from("/w/p")),
+        };
+        let inherited = ocx_shell::shell::reconcile::Composition::default();
+
+        assert_eq!(
+            watched_config(&composed, Some(&project)),
+            Some(Path::new("/w/p/ocx.toml"))
+        );
+        assert_eq!(watched_config(&inherited, Some(&project)), None);
+        assert_eq!(watched_config(&composed, None), None);
+    }
+
+    // -- notices ------------------------------------------------------------------------------
+
+    /// One ASCII line starting `ocx: `, stable for a repeat so the messages digest shows it once.
+    #[test]
+    fn the_cd_notice_is_one_ascii_line_shown_for_a_foreign_project_only() {
+        let own = identity("/w/p");
+        let other = identity("/w/q");
+        let selection = pinned("/w/p");
+
+        assert_eq!(
+            pinned_cd_notice(&selection, Some(&own), None),
+            None,
+            "outside every project"
+        );
+        assert_eq!(
+            pinned_cd_notice(&selection, Some(&own), Some(&own)),
+            None,
+            "inside the pinned one"
+        );
+        let notice = pinned_cd_notice(&selection, Some(&own), Some(&other)).expect("a foreign project");
+        assert!(
+            notice.starts_with("ocx: ") && notice.is_ascii() && !notice.contains('\n'),
+            "{notice}"
+        );
+        assert!(notice.contains("/w/p") && notice.contains("/w/q"), "{notice}");
+        assert_eq!(
+            pinned_cd_notice(&selection, Some(&own), Some(&other)),
+            Some(notice.clone())
+        );
+
+        let mut global = pinned("/w/p");
+        global.tier = PinnedTier::Global;
+        let on_global =
+            pinned_cd_notice(&global, None, Some(&other)).expect("any project is foreign to the global tier");
+        assert!(on_global.contains("global toolchain"), "{on_global}");
+    }
+
+    /// A state-derived directory never reaches the terminal with a control or bidi character in it.
+    ///
+    /// Red state: format the recorded directory without `display_safe`.
+    #[test]
+    fn the_cd_notice_strips_controls_bidi_and_non_ascii_from_the_state() {
+        let hostile = "/tmp/ocx-hostile\u{1b}[31m\u{202e}\u{61c}\u{9b}\u{7}evil-\u{e9}";
+        let selection = pinned(hostile);
+
+        let notice = pinned_cd_notice(&selection, None, Some(&identity("/w/q"))).expect("a notice");
+
+        assert!(notice.is_ascii(), "{notice:?}");
+        assert!(!notice.chars().any(char::is_control), "{notice:?}");
+        assert!(
+            notice.contains("evil-?"),
+            "the stripped name stays recognisable: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn a_truncation_notice_names_the_loss_in_one_ascii_line() {
+        assert_eq!(truncation_notice(Truncation::None, Some(10)), None);
+        for (rung, words) in [
+            (
+                Truncation::InheritedDropped,
+                "the records inherited from outer frames were dropped",
+            ),
+            (Truncation::AllAppliedDropped, "every applied record was dropped"),
+            (Truncation::PayloadDropped, "the whole payload was dropped"),
+        ] {
+            let notice = truncation_notice(rung, Some(1234)).expect("a loss is announced");
+            assert!(
+                notice.starts_with("ocx: ") && notice.is_ascii() && !notice.contains('\n'),
+                "{notice}"
+            );
+            assert!(
+                notice.contains(&format!(
+                    "outgrew its size limit (1234 bytes) and was truncated: {words};"
+                )),
+                "the hook notice names the size and the rung words: {notice}"
+            );
+        }
+        let carried = truncation_notice(Truncation::PayloadDropped, None).expect("a carried loss is announced");
+        assert!(!carried.contains("bytes"), "{carried}");
+    }
+
+    /// A message already announced is not announced again; a refused prompt records it without moving a scope.
+    #[test]
+    fn announced_messages_are_recorded_and_recognised() {
+        let previous = pinned_state("/w/p");
+        let messages = vec!["ocx: one notice".to_owned()];
+        assert!(!already_announced(&previous, &messages));
+
+        let after = announced(&previous, &messages);
+
+        assert!(already_announced(&after, &messages));
+        assert!(!already_announced(&after, &["ocx: another".to_owned()]));
+        assert!(
+            !already_announced(&after, &[]),
+            "no messages are never 'already announced'"
+        );
+        assert_eq!(after.applied, previous.applied);
+    }
+
+    // -- writing ------------------------------------------------------------------------------
+
+    /// A state that fits is written whole and silently; one that does not drops records and says so once.
+    ///
+    /// Red state: encode and ignore the rung, and a truncated write is invisible.
+    #[test]
+    fn a_state_that_outgrows_the_limit_is_written_truncated_with_one_notice() {
+        use sha2::Digest as _;
+
+        let fits = write_state(&pinned_state("/w/p"));
+        assert!(fits.value.is_some() && fits.notice.is_none());
+
+        let mut crowded = ExecState::default();
+        for index in 0..500u32 {
+            let value = hex::encode(sha2::Sha256::digest(index.to_le_bytes()));
+            crowded.applied.push(record(
+                &format!("OUTER_{index}"),
+                &value,
+                ValueKind::Constant,
+                Owner::Inherited,
+            ));
+        }
+        let written = write_state(&crowded);
+        let value = written.value.expect("the codec always yields a value");
+        assert!(value.len() <= ocx_config::exec_state::MAX_ENCODED, "{}", value.len());
+        let notice = written.notice.expect("a truncating write is announced");
+        assert!(notice.starts_with("ocx: ") && notice.is_ascii());
+
+        crowded.truncated = Truncation::InheritedDropped;
+        assert_eq!(
+            write_state(&crowded).notice,
+            None,
+            "a rung the state already carried was announced when it was reached"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stat_only_tests {
+    use ocx_config::exec_state::{ExecState, SessionCache, Verdict};
+
+    use super::state_is_stat_only;
+
+    fn cached(verdict: Option<Verdict>) -> ExecState {
+        ExecState {
+            session: SessionCache {
+                fp: "fp-1".to_owned(),
+                verdict,
+                ..SessionCache::default()
+            },
+            ..ExecState::default()
+        }
+    }
+
+    /// Only a negative verdict is cached, and only for the fingerprint it was derived under.
+    #[test]
+    fn a_negative_verdict_answers_from_stats_while_the_fingerprint_holds() {
+        for verdict in [Verdict::Inert, Verdict::NoProject] {
+            assert!(
+                state_is_stat_only(&cached(Some(verdict)), "fp-1"),
+                "{verdict:?} short-circuits"
+            );
+            assert!(
+                !state_is_stat_only(&cached(Some(verdict)), "fp-2"),
+                "{verdict:?}: a moved fingerprint expires the cache"
+            );
+        }
+    }
+
+    /// A state with no cached verdict re-derives consent every prompt: the state is never a consent input.
+    #[test]
+    fn a_state_without_a_verdict_never_short_circuits() {
+        assert!(!state_is_stat_only(&cached(None), "fp-1"));
     }
 }

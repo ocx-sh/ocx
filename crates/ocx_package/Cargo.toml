@@ -8,8 +8,8 @@ publish = false
 
 [features]
 # Internal-only escape hatch, the project's one seam convention
-# (`subsystem-tests.md` "Test-Only Seams"). Forwarded by `ocx_lib`'s and `ocx`'s
-# own `__testing`.
+# (`subsystem-tests.md` "Test-Only Seams"). Forwarded by the `ocx`
+# crate's own `__testing`.
 __testing = ["ocx_env/__testing"]
 
 [dependencies]
@@ -22,7 +22,7 @@ ocx_oci.workspace = true
 ocx_store.workspace = true
 # `$OCX_HOME` and the composed environment a metadata document declares.
 ocx_config.workspace = true
-# The environment registry: `OCX_ENV`, `__OCX_LAUNCH_IDENTITIES` and the env-key validators.
+# The environment registry: the env-key validators.
 ocx_env.workspace = true
 # The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
 ocx_exit.workspace = true
@@ -61,6 +61,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# `test_source` and `IndexImpl`, which the publish-gate and version tests build indexes from.
+ocx_index = { workspace = true, features = ["__testing"] }
 # The registry double the prune tests drive the delete loop through.
 ocx_oci = { workspace = true, features = ["__testing"] }
 # `cfg(test)` writes the environment through `ocx_env::overrides`.

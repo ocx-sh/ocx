@@ -138,6 +138,16 @@ pub enum HandoffStdio {
     Unattended,
 }
 
+/// The execution state the hand-off child inherits: what this process received and the policy it writes.
+///
+/// The child gets the calling environment layered with this state and a pin to the new binary, never the
+/// old binary's pin.
+#[derive(Debug, Clone)]
+pub struct HandoffState {
+    pub inherited: ocx_config::exec_state::Inherited,
+    pub written: ocx_config::exec_state::PolicyLayer,
+}
+
 /// Where the update-check probe lists candidate tags from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagProbe {
@@ -273,7 +283,7 @@ impl PackageManager {
     /// # Errors
     ///
     /// `crate::error::Error` on check or install failure; see [`Self::self_apply`] for hand-off outcomes.
-    pub async fn self_update(&self) -> Result<SelfUpdateResult, crate::error::Error> {
+    pub async fn self_update(&self, handoff: &HandoffState) -> Result<SelfUpdateResult, crate::error::Error> {
         let check_result = self
             .self_check_update(Some(Duration::ZERO), TagProbe::Remote)
             .await
@@ -288,7 +298,7 @@ impl PackageManager {
             UpdateCheckResult::Skipped(reason) => Ok(SelfUpdateResult::Skipped(reason)),
             UpdateCheckResult::AlreadyUpToDate => Ok(SelfUpdateResult::AlreadyUpToDate),
             UpdateCheckResult::UpdateAvailable(latest_id) => {
-                self.self_apply(latest_id, HandoffStdio::Interactive).await
+                self.self_apply(latest_id, HandoffStdio::Interactive, handoff).await
             }
         }
     }
@@ -307,6 +317,7 @@ impl PackageManager {
         &self,
         latest: ocx_oci::PackageRef,
         stdio: HandoffStdio,
+        handoff_state: &HandoffState,
     ) -> Result<SelfUpdateResult, crate::error::Error> {
         use crate::concurrency::Concurrency;
 
@@ -338,7 +349,7 @@ impl PackageManager {
             .next()
             .expect("install_all returns one InstallInfo per requested package");
 
-        let handoff = hand_off_setup(self, &info, &to_tag, stdio).await;
+        let handoff = hand_off_setup(self, &info, &to_tag, stdio, handoff_state).await;
         let moved = current_names(self.file_structure(), &ocx_id, info.dir().root()).await;
 
         Ok(self_update_verdict(moved, handoff, current_version, to_tag))
@@ -441,6 +452,7 @@ async fn hand_off_setup(
     info: &ocx_package::InstallInfo,
     tag: &str,
     stdio: HandoffStdio,
+    state: &HandoffState,
 ) -> Option<HandoffFailure> {
     let env = match compose_env_for(manager, info.clone()).await {
         Ok(env) => env,
@@ -450,7 +462,34 @@ async fn hand_off_setup(
         Ok(binary) => binary,
         Err(error) => return Some(HandoffFailure::SpawnFailed(error.to_string())),
     };
-    run_handoff(&binary, tag, &info.identifier().digest(), stdio).await
+    let child = handoff_env(state, &binary);
+    run_handoff(&binary, tag, &info.identifier().digest(), stdio, child).await
+}
+
+/// The hand-off child's environment: the calling one layered with the inherited state, `OCX_BINARY_PIN`
+/// naming the new binary. The package env above served only to find that binary.
+fn handoff_env(state: &HandoffState, binary: &std::path::Path) -> ocx_config::env::Env {
+    use ocx_config::exec_state::{Owner, Selection};
+
+    let child = crate::exec_env::project(
+        &state.inherited,
+        &crate::exec_env::Spawn {
+            mode: crate::exec_env::ExecMode::Layer,
+            written: &state.written,
+            binary_pin: Some(binary),
+            composed: &[],
+            composed_owner: Owner::Inherited,
+            composed_scope: None,
+            invocation: &[],
+            replay_env: &[],
+            launch_identities: &[],
+            selection: Selection::FollowCwd,
+        },
+    );
+    for warning in &child.warnings {
+        log::debug!("hand-off environment: {warning:?}");
+    }
+    child.env
 }
 
 /// Spawns `binary` with the hand-off argv and classifies how it ended.
@@ -465,12 +504,13 @@ async fn run_handoff(
     tag: &str,
     digest: &ocx_oci::Digest,
     stdio: HandoffStdio,
+    env: ocx_config::env::Env,
 ) -> Option<HandoffFailure> {
     let argv = handoff_argv(tag, digest);
     log::debug!("Handing setup to '{}' as {:?}.", binary.display(), argv);
 
     let mut command = tokio::process::Command::new(binary);
-    command.args(argv);
+    command.args(argv).env_clear().envs(env);
 
     match stdio {
         // Child stdout goes to our stderr, or `ocx --format json self update | jq` parses the child's table.
@@ -1093,7 +1133,14 @@ mod tests {
         // as "the update failed".
         let recorder = write_argv_recorder(tmp.path(), &recorded, 81);
 
-        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
+        let outcome = super::run_handoff(
+            &recorder,
+            "0.6.1",
+            &fixture_digest(),
+            super::HandoffStdio::Interactive,
+            ocx_config::env::Env::new(),
+        )
+        .await;
 
         let argv: Vec<String> = std::fs::read_to_string(&recorded)
             .expect("the recorder must have run")
@@ -1127,7 +1174,14 @@ mod tests {
         let recorded = tmp.path().join("argv");
         let recorder = write_argv_recorder(tmp.path(), &recorded, 0);
 
-        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
+        let outcome = super::run_handoff(
+            &recorder,
+            "0.6.1",
+            &fixture_digest(),
+            super::HandoffStdio::Interactive,
+            ocx_config::env::Env::new(),
+        )
+        .await;
 
         assert!(outcome.is_none(), "a clean child carries no failure; got: {outcome:?}");
     }
@@ -1138,7 +1192,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let absent = tmp.path().join("no-such-binary");
 
-        let outcome = super::run_handoff(&absent, "0.6.1", &fixture_digest(), super::HandoffStdio::Interactive).await;
+        let outcome = super::run_handoff(
+            &absent,
+            "0.6.1",
+            &fixture_digest(),
+            super::HandoffStdio::Interactive,
+            ocx_config::env::Env::new(),
+        )
+        .await;
 
         assert!(
             matches!(outcome, Some(super::HandoffFailure::SpawnFailed(_))),
@@ -1166,7 +1227,14 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let outcome = super::run_handoff(&script, "0.6.1", &fixture_digest(), super::HandoffStdio::Unattended).await;
+        let outcome = super::run_handoff(
+            &script,
+            "0.6.1",
+            &fixture_digest(),
+            super::HandoffStdio::Unattended,
+            ocx_config::env::Env::new(),
+        )
+        .await;
 
         assert!(outcome.is_none(), "got: {outcome:?}");
         let fds: Vec<String> = std::fs::read_to_string(&recorded)

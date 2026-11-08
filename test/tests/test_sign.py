@@ -818,10 +818,8 @@ def test_sign_does_not_forward_identity_token_to_children(
 
     Credential exemption (see ``subsystem-cli.md``): the token is a bearer
     credential read directly via ``std::env::var`` for the sign call only;
-    ``Env::apply_ocx_config`` actively scrubs it from any subprocess env
-    composed via ``OcxConfigView``. The Rust unit test
-    ``apply_ocx_config_never_forwards_credential_tokens`` covers the lib
-    boundary; this test pins the end-to-end behaviour through the sign command
+    the spawn projection removes it from every child environment (the
+    ``Credential`` propagation class); this test pins the end-to-end behaviour through the sign command
     by driving a real, accepted token and asserting it never appears on stdout
     or stderr (the streams a child would inherit or a log would capture).
     """

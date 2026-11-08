@@ -261,7 +261,7 @@ impl Ocx {
         locate(&spawn::parent_environment(), name).and_then(Self::new)
     }
 
-    /// Sets a variable in every child's environment, after the inherited ones are scrubbed.
+    /// Sets a variable in every child's environment, replacing an inherited one of the same name.
     #[must_use]
     pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.environment.push((key.into(), value.into()));

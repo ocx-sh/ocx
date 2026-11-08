@@ -191,10 +191,12 @@ impl DirenvExport {
         let (mut entries, _, _) = offline
             .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)
             .await?;
-        let inherited = ocx_env::__OCX_LAUNCH_IDENTITIES
-            .get_raw()
-            .and_then(|v| v.into_string().ok());
-        entries.extend(offline.launch_identity_entry(&composed.roots, &no_patches, inherited.as_deref()));
+        entries.extend(offline.exec_state_entry(
+            &composed.roots,
+            &no_patches,
+            context.inherited(),
+            ocx_package_manager::ExportDestination::RunningShell,
+        ));
 
         // A package's explicit separator must be what `None`-separator contributors (`[env]`, `--env`)
         // inherit, not the fold's default; nothing is forwarded, so one pass suffices.

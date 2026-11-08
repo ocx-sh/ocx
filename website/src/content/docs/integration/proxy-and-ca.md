@@ -110,7 +110,7 @@ On Windows, an inline PEM value passed through a `.bat` file or a `cmd /c` wrapp
 
 What reaches ocx is then a truncated bundle (exit `78`) or no variable at all (`UnknownIssuer`, exit `69`). The path form sidesteps the limit.
 
-The variable is not part of the set OCX forwards. So a CA supplied only through it does not reach a child launched under `ocx exec --clean`. That command rebuilds the environment from the composed package variables and OCX's own resolved `OCX_*` configuration. The config-key form survives `--clean`, because the child re-reads `config.toml` from disk itself.
+Under `--clean` the child starts from an empty environment, so the variable is absent there. [`__OCX_ENV_STATE`][env-ocx-env-state] and [`OCX_BINARY_PIN`][env-ocx-binary-pin] still reach the child, but neither carries the CA. A CA supplied only through the variable does not reach a child launched under `ocx exec --clean`. The config-key form survives `--clean`, because the child re-reads `config.toml` from disk itself.
 
 [`ocx self setup`][cmd-self-setup] reads the variable in a dedicated phase before it bootstraps anything else. That phase runs before any network access. A later bootstrap or managed-config fetch can then trust the corporate CA.
 
@@ -266,6 +266,8 @@ After inlining, the payload's total size is re-checked against the 64 KiB manage
 [env-ocx-extra-ca-certs]: ../reference/environment.md#ocx-extra-ca-certs
 [env-ocx-insecure-registries]: ../reference/environment.md#ocx-insecure-registries
 [env-no-config]: ../reference/environment.md#ocx-no-config
+[env-ocx-env-state]: ../reference/environment.md#ocx-env-state
+[env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
 
 <!-- internal -->
 [config-registries-trusted-hosts]: ../reference/configuration.md#keys-registries-trusted-hosts

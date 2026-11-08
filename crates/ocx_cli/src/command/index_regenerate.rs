@@ -355,10 +355,10 @@ mod tests {
         //
         // `context.oci_index()` is the offline gate (the accessor itself errors
         // under `--offline`) and `index_common::policy_blocked` is the frozen gate;
-        // neither may appear here. `config_view` is the struct both flags land
-        // in, so reading it at all would be the first half of a gate.
+        // neither may appear here. `frozen()` is the accessor the frozen gate
+        // reads, so calling it at all would be the first half of a gate.
         let body = module_code();
-        for forbidden in ["oci_index()", "policy_blocked(", "config_view("] {
+        for forbidden in ["oci_index()", "policy_blocked(", "frozen()"] {
             assert!(
                 !body.contains(forbidden),
                 "`{forbidden}` appears in index_regenerate.rs: C-021 forbids a --frozen or --offline gate here"

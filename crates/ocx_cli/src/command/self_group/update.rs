@@ -44,7 +44,7 @@ impl SelfUpdate {
             context.api().report(&UpdateCheckData::from_result(&result))?;
             Ok(exit)
         } else {
-            let result = context.manager().self_update().await?;
+            let result = context.manager().self_update(&context.handoff_state()).await?;
             // The new binary already ran its own `ocx self setup`; only the next-step line is left.
             if let Some(advisory) = crate::app::update_check::advisory_for(&result) {
                 crate::app::update_check::emit_advisory(&context, &advisory);

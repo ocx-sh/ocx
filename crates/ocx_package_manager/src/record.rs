@@ -17,7 +17,7 @@ pub mod sink;
 
 pub use error::RecordsError;
 pub use execution_record::{
-    ExecutionRecord, Frame, FrameCommand, PackageBinding, RecordInputs, ResourceDescriptor, Scope,
+    ExecutionRecord, Frame, FrameCommand, PackageBinding, RecordInputs, RecordedConfig, ResourceDescriptor, Scope,
 };
 pub use name_template::{NameContext, NameTemplate};
 pub use ocx_config::records::RecordsOptions;

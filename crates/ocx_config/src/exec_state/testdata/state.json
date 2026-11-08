@@ -1,0 +1,31 @@
+{
+  "minor": 0,
+  "policy": {"remote": false, "default_registry": "registry.example.com"},
+  "applied": [
+    {
+      "key": "FOO",
+      "value": {"literal": "bar"},
+      "kind": "constant",
+      "owner": {"session": {"scope": "global", "source": "composed"}},
+      "prior": "unset"
+    },
+    {
+      "key": "PATH",
+      "value": {"literal": "/opt/tool/bin"},
+      "kind": "path",
+      "owner": "inherited"
+    },
+    {
+      "key": "FIXTURE_TOKEN",
+      "value": {"literal": "tok-sentinel"},
+      "kind": "constant",
+      "owner": "inherited",
+      "prior": "unset"
+    }
+  ],
+  "inherited_scopes": ["global", {"project": {"root": "/work/proj"}}],
+  "replay": {"env": [], "launch_identities": []},
+  "selection": "follow_cwd",
+  "session": {"fp": "", "tiers": [], "ws": "", "messages_fp": ""},
+  "truncated": "none"
+}

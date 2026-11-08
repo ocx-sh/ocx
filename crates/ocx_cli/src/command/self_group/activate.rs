@@ -1,20 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use ocx_config::env::Env;
+use ocx_config::exec_state::{self, ExecState, HeaderView, Inherited, Selection, UnreadableReason};
 use ocx_config::loader::ConfigInputs;
 use ocx_config::loader::ConfigLoader;
 use ocx_config::shell::ShellConfig;
 use ocx_console::{ColorModeConfig, Theme};
-use ocx_package_manager::activation::{self, Outcome, ProjectIdentity, SessionError, SessionInput};
+use ocx_package::metadata::env::entry::Entry;
+use ocx_package::metadata::env::modifier::ModifierKind;
+use ocx_package_manager::activation::{
+    self, Claim, Outcome, ProjectIdentity, SessionError, SessionInput, ShellProcess, StateWrite,
+};
 use ocx_project::activate::ActivateMode;
 use ocx_shell::shell::Shell;
-use ocx_shell::shell::reconcile::{self, CARRIER_KEY, Ledger, Plan, ScopeId};
+use ocx_shell::shell::reconcile::{self, Composition, Plan, WatchSet};
 use ocx_shell::shell::{escape, hook};
 use ocx_store::file_structure::FileStructure;
 
@@ -75,16 +81,35 @@ pub struct SelfActivate {
     /// machine surface, not something to type.
     #[clap(long = "reconcile", hide = true)]
     reconcile: bool,
+
+    /// The process id of the shell this call runs for.
+    ///
+    /// Names the session's owner: the shell that claims it, and the one a tmux pane or IDE terminal
+    /// inheriting its state is not. Hidden: the emitted hook passes its own shell's pid variable. Absent,
+    /// as from an older emission, the hook runs token-less and never claims.
+    #[clap(long = "shell-pid", hide = true, value_name = "PID")]
+    shell_pid: Option<u32>,
 }
 
 impl SelfActivate {
     /// Called from `app.rs` before `Context::try_init`, which a shell start and a stat-only prompt must not pay.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
+        // Before the first config load or project walk, which read the received policy.
+        crate::app::install_received_policy(&exec_state::Inherited::from_process_env());
         if self.reconcile {
             // Always exit 0 so the prompt renders; failures log at debug, and the emitted body discards stderr anyway.
-            let carrier = ocx_env::__OCX_ENV_STATE.get_raw().and_then(|v| v.into_string().ok());
+            let carrier = ocx_env::__OCX_ENV_STATE.get_raw();
+            let stood_down = ocx_env::__OCX_ENV_STOOD_DOWN.get_raw();
             if let Err(error) = self
-                .run_reconcile(options, color_config, &FileStructure::new(), carrier.as_deref())
+                .run_reconcile(
+                    options,
+                    color_config,
+                    &FileStructure::new(),
+                    Received {
+                        carrier: carrier.as_deref(),
+                        stood_down: stood_down.as_deref(),
+                    },
+                )
                 .await
             {
                 log::debug!("per-prompt reconcile degraded, emitting nothing: {error:#}");
@@ -99,6 +124,14 @@ impl SelfActivate {
         let shell_arg = self.shell.or(Some(None));
         Ok(resolve_shell_arg(shell_arg)?
             .expect("resolve_shell_arg(Some(_)) always returns Some; see shell_arg remap above"))
+    }
+
+    /// The shell process `--shell-pid` names, or `None` for the token-less mode of an older emission.
+    async fn shell_process(&self) -> Option<ShellProcess> {
+        match self.shell_pid {
+            Some(pid) => Some(ShellProcess::resolve(pid).await),
+            None => None,
+        }
     }
 
     /// The shell-start path: emit the activation stream and no diagnostic at all.
@@ -128,21 +161,61 @@ impl SelfActivate {
         let hook_enabled = self
             .hook
             .enabled(interactive, shell_config.as_ref().and_then(|shell| shell.hook));
+
+        // The state this shell inherited decides what the stream may change; an unreadable one changes nothing.
+        let carrier = ocx_env::__OCX_ENV_STATE.get_raw();
+        let shell_process = self.shell_process().await;
+        // The tier list only feeds the hook's watch set, so a shell without the hook records none.
+        let recorded_tiers: &[PathBuf] = if hook_enabled { &tiers } else { &[] };
+        let mut login = claim_login(
+            exec_state::decode(carrier.as_deref()),
+            shell_process.as_ref(),
+            recorded_tiers,
+        );
+        let cwd_project = match resolve_walk(options, None).await {
+            Walk::Resolved(project) => Some(*project),
+            Walk::Determinate | Walk::Indeterminate => None,
+        };
+        let apply_env = match &login {
+            Login::StoodDown => false,
+            Login::Entered { state, .. } => login_applies_env(state, cwd_project.as_ref()),
+        };
+
         // Discovered here and baked into the emitted body, so the per-prompt path only stats this list.
         let watch = if hook_enabled {
-            // No ledger at shell start, so there is no scope an indeterminate walk could retain.
-            let project = match resolve_walk(options, &Ledger::empty()).await {
-                Walk::Resolved(project) => Some(project),
-                Walk::Determinate | Walk::Indeterminate => None,
+            let watched = match &login {
+                Login::StoodDown => None,
+                Login::Entered { state, .. } => resolve_target(state, cwd_project.as_ref()).await.project,
             };
-            reconcile::watch_paths(
+            sample_watch(reconcile::watch_paths(
                 &file_structure,
-                project.as_ref().map(|project| project.config_path.as_path()),
-                project.as_ref().map(|project| project.key.as_str()),
+                watched.as_ref().map(|project| project.config_path.as_path()),
+                watched.as_ref().map(|project| project.key.as_str()),
                 Some(&tiers),
-            )
+            ))
+            .await?
         } else {
-            Vec::new()
+            WatchSet::default()
+        };
+
+        // Exported before the hook registers, so the first prompt reads the claim and the tier list.
+        let seed = match &mut login {
+            Login::Entered { state, changed: true } => {
+                if hook_enabled {
+                    // This stream's own gate membership, or the first prompt redefines a byte-identical hook body.
+                    state.session.ws = reconcile::watch_set_fingerprint(&watch);
+                }
+                activation::write_state(state).value
+            }
+            Login::Entered { .. } | Login::StoodDown => None,
+        };
+
+        // A `stat` of the pinned trampoline, so off the async runtime.
+        let wrapper_binary = if hook_enabled {
+            let (file_structure, bin_path) = (file_structure.clone(), bin_path.clone());
+            Some(tokio::task::spawn_blocking(move || wrapper_binary_path(&file_structure, &bin_path)).await?)
+        } else {
+            None
         };
 
         emit_activation(&LoginStream {
@@ -150,90 +223,186 @@ impl SelfActivate {
             bin_path: &bin_path,
             toolchain_bin: &toolchain_bin,
             activate,
-            apply_env: !yields_to_exec(),
+            apply_env,
             completion: completion.as_deref(),
             hook_binary: hook_enabled.then(|| ocx_binary_path(&bin_path)).as_deref(),
-            wrapper_binary: hook_enabled
-                .then(|| wrapper_binary_path(&file_structure, &bin_path))
-                .as_deref(),
+            wrapper_binary: wrapper_binary.as_deref(),
             watch: &watch,
-            seed: hook_enabled.then(|| seed_carrier(&tiers, &watch)).flatten().as_deref(),
+            seed: seed.as_deref(),
         });
         Ok(ExitCode::SUCCESS)
     }
 }
 
-/// Whether an enclosing `ocx exec` composed this process's environment.
+/// What the login stream makes of the state its shell inherited.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per process, so boxing the state would only add an indirection"
+)]
+enum Login {
+    /// Unreadable: nothing is applied or written, and the first prompt prints the one notice.
+    StoodDown,
+    /// Readable or absent.
+    Entered {
+        /// The state as the stream leaves it: claimed, retagged, and carrying the tier list.
+        state: ExecState,
+        /// Whether `state` differs from what the shell inherited, so the stream has to export it.
+        changed: bool,
+    },
+}
+
+/// Settle the inherited state before the login stream emits anything.
 ///
-/// The login stream then changes no environment but still registers the hook, so a `cd` out of the
-/// exec project reconciles; inside it the hook emits nothing.
-fn yields_to_exec() -> bool {
-    ocx_env::__OCX_EXEC_SCOPE.get_raw().is_some()
+/// A readable state is claimed by this shell (retagging a foreign one, exactly as the hook would), and the
+/// `--config` tier list this process alone sees is recorded in it. An absent state is left to the first
+/// prompt unless there is a tier list to carry.
+fn claim_login(inherited: Inherited, shell: Option<&ShellProcess>, tiers: &[PathBuf]) -> Login {
+    let (mut state, mut changed) = match inherited {
+        Inherited::Unreadable { .. } => return Login::StoodDown,
+        Inherited::Absent => (ExecState::default(), false),
+        Inherited::Readable(mut state) => {
+            let claim = activation::claim_session(&mut state, shell);
+            (state, claim != Claim::Held)
+        }
+    };
+    // The tier list lets a grant added to the `--config` file expire a cached `inert` verdict at the next prompt.
+    if !tiers.is_empty() && state.session.tiers != tiers {
+        state.session.tiers = tiers.to_vec();
+        changed = true;
+    }
+    Login::Entered { state, changed }
+}
+
+/// Whether the login stream changes the environment: the `PATH` prepends and the global tier's env.
+///
+/// A pinned shell is the entered shell of `ocx shell`: its layer is composed already, so the stream claims and
+/// applies nothing. Under `FollowCwd` it composes only the global tier, and only when the desired composition
+/// for the working directory still lacks it.
+fn login_applies_env(state: &ExecState, cwd_project: Option<&ProjectIdentity>) -> bool {
+    match state.selection {
+        Selection::Pinned(_) => false,
+        Selection::FollowCwd => activation::follow_cwd_composition(state, cwd_project).global,
+    }
+}
+
+/// What one prompt composes: the scopes, the project that carries them, and the pinned notice owed.
+struct Target {
+    /// The scopes this prompt composes after the inherited layer is subtracted.
+    composition: Composition,
+    /// The project those scopes name, or `None` when they name none; it is also the one project whose files are watched.
+    project: Option<ProjectIdentity>,
+    /// The `ocx.toml` groups a pinned selection recomposes; empty for `FollowCwd`.
+    groups: Vec<String>,
+    /// Whether the shell is pinned.
+    pinned: bool,
+    /// The one-line notices a pinned shell owes: a working directory in another project, a vanished pinned project.
+    notices: Vec<String>,
+}
+
+/// Decide what `state` composes for the project the working directory resolved to.
+async fn resolve_target(state: &ExecState, cwd_project: Option<&ProjectIdentity>) -> Target {
+    match &state.selection {
+        Selection::FollowCwd => {
+            let composition = activation::follow_cwd_composition(state, cwd_project);
+            // An inherited project is neither composed nor watched: exec is a snapshot.
+            let project = cwd_project.filter(|_| composition.project.is_some()).cloned();
+            Target {
+                composition,
+                project,
+                groups: Vec::new(),
+                pinned: false,
+                notices: Vec::new(),
+            }
+        }
+        Selection::Pinned(pinned) => {
+            let identity = activation::pinned_identity(&pinned.tier).await;
+            let vanished = match identity {
+                Some(_) => None,
+                None => activation::vanished_pin_notice(&pinned.tier).await,
+            };
+            Target {
+                composition: activation::pinned_composition(&pinned.tier, identity.as_ref()),
+                notices: activation::pinned_cd_notice(pinned, identity.as_ref(), cwd_project)
+                    .into_iter()
+                    .chain(vanished)
+                    .collect(),
+                groups: activation::pinned_groups(pinned),
+                project: identity,
+                pinned: true,
+            }
+        }
+    }
 }
 
 /// The per-prompt path: it never consults [`options::Hook::enabled`], and its fast path reads no config.
 impl SelfActivate {
-    /// `file_structure` and `carrier` are parameters so a test can prove the stat-only exit precedes
+    /// `file_structure` and `received` are parameters so a test can prove the stat-only exit precedes
     /// `Context::try_init` without mutating the process environment.
     async fn run_reconcile(
         &self,
         options: &ContextOptions,
         color_config: ColorModeConfig,
         file_structure: &FileStructure,
-        carrier: Option<&str>,
+        received: Received<'_>,
     ) -> anyhow::Result<()> {
         let shell = self.target_shell()?;
+        let carrier = received.carrier;
 
-        // The carrier is untrusted: it names the revert set and an equality operand, never a path.
-        let ledger = carrier.and_then(Ledger::decode).unwrap_or_else(Ledger::empty);
-
-        // Before consent only `stat` calls and the `ocx.lock` parse may read project bytes; `ocx.toml` is parsed later.
-        let walk = resolve_walk(options, &ledger).await;
-        // Emit nothing, not even the checkpoint: a one-prompt `.git` `EACCES` must not flap PATH,
-        // and a stale stamp retries.
-        if matches!(walk, Walk::Indeterminate) {
-            log::debug!("the project walk was indeterminate; retaining the recorded scope unchanged");
-            return Ok(());
-        }
-        let project = match walk {
-            Walk::Resolved(project) => Some(*project),
-            Walk::Determinate | Walk::Indeterminate => None,
-        };
-        // Exec is hermetic: while the cwd stays in the exec project nothing applies, not even the global toolchain.
-        // A `cd` to another project falls through and reconciles it.
-        if let Some(project) = project.as_ref()
-            && yields_to_exec()
-            && activation::ExecScope::from_env()
-                .await
-                .is_some_and(|scope| scope.observe(&project.dir).is_some())
-        {
-            // Back from another project: its recorded entries would otherwise shadow the exec project's tools.
-            if ledger.scopes.project.is_some()
-                || ledger.scopes.global.as_ref().is_some_and(|applied| !applied.is_empty())
-            {
-                return undo_recorded_scopes(shell, &ledger, color_config, file_structure).await;
+        // The carrier is untrusted: decoded once, bounded, and never written over when unreadable.
+        let mut state = match exec_state::decode(carrier) {
+            Inherited::Absent => ExecState::default(),
+            Inherited::Readable(state) => state,
+            Inherited::Unreadable { header, reason } => {
+                self.stand_down(options, file_structure, &header, reason, received)
+                    .await?;
+                return Ok(());
             }
-            return Ok(());
-        }
-        let watch = reconcile::watch_paths(
+        };
+        let shell_process = self.shell_process().await;
+        let claim = activation::claim_session(&mut state, shell_process.as_ref());
+
+        let pinned = matches!(state.selection, Selection::Pinned(_));
+        // Before consent only `stat` calls and the `ocx.lock` parse may read project bytes; `ocx.toml` is parsed later.
+        let recorded_dir = state.session.project.as_ref().map(|hint| hint.dir.clone());
+        let cwd_project = match resolve_walk(options, recorded_dir).await {
+            Walk::Resolved(project) => Some(*project),
+            // A pinned shell ignores the working directory, so an uncertain walk retains nothing.
+            Walk::Determinate => None,
+            Walk::Indeterminate if pinned => None,
+            // Emit nothing, not even the checkpoint: a one-prompt `.git` `EACCES` must not flap PATH,
+            // and a stale stamp retries.
+            Walk::Indeterminate => {
+                log::debug!("the project walk was indeterminate; retaining the recorded scope unchanged");
+                return Ok(());
+            }
+        };
+        let target = resolve_target(&state, cwd_project.as_ref()).await;
+
+        let watch = sample_watch(reconcile::watch_paths(
             file_structure,
-            project.as_ref().map(|project| project.config_path.as_path()),
-            project.as_ref().map(|project| project.key.as_str()),
+            target.project.as_ref().map(|project| project.config_path.as_path()),
+            target.project.as_ref().map(|project| project.key.as_str()),
             // Recorded by the shell-start pass that saw `--config`; empty means `watch_paths` re-derives.
-            (!ledger.tiers.is_empty()).then_some(ledger.tiers.as_slice()),
-        );
-        let project_dir = project.as_ref().map(|project| project.dir.clone());
+            (!state.session.tiers.is_empty()).then_some(state.session.tiers.as_slice()),
+        ))
+        .await?;
+        // The working directory's project, composed or not: entering another one must expire a cached verdict.
+        let project_dir = cwd_project.as_ref().map(|project| project.dir.clone());
         let watch_fingerprint = reconcile::watch_set_fingerprint(&watch);
         let fingerprint = {
-            let watch = watch.clone();
-            let project_dir = project_dir.clone();
+            let watch: Vec<PathBuf> = watch.paths().map(Path::to_path_buf).collect();
             tokio::task::spawn_blocking(move || reconcile::current_fingerprint(&watch, project_dir.as_deref())).await?
         };
 
         // Only a negative verdict is cached: caching `Activate` would make the untrusted carrier a consent input.
-        if activation::is_stat_only(&ledger, &fingerprint) {
+        // A claim or retag has to be written, so it never takes the fast path.
+        if claim == Claim::Held && activation::state_is_stat_only(&state, &fingerprint) {
             // The stamp must still advance, or every prompt execs.
-            emit(hook::checkpoint(shell));
+            if json_channel(options) {
+                emit_plan_json(&checkpoint_plan(gate_entry(self.shell_pid, &Env::new()).await));
+            } else {
+                emit(hook::checkpoint(shell));
+            }
             return Ok(());
         }
 
@@ -244,58 +413,93 @@ impl SelfActivate {
                 // A prompt neither refuses over a missing managed snapshot nor adopts a new one.
                 enforce_required: false,
                 onboarding: false,
+                tolerate_vanished_received_config: false,
             },
         )
         .await?;
 
         // The ocx home is always consented, so the global tier resolves ahead of the session and its consent check.
-        let target = crate::conventions::platform_or_default(None);
-        let global = global_prompt_entries(&context, &target).await?;
+        let platform = crate::conventions::platform_or_default(None);
+        let (global, global_identities) = if target.composition.global {
+            global_prompt_entries(&context, &platform).await?
+        } else {
+            (Vec::new(), None)
+        };
         let session = activation::session(SessionInput {
             global,
+            global_identities,
             manager: context.manager(),
             local_index: context.local_index(),
             concurrency: context.concurrency(),
             file_structure: context.file_structure(),
             config: context.config(),
-            target: &target,
-            project: project.as_ref(),
+            target: &platform,
+            project: target.project.as_ref(),
+            composition: target.composition.clone(),
+            groups: target.groups.clone(),
+            pinned: target.pinned,
         })
         .await;
-        let outcome = match session {
+        let mut outcome = match session {
             Ok(outcome) => outcome,
             // Propagated, a lock error exits 65 into a discarded stderr and the project silently stops tracking.
             Err(error @ SessionError::Lock(_)) => {
-                for line in refusal_lines(shell, &ledger, &error) {
-                    println!("{line}");
+                if json_channel(options) {
+                    // The shim parses stdout as a `Plan`; a shell line would fail `from json` and lose the write.
+                    let (plan, notices) = refusal_plan(&state, &error);
+                    emit_plan_json(&plan);
+                    for notice in notices {
+                        eprintln!("{notice}");
+                    }
+                } else {
+                    for line in refusal_lines(shell, &state, &error) {
+                        println!("{line}");
+                    }
                 }
                 // No checkpoint: the stale stamp retries once the user regenerates the lock.
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
-        // `plan_for` canonicalizes, so it hops; the values move in and back out because each one deep-copies.
+        // Announced once through the messages digest, like every other deferred diagnostic.
+        outcome.messages.extend(target.notices);
+        outcome
+            .messages
+            .extend(activation::truncation_notice(state.truncated, None));
+
+        // `plan_for_state` canonicalizes, so it hops; the values move in and back out because each one deep-copies.
         let owned_root = file_structure.root().to_path_buf();
-        let (plan, ledger, outcome, current) = tokio::task::spawn_blocking(move || {
+        let (plan, state, outcome, current) = tokio::task::spawn_blocking(move || {
             let current = Env::new();
             // An owned prefix is a deletion authority over the live PATH, so `owned_home` stays `None` until consent.
             let plan = {
                 let mut owned: Vec<&Path> = vec![owned_root.as_path()];
                 owned.extend(outcome.owned_home.as_deref());
-                activation::plan_for(&ledger, &outcome, &owned, &current)
+                activation::plan_for_state(&state, &outcome, &owned, &current)
             };
-            (plan, ledger, outcome, current)
+            (plan, state, outcome, current)
         })
         .await?;
 
-        if matches!(options.format.mode(), options::FormatMode::Json) {
-            // Nushell applies the `Plan` as data; its inlined hook has no baked watch set, so no carrier or gate.
+        if json_channel(options) {
+            // Nushell applies the `Plan` as data, so the binary's own writes ride it as ordinary entries.
+            let next = activation::next_state(&state, &outcome, &current, &fingerprint);
+            let write = activation::write_state(&next);
+            let theme = Theme::new(color_config.stderr);
+            // Before the writes join the plan: the summary names toolchain keys only, and says so for a plan it has seen.
+            let messages = message_texts(&outcome, &plan, &state, &next, write.notice.clone(), &theme);
+            let mut plan = plan;
+            append_state_write(&mut plan, &write);
+            plan.sets.extend(gate_entry(self.shell_pid, &current).await);
             emit_plan_json(&plan);
+            for message in messages {
+                eprintln!("{message}");
+            }
             return Ok(());
         }
 
         // The gate is baked at emission, so `ws` advances only with a redefinition, or a stale gate is permanent.
-        let regate = watch_fingerprint != ledger.ws;
+        let regate = watch_fingerprint != state.session.ws;
         let gate = regate
             .then(|| hook::redefinition(shell, &ocx_binary_path(&file_structure.ocx_install_bin_path()), &watch))
             .flatten();
@@ -303,7 +507,7 @@ impl SelfActivate {
         let theme = Theme::new(color_config.relayed);
         for line in reconcile_lines(
             shell,
-            &ledger,
+            &state,
             &fingerprint,
             regate.then_some(watch_fingerprint.as_str()),
             &outcome,
@@ -321,50 +525,125 @@ impl SelfActivate {
     }
 }
 
-/// Revert everything `ledger` recorded and apply nothing, then advance the stamp.
-async fn undo_recorded_scopes(
-    shell: Shell,
-    ledger: &Ledger,
-    color_config: ColorModeConfig,
-    file_structure: &FileStructure,
-) -> anyhow::Result<()> {
-    let outcome = Outcome {
-        session: activation::SessionPath::new(file_structure),
-        global: Vec::new(),
-        project: Vec::new(),
-        owned_home: None,
-        slot: None,
-        resolved: false,
-        inert: false,
-        messages: Vec::new(),
-    };
-    let owned_root = file_structure.root().to_path_buf();
-    let previous = ledger.clone();
-    let (plan, outcome, current) = tokio::task::spawn_blocking(move || {
-        let current = Env::new();
-        let plan = activation::plan_for(&previous, &outcome, &[owned_root.as_path()], &current);
-        (plan, outcome, current)
-    })
-    .await?;
-    let theme = Theme::new(color_config.relayed);
-    for line in reconcile_lines(shell, ledger, &ledger.fp, None, &outcome, &plan, &current, &theme) {
-        println!("{line}");
+/// What the process environment handed one reconcile: the state, and the stood-down copy a shell may have exported.
+#[derive(Clone, Copy)]
+struct Received<'a> {
+    carrier: Option<&'a OsStr>,
+    stood_down: Option<&'a OsStr>,
+}
+
+impl Received<'_> {
+    /// Whether a stand-down still owes its notice: a copy equal to the state means an earlier run printed it.
+    ///
+    /// Elvish exports the copy, so a hook closure that re-runs after every `cd` reaches here with it.
+    fn notice_owed(&self) -> bool {
+        !matches!((self.carrier, self.stood_down), (Some(state), Some(copy)) if state == copy)
     }
-    emit(hook::checkpoint(shell));
-    Ok(())
+}
+
+impl SelfActivate {
+    /// Stand the hook down for a state it cannot read: write nothing, revert nothing, apply nothing.
+    ///
+    /// The emitted code copies the live value by reference and re-emits the gate, whose first clause skips the hook
+    /// while the state equals that copy, so the notice prints once. `unset __OCX_ENV_STATE` re-arms it. Nushell
+    /// has no code to emit, so its copy and checkpoint ride the `Plan` and the notice goes to stderr.
+    async fn stand_down(
+        &self,
+        options: &ContextOptions,
+        file_structure: &FileStructure,
+        header: &HeaderView,
+        reason: UnreadableReason,
+        received: Received<'_>,
+    ) -> anyhow::Result<()> {
+        let notice_owed = received.notice_owed();
+        if json_channel(options) {
+            let gate = gate_entry(self.shell_pid, &Env::new()).await;
+            emit_plan_json(&stand_down_plan(received.carrier, gate));
+            if notice_owed {
+                eprintln!("{}", activation::printable(&stand_down_notice(header, reason)));
+            }
+            return Ok(());
+        }
+        let shell = self.target_shell()?;
+        let binary = ocx_binary_path(&file_structure.ocx_install_bin_path());
+        let watch = sample_watch(reconcile::watch_paths(file_structure, None, None, None)).await?;
+        for line in stand_down_lines(shell, &binary, &watch, header, reason, notice_owed) {
+            println!("{line}");
+        }
+        Ok(())
+    }
+}
+
+/// The stood-down copy and checkpoint, then the notice when it is owed.
+fn stand_down_lines(
+    shell: Shell,
+    binary: &Path,
+    watch: &WatchSet,
+    header: &HeaderView,
+    reason: UnreadableReason,
+    notice_owed: bool,
+) -> Vec<String> {
+    let mut lines: Vec<String> = hook::stand_down(shell, binary, watch).into_iter().collect();
+    if notice_owed {
+        lines.extend(shell.emit_message(activation::printable(&stand_down_notice(header, reason))));
+    }
+    lines
+}
+
+/// Stat the watch set once, off the async runtime; the digest and the baked gate both read this snapshot.
+async fn sample_watch(paths: Vec<PathBuf>) -> anyhow::Result<WatchSet> {
+    Ok(tokio::task::spawn_blocking(move || WatchSet::sample(paths)).await?)
+}
+
+/// The one stderr line a stood-down hook prints; every word that comes from the state passes `display_safe`.
+fn stand_down_notice(header: &HeaderView, reason: UnreadableReason) -> String {
+    let current = exec_state::MAJOR;
+    let cause = match (header.major, reason) {
+        (Some(found), _) if found > current => format!("was written by a newer ocx (format {found})"),
+        (Some(found), _) if found < current => {
+            format!("was written by another ocx version (format {found}; this ocx reads format {current})")
+        }
+        (None, UnreadableReason::HeaderInvalid | UnreadableReason::OtherMajor) => {
+            format!("was written by another ocx version (this ocx reads format {current})")
+        }
+        (_, reason) => format!("could not be read ({})", reason),
+    };
+    format!(
+        "ocx: this shell's environment state {cause}. ocx stopped updating this shell. Run 'unset __OCX_ENV_STATE' to \
+         start over here (values already applied stay), or open a new shell."
+    )
 }
 
 /// What a prompt emits when the consenting project's lock is absent or stale: no plan, so the scope is retained.
 ///
-/// The carrier changes only `messages_fp`, or the message reprints every prompt until `ocx lock` runs.
-fn refusal_lines(shell: Shell, previous: &Ledger, error: &SessionError) -> Vec<String> {
-    let message = format!("ocx: {error}");
-    let announced = activation::announcing(previous, std::slice::from_ref(&message));
-    let mut lines = ledger_lines(shell, previous, &announced);
-    if announced.messages_fp != previous.messages_fp {
-        lines.extend(shell.emit_message(message));
-    }
+/// The state changes only `messages_fp`, or the message reprints every prompt until `ocx lock` runs.
+fn refusal_lines(shell: Shell, previous: &ExecState, error: &SessionError) -> Vec<String> {
+    let (write, notices) = refusal_parts(previous, error);
+    let mut lines = state_lines(shell, &write);
+    lines.extend(notices.into_iter().filter_map(|notice| shell.emit_message(notice)));
     lines
+}
+
+/// The refusal for nushell's channel: the state write as a `Plan` entry, and the notices for stderr.
+fn refusal_plan(previous: &ExecState, error: &SessionError) -> (Plan, Vec<String>) {
+    let (write, notices) = refusal_parts(previous, error);
+    let mut plan = empty_plan();
+    append_state_write(&mut plan, &write);
+    (plan, notices)
+}
+
+/// The state a refusal leaves and the printable notices it owes, whichever way the shell receives them.
+fn refusal_parts(previous: &ExecState, error: &SessionError) -> (StateWrite, Vec<String>) {
+    let message = format!("ocx: {error}");
+    let owed = !activation::already_announced(previous, std::slice::from_ref(&message));
+    let mut write = activation::write_state(&activation::announced(previous, std::slice::from_ref(&message)));
+    let notices = owed
+        .then_some(message)
+        .into_iter()
+        .chain(write.notice.take())
+        .map(|notice| activation::printable(&notice))
+        .collect();
+    (write, notices)
 }
 
 /// Every line one reconcile emits, in order; a `Vec` so a unit test can read the order.
@@ -374,7 +653,7 @@ fn refusal_lines(shell: Shell, previous: &Ledger, error: &SessionError) -> Vec<S
 )]
 fn reconcile_lines(
     shell: Shell,
-    previous: &Ledger,
+    previous: &ExecState,
     fingerprint: &str,
     regated: Option<&str>,
     outcome: &Outcome,
@@ -382,15 +661,24 @@ fn reconcile_lines(
     current: &Env,
     theme: &Theme,
 ) -> Vec<String> {
-    // `current` is the pre-global environment; `next_ledger` derives the post-global one itself.
-    let mut next = activation::next_ledger(previous, fingerprint, outcome, current);
-    // `next_ledger` carries `ws` forward; overwrite it only when a redefined gate is emitted.
+    // `current` is the live shell before this prompt's plan applies; `next_state` derives the priors from it.
+    let mut next = activation::next_state(previous, outcome, current, fingerprint);
+    // `next_state` carries `ws` forward; overwrite it only when a redefined gate is emitted.
     if let Some(membership) = regated {
-        next.ws = membership.to_owned();
+        next.session.ws = membership.to_owned();
     }
+    let write = activation::write_state(&next);
     let mut lines = plan_lines(shell, plan);
-    lines.extend(ledger_lines(shell, previous, &next));
-    lines.extend(message_lines(shell, outcome, plan, previous, &next, theme));
+    lines.extend(state_lines(shell, &write));
+    lines.extend(message_lines(
+        shell,
+        outcome,
+        plan,
+        previous,
+        &next,
+        write.notice,
+        theme,
+    ));
     lines
 }
 
@@ -429,33 +717,15 @@ fn set_line(shell: Shell, entry: &ocx_package::metadata::env::entry::Entry) -> O
     }
 }
 
-/// Emit `__OCX_ENV_STATE` for the next prompt, plus one over-cap line per transition into that state.
-///
-/// The transition is read from `previous.over_cap`, or every `cd` in an over-cap project reprints the notice.
-fn ledger_lines(shell: Shell, previous: &Ledger, next: &Ledger) -> Vec<String> {
-    let Some(encoded) = next.encode() else {
+/// The line that hands the next prompt its state: the encoded value, or no variable at all.
+fn state_lines(shell: Shell, write: &StateWrite) -> Vec<String> {
+    match &write.value {
+        Some(value) => shell.export_constant(ocx_env::__OCX_ENV_STATE.name, value),
         // Omit the variable rather than carry a value the next prompt cannot decode.
-        return shell.unset(CARRIER_KEY).into_iter().collect();
-    };
-
-    let mut lines: Vec<String> = shell.export_constant(CARRIER_KEY, &encoded).into_iter().collect();
-    for scope in Ledger::decode(&encoded)
-        .map(|ledger| ledger.over_cap)
-        .unwrap_or_default()
-    {
-        if previous.over_cap.contains(&scope) {
-            // Already announced: a prompt reads a repeated line as a new event.
-            continue;
-        }
-        let name = match scope {
-            ScopeId::Global => "global",
-            ScopeId::Project => "project",
-        };
-        lines.extend(shell.emit_message(format!(
-            "ocx: the {name} scope is too large to record; it will not be reverted"
-        )));
+        None => shell.unset(ocx_env::__OCX_ENV_STATE.name),
     }
-    lines
+    .into_iter()
+    .collect()
 }
 
 /// Every deferred diagnostic as stderr-printing shell code, through `Shell::emit_message`, which escapes each one
@@ -464,21 +734,39 @@ fn message_lines(
     shell: Shell,
     outcome: &Outcome,
     plan: &Plan,
-    previous: &Ledger,
-    next: &Ledger,
+    previous: &ExecState,
+    next: &ExecState,
+    notice: Option<String>,
+    theme: &Theme,
+) -> Vec<String> {
+    message_texts(outcome, plan, previous, next, notice, theme)
+        .into_iter()
+        .filter_map(|message| shell.emit_message(message))
+        .collect()
+}
+
+/// Every deferred diagnostic as plain text, in print order.
+///
+/// A notice can carry text the state or the filesystem chose, so each passes `display_safe` and is ASCII; the
+/// summary is ocx's own and keeps the resolved colour.
+fn message_texts(
+    outcome: &Outcome,
+    plan: &Plan,
+    previous: &ExecState,
+    next: &ExecState,
+    notice: Option<String>,
     theme: &Theme,
 ) -> Vec<String> {
     let mut messages: Vec<String> = Vec::new();
     // Conditions are announced once: unchanged, the direnv line would otherwise print every prompt.
-    if next.messages_fp != previous.messages_fp {
+    if next.session.messages_fp != previous.session.messages_fp {
         messages.extend(outcome.messages.iter().cloned());
     }
+    messages.extend(notice);
+    let mut messages: Vec<String> = messages.iter().map(|message| activation::printable(message)).collect();
     // The summary is already a delta, `None` on a prompt that changed nothing.
-    messages.extend(reconcile::summary(plan, previous, next, theme));
+    messages.extend(reconcile::session_summary(plan, previous, next, theme));
     messages
-        .into_iter()
-        .filter_map(|message| shell.emit_message(message))
-        .collect()
 }
 
 /// The global tier's env entries for one prompt; `bin`/`none` compose none, while the session directories stay
@@ -489,7 +777,10 @@ fn message_lines(
 async fn global_prompt_entries(
     context: &crate::app::Context,
     target: &ocx_oci::Platform,
-) -> anyhow::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
+) -> anyhow::Result<(
+    Vec<ocx_package::metadata::env::entry::Entry>,
+    Option<ocx_package::launch::LaunchIdentities>,
+)> {
     // The resolver reparses `ocx.toml` to keep its signature and never-fail contract; do not thread it in.
     match global_activate_mode(context.file_structure().root()).await {
         ocx_project::activate::ActivateMode::Env => {
@@ -497,10 +788,13 @@ async fn global_prompt_entries(
                 // The hook has no `--pinned`, so `None` leaves `pinned` and `OCX_TOOLCHAIN_PINNED` deciding.
                 crate::command::toolchain_env::resolve_global_pinned_env(context, target, &[], &[], None)
                     .await?
-                    .map_or_else(Vec::new, |(entries, ..)| entries),
+                    .map_or_else(
+                        || (Vec::new(), None),
+                        |(entries, _, _, _, identities)| (entries, identities),
+                    ),
             )
         }
-        ocx_project::activate::ActivateMode::Bin | ocx_project::activate::ActivateMode::None => Ok(Vec::new()),
+        ocx_project::activate::ActivateMode::Bin | ocx_project::activate::ActivateMode::None => Ok((Vec::new(), None)),
     }
 }
 
@@ -530,6 +824,90 @@ fn emit_plan_json(plan: &Plan) {
     }
 }
 
+/// Whether this run answers nushell's channel: a `Plan` as JSON on stdout, diagnostics on stderr.
+fn json_channel(options: &ContextOptions) -> bool {
+    matches!(options.format.mode(), options::FormatMode::Json)
+}
+
+/// A constant the binary writes itself, as the ordinary entry nushell's applier already understands.
+fn constant_entry(key: &str, value: String) -> Entry {
+    Entry {
+        key: key.to_owned(),
+        value,
+        kind: ModifierKind::Constant,
+        separator: None,
+    }
+}
+
+/// The state this run leaves behind: the encoded value, or a restore-to-unset when none can be written.
+fn append_state_write(plan: &mut Plan, write: &StateWrite) {
+    match &write.value {
+        Some(value) => plan
+            .sets
+            .push(constant_entry(ocx_env::__OCX_ENV_STATE.name, value.clone())),
+        None => plan.restores.push((ocx_env::__OCX_ENV_STATE.name.to_owned(), None)),
+    }
+}
+
+/// The checkpoint of a successful run, which stops the shim's in-shell gate from exec'ing the next prompt.
+///
+/// `None` without `--shell-pid`: the gate value names the recording shell, and an older shim passes none.
+async fn gate_entry(shell_pid: Option<u32>, current: &Env) -> Option<Entry> {
+    let pid = shell_pid?;
+    let cwd = ocx_env::current_dir().ok()?;
+    Some(gate_entry_at(pid, &cwd, current).await)
+}
+
+async fn gate_entry_at(pid: u32, cwd: &Path, current: &Env) -> Entry {
+    let pwd = logical_pwd(current, cwd).await;
+    let value = hook::gate_value(pid, &pwd, |key| {
+        current.get(key).map(|value| value.to_string_lossy().into_owned())
+    });
+    constant_entry(ocx_env::__OCX_ENV_PWD.name, value)
+}
+
+/// A `Plan` carrying only the checkpoint, for a prompt that changes nothing.
+fn checkpoint_plan(gate: Option<Entry>) -> Plan {
+    let mut plan = empty_plan();
+    plan.sets.extend(gate);
+    plan
+}
+
+/// The `Plan` of a stand-down: the stood-down copy of the unreadable state, and the checkpoint.
+fn stand_down_plan(carrier: Option<&OsStr>, gate: Option<Entry>) -> Plan {
+    let mut plan = checkpoint_plan(None);
+    plan.sets.extend(carrier.map(|carrier| {
+        constant_entry(
+            ocx_env::__OCX_ENV_STOOD_DOWN.name,
+            carrier.to_string_lossy().into_owned(),
+        )
+    }));
+    plan.sets.extend(gate);
+    plan
+}
+
+fn empty_plan() -> Plan {
+    Plan {
+        v: reconcile::PLAN_VERSION,
+        sets: Vec::new(),
+        removes: Vec::new(),
+        restores: Vec::new(),
+    }
+}
+
+/// The directory as the shell spells it: `PWD` when it names the working directory, else the resolved one.
+///
+/// A symlinked directory resolves to another path than the shell's own, and the gate compares the shell's.
+async fn logical_pwd(current: &Env, cwd: &Path) -> String {
+    if let Some(pwd) = current.get("PWD").map(PathBuf::from).filter(|pwd| pwd.is_absolute())
+        && let (Ok(left), Ok(right)) = (tokio::fs::canonicalize(&pwd).await, tokio::fs::canonicalize(cwd).await)
+        && left == right
+    {
+        return pwd.to_string_lossy().into_owned();
+    }
+    cwd.to_string_lossy().into_owned()
+}
+
 /// What one CWD walk decided: resolved, determinately absent, or indeterminate.
 ///
 /// `ConfigLoader::project_path` folds errors and a genuine miss into `Ok(None)`, so a miss is checked for
@@ -544,7 +922,7 @@ enum Walk {
 }
 
 /// Resolve the project's identity without deserializing `ocx.toml`, classified per [`Walk`]; failures degrade at debug.
-async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
+async fn resolve_walk(options: &ContextOptions, recorded_dir: Option<PathBuf>) -> Walk {
     let cwd = match ocx_env::current_dir() {
         Ok(cwd) => Some(cwd),
         // Never fall back to a cached CWD: with none, the ancestor test cannot run.
@@ -573,8 +951,7 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
         }
     }
 
-    // The probe calls `symlink_metadata`, so it hops; only the recorded directory crosses, not a deep-copied `Ledger`.
-    let recorded_dir = ledger.scopes.project.as_ref().map(|scope| scope.dir.clone());
+    // The probe calls `symlink_metadata`, so it hops; only the recorded directory crosses, not the whole state.
     let has_recorded = recorded_dir.is_some();
     let indeterminate = match tokio::task::spawn_blocking(move || {
         activation::walk_is_indeterminate(recorded_dir.as_deref(), cwd.as_deref())
@@ -614,23 +991,6 @@ pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<Shell
             (None, Vec::new())
         }
     }
-}
-
-/// The seed carrier the startup path exports, holding only the config-tier list; `None` when there is none.
-///
-/// It lets a grant added to the `--config` file expire a cached `inert` verdict at the next prompt; its empty `fp`
-/// never matches, so the first reconcile still fires.
-fn seed_carrier(tiers: &[PathBuf], watch: &[PathBuf]) -> Option<String> {
-    if tiers.is_empty() {
-        return None;
-    }
-    Ledger {
-        tiers: tiers.to_vec(),
-        // This stream's own gate membership, or the first prompt redefines a byte-identical hook body.
-        ws: reconcile::watch_set_fingerprint(watch),
-        ..Ledger::empty()
-    }
-    .encode()
 }
 
 /// The `ocx` binary inside `bin_path`; `OCX_BINARY_PIN` never applies, since only re-entrant invocations consult it.
@@ -688,9 +1048,9 @@ struct LoginStream<'a> {
     wrapper_binary: Option<&'a Path>,
 
     /// The watch set the emitted hook body stats on each prompt.
-    watch: &'a [PathBuf],
+    watch: &'a WatchSet,
 
-    /// The encoded tier-list carrier the first prompt reads, when there is one.
+    /// The encoded state the first prompt reads (the shell's claim, the tier list), when the stream changed it.
     seed: Option<&'a str>,
 }
 
@@ -736,13 +1096,15 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
         lines.push(format_global_env_eval(shell, &ocx_binary_path(bin_path)));
     }
 
+    // ── Execution state (claim, tier list) ───────────────────────────────────
+    // Before the hook registers: its first prompt reads the carrier.
+    if let Some(seed) = seed {
+        lines.extend(shell.export_constant(ocx_env::__OCX_ENV_STATE.name, seed));
+    }
+
     // ── Per-prompt hook + wrapper (emitted LAST) ─────────────────────────────
     // Last: the hook must follow the settled PATH prepend, and pwsh's `using namespace` must stay first.
     if let Some(binary) = hook_binary {
-        // Seed first: the hook body reads the carrier on the first prompt.
-        if let Some(seed) = seed {
-            lines.extend(shell.export_constant(CARRIER_KEY, seed));
-        }
         lines.extend(hook::registration(shell, binary, watch));
         // `wrapper_binary`, not `binary`: a function named `ocx` shadows `PATH`,
         // so it must follow the precedence `PATH` gives.
@@ -802,9 +1164,9 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
         // Evaluate only non-empty output (`Invoke-Expression $null` throws); `Out-String` keeps the newlines
         // `Invoke-Expression` would otherwise join with spaces.
         Shell::PowerShell => {
-            let quoted = escape::powershell_single_quoted(&path);
+            let literal = escape::powershell_literal(&path);
             format!(
-                "if (Test-Path -LiteralPath '{quoted}' -PathType Leaf) {{ $__ocx_global_env = (& '{quoted}' --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
+                "if ([System.IO.File]::Exists({literal})) {{ $__ocx_global_env = (& {literal} --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
             )
         }
         // `delims=` makes `%i` the whole line; the default split would keep only `SET` and drop the assignment.
@@ -817,8 +1179,7 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
             let quoted = escape::elvish_single_quoted(&path);
             format!("if ?(test -x '{quoted}') {{ eval ('{quoted}' --global env --shell={shell_name} | slurp) }}")
         }
-        // Nushell has no string `eval`, so its JSON output is applied as data through `NU_ENV_APPLY_LOOP`,
-        // shared with `$OCX_HOME/env.nu` so the two cannot drift.
+        // Nushell has no string `eval`, so its JSON output is applied as data through `NU_ENV_APPLY_LOOP`.
         Shell::Nushell => [
             "if (which ocx | length) > 0 { try { let _ocx_json = (ocx --format json --global env | from json); ",
             ocx_setup::shims::NU_ENV_APPLY_LOOP,
@@ -997,9 +1358,8 @@ mod tests {
     /// Nushell must apply the global env as DATA (`from json` + `load-env`),
     /// never via the no-op `nu -c $in` subprocess (which mutates only a child's
     /// env, so the global toolchain never reached the parent shell). The apply
-    /// body is the shared `NU_ENV_APPLY_LOOP`, embedded verbatim so this line and
-    /// `$OCX_HOME/env.nu` cannot drift, and it dispatches on the entry modifier
-    /// type (so a non-PATH `type:path` var prepends, not overwrites).
+    /// body is `NU_ENV_APPLY_LOOP`, embedded verbatim, and it dispatches on the entry
+    /// modifier type (so a non-PATH `type:path` var prepends, not overwrites).
     #[test]
     fn global_env_eval_nushell_applies_json_via_load_env() {
         let line = format_global_env_eval(Shell::Nushell, &test_binary());
@@ -1073,10 +1433,7 @@ mod tests {
                 })
                 .collect()
         };
-        for (name, text) in [
-            ("NU_ENV_APPLY_LOOP", ocx_setup::shims::NU_ENV_APPLY_LOOP),
-            ("ENV_NU", ocx_setup::shims::ENV_NU),
-        ] {
+        for (name, text) in [("NU_ENV_APPLY_LOOP", ocx_setup::shims::NU_ENV_APPLY_LOOP)] {
             let roots = references(text, "$_ocx_json.");
             assert!(!roots.is_empty(), "{name} reads no `$_ocx_json` key");
             for root in &roots {
@@ -1099,6 +1456,73 @@ mod tests {
         }
     }
 
+    /// The plan applier reads only keys the `Plan` wire shape carries: its version, its three root lists and each set
+    /// entry's fields. A rename leaves `default []` applying nothing, and the behavioural rows skip on any
+    /// host without `nu`, so nothing else goes red.
+    #[test]
+    fn nushell_plan_apply_reads_the_keys_the_plan_emits() {
+        use ocx_package::metadata::env::entry::Entry;
+        use ocx_package::metadata::env::modifier::ModifierKind;
+        use ocx_shell::shell::reconcile::Plan;
+
+        let plan = Plan {
+            v: ocx_shell::shell::reconcile::PLAN_VERSION,
+            sets: vec![Entry {
+                key: "CFLAGS".to_owned(),
+                value: "-g".to_owned(),
+                kind: ModifierKind::List,
+                separator: Some(" ".to_owned()),
+            }],
+            removes: vec![("PATH".to_owned(), "/old".to_owned(), None)],
+            restores: vec![("K".to_owned(), None)],
+        };
+        let json = serde_json::to_value(&plan).expect("a plan serializes");
+        let root = json.as_object().expect("object root");
+        let set = root["sets"][0].as_object().expect("a set is an object");
+
+        let text = ocx_setup::shims::NU_PLAN_APPLY;
+        let references = |prefix: &str| -> Vec<String> {
+            text.split(prefix)
+                .skip(1)
+                .map(|rest| {
+                    rest.chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect()
+                })
+                .collect()
+        };
+        let roots = references("$_ocx_plan.");
+        assert_eq!(
+            roots.len(),
+            4,
+            "the applier reads the version and the three lists: {roots:?}"
+        );
+        for name in &roots {
+            assert!(
+                root.contains_key(name),
+                "the applier reads `$_ocx_plan.{name}`, which the plan lacks"
+            );
+        }
+        let fields = references("$_ocx_e.");
+        assert!(!fields.is_empty(), "the applier reads no set field");
+        for field in &fields {
+            assert!(
+                set.contains_key(field),
+                "the applier reads `$_ocx_e.{field}`, which no emitted set carries: {set:?}"
+            );
+        }
+        assert_eq!(
+            root["removes"][0].as_array().map(Vec::len),
+            Some(3),
+            "a removal is [key, element, separator]"
+        );
+        assert_eq!(
+            root["restores"][0].as_array().map(Vec::len),
+            Some(2),
+            "a restore is [key, prior]"
+        );
+    }
+
     /// The eval stays gated on an `ocx`-existence probe (not a state guard) for
     /// every shell that has one, so a shell with ocx uninstalled is a clean
     /// no-op rather than an error. Batch has no probe — `FOR /F` runs ocx and a
@@ -1119,10 +1543,7 @@ mod tests {
             (Shell::Ash, format!("[ -x '{binary}' ]")),
             (Shell::Ksh, format!("[ -x '{binary}' ]")),
             (Shell::Fish, format!("test -x '{binary}'")),
-            (
-                Shell::PowerShell,
-                format!("Test-Path -LiteralPath '{binary}' -PathType Leaf"),
-            ),
+            (Shell::PowerShell, format!("[System.IO.File]::Exists('{binary}')")),
             // A path test, not a name lookup: elvish hosts an `ocx`
             // wrapper function, and `has-external` would find it.
             (Shell::Elvish, format!("?(test -x '{binary}')")),
@@ -1159,6 +1580,28 @@ mod tests {
             line.contains("if ($__ocx_global_env) { Invoke-Expression $__ocx_global_env }"),
             "pwsh eval line must guard Invoke-Expression on non-empty output; got: {line:?}"
         );
+    }
+
+    /// `Test-Path` globs `[`/`]` in a path; the existence probe is a .NET call.
+    #[test]
+    fn global_env_eval_powershell_does_not_use_test_path() {
+        let line = format_global_env_eval(Shell::PowerShell, std::path::Path::new("/opt/[x]/ocx"));
+        assert!(!line.contains("Test-Path"), "{line:?}");
+        assert!(line.contains("[System.IO.File]::Exists('/opt/[x]/ocx')"), "{line:?}");
+    }
+
+    /// A non-ASCII binary path rides as `[char]` escapes: the line is evaluated by a Windows PowerShell
+    /// that reads it in the ANSI code page.
+    #[test]
+    fn global_env_eval_powershell_escapes_a_non_ascii_binary_path() {
+        let line = format_global_env_eval(Shell::PowerShell, std::path::Path::new("/opt/\u{4E2D}\u{6587}/ocx"));
+        assert!(line.is_ascii(), "{line:?}");
+        let literal = "('/opt/'+[char]0x4E2D+[char]0x6587+'/ocx')";
+        assert!(
+            line.contains(&format!("[System.IO.File]::Exists({literal})")),
+            "{line:?}"
+        );
+        assert!(line.contains(&format!("(& {literal} --global env")), "{line:?}");
     }
 
     // ── Inline completion generation ────────────────────────────────────────
@@ -1256,8 +1699,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod exec_yield_tests {
-    use super::{ActivateMode, LoginStream, activation_lines, yields_to_exec};
+mod login_stream_tests {
+    use super::{ActivateMode, LoginStream, activation_lines};
     use ocx_shell::shell::Shell;
     use std::path::PathBuf;
 
@@ -1278,7 +1721,7 @@ mod exec_yield_tests {
                 completion: None,
                 hook_binary: Some(&hook_binary),
                 wrapper_binary: None,
-                watch: &[],
+                watch: &ocx_shell::shell::reconcile::WatchSet::default(),
                 seed: None,
             })
             .join("\n")
@@ -1301,34 +1744,27 @@ mod exec_yield_tests {
             "control: the applying stream does prepend PATH"
         );
     }
-
-    /// Refs #668 - the marker `ocx exec` sets is what makes activation step aside.
-    #[test]
-    fn activation_yields_only_while_the_exec_marker_is_present() {
-        let env = ocx_env::overrides::lock();
-        env.remove(&ocx_env::__OCX_EXEC_SCOPE);
-        assert!(!yields_to_exec());
-        env.set(&ocx_env::__OCX_EXEC_SCOPE, "/work/acme");
-        assert!(yields_to_exec());
-    }
 }
 
 #[cfg(test)]
 mod reconcile_tests {
     use std::path::{Path, PathBuf};
 
+    use std::ffi::OsStr;
+
     use clap::{CommandFactory as _, Parser as _};
     use ocx_config::env::Env;
+    use ocx_config::exec_state::{self, ExecState, Inherited, SessionCache, Truncation};
     use ocx_console::Theme;
     use ocx_package::metadata::env::entry::Entry;
     use ocx_package::metadata::env::modifier::ModifierKind;
     use ocx_project::LockCurrency;
     use ocx_shell::shell::Shell;
     use ocx_shell::shell::coexistence::{Observation, Tool, Yield};
-    use ocx_shell::shell::reconcile::{CARRIER_KEY, Ledger, Prior, Verdict};
 
     use ocx_package_manager::activation::{
-        Outcome, ProjectIdentity, SessionError, SessionPath, is_stat_only, next_ledger, plan_for, yield_messages,
+        Outcome, ProjectIdentity, SessionError, SessionPath, next_state, plan_for_state, state_is_stat_only,
+        yield_messages,
     };
 
     use super::{ActivateMode, SelfActivate, activation_lines, ocx_binary_path, reconcile_lines};
@@ -1365,14 +1801,15 @@ mod reconcile_tests {
 
     fn identity() -> ProjectIdentity {
         ProjectIdentity {
-            config_path: PathBuf::from("/work/acme/ocx.toml"),
-            dir: PathBuf::from("/work/acme"),
+            config_path: ocx_test_support::paths::abs("/work/acme/ocx.toml"),
+            dir: ocx_test_support::paths::abs("/work/acme"),
             key: "a1b2c3d4e5f60718".to_owned(),
         }
     }
 
     fn outcome(global: Vec<Entry>, project: Vec<Entry>, slot: Option<ProjectIdentity>) -> Outcome {
         Outcome {
+            session_enforced: true,
             // The two session directories, spelled as literals here on
             // purpose: these tests own no `FileStructure`, and what they assert
             // is the *rendering* of an outcome, never how one is minted.
@@ -1383,6 +1820,8 @@ mod reconcile_tests {
             },
             global,
             project,
+            global_identities: None,
+            project_identities: None,
             owned_home: None,
             resolved: slot.is_some(),
             slot,
@@ -1439,7 +1878,7 @@ mod reconcile_tests {
             completion: super::generate_completion_inline(shell).as_deref(),
             hook_binary: binary.as_deref(),
             wrapper_binary: None,
-            watch: &[PathBuf::from("/work/acme/ocx.lock")],
+            watch: &ocx_shell::shell::reconcile::WatchSet::sample(vec![PathBuf::from("/work/acme/ocx.lock")]),
             seed: None,
         })
     }
@@ -1690,59 +2129,37 @@ mod reconcile_tests {
 
     // ── the negative-consent cache ──────────────────────────────────
 
-    /// An unchanged fingerprint **and** a cached `inert` verdict make
-    /// the prompt stat-only. A fresh clone with no grant would otherwise pay a
-    /// full loader pass plus a lock parse on every prompt.
-    #[test]
-    fn c042_an_unchanged_fingerprint_with_a_cached_inert_verdict_is_stat_only() {
-        let mut ledger = Ledger::empty();
-        ledger.fp = "fp-1".to_owned();
-        ledger.verdict = Some(Verdict::Inert);
-
-        assert!(is_stat_only(&ledger, "fp-1"), "unchanged + inert must short-circuit");
-        assert!(
-            !is_stat_only(&ledger, "fp-2"),
-            "a moved fingerprint must expire the cache (A-13)"
-        );
-    }
-
     /// **Only** the negative verdict is cached. An `Activate`
-    /// verdict is re-derived every prompt; reading one back from the carrier
-    /// would make the ledger a consent input.
+    /// verdict is re-derived every prompt; reading one back from the state would
+    /// make it a consent input.
     /// EC-FP-007 — the verdict is recomputed every prompt; nothing caches it across runs.
     #[test]
     fn c042_c007_an_activate_verdict_is_never_cached() {
-        let mut ledger = Ledger::empty();
-        ledger.fp = "fp-1".to_owned();
+        let mut state = ExecState::default();
+        state.session.fp = "fp-1".to_owned();
 
-        ledger.verdict = None;
+        state.session.verdict = None;
         assert!(
-            !is_stat_only(&ledger, "fp-1"),
-            "a ledger with no cached verdict must re-derive consent"
-        );
-
-        ledger.verdict = Some(Verdict::Activate);
-        assert!(
-            !is_stat_only(&ledger, "fp-1"),
-            "an Activate verdict must never short-circuit the consent read (C-007)"
+            !state_is_stat_only(&state, "fp-1"),
+            "a state with no cached verdict must re-derive consent"
         );
 
         // And nothing this command writes ever puts one there.
-        let active = next_ledger(
-            &Ledger::empty(),
-            "fp-1",
+        let active = next_state(
+            &ExecState::default(),
             &outcome(Vec::new(), Vec::new(), Some(identity())),
             &Env::clean(),
+            "fp-1",
         );
-        assert_eq!(active.verdict, None, "an active project caches no verdict");
+        assert_eq!(active.session.verdict, None, "an active project caches no verdict");
 
         let mut refused = outcome(Vec::new(), Vec::new(), None);
         refused.inert = true;
-        let refused = next_ledger(&Ledger::empty(), "fp-1", &refused, &Env::clean());
+        let refused = next_state(&ExecState::default(), &refused, &Env::clean(), "fp-1");
         assert_eq!(
-            refused.verdict,
-            Some(Verdict::Inert),
-            "the refusal is the one verdict the ledger caches"
+            refused.session.verdict,
+            Some(exec_state::Verdict::Inert),
+            "the refusal is the one verdict the state caches"
         );
     }
 
@@ -1790,22 +2207,14 @@ mod reconcile_tests {
         let mut project = refused.clone();
         project.push(kept.clone());
 
-        let ledger = next_ledger(
-            &Ledger::empty(),
-            "fp-1",
+        let state = next_state(
+            &ExecState::default(),
             &outcome(global, project, Some(identity())),
             &Env::clean(),
+            "fp-1",
         );
 
-        let recorded: Vec<&str> = ledger
-            .scopes
-            .global
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .chain(ledger.scopes.project.as_ref().map_or(&[][..], |scope| &scope.applied))
-            .map(|entry| entry.key.as_str())
-            .collect();
+        let recorded: Vec<&str> = state.applied.iter().map(|record| record.key.as_str()).collect();
         assert_eq!(
             recorded,
             ["JAVA_HOME", "JAVA_HOME"],
@@ -1826,23 +2235,23 @@ mod reconcile_tests {
     /// two-way form, which leaves `verdict == None` here.
     #[test]
     fn p2_a_walk_that_resolved_no_project_caches_a_noproject_verdict() {
-        let none = next_ledger(
-            &Ledger::empty(),
-            "fp-1",
+        let none = next_state(
+            &ExecState::default(),
             &outcome(Vec::new(), Vec::new(), None),
             &Env::clean(),
+            "fp-1",
         );
         assert_eq!(
-            none.verdict,
-            Some(Verdict::NoProject),
+            none.session.verdict,
+            Some(exec_state::Verdict::NoProject),
             "no project resolved is cacheable and is not consent-derived"
         );
         assert!(
-            is_stat_only(&none, "fp-1"),
+            state_is_stat_only(&none, "fp-1"),
             "and the next prompt in the same directory answers from stats alone"
         );
         assert!(
-            !is_stat_only(&none, "fp-2"),
+            !state_is_stat_only(&none, "fp-2"),
             "`project_dir` is folded into the fingerprint, so entering any project expires it"
         );
     }
@@ -1859,12 +2268,12 @@ mod reconcile_tests {
     fn p2_a_yielded_project_is_never_cached() {
         let mut yielded = outcome(Vec::new(), Vec::new(), None);
         yielded.resolved = true;
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &yielded, &Env::clean());
+        let state = next_state(&ExecState::default(), &yielded, &Env::clean(), "fp-1");
         assert_eq!(
-            ledger.verdict, None,
+            state.session.verdict, None,
             "a yield is not expirable by the watch set, so it caches nothing"
         );
-        assert!(!is_stat_only(&ledger, "fp-1"));
+        assert!(!state_is_stat_only(&state, "fp-1"));
     }
 
     // ── the yield behaviour ──────────────────────────────────
@@ -1930,7 +2339,7 @@ mod reconcile_tests {
         );
         let mut before = Env::clean();
         before.set("CARGO_HOME", "/home/u/.cargo");
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &before);
+        let ledger = next_state(&ExecState::default(), &applied, &before, "fp-1");
 
         // Prompt 2: direnv is live for this directory, so only the global scope
         // is desired and the project slot retires.
@@ -1945,7 +2354,7 @@ mod reconcile_tests {
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/global/java");
         current.set("CARGO_HOME", "/proj/cargo");
-        let plan = plan_for(&ledger, &yielded, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &yielded, &[Path::new("/tmp/ocx_home")], &current);
 
         assert_eq!(
             plan.restores,
@@ -2008,10 +2417,10 @@ mod reconcile_tests {
 
             // Prompt 1 — the condition is new, so the line is owed.
             let current = Env::clean();
-            let first = plan_for(&Ledger::empty(), &steady, &[Path::new("/tmp/ocx_home")], &current);
+            let first = plan_for_state(&ExecState::default(), &steady, &[Path::new("/tmp/ocx_home")], &current);
             let announced = reconcile_lines(
                 Shell::Bash,
-                &Ledger::empty(),
+                &ExecState::default(),
                 "fp-1",
                 None,
                 &steady,
@@ -2023,12 +2432,12 @@ mod reconcile_tests {
                 announced.iter().any(|line| line.contains(label)),
                 "{label}: the prompt that produced the condition must say so; got: {announced:#?}"
             );
-            let recorded = next_ledger(&Ledger::empty(), "fp-1", &steady, &current);
+            let recorded = next_state(&ExecState::default(), &steady, &current, "fp-1");
 
             // Prompt 2 — same condition, same message, nothing else moved.
             let mut settled = Env::clean();
             settled.set("JAVA_HOME", "/global/java");
-            let second = plan_for(&recorded, &steady, &[Path::new("/tmp/ocx_home")], &settled);
+            let second = plan_for_state(&recorded, &steady, &[Path::new("/tmp/ocx_home")], &settled);
             let repeated = reconcile_lines(
                 Shell::Bash,
                 &recorded,
@@ -2049,7 +2458,7 @@ mod reconcile_tests {
             // message on the same condition is announced again.
             let mut changed = outcome(vec![constant("JAVA_HOME", "/global/java")], Vec::new(), None);
             changed.messages = vec![format!("{message} (and mise too)")];
-            let third = plan_for(&recorded, &changed, &[Path::new("/tmp/ocx_home")], &settled);
+            let third = plan_for_state(&recorded, &changed, &[Path::new("/tmp/ocx_home")], &settled);
             let announced_again = reconcile_lines(
                 Shell::Bash,
                 &recorded,
@@ -2079,8 +2488,8 @@ mod reconcile_tests {
     /// back with the project scope intact, and no plan line is written at all.
     ///
     /// Red state for the first assertion: restore `session(...).await?` and the
-    /// refusal never reaches an emitter. For the second: build the announced
-    /// ledger with `next_ledger` instead of `announcing` and the project scope
+    /// refusal never reaches an emitter. For the second: rebuild the
+    /// state with `next_state` instead of carrying it forward and the project scope
     /// disappears from the carrier.
     #[test]
     fn a021_a_stale_lock_is_reported_and_the_applied_scope_is_retained() {
@@ -2091,9 +2500,9 @@ mod reconcile_tests {
         );
         let mut before = Env::clean();
         before.set("CARGO_HOME", "/home/u/.cargo");
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &before);
+        let ledger = next_state(&ExecState::default(), &applied, &before, "fp-1");
         assert!(
-            ledger.scopes.project.is_some(),
+            ledger.applied.iter().any(|record| record.key == "CARGO_HOME"),
             "the fixture must have an applied project scope, or the retention assertion is vacuous"
         );
 
@@ -2121,16 +2530,15 @@ mod reconcile_tests {
         // in-memory ledger: the emitted value is what the shell will hand back.
         let carrier = lines
             .iter()
-            .find(|line| line.contains(CARRIER_KEY))
+            .find(|line| line.contains(ocx_env::__OCX_ENV_STATE.name))
             .and_then(|line| line.split('\'').nth(1))
             .expect("the refusal re-emits the carrier");
-        let decoded = Ledger::decode(carrier).expect("the re-emitted carrier decodes");
+        let decoded = decode_state(carrier);
         assert_eq!(
-            decoded.scopes.project.as_ref().map(|scope| scope.applied.clone()),
-            ledger.scopes.project.as_ref().map(|scope| scope.applied.clone()),
+            decoded.applied, ledger.applied,
             "the applied project scope must survive a refusal verbatim"
         );
-        assert_eq!(decoded.fp, ledger.fp, "a refusal moves no fingerprint");
+        assert_eq!(decoded.session.fp, ledger.session.fp, "a refusal moves no fingerprint");
 
         // Second prompt, same broken lock: the line has been said.
         let repeated = super::refusal_lines(Shell::Bash, &decoded, &error);
@@ -2138,6 +2546,48 @@ mod reconcile_tests {
             !repeated.iter().any(|line| line.contains("ocx.lock is stale")),
             "an unchanged refusal is not a new event; got: {repeated:#?}"
         );
+    }
+
+    /// A refusal names a path the filesystem chose, so no control or bidi character reaches the terminal.
+    #[test]
+    fn a_refusal_reaches_the_stream_without_its_control_characters() {
+        const HOSTILE: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];
+
+        let error = SessionError::from(LockCurrency::Missing {
+            path: PathBuf::from("/work/\u{1b}]0;hostile-dir\u{7}\u{202e}/ocx.lock"),
+        });
+        for shell in ALL_SHELLS {
+            let lines = super::refusal_lines(shell, &ExecState::default(), &error);
+
+            if shell.emit_message("probe").is_some() {
+                assert!(
+                    lines.iter().any(|line| line.contains("hostile-dir")),
+                    "{shell:?}: the refusal is emitted: {lines:?}"
+                );
+            }
+            for line in &lines {
+                assert!(
+                    !line.contains(HOSTILE),
+                    "{shell:?}: a control character reached the stream: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// The prior the state recorded for `key` in the composed records of `scope`.
+    fn prior_of(state: &ExecState, scope: exec_state::ScopeId, key: &str) -> Option<exec_state::Prior> {
+        state
+            .applied
+            .iter()
+            .find(|record| {
+                record.key == key
+                    && record.owner
+                        == exec_state::Owner::Session {
+                            scope,
+                            source: exec_state::SessionSource::Composed,
+                        }
+            })
+            .and_then(|record| record.prior.clone())
     }
 
     // ── prior capture ordering ────────────────────────────────
@@ -2153,19 +2603,13 @@ mod reconcile_tests {
             vec![constant("JAVA_HOME", "/proj/java")],
             Some(identity()),
         );
-        // The **pre-global** environment goes in; `next_ledger` owns the apply,
+        // The **pre-global** environment goes in; `next_state` owns the apply,
         // so this asserts the ordering rather than performing it.
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
+        let ledger = next_state(&ExecState::default(), &applied, &Env::clean(), "fp-1");
 
         assert_eq!(
-            ledger
-                .scopes
-                .project
-                .as_ref()
-                .expect("the project slot")
-                .priors
-                .get("JAVA_HOME"),
-            Some(&Prior::Value("/global/java".to_owned())),
+            prior_of(&ledger, exec_state::ScopeId::Project, "JAVA_HOME"),
+            Some(exec_state::Prior::Value("/global/java".to_owned())),
             "the recorded prior must be global's value, not the pre-global environment"
         );
     }
@@ -2186,11 +2630,11 @@ mod reconcile_tests {
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/usr/lib/jvm");
 
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &current);
+        let ledger = next_state(&ExecState::default(), &applied, &current, "fp-1");
 
         assert_eq!(
-            ledger.scopes.global_priors.get("JAVA_HOME"),
-            Some(&Prior::Value("/usr/lib/jvm".to_owned())),
+            prior_of(&ledger, exec_state::ScopeId::Global, "JAVA_HOME"),
+            Some(exec_state::Prior::Value("/usr/lib/jvm".to_owned())),
             "the user's own value, not the one global is about to write"
         );
     }
@@ -2207,16 +2651,16 @@ mod reconcile_tests {
         let applied = outcome(vec![constant("JAVA_HOME", "/global/java")], Vec::new(), None);
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/usr/lib/jvm");
-        let first = next_ledger(&Ledger::empty(), "fp-1", &applied, &current);
+        let first = next_state(&ExecState::default(), &applied, &current, "fp-1");
 
         // Prompt 2: the shell now holds what ocx wrote.
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/global/java");
-        let second = next_ledger(&first, "fp-2", &applied, &current);
+        let second = next_state(&first, &applied, &current, "fp-2");
 
         assert_eq!(
-            second.scopes.global_priors.get("JAVA_HOME"),
-            Some(&Prior::Value("/usr/lib/jvm".to_owned())),
+            prior_of(&second, exec_state::ScopeId::Global, "JAVA_HOME"),
+            Some(exec_state::Prior::Value("/usr/lib/jvm".to_owned())),
             "the prior survives every prompt in which the value is still ocx's"
         );
 
@@ -2224,10 +2668,10 @@ mod reconcile_tests {
         // unsets a variable the user set themselves.
         let mut typed = Env::clean();
         typed.set("JAVA_HOME", "/opt/typed-by-hand");
-        let third = next_ledger(&first, "fp-3", &applied, &typed);
+        let third = next_state(&first, &applied, &typed, "fp-3");
         assert_eq!(
-            third.scopes.global_priors.get("JAVA_HOME"),
-            Some(&Prior::Value("/opt/typed-by-hand".to_owned()))
+            prior_of(&third, exec_state::ScopeId::Global, "JAVA_HOME"),
+            Some(exec_state::Prior::Value("/opt/typed-by-hand".to_owned()))
         );
     }
 
@@ -2237,21 +2681,21 @@ mod reconcile_tests {
     ///
     /// The reconciler-side unit hand-builds its ledger; this one only ever
     /// builds a ledger the way a real prompt does, so a producer that recorded
-    /// nothing would show up here even with `Ledger::prior` perfect.
+    /// nothing would show up here even with the planner perfect.
     #[test]
     fn r1_removing_a_global_package_restores_the_users_constant_end_to_end() {
         // Prompt 1: the user had JAVA_HOME; the global tier overrides it.
         let applied = outcome(vec![constant("JAVA_HOME", "/global/java")], Vec::new(), None);
         let mut before = Env::clean();
         before.set("JAVA_HOME", "/usr/lib/jvm");
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &before);
+        let ledger = next_state(&ExecState::default(), &applied, &before, "fp-1");
 
         // Prompt 2: `ocx remove --global` ran in another terminal, so the tier
         // declares nothing at all.
         let removed = outcome(Vec::new(), Vec::new(), None);
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/global/java");
-        let plan = plan_for(&ledger, &removed, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &removed, &[Path::new("/tmp/ocx_home")], &current);
 
         assert_eq!(
             plan.restores,
@@ -2278,19 +2722,13 @@ mod reconcile_tests {
         );
         let mut before = Env::clean();
         before.set("JAVA_HOME", "/usr/lib/jvm");
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &before);
+        let ledger = next_state(&ExecState::default(), &applied, &before, "fp-1");
 
         // The reachability half: the producer really did record global's value
         // as the project's prior, which is what makes the chain hop necessary.
         assert_eq!(
-            ledger
-                .scopes
-                .project
-                .as_ref()
-                .expect("the project slot")
-                .priors
-                .get("JAVA_HOME"),
-            Some(&Prior::Value("/global/java".to_owned()))
+            prior_of(&ledger, exec_state::ScopeId::Project, "JAVA_HOME"),
+            Some(exec_state::Prior::Value("/global/java".to_owned()))
         );
 
         // Prompt 2: the CWD left the project *and* the global tier dropped the
@@ -2298,12 +2736,13 @@ mod reconcile_tests {
         let gone = outcome(Vec::new(), Vec::new(), None);
         let mut current = Env::clean();
         current.set("JAVA_HOME", "/proj/java");
-        let plan = plan_for(&ledger, &gone, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &gone, &[Path::new("/tmp/ocx_home")], &current);
 
+        // The restores unwind in reverse application order, so the key ends on the last one.
         assert_eq!(
-            plan.restores,
-            vec![("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned()))],
-            "not /global/java, which no scope declares any more"
+            plan.restores.last(),
+            Some(&("JAVA_HOME".to_owned(), Some("/usr/lib/jvm".to_owned()))),
+            "the key must end on the user's value, not /global/java, which no scope declares any more"
         );
     }
 
@@ -2322,13 +2761,13 @@ mod reconcile_tests {
             vec![constant("PYENV_ROOT", "/proj/pyenv")],
             Some(identity()),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &before);
+        let ledger = next_state(&ExecState::default(), &applied, &before, "fp-1");
 
         // Prompt 2: the CWD left the project, so the slot retires.
         let left = outcome(Vec::new(), Vec::new(), None);
         let mut current = Env::clean();
         current.set("PYENV_ROOT", "/proj/pyenv");
-        let plan = plan_for(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
 
         assert_eq!(
             plan.restores,
@@ -2347,12 +2786,12 @@ mod reconcile_tests {
             vec![constant("PYENV_ROOT", "/proj/pyenv")],
             Some(identity()),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
+        let ledger = next_state(&ExecState::default(), &applied, &Env::clean(), "fp-1");
 
         let left = outcome(Vec::new(), Vec::new(), None);
         let mut current = Env::clean();
         current.set("PYENV_ROOT", "/proj/pyenv");
-        let plan = plan_for(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
 
         assert_eq!(plan.restores, vec![("PYENV_ROOT".to_owned(), None)]);
         let lines = super::plan_lines(Shell::Bash, &plan);
@@ -2404,23 +2843,17 @@ mod reconcile_tests {
         // Prompt 1: global contributes a path element, the project shadows the
         // same key with a constant. The prior is captured against the
         // post-global environment, so it holds global's element.
-        let mut after_global = Env::clean();
-        after_global.set("TOOLPATH", &global_then_usr);
+        let mut before_global = Env::clean();
+        before_global.set("TOOLPATH", "/usr/bin");
         let applied = outcome(
             vec![path_entry("TOOLPATH", "/global/bin")],
             vec![constant("TOOLPATH", "/proj/fixed")],
             Some(identity()),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &after_global);
+        let ledger = next_state(&ExecState::default(), &applied, &before_global, "fp-1");
         assert_eq!(
-            ledger
-                .scopes
-                .project
-                .as_ref()
-                .expect("the project slot")
-                .priors
-                .get("TOOLPATH"),
-            Some(&Prior::Value(global_then_usr.clone())),
+            prior_of(&ledger, exec_state::ScopeId::Project, "TOOLPATH"),
+            Some(exec_state::Prior::Value(global_then_usr.clone())),
             "the prior must carry global's element, or this test is not the two-scope case"
         );
 
@@ -2428,7 +2861,7 @@ mod reconcile_tests {
         let left = outcome(Vec::new(), Vec::new(), None);
         let mut current = Env::clean();
         current.set("TOOLPATH", "/proj/fixed");
-        let plan = plan_for(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ledger, &left, &[Path::new("/tmp/ocx_home")], &current);
 
         assert!(
             plan.removes
@@ -2462,59 +2895,85 @@ mod reconcile_tests {
         );
     }
 
-    /// One abandonment line per **transition into** the over-cap
-    /// state, not one per prompt.
+    /// One size-limit notice per **transition into** a truncated state, not one per prompt.
     ///
-    /// Without the comparison against the previous ledger, every `cd` inside an
-    /// over-cap project reprints a line about something that has not changed
-    /// since the user was told about it — and at a prompt a repeated line reads
-    /// as a new event.
+    /// Without the comparison against the previous state, every `cd` inside an over-cap project reprints a
+    /// line about something that has not changed since the user was told about it - and at a prompt a
+    /// repeated line reads as a new event.
     ///
-    /// Red state: drop the `previous.over_cap.contains(&scope)` guard in
-    /// `ledger_lines` and the second reconcile prints the line again.
+    /// Red state: report `truncation_notice(encoded.truncated, ..)` unconditionally in `write_state` and the
+    /// second reconcile prints the line again.
     #[test]
-    fn r3_a01_the_over_cap_line_is_emitted_once_per_transition_not_per_prompt() {
-        // Comfortably past the 16 KiB cap, so `encode` falls back to the
-        // marker-only ledger that carries `over_cap`.
-        let bulky: Vec<Entry> = (0..400)
-            .map(|index| constant(&format!("OCX_BULK_{index}"), &"x".repeat(64)))
+    fn r3_a01_the_size_limit_notice_is_emitted_once_per_transition_not_per_prompt() {
+        // Comfortably past the encoded cap even compressed: no two values share a byte pattern.
+        let bulky: Vec<Entry> = (0..400u64)
+            .map(|index| {
+                let value: String = (0..4u64)
+                    .map(|part| format!("{:016x}", (index * 4 + part + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+                    .collect();
+                constant(&format!("OCX_BULK_{index}"), &value)
+            })
             .collect();
         let applied = outcome(bulky.clone(), bulky, Some(identity()));
+        let announced = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| line.contains("outgrew its size limit"))
+                .count()
+        };
 
-        let first_previous = Ledger::empty();
-        let next = next_ledger(&first_previous, "fp-1", &applied, &Env::clean());
-        let encoded = next.encode().expect("the marker ledger must still encode");
-        let marker = Ledger::decode(&encoded).expect("the marker must decode");
-        assert!(
-            !marker.over_cap.is_empty(),
-            "the fixture must actually exceed the cap, or both assertions below are vacuous"
+        let first_previous = ExecState::default();
+        let plan = plan_for_state(&first_previous, &applied, &[Path::new("/tmp/ocx_home")], &Env::clean());
+        let entry_lines = reconcile_lines(
+            Shell::Bash,
+            &first_previous,
+            "fp-1",
+            None,
+            &applied,
+            &plan,
+            &Env::clean(),
+            &plain(),
         );
-
-        let entry_lines = super::ledger_lines(Shell::Bash, &first_previous, &next);
-        let announced = |lines: &[String]| lines.iter().filter(|line| line.contains("too large to record")).count();
         assert_eq!(
             announced(&entry_lines),
-            marker.over_cap.len(),
-            "entering the over-cap state announces each abandoned scope once; got: {entry_lines:#?}"
+            1,
+            "entering the truncated state announces it once; got: {entry_lines:#?}"
+        );
+        let marker = decoded_carrier(&entry_lines);
+        assert_ne!(
+            marker.truncated,
+            Truncation::None,
+            "the fixture must actually exceed the cap, or both assertions are vacuous"
         );
 
-        // The next prompt in the same project: same outcome, same cap, and the
-        // previous ledger is the marker the line above exported.
-        let steady_lines = super::ledger_lines(Shell::Bash, &marker, &next);
+        // The next prompt in the same project: same outcome, same cap, and the previous state is the one
+        // the lines above exported.
+        let steady_lines = reconcile_lines(
+            Shell::Bash,
+            &marker,
+            "fp-1",
+            None,
+            &applied,
+            &plan,
+            &Env::clean(),
+            &plain(),
+        );
         assert_eq!(
             announced(&steady_lines),
             0,
             "a second consecutive over-cap reconcile must announce nothing; got: {steady_lines:#?}"
         );
         assert!(
-            steady_lines.iter().any(|line| line.contains(CARRIER_KEY)),
+            steady_lines
+                .iter()
+                .any(|line| line.contains(ocx_env::__OCX_ENV_STATE.name)),
             "the carrier is still exported - only the diagnostic is suppressed"
         );
     }
 
     // ── the carrier ───────────────────────────────────────────
 
-    /// Every reconcile emits the next ledger, and it round-trips: what
+    /// Every reconcile emits the next state, and it round-trips: what
     /// the prompt exports is what the next prompt decodes.
     #[test]
     fn c002_the_emitted_carrier_round_trips() {
@@ -2523,10 +2982,15 @@ mod reconcile_tests {
             vec![constant("CARGO_HOME", "/proj/cargo")],
             Some(identity()),
         );
-        let plan = plan_for(&Ledger::empty(), &applied, &[Path::new("/tmp/ocx_home")], &Env::clean());
+        let plan = plan_for_state(
+            &ExecState::default(),
+            &applied,
+            &[Path::new("/tmp/ocx_home")],
+            &Env::clean(),
+        );
         let lines = reconcile_lines(
             Shell::Bash,
-            &Ledger::empty(),
+            &ExecState::default(),
             "fp-1",
             None,
             &applied,
@@ -2535,21 +2999,12 @@ mod reconcile_tests {
             &plain(),
         );
 
-        let carrier = lines
-            .iter()
-            .find(|line| line.contains(CARRIER_KEY))
-            .unwrap_or_else(|| panic!("no carrier line emitted; got: {lines:#?}"));
-        let encoded = carrier
-            .split_once('=')
-            .expect("an export line")
-            .1
-            .trim_matches(|c| c == '\'' || c == ' ');
-        let decoded = Ledger::decode(encoded).expect("the emitted carrier must decode");
+        let decoded = decoded_carrier(&lines);
 
-        assert_eq!(decoded.fp, "fp-1");
+        assert_eq!(decoded.session.fp, "fp-1");
         assert_eq!(
-            decoded.scopes.project.expect("the project slot").dir,
-            PathBuf::from("/work/acme")
+            decoded.session.project.expect("the project hint").dir,
+            ocx_test_support::paths::abs("/work/acme")
         );
     }
 
@@ -2570,11 +3025,16 @@ mod reconcile_tests {
             vec![constant("CARGO_HOME", "/proj/cargo")],
             Some(identity()),
         );
-        let plan = plan_for(&Ledger::empty(), &applied, &[Path::new("/tmp/ocx_home")], &Env::clean());
+        let plan = plan_for_state(
+            &ExecState::default(),
+            &applied,
+            &[Path::new("/tmp/ocx_home")],
+            &Env::clean(),
+        );
         let emitted = |theme: &Theme| {
             reconcile_lines(
                 Shell::Bash,
-                &Ledger::empty(),
+                &ExecState::default(),
                 "fp-1",
                 None,
                 &applied,
@@ -2635,11 +3095,16 @@ mod reconcile_tests {
             vec![constant("CARGO_HOME", "/proj/cargo")],
             Some(identity()),
         );
-        let plan = plan_for(&Ledger::empty(), &applied, &[Path::new("/tmp/ocx_home")], &Env::clean());
+        let plan = plan_for_state(
+            &ExecState::default(),
+            &applied,
+            &[Path::new("/tmp/ocx_home")],
+            &Env::clean(),
+        );
         for shell in ALL_SHELLS {
             let lines = reconcile_lines(
                 shell,
-                &Ledger::empty(),
+                &ExecState::default(),
                 "fp-1",
                 None,
                 &applied,
@@ -2675,6 +3140,47 @@ mod reconcile_tests {
         }
     }
 
+    /// A deferred notice carries text the filesystem chose, so no control or bidi character reaches the terminal.
+    #[test]
+    fn a_deferred_notice_reaches_the_stream_without_its_control_characters() {
+        const HOSTILE: [char; 3] = ['\u{1b}', '\u{7}', '\u{202e}'];
+
+        let mut applied = outcome(Vec::new(), Vec::new(), Some(identity()));
+        applied.messages = vec!["ocx: \u{1b}]0;hostile-project-name\u{7}\u{202e} skipped".to_owned()];
+        let plan = plan_for_state(
+            &ExecState::default(),
+            &applied,
+            &[Path::new("/tmp/ocx_home")],
+            &Env::clean(),
+        );
+        for shell in ALL_SHELLS {
+            let lines = reconcile_lines(
+                shell,
+                &ExecState::default(),
+                "fp-1",
+                None,
+                &applied,
+                &plan,
+                &Env::clean(),
+                &plain(),
+            );
+
+            let carrying: Vec<&String> = lines
+                .iter()
+                .filter(|line| line.contains("hostile-project-name"))
+                .collect();
+            if shell.emit_message("probe").is_some() {
+                assert_eq!(carrying.len(), 1, "{shell:?}: the notice is emitted once: {lines:?}");
+            }
+            for line in &lines {
+                assert!(
+                    !line.contains(HOSTILE),
+                    "{shell:?}: a control character reached the stream: {line:?}"
+                );
+            }
+        }
+    }
+
     /// The recorded membership must move **only** with the emission that
     /// redefines the gate, and must move **with** it.
     ///
@@ -2685,10 +3191,18 @@ mod reconcile_tests {
     #[test]
     fn the_recorded_membership_moves_only_with_the_gate_emission() {
         let applied = outcome(Vec::new(), Vec::new(), None);
-        let plan = plan_for(&Ledger::empty(), &applied, &[Path::new("/tmp/ocx_home")], &Env::clean());
-        let previous = Ledger {
-            ws: "0123456789abcdef".to_owned(),
-            ..Ledger::empty()
+        let plan = plan_for_state(
+            &ExecState::default(),
+            &applied,
+            &[Path::new("/tmp/ocx_home")],
+            &Env::clean(),
+        );
+        let previous = ExecState {
+            session: SessionCache {
+                ws: "0123456789abcdef".to_owned(),
+                ..SessionCache::default()
+            },
+            ..ExecState::default()
         };
 
         let carried = decoded_carrier(&reconcile_lines(
@@ -2702,7 +3216,7 @@ mod reconcile_tests {
             &plain(),
         ));
         assert_eq!(
-            carried.ws, previous.ws,
+            carried.session.ws, previous.session.ws,
             "a reconcile that did not redefine the gate must record the gate the shell still has"
         );
 
@@ -2717,23 +3231,36 @@ mod reconcile_tests {
             &plain(),
         ));
         assert_eq!(
-            regated.ws, "fedcba9876543210",
+            regated.session.ws, "fedcba9876543210",
             "the prompt that redefines the gate must record the membership it emitted"
         );
     }
 
-    /// Read the emitted carrier back out of a reconcile stream.
-    fn decoded_carrier(lines: &[String]) -> Ledger {
+    /// The value the emitted carrier line exports.
+    fn exported_value(lines: &[String]) -> String {
         let carrier = lines
             .iter()
-            .find(|line| line.contains(CARRIER_KEY))
+            .find(|line| line.contains(ocx_env::__OCX_ENV_STATE.name))
             .unwrap_or_else(|| panic!("no carrier line emitted; got: {lines:#?}"));
-        let encoded = carrier
+        carrier
             .split_once('=')
             .expect("an export line")
             .1
-            .trim_matches(|c| c == '\'' || c == ' ');
-        Ledger::decode(encoded).expect("the emitted carrier must decode")
+            .trim_matches(|c| c == '\'' || c == ' ')
+            .to_owned()
+    }
+
+    /// Decode an exported value as the next prompt would.
+    fn decode_state(encoded: &str) -> ExecState {
+        match exec_state::decode(Some(OsStr::new(encoded))) {
+            Inherited::Readable(state) => state,
+            other => panic!("the emitted carrier must decode; got: {other:?}"),
+        }
+    }
+
+    /// Read the emitted carrier back out of a reconcile stream.
+    fn decoded_carrier(lines: &[String]) -> ExecState {
+        decode_state(&exported_value(lines))
     }
 
     /// A reconcile that changed nothing emits no summary line;
@@ -2748,10 +3275,10 @@ mod reconcile_tests {
     fn a021_a_no_op_reconcile_emits_no_summary() {
         let empty = outcome(Vec::new(), Vec::new(), None);
         let current = settled_env();
-        let plan = plan_for(&Ledger::empty(), &empty, &[Path::new("/tmp/ocx_home")], &current);
+        let plan = plan_for_state(&ExecState::default(), &empty, &[Path::new("/tmp/ocx_home")], &current);
         let lines = reconcile_lines(
             Shell::Bash,
-            &Ledger::empty(),
+            &ExecState::default(),
             "fp-1",
             None,
             &empty,
@@ -2859,7 +3386,7 @@ mod bare_ocx_tests {
                 completion: generate_completion_inline(shell).as_deref(),
                 hook_binary: Some(&binary),
                 wrapper_binary: None,
-                watch: &[PathBuf::from("/work/acme/ocx.lock")],
+                watch: &ocx_shell::shell::reconcile::WatchSet::sample(vec![PathBuf::from("/work/acme/ocx.lock")]),
                 seed: None,
             })
             .join("\n");
@@ -3054,18 +3581,29 @@ mod bare_ocx_tests {
 /// one at compile time.
 #[cfg(test)]
 mod ordering_tests {
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     use clap::Parser as _;
+    use ocx_config::exec_state::{self, ExecState, Inherited, SessionCache, Verdict};
     use ocx_console::ColorModeConfig;
     use ocx_project::consent::{self, Decision, Grant, Reason};
-    use ocx_shell::shell::reconcile::{self, Ledger, Verdict};
+    use ocx_shell::shell::reconcile;
     use ocx_store::file_structure::FileStructure;
 
-    use ocx_package_manager::activation::{ConsentProof, authorized_project_env, is_stat_only, walk_is_indeterminate};
+    use ocx_package_manager::activation::{
+        self, ConsentProof, authorized_project_env, state_is_stat_only, walk_is_indeterminate,
+    };
 
     use super::SelfActivate;
     use crate::app::Cli;
+
+    /// The value a prompt would have exported for `state`.
+    fn encoded(state: &ExecState) -> String {
+        exec_state::encode(state)
+            .value
+            .expect("the state must encode within the cap")
+    }
 
     /// The per-prompt fast path reaches its short-circuit **before**
     /// `Context::try_init`, so a stat-only prompt reads no config at all.
@@ -3075,10 +3613,13 @@ mod ordering_tests {
     /// `Ok`. That is the whole discrimination — a test asserting on emitted
     /// output cannot see this, because both orders emit nothing.
     ///
-    /// Red state: swap `is_stat_only`'s early return with the
+    /// Red state: swap `state_is_stat_only`'s early return with the
     /// `Context::try_init` call and this returns `Err`.
     #[tokio::test]
     async fn c042_a_stat_only_prompt_never_reaches_the_config_loader() {
+        // The walk and the fingerprint read the process environment, which a test holding the override lock
+        // makes hermetic; unserialized, a neighbour's override moves the fingerprint under this test.
+        let _env = ocx_env::overrides::lock();
         let home = tempfile::TempDir::new().expect("tempdir");
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
@@ -3093,16 +3634,16 @@ mod ordering_tests {
         let broken = home.path().join("broken.toml");
         std::fs::write(&broken, "this is not = = valid toml\n").expect("write the broken config");
 
-        // Reproduce the ledger a previous inert prompt would have written: the
+        // Reproduce the state a previous inert prompt would have written: the
         // real fold over the real watch set, so the fast path's `fp` comparison
         // is the production one and not a stub.
         let canonical = consent::canonical_project_dir(&project_file).expect("canonicalize");
         let key = ocx_store::reference_manager::ReferenceManager::name_for_path(&canonical);
         let watch = reconcile::watch_paths(&file_structure, Some(&project_file), Some(&key), None);
-        let mut ledger = Ledger::empty();
-        ledger.fp = reconcile::current_fingerprint(&watch, Some(&canonical));
-        ledger.verdict = Some(Verdict::Inert);
-        let carrier = ledger.encode().expect("the ledger must encode");
+        let mut state = ExecState::default();
+        state.session.fp = reconcile::current_fingerprint(&watch, Some(&canonical));
+        state.session.verdict = Some(Verdict::Inert);
+        let carrier = encoded(&state);
 
         let cli = Cli::parse_from([
             "ocx",
@@ -3126,7 +3667,10 @@ mod ordering_tests {
                     relayed: false,
                 },
                 &file_structure,
-                Some(&carrier),
+                super::Received {
+                    carrier: Some(OsStr::new(&carrier)),
+                    stood_down: None,
+                },
             )
             .await;
 
@@ -3141,8 +3685,8 @@ mod ordering_tests {
         // to reach the loader and fail. Without this the assertion above passes
         // for a build that never reads config on either path, which is
         // indistinguishable from the check never running.
-        ledger.fp = "moved".to_owned();
-        let stale = ledger.encode().expect("the ledger must encode");
+        state.session.fp = "moved".to_owned();
+        let stale = encoded(&state);
         let reached = activate
             .run_reconcile(
                 &cli.context,
@@ -3152,7 +3696,10 @@ mod ordering_tests {
                     relayed: false,
                 },
                 &file_structure,
-                Some(&stale),
+                super::Received {
+                    carrier: Some(OsStr::new(&stale)),
+                    stood_down: None,
+                },
             )
             .await;
         assert!(
@@ -3288,9 +3835,9 @@ mod ordering_tests {
     /// The explicit tier is a consent-bearing channel, and the emitted hook body
     /// invokes `--reconcile` with no `--config`, so a per-prompt process that
     /// re-derived its watch set could never see that file. The list is therefore
-    /// recorded — seeded at shell start, carried in the ledger — and this walks
-    /// the whole production chain: `watch_paths` -> `fingerprint` ->
-    /// `is_stat_only`.
+    /// recorded — seeded at shell start, carried in the session cache — and this
+    /// walks the whole production chain: `watch_paths` -> `fingerprint` ->
+    /// `state_is_stat_only`.
     ///
     /// Red state: drop `watch_paths`' `Some(recorded)` arm so it always
     /// re-derives, and the grant leaves the fingerprint unmoved — the prompt
@@ -3307,14 +3854,17 @@ mod ordering_tests {
 
         // The shell-start pass recorded it; a prompt has since gone inert.
         let watch = reconcile::watch_paths(&file_structure, None, None, Some(&tiers));
-        let mut ledger = Ledger {
-            tiers: tiers.clone(),
-            ..Ledger::empty()
+        let state = ExecState {
+            session: SessionCache {
+                tiers: tiers.clone(),
+                fp: reconcile::current_fingerprint(&watch, None),
+                verdict: Some(Verdict::Inert),
+                ..SessionCache::default()
+            },
+            ..ExecState::default()
         };
-        ledger.fp = reconcile::current_fingerprint(&watch, None);
-        ledger.verdict = Some(Verdict::Inert);
         assert!(
-            is_stat_only(&ledger, &reconcile::current_fingerprint(&watch, None)),
+            state_is_stat_only(&state, &reconcile::current_fingerprint(&watch, None)),
             "with nothing changed the prompt must be stat-only - otherwise the assertion below \
              passes for a build whose fingerprint never settles"
         );
@@ -3323,7 +3873,7 @@ mod ordering_tests {
         std::fs::write(&overlay, "[shell.consent]\npaths = [\"/work/acme\"]\n").expect("add the grant");
 
         assert!(
-            !is_stat_only(&ledger, &reconcile::current_fingerprint(&watch, None)),
+            !state_is_stat_only(&state, &reconcile::current_fingerprint(&watch, None)),
             "a grant written to the recorded --config overlay must expire the cached `inert` \
              verdict at the next prompt (A-13, A-33)"
         );
@@ -3336,8 +3886,14 @@ mod ordering_tests {
     fn a13_the_startup_stream_seeds_the_recorded_tier_list() {
         let bin = PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin");
         let binary = super::ocx_binary_path(&bin);
-        let overlay = PathBuf::from("/etc/fleet/consent.toml");
-        let seed = super::seed_carrier(std::slice::from_ref(&overlay), &[]).expect("a non-empty tier list seeds");
+        let overlay = ocx_test_support::paths::abs("/etc/fleet/consent.toml");
+        let super::Login::Entered { state, changed } =
+            super::claim_login(Inherited::Absent, None, std::slice::from_ref(&overlay))
+        else {
+            panic!("an absent state enters the login stream");
+        };
+        assert!(changed, "a non-empty tier list seeds");
+        let seed = activation::write_state(&state).value.expect("the seed must encode");
 
         let stream = super::activation_lines(&super::LoginStream {
             shell: ocx_shell::shell::Shell::Bash,
@@ -3348,28 +3904,34 @@ mod ordering_tests {
             completion: None,
             hook_binary: Some(&binary),
             wrapper_binary: None,
-            watch: &[],
+            watch: &ocx_shell::shell::reconcile::WatchSet::default(),
             seed: Some(&seed),
         });
 
         let carrier = stream
             .iter()
-            .find(|line| line.contains(ocx_shell::shell::reconcile::CARRIER_KEY))
+            .find(|line| line.contains(ocx_env::__OCX_ENV_STATE.name))
             .unwrap_or_else(|| panic!("the startup stream must export the seed; got: {stream:#?}"));
         let encoded = carrier
             .split_once('=')
             .expect("an export line")
             .1
             .trim_matches(|c| c == '\'' || c == ' ');
-        let decoded = Ledger::decode(encoded).expect("the seed must decode");
+        let Inherited::Readable(decoded) = exec_state::decode(Some(OsStr::new(encoded))) else {
+            panic!("the seed must decode");
+        };
 
-        assert_eq!(decoded.tiers, vec![overlay], "the seed carries the recorded tier list");
+        assert_eq!(
+            decoded.session.tiers,
+            vec![overlay],
+            "the seed carries the recorded tier list"
+        );
         assert!(
-            decoded.fp.is_empty(),
+            decoded.session.fp.is_empty(),
             "the seed carries no fingerprint, so the first prompt still reconciles (C-005, A-21)"
         );
         assert!(
-            decoded.scopes.global.is_none() && decoded.scopes.project.is_none(),
+            decoded.applied.is_empty() && decoded.session.project.is_none(),
             "the seed applies nothing - it is a record, not a scope"
         );
     }
@@ -3382,25 +3944,22 @@ mod ordering_tests {
     /// a transient `.git` probe error tears the project scope down.
     #[test]
     fn a011_an_indeterminate_walk_retains_the_scope_a_determinate_one_reverts() {
-        use ocx_shell::shell::reconcile::{ProjectScope, Scopes};
+        use ocx_config::exec_state::ProjectScopeHint;
 
         let home = tempfile::TempDir::new().expect("tempdir");
         let project_dir = home.path().join("acme");
         std::fs::create_dir_all(&project_dir).expect("mkdir project");
         std::fs::write(project_dir.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
 
-        let recorded = |dir: PathBuf| Ledger {
-            scopes: Scopes {
-                global: None,
-                global_priors: Default::default(),
-                project: Some(ProjectScope {
+        let recorded = |dir: PathBuf| ExecState {
+            session: SessionCache {
+                project: Some(ProjectScopeHint {
                     key: "a1b2c3d4e5f60718".to_owned(),
                     dir,
-                    applied: Vec::new(),
-                    priors: Default::default(),
                 }),
+                ..SessionCache::default()
             },
-            ..Ledger::empty()
+            ..ExecState::default()
         };
         let ledger = recorded(project_dir.clone());
         let inside = project_dir.join("src");
@@ -3408,8 +3967,8 @@ mod ordering_tests {
 
         /// What the caller hands the predicate: the recorded project directory
         /// and nothing else.
-        fn recorded_dir(ledger: &Ledger) -> Option<&Path> {
-            ledger.scopes.project.as_ref().map(|scope| scope.dir.as_path())
+        fn recorded_dir(state: &ExecState) -> Option<&Path> {
+            state.session.project.as_ref().map(|hint| hint.dir.as_path())
         }
 
         // Indeterminate: the CWD is still inside the recorded project and its
@@ -3439,7 +3998,7 @@ mod ordering_tests {
 
         // Nothing recorded: the distinction cannot arise.
         assert!(
-            !walk_is_indeterminate(recorded_dir(&Ledger::empty()), Some(&inside)),
+            !walk_is_indeterminate(recorded_dir(&ExecState::default()), Some(&inside)),
             "with no recorded scope there is nothing to retain"
         );
     }
@@ -3467,11 +4026,11 @@ mod emitted_path_tests {
     use std::path::{Path, PathBuf};
 
     use ocx_config::env::Env;
+    use ocx_config::exec_state::ExecState;
     use ocx_package::metadata::env::entry::Entry;
     use ocx_package::metadata::env::modifier::ModifierKind;
-    use ocx_package_manager::activation::{Outcome, ProjectIdentity, SessionPath, next_ledger, plan_for};
+    use ocx_package_manager::activation::{Outcome, ProjectIdentity, SessionPath, next_state, plan_for_state};
     use ocx_shell::shell::Shell;
-    use ocx_shell::shell::reconcile::Ledger;
 
     use super::plan_lines;
 
@@ -3511,8 +4070,11 @@ mod emitted_path_tests {
     fn outcome(session: SessionPath, global: Vec<Entry>, project: Vec<Entry>) -> Outcome {
         Outcome {
             session,
+            session_enforced: true,
             global,
             project,
+            global_identities: None,
+            project_identities: None,
             owned_home: Some(PathBuf::from(PROJECT_HOME)),
             resolved: true,
             slot: Some(identity()),
@@ -3580,7 +4142,7 @@ mod emitted_path_tests {
     /// install directory, so the **first prompt of any shell strips it** — the
     /// user's `ocx` stops resolving.
     ///
-    /// Red state — today's `goat`: `desired_entries` returns `global ++ project`
+    /// Red state — today's `goat`: `session_desired` returns `global ++ project`
     /// and never splices [`Outcome::session`], so the emitted stream carries a
     /// `remove_list_element` for the install directory and `bash` drops it.
     #[test]
@@ -3605,9 +4167,9 @@ mod emitted_path_tests {
             vec![path_entry(&format!("{OCX_HOME}/packages/gg/global/content/bin"))],
             Vec::new(),
         );
-        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
+        let ledger = next_state(&ExecState::default(), &applied, &Env::clean(), "fp-1");
         let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
-        let plan = plan_for(&ledger, &applied, &owned, &current);
+        let plan = plan_for_state(&ledger, &applied, &owned, &current);
 
         let path = path_after(&seed, &plan_lines(Shell::Bash, &plan));
         position(&path, &install_bin());
@@ -3642,8 +4204,8 @@ mod emitted_path_tests {
             vec![path_entry(&global_tool)],
             vec![path_entry(&project_tool)],
         );
-        let plan = plan_for(
-            &Ledger::empty(),
+        let plan = plan_for_state(
+            &ExecState::default(),
             &applied,
             &[Path::new(OCX_HOME), Path::new(PROJECT_HOME)],
             &env_with_path(&seed),
@@ -3680,8 +4242,8 @@ mod emitted_path_tests {
             Vec::new(),
             Vec::new(),
         );
-        let plan = plan_for(
-            &Ledger::empty(),
+        let plan = plan_for_state(
+            &ExecState::default(),
             &applied,
             &[Path::new(OCX_HOME)],
             &env_with_path(&seed),
@@ -3831,6 +4393,7 @@ mod global_activate_tests {
             ManagedConfigGate {
                 enforce_required: false,
                 onboarding: false,
+                tolerate_vanished_received_config: false,
             },
         )
         .await
@@ -3851,6 +4414,7 @@ mod global_activate_tests {
             global_prompt_entries(&context, &target)
                 .await
                 .expect("the gate never fails on a well-formed home")
+                .0
                 .is_empty(),
             "D-3: with `activate = \"bin\"` the global tier contributes nothing to a prompt"
         );
@@ -3879,6 +4443,7 @@ mod global_activate_tests {
                 &global_prompt_entries(&context, &target)
                     .await
                     .expect("the gate never fails on a well-formed home")
+                    .0
             ),
             vec!["WP16".to_owned()],
             "`env` mode composes the global tier, exactly as it always has"
@@ -3924,7 +4489,7 @@ mod global_activate_tests {
             completion: None,
             hook_binary: Some(&super::ocx_binary_path(&bin_dir())),
             wrapper_binary: None,
-            watch: &[],
+            watch: &ocx_shell::shell::reconcile::WatchSet::default(),
             seed: None,
         })
     }
@@ -4048,5 +4613,464 @@ mod global_activate_tests {
                  it on PATH (C-060); got {stream:#?}"
             );
         }
+    }
+}
+
+/// What the hook and the login stream do with the execution state a shell inherited.
+#[cfg(test)]
+mod session_tests {
+    use std::path::PathBuf;
+
+    use clap::{CommandFactory as _, Parser as _};
+    use ocx_config::exec_state::{
+        ExecState, HeaderView, Inherited, MAJOR, Pinned, PinnedTier, Scope, Selection, SessionToken, UnreadableReason,
+    };
+    use ocx_package_manager::activation::{ProjectIdentity, ShellProcess};
+
+    use std::ffi::OsStr;
+
+    use ocx_shell::shell::reconcile::WatchSet;
+    use ocx_shell::shell::{Shell, hook};
+
+    use ocx_config::env::Env;
+    use ocx_package_manager::activation::StateWrite;
+    use ocx_shell::shell::reconcile::Plan;
+
+    use super::{
+        Login, Received, SelfActivate, append_state_write, checkpoint_plan, claim_login, gate_entry, gate_entry_at,
+        logical_pwd, login_applies_env, stand_down_lines, stand_down_notice, stand_down_plan,
+    };
+
+    fn identity(dir: &str) -> ProjectIdentity {
+        ProjectIdentity {
+            config_path: PathBuf::from(dir).join("ocx.toml"),
+            dir: PathBuf::from(dir),
+            key: "a1b2c3d4e5f60718".to_owned(),
+        }
+    }
+
+    fn pinned(dir: &str) -> Selection {
+        Selection::Pinned(Pinned {
+            tier: PinnedTier::Project {
+                dir: PathBuf::from(dir),
+            },
+            groups: Vec::new(),
+            with_names: Vec::new(),
+            env_keys: Vec::new(),
+            invocation_digest: "0".repeat(64),
+            pinned_paths: None,
+        })
+    }
+
+    fn state_with_scopes(scopes: Vec<Scope>) -> ExecState {
+        ExecState {
+            inherited_scopes: scopes,
+            ..ExecState::default()
+        }
+    }
+
+    fn project_scope(dir: &str) -> Scope {
+        Scope::Project {
+            root: PathBuf::from(dir),
+        }
+    }
+
+    // ── the flag ───────────────────────────────────────────────────
+
+    #[test]
+    fn c023_the_shell_pid_flag_is_optional_numeric_and_hidden() {
+        let with = SelfActivate::parse_from(["self-activate", "--shell=bash", "--reconcile", "--shell-pid", "4242"]);
+        assert_eq!(with.shell_pid, Some(4242));
+        let without = SelfActivate::parse_from(["self-activate", "--shell=bash", "--reconcile"]);
+        assert_eq!(
+            without.shell_pid, None,
+            "an older hook passes no pid: token-less mode (D-12)"
+        );
+        assert!(
+            SelfActivate::try_parse_from(["self-activate", "--shell=bash", "--shell-pid", "not-a-pid"]).is_err(),
+            "a pid is a number"
+        );
+        assert!(
+            SelfActivate::command()
+                .get_arguments()
+                .find(|argument| argument.get_id() == "shell_pid")
+                .expect("the --shell-pid flag must exist")
+                .is_hide_set(),
+            "--shell-pid is machine surface the emitted hook types"
+        );
+    }
+
+    // ── the stand-down notice ──────────────────────────────────────
+
+    fn header(major: Option<u32>) -> HeaderView {
+        HeaderView {
+            major,
+            ..HeaderView::default()
+        }
+    }
+
+    #[test]
+    fn c024_a_lower_major_names_the_format_the_other_version_wrote() {
+        assert_eq!(
+            stand_down_notice(&header(Some(1)), UnreadableReason::OtherMajor),
+            "ocx: this shell's environment state was written by another ocx version (format 1; this ocx reads \
+             format 2). ocx stopped updating this shell. Run 'unset __OCX_ENV_STATE' to start over here (values \
+             already applied stay), or open a new shell."
+        );
+    }
+
+    #[test]
+    fn c024_a_higher_major_is_a_newer_ocx() {
+        let notice = stand_down_notice(&header(Some(MAJOR + 1)), UnreadableReason::OtherMajor);
+        assert!(notice.contains("written by a newer ocx (format 3)"), "got: {notice}");
+    }
+
+    #[test]
+    fn c024_an_unparsed_header_is_another_version_without_inventing_a_format() {
+        let notice = stand_down_notice(&header(None), UnreadableReason::HeaderInvalid);
+        assert!(notice.contains("written by another ocx version"), "got: {notice}");
+        assert!(!notice.contains("format 1"), "no format is known: {notice}");
+    }
+
+    #[test]
+    fn c024_a_readable_major_with_an_invalid_payload_names_the_reason() {
+        let notice = stand_down_notice(&header(Some(MAJOR)), UnreadableReason::Inflate);
+        assert!(notice.contains("could not be read ("), "got: {notice}");
+        let invalid = stand_down_notice(
+            &header(Some(MAJOR)),
+            UnreadableReason::Invalid {
+                field: "hostile\u{1b}[31m\u{202e}field",
+            },
+        );
+        assert!(
+            invalid.chars().all(|c| c.is_ascii() && !c.is_control()),
+            "a state-derived word passes display_safe: {invalid:?}"
+        );
+    }
+
+    #[test]
+    fn c024_every_notice_is_one_ascii_line_naming_its_fix() {
+        for reason in [
+            UnreadableReason::HeaderInvalid,
+            UnreadableReason::OtherMajor,
+            UnreadableReason::TooLong,
+            UnreadableReason::NotUtf8,
+            UnreadableReason::Base64,
+            UnreadableReason::Inflate,
+            UnreadableReason::InflateLimit,
+            UnreadableReason::TrailingBytes,
+            UnreadableReason::Json,
+            UnreadableReason::RecordLimit,
+            UnreadableReason::TierLimit,
+            UnreadableReason::ScopeLimit,
+        ] {
+            let notice = stand_down_notice(&header(Some(MAJOR)), reason);
+            assert!(notice.is_ascii() && !notice.contains('\n'), "{reason:?}: {notice:?}");
+            assert!(notice.contains("unset __OCX_ENV_STATE"), "{reason:?}: {notice:?}");
+        }
+    }
+
+    // ── the notice is owed once ────────────────────────────────────
+
+    const STALE_STATE: &str = "1.legacy-state";
+
+    fn elvish_stand_down(carrier: Option<&str>, stood_down: Option<&str>) -> Vec<String> {
+        let received = Received {
+            carrier: carrier.map(OsStr::new),
+            stood_down: stood_down.map(OsStr::new),
+        };
+        stand_down_lines(
+            Shell::Elvish,
+            std::path::Path::new("/h/.ocx/bin/ocx"),
+            &WatchSet::default(),
+            &header(Some(1)),
+            UnreadableReason::OtherMajor,
+            received.notice_owed(),
+        )
+    }
+
+    fn prints_notice(lines: &[String]) -> bool {
+        lines.iter().any(|line| line.contains("stopped updating this shell"))
+    }
+
+    #[test]
+    fn an_unseen_unreadable_state_prints_the_notice_with_its_copy_and_checkpoint() {
+        for stood_down in [None, Some("another-state")] {
+            let lines = elvish_stand_down(Some(STALE_STATE), stood_down);
+            assert!(prints_notice(&lines), "{stood_down:?}: the notice is owed: {lines:?}");
+            assert!(
+                lines.join("\n").contains("set-env __OCX_ENV_STOOD_DOWN "),
+                "{stood_down:?}: the copy is emitted: {lines:?}"
+            );
+            assert!(
+                lines.join("\n").contains("set-env __OCX_ENV_PWD "),
+                "{stood_down:?}: the checkpoint is emitted: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_received_copy_equal_to_the_state_keeps_the_copy_and_checkpoint_and_drops_the_notice() {
+        let lines = elvish_stand_down(Some(STALE_STATE), Some(STALE_STATE));
+        assert!(
+            !prints_notice(&lines),
+            "an earlier run printed it; a pre-upgrade closure re-runs after every `cd`: {lines:?}"
+        );
+        assert!(
+            lines.join("\n").contains("set-env __OCX_ENV_STOOD_DOWN "),
+            "the copy is still emitted: {lines:?}"
+        );
+        assert!(
+            lines.join("\n").contains("set-env __OCX_ENV_PWD "),
+            "the checkpoint is still emitted, or the closure re-runs every prompt: {lines:?}"
+        );
+    }
+
+    // ── nushell's Plan carries the binary's own writes ─────────────
+
+    fn sets(plan: &Plan) -> serde_json::Value {
+        serde_json::to_value(plan).expect("a plan serializes")["sets"].clone()
+    }
+
+    fn value_of(sets: &serde_json::Value, key: &str) -> Option<String> {
+        sets.as_array()?
+            .iter()
+            .find(|entry| entry["key"] == key)
+            .map(|entry| entry["value"].as_str().expect("a string value").to_owned())
+    }
+
+    /// The shim builds the gate string without asking the binary, so its fields must be the binary's, in its order.
+    #[test]
+    fn the_nushell_shims_gate_string_names_the_signals_the_binary_folds() {
+        let folded = std::cell::RefCell::new(Vec::new());
+        let value = hook::gate_value(7, "/cwd", |key| {
+            folded.borrow_mut().push(key.to_owned());
+            None
+        });
+        assert_eq!(value.matches(' ').count(), 2 + folded.borrow().len() - 1, "{value:?}");
+
+        let fields: String = folded
+            .borrow()
+            .iter()
+            .map(|key| format!(" ($env.{key}? | default \"\")"))
+            .collect();
+        let expected = format!("let _ocx_gate = ([$nu.pid $env.PWD{fields}] | str join \" \")");
+        assert!(
+            ocx_setup::shims::ENV_NU.contains(&expected),
+            "the nushell gate must fold the binary's signals in the binary's order\nwant: {expected}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stand_down_plan_carries_the_copy_and_the_gate_and_stays_version_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = Env::clean();
+        env.set("DIRENV_DIR", "/w");
+        let gate = gate_entry_at(4242, dir.path(), &env).await;
+
+        let plan = stand_down_plan(Some(OsStr::new(STALE_STATE)), Some(gate));
+        let json = serde_json::to_value(&plan).expect("serialize");
+
+        assert_eq!(json["v"], 1, "an added entry never bumps the structural version");
+        let sets = sets(&plan);
+        assert_eq!(value_of(&sets, "__OCX_ENV_STOOD_DOWN").as_deref(), Some(STALE_STATE));
+        let gate = value_of(&sets, "__OCX_ENV_PWD").expect("the checkpoint rides the plan");
+        assert!(
+            gate.starts_with(&format!("4242 {} /w ", dir.path().display())),
+            "pid, directory, then DIRENV_DIR first: {gate:?}"
+        );
+        assert!(
+            sets.as_array()
+                .expect("sets")
+                .iter()
+                .all(|entry| entry["type"] == "constant"),
+            "the binary's writes are constants: {sets}"
+        );
+        assert_eq!(json["removes"], serde_json::json!([]));
+        assert_eq!(json["restores"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn without_a_shell_pid_the_plan_carries_no_gate() {
+        assert!(
+            gate_entry(None, &Env::clean()).await.is_none(),
+            "an older shim passes no pid, and the gate value names the recording shell"
+        );
+        let plan = stand_down_plan(Some(OsStr::new(STALE_STATE)), None);
+        assert!(value_of(&sets(&plan), "__OCX_ENV_PWD").is_none());
+        assert!(value_of(&sets(&plan), "__OCX_ENV_STOOD_DOWN").is_some());
+    }
+
+    /// Nushell parses stdout as a `Plan`, so a stale lock must reach it as data with the notice on stderr.
+    #[test]
+    fn a_stale_lock_refusal_for_nushell_is_a_plan_with_the_state_write_and_a_stderr_notice() {
+        let error = super::SessionError::from(ocx_project::LockCurrency::Stale {
+            lock_path: PathBuf::from("/work/acme/ocx.lock"),
+        });
+        let (plan, notices) = super::refusal_plan(&ExecState::default(), &error);
+
+        let json = serde_json::to_value(&plan).expect("serialize");
+        assert_eq!(json["v"], 1);
+        assert!(
+            value_of(&sets(&plan), "__OCX_ENV_STATE").is_some(),
+            "the announced stamp rides the plan: {json}"
+        );
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("ocx.lock is stale"), "{notices:?}");
+    }
+
+    #[test]
+    fn a_state_to_write_is_a_set_and_one_to_drop_is_a_restore_to_unset() {
+        let mut plan = checkpoint_plan(None);
+        append_state_write(
+            &mut plan,
+            &StateWrite {
+                value: Some("2;payload".to_owned()),
+                notice: None,
+            },
+        );
+        assert_eq!(value_of(&sets(&plan), "__OCX_ENV_STATE").as_deref(), Some("2;payload"));
+
+        let mut plan = checkpoint_plan(None);
+        append_state_write(
+            &mut plan,
+            &StateWrite {
+                value: None,
+                notice: None,
+            },
+        );
+        let json = serde_json::to_value(&plan).expect("serialize");
+        assert_eq!(json["restores"], serde_json::json!([["__OCX_ENV_STATE", null]]));
+        assert_eq!(json["sets"], serde_json::json!([]));
+        assert_eq!(json["v"], 1);
+    }
+
+    #[tokio::test]
+    async fn the_gate_records_the_shells_own_spelling_of_a_symlinked_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).expect("mkdir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        #[cfg(not(unix))]
+        std::fs::create_dir(&link).expect("mkdir");
+
+        let mut env = Env::clean();
+        env.set("PWD", link.as_os_str());
+        #[cfg(unix)]
+        assert_eq!(
+            logical_pwd(&env, &real).await,
+            link.to_string_lossy(),
+            "the shell's PWD names the working directory, so the gate compares that spelling"
+        );
+
+        env.set("PWD", dir.path().as_os_str());
+        assert_eq!(
+            logical_pwd(&env, &real).await,
+            real.to_string_lossy(),
+            "a PWD naming another directory is not trusted"
+        );
+        env.remove("PWD");
+        assert_eq!(logical_pwd(&env, &real).await, real.to_string_lossy());
+    }
+
+    // ── the login stream ───────────────────────────────────────────
+
+    #[test]
+    fn c026_the_login_stream_of_an_unclaimed_pinned_shell_claims_and_applies_nothing() {
+        let state = ExecState {
+            selection: pinned("/work/p"),
+            ..ExecState::default()
+        };
+        let shell = ShellProcess::new(4242, Some(7));
+        let Login::Entered { state, changed } = claim_login(Inherited::Readable(state), Some(&shell), &[]) else {
+            panic!("a readable state enters the login stream");
+        };
+        assert!(changed, "the claim has to be written");
+        assert_eq!(
+            state.session.token,
+            Some(SessionToken {
+                pid: 4242,
+                started: Some(7)
+            })
+        );
+        assert!(
+            !login_applies_env(&state, None),
+            "a pinned shell composes nothing at login"
+        );
+        assert!(!login_applies_env(&state, Some(&identity("/work/q"))));
+    }
+
+    #[test]
+    fn c026_follow_cwd_composes_only_what_inherited_scopes_lacks() {
+        let none = ExecState::default();
+        assert!(
+            login_applies_env(&none, None),
+            "the control: nothing inherited composes"
+        );
+
+        let inside = state_with_scopes(vec![project_scope("/work/p")]);
+        assert!(
+            !login_applies_env(&inside, Some(&identity("/work/p"))),
+            "inside an inherited project nothing is composed, global included"
+        );
+        assert!(
+            login_applies_env(&inside, Some(&identity("/work/q"))),
+            "an uninherited project still gets the global tier"
+        );
+
+        let global = state_with_scopes(vec![Scope::Global]);
+        assert!(
+            !login_applies_env(&global, None),
+            "an inherited global tier is not composed again"
+        );
+    }
+
+    #[test]
+    fn c026_an_unreadable_state_stands_the_login_stream_down() {
+        let unreadable = Inherited::Unreadable {
+            header: header(Some(1)),
+            reason: UnreadableReason::OtherMajor,
+        };
+        assert!(matches!(
+            claim_login(unreadable, Some(&ShellProcess::new(1, None)), &[]),
+            Login::StoodDown
+        ));
+    }
+
+    #[test]
+    fn c023_the_login_stream_writes_nothing_for_an_absent_state_without_tiers() {
+        let Login::Entered { changed, .. } = claim_login(Inherited::Absent, Some(&ShellProcess::new(1, None)), &[])
+        else {
+            panic!("absent enters the login stream");
+        };
+        assert!(
+            !changed,
+            "the first prompt starts the session; the login stream seeds nothing"
+        );
+    }
+
+    #[test]
+    fn a13_the_login_stream_records_the_config_tier_list_in_the_session_cache() {
+        let tiers = [PathBuf::from("/etc/ocx/config.toml")];
+        let Login::Entered { state, changed } = claim_login(Inherited::Absent, None, &tiers) else {
+            panic!("absent enters the login stream");
+        };
+        assert!(changed);
+        assert_eq!(state.session.tiers, tiers);
+    }
+
+    #[test]
+    fn d12_a_token_less_login_stream_never_claims() {
+        let state = ExecState {
+            selection: pinned("/work/p"),
+            ..ExecState::default()
+        };
+        let Login::Entered { state, changed } = claim_login(Inherited::Readable(state), None, &[]) else {
+            panic!("a readable state enters the login stream");
+        };
+        assert!(!changed);
+        assert_eq!(state.session.token, None);
     }
 }

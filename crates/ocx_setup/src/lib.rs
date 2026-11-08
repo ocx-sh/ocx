@@ -49,7 +49,7 @@ if ?(test -f $_ocx_home/env.elv) {
 // because `$env:USERPROFILE` is null on non-Windows pwsh, which would never activate.
 const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
 $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
-if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
+if ([System.IO.File]::Exists($_ocxEnv)) { . $_ocxEnv }"#;
 
 /// Options controlling a single `ocx self setup` run.
 #[derive(Debug, Clone, Default)]
@@ -878,6 +878,16 @@ async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Test-Path` globs `[`/`]` in `OCX_HOME`, so the profile block probes with .NET.
+    #[test]
+    fn the_powershell_profile_block_uses_no_test_path() {
+        assert!(!POWERSHELL_BODY.contains("Test-Path"), "{POWERSHELL_BODY}");
+        assert!(
+            POWERSHELL_BODY.contains("[System.IO.File]::Exists($_ocxEnv)"),
+            "{POWERSHELL_BODY}"
+        );
+    }
 
     /// Read a profile file back, for write-side assertions.
     fn read(path: &Path) -> String {

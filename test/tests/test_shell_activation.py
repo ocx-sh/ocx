@@ -115,8 +115,7 @@ def _seed_candidate(ocx_home: Path, binary: Path) -> None:
     """Place a real ocx binary as the install candidate so offline bootstrap is a no-op."""
     candidate = ocx_home / _CANDIDATE_REL
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(binary, candidate)
-    candidate.chmod(0o755)
+    matrix.seed_binary(binary, candidate)
 
 
 def _clean_env(home: Path, shell_abs: str, *, ocx_home: Path | None = None, shell_name: str | None = None) -> dict[str, str]:
@@ -346,6 +345,62 @@ def test_elvish_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> None
     assert bin_seg in combined, (
         f"elvish: the ocx bin dir must land on PATH after the fence sources env.elv "
         f"with OCX_HOME unset; not found in:\n{combined}"
+    )
+
+
+# The hook closure a pre-upgrade ocx registered in elvish: it re-runs `self activate --reconcile` after every
+# `cd` and passes no `--shell-pid`. The text is frozen from that release, so the test keeps proving the
+# upgrade path after the current registration moves on.
+_ELVISH_MAIN_HOOK = Path(__file__).resolve().parent / "data" / "elvish_hook_main.elv"
+_ELVISH_MAIN_HOOK_BINARY = "@OCX_BINARY@"
+_STAND_DOWN_NOTICE = "stopped updating this shell"
+_OTHER_MAJOR_STATE = "1.legacy-state"
+
+
+def test_elvish_closure_from_the_previous_release_prints_the_stand_down_notice_once(tmp_path: Path) -> None:
+    """A state of another major stands the shell down; the old closure's later `cd`s do not repeat the notice."""
+    shell_abs = _require("elvish")
+    assert _OCX is not None
+
+    home = tmp_path / "home"
+    ocx_home = home / ".ocx"
+    projects = [home / name for name in ("alpha", "beta", "gamma")]
+    for directory in (ocx_home, *projects):
+        directory.mkdir(parents=True)
+
+    binary = str(_OCX)
+    assert "'" not in binary, "the closure text quotes the binary path twice; a quote would need doubling"
+    rc = home / "rc.elv"
+    rc.write_text(_ELVISH_MAIN_HOOK.read_text(encoding="utf-8").replace(_ELVISH_MAIN_HOOK_BINARY, binary), encoding="utf-8")
+
+    env = _clean_env(home, shell_abs, ocx_home=ocx_home)
+    env["TERM"] = "dumb"
+    env["__OCX_ENV_STATE"] = _OTHER_MAJOR_STATE
+    output = matrix.pty_session(
+        [shell_abs, "-rc", str(rc)],
+        [
+            *(matrix.cd_to("elvish", directory) for directory in projects),
+            matrix.probe("elvish", "state", "__OCX_ENV_STATE"),
+            matrix.probe("elvish", "stood", "__OCX_ENV_STOOD_DOWN"),
+            matrix.probe("elvish", "path", "PATH"),
+        ],
+        cwd=home,
+        env=env,
+        timeout=60,
+    )
+
+    assert output.count(_STAND_DOWN_NOTICE) == 1, (
+        f"the notice must print once across the first prompt and three `cd`s\npty transcript:\n{output}"
+    )
+    found = matrix.probes(output)
+    assert found.get("state") == _OTHER_MAJOR_STATE, (
+        f"an unreadable state is never rewritten\npty transcript:\n{output}"
+    )
+    assert found.get("stood") == _OTHER_MAJOR_STATE, (
+        f"the stood-down copy is what lets a later run stay quiet\npty transcript:\n{output}"
+    )
+    assert str(ocx_home) not in found.get("path", ""), (
+        f"a stood-down shell applies nothing\npty transcript:\n{output}"
     )
 
 

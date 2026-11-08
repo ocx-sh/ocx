@@ -41,7 +41,7 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx status` — report what `ocx.toml` + `ocx.lock` declare, with no resolution at all. Offline, no flock, no staleness gate: a missing / stale / unparseable lock is payload with exit 0, which is the whole point (every other project-tier command refuses on exactly those). Takes NO selectors — `-g` would only hide rows from a keyed object, unlike `inspect` where the selection decides what composes. Routes through `project_context::resolve_project_paths` + `ProjectConfig::from_path` + `ProjectLock::from_path`, deliberately NOT `load_project_with_lock`
 - `ocx inspect [-g GROUP]... [NAME...] [-p PLATFORM] [--resolve] [--closure] [--env KEY[:TYPE]=VALUE]...` — toolchain-tier `ocx package inspect`. Shares `api::data::package_inspect::InspectReport` verbatim (one schema, both tiers), keyed by binding instead of raw identifier, plus the project's composed `env` array. Pipeline: `select_tool_set` → `project_context::filter_by_names` → `check_duplicate_selection` → `resolve_selected_tools` → `inspect_all`, same order `ocx exec` uses. Needs a current lock (78 / 65)
 - `ocx [--global] env [-g GROUP]... [--env KEY[:TYPE]=VALUE]... [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull] [--pinned | --no-pinned]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
-- `ocx shell [-g GROUP]... [--with ID]... [--stack] [--env KEY[:TYPE]=VALUE]... [--pinned | --no-pinned] [--no-consent]` — open the user's shell (`$SHELL`, else the parent shell) inside the project environment composed like `ocx exec`; hermetic (the global toolchain yields under `__OCX_EXEC_SCOPE`) while the prompt hook stays registered so leaving the project resumes activation. Records activation consent like `exec`; `--no-consent` opts out. The program resolves against the ambient `PATH` before composition; `cmd` uses `%ComSpec%`; the Windows parent ignores Ctrl-C while the child runs. The `shell` group below carries `{allow, completion, revoke, state}`
+- `ocx shell [-g GROUP]... [--with ID]... [--env KEY[:TYPE]=VALUE]... [--pinned | --no-pinned] [--no-consent]` — open the user's shell (`$SHELL`, else the parent shell) inside the project environment composed like `ocx exec`; a pinned session: the environment is composed once for the shell's lifetime, and the prompt hook, reading `inherited_scopes` from `__OCX_ENV_STATE`, never recomposes a scope the shell already holds, so leaving the project resumes activation. Records activation consent like `exec`; `--no-consent` opts out. The program resolves against the ambient `PATH` before composition; `cmd` uses `%ComSpec%`; the Windows parent ignores Ctrl-C while the child runs. The `shell` group below carries `{allow, completion, revoke, state}`
 
 ### `ocx shell` — carries `{allow, completion, revoke, state}`
 - `ocx shell allow [PATH]` — write a consent stamp for the project governing PATH (default: cwd), resolved through the full precedence chain with PATH substituting for the CWD (`project_context::resolve_project_paths`'s `walk_from`). One of the two stamp writers outside the seven mutating commands — `ocx init` is the other, stamping the project it creates unless `--no-consent` is passed (`options::Consent`). **The one writer `OCX_NO_CONSENT` does not reach**: it calls `consent::record` directly rather than through `project_context::record_activation_consent_over`, where that ladder resolves, because it *is* the explicit gesture the variable exists to tell machine invocation apart from. Exit 64 when no `ocx.toml` governs PATH, and exit 64 when the target is `$OCX_HOME` — A-44, enforced once in `consent::record`'s `same_dir` guard and surfaced by the `Recorded::OcxHomeNeedsNoStamp` return, never re-tested at the CLI
@@ -173,9 +173,10 @@ struct — never read the two raw booleans at the call site.
   the env var unheard, and reading the env at *both* levels would make it outrank the
   flag. Neither failure is visible in a diff of either site alone, which is why
   `c400_the_consent_env_var_is_read_only_at_the_seam` pins the read to one depth.
-- **The refusal, and only the refusal, crosses a spawn.** `ocx exec` sets
-  `OcxConfigView.no_consent` from `self.consent.explicit() == Some(false)`, and
-  `Env::apply_ocx_config` ORs that with the ambient `OCX_NO_CONSENT` — so a nested ocx
+- **The refusal, and only the refusal, crosses a spawn.** An explicit `--no-consent` is
+  written into the child's `__OCX_ENV_STATE` as the narrowing header name `n=no_consent`
+  (`PolicyInputs::to_write`; the projection writes no public `OCX_*`), and an ambient
+  `OCX_NO_CONSENT` (`Propagation::UserInput`) is inherited untouched — so a nested ocx
   the child launches inherits a `--no-consent` that would otherwise die with argv.
   Asymmetric on purpose: a `--consent` leaves the field `false` and never *clears* an
   inherited refusal, because it answers for the one project this invocation targets, not
@@ -232,12 +233,13 @@ at a call site — go through `EnvOverride::entries(cwd)`.
 - **Export/execute parity is the point.** `ocx exec` never prints (it replaces the child process via
   `exec`), so `ocx env --env X` must compose exactly what `ocx exec --env X` executes with. Same
   pairing for `package env` / `package exec`. Tests assert the two against one shared oracle.
-- **A command that composes AND spawns must forward.** `set_forwarded_env(&overrides)` after
-  `apply_ocx_config` (which strips a stale `OCX_ENV` first — the order is load-bearing). Without it
-  a generated entrypoint launcher re-enters `ocx launcher exec`, re-applies the package's own
-  entries, and silently reverts the override. `ocx exec` and `ocx package exec` both do this.
-  The same `ChildEnv` carries `identities: Some(&LaunchIdentities::from_infos(..))` for the composed
-  roots; with `None` a launcher matches patch rules only by `*`, since its package dir has no name.
+- **A command that composes AND spawns goes through the projection.** `exec_env::project`
+  (`crates/ocx_package_manager/src/exec_env.rs`, reached from spawn sites through
+  `apply_child_env`) records the composed entries in `__OCX_ENV_STATE`, so a generated entrypoint
+  launcher that re-enters `ocx launcher exec` replays the override instead of silently reverting it.
+  `ocx exec` and `ocx package exec` both do this. The same inputs carry
+  `identities: Some(&LaunchIdentities::from_infos(..))` for the composed roots; with `None` a
+  launcher matches patch rules only by `*`, since its package dir has no name.
 
 ## Cross-Cutting: CI Env Export (`--ci`)
 
@@ -326,10 +328,10 @@ Toolchain-tier commands affected: `add`, `remove`, `lock`, `update`, `pull`, `ex
 
 Strict isolation rules:
 - `--global` and `--project` together → clap `conflicts_with` conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No precedence guessing.
-- `check_global_project_exclusivity` (in `app/context.rs`, called from `Context::try_init`) closes env-sourced gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
+- `check_global_project_exclusivity` (in `app/context.rs`, called from `Context::try_init`) closes env-sourced gaps (the `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
 - `ocx exec` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
 - `ocx --global exec -- cmd` composes global toolchain env for child process only; never mutates parent shell.
-- `OCX_GLOBAL` is the env-var equivalent. Never forwarded: `apply_ocx_config` always clears it, so a child ocx selects its own tier and a nested `--project` cannot hit the exclusivity check.
+- `--global` has no env-var form; a child ocx selects its own tier, so a nested `--project` cannot hit the exclusivity check.
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
 - `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on any `ocx package` subcommand.
 
@@ -400,15 +402,17 @@ User-facing surface: the generated `website/src/content/docs/reference/configura
 
 ## Cross-Cutting: Plugin Dispatch
 
-The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand names to `ocx-<name>` binaries discovered on `$PATH`, matching the cargo / git / kubectl plugin pattern. Dispatch fires from `App::run` before `Context::try_init`, so plugins bypass `FileStructure` / OCI client init. Resolution-affecting env is forwarded via `Env::apply_ocx_config`; plugins inherit the full parent env (trust boundary, see module doc). Built-ins always shadow plugins — clap matches built-in variants first; `External` only fires for unrecognized names. Plugin not-found exits 64 (`EX_USAGE`) with a stderr install hint. Implementation: `app/plugin_dispatch.rs`. ADR: `adr_cli_plugin_pattern.md`.
+The `External(Vec<OsString>)` variant on `Command` routes unknown subcommand names to `ocx-<name>` binaries discovered on `$PATH`, matching the cargo / git / kubectl plugin pattern. Dispatch fires from `App::run` before `Context::try_init`, so plugins bypass `FileStructure` / OCI client init. Plugins are spawned through `exec_env::project`, so they receive `__OCX_ENV_STATE` and `OCX_BINARY_PIN`, with `Propagation::Credential` variables removed; they otherwise inherit the parent env (trust boundary, see module doc). Built-ins always shadow plugins — clap matches built-in variants first; `External` only fires for unrecognized names. Plugin not-found exits 64 (`EX_USAGE`) with a stderr install hint. Implementation: `app/plugin_dispatch.rs`. ADR: `adr_cli_plugin_pattern.md`.
 
-## Cross-Cutting: OCX Configuration Forwarding
+## Cross-Cutting: Exec-Env Projection
 
-Any code that spawns a subprocess MUST call `env::Env::apply_ocx_config(ctx.config_view())` after building the child env and before `Command::envs()`. Resolution-affecting `ContextOptions` fields MUST appear in `OcxConfigView`, in `Env::apply_ocx_config`, and in `website/src/content/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
+`exec_env::project` is the one projection that writes `__OCX_ENV_STATE` and `OCX_BINARY_PIN` into every ocx descendant. Any code that spawns a subprocess MUST build the child env through it (via `apply_child_env`) and run the child with `env_clear().envs(child.env)`. The firewall test in `crates/ocx_package_manager/src/launch.rs` (`firewall_tests`) pins every `exec_env::project(` call site; a new spawn path that disagrees with its projection table reds it. `ocx_env::Propagation` classes every variable (UserInput, SecretInput, SetupWritten, State, BinaryPin, HookLocal, Credential) and decides what a child sees; the state codec lives in `ocx_config::exec_state` (`types`, `header`, `decode`, `encode`, `policy`, `revert`, `display`). A new resolution-affecting variable is declared in `crates/ocx_env/src/vars.rs` with its `propagation` and documented in `website/src/content/docs/reference/environment.md`. Presentation fields (log-level / format / color) MUST NOT propagate via env.
+
+Exec modes (`ExecModeOptions`, `crates/ocx_cli/src/options/exec_mode.rs`): the default layers the composition onto the calling environment; `--isolate` first reverts every value ocx applied to it; `--clean` starts from an empty environment holding only the composed variables. The two flags conflict.
 
 ### Credential exemption
 
-Env vars carrying bearer credentials are read directly via `std::env::var` and intentionally NOT forwarded via `OcxConfigView` or `apply_ocx_config`. Rationale: tokens are short-lived bearer credentials; forwarding them propagates the credential into every subprocess child env, broadening the attack surface unnecessarily.
+Env vars carrying bearer credentials are read directly via `std::env::var` and classed `Propagation::Credential`: removed at every projected spawn and never recorded in state. Rationale: tokens are short-lived bearer credentials; forwarding them propagates the credential into every subprocess child env, broadening the attack surface unnecessarily.
 
 Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule violation):
 
@@ -427,7 +431,7 @@ Two variables meet the bar and are **deliberately not** on the list; a third is 
 | `OCX_AUTH_<slug>_TOKEN` | `auth.rs::get_env_auth` | **Known-open, mechanism gap.** A name *pattern*, so a fixed `&[&str]` cannot hold it at all. `script/ocx_module.rs::is_reserved_env_key` already masks this family from Starlark **by prefix** — two credential masks, one of which handles patterns. Closing it means teaching `ocx_env::credential_keys()` prefixes too. |
 | `OCX_ANNOUNCE_GIT_USERNAME` | `forge/credentials.rs::ForgeCredentials::resolve` | **Not open — a decided no.** The user half of the HTTP Basic pair (default `gitlab-ci-token`). It does not meet the bar at all: holding it authenticates nobody, and listing it would say that it did. |
 
-Reviewers: read these through their `ocx_env` declaration (a `secret` one yields `Sensitive`). Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** declare it in `crates/ocx_env/src/vars.rs` with `secret, child = Scrub` (that set is `ocx_env::credential_keys()`, whose doc comment carries the membership rule and the four-edit checklist) **and** in `website/src/content/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
+Reviewers: read these through their `ocx_env` declaration (a `secret` one yields `Sensitive`). Do NOT give these vars any propagation other than `Credential`. If a new credential var is introduced, document it in this table in the same PR **and** declare it in `crates/ocx_env/src/vars.rs` with `secret, child = Scrub, propagation = Credential` (that set is `ocx_env::credential_keys()`, whose doc comment carries the membership rule and the four-edit checklist) **and** in `website/src/content/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
 
 ### Secret-bearing values: the `env://` convention
 

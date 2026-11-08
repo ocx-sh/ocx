@@ -176,7 +176,7 @@ def test_two_packages_contribute_to_the_same_list_var_later_composed_last(
 
 
 # ---------------------------------------------------------------------------
-# Scenario 3 — launcher re-entry: comma list survives OCX_ENV byte-identical
+# Scenario 3 — launcher re-entry: comma list survives replay.env byte-identical
 # ---------------------------------------------------------------------------
 
 
@@ -185,9 +185,9 @@ def test_env_flag_list_contributions_with_separator_survive_launcher_reentry(
 ) -> None:
     """A comma-separated `list` `--env` override reaches a tool THROUGH a
     generated entrypoint launcher byte-identical, including its separator
-    (W-7): the launcher re-enters `ocx launcher exec`, which rebuilds its env
-    from scratch and relies on the `OCX_ENV` forwarded envelope to recover a
-    `--env` override that is not part of the package's own declared metadata.
+    (W-7): the launcher re-enters `ocx launcher exec`, whose package env re-applies
+    the package's own values, and relies on the received state's `replay.env` to
+    recover a `--env` override that is not part of the declared metadata.
 
     Mirrors `test_env.py::test_package_exec_env_flag_survives_generated_entrypoint_launcher`,
     substituting a `list` override (with its separator) for that test's

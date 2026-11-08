@@ -28,23 +28,45 @@ pub fn fish_double_quoted(value: &str) -> String {
     value.replace('\\', "\\\\").replace('$', "\\$").replace('"', "\\\"")
 }
 
-/// Escape `value` for a PowerShell **single-quoted** literal.
+/// Render `value` as a complete PowerShell expression that evaluates to exactly `value`.
 ///
-/// PowerShell's tokenizer reads U+2018..U+201B as single-quote delimiters too (Windows PowerShell 5.1 and
-/// pwsh 7 alike), so a value carrying one closes the literal and the rest runs as code. Each is doubled
-/// with itself, which PowerShell reads back as that one character; so is the ASCII `'`.
+/// The output is pure ASCII: Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page,
+/// so a literal non-ASCII character is garbled. Every char at or above U+0080 becomes `[char]0xNNNN`
+/// (astral chars as their two UTF-16 surrogate halves; 5.1 has no `` `u{} `` escape). That also covers
+/// U+2018..U+201B, which PowerShell reads as quote delimiters, so only the ASCII `'` needs doubling.
 ///
-/// Keep emits single-quoted: double quotes let a value start a subexpression.
+/// All-ASCII input stays a plain `'...'` literal. Otherwise the result is a parenthesised `+` chain that
+/// starts with a string, so the chars concatenate as text. Callers emit the result unquoted.
 #[must_use]
-pub fn powershell_single_quoted(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for c in value.chars() {
-        out.push(c);
-        if matches!(c, '\'' | '\u{2018}'..='\u{201B}') {
-            out.push(c);
+pub fn powershell_literal(value: &str) -> String {
+    fn push_run(parts: &mut Vec<String>, run: &mut String) {
+        if !run.is_empty() {
+            parts.push(format!("'{}'", run.replace('\'', "''")));
+            run.clear();
         }
     }
-    out
+
+    if value.is_ascii() {
+        return format!("'{}'", value.replace('\'', "''"));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut run = String::new();
+    for c in value.chars() {
+        if c.is_ascii() {
+            run.push(c);
+            continue;
+        }
+        push_run(&mut parts, &mut run);
+        let mut units = [0u16; 2];
+        for unit in c.encode_utf16(&mut units) {
+            parts.push(format!("[char]0x{unit:04X}"));
+        }
+    }
+    push_run(&mut parts, &mut run);
+    if !parts[0].starts_with('\'') {
+        parts.insert(0, "''".to_owned());
+    }
+    format!("({})", parts.join("+"))
 }
 
 /// Escape `value` for an elvish **single-quoted** raw string (`'` → `''`).
@@ -101,15 +123,34 @@ mod tests {
     }
 
     #[test]
-    fn powershell_single_quoted_doubles_the_ascii_and_typographic_quotes() {
-        assert_eq!(powershell_single_quoted("it's"), "it''s");
-        for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
-            assert_eq!(powershell_single_quoted(&format!("a{c}b")), format!("a{c}{c}b"));
-        }
+    fn powershell_literal_goldens() {
+        assert_eq!(powershell_literal(""), "''");
+        assert_eq!(powershell_literal("plain"), "'plain'");
+        assert_eq!(powershell_literal("it's"), "'it''s'");
+        assert_eq!(powershell_literal("'"), "''''");
+        assert_eq!(powershell_literal("a\\$b`c\"d"), "'a\\$b`c\"d'");
+        assert_eq!(powershell_literal("\u{00E9}"), "(''+[char]0x00E9)");
+        assert_eq!(powershell_literal("\u{4E2D}\u{6587}"), "(''+[char]0x4E2D+[char]0x6587)");
+        assert_eq!(powershell_literal("\u{2019}"), "(''+[char]0x2019)");
+        assert_eq!(powershell_literal("\u{2019}'"), "(''+[char]0x2019+'''')");
+        assert_eq!(powershell_literal("x\u{1F600}"), "('x'+[char]0xD83D+[char]0xDE00)");
+        assert_eq!(powershell_literal("a\u{0451}b"), "('a'+[char]0x0451+'b')");
         assert_eq!(
-            powershell_single_quoted("a\\$b`c\u{201C}\u{201C}"),
-            "a\\$b`c\u{201C}\u{201C}"
+            powershell_literal("a\u{0451}\u{0451}b'c"),
+            "('a'+[char]0x0451+[char]0x0451+'b''c')"
         );
+    }
+
+    #[test]
+    fn powershell_literal_is_always_ascii() {
+        for v in [
+            "\u{4E2D}\u{6587}",
+            "\u{2018}\u{201B}x",
+            "\u{1F600}'",
+            "C:\\\u{00FC}\\bin",
+        ] {
+            assert!(powershell_literal(v).is_ascii(), "{v}");
+        }
     }
 
     #[test]

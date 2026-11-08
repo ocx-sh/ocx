@@ -995,14 +995,19 @@ fn shim_env_literal_scan_reds_on_an_unregistered_read() {
     assert_eq!(unregistered(&literals), ["OCX_SHIM_RENAMED"]);
 }
 
-/// `ocx_env::dynamic` / `dynamic_secret` reads in `crates/` outside `ocx_env`, pinned.
+/// References to `ocx_env::dynamic` / `dynamic_secret` in `crates/` outside `ocx_env`, pinned: calls
+/// plus path uses (a function passed by name is a read too).
 ///
 /// A name from data is the exception; a declared variable reads through its static. A new site
 /// moves this number in the same change, so the review sees it; a removed one lowers it.
-const DYNAMIC_READS: usize = 8;
+///
+/// One reference is not a read: `ocx_config`'s `ecosystem_api_pin` names `ocx_env::dynamic` as a type
+/// binding for the lockstep consumer and never calls it, so the count is an upper bound on reads.
+const DYNAMIC_REFERENCES: usize = 9;
 
 /// Every `dynamic` / `dynamic_secret` token called or named through `ocx_env::`, literals and comments skipped.
-fn dynamic_reads(tokens: &[Token]) -> usize {
+/// Counts references, not proven reads.
+fn dynamic_references(tokens: &[Token]) -> usize {
     (0..tokens.len())
         .filter(|&at| matches!(tokens[at].text.as_str(), "dynamic" | "dynamic_secret"))
         .filter(|&at| {
@@ -1015,7 +1020,7 @@ fn dynamic_reads(tokens: &[Token]) -> usize {
 }
 
 #[test]
-fn dynamic_read_ratchet() {
+fn dynamic_reference_ratchet() {
     let mut files = Vec::new();
     for (name, dir) in crate_dirs() {
         if name == "ocx_env" {
@@ -1034,11 +1039,11 @@ fn dynamic_read_ratchet() {
     }
     assert!(
         files.len() >= floor::ALL_CRATE_SOURCES,
-        "dynamic_read_ratchet walked {} file(s), under its floor of {}",
+        "dynamic_reference_ratchet walked {} file(s), under its floor of {}",
         files.len(),
         floor::ALL_CRATE_SOURCES
     );
-    let per_file = map_sources(&files, &|_: &Path, source: &Source| dynamic_reads(source.tokens()));
+    let per_file = map_sources(&files, &|_: &Path, source: &Source| dynamic_references(source.tokens()));
     let sites: Vec<String> = files
         .iter()
         .zip(&per_file)
@@ -1047,15 +1052,15 @@ fn dynamic_read_ratchet() {
         .collect();
     assert_eq!(
         per_file.iter().sum::<usize>(),
-        DYNAMIC_READS,
+        DYNAMIC_REFERENCES,
         "`ocx_env::dynamic` reads moved; read a declared variable through its static, or move \
-         `DYNAMIC_READS` with the new data-derived site:\n  {}",
+         `DYNAMIC_REFERENCES` with the new data-derived site:\n  {}",
         sites.join("\n  ")
     );
 }
 
 #[test]
-fn dynamic_read_scan_counts_calls_and_paths_only() {
+fn dynamic_reference_scan_counts_calls_and_paths_only() {
     let source = r#"
         fn f(name: &str) {
             let a = ocx_env::dynamic(name);
@@ -1067,7 +1072,7 @@ fn dynamic_read_scan_counts_calls_and_paths_only() {
         }
     "#;
     let tokens = flatten(source.parse().expect("fixture lexes"));
-    assert_eq!(dynamic_reads(&tokens), 3);
+    assert_eq!(dynamic_references(&tokens), 3);
 }
 
 /// The `std::env` functions `clippy.toml` disallows.

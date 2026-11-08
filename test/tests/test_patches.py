@@ -37,7 +37,7 @@ from uuid import uuid4
 
 import pytest
 
-from src import static_index
+from src import exec_state, static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import (
     assert_shim_dir_exists,
@@ -1835,17 +1835,60 @@ def test_no_patches_opt_out_honored_across_launcher_in_run(
     )
 
 
-@pytest.mark.parametrize("carrier", ["patches", "identities"])
-def test_launcher_identity_opt_out_respects_system_required(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str, carrier: str
-) -> None:
-    """A forwarded opt-out, whether `ocx exec`'s `OCX_PATCHES` list or an exported
-    identity's marker, suppresses a non-system-required companion but never a
-    system-required one.
+def _identity_state(records: list[dict[str, object]]) -> str:
+    """A crafted ``__OCX_ENV_STATE`` whose replay carries ``records`` as launch identities."""
+    state = exec_state.default_state()
+    state["replay"]["launch_identities"] = records
+    return exec_state.encode(state)
 
-    `system_required` needs a SYSTEM-scope config this harness cannot write, so this
-    drives `ocx launcher exec` directly with hand-set `OCX_PATCHES` and
-    `__OCX_LAUNCH_IDENTITIES`, keyed by the digest the package directory records.
+
+def _identity_record(digest: str, name: str, *, no_patches: bool) -> dict[str, object]:
+    record: dict[str, object] = {"digest": digest, "names": [name], "owner": "inherited"}
+    if no_patches:
+        record["no_patches"] = True
+    return record
+
+
+def _launcher_env_dump_under_state(
+    ocx: OcxRunner,
+    registry: str,
+    pkg_root: Path,
+    state: str,
+    *,
+    system_required: bool,
+    ambient_opt_out: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Drives ``ocx launcher exec`` directly with a hand-built patch tier and execution state."""
+    wire = json.dumps(
+        {
+            "registry": f"{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}",
+            "path_template": "{registry}/{repository}",
+            "required": True,
+            "system_required": system_required,
+            "no_patches": ambient_opt_out or [],
+        }
+    )
+    env = {**ocx.env, "OCX_NO_CONFIG": "1", "OCX_PATCHES": wire, "__OCX_ENV_STATE": state}
+    return subprocess.run(
+        [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_launcher_identity_opt_out_respects_system_required(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A package's recorded opt-out suppresses a non-system-required companion
+    at launcher re-entry but never a system-required one.
+
+    The opt-out travels in the received ``__OCX_ENV_STATE`` as the identity
+    record's ``no_patches`` mark, keyed by the digest the package directory
+    records. ``system_required`` needs a SYSTEM-scope config this harness cannot
+    write, so this drives ``ocx launcher exec`` directly with a hand-set
+    ``OCX_PATCHES`` and a crafted state.
     """
     companion_repo = _unique_repo("identity_sysreq_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -1858,46 +1901,56 @@ def test_launcher_identity_opt_out_respects_system_required(
     pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
     base_digest = (pkg_root / "digest").read_text().strip()
     assert base_digest.startswith("sha256:"), f"unexpected digest sidecar content: {base_digest!r}"
-    base_name = base_pkg.fq.rpartition(":")[0]
+    state = _identity_state([_identity_record(base_digest, base_pkg.fq, no_patches=True)])
 
-    def _launcher_env_dump(*, system_required: bool) -> subprocess.CompletedProcess[str]:
-        wire = json.dumps(
-            {
-                "registry": f"{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}",
-                "path_template": "{registry}/{repository}",
-                "required": True,
-                "system_required": system_required,
-                "no_patches": [base_name] if carrier == "patches" else [],
-            }
-        )
-        identity: dict[str, object] = {"names": [base_pkg.fq]}
-        if carrier == "identities":
-            identity["no_patches"] = True
-        env = {
-            **ocx.env,
-            "OCX_NO_CONFIG": "1",
-            "OCX_PATCHES": wire,
-            "__OCX_LAUNCH_IDENTITIES": json.dumps({base_digest: identity}),
-        }
-        return subprocess.run(
-            [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
-            capture_output=True,
-            text=True,
-            env=env, check=False,
-        )
-
-    non_enforced = _launcher_env_dump(system_required=False)
+    non_enforced = _launcher_env_dump_under_state(ocx, registry, pkg_root, state, system_required=False)
     assert non_enforced.returncode == 0, f"launcher exec must succeed; stderr: {non_enforced.stderr}"
     assert "IDENTITY_SYSREQ_CA" not in non_enforced.stdout, (
-        "an opt-out of the forwarded name must suppress a non-system-required companion; "
+        "an opt-out recorded for the package's digest must suppress a non-system-required companion; "
         f"got env dump:\n{non_enforced.stdout}"
     )
 
-    enforced = _launcher_env_dump(system_required=True)
+    enforced = _launcher_env_dump_under_state(ocx, registry, pkg_root, state, system_required=True)
     assert enforced.returncode == 0, f"launcher exec must succeed; stderr: {enforced.stderr}"
     assert "IDENTITY_SYSREQ_CA=identity-sysreq-ca-value" in enforced.stdout, (
-        "a system-required tier must overlay its companion even when the forwarded name "
+        "a system-required tier must overlay its companion even when the recorded package "
         f"is opted out; got env dump:\n{enforced.stdout}"
+    )
+
+
+def test_launcher_ignores_an_opt_out_recorded_for_another_digest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """An opt-out is keyed to the record's digest, not to a repository name.
+
+    An outer frame (or a forged state) can record the same repository under another
+    digest with ``no_patches``. That must not skip the patches of the package this
+    launcher composes, whose own record carries no opt-out.
+    """
+    companion_repo = _unique_repo("other_digest_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "OTHER_DIGEST_CA", "other-digest-ca-value")
+
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": "*", "packages": [companion_fq]}])
+    ocx.plain("package", "install", base_pkg.short)
+
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
+    base_digest = (pkg_root / "digest").read_text().strip()
+    other_digest = "sha256:" + "b" * 64
+    assert other_digest != base_digest
+    state = _identity_state(
+        [
+            _identity_record(base_digest, base_pkg.fq, no_patches=False),
+            _identity_record(other_digest, base_pkg.fq, no_patches=True),
+        ]
+    )
+
+    result = _launcher_env_dump_under_state(ocx, registry, pkg_root, state, system_required=False)
+    assert result.returncode == 0, f"launcher exec must succeed; stderr: {result.stderr}"
+    assert "OTHER_DIGEST_CA=other-digest-ca-value" in result.stdout, (
+        "an opt-out recorded for another digest must not skip this package's patches; "
+        f"got env dump:\n{result.stdout}"
     )
 
 
@@ -2042,83 +2095,41 @@ def test_global_no_patches_opt_out_suppresses_overlay_in_global_env(
     )
 
 
-def test_forwarded_opt_out_does_not_leak_into_unrelated_child_process(
+def test_ambient_patches_opt_out_list_is_inert_at_launcher_reentry(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
-    """F2 (Codex cross-model finding): a forwarded project `no-patches` opt-out
-    must NOT become ambient inherited process state.
+    """A ``no_patches`` list inside an ambient ``OCX_PATCHES`` opts nothing out.
 
-    Regression: `Context::try_init` grafted an inherited `OCX_PATCHES.no_patches`
-    onto ANY config-file-sourced `[patches]` tier, so the opt-out landed in
-    `manager.patches()` AND was re-forwarded verbatim over `OCX_PATCHES` into
-    every child process this ocx spawns — even for a resolution in an unrelated
-    project/base that never opted anything out. A project-local opt-out thus
-    became ambient inherited process state. The forwarded opt-out is meaningful
-    ONLY at the launcher re-entry (`ocx launcher exec`), which now decodes it
-    directly from the env at consumption time; it is never grafted onto the
-    manager tier and therefore never re-forwarded from a config-file tier.
-
-    Reproduction (single hop, deterministic): a site `config.toml` declares a
-    `[patches]` tier (the config-file tier the graft attached to). An ambient
-    `OCX_PATCHES` carries an UNRELATED opt-out key (a repository the base is
-    not). `ocx package exec <base> -- env` forwards this ocx's
-    `config_view.patches` into the child `env` process, which dumps its
-    environment. The re-forwarded `OCX_PATCHES` must carry an EMPTY `no_patches`
-    — the ambient opt-out must not leak through a config-file tier.
-
-    - Before the fix: child `OCX_PATCHES.no_patches` == [unrelated_key] (leak).
-    - After the fix:  child `OCX_PATCHES.no_patches` == []            (no leak).
+    The opt-out is a project's decision and travels only in the execution state,
+    keyed to a package digest. The ``OCX_PATCHES`` value is the user's own input,
+    handed to children unchanged, so a project-local opt-out never becomes ambient
+    process state: the list it carries names the base itself here, and the
+    launcher must still overlay the companion.
     """
-    # Config-file `[patches]` tier: the tier the graft attached the forwarded
-    # opt-out to. required=false so the absent global descriptor is tolerated
-    # (fail-open) during install-time discovery.
-    _write_config(ocx, registry, required=False)
+    companion_repo = _unique_repo("ambient_list_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "AMBIENT_LIST_CA", "ambient-list-ca-value")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+    base_pkg = _make_showenv_package(ocx, unique_repo, tmp_path)
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": "*", "packages": [companion_fq]}])
     ocx.plain("package", "install", base_pkg.short)
 
-    # An UNRELATED opt-out key: a repository the base is not, so it is only
-    # meaningful as leaked ambient state — never a legitimate opt-out here.
-    unrelated_key = f"{registry}/unrelated-{uuid4().hex[:8]}"
-    ambient_patches = json.dumps(
-        {
-            "registry": f"{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}",
-            "path_template": "{registry}/{repository}",
-            "required": False,
-            "system_required": False,
-            "no_patches": [unrelated_key],
-        }
-    )
-    env = {**ocx.env, "OCX_PATCHES": ambient_patches}
+    pkg_root = Path(ocx.json("package", "which", base_pkg.short)["paths"][base_pkg.short]["path"])
+    base_digest = (pkg_root / "digest").read_text().strip()
+    state = _identity_state([_identity_record(base_digest, base_pkg.fq, no_patches=False)])
 
-    # `ocx package exec <base> -- env` composes the base env (OCI-tier, no
-    # project opt-out) and forwards this ocx's resolution-affecting config —
-    # including `[patches]` — into the child `env`, which dumps its environment.
-    result = subprocess.run(
-        [str(ocx.binary), "package", "exec", base_pkg.short, "--", "env"],
-        capture_output=True,
-        text=True,
-        env=env, check=False,
+    result = _launcher_env_dump_under_state(
+        ocx,
+        registry,
+        pkg_root,
+        state,
+        system_required=False,
+        ambient_opt_out=[base_pkg.fq.rpartition(":")[0]],
     )
-    assert result.returncode == 0, (
-        f"ocx package exec must succeed; rc={result.returncode}\nstderr: {result.stderr}"
-    )
-
-    # Extract the re-forwarded OCX_PATCHES from the child env dump (a single line;
-    # json.dumps emits no embedded newlines).
-    forwarded_line = next(
-        (line for line in result.stdout.splitlines() if line.startswith("OCX_PATCHES=")),
-        None,
-    )
-    assert forwarded_line is not None, (
-        "the child process must receive a forwarded OCX_PATCHES (a `[patches]` tier "
-        f"is configured); env dump:\n{result.stdout}"
-    )
-    forwarded = json.loads(forwarded_line[len("OCX_PATCHES=") :])
-    assert unrelated_key not in forwarded.get("no_patches", []), (
-        "a forwarded project opt-out must NOT leak into unrelated child processes as "
-        "ambient inherited state; a config-file `[patches]` tier must re-forward an "
-        f"EMPTY no_patches. Got no_patches={forwarded.get('no_patches')!r}"
+    assert result.returncode == 0, f"launcher exec must succeed; stderr: {result.stderr}"
+    assert "AMBIENT_LIST_CA=ambient-list-ca-value" in result.stdout, (
+        "an opt-out list in an ambient OCX_PATCHES must not suppress the overlay; "
+        f"got env dump:\n{result.stdout}"
     )
 
 
@@ -4874,6 +4885,55 @@ def test_patch_test_forwards_child_exit_code(
     assert result.returncode == 7, (
         "the trailing command's exit code must be forwarded verbatim; "
         f"got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
+def test_patch_test_mode_flags_conflict(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``--isolate --clean`` is a usage error (64), refused before any descriptor or registry work."""
+    descriptor_path = tmp_path / "mode_conflict_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+
+    result = ocx.plain(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        "--isolate", "--clean",
+        "cmake:1.0",
+        "--",
+        "true",
+        check=False,
+    )
+
+    assert result.returncode == 64, (
+        f"--isolate with --clean must exit 64; got {result.returncode}\nstderr: {result.stderr}"
+    )
+    # An unknown flag also exits 64, so the message tells the conflict from a flag the command lacks.
+    assert "cannot be used with" in result.stderr, f"expected clap's conflict message; got: {result.stderr}"
+
+
+def test_patch_test_layers_onto_the_calling_environment(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """Without a mode flag ``patch test`` layers: a variable the caller exported reaches the trailing command."""
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
+
+    descriptor_path = tmp_path / "layering_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[])
+    _write_config(ocx, registry)
+
+    sentinel = f"ambient-{uuid4().hex[:8]}"
+    ocx.env["OCX_TEST_AMBIENT_FOO"] = sentinel
+    result = ocx.plain(
+        "patch", "test",
+        "--descriptor", str(descriptor_path),
+        base_pkg.short,
+        "--",
+        "sh", "-c", 'echo "${OCX_TEST_AMBIENT_FOO:-ABSENT}"',
+        check=False,
+    )
+
+    assert result.returncode == 0, f"expected exit 0; got {result.returncode}\nstderr: {result.stderr}"
+    assert sentinel in result.stdout, (
+        f"the default mode layers onto the calling environment; stdout: {result.stdout!r}"
     )
 
 

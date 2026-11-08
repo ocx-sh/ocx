@@ -320,8 +320,9 @@ impl EnvArgs {
 pub struct ExecArgs {
     /// Restrict to the named group(s)
     pub groups: Vec<String>,
-    /// Start with a clean environment containing only the package variables, instead of inheriting
-    /// the current shell environment
+    /// Remove every value ocx applied to the calling environment before composing
+    pub isolate: bool,
+    /// Start the child from an empty environment holding only the composed variables
     pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -338,8 +339,6 @@ pub struct ExecArgs {
     pub name: Option<String>,
     /// Add a package that `ocx.toml` does not pin to the composed environment
     pub with: Vec<String>,
-    /// Layer this project onto the active environment instead of replacing it
-    pub stack: bool,
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     pub consent: bool,
     /// Run without consenting to this project's shell activation
@@ -358,6 +357,7 @@ impl ExecArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
         argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.switch("isolate", self.isolate);
         argv.switch("clean", self.clean);
         argv.flag("env", &self.env, Presence::Optional, &[]);
         argv.flag("lazy-mode", &self.lazy_mode, Presence::Optional, &["never", "always"]);
@@ -366,7 +366,6 @@ impl ExecArgs {
         argv.flag("records-dir", &self.dir, Presence::Optional, &[]);
         argv.flag("records-name", &self.name, Presence::Optional, &[]);
         argv.flag("with", &self.with, Presence::Optional, &[]);
-        argv.switch("stack", self.stack);
         argv.switch("consent", self.consent);
         argv.switch("no-consent", self.no_consent);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
@@ -1150,8 +1149,9 @@ impl PackageEnvArgs {
 /// The arguments of `ocx package exec`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageExecArgs {
-    /// Start with a clean environment containing only the package variables, instead of inheriting
-    /// the current shell environment
+    /// Remove every value ocx applied to the calling environment before composing
+    pub isolate: bool,
+    /// Start the child from an empty environment holding only the composed variables
     pub clean: bool,
     /// Expose the package's full env, including its private (self-only) entries. Off by default:
     /// only public + interface entries are loaded (the consumer view). Generated launchers use `ocx
@@ -1188,6 +1188,7 @@ pub struct PackageExecArgs {
 impl PackageExecArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
+        argv.switch("isolate", self.isolate);
         argv.switch("clean", self.clean);
         argv.switch("self", self.self_view);
         argv.switch("rm", self.rm);
@@ -1609,8 +1610,9 @@ pub struct PackageTestArgs {
     /// Compose the package's private env surface (default: interface surface). Same semantics as
     /// `ocx exec --self` / `ocx env --self`
     pub self_view: bool,
-    /// Strip ambient parent env before composing - only `OCX_*` config and composed package vars
-    /// reach the child. Mirrors `ocx exec --clean`
+    /// Remove every value ocx applied to the calling environment before composing
+    pub isolate: bool,
+    /// Start the child from an empty environment holding only the composed variables
     pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -1644,6 +1646,7 @@ impl PackageTestArgs {
         argv.flag("output", &self.output, Presence::Optional, &[]);
         argv.switch("keep", self.keep);
         argv.switch("self", self.self_view);
+        argv.switch("isolate", self.isolate);
         argv.switch("clean", self.clean);
         argv.flag("env", &self.env, Presence::Optional, &[]);
         argv.flag("identifier", [&self.identifier], Presence::Required, &[]);
@@ -1832,6 +1835,10 @@ pub struct PatchTestArgs {
     /// Path to a Starlark test script to run in the composed environment. Mutually exclusive with a
     /// trailing command
     pub script: Option<PathBuf>,
+    /// Remove every value ocx applied to the calling environment before composing
+    pub isolate: bool,
+    /// Start the child from an empty environment holding only the composed variables
+    pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
     pub env: Vec<String>,
@@ -1850,6 +1857,8 @@ impl PatchTestArgs {
         argv.positional("base", [&self.base], Presence::Required, Hyphen::Refuse);
         argv.flag("registry", &self.registry, Presence::Optional, &[]);
         argv.flag("script", &self.script, Presence::Optional, &[]);
+        argv.switch("isolate", self.isolate);
+        argv.switch("clean", self.clean);
         argv.flag("env", &self.env, Presence::Optional, &[]);
         argv.operand("command", &self.command, Presence::Optional);
     }
@@ -2055,14 +2064,16 @@ pub struct ShellArgs {
     pub pinned: bool,
     /// Compose through the toolchain links instead of digest paths
     pub no_pinned: bool,
-    /// Add a package that `ocx.toml` does not pin to the composed environment
-    pub with: Vec<String>,
-    /// Layer this project onto the active environment instead of replacing it
-    pub stack: bool,
+    /// Remove every value ocx applied to the calling environment before composing
+    pub isolate: bool,
+    /// Start the child from an empty environment holding only the composed variables
+    pub clean: bool,
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     pub consent: bool,
     /// Run without consenting to this project's shell activation
     pub no_consent: bool,
+    /// Add a package that `ocx.toml` does not pin to the composed environment
+    pub with: Vec<String>,
 }
 
 impl ShellArgs {
@@ -2072,10 +2083,11 @@ impl ShellArgs {
         argv.flag("env", &self.env, Presence::Optional, &[]);
         argv.switch("pinned", self.pinned);
         argv.switch("no-pinned", self.no_pinned);
-        argv.flag("with", &self.with, Presence::Optional, &[]);
-        argv.switch("stack", self.stack);
+        argv.switch("isolate", self.isolate);
+        argv.switch("clean", self.clean);
         argv.switch("consent", self.consent);
         argv.switch("no-consent", self.no_consent);
+        argv.flag("with", &self.with, Presence::Optional, &[]);
     }
 }
 
@@ -2144,8 +2156,8 @@ impl ShellRevokeArgs {
 /// The arguments of `ocx shell state`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShellStateArgs {
-    /// Add the diagnostics behind the answer - the decoded ledger, the fingerprint watch set and
-    /// the hook ladder
+    /// Add the diagnostics behind the answer - the decoded state, the fingerprint watch set and the
+    /// hook ladder
     pub verbose: bool,
 }
 

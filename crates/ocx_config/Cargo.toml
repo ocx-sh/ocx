@@ -47,6 +47,8 @@ ocx_util.workspace = true
 # The environment registry every variable this crate reads is declared in.
 ocx_env.workspace = true
 
+# `__OCX_ENV_STATE`: the payload and header `h=` are base64url without padding.
+base64.workspace = true
 # `fetched_at` on the managed snapshot and the pause file's deadline are
 # timestamps, compared and rendered.
 chrono.workspace = true

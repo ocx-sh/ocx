@@ -403,7 +403,7 @@ pub fn manager_with_verify_flag(
     let Some(auto_verify) = manager.auto_verify().cloned() else {
         return manager;
     };
-    let opted_out = !verify.resolve(context.config_view().no_verify);
+    let opted_out = !verify.resolve(context.no_verify());
     manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
 }
 

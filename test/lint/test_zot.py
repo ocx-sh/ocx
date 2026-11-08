@@ -118,9 +118,19 @@ def alive(pid: int) -> bool:
             .rsplit(")", 1)[1]
             .split()[0]
         )
-    except FileNotFoundError:
+    # A process reaped between open and read fails the read with ESRCH, not ENOENT.
+    except (FileNotFoundError, ProcessLookupError):
         return False
     return state != "Z"  # a zombie is dead, only not yet reaped
+
+
+def test_a_process_reaped_mid_read_reads_as_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reaped(self: Path, *args: object, **kwargs: object) -> str:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(sys, "platform", "linux")  # the /proc reader is the POSIX branch
+    monkeypatch.setattr(Path, "read_text", reaped)
+    assert alive(1) is False
 
 
 def wait_until(condition, seconds: float = 10.0) -> bool:

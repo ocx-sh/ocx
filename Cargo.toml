@@ -328,8 +328,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
-    # SetEnvironmentVariableW — the shim deletes OCX_GLOBAL / OCX_PROJECT from
-    # its own block before spawning, which is how they are stripped from the
+    # SetEnvironmentVariableW — the shim deletes the withdrawn selector variables from its own
+    # block before spawning, which is how they are stripped from the
     # child (CreateProcessW runs with lpEnvironment = NULL). Already in the
     # pinned 0.61.2; no new crate.
     "Win32_System_Environment",

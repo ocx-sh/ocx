@@ -195,7 +195,7 @@ impl Shell {
             // are case-INsensitive, so on Linux `-ne` would delete a foreign `/opt/Bin` when asked for
             // `/opt/bin`. The three-argument form also parses on Windows PowerShell 5.1.
             Self::PowerShell => {
-                let value = escape::powershell_single_quoted(raw);
+                let value = escape::powershell_literal(raw);
                 // Each segment is compared after stripping one surrounding `"` pair (Windows quotes PATH
                 // segments with spaces; `split_paths` unquotes in process), and the operand gets the
                 // identical normalisation: normalising one side only never recognised the quoted value
@@ -204,7 +204,7 @@ impl Shell {
                 let comparison = path_element_comparison();
                 let normalisation = path_segment_normalisation();
                 format!(
-                    "$__ocx_p='{value}'; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(@($__ocx_p)+($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), ($__ocx_p{normalisation}), [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
+                    "$__ocx_p={value}; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(@($__ocx_p)+($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), ($__ocx_p{normalisation}), [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
                 )
             }
             // elvish: split the env string, filter empties + the value, prepend, re-join. The value is
@@ -319,10 +319,10 @@ impl Shell {
             // `[regex]::Escape`; value and separator are single-quoted literals (`''` escapes a quote).
             // `.Substring` needs no bounds guard: the working string always starts with the separator.
             Self::PowerShell => {
-                let value = escape::powershell_single_quoted(raw);
-                let separator = escape::powershell_single_quoted(raw_separator);
+                let value = escape::powershell_literal(raw);
+                let separator = escape::powershell_literal(raw_separator);
                 Some(format!(
-                    "$__ocx_v='{value}'; $__ocx_s='{separator}'; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length)+$__ocx_v; Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
+                    "$__ocx_v={value}; $__ocx_s={separator}; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length)+$__ocx_v; Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
                 ))
             }
             // elvish: `str:replace` mirrors Go's `strings.Replace` (literal, case-sensitive, all
@@ -444,11 +444,11 @@ impl Shell {
             // `C:\WINDOWS\system32`, one surrounding `"` pair stripped per segment. `$env:PATH` and
             // `$env:Path` are one variable on Windows and two elsewhere, so the authored key is emitted verbatim.
             Self::PowerShell if path_kind => {
-                let value = escape::powershell_single_quoted(raw);
+                let value = escape::powershell_literal(raw);
                 let comparison = path_element_comparison();
                 let normalisation = path_segment_normalisation();
                 format!(
-                    "$__ocx_p='{value}'; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), $__ocx_p, [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
+                    "$__ocx_p={value}; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), $__ocx_p, [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
                 )
             }
             // PowerShell, list-kind: ordinal (case-sensitive) .NET string methods, so no `-creplace` and
@@ -456,10 +456,10 @@ impl Shell {
             // beyond the `Max`: the working string always starts with the separator, and `Max` covers
             // everything between the wrappers having collapsed.
             Self::PowerShell => {
-                let value = escape::powershell_single_quoted(raw);
-                let separator = escape::powershell_single_quoted(raw_separator);
+                let value = escape::powershell_literal(raw);
+                let separator = escape::powershell_literal(raw_separator);
                 format!(
-                    "$__ocx_v='{value}'; $__ocx_s='{separator}'; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length,[Math]::Max(0,$__ocx_l.Length-2*$__ocx_s.Length)); Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
+                    "$__ocx_v={value}; $__ocx_s={separator}; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length,[Math]::Max(0,$__ocx_l.Length-2*$__ocx_s.Length)); Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
                 )
             }
             // elvish: `str:replace` mirrors Go's `strings.Replace` (literal, case-sensitive, all
@@ -536,10 +536,10 @@ impl Shell {
             Self::Ash | Self::Ksh | Self::Dash | Self::Bash | Self::Zsh => {
                 format!("export {key}='{}'", escape::posix_single_quoted(raw))
             }
-            Self::Fish => format!("set -x {key} \"{}\"", escape::fish_double_quoted(raw)),
+            Self::Fish => format!("set -gx {key} \"{}\"", escape::fish_double_quoted(raw)),
             // Single-quoted, quote doubled. `"` would interpolate `$var` and
             // treat backtick as the escape character.
-            Self::PowerShell => format!("$env:{key} = '{}'", escape::powershell_single_quoted(raw)),
+            Self::PowerShell => format!("$env:{key} = {}", escape::powershell_literal(raw)),
             Self::Batch => format!("SET \"{key}={}\"", escape::batch_set_value(raw)),
             // Single-quoted raw string. Elvish rejects `\$` and `` \` `` inside
             // a double-quoted string as *invalid escape sequences* — a parse
@@ -591,10 +591,7 @@ impl Shell {
             // latter emits an ErrorRecord, which a hardened profile's
             // `$ErrorActionPreference = 'Stop'` turns into a terminating error
             // in the middle of the prompt function.
-            Self::PowerShell => format!(
-                "[Console]::Error.WriteLine('{}')",
-                escape::powershell_single_quoted(text)
-            ),
+            Self::PowerShell => format!("[Console]::Error.WriteLine({})", escape::powershell_literal(text)),
             Self::Elvish => format!("echo '{}' >&2", escape::elvish_single_quoted(text)),
             Self::Nushell => format!("print --stderr \"{}\"", escape::nushell_plain_string(text)),
             Self::Batch => return None,
@@ -994,6 +991,25 @@ mod tests {
         }
     }
 
+    /// `Test-Path` globs `[`/`]` and rewrites `\` on Unix, so a PowerShell line holding a path must never use it.
+    #[test]
+    fn no_powershell_emission_uses_test_path() {
+        let dir = "/home/[x]/bin";
+        let lines = [
+            Shell::PowerShell.export_path("PATH", dir),
+            Shell::PowerShell.export_list("JAVA_OPTS", dir, " "),
+            Shell::PowerShell.remove_list_element("PATH", dir, None),
+            Shell::PowerShell.remove_list_element("JAVA_OPTS", dir, Some(" ")),
+            Shell::PowerShell.export_constant("HOME_X", dir),
+            Shell::PowerShell.unset("HOME_X"),
+            Shell::PowerShell.emit_message(dir),
+        ];
+        for line in lines {
+            let line = line.expect("PowerShell emits every one of these");
+            assert!(!line.contains("Test-Path"), "{line}");
+        }
+    }
+
     /// EC-CONST-010 — the PowerShell and elvish arms of the shared
     /// emit-and-restore escaper (see the block comment above
     /// `export_constant_posix_is_a_single_quoted_literal`).
@@ -1022,15 +1038,21 @@ mod tests {
         );
     }
 
-    /// PowerShell reads U+2018..U+201B as quote delimiters; an undoubled one closes the literal and the
-    /// payload runs as code. Elvish treats them as text, so there they stay single.
+    /// PowerShell reads U+2018..U+201B as quote delimiters; a raw one closes the literal and the payload
+    /// runs as code, so they ride as `[char]` escapes. Elvish treats them as text, so there they stay raw.
     #[test]
-    fn export_constant_powershell_doubles_typographic_quotes_and_elvish_does_not() {
+    fn export_constant_powershell_escapes_typographic_quotes_and_elvish_does_not() {
         for c in ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
             let value = format!("x{c}; Remove-Item -Recurse /; ${c}");
             assert_eq!(
                 Shell::PowerShell.export_constant("K", &value).as_deref(),
-                Some(format!("$env:K = 'x{c}{c}; Remove-Item -Recurse /; ${c}{c}'").as_str())
+                Some(
+                    format!(
+                        "$env:K = ('x'+[char]0x{cp:04X}+'; Remove-Item -Recurse /; $'+[char]0x{cp:04X})",
+                        cp = c as u32
+                    )
+                    .as_str()
+                )
             );
             assert_eq!(
                 Shell::Elvish.export_constant("K", &value).as_deref(),
@@ -1139,6 +1161,15 @@ mod tests {
     }
 
     // ── Per-shell unset syntax matrix (Round 2 W4) ───────────────────
+
+    #[test]
+    fn fish_export_constant_is_global_so_a_hook_function_cannot_scope_it_away() {
+        // Sourced inside the prompt-hook function, `set -x` would create a function-local variable.
+        assert_eq!(
+            Shell::Fish.export_constant("FOO", "bar"),
+            Some("set -gx FOO \"bar\"".into())
+        );
+    }
 
     #[test]
     fn unset_per_shell_syntax() {
@@ -1918,7 +1949,7 @@ mod tests {
                 ),
                 (
                     &["pwsh", "-NoProfile", "-Command"],
-                    format!("[Console]::Out.Write('{}')", escape::powershell_single_quoted(value)),
+                    format!("[Console]::Out.Write({})", escape::powershell_literal(value)),
                 ),
             ];
             for (argv, script) in cases {
@@ -2372,8 +2403,8 @@ mod tests {
         // match.
         for (existing, value, separator) in LIST_CASES {
             let line = Shell::PowerShell.export_list("OPTS", value, separator).unwrap();
-            let seed = escape::powershell_single_quoted(existing);
-            let script = format!("$env:OPTS='{seed}'; {line}; {line}; [Console]::Out.Write($env:OPTS)");
+            let seed = escape::powershell_literal(existing);
+            let script = format!("$env:OPTS={seed}; {line}; {line}; [Console]::Out.Write($env:OPTS)");
             if let Some(out) = run_script(&["pwsh", "-NoProfile", "-Command"], &script) {
                 assert_eq!(
                     out,
@@ -2789,7 +2820,7 @@ mod tests {
                         escape::posix_single_quoted(hostile)
                     }
                     Shell::Fish => escape::fish_double_quoted(hostile),
-                    Shell::PowerShell => escape::powershell_single_quoted(hostile),
+                    Shell::PowerShell => escape::powershell_literal(hostile),
                     Shell::Elvish => escape::elvish_single_quoted(hostile),
                     Shell::Nushell => escape::nushell_plain_string(hostile),
                     Shell::Batch => unreachable!("batch answers None and is filtered out"),
@@ -2812,6 +2843,28 @@ mod tests {
                     shell == Shell::Fish && hostile.contains('$'),
                     "{shell}: only fish backslash-escapes a `$` separator: {as_separator}"
                 );
+            }
+        }
+    }
+
+    /// Every PowerShell exporter emits ASCII only: Windows PowerShell 5.1 reads a BOM-less script in the
+    /// ANSI code page, so a literal CJK, typographic-quote or astral char arrives garbled.
+    #[test]
+    fn powershell_exporters_emit_ascii_for_non_ascii_input() {
+        for hostile in ["\u{4E2D}\u{6587}/bin", "a\u{2019}b", "x\u{1F600}y"] {
+            let p = Shell::PowerShell;
+            let lines = [
+                p.export_path("PATH", hostile).unwrap_or_default(),
+                p.export_list("OPTS", hostile, "\u{2019}").unwrap_or_default(),
+                p.export_constant("K", hostile).unwrap_or_default(),
+                p.remove_list_element("PATH", hostile, None).unwrap_or_default(),
+                p.remove_list_element("OPTS", hostile, Some("\u{4E2D}"))
+                    .unwrap_or_default(),
+                p.emit_message(hostile).unwrap_or_default(),
+            ];
+            for line in lines {
+                assert!(line.is_ascii(), "{hostile:?} leaked a non-ASCII char: {line}");
+                assert!(!line.is_empty());
             }
         }
     }
@@ -2975,7 +3028,7 @@ mod tests {
                 format!("export {key}='{}'", escape::posix_single_quoted(value))
             }
             Shell::Fish => format!("set -gx {key} \"{}\"", escape::fish_double_quoted(value)),
-            Shell::PowerShell => format!("$env:{key}='{}'", escape::powershell_single_quoted(value)),
+            Shell::PowerShell => format!("$env:{key}={}", escape::powershell_literal(value)),
             // Elvish raw strings are single-quoted with `'` doubled — the pwsh
             // escaper. The double-quoted form would reject `\$` / `` \` `` as an
             // invalid escape sequence, which is a parse error rather than a

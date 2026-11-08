@@ -297,9 +297,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::record::RecordsOptions;
+    use crate::record::{RecordedConfig, RecordsOptions};
     use crate::tasks::resolve::AdmittedClaims;
-    use ocx_config::env::OcxConfigView;
     use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::install_info::InstallInfo;
     use ocx_package::resolved_package::ResolvedPackage;
@@ -315,7 +314,7 @@ mod tests {
         store_root: PathBuf,
         shim_root: PathBuf,
         argv: Vec<String>,
-        config: OcxConfigView,
+        config: RecordedConfig,
         auto_installed: Vec<PackageRef>,
     }
 
@@ -341,7 +340,7 @@ mod tests {
                 store_root: PathBuf::from("/store"),
                 shim_root: PathBuf::from("/shims"),
                 argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
-                config: OcxConfigView::new("/opt/ocx/bin/ocx"),
+                config: RecordedConfig::new("/opt/ocx/bin/ocx"),
                 auto_installed: Vec::new(),
             }
         }
@@ -733,6 +732,99 @@ mod firewall_tests {
     /// with whitespace removed so a rustfmt-wrapped attribute still counts.
     const EXPECTATION: &str = "#[expect(clippy::disallowed_types";
 
+    /// The `exec_env` entry points that build a child's environment. Matched as `exec_env::<name>(` paths, or as
+    /// a bare `<name>(` in a file that imports the name from `exec_env`; a method call of the same
+    /// name is a different call and is not counted.
+    const PROJECTION_ENTRY_POINTS: &[&str] = &["project", "apply_child_env"];
+
+    /// Every file that calls a projection entry point, with how many calls it makes. A call in a file not listed,
+    /// or a different count, reds: a spawn path that stops projecting is a spawn path that leaks the parent's
+    /// environment.
+    const PROJECTED: &[(&str, usize)] = &[
+        ("ocx_cli/src/app/plugin_dispatch.rs", 1),
+        ("ocx_cli/src/command/exec.rs", 1),
+        ("ocx_cli/src/command/launcher/exec.rs", 1),
+        ("ocx_cli/src/command/launcher/shim.rs", 1),
+        ("ocx_cli/src/command/package_test.rs", 1),
+        ("ocx_cli/src/command/patch_test.rs", 1),
+        ("ocx_cli/src/command/toolchain_exec.rs", 1),
+        // The self-update hand-off; the version probe in the same file is exempt below.
+        ("ocx_package_manager/src/tasks/update_check.rs", 1),
+    ];
+
+    /// Files carrying more [`EXPECTATION`]s than projection calls, with why none of the extra spawns needs one.
+    /// An entry whose file no longer carries more expectations than calls reds.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "ocx_announce/src/forge/git_command.rs",
+            "the operator's own `git` on `PATH`, not a package tool",
+        ),
+        (
+            "ocx_cli/src/command/self_group/activate.rs",
+            "test-only live-shell harness",
+        ),
+        (
+            "ocx_cli/tests/linux_self_contained.rs",
+            "integration test running `ldd` against the built binary",
+        ),
+        (
+            "ocx_cli/tests/macos_self_contained.rs",
+            "integration test running `otool` against the built binary",
+        ),
+        (
+            "ocx_oci/src/host_capabilities.rs",
+            "libc detection runs a discovered loader",
+        ),
+        ("ocx_package/src/bin_scan.rs", "test-only `cc` building ELF fixtures"),
+        ("ocx_package/src/libc_lint.rs", "test-only `cc` building ELF fixtures"),
+        (
+            "ocx_package_manager/src/launcher/body.rs",
+            "test-only `/bin/sh` harness over the emitted launcher body",
+        ),
+        (
+            "ocx_package_manager/src/tasks/update_check.rs",
+            "the installed-version probe is hermetic (`env_clear` plus the resolved package env, nothing inherited)",
+        ),
+        (
+            "ocx_schema/tests/schema_outputs.rs",
+            "integration test running the built schema generator",
+        ),
+        (
+            "ocx_script/src/ocx_module.rs",
+            "`ocx.run` spawns on the env the `package test` projection handed in, with reserved keys refused",
+        ),
+        (
+            "ocx_sdkgen/tests/conformance.rs",
+            "the generated SDK spawns the caller's `ocx`, never runs inside ocx",
+        ),
+        (
+            "ocx_sdkgen/tests/sdk_rust.rs",
+            "the generated SDK spawns the caller's `ocx`, never runs inside ocx",
+        ),
+        (
+            "ocx_sdkgen/tests/spawn_conformance.rs",
+            "the generated SDK spawns the caller's `ocx`, never runs inside ocx",
+        ),
+        (
+            "ocx_setup/src/profiles.rs",
+            "shell detection asks a candidate shell what it is",
+        ),
+        (
+            "ocx_setup/src/session_path/macos.rs",
+            "`launchctl` and a test-only merge script",
+        ),
+        ("ocx_shell/src/shell.rs", "test-only live-shell harness"),
+        ("ocx_shell/src/shell/hook.rs", "test-only live-shell harness"),
+        (
+            "ocx_store/src/codesign.rs",
+            "fixed macOS system utilities (`xattr`, `codesign`) during extraction",
+        ),
+        (
+            "ocx_test_support/tests/workspace_structure.rs",
+            "structural guards running `cargo metadata` and `cargo tree`",
+        ),
+    ];
+
     /// Files the unlinted roots must yield: the three templates and the nine golden files today. A reader
     /// that stopped early would otherwise pass an empty tree.
     const SCAN_FLOOR: usize = 12;
@@ -846,6 +938,116 @@ mod firewall_tests {
         found
     }
 
+    /// `content` with comment lines dropped, so a doc example or a quoted call never counts.
+    fn code_lines(content: &str) -> impl Iterator<Item = &str> {
+        content.lines().filter(|line| !line.trim_start().starts_with("//"))
+    }
+
+    /// Whether `content` imports `name` straight from `exec_env`, as `exec_env::{.., name, ..}` or
+    /// `exec_env::name;`, so a bare `name(` call in the file is the projection entry point.
+    fn imports_from_exec_env(content: &str, name: &str) -> bool {
+        let code: String = code_lines(content)
+            .flat_map(str::chars)
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("exec_env::") {
+            rest = &rest[at + "exec_env::".len()..];
+            if let Some(braced) = rest.strip_prefix('{') {
+                let names = braced.split('}').next().unwrap_or_default();
+                if names.split(',').any(|item| item == name) {
+                    return true;
+                }
+            } else if rest.strip_prefix(name).is_some_and(|after| after.starts_with(';')) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// How many projection entry points `content` calls, comments excluded.
+    fn projection_calls(content: &str) -> usize {
+        PROJECTION_ENTRY_POINTS
+            .iter()
+            .map(|name| {
+                let qualified = format!("exec_env::{name}(");
+                let bare = format!("{name}(");
+                let imported = imports_from_exec_env(content, name);
+                code_lines(content)
+                    .map(|line| {
+                        let mut count = line.matches(qualified.as_str()).count();
+                        if imported {
+                            count += line
+                                .match_indices(bare.as_str())
+                                .filter(|(at, _)| {
+                                    let before = &line[..*at];
+                                    !before.ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | ':' | '.'))
+                                        && !before.trim_end().ends_with("fn")
+                                })
+                                .count();
+                        }
+                        count
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// How many [`EXPECTATION`]s `content` carries outside comments, whitespace removed like [`claims`].
+    fn expectations(content: &str) -> usize {
+        let code: String = code_lines(content)
+            .flat_map(str::chars)
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        code.matches(EXPECTATION).count()
+    }
+
+    /// The files whose projection calls or expectations disagree with `projected` and `exempt`: a call count that
+    /// is not the pinned one, a file carrying more expectations than calls without an exemption, an exemption
+    /// that no longer applies, and a pinned file that is gone.
+    fn projection_disagreements(
+        sources: &[(String, String)],
+        projected: &[(&str, usize)],
+        exempt: &[(&str, &str)],
+    ) -> Vec<String> {
+        let mut found = Vec::new();
+        for (path, content) in sources {
+            if LAUNCH_SEAM.iter().any(|seam| path.starts_with(seam)) {
+                continue;
+            }
+            let calls = projection_calls(content);
+            let pinned = projected
+                .iter()
+                .find(|(file, _)| file == path)
+                .map_or(0, |(_, count)| *count);
+            let carried = expectations(content);
+            let is_exempt = exempt.iter().any(|(file, _)| file == path);
+            if calls != pinned {
+                found.push(format!("{path}: {calls} projection call(s), pinned {pinned}"));
+            }
+            if carried > calls && !is_exempt {
+                found.push(format!(
+                    "{path}: {carried} spawn expectation(s) against {calls} projection call(s), not exempt"
+                ));
+            }
+            if is_exempt && carried <= calls {
+                found.push(format!("{path}: exempt, but every spawn expectation is projected"));
+            }
+        }
+        for path in projected
+            .iter()
+            .map(|(path, _)| path)
+            .chain(exempt.iter().map(|(path, _)| path))
+        {
+            if !sources.iter().any(|(source, _)| source == path) {
+                found.push(format!("{path}: listed, but the file is gone"));
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+
     #[test]
     fn no_process_spawn_outside_launch() {
         let workspace = workspace_sources();
@@ -953,5 +1155,85 @@ mod firewall_tests {
             unexpected_spawners(&sources),
             ["ocx_a/src/allowed.rs", "ocx_a/src/commented.rs", "ocx_a/src/stray.rs"]
         );
+    }
+
+    /// Every child environment is built by the projection: each file that calls it is pinned to its call count,
+    /// and each file that spawns under an expectation either projects or says why it need not. A renamed call,
+    /// a dropped one or a new unprojected spawn site turns this red.
+    #[test]
+    fn every_child_spawn_is_pinned_to_the_projection() {
+        let workspace = workspace_sources();
+        assert!(
+            workspace.len() >= WORKSPACE_FLOOR,
+            "the scan read {} files under crates/, below the floor of {WORKSPACE_FLOOR}",
+            workspace.len()
+        );
+        let calling = workspace
+            .iter()
+            .filter(|(path, _)| !LAUNCH_SEAM.iter().any(|seam| path.starts_with(seam)))
+            .filter(|(_, content)| projection_calls(content) > 0)
+            .count();
+        assert_eq!(
+            calling,
+            PROJECTED.len(),
+            "the scan found {calling} files calling a projection entry point, the table pins {}",
+            PROJECTED.len()
+        );
+        let found = projection_disagreements(&workspace, PROJECTED, EXEMPT);
+        assert!(
+            found.is_empty(),
+            "a child spawn path disagrees with the projection table in `launch.rs` `firewall_tests`:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// The detector goes red on a renamed call, a changed count, an unlisted caller, an unexempt expectation, a
+    /// stale exemption and a vanished file, and stays quiet on prose, a trait-method call and a `fn` of the
+    /// same name.
+    #[test]
+    fn the_projection_scan_goes_red_on_a_planted_change() {
+        let expectation = "#[expect(clippy::disallowed_types, reason = \"why\")]\nfn spawn() {}\n";
+        let qualified = format!("{expectation}fn go() {{ exec_env::project(&a, &b); }}");
+        let imported = format!("{expectation}use pm::exec_env::{{ExecMode, project}};\nfn go() {{ project(&a, &b); }}");
+        let projected = [("a.rs", 1)];
+        let sources = |a: &str| [("a.rs".to_owned(), a.to_owned())];
+
+        assert!(projection_disagreements(&sources(&qualified), &projected, &[]).is_empty());
+        assert!(projection_disagreements(&sources(&imported), &projected, &[]).is_empty());
+
+        let renamed = qualified.replace("project(", "projected(");
+        assert_eq!(
+            projection_disagreements(&sources(&renamed), &projected, &[]),
+            [
+                "a.rs: 0 projection call(s), pinned 1",
+                "a.rs: 1 spawn expectation(s) against 0 projection call(s), not exempt",
+            ]
+        );
+        let doubled = format!("{qualified}\nfn again() {{ exec_env::apply_child_env(&a, &b); }}");
+        assert_eq!(
+            projection_disagreements(&sources(&doubled), &projected, &[]),
+            ["a.rs: 2 projection call(s), pinned 1"]
+        );
+        assert_eq!(
+            projection_disagreements(&sources(&qualified), &[], &[]),
+            ["a.rs: 1 projection call(s), pinned 0"]
+        );
+        assert_eq!(
+            projection_disagreements(&sources(&qualified), &projected, &[("a.rs", "why")]),
+            ["a.rs: exempt, but every spawn expectation is projected"]
+        );
+        assert_eq!(
+            projection_disagreements(&[], &projected, &[("b.rs", "why")]),
+            [
+                "a.rs: listed, but the file is gone",
+                "b.rs: listed, but the file is gone"
+            ]
+        );
+
+        let quiet = "// exec_env::project(&a, &b)\nuse pm::exec_env::{ExecMode};\nfn project() {}\nfn go() { env.apply_child_env(x, y); project(); }";
+        assert_eq!(projection_calls(quiet), 0);
+        let local_fn =
+            "use pm::exec_env::{project};\nfn project(x: u8) {}\nfn go() { p.project(x); self::project(1); }";
+        assert_eq!(projection_calls(local_fn), 0);
     }
 }

@@ -199,7 +199,6 @@ Input data is malformed or fails verification.
 | `extra_ca_certs_not_utf8` | The extra CA bundle is not UTF-8 and cannot be persisted |
 | `extra_ca_file_invalid` | The extra CA bundle file holds no usable certificate |
 | `feature_mismatch` | The package needs a platform feature this host lacks |
-| `forwarded_env_invalid` | The OCX_ENV value a parent ocx forwarded is malformed |
 | `index_dispatch_digest_mismatch` | A dispatch object does not hash to the digest its root claims |
 | `index_serialization` | An index document could not be serialized |
 | `integration_namespace_invalid` | An integrations namespace is invalid |
@@ -482,7 +481,6 @@ Configuration is invalid or incomplete.
 | `invalid_managed_config_source` | The managed-config source is not a valid OCI identifier |
 | `invalid_toolchain_name_charset` | A group or binding name carries a character toolchain paths refuse |
 | `invalid_trust_policy` | The payload declares an unusable trust-policy entry |
-| `launch_identities_invalid` | The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed |
 | `lock_declared_mismatch` | ocx.lock records a declared spelling its version does not allow |
 | `lock_missing` | ocx.lock does not exist |
 | `lock_repository_not_bare` | ocx.lock records a repository carrying a tag or digest |

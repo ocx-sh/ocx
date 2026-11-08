@@ -101,7 +101,7 @@ tasks:
       text-and-`--version` check: `bazel --version` starts no server and loads
       no package.
     dir: '{{.ROOT_DIR}}'
-    cmd: ocx exec bazel -- python3 scripts/bazel_pin_check.py --check
+    cmd: ocx exec bazel python -- python3 scripts/bazel_pin_check.py --check
 
   build:nobuild:
     desc: Load and analyse every target without building — the loading-clean graph the drift and tag gates read
@@ -191,7 +191,7 @@ tasks:
       # green while the ignore set degrades. Here rather than beside the drift
       # and tag gates because `.bazelignore` is what decides the `//...` this
       # step just analysed, and it needs a graph that loaded to query at all.
-      - ocx exec bazel -- python3 scripts/bazel_ignore_check.py
+      - ocx exec bazel python -- python3 scripts/bazel_ignore_check.py
       # Per-target analysis timings to otel.ocx.sh; a silent no-op unless this
       # machine is configured for it (taskfiles/telemetry.taskfile.yml). CI
       # runs the same item rather than a step of its own — the BEP dies with
@@ -214,7 +214,7 @@ tasks:
       spelling of either is a thing to forget.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - ocx exec bazel -- python3 scripts/bazel_build_drift.py
+      - ocx exec bazel python -- python3 scripts/bazel_build_drift.py
 
   tag:guard:
     desc: Every `no-sandbox` target carries the cache-excluding tag its kind was measured to need; every `rust_binary` carries `no-remote-cache` or `stamp = 0`
@@ -238,7 +238,7 @@ tasks:
       its tests red each kind against the other's tag.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - ocx exec bazel -- python3 scripts/bazel_tag_guard.py
+      - ocx exec bazel python -- python3 scripts/bazel_tag_guard.py
 
   lint:
     desc: Buildifier over every `BUILD.bazel` and `.bzl` — format diff plus lint findings, decided on the exit code

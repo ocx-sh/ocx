@@ -898,8 +898,8 @@ def test_managed_payload_pem_this_host_cannot_load_is_refused_at_adoption(
 def test_env_var_is_not_forwarded_across_exec_clean(
     ocx: OcxRunner, tmp_path: Path, minted_pki: MintedPki
 ) -> None:
-    """D-8: `OCX_EXTRA_CA_CERTS` is deliberately absent from the forwarded
-    `OCX_*` set (`apply_ocx_config`), so a `--clean` child does not see it —
+    """D-8: `OCX_EXTRA_CA_CERTS` is deliberately not part of the policy
+    a `--clean` child receives, so it does not see it —
     a CA is public material a child re-reads from disk for itself, and an
     inline PEM would exceed Windows' per-variable limit. The inherited
     (non-`--clean`) form is the positive control: the same variable, the

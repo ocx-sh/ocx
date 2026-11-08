@@ -602,6 +602,10 @@
         "secret": {
           "type": "boolean"
         },
+        "propagation": {
+          "description": "How the variable reaches a child process: `user_input`, `secret_input`, `setup_written`, `state`,\n`binary_pin`, `hook_local` or `credential`.",
+          "type": "string"
+        },
         "on_invalid": {
           "description": "What a value outside the grammar does: `default` falls back, `error` refuses.",
           "type": "string"
@@ -613,6 +617,7 @@
         "visibility",
         "summary",
         "secret",
+        "propagation",
         "on_invalid"
       ]
     },
@@ -627,7 +632,7 @@
           "type": "string"
         },
         "change": {
-          "description": "`rename`, `value_rename` or `polarity`.",
+          "description": "`rename`, `value_rename`, `polarity` or `withdrawn`.",
           "type": "string"
         },
         "status": {

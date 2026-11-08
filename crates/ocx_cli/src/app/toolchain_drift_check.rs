@@ -23,7 +23,11 @@ use super::{Context, background_check, project_context};
 /// Never fails the command: every failure logs at debug and yields no row.
 pub(crate) async fn check_for_toolchain_drift(ctx: &Context) -> Vec<NoticeRow> {
     let mut rows = Vec::new();
-    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(
+        &ocx_env::OCX_NO_UPDATE_CHECK,
+        ctx.env_slot().0.policy.no_update_check,
+        ctx.is_offline(),
+    ) {
         log::debug!("Toolchain drift check skipped: {reason}");
         return rows;
     }
@@ -34,7 +38,7 @@ pub(crate) async fn check_for_toolchain_drift(ctx: &Context) -> Vec<NoticeRow> {
         return rows;
     }
     // A frozen run forbids discovering a new tag mapping.
-    if ctx.config_view().frozen {
+    if ctx.frozen() {
         log::debug!("Toolchain drift check skipped: --frozen");
         return rows;
     }

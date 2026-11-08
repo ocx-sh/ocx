@@ -969,11 +969,6 @@
           "exit_code": 1
         },
         {
-          "value": "forwarded_env_invalid",
-          "description": "The OCX_ENV value a parent ocx forwarded is malformed",
-          "exit_code": 65
-        },
-        {
           "value": "frozen_refused",
           "description": "The verb discovers new digests, which frozen mode forbids",
           "exit_code": 81
@@ -1282,11 +1277,6 @@
           "value": "key_unreadable",
           "description": "A signing or verification key could not be read from its location",
           "exit_code": 74
-        },
-        {
-          "value": "launch_identities_invalid",
-          "description": "The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed",
-          "exit_code": 78
         },
         {
           "value": "launch_spawn_failed",

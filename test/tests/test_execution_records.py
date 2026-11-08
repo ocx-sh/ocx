@@ -415,38 +415,52 @@ def test_exec_frame_emits_record(
     )
 
 
-def test_exec_with_and_stack_are_recorded_beside_the_bindings(
+def test_exec_with_is_recorded_beside_the_bindings(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ) -> None:
-    """A `--with` package is listed in `scope.with` and carries no binding; `scope.stack` echoes `--stack`."""
+    """A `--with` package is listed in `scope.with` and carries no binding; `scope` has no `stack` key."""
     project = _project_with_tool(ocx, tmp_path, published_package)
     extra_repo = f"t_{uuid4().hex[:8]}_recwith"
     make_package(ocx, extra_repo, "1.0.0", tmp_path, cascade=False, bins=["extra"])
     extra = f"{ocx.registry}/{extra_repo}:1.0.0"
 
-    runs = {}
-    for label, flags in (("plain", ()), ("stacked", ("--stack",))):
-        sink = _sink(tmp_path, f"with-{label}")
-        result = _run_in(
-            ocx, project, "exec", "--records-dir", str(sink), "--with", extra, *flags, "--", "hello"
-        )
-        assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
-        runs[label] = _one_record(sink)
+    sink = _sink(tmp_path, "with")
+    result = _run_in(ocx, project, "exec", "--records-dir", str(sink), "--with", extra, "--", "hello")
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    record = _one_record(sink)
 
-    for label, record in runs.items():
-        assert record["scope"]["with"] == [extra], f"{label}: scope.with must echo --with as typed: {record['scope']}"
-        bound = {
-            entry["annotations"]["sh.ocx.binding"]
-            for entry in record["packages"]
-            if "sh.ocx.binding" in entry.get("annotations", {})
-        }
-        assert bound == {published_package.repo}, (
-            f"{label}: only the ocx.toml tool carries a binding, the `--with` package carries none: {bound}"
-        )
-        roots = {entry["name"] for entry in _entries_with_role(record, "root")}
-        assert {published_package.repo, extra_repo} <= roots, f"{label}: both roots are recorded: {roots}"
-    assert not runs["plain"]["scope"].get("stack", False), "`stack` is omitted when `--stack` is not given"
-    assert runs["stacked"]["scope"]["stack"] is True
+    assert record["scope"]["with"] == [extra], f"scope.with must echo --with as typed: {record['scope']}"
+    bound = {
+        entry["annotations"]["sh.ocx.binding"]
+        for entry in record["packages"]
+        if "sh.ocx.binding" in entry.get("annotations", {})
+    }
+    assert bound == {published_package.repo}, (
+        f"only the ocx.toml tool carries a binding, the `--with` package carries none: {bound}"
+    )
+    roots = {entry["name"] for entry in _entries_with_role(record, "root")}
+    assert {published_package.repo, extra_repo} <= roots, f"both roots are recorded: {roots}"
+    assert "stack" not in record["scope"], f"`--stack` is gone, so no record states it: {record['scope']}"
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [((), "layer"), (("--isolate",), "isolate"), (("--clean",), "clean")],
+)
+def test_exec_records_the_env_mode_it_ran_in(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path, flags: tuple[str, ...], expected: str
+) -> None:
+    """`envMode` names the mode per run; `scope.cleanEnv` keeps its meaning."""
+    project = _project_with_tool(ocx, tmp_path, published_package)
+    sink = _sink(tmp_path, f"mode-{expected}")
+
+    result = _run_in(ocx, project, "exec", "--records-dir", str(sink), *flags, "--", "hello")
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    record = _one_record(sink)
+    assert record["envMode"] == expected, f"`ocx exec {' '.join(flags)}` records envMode={expected!r}; got {record}"
+    assert record["scope"]["cleanEnv"] is (expected == "clean"), record["scope"]
+    assert "stack" not in record["scope"], record["scope"]
 
 
 def test_package_exec_frame_emits_record(
@@ -1622,8 +1636,8 @@ def test_records_dir_flag_alone_reaches_the_launcher_re_entry(
     flag forwarding deleted entirely.
 
     The config and environment tiers a child re-reads for itself. The CLI tier is
-    per-invocation and ``apply_ocx_config`` is set-**or-remove**, so without the
-    forward the inner frame records somewhere else — or, more likely, nowhere —
+    per-invocation and the projection sets or removes each policy key, so without
+    the recorded policy the inner frame records somewhere else — or, more likely, nowhere —
     and the entrypoint pair silently loses the leaf binary, which is the one
     field the inner record exists to carry.
     """

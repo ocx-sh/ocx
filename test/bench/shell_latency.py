@@ -449,6 +449,7 @@ for _candidate in (_TEST_DIR, _TEST_DIR / "src"):
     if str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
+import exec_state
 import shell_matrix as matrix
 
 # ---------------------------------------------------------------------------
@@ -662,6 +663,16 @@ STARTUP_WORK_FLOOR_MS = 0.25
 #: 0.303–0.557 and 1.000–1.276 over ten runs at 15. The marginal sample has
 #: stopped buying anything by 15.
 SAMPLES = 15
+
+#: ADR exec_env_model, "Latency": decoding a state at ``MAX_ENCODED`` adds at most this much to a hook
+#: prompt. The gate reads it as the min-of-N difference between the same reconcile over a cap-sized
+#: state and over a minimal one, the estimator every budget in this file uses; the p99 of both series is
+#: recorded beside it, because a 15-sample p99 is the maximum and a maximum measures the runner.
+CAP_DECODE_BUDGET_MS = 1.0
+
+#: How much of ``MAX_ENCODED`` the cap-sized fixture must fill, so a fixture that quietly shrank cannot
+#: pass for the cap.
+CAP_FILL_MIN = 0.9
 
 #: Quiet prompts fired after convergence. Any exec here is a broken
 #: short-circuit, so more is only more evidence. They are pure shell builtins:
@@ -1476,6 +1487,49 @@ def _consent_gates(consent: Mapping[str, float]) -> list[Gate]:
     ]
 
 
+def _p99(samples: Sequence[float]) -> float:
+    """Nearest-rank 99th percentile; with fewer than 100 samples that is the maximum."""
+    ordered = sorted(samples)
+    return ordered[max(0, -(-99 * len(ordered) // 100) - 1)]
+
+
+def _cap_decode_gates(cap: Mapping[str, Any], spread: float) -> list[Gate]:
+    """The decode budget with its two controls: the fixture is cap-sized, and it is read rather than stood down."""
+    fill = float(cap["cap_bytes"])
+    floor_bytes = CAP_FILL_MIN * float(cap["max_bytes"])
+    read = float(cap["read"])
+    delta = min(cap["cap_samples"]) - min(cap["small_samples"])
+    return [
+        Gate(
+            name="the cap-sized fixture fills the cap",
+            observed=fill,
+            budget=floor_bytes,
+            passed=fill >= floor_bytes,
+            unit="bytes",
+            note=""
+            if fill >= floor_bytes
+            else f"the fixture is {fill:.0f} bytes, under the {floor_bytes:.0f} that make it a cap-sized state",
+        ),
+        Gate(
+            name="the cap-sized state is read, not stood down",
+            observed=read,
+            budget=1.0,
+            passed=read == 1.0,
+            unit="reads",
+            note=""
+            if read == 1.0
+            else "the hook stood down on the fixture, so the series measures a skipped hook and the delta is free",
+        ),
+        _budget_gate(
+            name="decoding a cap-sized state <= a minimal state + delta",
+            observed=delta,
+            budget=CAP_DECODE_BUDGET_MS,
+            spread=spread,
+            breach=f"decoding a cap-sized state adds {delta:.3f} ms to a prompt, budget is {CAP_DECODE_BUDGET_MS:.3f} ms",
+        ),
+    ]
+
+
 def evaluate(
     *,
     floor_samples: Sequence[float],
@@ -1488,6 +1542,7 @@ def evaluate(
     consent: Mapping[str, float],
     bin_arena: Mapping[str, float],
     reentry: Mapping[str, float],
+    cap_decode: Mapping[str, Any],
     capability_record: bool,
     budget_ms: float = DELTA_BUDGET_MS,
     reconcile_budget_ms: float = RECONCILE_BUDGET_MS,
@@ -1534,6 +1589,10 @@ def evaluate(
         are gated, and so is the overhead **above the bare-exec floor**; the raw
         overhead is recorded beside it and carries the owner's issue-filing
         signal — see :data:`REENTRY_OWNER_TRIGGER_MS`.
+    cap_decode:
+        :func:`measure_cap_decode`' mapping. The reconcile over a cap-sized state against a minimal one:
+        the delta is gated and its two controls are, so a fixture that shrank or a hook that stood
+        down cannot pass for free.
     capability_record:
         Whether a host-capability record existed to delete, i.e. whether
         ``cold_reconcile_samples`` measured a genuinely colder path. Recorded
@@ -1564,15 +1623,9 @@ def evaluate(
     # The positive control's statistic, and not the one the budgets use. See
     # STARTUP_WORK_FLOOR_MS for the measurements that separate the two.
     startup_work = statistics.median(startup_samples) - statistics.median(floor_samples)
-    # The reconcile's counterpart. Recorded, never gated, and its whole content is
-    # the identity `work - delta`: that difference is the measured series'
-    # median-to-min gap minus the floor's, i.e. how much MORE than the floor the
-    # timed command itself scattered. It is the one number that separates a runner
-    # that got noisier from one that got uniformly slower, and the startup half was
-    # only ever recoverable by subtracting two printed gate rows by hand. The
-    # reconcile half was not recorded at all, so answering that question for
-    # ocx-sh/ocx#340's CI flap cost a fourteen-run dev-box study. It is one
-    # subtraction.
+    # The reconcile's counterpart, recorded and never gated: `work - delta` is the measured series'
+    # median-to-min gap minus the floor's, the one number that separates a noisier runner from a
+    # uniformly slower one (ocx-sh/ocx#340's CI flap cost a fourteen-run study without it).
     reconcile_work = statistics.median(reconcile_samples) - statistics.median(floor_samples)
     # Admissibility, computed from the floor alone and shared by both budgets:
     # the same runner produced both deltas, so one scatter figure decides for
@@ -1666,6 +1719,7 @@ def evaluate(
         *_consent_gates(consent),
         *_bin_arena_gates(bin_arena),
         *_reentry_gates(reentry, spread, floor),
+        *_cap_decode_gates(cap_decode, spread),
     ]
 
     records = {
@@ -1706,6 +1760,13 @@ def evaluate(
         "eval": dict(streams),
         "consent": dict(consent),
         "bin_arena": dict(bin_arena),
+        "cap_decode": {
+            "cap_bytes": cap_decode["cap_bytes"],
+            "delta_ms": min(cap_decode["cap_samples"]) - min(cap_decode["small_samples"]),
+            "p99_cap_ms": _p99(cap_decode["cap_samples"]),
+            "p99_small_ms": _p99(cap_decode["small_samples"]),
+            "p99_delta_ms": _p99(cap_decode["cap_samples"]) - _p99(cap_decode["small_samples"]),
+        },
         # The gated figure travels with the raw ones. A reader comparing two
         # runs on different platforms cannot recompute it without the floor,
         # and the verdict is taken on this number, not on the raw overhead.
@@ -2020,7 +2081,8 @@ def _derive_reconcile_command(activation: str, ocx: Path) -> list[str]:
     argv = shlex.split(line[start + 2 : end])
     if len(argv) < 2 or "--reconcile" not in argv:
         raise RuntimeError(f"the parsed reconcile invocation is not one: {argv!r} (from {line!r})")
-    return [str(ocx), *argv[1:]]
+    # The hook passes its own shell's pid (`--shell-pid $$`); this process stands in for that shell.
+    return [str(ocx), *(str(os.getpid()) if arg == "$$" else arg for arg in argv[1:])]
 
 
 def measure_wall_clock(
@@ -2104,6 +2166,56 @@ def measure_wall_clock(
                 record.unlink(missing_ok=True)
             out[name].append(_sample(cmd, cwd=cwds[name], env=envs[name]))
     return out
+
+
+def build_cap_state() -> str:
+    """A readable ``__OCX_ENV_STATE`` whose encoded length is within :data:`CAP_FILL_MIN` of the cap.
+
+    Inherited constants with incompressible values, so the hook decodes them and touches none of them:
+    the work above a minimal state is the decode (and the re-encode of the same records), not a
+    composition. Grown a record at a time until the next one would not fit.
+    """
+    state = exec_state.default_state()
+    index = 0
+    while True:
+        record = exec_state.applied_constant(f"LATENCY_CAP_{index:03d}", matrix.incompressible_text(index, 96), session=False)
+        grown = {**state, "applied": [*state["applied"], record]}
+        if len(exec_state.encode(grown)) > exec_state.MAX_ENCODED - 64:
+            return exec_state.encode(state)
+        state = grown
+        index += 1
+
+
+def measure_cap_decode(
+    *, cwd: Path, env: Mapping[str, str], reconcile: Sequence[str], samples: int = SAMPLES
+) -> dict[str, Any]:
+    """The reconcile over a cap-sized state against the same reconcile over a minimal one.
+
+    Two series, interleaved for the reason :func:`measure_wall_clock` is. The positive controls ride in
+    the result: the fixture fills the cap, and the hook **reads** it rather than standing down, because
+    a stood-down hook skips all the work and would pass the budget for free.
+    """
+    cap_value = build_cap_state()
+    small_value = exec_state.encode(exec_state.default_state())
+    envs = {"cap": {**env, matrix.CARRIER: cap_value}, "small": {**env, matrix.CARRIER: small_value}}
+    warm = {
+        name: subprocess.run(list(reconcile), cwd=str(cwd), env=envs[name], capture_output=True, check=False, text=True)
+        for name in envs
+    }
+    for name, result in warm.items():
+        if result.returncode != 0:
+            raise RuntimeError(f"the {name}-state reconcile exited {result.returncode}: {list(reconcile)}\n{result.stderr}")
+    out: dict[str, list[float]] = {name: [] for name in envs}
+    for _ in range(samples):
+        for name, series_env in envs.items():
+            out[name].append(_sample(reconcile, cwd=cwd, env=series_env))
+    return {
+        "cap_samples": out["cap"],
+        "small_samples": out["small"],
+        "cap_bytes": float(len(cap_value)),
+        "max_bytes": float(exec_state.MAX_ENCODED),
+        "read": 0.0 if "stopped updating this shell" in warm["cap"].stdout else 1.0,
+    }
 
 
 _COUNTER_SHIM = """#!/bin/sh
@@ -3300,6 +3412,7 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         # Last, and inside the arena: it swaps the grant, so it must not run
         # before anything that is timed or read under the paths grant.
         consent = measure_clause_two(ocx, cwd=project, env=env, reconcile=reconcile)
+        cap_decode = measure_cap_decode(cwd=project, env=env, reconcile=reconcile, samples=samples)
 
     report = evaluate(
         floor_samples=wall["floor"],
@@ -3312,6 +3425,7 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         consent=consent,
         bin_arena=bin_arena,
         reentry=reentry,
+        cap_decode=cap_decode,
         capability_record=capability_record,
     )
     artifact = {
@@ -3433,6 +3547,13 @@ _GREEN = {
     "consent": {
         "locked_tools": float(WALL_PROJECT_TOOLS),
         "corroborated_tools": float(WALL_PROJECT_TOOLS),
+    },
+    "cap_decode": {
+        "cap_samples": [4.9, 5.2, 5.4],
+        "small_samples": [4.6, 4.9, 5.0],
+        "cap_bytes": float(exec_state.MAX_ENCODED - 80),
+        "max_bytes": float(exec_state.MAX_ENCODED),
+        "read": 1.0,
     },
     "bin_arena": {
         "trampolines": float(WALL_PROJECT_TOOLS),
@@ -3687,6 +3808,34 @@ def self_check() -> None:
         reconcile_bin_samples=[3.0 + RECONCILE_BUDGET_MS + 0.5] * 3,
     )
     assert not slow_bin.records["reconcile_bin"]["contract_met"]
+    # The cap-decode budget and both of its controls, each red on its own gate. The overshoot clears
+    # `_GREEN`'s 0.2 ms floor scatter for the reason the startup case above gives.
+    case(
+        expect_pass=False,
+        why="decoding a cap-sized state over budget must fail",
+        red_gate="decoding a cap-sized state <= a minimal state + delta",
+        cap_decode={**_GREEN["cap_decode"], "cap_samples": [4.6 + CAP_DECODE_BUDGET_MS + 0.5] * 3},
+    )
+    case(
+        expect_pass=False,
+        why="a hook that stood down on the fixture must fail: a skipped hook passes the budget for free",
+        red_gate="the cap-sized state is read, not stood down",
+        cap_decode={**_GREEN["cap_decode"], "read": 0.0},
+    )
+    case(
+        expect_pass=False,
+        why="a fixture that shrank below the cap must fail",
+        red_gate="the cap-sized fixture fills the cap",
+        cap_decode={**_GREEN["cap_decode"], "cap_bytes": 100.0},
+    )
+    p99 = green.records["cap_decode"]
+    assert abs(p99["p99_delta_ms"] - (max(_GREEN["cap_decode"]["cap_samples"]) - max(_GREEN["cap_decode"]["small_samples"]))) < 1e-9, (  # type: ignore[index, arg-type]
+        "the recorded p99 delta must be the difference of the two series' p99s (their maxima at three samples)"
+    )
+    # The fixture is built by the code the gate measures with, so its size claim is checked here too.
+    assert len(build_cap_state()) >= CAP_FILL_MIN * exec_state.MAX_ENCODED, "build_cap_state must fill the cap"
+    assert len(build_cap_state()) <= exec_state.MAX_ENCODED, "build_cap_state must stay readable (under the cap)"
+
     # The marginal figure is recorded, never asserted (plan step 5.2), so no gate
     # reds when it is computed from the wrong pair. Its whole content is the
     # identity below.

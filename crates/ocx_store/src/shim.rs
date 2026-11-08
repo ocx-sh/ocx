@@ -315,7 +315,7 @@ mod tests {
     /// precisely *because* nothing was rebuilt. Worse, all three are
     /// `_on_windows`-gated and do not run on the Linux leg at all. Without this
     /// row, a Windows trampoline would silently keep the two-sidecar shim: no
-    /// `.exec` probe, no root-flag arm, no `OCX_GLOBAL` strip, and no test
+    /// `.exec` probe, no root-flag arm, no selector-variable strip, and no test
     /// anywhere would notice.
     ///
     /// # Both states were observed on the real artifact
@@ -385,7 +385,7 @@ mod tests {
                     "{} predates the `.exec` sidecar grammar: it carries no `{literal}`. \
                      The shim SOURCE changed but the committed blob did not, so Windows \
                      trampolines still run the two-sidecar shim — no `.exec` probe, no \
-                     root-flag arm, no OCX_GLOBAL strip. Rebuild both arches via \
+                     root-flag arm, no selector-variable strip. Rebuild both arches via \
                      `task rust:shim:build` and re-record SHIM_SHA256.",
                     path.display()
                 );

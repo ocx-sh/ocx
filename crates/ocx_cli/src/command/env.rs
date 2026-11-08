@@ -176,17 +176,18 @@ impl Env {
                 &platform,
             )
             .await?;
-        let inherited = ocx_env::__OCX_LAUNCH_IDENTITIES
-            .get_raw()
-            .and_then(|v| v.into_string().ok());
-        entries.extend(manager.launch_identity_entry(&info, &std::collections::BTreeSet::new(), inherited.as_deref()));
+        let no_patches = std::collections::BTreeSet::new();
+        // `--ci` wins over `--shell` at emit, so only a bare `--shell` writes into the running shell.
+        let shell = resolve_shell_arg(self.shell)?;
+        let destination = super::toolchain_env::export_destination(ci.is_none() && shell.is_some());
+        entries.extend(manager.exec_state_entry(&info, &no_patches, context.inherited(), destination));
         // Before any of the three output branches reads `entries`.
         reconcile_list_separators(entries.iter_mut())?;
         if let Some(provider) = ci {
             export_ci(provider, self.export_file.clone(), &entries)?;
             return Ok(ExitCode::SUCCESS);
         }
-        if let Some(shell) = resolve_shell_arg(self.shell)? {
+        if let Some(shell) = shell {
             emit_lines(shell, &entries);
             return Ok(ExitCode::SUCCESS);
         }

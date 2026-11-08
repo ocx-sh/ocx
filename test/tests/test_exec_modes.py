@@ -1,4 +1,4 @@
-"""Acceptance tests for the visibility / exec-mode feature.
+"""Acceptance tests for the visibility / exec-mode feature (the spawn modes close the module).
 
 Two user-facing exec modes (`consumer` / `self`) cross-tabbed against three
 package shapes (private-dep, interface-deps meta, diamond merge), plus
@@ -11,6 +11,8 @@ Per ADR `.claude/artifacts/archive/adr_visibility_two_axis_and_exec_modes.md`.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -696,3 +698,97 @@ def test_suite_d_dep_public_entry_visibility_matrix(
             f"Suite D edge={edge_visibility!r} self={self_flag}: "
             f"expected FOO absent; keys: {keys}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Environment modes of a spawn: layer (default), --isolate, --clean
+# (adr_exec_env_model.md § Exec modes and flag grammar)
+# ---------------------------------------------------------------------------
+
+_EXEC_SURFACES = [
+    pytest.param(("exec",), id="exec"),
+    pytest.param(("shell",), id="shell"),
+    pytest.param(("package", "exec"), id="package-exec"),
+    pytest.param(("package", "test"), id="package-test"),
+    pytest.param(("patch", "test"), id="patch-test"),
+]
+
+
+@pytest.mark.parametrize("surface", _EXEC_SURFACES)
+def test_isolate_together_with_clean_is_a_flag_conflict_on_every_exec_surface(
+    ocx: OcxRunner, surface: tuple[str, ...]
+) -> None:
+    """`--isolate --clean` exits 64 naming both flags, on all five surfaces that spawn.
+
+    The message is pinned as well as the code: an absent flag is also a usage error (64),
+    and only the conflict text shows the two flags are declared on this surface.
+    """
+    result = ocx.run(*surface, "--isolate", "--clean", check=False, format=None)
+    assert result.returncode == 64, (
+        f"`{' '.join(surface)} --isolate --clean` must exit 64; got rc={result.returncode}, "
+        f"stderr={result.stderr!r}"
+    )
+    assert "cannot be used with" in result.stderr, result.stderr
+    assert "--isolate" in result.stderr and "--clean" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("surface", [("exec",), ("shell",)])
+def test_the_stack_flag_is_gone(ocx: OcxRunner, surface: tuple[str, ...]) -> None:
+    """`--stack` was deleted with the old stacking rule; clap rejects it as an unknown flag."""
+    result = ocx.run(*surface, "--stack", check=False, format=None)
+    assert result.returncode == 64, result.stderr
+    assert "unexpected argument '--stack'" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the child is probed through POSIX `sh`"
+)
+@pytest.mark.parametrize(
+    "mode_flags, keeps_parent_values",
+    [
+        pytest.param((), True, id="layer"),
+        pytest.param(("--isolate",), True, id="isolate"),
+        pytest.param(("--clean",), False, id="clean"),
+    ],
+)
+def test_package_exec_modes_differ_in_what_the_parent_environment_contributes(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    mode_flags: tuple[str, ...],
+    keeps_parent_values: bool,
+) -> None:
+    """A parent's own variable and `PATH` entry survive layer and `--isolate` (ocx never
+    applied them, so there is nothing to revert); `--clean` starts from nothing."""
+    ocx.plain("package", "install", published_package.short)
+    own_entry = "/parent-own-path-entry"
+    env = {**ocx.env, "STRAY_VAR": "kept", "PATH": f"{own_entry}:{ocx.env['PATH']}"}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "package",
+            "exec",
+            *mode_flags,
+            published_package.short,
+            "--",
+            "/bin/sh",
+            "-c",
+            'printf "%s|%s" "${STRAY_VAR-unset}" "$PATH"',
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    stray, path = result.stdout.split("|", 1)
+    assert (stray == "kept") is keeps_parent_values, (
+        f"{mode_flags or ('layer',)}: STRAY_VAR={stray!r}"
+    )
+    assert (own_entry in path.split(":")) is keeps_parent_values, (
+        f"{mode_flags or ('layer',)}: PATH={path!r}"
+    )
+    assert path.split(":")[0] != own_entry, (
+        f"the composition goes in front of the parent's entries, never behind: {path!r}"
+    )

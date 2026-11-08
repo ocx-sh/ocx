@@ -36,7 +36,6 @@ ocx_util.workspace = true
 # The environment registry every variable this crate reads is declared in.
 ocx_env.workspace = true
 
-base64.workspace = true
 chrono.workspace = true
 # Shell-completion generation is driven from the same builder the CLI uses, so
 # the emitted hook and the completions it installs agree on one command tree.

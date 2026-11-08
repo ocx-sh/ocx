@@ -62,7 +62,7 @@ _FISH_GLOBAL_ENV_EVAL = re.compile(
     r"""--global env --shell=(?P<shell>\w+) \| source; end"""
 )
 _PWSH_GLOBAL_ENV_EVAL = re.compile(
-    r"""if \(Test-Path -LiteralPath '(?P<bin>/[^']*/ocx)' -PathType Leaf\) \{ """
+    r"""if \(\[System\.IO\.File\]::Exists\('(?P<bin>/[^']*/ocx)'\)\) \{ """
     r"""\$__ocx_global_env = \(& '(?P=bin)' """
     r"""--global env --shell=(?P<shell>\w+) \| Out-String\);"""
 )
@@ -519,7 +519,7 @@ def test_activate_emits_global_env_eval_pwsh(
     """stdout must contain the --global env eval line for PowerShell.
 
     PowerShell form:
-      if (Test-Path -LiteralPath '<abs>/ocx' -PathType Leaf) { ... & '<abs>/ocx' ... }
+      if ([System.IO.File]::Exists('<abs>/ocx')) { ... & '<abs>/ocx' ... }
     """
     result = _run_activate(ocx, "--shell=pwsh")
     stdout = result.stdout
@@ -532,7 +532,7 @@ def test_activate_emits_global_env_eval_pwsh(
     # name the same absolute binary, never a bare `ocx`.
     match = _PWSH_GLOBAL_ENV_EVAL.search(stdout)
     assert match is not None, (
-        "stdout must gate the eval on `Test-Path -LiteralPath '<abs>/ocx'` and "
+        "stdout must gate the eval on `[System.IO.File]::Exists('<abs>/ocx')` and "
         f"invoke that same absolute path for --shell=pwsh; got:\n{stdout}"
     )
     assert match.group("shell") == "pwsh", (

@@ -9,7 +9,6 @@ use ocx_env::EnvVar;
 pub static ENV_FLAGS: &[(&EnvVar, &str)] = &[
     (&ocx_env::OCX_CONFIG, "--config"),
     (&ocx_env::OCX_PROJECT, "--project"),
-    (&ocx_env::OCX_GLOBAL, "--global"),
     (&ocx_env::OCX_REMOTE, "--remote"),
     (&ocx_env::OCX_OFFLINE, "--offline"),
     (&ocx_env::OCX_FROZEN, "--frozen"),

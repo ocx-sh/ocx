@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src import helpers
 
@@ -51,3 +52,15 @@ def test_the_sigstore_up_names_only_the_profile_services(
         f"`up -d` started {started or 'every service'}; a profile-less service "
         f"there creates a container the session never asked for"
     )
+
+
+def test_the_ct_log_stores_on_tmpfs_not_a_named_volume() -> None:
+    compose = yaml.safe_load(helpers.COMPOSE_FILE.read_text())
+    ct = compose["services"]["sigstore-ct"]
+    mounts = [v if isinstance(v, str) else v.get("source", "") for v in ct.get("volumes", [])]
+    assert not any(m.startswith("ctdata") for m in mounts), (
+        f"sigstore-ct mounts the ctdata volume {mounts}; a persisted tree outlives the "
+        f"regenerated keys and a stale write path is what Fulcio sees as CT 500s"
+    )
+    assert "/ctdata" in ct.get("tmpfs", []), f"sigstore-ct has no /ctdata tmpfs: {ct.get('tmpfs')}"
+    assert "ctdata" not in (compose.get("volumes") or {}), "the ctdata volume is still declared"

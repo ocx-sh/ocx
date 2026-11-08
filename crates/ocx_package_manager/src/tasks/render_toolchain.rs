@@ -4079,6 +4079,13 @@ mod tests {
     /// returns during the hold and the events arrive the other way round.
     #[tokio::test]
     async fn two_renders_against_one_home_are_serialized_by_the_render_lock() {
+        // The lock timeout is process-wide: a sibling test that sets it to 150 ms for its own wait
+        // would reach this render mid-hold and make it give up (a skip) at the moment the holder
+        // lets go, so the order below would flip. Taking the environment lock pins a budget far
+        // above the hold for the whole test.
+        let environment = ocx_env::overrides::lock();
+        environment.set(&ocx_env::__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS, "60000");
+
         let tree = Tree::new();
         tree.create_home_root();
 
@@ -6439,7 +6446,7 @@ mod tests {
 
     // ── 12. The review round's regressions (B1…B5, W8) ──────────────────────
 
-    /// The directory's own `mtime`, in nanoseconds.
+    /// The directory's own `mtime`.
     ///
     /// The one observation that catches a file **created and then unlinked**
     /// inside a directory: a subtree snapshot of that directory cannot, because
@@ -6447,11 +6454,20 @@ mod tests {
     /// of the claim, not the leftover.
     #[cfg(unix)]
     #[track_caller]
-    fn dir_mtime_nsec(path: &Path) -> i64 {
-        use std::os::unix::fs::MetadataExt as _;
+    fn dir_mtime(path: &Path) -> std::time::SystemTime {
         std::fs::symlink_metadata(path)
+            .and_then(|metadata| metadata.modified())
             .unwrap_or_else(|e| panic!("{path:?} must exist: {e}"))
-            .mtime_nsec()
+    }
+
+    /// Sets a directory's `mtime` an hour back. A directory's `mtime` is stamped from the kernel's
+    /// coarse clock, so a write within one tick of the directory's creation leaves it unchanged and
+    /// reads as "no write happened"; aging it first makes any later write visibly newer.
+    fn age_dir_mtime(path: &Path) {
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::open(path)
+            .and_then(|dir| dir.set_modified(aged))
+            .unwrap_or_else(|e| panic!("{path:?} must be ageable: {e}"));
     }
 
     /// B1/RUL-33 — `heal_links` refuses a home root that is a symlink out of
@@ -6885,8 +6901,9 @@ mod tests {
         };
 
         assert!(!tree.home.root().exists(), "precondition: the home was never rendered");
+        age_dir_mtime(&tree.project_dir);
         let before = snapshot_subtree(&tree.project_dir);
-        let before_mtime = dir_mtime_nsec(&tree.project_dir);
+        let before_mtime = dir_mtime(&tree.project_dir);
 
         manager.render_toolchain(request()).await.expect("the dry run succeeds");
 
@@ -6896,7 +6913,7 @@ mod tests {
             "C-049 — the dry run left no object in the project checkout"
         );
         assert_eq!(
-            dir_mtime_nsec(&tree.project_dir),
+            dir_mtime(&tree.project_dir),
             before_mtime,
             "…and created none there either: a probe file that is created and unlinked is \
              invisible to a snapshot but moves the directory's own mtime"
@@ -6904,10 +6921,11 @@ mod tests {
 
         // A home root that exists is not a licence to write into it either.
         tree.create_home_root();
-        let seeded_mtime = dir_mtime_nsec(tree.home.root());
+        age_dir_mtime(tree.home.root());
+        let seeded_mtime = dir_mtime(tree.home.root());
         manager.render_toolchain(request()).await.expect("the dry run succeeds");
         assert_eq!(
-            dir_mtime_nsec(tree.home.root()),
+            dir_mtime(tree.home.root()),
             seeded_mtime,
             "RUL-74 — the probe writes into the directory it judges, so probing an existing home \
              root is still a write C-049 forbids"
@@ -6915,14 +6933,14 @@ mod tests {
 
         // The positive control: the probe does move the mtime this test reads,
         // so the two negatives above are the probe not running — not
-        // `dir_mtime_nsec` failing to observe it.
+        // `dir_mtime` failing to observe it.
         filesystem_is_case_insensitive(tree.home.root())
             .await
             .expect("the probe answers for a directory it may write in");
         assert_ne!(
-            dir_mtime_nsec(tree.home.root()),
+            dir_mtime(tree.home.root()),
             seeded_mtime,
-            "the probe moves the home root's mtime — without this, a `dir_mtime_nsec` that never \
+            "the probe moves the home root's mtime — without this, a `dir_mtime` that never \
              changed would pass both assertions above"
         );
     }

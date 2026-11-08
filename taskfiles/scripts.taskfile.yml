@@ -32,19 +32,19 @@ tasks:
     cmd: uv run --project test ruff check --config test/pyproject.toml scripts
 
   self-test:
-    desc: Run the gate scripts' tests (scripts/tests, pytest, in parallel; budgeted at 30 s, 180 s on GitHub Actions)
+    desc: Run the gate scripts' tests (scripts/tests, pytest, in parallel; budgeted at 90 CPU seconds, 180 on GitHub Actions)
     # No `sources:` cache, for the reason `ci:actionlint` and `test:lint` have
     # none: a fingerprint-cached run reports the last run's verdict, and a
     # cached green cannot be told from one that never ran.
     #
-    # Through `ocx exec bazel prek --`: the tests that read the live graph need
+    # Through `ocx exec bazel prek uv --`: the tests that read the live graph need
     # a `bazel` on PATH, the commit-gate tests drive real git hooks through
     # `prek`, and `ocx exec` puts only the packages it names on PATH. The
     # graph tests share one xdist group, so one worker queries the graph
     # while the rest run beside it.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      - ocx exec bazel prek -- uv run --project test pytest scripts/tests -q -n auto --dist loadgroup {{.CLI_ARGS}}
+      - ocx exec bazel prek uv -- uv run --project test pytest scripts/tests -q -n auto --dist loadgroup {{.CLI_ARGS}}
 
   dead-path-sweep:
     desc: Every `crates/ocx_*/src/...` literal on a live surface that names nothing on disk (DEC-52)

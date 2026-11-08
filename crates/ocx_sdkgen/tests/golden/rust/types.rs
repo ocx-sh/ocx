@@ -307,6 +307,48 @@ impl Unknowns for AnnounceReport {
     }
 }
 
+/// One value ocx applied to an environment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AppliedReport {
+    /// Environment-variable name.
+    pub key: String,
+    /// The exact string ocx wrote.
+    pub value: String,
+    /// How the value combines.
+    pub kind: ValueKindReport,
+    /// The effective list separator; present only for a `list` record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// The element was already present and was only moved; reverting keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_existing: Option<bool>,
+    /// Who applied it.
+    pub owner: OwnerReport,
+    /// The scope of a session record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeIdReport>,
+    /// The origin of a session record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceReport>,
+    /// What a constant held before; absent for a path or list record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior: Option<PriorReport>,
+}
+
+impl Unknowns for AppliedReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "key", &self.key);
+        field(pointer, out, "value", &self.value);
+        field(pointer, out, "kind", &self.kind);
+        field(pointer, out, "separator", &self.separator);
+        field(pointer, out, "pre_existing", &self.pre_existing);
+        field(pointer, out, "owner", &self.owner);
+        field(pointer, out, "scope", &self.scope);
+        field(pointer, out, "source", &self.source);
+        field(pointer, out, "prior", &self.prior);
+    }
+}
+
 /// The terminating assertion record (when the run failed on an assertion).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AssertionRecord {
@@ -584,6 +626,26 @@ impl Unknowns for BinaryAttribution {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         field(pointer, out, "name", &self.name);
         field(pointer, out, "package", &self.package);
+    }
+}
+
+/// The `ocx` binary generated launchers re-enter (`OCX_BINARY_PIN`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BinaryPinReport {
+    /// The pinned path; absent when no pin is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether the pinned path exists.
+    pub exists: bool,
+    /// Whether the pinned path and the running binary canonicalise to one file.
+    pub matches_running: bool,
+}
+
+impl Unknowns for BinaryPinReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "path", &self.path);
+        field(pointer, out, "exists", &self.exists);
+        field(pointer, out, "matches_running", &self.matches_running);
     }
 }
 
@@ -2440,6 +2502,131 @@ impl Unknowns for EnvEntry {
     }
 }
 
+/// The decoded `__OCX_ENV_STATE`: what a parent handed this process.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EnvStateReport {
+    /// Whether the value is unset, readable or unreadable.
+    pub status: EnvStateStatus,
+    /// The major version this ocx reads.
+    pub major: i64,
+    /// The minor version the state was written with; present when readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor: Option<i64>,
+    /// The major the header carries; present when unreadable and the header parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found_major: Option<i64>,
+    /// The narrowings the header carries; present when readable or unreadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowing: Option<Vec<NarrowingName>>,
+    /// The `OCX_HOME` the header carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<AbsolutePath>,
+    /// What was dropped to fit the size cap; omitted when nothing was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<TruncationReport>,
+    /// The inherited settings that are set; present when readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyReport>,
+    /// The set settings that relax a protection, plus `home`, sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relaxing_policy: Option<Vec<String>>,
+    /// Whether a shell instance claimed the session; the token itself is not published.
+    pub session_claimed: bool,
+    /// Scopes an outer frame composed, oldest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_scopes: Option<Vec<ScopeReport>>,
+    /// What was applied, oldest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Vec<AppliedReport>>,
+    /// Counts of the records launchers replay; present when readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayCounts>,
+    /// What the writing invocation selected; present when readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionReport>,
+}
+
+impl Unknowns for EnvStateReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "status", &self.status);
+        field(pointer, out, "major", &self.major);
+        field(pointer, out, "minor", &self.minor);
+        field(pointer, out, "found_major", &self.found_major);
+        field(pointer, out, "narrowing", &self.narrowing);
+        field(pointer, out, "home", &self.home);
+        field(pointer, out, "truncated", &self.truncated);
+        field(pointer, out, "policy", &self.policy);
+        field(pointer, out, "relaxing_policy", &self.relaxing_policy);
+        field(pointer, out, "session_claimed", &self.session_claimed);
+        field(pointer, out, "inherited_scopes", &self.inherited_scopes);
+        field(pointer, out, "applied", &self.applied);
+        field(pointer, out, "replay", &self.replay);
+        field(pointer, out, "selection", &self.selection);
+    }
+}
+
+/// Whether `__OCX_ENV_STATE` is set, and whether it could be read.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EnvStateStatus {
+    /// The variable is unset or empty.
+    Absent,
+    /// The value decoded; its fields follow.
+    Readable,
+    /// The value is set and could not be read; only the header fields follow.
+    Unreadable,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl EnvStateStatus {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Absent => "absent",
+            Self::Readable => "readable",
+            Self::Unreadable => "unreadable",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "absent" => Self::Absent,
+            "readable" => Self::Readable,
+            "unreadable" => Self::Unreadable,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for EnvStateStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for EnvStateStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvStateStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for EnvStateStatus {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
 /// One declared environment value, normalized: `kind` and `value` are always emitted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnvValueOut {
@@ -2956,8 +3143,6 @@ pub enum ErrorDetail {
     ForkParentAbsent,
     /// The fork's parent is not the expected upstream
     ForkParentMismatch,
-    /// The OCX_ENV value a parent ocx forwarded is malformed
-    ForwardedEnvInvalid,
     /// The verb discovers new digests, which frozen mode forbids
     FrozenRefused,
     /// The certificate authority rejected the signing request
@@ -3083,8 +3268,6 @@ pub enum ErrorDetail {
     KeyReferenceInvalid,
     /// A signing or verification key could not be read from its location
     KeyUnreadable,
-    /// The __OCX_LAUNCH_IDENTITIES value a parent ocx forwarded is malformed
-    LaunchIdentitiesInvalid,
     /// The resolved command could not be started
     LaunchSpawnFailed,
     /// A path baked into a generated launcher is not valid UTF-8
@@ -3858,7 +4041,6 @@ impl ErrorDetail {
             Self::ForkOwnerMismatch => "fork_owner_mismatch",
             Self::ForkParentAbsent => "fork_parent_absent",
             Self::ForkParentMismatch => "fork_parent_mismatch",
-            Self::ForwardedEnvInvalid => "forwarded_env_invalid",
             Self::FrozenRefused => "frozen_refused",
             Self::FulcioBadRequest => "fulcio_bad_request",
             Self::FulcioUnavailable => "fulcio_unavailable",
@@ -3921,7 +4103,6 @@ impl ErrorDetail {
             Self::KeyMalformed => "key_malformed",
             Self::KeyReferenceInvalid => "key_reference_invalid",
             Self::KeyUnreadable => "key_unreadable",
-            Self::LaunchIdentitiesInvalid => "launch_identities_invalid",
             Self::LaunchSpawnFailed => "launch_spawn_failed",
             Self::LauncherPathNotUtf8 => "launcher_path_not_utf8",
             Self::LauncherUnsafeCharacter => "launcher_unsafe_character",
@@ -4385,7 +4566,6 @@ impl ErrorDetail {
             "fork_owner_mismatch" => Self::ForkOwnerMismatch,
             "fork_parent_absent" => Self::ForkParentAbsent,
             "fork_parent_mismatch" => Self::ForkParentMismatch,
-            "forwarded_env_invalid" => Self::ForwardedEnvInvalid,
             "frozen_refused" => Self::FrozenRefused,
             "fulcio_bad_request" => Self::FulcioBadRequest,
             "fulcio_unavailable" => Self::FulcioUnavailable,
@@ -4448,7 +4628,6 @@ impl ErrorDetail {
             "key_malformed" => Self::KeyMalformed,
             "key_reference_invalid" => Self::KeyReferenceInvalid,
             "key_unreadable" => Self::KeyUnreadable,
-            "launch_identities_invalid" => Self::LaunchIdentitiesInvalid,
             "launch_spawn_failed" => Self::LaunchSpawnFailed,
             "launcher_path_not_utf8" => Self::LauncherPathNotUtf8,
             "launcher_unsafe_character" => Self::LauncherUnsafeCharacter,
@@ -5741,68 +5920,6 @@ impl Unknowns for LazyAdvisoryReport {
     }
 }
 
-/// The decoded `__OCX_ENV_STATE` payload.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Ledger {
-    /// Schema version of the payload shape.
-    pub v: i64,
-    /// Watch-set fingerprint; the cached verdict expires when it changes.
-    pub fp: String,
-    /// The cached negative verdict: `inert` or `no_project`, never `activate`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdict: Option<Verdict>,
-    /// The config-tier paths in effect at compose time; omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tiers: Option<Vec<String>>,
-    /// Digest of the ordered watch-path list baked into the shell's gate; omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ws: Option<String>,
-    /// Digest of the deferred diagnostics the previous prompt printed; omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub messages_fp: Option<String>,
-    /// Scopes the carrier size cap dropped; omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub over_cap: Option<Vec<ScopeId>>,
-    /// What each scope applied.
-    pub scopes: Scopes,
-}
-
-impl Unknowns for Ledger {
-    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
-        field(pointer, out, "v", &self.v);
-        field(pointer, out, "fp", &self.fp);
-        field(pointer, out, "verdict", &self.verdict);
-        field(pointer, out, "tiers", &self.tiers);
-        field(pointer, out, "ws", &self.ws);
-        field(pointer, out, "messages_fp", &self.messages_fp);
-        field(pointer, out, "over_cap", &self.over_cap);
-        field(pointer, out, "scopes", &self.scopes);
-    }
-}
-
-/// One environment binding the reconciler applied, recorded literally.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LedgerEntry {
-    /// Environment-variable name.
-    pub key: String,
-    /// The exact string ocx wrote, byte for byte.
-    pub value: String,
-    /// How the value combines.
-    pub kind: ModifierKind,
-    /// The effective list separator; present only for a `list` entry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub separator: Option<String>,
-}
-
-impl Unknowns for LedgerEntry {
-    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
-        field(pointer, out, "key", &self.key);
-        field(pointer, out, "value", &self.value);
-        field(pointer, out, "kind", &self.kind);
-        field(pointer, out, "separator", &self.separator);
-    }
-}
-
 /// Whether every examined candidate was listed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -6439,6 +6556,72 @@ impl Unknowns for NamespaceAttribution {
     }
 }
 
+/// A narrowing the header carries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NarrowingName {
+    /// No network.
+    Offline,
+    /// No index refresh.
+    Frozen,
+    /// No consent stamp is written.
+    NoConsent,
+    /// A credential helper child; implies offline.
+    CredentialHelper,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl NarrowingName {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Offline => "offline",
+            Self::Frozen => "frozen",
+            Self::NoConsent => "no_consent",
+            Self::CredentialHelper => "credential_helper",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "offline" => Self::Offline,
+            "frozen" => Self::Frozen,
+            "no_consent" => Self::NoConsent,
+            "credential_helper" => Self::CredentialHelper,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for NarrowingName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for NarrowingName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for NarrowingName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for NarrowingName {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
 /// A reason row that is not an inertness reason, because it does not make the shell inert on its
 /// own: it explains an answer the user would otherwise get wrong.
 #[derive(Clone, Debug, PartialEq)]
@@ -6484,6 +6667,40 @@ pub enum Note {
         manifest: String,
         /// The parse failure, rendered for a human.
         detail: String,
+    },
+    /// `__OCX_ENV_STATE` is set and cannot be read, so its payload is ignored.
+    EnvStateUnreadable {
+        /// The major this ocx reads.
+        major: i64,
+        /// The major the header carries, when the header parsed.
+        found_major: Option<i64>,
+        /// Why the value was refused, as a stable slug.
+        reason: String,
+        /// The record or payload field that failed validation; present for `invalid` only.
+        field: Option<String>,
+    },
+    /// The state is unreadable and the shell's hook skips every prompt until the value changes.
+    EnvStateStoodDown,
+    /// The state dropped data to fit the size cap.
+    EnvStateTruncated {
+        /// What was dropped.
+        truncated: TruncationReport,
+    },
+    /// The inherited state carries settings that relax a protection.
+    RelaxingPolicy {
+        /// The relaxing settings that are set, sorted.
+        names: Vec<String>,
+    },
+    /// The pinned `ocx` binary named by `OCX_BINARY_PIN` does not exist.
+    BinaryPinMissing {
+        /// The pinned path.
+        path: String,
+    },
+    /// The inherited state names a `config_path` whose file no longer exists, so this report was
+    /// built without it.
+    ReceivedConfigMissing {
+        /// The config path the parent ocx recorded.
+        path: String,
     },
     /// A variant this SDK was not generated for: the whole object, as sent.
     Unknown(Value),
@@ -6542,6 +6759,53 @@ impl Serialize for Note {
                 object.serialize_entry("type", "toolchain_manifest_unparsed")?;
                 object.serialize_entry("manifest", field_0)?;
                 object.serialize_entry("detail", field_1)?;
+                object.end()
+            }
+            Self::EnvStateUnreadable {
+                major: field_0,
+                found_major: field_1,
+                reason: field_2,
+                field: field_3,
+            } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "env_state_unreadable")?;
+                object.serialize_entry("major", field_0)?;
+                if let Some(field_1) = field_1 {
+                    object.serialize_entry("found_major", field_1)?;
+                }
+                object.serialize_entry("reason", field_2)?;
+                if let Some(field_3) = field_3 {
+                    object.serialize_entry("field", field_3)?;
+                }
+                object.end()
+            }
+            Self::EnvStateStoodDown => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "env_state_stood_down")?;
+                object.end()
+            }
+            Self::EnvStateTruncated { truncated: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "env_state_truncated")?;
+                object.serialize_entry("truncated", field_0)?;
+                object.end()
+            }
+            Self::RelaxingPolicy { names: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "relaxing_policy")?;
+                object.serialize_entry("names", field_0)?;
+                object.end()
+            }
+            Self::BinaryPinMissing { path: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "binary_pin_missing")?;
+                object.serialize_entry("path", field_0)?;
+                object.end()
+            }
+            Self::ReceivedConfigMissing { path: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "received_config_missing")?;
+                object.serialize_entry("path", field_0)?;
                 object.end()
             }
             Self::Unknown(value) => value.serialize(serializer),
@@ -6620,6 +6884,59 @@ impl<'de> Deserialize<'de> for Note {
                     detail: fields.detail,
                 })
             }
+            "env_state_unreadable" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    major: i64,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    found_major: Option<i64>,
+                    reason: String,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    field: Option<String>,
+                }
+                let fields = payload::<Fields, D::Error>("env_state_unreadable", value)?;
+                Ok(Self::EnvStateUnreadable {
+                    major: fields.major,
+                    found_major: fields.found_major,
+                    reason: fields.reason,
+                    field: fields.field,
+                })
+            }
+            "env_state_stood_down" => Ok(Self::EnvStateStoodDown),
+            "env_state_truncated" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    truncated: TruncationReport,
+                }
+                let fields = payload::<Fields, D::Error>("env_state_truncated", value)?;
+                Ok(Self::EnvStateTruncated {
+                    truncated: fields.truncated,
+                })
+            }
+            "relaxing_policy" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    names: Vec<String>,
+                }
+                let fields = payload::<Fields, D::Error>("relaxing_policy", value)?;
+                Ok(Self::RelaxingPolicy { names: fields.names })
+            }
+            "binary_pin_missing" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    path: String,
+                }
+                let fields = payload::<Fields, D::Error>("binary_pin_missing", value)?;
+                Ok(Self::BinaryPinMissing { path: fields.path })
+            }
+            "received_config_missing" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    path: String,
+                }
+                let fields = payload::<Fields, D::Error>("received_config_missing", value)?;
+                Ok(Self::ReceivedConfigMissing { path: fields.path })
+            }
             _ => Ok(Self::Unknown(value)),
         }
     }
@@ -6662,6 +6979,30 @@ impl Unknowns for Note {
                 field(pointer, out, "manifest", field_0);
                 field(pointer, out, "detail", field_1);
             }
+            Self::EnvStateUnreadable {
+                major: field_0,
+                found_major: field_1,
+                reason: field_2,
+                field: field_3,
+            } => {
+                field(pointer, out, "major", field_0);
+                field(pointer, out, "found_major", field_1);
+                field(pointer, out, "reason", field_2);
+                field(pointer, out, "field", field_3);
+            }
+            Self::EnvStateStoodDown => {}
+            Self::EnvStateTruncated { truncated: field_0 } => {
+                field(pointer, out, "truncated", field_0);
+            }
+            Self::RelaxingPolicy { names: field_0 } => {
+                field(pointer, out, "names", field_0);
+            }
+            Self::BinaryPinMissing { path: field_0 } => {
+                field(pointer, out, "path", field_0);
+            }
+            Self::ReceivedConfigMissing { path: field_0 } => {
+                field(pointer, out, "path", field_0);
+            }
             Self::Unknown(_) => out.push(pointer.clone()),
         }
     }
@@ -6702,6 +7043,64 @@ impl Unknowns for OwnerEntry {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         field(pointer, out, "login", &self.login);
         field(pointer, out, "id", &self.id);
+    }
+}
+
+/// Who applied a record.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OwnerReport {
+    /// A shell instance of this session.
+    Session,
+    /// An outer frame; this process only inherits it.
+    Inherited,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl OwnerReport {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Session => "session",
+            Self::Inherited => "inherited",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "session" => Self::Session,
+            "inherited" => Self::Inherited,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for OwnerReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for OwnerReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OwnerReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for OwnerReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
     }
 }
 
@@ -7158,10 +7557,92 @@ impl Unknowns for Platform {
     }
 }
 
+/// The inherited settings that are set; same names as the state's `policy`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PolicyReport {
+    /// `OCX_REMOTE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<bool>,
+    /// `OCX_NO_PROJECT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_project: Option<bool>,
+    /// `OCX_NO_CONFIG_REFRESH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_config_refresh: Option<bool>,
+    /// `OCX_NO_UPDATE_CHECK`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_update_check: Option<bool>,
+    /// `OCX_CONFIG`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<AbsolutePath>,
+    /// `OCX_NO_CONFIG`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_config: Option<bool>,
+    /// `OCX_INDEX`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_dir: Option<AbsolutePath>,
+    /// `OCX_TOOLCHAIN_DIR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain_dir: Option<AbsolutePath>,
+    /// `OCX_MIRRORS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirrors: Option<String>,
+    /// `OCX_PATCHES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patches: Option<String>,
+    /// `OCX_PATCH_SNAPSHOT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_snapshot_path: Option<AbsolutePath>,
+    /// `OCX_MANAGED_CONFIG`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_config: Option<String>,
+    /// `OCX_NO_VERIFY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_verify: Option<bool>,
+    /// `OCX_RECORDS_DIR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_dir: Option<AbsolutePath>,
+    /// `OCX_RECORDS_NAME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_name: Option<String>,
+    /// `OCX_ALLOW_YANKED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_yanked: Option<bool>,
+    /// `OCX_DEFAULT_REGISTRY`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_registry: Option<String>,
+    /// `OCX_INSECURE_REGISTRIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure_registries: Option<String>,
+}
+
+impl Unknowns for PolicyReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "remote", &self.remote);
+        field(pointer, out, "no_project", &self.no_project);
+        field(pointer, out, "no_config_refresh", &self.no_config_refresh);
+        field(pointer, out, "no_update_check", &self.no_update_check);
+        field(pointer, out, "config_path", &self.config_path);
+        field(pointer, out, "no_config", &self.no_config);
+        field(pointer, out, "index_dir", &self.index_dir);
+        field(pointer, out, "toolchain_dir", &self.toolchain_dir);
+        field(pointer, out, "mirrors", &self.mirrors);
+        field(pointer, out, "patches", &self.patches);
+        field(pointer, out, "patch_snapshot_path", &self.patch_snapshot_path);
+        field(pointer, out, "managed_config", &self.managed_config);
+        field(pointer, out, "no_verify", &self.no_verify);
+        field(pointer, out, "records_dir", &self.records_dir);
+        field(pointer, out, "records_name", &self.records_name);
+        field(pointer, out, "allow_yanked", &self.allow_yanked);
+        field(pointer, out, "default_registry", &self.default_registry);
+        field(pointer, out, "insecure_registries", &self.insecure_registries);
+    }
+}
+
 /// What a variable held before ocx set it.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum Prior {
+pub enum PriorReport {
     /// The variable did not exist; reverting removes it.
     Unset,
     /// The variable held a value; reverting restores it.
@@ -7169,11 +7650,13 @@ pub enum Prior {
         /// The exact string the variable held.
         value: String,
     },
+    /// The prior was not UTF-8; it is never restored.
+    Withheld,
     /// A variant this SDK was not generated for: the whole object, as sent.
     Unknown(Value),
 }
 
-impl Serialize for Prior {
+impl Serialize for PriorReport {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Unset => {
@@ -7187,12 +7670,17 @@ impl Serialize for Prior {
                 object.serialize_entry("value", field_0)?;
                 object.end()
             }
+            Self::Withheld => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "withheld")?;
+                object.end()
+            }
             Self::Unknown(value) => value.serialize(serializer),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Prior {
+impl<'de> Deserialize<'de> for PriorReport {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
         let Some(tag) = value.get("type").and_then(Value::as_str) else {
@@ -7208,18 +7696,20 @@ impl<'de> Deserialize<'de> for Prior {
                 let fields = payload::<Fields, D::Error>("value", value)?;
                 Ok(Self::Value { value: fields.value })
             }
+            "withheld" => Ok(Self::Withheld),
             _ => Ok(Self::Unknown(value)),
         }
     }
 }
 
-impl Unknowns for Prior {
+impl Unknowns for PriorReport {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         match self {
             Self::Unset => {}
             Self::Value { value: field_0 } => {
                 field(pointer, out, "value", field_0);
             }
+            Self::Withheld => {}
             Self::Unknown(_) => out.push(pointer.clone()),
         }
     }
@@ -7320,28 +7810,6 @@ impl Unknowns for ProfileOutcomeKind {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
         }
-    }
-}
-
-/// The project scope's record.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProjectScope {
-    /// The project key derived from the canonical project directory.
-    pub key: String,
-    /// The canonical project directory, an advisory label.
-    pub dir: String,
-    /// What this scope applied, in emission order.
-    pub applied: Vec<LedgerEntry>,
-    /// Pre-apply values for this scope's constants, keyed by variable.
-    pub priors: BTreeMap<String, Prior>,
-}
-
-impl Unknowns for ProjectScope {
-    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
-        field(pointer, out, "key", &self.key);
-        field(pointer, out, "dir", &self.dir);
-        field(pointer, out, "applied", &self.applied);
-        field(pointer, out, "priors", &self.priors);
     }
 }
 
@@ -7949,16 +8417,16 @@ pub enum Reason {
         /// The env-var evidence, rendered for a human.
         signal: String,
     },
-    /// The ledger's payload exceeded the 16 KiB cap and this scope was abandoned, its record lost
-    /// rather than repaired.
-    LedgerOverCap {
+    /// The state's payload exceeded the cap and this scope was abandoned, its record lost rather
+    /// than repaired.
+    StateOverCap {
         /// The scope whose payload was dropped.
         scope: ScopeId,
     },
     /// The carrier is absent, truncated, or carries an unrecognised envelope tag —
     /// **distinguishing** the first prompt of a shell (nothing applied, nothing to repair) from a
     /// corrupt carrier (a scope was applied and its record is gone).
-    LedgerUnreadable {
+    StateUnreadable {
         /// `true` for the ordinary first-prompt absence.
         first_prompt: bool,
     },
@@ -8023,15 +8491,15 @@ impl Serialize for Reason {
                 object.serialize_entry("signal", field_1)?;
                 object.end()
             }
-            Self::LedgerOverCap { scope: field_0 } => {
+            Self::StateOverCap { scope: field_0 } => {
                 let mut object = serializer.serialize_map(None)?;
-                object.serialize_entry("type", "ledger_over_cap")?;
+                object.serialize_entry("type", "state_over_cap")?;
                 object.serialize_entry("scope", field_0)?;
                 object.end()
             }
-            Self::LedgerUnreadable { first_prompt: field_0 } => {
+            Self::StateUnreadable { first_prompt: field_0 } => {
                 let mut object = serializer.serialize_map(None)?;
-                object.serialize_entry("type", "ledger_unreadable")?;
+                object.serialize_entry("type", "state_unreadable")?;
                 object.serialize_entry("first_prompt", field_0)?;
                 object.end()
             }
@@ -8114,21 +8582,21 @@ impl<'de> Deserialize<'de> for Reason {
                     signal: fields.signal,
                 })
             }
-            "ledger_over_cap" => {
+            "state_over_cap" => {
                 #[derive(Deserialize)]
                 struct Fields {
                     scope: ScopeId,
                 }
-                let fields = payload::<Fields, D::Error>("ledger_over_cap", value)?;
-                Ok(Self::LedgerOverCap { scope: fields.scope })
+                let fields = payload::<Fields, D::Error>("state_over_cap", value)?;
+                Ok(Self::StateOverCap { scope: fields.scope })
             }
-            "ledger_unreadable" => {
+            "state_unreadable" => {
                 #[derive(Deserialize)]
                 struct Fields {
                     first_prompt: bool,
                 }
-                let fields = payload::<Fields, D::Error>("ledger_unreadable", value)?;
-                Ok(Self::LedgerUnreadable {
+                let fields = payload::<Fields, D::Error>("state_unreadable", value)?;
+                Ok(Self::StateUnreadable {
                     first_prompt: fields.first_prompt,
                 })
             }
@@ -8174,10 +8642,10 @@ impl Unknowns for Reason {
                 field(pointer, out, "tool", field_0);
                 field(pointer, out, "signal", field_1);
             }
-            Self::LedgerOverCap { scope: field_0 } => {
+            Self::StateOverCap { scope: field_0 } => {
                 field(pointer, out, "scope", field_0);
             }
-            Self::LedgerUnreadable { first_prompt: field_0 } => {
+            Self::StateUnreadable { first_prompt: field_0 } => {
                 field(pointer, out, "first_prompt", field_0);
             }
             Self::LockUnavailable => {}
@@ -8384,6 +8852,22 @@ impl Unknowns for RepairOutcome {
     }
 }
 
+/// How many replay records the state carries; the records themselves are not published.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReplayCounts {
+    /// Environment values launchers re-apply.
+    pub env_count: i64,
+    /// Package identities launchers match patch rules by.
+    pub launch_identity_count: i64,
+}
+
+impl Unknowns for ReplayCounts {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "env_count", &self.env_count);
+        field(pointer, out, "launch_identity_count", &self.launch_identity_count);
+    }
+}
+
 /// One repository resolved to two or more distinct digests on the interface projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RepositoryConflictOut {
@@ -8533,13 +9017,13 @@ impl Unknowns for SbomSummaryOut {
     }
 }
 
-/// Which scope a ledger datum belongs to: `global` or `project`.
+/// A session record's scope.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ScopeId {
-    /// The `--global` toolchain tier.
+    /// The global toolchain tier.
     Global,
-    /// The project resolved by the CWD walk.
+    /// The project in effect.
     Project,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
@@ -8591,25 +9075,128 @@ impl Unknowns for ScopeId {
     }
 }
 
-/// The two scope slots.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Scopes {
-    /// The global toolchain tier's applied entries; absent when the tier applied nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub global: Option<Vec<LedgerEntry>>,
-    /// Pre-apply values for the global scope's constants, keyed by variable; omitted when empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub global_priors: Option<BTreeMap<String, Prior>>,
-    /// The resolved project tier; absent when none applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<ProjectScope>,
+/// The scope a session record belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ScopeIdReport {
+    /// The global toolchain tier.
+    Global,
+    /// The project in effect.
+    Project,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
 }
 
-impl Unknowns for Scopes {
+impl ScopeIdReport {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Global => "global",
+            Self::Project => "project",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "global" => Self::Global,
+            "project" => Self::Project,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for ScopeIdReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ScopeIdReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ScopeIdReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for ScopeIdReport {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
-        field(pointer, out, "global", &self.global);
-        field(pointer, out, "global_priors", &self.global_priors);
-        field(pointer, out, "project", &self.project);
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// A scope an outer frame composed.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum ScopeReport {
+    /// The global toolchain tier.
+    Global,
+    /// A project, by the root it was composed from.
+    Project {
+        /// The project directory as the state recorded it.
+        root: String,
+    },
+    /// A variant this SDK was not generated for: the whole object, as sent.
+    Unknown(Value),
+}
+
+impl Serialize for ScopeReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Global => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "global")?;
+                object.end()
+            }
+            Self::Project { root: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "project")?;
+                object.serialize_entry("root", field_0)?;
+                object.end()
+            }
+            Self::Unknown(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ScopeReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let Some(tag) = value.get("type").and_then(Value::as_str) else {
+            return Err(D::Error::custom("a union object needs a string `type`"));
+        };
+        match tag {
+            "global" => Ok(Self::Global),
+            "project" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    root: String,
+                }
+                let fields = payload::<Fields, D::Error>("project", value)?;
+                Ok(Self::Project { root: fields.root })
+            }
+            _ => Ok(Self::Unknown(value)),
+        }
+    }
+}
+
+impl Unknowns for ScopeReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        match self {
+            Self::Global => {}
+            Self::Project { root: field_0 } => {
+                field(pointer, out, "root", field_0);
+            }
+            Self::Unknown(_) => out.push(pointer.clone()),
+        }
     }
 }
 
@@ -8705,6 +9292,131 @@ impl Unknowns for ScriptStatus {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
+        }
+    }
+}
+
+/// What the invocation that wrote the state selected.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum SelectionReport {
+    /// Follow the working directory; nothing is pinned.
+    FollowCwd,
+    /// Pinned to a project's groups.
+    PinnedProject {
+        /// The project directory as the state recorded it.
+        project_dir: AbsolutePath,
+        /// The pinned groups.
+        groups: Vec<String>,
+        /// `--with` identifiers as typed.
+        with_names: Option<Vec<String>>,
+        /// `--env` keys; never their values.
+        env_keys: Option<Vec<String>>,
+    },
+    /// Pinned to the global toolchain's groups.
+    PinnedGlobal {
+        /// The pinned groups.
+        groups: Vec<String>,
+    },
+    /// A variant this SDK was not generated for: the whole object, as sent.
+    Unknown(Value),
+}
+
+impl Serialize for SelectionReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::FollowCwd => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "follow_cwd")?;
+                object.end()
+            }
+            Self::PinnedProject {
+                project_dir: field_0,
+                groups: field_1,
+                with_names: field_2,
+                env_keys: field_3,
+            } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "pinned_project")?;
+                object.serialize_entry("project_dir", field_0)?;
+                object.serialize_entry("groups", field_1)?;
+                if let Some(field_2) = field_2 {
+                    object.serialize_entry("with_names", field_2)?;
+                }
+                if let Some(field_3) = field_3 {
+                    object.serialize_entry("env_keys", field_3)?;
+                }
+                object.end()
+            }
+            Self::PinnedGlobal { groups: field_0 } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "pinned_global")?;
+                object.serialize_entry("groups", field_0)?;
+                object.end()
+            }
+            Self::Unknown(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SelectionReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let Some(tag) = value.get("type").and_then(Value::as_str) else {
+            return Err(D::Error::custom("a union object needs a string `type`"));
+        };
+        match tag {
+            "follow_cwd" => Ok(Self::FollowCwd),
+            "pinned_project" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    project_dir: AbsolutePath,
+                    groups: Vec<String>,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    with_names: Option<Vec<String>>,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    env_keys: Option<Vec<String>>,
+                }
+                let fields = payload::<Fields, D::Error>("pinned_project", value)?;
+                Ok(Self::PinnedProject {
+                    project_dir: fields.project_dir,
+                    groups: fields.groups,
+                    with_names: fields.with_names,
+                    env_keys: fields.env_keys,
+                })
+            }
+            "pinned_global" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    groups: Vec<String>,
+                }
+                let fields = payload::<Fields, D::Error>("pinned_global", value)?;
+                Ok(Self::PinnedGlobal { groups: fields.groups })
+            }
+            _ => Ok(Self::Unknown(value)),
+        }
+    }
+}
+
+impl Unknowns for SelectionReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        match self {
+            Self::FollowCwd => {}
+            Self::PinnedProject {
+                project_dir: field_0,
+                groups: field_1,
+                with_names: field_2,
+                env_keys: field_3,
+            } => {
+                field(pointer, out, "project_dir", field_0);
+                field(pointer, out, "groups", field_1);
+                field(pointer, out, "with_names", field_2);
+                field(pointer, out, "env_keys", field_3);
+            }
+            Self::PinnedGlobal { groups: field_0 } => {
+                field(pointer, out, "groups", field_0);
+            }
+            Self::Unknown(_) => out.push(pointer.clone()),
         }
     }
 }
@@ -9045,10 +9757,11 @@ pub struct ShellStateReport {
     pub carrier_present: bool,
     /// The carrier's encoded length in bytes, measured against the carrier cap.
     pub carrier_bytes: ByteSize,
-    /// The decoded ledger, **rendered as fields, never as base64**.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ledger: Option<Ledger>,
-    /// Whether the ledger's recorded `fp` still matches the watch set on disk now.
+    /// The decoded execution state, **rendered as fields, never as base64**.
+    pub env_state: EnvStateReport,
+    /// The `ocx` binary generated launchers re-enter, and whether it is still there.
+    pub binary_pin: BinaryPinReport,
+    /// Whether the state's recorded `fp` still matches the watch set on disk now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint_current: Option<bool>,
     /// The watch set, with each member's presence, size and modification time.
@@ -9067,7 +9780,7 @@ pub struct ShellStateReport {
     /// When the consent stamp was written, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stamp_written_at: Option<Timestamp>,
-    /// Prior intactness for each constant the ledger's project scope owns.
+    /// Prior intactness for each constant the project scope owns.
     pub priors: Vec<PriorStatus>,
     /// The hook's enablement and the rung that decided it.
     pub hook: HookStatus,
@@ -9098,7 +9811,8 @@ impl Unknowns for ShellStateReport {
         field(pointer, out, "lock_refusal", &self.lock_refusal);
         field(pointer, out, "carrier_present", &self.carrier_present);
         field(pointer, out, "carrier_bytes", &self.carrier_bytes);
-        field(pointer, out, "ledger", &self.ledger);
+        field(pointer, out, "env_state", &self.env_state);
+        field(pointer, out, "binary_pin", &self.binary_pin);
         field(pointer, out, "fingerprint_current", &self.fingerprint_current);
         field(pointer, out, "watch_set", &self.watch_set);
         field(pointer, out, "project_dir", &self.project_dir);
@@ -9731,6 +10445,64 @@ impl Unknowns for SourceLocation {
     }
 }
 
+/// Where a session record came from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SourceReport {
+    /// From `ocx.toml` groups or the global tier; refreshed each prompt.
+    Composed,
+    /// From `ocx shell --with` or `--env`; removed, never refreshed.
+    Invocation,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl SourceReport {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Composed => "composed",
+            Self::Invocation => "invocation",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "composed" => Self::Composed,
+            "invocation" => Self::Invocation,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for SourceReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for SourceReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for SourceReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
 /// Report emitted by `ocx status`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatusReport {
@@ -9943,11 +10715,6 @@ pub enum Tool {
     Direnv,
     /// Yielded on `MISE_SHELL` **or** `__MISE_ORIG_PATH` being present.
     Mise,
-    /// An enclosing `ocx exec` composed this shell's environment for the resolved project
-    /// (`__OCX_EXEC_SCOPE` names that project's directory). Not part of \[`detect`\]: exec is
-    /// hermetic, so the per-prompt hook applies neither the project nor the global toolchain while
-    /// the cwd stays in that project, and reconciles again once it leaves.
-    OcxExec,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -9958,7 +10725,6 @@ impl Tool {
         match self {
             Self::Direnv => "direnv",
             Self::Mise => "mise",
-            Self::OcxExec => "ocx_exec",
             Self::Unknown(value) => value,
         }
     }
@@ -9968,7 +10734,6 @@ impl Tool {
         match value.as_str() {
             "direnv" => Self::Direnv,
             "mise" => Self::Mise,
-            "ocx_exec" => Self::OcxExec,
             _ => Self::Unknown(value),
         }
     }
@@ -10070,6 +10835,68 @@ impl<'de> Deserialize<'de> for Transport {
 }
 
 impl Unknowns for Transport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// What the encoder dropped to fit the size cap.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TruncationReport {
+    /// Records received from an outer frame were dropped.
+    InheritedDropped,
+    /// Every applied record was dropped.
+    AllAppliedDropped,
+    /// The whole payload was dropped; only the header remains.
+    PayloadDropped,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl TruncationReport {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::InheritedDropped => "inherited_dropped",
+            Self::AllAppliedDropped => "all_applied_dropped",
+            Self::PayloadDropped => "payload_dropped",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "inherited_dropped" => Self::InheritedDropped,
+            "all_applied_dropped" => Self::AllAppliedDropped,
+            "payload_dropped" => Self::PayloadDropped,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for TruncationReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for TruncationReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TruncationReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for TruncationReport {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
@@ -10275,6 +11102,68 @@ impl Unknowns for UpgradeReport {
         field(pointer, out, "skipped", &self.skipped);
         field(pointer, out, "beyond_major", &self.beyond_major);
         field(pointer, out, "lock", &self.lock);
+    }
+}
+
+/// How an applied value combines with the variable's existing value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ValueKindReport {
+    /// A path-list element, prepended.
+    Path,
+    /// A list element joined by a separator.
+    List,
+    /// The whole value.
+    Constant,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl ValueKindReport {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Path => "path",
+            Self::List => "list",
+            Self::Constant => "constant",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "path" => Self::Path,
+            "list" => Self::List,
+            "constant" => Self::Constant,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for ValueKindReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ValueKindReport {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ValueKindReport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for ValueKindReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
     }
 }
 
@@ -10572,10 +11461,11 @@ pub struct VerboseShellState {
     pub carrier_present: bool,
     /// The carrier's encoded length in bytes, measured against the carrier cap.
     pub carrier_bytes: ByteSize,
-    /// The decoded ledger, **rendered as fields, never as base64**.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ledger: Option<Ledger>,
-    /// Whether the ledger's recorded `fp` still matches the watch set on disk now.
+    /// The decoded execution state, **rendered as fields, never as base64**.
+    pub env_state: EnvStateReport,
+    /// The `ocx` binary generated launchers re-enter, and whether it is still there.
+    pub binary_pin: BinaryPinReport,
+    /// Whether the state's recorded `fp` still matches the watch set on disk now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint_current: Option<bool>,
     /// The watch set, with each member's presence, size and modification time.
@@ -10594,7 +11484,7 @@ pub struct VerboseShellState {
     /// When the consent stamp was written, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stamp_written_at: Option<Timestamp>,
-    /// Prior intactness for each constant the ledger's project scope owns.
+    /// Prior intactness for each constant the project scope owns.
     pub priors: Vec<PriorStatus>,
     /// The hook's enablement and the rung that decided it.
     pub hook: HookStatus,
@@ -10625,7 +11515,8 @@ impl Unknowns for VerboseShellState {
         field(pointer, out, "lock_refusal", &self.lock_refusal);
         field(pointer, out, "carrier_present", &self.carrier_present);
         field(pointer, out, "carrier_bytes", &self.carrier_bytes);
-        field(pointer, out, "ledger", &self.ledger);
+        field(pointer, out, "env_state", &self.env_state);
+        field(pointer, out, "binary_pin", &self.binary_pin);
         field(pointer, out, "fingerprint_current", &self.fingerprint_current);
         field(pointer, out, "watch_set", &self.watch_set);
         field(pointer, out, "project_dir", &self.project_dir);
@@ -10719,68 +11610,6 @@ impl Unknowns for VerboseVersionData {
         field(pointer, out, "build", &self.build);
         field(pointer, out, "ci", &self.ci);
         field(pointer, out, "contract", &self.contract);
-    }
-}
-
-/// A cached activation verdict; a change to the watch set expires it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Verdict {
-    /// Activate the project; ocx never caches it, so a carrier holding it was not written by ocx.
-    Activate,
-    /// Consent refused activation for the project in effect.
-    Inert,
-    /// No project resolved from the working directory; entering one expires it.
-    NoProject,
-    /// A value this SDK was not generated for, kept as sent.
-    Unknown(String),
-}
-
-impl Verdict {
-    /// The wire value.
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Activate => "activate",
-            Self::Inert => "inert",
-            Self::NoProject => "no_project",
-            Self::Unknown(value) => value,
-        }
-    }
-
-    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
-    pub fn from_value(value: String) -> Self {
-        match value.as_str() {
-            "activate" => Self::Activate,
-            "inert" => Self::Inert,
-            "no_project" => Self::NoProject,
-            _ => Self::Unknown(value),
-        }
-    }
-}
-
-impl std::fmt::Display for Verdict {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl Serialize for Verdict {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for Verdict {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self::from_value(String::deserialize(deserializer)?))
-    }
-}
-
-impl Unknowns for Verdict {
-    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
-        if matches!(self, Self::Unknown(_)) {
-            out.push(pointer.clone());
-        }
     }
 }
 

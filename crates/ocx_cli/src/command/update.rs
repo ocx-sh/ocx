@@ -146,7 +146,7 @@ impl Update {
         // Built while the guard still holds the declaration the tag column reads; the commit consumes it.
         let mut report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref())?;
         // Offline and frozen runs read a snapshot that may lag the registry, so they report no version.
-        if !context.is_offline() && !context.config_view().frozen {
+        if !context.is_offline() && !context.frozen() {
             report.fill_versions(&concrete_versions(resolve_index, report.version_lookups()).await);
         }
 

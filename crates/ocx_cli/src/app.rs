@@ -15,6 +15,8 @@ mod boundary;
 pub use boundary::finish;
 
 mod context;
+pub(crate) use context::install_received_policy;
+pub(crate) use context::report_projection_warnings;
 pub use context::{Context, ManagedConfigGate, is_published_namespace};
 
 mod context_options;
@@ -150,6 +152,7 @@ impl App {
             ManagedConfigGate {
                 enforce_required: should_enforce_managed_config_required(&cli.command),
                 onboarding: is_managed_config_onboarding_command(&cli.command),
+                tolerate_vanished_received_config: is_shell_state_command(&cli.command),
             },
         )
         .await
@@ -177,14 +180,15 @@ impl App {
         update_notice::print(context.ui(), &notice_rows);
         // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
         // so trust policy also covers the unattended install.
-        let pending_update = pending_update.map(|identifier| (context.manager().clone(), identifier));
+        let pending_update =
+            pending_update.map(|identifier| (context.manager().clone(), identifier, context.handoff_state()));
 
         // No error document after a report, or stdout carries two JSON documents.
         let reported = context.api().reported_handle();
         let result = command.execute(context).await;
         // After the command, on success and failure alike, and never changing its result.
-        if let Some((manager, identifier)) = pending_update {
-            update_check::apply_pending(&manager, &identifier).await;
+        if let Some((manager, identifier, handoff)) = pending_update {
+            update_check::apply_pending(&manager, &identifier, &handoff).await;
         }
         match result {
             Ok(code) => Ok(code),
@@ -412,6 +416,17 @@ fn should_enforce_managed_config_required(command: &Option<command::Command>) ->
 ///
 /// Narrower than the required-gate exemption: `self activate` runs on every shell startup and
 /// must not pay that build.
+/// `ocx shell state` reports in every reportable state, so a vanished received config path is a finding for it.
+fn is_shell_state_command(command: &Option<command::Command>) -> bool {
+    matches!(
+        command,
+        Some(command::Command::Shell(command::shell::ShellArgs {
+            command: Some(command::shell::Shell::State(_)),
+            ..
+        }))
+    )
+}
+
 fn is_managed_config_onboarding_command(command: &Option<command::Command>) -> bool {
     matches!(
         command,

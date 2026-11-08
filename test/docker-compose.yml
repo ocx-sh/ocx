@@ -126,7 +126,11 @@ services:
       - -not_after_start=2020-01-01T00:00:00Z
     volumes:
       - ./sigstore/keys:/keys:ro
-      - ctdata:/ctdata
+    # The tree is disposable: the keys are regenerated with the stack, and a
+    # persisted tree from an older key set fails in a way that reads as a
+    # Fulcio bug. tmpfs also keeps log writes off the disk under parallel load.
+    tmpfs:
+      - /ctdata
     ports:
       - "${OCX_TEST_CT_PORT:-6962}:6962"
     profiles:
@@ -264,9 +268,3 @@ services:
         condition: service_started
     profiles:
       - sigstore
-
-volumes:
-  # TesseraCT's POSIX-backend tree state. Named rather than a bind mount so a
-  # `docker compose down -v` genuinely resets the log; a stale tree against
-  # freshly regenerated keys fails in a way that reads as a Fulcio bug.
-  ctdata:

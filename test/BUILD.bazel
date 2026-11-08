@@ -262,6 +262,9 @@ acceptance_suite(
         "tests/test_cosign_matrix_cosign_signs.py": _PROJECT_TOOLCHAIN,
         "tests/test_cosign_matrix_extras.py": _PROJECT_TOOLCHAIN,
         "tests/test_cosign_matrix_ocx_signs.py": _PROJECT_TOOLCHAIN,
+        # `src/previous_release.py` asks `ocx --project <root>/ocx.toml env -g test`
+        # for the pinned previous-release binary, which reads the lock beside it.
+        "tests/test_hardening_nesting.py": _PROJECT_TOOLCHAIN,
         "tests/test_doc_scripts.py": _PROJECT_TOOLCHAIN + [
             ":recording_sources",
             "//test/doc_scripts:doc_script_sources",

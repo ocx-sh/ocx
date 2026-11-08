@@ -4,18 +4,22 @@
 //! Git-style plugin dispatch: `ocx <name> args` runs `ocx-<name> args` from PATH, before
 //! `Context::try_init`. See `.claude/artifacts/adr_cli_plugin_pattern.md`.
 //!
-//! Plugins inherit the parent env like cargo/git plugins, minus bearer credentials;
-//! `ocx exec` and `ocx package exec` run with a clean env.
+//! Plugins inherit the parent env like cargo/git plugins, minus bearer credentials, through the
+//! one child-environment projection in `Layer` mode with nothing composed. The dispatching
+//! parent's narrowing and root flags travel in `__OCX_ENV_STATE`, not as public `OCX_*`
+//! variables, so a plugin's own `ocx` child honours them. `ocx exec` and `ocx package exec` run
+//! with a composed env of their own.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use crate::error::UsageError;
 use clap::CommandFactory as _;
 
 use crate::tracing_init::LogSettings;
-use ocx_config::env::Env;
+use ocx_config::exec_state::{Inherited, Owner, Selection, WriteMode};
+use ocx_package_manager::exec_env::{ExecMode, Spawn, project};
 use ocx_util::child_process::propagate_exit_code;
 
 use crate::app::context_options::ContextOptions;
@@ -62,9 +66,24 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
         .ok()
         .ok_or_else(|| UsageError::new(unknown_subcommand_hint(&name_str)))?;
 
-    let mut cmd = build_plugin_command(&binary, &argv, opts)?;
+    // Plugin dispatch runs before `Context`, so the pin is resolved here: once, off the async threads.
+    let pin = tokio::task::spawn_blocking(plugin_binary_pin).await?;
+
+    let mut cmd = build_plugin_command(&binary, &argv, opts, pin.as_deref())?;
     let status = cmd.status().await?;
     Ok(propagate_exit_code(status))
+}
+
+/// The `OCX_BINARY_PIN` for the plugin's children, from the home this process resolves.
+///
+/// A plugin needs no home to run, so an unresolvable one pins nothing instead of failing the dispatch.
+fn plugin_binary_pin() -> Option<std::path::PathBuf> {
+    let file_structure =
+        ocx_config::home::default_ocx_root().map(ocx_store::file_structure::FileStructure::with_root)?;
+    let running = std::env::current_exe()
+        .inspect_err(|e| log::warn!("could not resolve current exe: {e}"))
+        .ok();
+    ocx_package_manager::launcher::binary_pin_value(&file_structure, running.as_deref())
 }
 
 /// The hint shown when `ocx <name>` matches no built-in and no `ocx-<name>` binary is on PATH.
@@ -86,7 +105,8 @@ fn rewrite_help_invocation(argv: Vec<OsString>) -> Vec<OsString> {
 }
 
 /// Builds the plugin command: the user args after the subcommand name (git style, not cargo's
-/// re-passed name), resolution-affecting config forwarded, bearer credentials removed.
+/// re-passed name), the ambient environment minus bearer credentials, and the execution state the
+/// plugin's own `ocx` children inherit.
 #[expect(
     clippy::disallowed_types,
     reason = "git-style `ocx-<name>` plugin dispatch; an ocx extension, not a resolved package tool or a recording frame"
@@ -95,26 +115,34 @@ fn build_plugin_command(
     binary: &Path,
     argv: &[OsString],
     opts: &ContextOptions,
+    pin: Option<&Path>,
 ) -> anyhow::Result<tokio::process::Command> {
-    // Pins child `ocx` calls inside the plugin to this binary via `OCX_BINARY_PIN`; on failure they fall back to PATH.
-    let self_exe = std::env::current_exe().unwrap_or_else(|e| {
-        log::warn!("could not resolve current exe: {e}");
-        PathBuf::from("ocx")
+    let inherited = Inherited::from_process_env();
+    let written = super::context::with_policy_inputs(&opts.root_flags(), false, &inherited, |inputs| {
+        inputs.to_write(WriteMode::Inherit)
     });
-    let config_view = opts.as_view(self_exe);
-
-    // Full ambient `Env::new()`, not `Env::inherited()`: plugins inherit the parent env (module doc).
-    let mut env = Env::new();
-    env.apply_ocx_config(&config_view);
+    let child = project(
+        &inherited,
+        &Spawn {
+            mode: ExecMode::Layer,
+            written: &written,
+            binary_pin: pin,
+            composed: &[],
+            composed_owner: Owner::Inherited,
+            composed_scope: None,
+            invocation: &[],
+            replay_env: &[],
+            launch_identities: &[],
+            selection: Selection::FollowCwd,
+        },
+    );
+    super::report_projection_warnings(&child.warnings);
 
     let mut cmd = tokio::process::Command::new(binary);
     // Re-passing the name (cargo style) makes a plain clap plugin reject it as an unknown subcommand.
     cmd.args(argv.get(1..).unwrap_or(&[]));
-    cmd.envs(env);
-    // `envs` cannot unset an inherited key, so without this a bearer credential reaches the plugin.
-    for credential in ocx_env::all().filter(|var| var.child == ocx_env::Child::Scrub) {
-        cmd.env_remove(credential.name);
-    }
+    // The projection already removed every credential; clearing keeps the child to exactly that environment.
+    cmd.env_clear().envs(child.env);
 
     Ok(cmd)
 }
@@ -133,6 +161,22 @@ mod tests {
         ContextOptions::parse_from(["ocx"])
     }
 
+    /// A plugin needs no home: with none resolvable the dispatch pins nothing and does not panic.
+    #[test]
+    fn plugin_dispatch_pins_nothing_when_no_home_resolves() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.remove(&ocx_env::OCX_HOME);
+        env.remove(&ocx_env::__OCX_ENV_STATE);
+        env.remove(&ocx_env::HOME);
+        assert_eq!(
+            ocx_config::home::default_ocx_root(),
+            None,
+            "the fixture resolves no home"
+        );
+        assert_eq!(plugin_binary_pin(), None);
+    }
+
     /// Regression: git-style dispatch drops the subcommand name so the plugin
     /// receives only the user args. `ocx help mirror` rewrites to
     /// `["mirror", "--help"]`, which must reach `ocx-mirror` as `["--help"]`
@@ -141,7 +185,7 @@ mod tests {
     #[test]
     fn plugin_command_drops_subcommand_name() {
         let argv = osvec(&["mirror", "--help"]);
-        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts(), None).unwrap();
         let args: Vec<_> = cmd.as_std().get_args().collect();
         assert_eq!(args, vec![std::ffi::OsStr::new("--help")]);
     }
@@ -150,7 +194,7 @@ mod tests {
     #[test]
     fn plugin_command_forwards_user_args_after_name() {
         let argv = osvec(&["mirror", "sync", "--exact-version"]);
-        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts(), None).unwrap();
         let args: Vec<_> = cmd.as_std().get_args().collect();
         assert_eq!(
             args,
@@ -163,38 +207,40 @@ mod tests {
     #[test]
     fn plugin_command_bare_name_forwards_no_args() {
         let argv = osvec(&["mirror"]);
-        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts(), None).unwrap();
         assert_eq!(cmd.as_std().get_args().count(), 0);
     }
 
-    /// A plugin is third-party code launched with the **full** ambient
-    /// environment, so the one thing that must not ride along is a bearer
-    /// credential. `Command::envs` only adds and overrides — dropping a key
-    /// from the map cannot unset one this process inherited — so the removal
-    /// has to be an explicit `env_remove`, which surfaces here as a `None`
-    /// value in `get_envs()`.
+    /// A plugin is third-party code launched with the ambient environment, so the one thing that
+    /// must not ride along is a bearer credential. The command runs on exactly the projected
+    /// environment (`env_clear`), and the projection holds none of them.
     #[test]
-    fn plugin_command_unsets_every_credential_key() {
-        let argv = osvec(&["mirror"]);
-        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
-        let removed: Vec<_> = cmd
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(key, _)| key.to_string_lossy().into_owned())
-            .collect();
-        let credentials: Vec<&str> = ocx_env::all()
-            .filter(|var| var.child == ocx_env::Child::Scrub)
-            .map(|var| var.name)
+    fn plugin_command_carries_no_credential_key() {
+        let env = ocx_env::overrides::lock();
+        let credentials: Vec<&'static ocx_env::EnvVar> = ocx_env::all()
+            .filter(|var| var.propagation == ocx_env::Propagation::Credential)
             .collect();
         assert!(
             !credentials.is_empty(),
             "an empty credential list would make the loop below vacuous"
         );
+        for credential in &credentials {
+            env.set(credential, "fixture-secret-value");
+        }
+        let argv = osvec(&["mirror"]);
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts(), None).unwrap();
+        let carried: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(!carried.is_empty(), "the projected environment must not be empty");
         for credential in credentials {
             assert!(
-                removed.iter().any(|key| key == credential),
-                "{credential} reaches the plugin; removed = {removed:?}"
+                !carried.iter().any(|key| key == credential.name),
+                "{} reaches the plugin",
+                credential.name
             );
         }
     }

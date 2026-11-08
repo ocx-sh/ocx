@@ -99,9 +99,11 @@ ocx patch test [OPTIONS] --descriptor <DESCRIPTOR> <BASE-ID> [-- <COMMAND>...]
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables |
 | `--companion-archive` | `PATH` | Path to a local archive for a companion package, read without a registry round-trip; needs a `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor lists. Repeatable |
 | `--descriptor` | `DESCRIPTOR` | Path to the patch descriptor JSON file to compose |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
+| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
 | `--platform`, `-p` | `PLATFORM` | Target platform for composing the environment. Defaults to the host platform |
 | `--registry` | `HOST/PATH` | Patch registry to compose against, as `HOST/PATH` (e.g. registry.corp.example/ocx-patches) |
 | `--script` | `SCRIPT` | Path to a Starlark test script to run in the composed environment. Mutually exclusive with a trailing command |

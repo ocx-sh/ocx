@@ -15,6 +15,7 @@ pub mod activation;
 pub mod composer;
 pub mod concurrency;
 pub mod error;
+pub mod exec_env;
 pub mod launcher;
 pub mod managed_config;
 pub mod mutate;
@@ -302,18 +303,14 @@ mod install_info_identifier_tests {
         assert_eq!(aliases, ["ocx.sh/plantuml:1"]);
     }
 
-    /// An exported environment names its packages for their launchers only under a patch tier.
+    /// A session names its packages for their launchers only under a patch tier.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_launch_identity_entry_is_written_only_under_a_patch_tier() {
+    async fn the_launch_identities_are_composed_only_under_a_patch_tier() {
         let tmp = tempdir().unwrap();
         let manager = make_test_manager(tmp.path());
         let root = tmp.path().join("pkg");
         let hex = "c".repeat(64);
         write_minimal_package_root(&root, &hex).await;
-        let identities = ocx_package::launch::LaunchIdentities::decode(&format!(
-            r#"{{"sha256:{hex}":{{"names":["ocx.sh/plantuml:1"]}}}}"#
-        ))
-        .unwrap();
         let infos = vec![std::sync::Arc::new(
             manager
                 .install_info_from_package_root(&root, &[ocx_oci::PackageRef::parse("ocx.sh/plantuml:1").unwrap()])
@@ -322,7 +319,7 @@ mod install_info_identifier_tests {
         )];
         let opt_out = std::collections::BTreeSet::from(["ocx.sh/plantuml".to_owned()]);
 
-        assert!(manager.launch_identity_entry(&infos, &opt_out, None).is_none());
+        assert!(manager.launch_identities(&infos, &opt_out).is_none());
 
         let patched = manager.with_patches(Some(ocx_config::patch::ResolvedPatchConfig {
             system_required: false,
@@ -331,30 +328,86 @@ mod install_info_identifier_tests {
             path_template: "{registry}/{repository}".to_owned(),
             required: false,
         }));
-        let entry = patched
-            .launch_identity_entry(&infos, &std::collections::BTreeSet::new(), None)
-            .expect("a patch tier writes the key");
-        assert_eq!(entry.key, ocx_env::__OCX_LAUNCH_IDENTITIES.name);
-        assert_eq!(
-            ocx_package::launch::LaunchIdentities::decode(&entry.value).unwrap(),
-            identities
+        let plain = patched
+            .launch_identities(&infos, &std::collections::BTreeSet::new())
+            .expect("a patch tier composes the names");
+        let records = plain.to_records(ocx_config::exec_state::Owner::Inherited);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].digest, format!("sha256:{hex}"));
+        assert_eq!(records[0].names, ["ocx.sh/plantuml:1"]);
+        assert!(!records[0].no_patches);
+
+        let marked = patched
+            .launch_identities(&infos, &opt_out)
+            .expect("a patch tier composes the names");
+        assert!(marked.to_records(ocx_config::exec_state::Owner::Inherited)[0].no_patches);
+    }
+
+    /// An exported environment carries a fresh minimal state, and a shell export over a readable one carries none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_exec_state_entry_is_fresh_and_withheld_from_a_shell_with_a_readable_state() {
+        use crate::ExportDestination;
+        use ocx_config::exec_state::{ExecState, Inherited, Owner, decode, encode};
+
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+        let root = tmp.path().join("pkg");
+        let hex = "c".repeat(64);
+        write_minimal_package_root(&root, &hex).await;
+        let infos = vec![std::sync::Arc::new(
+            manager
+                .install_info_from_package_root(&root, &[ocx_oci::PackageRef::parse("ocx.sh/plantuml:1").unwrap()])
+                .await
+                .unwrap(),
+        )];
+        let no_patches = std::collections::BTreeSet::new();
+        let absent = Inherited::Absent;
+        assert!(
+            manager
+                .exec_state_entry(&infos, &no_patches, &absent, ExportDestination::Persisted)
+                .is_none(),
+            "no patch tier, no entry"
         );
 
-        // The opt-out is marked, and an inherited map keeps only the digests this one lacks.
-        let inherited = format!(
-            r#"{{"sha256:{hex}":{{"names":["ocx.sh/other:1"]}},"sha256:{}":{{"names":["ocx.sh/jre:21"]}}}}"#,
-            "e".repeat(64)
+        let patched = manager.with_patches(Some(ocx_config::patch::ResolvedPatchConfig {
+            system_required: false,
+            no_patches: std::collections::BTreeSet::new(),
+            registry: "patches.example.com".to_owned(),
+            path_template: "{registry}/{repository}".to_owned(),
+            required: false,
+        }));
+        let mut parent = ExecState::default();
+        parent.narrowing.offline = true;
+        parent.inherited_scopes.push(ocx_config::exec_state::Scope::Global);
+        let readable = decode(encode(&parent).value.as_deref().map(std::ffi::OsStr::new));
+        assert!(matches!(readable, Inherited::Readable(_)));
+
+        for destination in [ExportDestination::RunningShell, ExportDestination::Persisted] {
+            let entry = patched
+                .exec_state_entry(&infos, &no_patches, &absent, destination)
+                .unwrap();
+            assert_eq!(entry.key, ocx_env::__OCX_ENV_STATE.name);
+            let Inherited::Readable(state) = decode(Some(std::ffi::OsStr::new(&entry.value))) else {
+                panic!("the exported state must decode");
+            };
+            assert_eq!(state.replay.launch_identities.len(), 1);
+            assert_eq!(state.replay.launch_identities[0].owner, Owner::Inherited);
+            assert!(state.applied.is_empty() && state.inherited_scopes.is_empty());
+        }
+
+        assert!(
+            patched
+                .exec_state_entry(&infos, &no_patches, &readable, ExportDestination::RunningShell)
+                .is_none()
         );
         let entry = patched
-            .launch_identity_entry(&infos, &opt_out, Some(&inherited))
-            .expect("a patch tier writes the key");
-        assert_eq!(
-            entry.value,
-            format!(
-                r#"{{"sha256:{hex}":{{"names":["ocx.sh/plantuml:1"],"no_patches":true}},"sha256:{}":{{"names":["ocx.sh/jre:21"]}}}}"#,
-                "e".repeat(64)
-            )
-        );
+            .exec_state_entry(&infos, &no_patches, &readable, ExportDestination::Persisted)
+            .unwrap();
+        let Inherited::Readable(state) = decode(Some(std::ffi::OsStr::new(&entry.value))) else {
+            panic!("the exported state must decode");
+        };
+        assert!(state.narrowing.offline, "the inherited narrowing name survives");
+        assert!(state.inherited_scopes.is_empty(), "the parent's scopes are not copied");
     }
 
     /// Calling `install_info_from_package_root` twice on the same root must
@@ -416,13 +469,22 @@ pub use tasks::sbom::{SbomOptions, SbomReport};
 pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
 pub use tasks::toolchain_drift::{DRIFT_DEADLINE, DriftedTool};
 pub use tasks::update_check::{
-    HandoffFailure, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,
+    HandoffFailure, HandoffState, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,
 };
 pub use tasks::verify::{VerifyOptions, VerifyReport};
 
 use crate::patch::PatchSnapshot;
 use ocx_config::patch::ResolvedPatchConfig;
 use ocx_store::file_structure;
+
+/// Where an exported environment is going, which decides whether it may carry a fresh execution state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportDestination {
+    /// The shell evaluating the export (`--shell`, `direnv export`).
+    RunningShell,
+    /// A file or report read by a later process (`--ci`, the structured report).
+    Persisted,
+}
 
 /// Central facade for package operations (find, install, uninstall, etc.): holds
 /// what tasks need — file structure, index, OCI client — and is cheap to [`Clone`].
@@ -658,26 +720,62 @@ impl PackageManager {
         self.client.is_none()
     }
 
-    /// The [`ocx_env::__OCX_LAUNCH_IDENTITIES`] entry an exported environment carries, so a launcher
-    /// run from its `PATH` matches patch rules by the names `infos` composed under.
+    /// The names `infos` were composed under, marked `no_patches`, so a launcher run from the
+    /// composed environment matches patch rules by them.
     ///
-    /// Packages in `no_patches` are marked, so their launchers skip the patch tier; `inherited`,
-    /// an enclosing environment's value, keeps the digests `infos` lack.
-    ///
-    /// `None` without a patch tier: an environment without patches never sees the key.
+    /// `None` without a patch tier: an environment without patches records no names.
     #[must_use]
-    pub fn launch_identity_entry(
+    pub fn launch_identities(
         &self,
         infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
         no_patches: &std::collections::BTreeSet<String>,
-        inherited: Option<&str>,
-    ) -> Option<ocx_package::metadata::env::entry::Entry> {
+    ) -> Option<ocx_package::launch::LaunchIdentities> {
         self.patches.as_ref()?;
-        let mut identities = ocx_package::launch::LaunchIdentities::from_infos(infos).with_opt_out(no_patches);
-        if let Some(raw) = inherited {
-            identities.inherit(raw);
+        Some(ocx_package::launch::LaunchIdentities::from_infos(infos).with_opt_out(no_patches))
+    }
+
+    /// The [`ocx_env::__OCX_ENV_STATE`] entry an exported environment carries, so a launcher run
+    /// from it matches patch rules by the names `infos` composed under.
+    ///
+    /// The value is a fresh minimal state, never `inherited` itself: the inherited header's
+    /// narrowing names, no home, empty policy, no applied records, empty scopes, this composition's
+    /// identities owned [`ocx_config::exec_state::Owner::Inherited`], follow-cwd and a reset session.
+    ///
+    /// `None` without a patch tier, and for [`ExportDestination::RunningShell`] while `inherited`
+    /// is readable: a fresh state would replace the hook's session records and claimed token.
+    #[must_use]
+    pub fn exec_state_entry(
+        &self,
+        infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
+        no_patches: &std::collections::BTreeSet<String>,
+        inherited: &ocx_config::exec_state::Inherited,
+        destination: ExportDestination,
+    ) -> Option<ocx_package::metadata::env::entry::Entry> {
+        use ocx_config::exec_state::{ExecState, Inherited, Owner, Replay, encode};
+
+        self.patches.as_ref()?;
+        if destination == ExportDestination::RunningShell && matches!(inherited, Inherited::Readable(_)) {
+            return None;
         }
-        identities.to_entry()
+        let identities = ocx_package::launch::LaunchIdentities::from_infos(infos).with_opt_out(no_patches);
+        let state = ExecState {
+            narrowing: inherited.narrowing(),
+            replay: Replay {
+                launch_identities: identities.to_records(Owner::Inherited),
+                ..Replay::default()
+            },
+            ..ExecState::default()
+        };
+        let encoded = encode(&state);
+        if encoded.truncated != ocx_config::exec_state::Truncation::None {
+            log::debug!("exported execution state shrank to {:?}", encoded.truncated);
+        }
+        Some(ocx_package::metadata::env::entry::Entry {
+            key: ocx_env::__OCX_ENV_STATE.name.to_owned(),
+            value: encoded.value?,
+            kind: ocx_package::metadata::env::modifier::ModifierKind::Constant,
+            separator: None,
+        })
     }
 
     /// Builds an [`InstallInfo`] from a known **package root**, skipping identifier

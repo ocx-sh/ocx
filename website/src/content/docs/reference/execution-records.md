@@ -30,6 +30,7 @@ A record describes what OCX was about to run and not what happened, so it has no
     "sh.ocx.kind": "binary",
     "sh.ocx.package": "pkg:oci/solver@sha256:aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899?arch=amd64&repository_url=internal.corp.example%2Fsolver"
   },
+  "envMode": "clean",
   "scope": {
     "tier": "package",
     "cleanEnv": true,
@@ -68,6 +69,7 @@ A record describes what OCX was about to run and not what happened, so it has no
 | `process` | `pid`, `user`, `parent`, `arch`, `executable` and `working_directory` of the process that runs the binary |
 | `host`, `os` | `host.name` and `os.type` |
 | `executable` | `sh.ocx.provenance`, `sh.ocx.kind` and `sh.ocx.package` of the resolved executable |
+| `envMode` | The starting environment of the composition, a snake_case value from an open set that a consumer must tolerate. `layer` composed over the calling environment (the default), `isolate` reverted what earlier ocx layers applied first (`--isolate`), `clean` started empty (`--clean`) |
 | `scope` | `tier`, `cleanEnv`, and the requested identifiers or the project's `projectRoot`, `lock`, `groups` and, when `--with` named any, `with` |
 | `resolution` | How the closure was resolved: see [Resolution](#execution-records-format-resolution) |
 | `packages` | One descriptor per package that composed the child's environment |
@@ -126,6 +128,7 @@ A record describes what OCX was about to run and not what happened, so it has no
 
 ```json
 {
+  "envMode": "layer",
   "scope": {
     "tier": "project",
     "cleanEnv": false,
@@ -200,7 +203,7 @@ An entrypoint launcher re-enters OCX, so one invocation through a launcher write
 | `executable["sh.ocx.kind"]` | `launcher` — the resolved path is the launcher shim | `binary` — the actual leaf executable |
 | `packages[0].digest.sha256` | same content digest as the inner frame | same content digest as the outer frame |
 
-- Sink: [`ocx launcher exec`][cmd-launcher-exec] takes no `--records-*` flags and inherits the sink through the forwarded `OCX_RECORDS_DIR` and `OCX_RECORDS_NAME`
+- Sink: [`ocx launcher exec`][cmd-launcher-exec] takes no `--records-*` flags and inherits the sink through the `OCX_RECORDS_DIR` and `OCX_RECORDS_NAME` variables, which a child inherits (under `--clean` it reads them from [`__OCX_ENV_STATE`][env-ocx-env-state])
 
 See [Two records per launcher invocation][execution-records-explanation-frames] for how the frames join and count. [Launcher frames in records][records-launcher-frames] covers degraded frames and why previews write no record.
 
@@ -283,7 +286,7 @@ required = true
 
 - Precedence: [`[records]`][config-records] config, then the variables, then the flags on [`ocx exec`][cmd-exec] or [`ocx package exec`][cmd-package-exec]. The highest layer wins per field
 - Empty variable: reads as unset, so a profile-exported value can be disabled for one invocation
-- Forwarding: both variables are resolution-affecting and forwarded to every subprocess
+- Forwarding: both variables are inherited by a child under the default and `--isolate` modes. Under `--clean` the child reads the values from [`__OCX_ENV_STATE`][env-ocx-env-state]
 - SYSTEM lock: a SYSTEM-scope `[records]` declaration locks the whole block, `dir`, `name` and `required` together, and the variables and flags have no effect once it is locked
 - Lock survival: the lock survives [`OCX_NO_CONFIG=1`][env-ocx-no-config], and an unreadable `/etc/ocx/config.toml` aborts the invocation with exit `78`. An absent system file is silent
 - Relative `dir` in a config file: anchored at the declaring file's directory, like [`[trust.sigstore] trusted_root`][config-trust-sigstore]. `--records-dir` and `OCX_RECORDS_DIR` resolve against the process's working directory
@@ -340,6 +343,7 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 
 <!-- environment -->
 [env-ocx-records-dir]: ./environment.md#ocx-records-dir
+[env-ocx-env-state]: ./environment.md#ocx-env-state
 [env-ocx-records-name]: ./environment.md#ocx-records-name
 [env-ocx-no-config]: ./environment.md#ocx-no-config
 [env-ocx-no-verify]: ./environment.md#ocx-no-verify

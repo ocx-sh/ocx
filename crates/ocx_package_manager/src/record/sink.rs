@@ -195,10 +195,9 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::*;
-    use crate::record::execution_record::{RecordInputs, Scope};
+    use crate::record::execution_record::{RecordInputs, RecordedConfig, Scope};
     use crate::record::{RecordsOptions, resolve_records};
     use crate::tasks::resolve::AdmittedClaims;
-    use ocx_config::env::OcxConfigView;
     use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::install_info::InstallInfo;
     use ocx_package::resolved_package::ResolvedPackage;
@@ -587,7 +586,7 @@ mod tests {
         let store_root = PathBuf::from("/store");
         let shim_root = PathBuf::from("/shims");
         let argv = vec!["cmake".to_string(), "--version".to_string()];
-        let config = OcxConfigView::new("/opt/ocx/bin/ocx");
+        let config = RecordedConfig::new("/opt/ocx/bin/ocx");
 
         ExecutionRecord::build(
             &RecordInputs {

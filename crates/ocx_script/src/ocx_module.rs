@@ -27,11 +27,13 @@ use ocx_oci::platform::{Architecture, OperatingSystem};
 const DEFAULT_READ_MAX_BYTES: i32 = 1_048_576;
 
 /// Env keys an `ocx.run(env=...)` overlay may never override, or it changes which binary and OCX config the child
-/// resolves.
+/// resolves. `__OCX_ENV_STATE` is the execution state a child ocx decodes, so a forged one would redirect what that
+/// ocx believes it inherited.
 static RESERVED_ENV_KEYS: &[&ocx_env::EnvVar] = &[
     &ocx_env::PATH,
     &ocx_env::OCX_HOME,
     &ocx_env::OCX_BINARY_PIN,
+    &ocx_env::__OCX_ENV_STATE,
     &ocx_env::OCX_CONFIG,
     &ocx_env::OCX_PROJECT,
     &ocx_env::OCX_INDEX,
@@ -533,6 +535,8 @@ mod tests {
         assert!(is_reserved_env_key("PATH"));
         assert!(is_reserved_env_key("OCX_HOME"));
         assert!(is_reserved_env_key(ocx_env::OCX_BINARY_PIN.name));
+        // The execution state a child ocx would read: a script may neither read nor forge it.
+        assert!(is_reserved_env_key(ocx_env::__OCX_ENV_STATE.name));
         assert!(is_reserved_env_key(ocx_env::OCX_CONFIG.name));
         assert!(is_reserved_env_key(ocx_env::OCX_INDEX.name));
     }
@@ -574,6 +578,7 @@ mod tests {
             .filter(|name| is_reserved_env_key(name))
             .collect();
         let expected = std::collections::BTreeSet::from([
+            "__OCX_ENV_STATE",
             "OCX_AUTH_{REGISTRY}_TOKEN",
             "OCX_AUTH_{REGISTRY}_TYPE",
             "OCX_AUTH_{REGISTRY}_USER",

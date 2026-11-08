@@ -9,6 +9,7 @@ pub mod data;
 #[cfg(unix)]
 pub mod fifo;
 pub mod net;
+pub mod paths;
 pub mod pki;
 
 // Re-exported so a guard walking the syntax tree itself uses the same `syn` the harness parsed with.

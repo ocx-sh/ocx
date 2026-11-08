@@ -33,7 +33,8 @@ DOC_RUNNER = Path("tests/test_doc_scripts.py")
 HARNESS_ONLY = {"__OCX_TESTING_REQUIRE_LIVE_SHELLS"}
 
 _DECLARED = re.compile(r"\bpub\s+(__OCX_TESTING_[A-Z_]+)\s*:")
-_DECLARED_TESTING = re.compile(r"\bpub\s+(__OCX_TESTING_[A-Z_]+)\s*:[^;]*,\s*Testing\s*;")
+# The visibility class is the second field; attributes such as `propagation = UserInput` may follow it.
+_DECLARED_TESTING = re.compile(r"\bpub\s+(__OCX_TESTING_[A-Z_]+)\s*:[^;,]*,\s*Testing\s*(?:,[^;]*)?;")
 # Clippy's `items_after_test_module` keeps non-test items above the first top-level test cfg.
 _TEST_CFG = re.compile(r"^#\[cfg\((?:all\()?test\b", re.MULTILINE)
 

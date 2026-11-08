@@ -5,21 +5,31 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use ocx_package_manager::activation;
-
 use crate::app::CliRefusal;
 use crate::options;
+
+const WITH_LONG_HELP: &str = "\
+Repeatable. The package is installed when missing and layered on top of the project's tools, so it \
+wins a name clash on PATH. A project tool of the same repository is replaced by the `--with` \
+package instead, so `--with tool:2` runs version 2 of a pinned tool. Nothing is written to `ocx.toml` \
+or `ocx.lock`.\n\n\
+https://ocx.sh/docs/guides/project-toolchain/";
 
 /// Open your shell inside the project environment.
 ///
 /// Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it:
-/// `-g` selects groups, `--with` adds packages not in `ocx.toml`, `--stack` keeps the active
-/// environment underneath. `exit` returns to the shell you came from.
+/// `-g` selects groups, `--with` adds packages not in `ocx.toml`. The composition layers onto the
+/// calling environment; `--isolate` first reverts what ocx applied to it, `--clean` starts from
+/// nothing. The shell stays tied to its project: its hook refreshes that layer when `ocx.toml` or
+/// `ocx.lock` change, and `cd` elsewhere applies nothing. `exit` returns to the parent shell.
 ///
-/// The subcommands generate shell completions, grant or revoke a project's shell activation,
-/// and report the state of the per-prompt integration. Login activation is `$OCX_HOME/env.sh`.
+/// The subcommands generate completions, grant or revoke activation and report per-prompt state.
+/// Login activation is `$OCX_HOME/env.sh`.
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true, subcommand_required = false)]
+// The shared flag's help is written for `ocx exec`, where a project tool leads `PATH`; in a shell the
+// `--with` package is the last layer applied and leads it.
+#[clap(mut_arg("with", |arg| arg.long_help(WITH_LONG_HELP)))]
 pub struct ShellArgs {
     #[command(subcommand)]
     pub command: Option<Shell>,
@@ -37,7 +47,7 @@ pub struct ShellArgs {
     pub with: options::With,
 
     #[clap(flatten)]
-    pub stack: options::Stack,
+    pub mode: options::ExecModeOptions,
 
     #[clap(flatten)]
     pub consent: options::Consent,
@@ -55,42 +65,19 @@ impl ShellArgs {
     async fn open(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Resolved before the composed env, so a `--with` or project package missing from the ambient PATH cannot become the shell.
         let program = user_shell_program()?;
-        if !self.stack.enabled() {
-            warn_when_nested(&context).await;
-        }
         let exec = super::toolchain_exec::ToolchainExec {
             groups: self.groups.clone(),
-            clean: false,
+            mode: self.mode,
             env: self.env.clone(),
             lazy_mode: Default::default(),
             pinned: self.pinned.clone(),
             records: Default::default(),
             with: self.with.clone(),
-            stack: self.stack,
             consent: self.consent.clone(),
             names: Vec::new(),
             argv: vec![program],
         };
-        exec.execute(context).await
-    }
-}
-
-/// One stderr line when the project this shell would open is the one an enclosing `ocx exec` or `ocx shell` composed.
-async fn warn_when_nested(context: &crate::app::Context) {
-    let Ok((config_path, _)) = crate::app::project_context::resolve_project_paths(context, None).await else {
-        return;
-    };
-    let Ok(identity) = activation::ProjectIdentity::resolve(config_path).await else {
-        return;
-    };
-    if activation::ExecScope::from_env()
-        .await
-        .is_some_and(|scope| scope.observe(&identity.dir).is_some())
-    {
-        context.ui().warn(format!(
-            "already inside an `ocx exec` or `ocx shell` environment for {}; `ocx exec --stack` layers a new one on top",
-            identity.dir.display()
-        ));
+        exec.open_shell(context).await
     }
 }
 
@@ -184,7 +171,7 @@ pub enum Shell {
     /// Report the shell integration's state, and why it is inert when it is.
     #[command(long_about = "\
         Report the shell integration's state, and why it is inert when it is.\n\n\
-        Prints the decoded `__OCX_ENV_STATE` ledger as fields. They show what each scope \
+        Prints the decoded `__OCX_ENV_STATE` as fields. They show what each scope \
         applied, whether the watch-set fingerprint still matches, and whether the project \
         scope's constant priors are intact. Above all they show the enumerated reason the shell \
         is not active.\n\n\
@@ -199,15 +186,15 @@ pub enum Shell {
         The source set drifted from the stamp; the report names the new sources. Run \
         `ocx shell allow` again.\n\n\
         There is no consent stamp and no matching grant. Run `ocx shell allow`.\n\n\
-        The ledger exceeded its cap. Declare less environment in the abandoned scope.\n\n\
-        The ledger is absent. In a shell `ocx self setup` wired, that is the first prompt and \
+        The state exceeded its cap. Declare less environment in the abandoned scope.\n\n\
+        The state is absent. In a shell `ocx self setup` wired, that is the first prompt and \
         none is needed; the next prompt applies it. If setup never wired this shell, run \
         `ocx self setup` and start a new shell.\n\n\
-        The ledger is present but corrupt. Start a new shell, or run `unset __OCX_ENV_STATE`.\n\n\
-        A consented project the ledger does not yet show reports `active: not yet`, and applies at \
+        The state is present but corrupt. Start a new shell, or run `unset __OCX_ENV_STATE`.\n\n\
+        A consented project the state does not yet show reports `active: not yet`, and applies at \
         the next prompt. If its lock is absent or stale, it reports `active: no`, names the \
         refusal and points at `ocx lock`.\n\n\
-        Read-only: it never writes a consent stamp, never repairs the ledger and never emits a \
+        Read-only: it never writes a consent stamp, never repairs the state and never emits a \
         plan. The repair gesture is `unset __OCX_ENV_STATE` (which destroys the priors, so a \
         new shell is the cleaner floor); this command is how you check it worked.\n\n\
         The output is diagnostics for a human to read and is never valid shell source. It is \
@@ -257,10 +244,44 @@ mod tests {
 
     #[test]
     fn bare_shell_takes_the_exec_composition_flags() {
-        let args = parse(&["-g", "ci", "--with", "cmake:3", "--stack", "--env", "A=b"]).unwrap();
+        let args = parse(&["-g", "ci", "--with", "cmake:3", "--isolate", "--env", "A=b"]).unwrap();
         assert!(args.command.is_none());
         assert_eq!(args.groups.names(), ["ci"]);
-        assert!(args.stack.enabled());
+        assert_eq!(args.mode.mode(), ocx_package_manager::exec_env::ExecMode::Isolate);
+    }
+
+    /// The shared `--with` help says a project tool wins a clash, which holds for `ocx exec` only.
+    #[test]
+    fn shell_with_help_says_the_with_package_wins_a_name_clash() {
+        use clap::CommandFactory;
+        let command = ShellArgs::command();
+        let with = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "with")
+            .expect("`--with` is a shell flag");
+        let long = with.get_long_help().expect("the shell sets a long help").to_string();
+        assert!(long.contains("wins a name clash on PATH"), "{long}");
+        assert!(!long.contains("a project tool wins"), "{long}");
+    }
+
+    #[test]
+    fn the_retired_stack_flag_is_a_usage_error() {
+        let error = parse(&["--stack"]).err().expect("--stack no longer exists");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn shell_isolate_and_clean_conflict() {
+        let error = parse(&["--isolate", "--clean"]).err().expect("the pair conflicts");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn shell_clean_selects_the_clean_mode() {
+        assert_eq!(
+            parse(&["--clean"]).unwrap().mode.mode(),
+            ocx_package_manager::exec_env::ExecMode::Clean
+        );
     }
 
     #[test]
@@ -297,7 +318,7 @@ mod tests {
 
     #[test]
     fn open_flags_do_not_combine_with_a_subcommand() {
-        assert!(parse(&["--stack", "state"]).is_err());
+        assert!(parse(&["--clean", "state"]).is_err());
     }
 
     #[test]

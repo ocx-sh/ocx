@@ -628,7 +628,7 @@ async fn refresh_pushed_pins(
     tags: &[String],
 ) {
     // A frozen invocation never moves a pin.
-    if context.config_view().frozen {
+    if context.frozen() {
         return;
     }
     // An index-owned namespace pins what its published index says, which a push does not change.

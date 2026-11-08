@@ -303,29 +303,28 @@ mod child_environment {
     }
 
     #[test]
-    fn no_ocx_variable_is_inherited_and_the_callers_stay() {
+    fn every_parent_variable_stays_the_callers_replace_and_the_pin_is_last() {
         let parent = vec![
             pair("PATH", "/bin"),
-            pair("OCX_HOME", "/leak"),
+            pair("OCX_HOME", "/inherited"),
             pair("__OCX_TESTING_X", "1"),
             pair("__ocx_plumbing", "1"),
-            pair("ocx_log_level", "debug"),
-            pair("OCX_BINARY_PIN", "/other/ocx"),
+            pair("ocx_binary_pin", "/other/ocx"),
             pair("HOME", "/home/a"),
         ];
         let caller = vec![pair("OCX_HOME", "/chosen")];
         let child = sdk::spawn::child_environment(parent, &caller, std::path::Path::new("/the/ocx"));
-        let keys: Vec<_> = child.iter().map(|(key, _)| key.to_str().expect("utf-8")).collect();
         assert_eq!(
-            keys,
-            ["PATH", "HOME", "OCX_HOME", "OCX_BINARY_PIN"]
-                .map(String::from)
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
+            child,
+            vec![
+                pair("PATH", "/bin"),
+                pair("__OCX_TESTING_X", "1"),
+                pair("__ocx_plumbing", "1"),
+                pair("HOME", "/home/a"),
+                pair("OCX_HOME", "/chosen"),
+                pair("OCX_BINARY_PIN", "/the/ocx"),
+            ]
         );
-        assert!(child.contains(&pair("OCX_HOME", "/chosen")));
-        assert!(child.contains(&pair("OCX_BINARY_PIN", "/the/ocx")));
     }
 }
 
@@ -489,7 +488,7 @@ mod fake_child {
     }
 
     #[test]
-    fn the_child_environment_is_the_scrubbed_one_plus_what_the_caller_set() {
+    fn the_child_environment_is_the_callers_plus_the_pin() {
         let done = Ocx::new(script())
             .expect("fake")
             .with_env("FAKE_HANDSHAKE", handshake())
@@ -498,16 +497,13 @@ mod fake_child {
             .call_raw("exec", &[], sdk::wire::Argv::new())
             .expect("runs");
         let printed = String::from_utf8(done.stdout).expect("utf-8");
-        let ocx_keys: Vec<_> = printed
+        let keys: std::collections::BTreeSet<_> = printed
             .lines()
             .filter_map(|line| line.split_once('=').map(|(key, _)| key))
-            .filter(|key| key.starts_with("OCX_") || key.starts_with("__OCX_"))
             .collect();
-        assert_eq!(
-            ocx_keys.iter().copied().collect::<std::collections::BTreeSet<_>>(),
-            ["OCX_BINARY_PIN", "OCX_KEPT"].into_iter().collect(),
-            "{printed}"
-        );
+        for key in ["OCX_BINARY_PIN", "OCX_KEPT"] {
+            assert!(keys.contains(key), "{key} missing from {printed}");
+        }
     }
 
     #[test]

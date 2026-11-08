@@ -79,7 +79,6 @@ ocx_exit::families!(
     ::ocx_config::ToolchainRootError: rows_only,
     ::ocx_package::metadata::env::apply::ListSeparatorError,
     ::ocx_config::env::CommandResolutionError,
-    ::ocx_package::metadata::env::apply::ForwardedEnvError,
     ::ocx_config::managed_config::ManagedConfigFetchError,
     ::ocx_config::managed_config::ManagedConfigPersistError,
     ::ocx_config::managed_config::ManagedConfigUpdateError,
@@ -89,7 +88,6 @@ ocx_exit::families!(
     ::ocx_config::managed::ManagedConfigError,
     ::ocx_config::mirror::MirrorConfigError,
     ::ocx_config::patch::PatchConfigError,
-    ::ocx_package::launch::LaunchIdentityError,
     ::ocx_config::tls::TlsError,
     // ocx_env
     ::ocx_env::InvalidEnv,

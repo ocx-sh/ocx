@@ -140,7 +140,7 @@ Explicit paths follow symlinks, while the walk rejects a symlinked `ocx.toml`. N
 
 [`OCX_CEILING_PATH`][env-ocx-ceiling-path] bounds the walk where no repository marks the edge, such as a CI workspace mounted under a shared parent. The walk probes the ceiling directory and never ascends above it. A project file at the ceiling is found, and one in a parent is not. A relative value joins onto the working directory the walk starts from. An explicit `--project` or `OCX_PROJECT` is not bounded by it, and the variable is not forwarded to child `ocx` processes.
 
-[`OCX_NO_PROJECT`][env-ocx-no-project] prunes the walk and `OCX_PROJECT` for a hermetic run. See [the kill switch][in-depth-configuration-kill-switch].
+[`OCX_NO_PROJECT`][env-ocx-no-project] prunes the walk and `OCX_PROJECT` for a run that reads no project. See [the kill switch][in-depth-configuration-kill-switch].
 
 ## Keep rendered toolchains out of the checkout \{#project-toolchain_dir\}
 
@@ -336,13 +336,13 @@ ocx env --with ocx.sh/hyperfine:1 --shell=bash
 
 The extra packages compose after the project's tools, so a project tool wins a `PATH` tie. An extra package whose repository matches a project binding replaces that binding for the run instead: `--with` overrides the project's pin of the same repository. The execution record lists them under `scope.with`.
 
-`ocx exec --stack` keeps the environment an activated parent project already put on the shell and adds this project's tools in front of it, where a plain `ocx exec` replaces the parent's tools.
+`ocx exec` layers this project's tools in front of whatever the shell already carries, an activated parent project's tools included. `--isolate` first reverts what earlier ocx layers applied, so the parent's tools leave and only this project's remain. Your own variables stay either way.
 
-With `--clean` as well, the child gets only those two toolchains: the parent's tools, then this project's in front, and none of the shell's own variables.
+`--clean` starts from an empty environment instead, so the child gets only this project's package-declared variables. `--isolate` and `--clean` together are a usage error (exit 64).
 
 ## Open a shell in the project \{#project-shell-open\}
 
-`ocx shell` starts your shell (`$SHELL`, else the shell that started `ocx`) inside the project environment, composed like `ocx exec`. `-g` selects groups, `--with` adds packages, `--stack` layers the project onto the active environment, and `exit` returns to where you came from.
+`ocx shell` starts your shell (`$SHELL`, else the shell that started `ocx`) inside the project environment, composed like `ocx exec`. `-g` selects groups, `--with` adds packages, `--isolate` and `--clean` choose the starting environment as they do for `ocx exec`, and `exit` returns to where you came from.
 
 ```shell
 ocx shell -g ci --with ocx.sh/hyperfine:1
@@ -350,7 +350,7 @@ ocx shell -g ci --with ocx.sh/hyperfine:1
 
 Like `ocx exec`, a bare `ocx shell` records activation consent for the project. `--no-consent` opts out, and `OCX_NO_CONSENT` makes that the default. `--pinned` and `--env` behave as they do for `ocx exec`.
 
-The environment inside is hermetic, as with `ocx exec`: the global toolchain is not applied there. The per-prompt hook stays registered, so leaving the project's `ocx exec` or `ocx shell` session resumes normal activation at the next prompt. `exit` returns you to the outer shell.
+The session is pinned to this project: it keeps the project's consented groups, refreshes them when `ocx.toml` or `ocx.lock` changes, and keeps your `--with` and `--env` values. A `cd` into another project prints one notice and applies nothing. The global toolchain is not composed inside, as with `ocx exec`. A shell started by `ocx exec -- bash` is a snapshot instead: the hook composes nothing for the scope it inherited, and editing that `ocx.toml` changes nothing there. `exit` returns you to the outer shell.
 
 ## Shell activation \{#project-shell\}
 
@@ -368,7 +368,7 @@ A project nested inside another one is a *switch* and not a stack. Only the near
 
 An operator can also pre-authorize a checkout path or a whole namespace of registries in advance. That is how a devcontainer or a fleet skips the per-project prompt entirely. See [Shell Integration → Consent grants][in-depth-shell-integration-consent] for the full predicate and where each kind of grant can live.
 
-Nushell, the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point. A project scope on those shells needs an explicit entry point:
+The strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point. A project scope on those shells needs an explicit entry point:
 
 - [`ocx direnv export`][cmd-direnv-export] is stateless and exports only. It installs a missing package unless `--no-pull` is passed or ocx runs offline, so run [`ocx pull`][cmd-pull] first to keep the export offline.
 - [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry.

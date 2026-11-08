@@ -33,7 +33,6 @@ runs ocx ``--offline``. It touches no shared-registry fixture.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -42,7 +41,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -110,8 +109,7 @@ def arena(tmp_path: Path) -> Arena:
     ocx_home = home / ".ocx"
     candidate = ocx_home / _CANDIDATE_REL
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_OCX, candidate)
-    candidate.chmod(0o755)
+    matrix.seed_binary(_OCX, candidate)
 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -166,23 +164,6 @@ def _self_setup(arena: Arena, shell_name: str = "bash") -> subprocess.CompletedP
     )
     assert result.returncode == 0, f"self setup must succeed; stderr:\n{result.stderr}"
     return result
-
-
-def _skip_nushell_without_reconcile(shell: str, arena: Arena) -> None:
-    """Skip a project-scope row on nushell — after **observing** why (mirrors WP-14)."""
-    if shell != "nushell":
-        return
-    env_nu = arena.ocx_home / "env.nu"
-    if not env_nu.is_file():
-        _self_setup(arena, "nu")
-    assert env_nu.is_file(), f"self setup must write {env_nu}; without it the skip below would be unobserved"
-    body = env_nu.read_text(encoding="utf-8")
-    occurrences = body.count("reconcile")
-    if occurrences == 0:
-        pytest.skip(
-            "WP-12b unlanded: `ENV_NU` never calls `--reconcile` — the shipped "
-            f"{env_nu} contains 0 occurrences of 'reconcile' (observed)"
-        )
 
 
 def _locate_prompt_tool(tool: str) -> str:
@@ -248,6 +229,11 @@ def _write_config(arena: Arena, body: str) -> Path:
     config = arena.ocx_home / "config.toml"
     config.write_text(body, encoding="utf-8")
     return config
+
+
+def _over_cap_block() -> str:
+    """``[env]`` lines too large for one state, even compressed (the value is incompressible by construction)."""
+    return "".join(f'WP15_BIG_{index:02d} = "{matrix.incompressible_text(index, 900)}"\n' for index in range(24))
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +425,6 @@ def test_ec_ledger_014_unset_carrier_repairs_lists_constants_stay(arena: Arena) 
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_001_unset_prior_removed_value_prior_restored(shell: str, arena: Arena) -> None:
     """EC-CONST-001 — ``priors: Unset`` removes on exit; ``priors: Value`` restores."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -471,7 +456,6 @@ def test_ec_const_001_unset_prior_removed_value_prior_restored(shell: str, arena
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_002_mid_session_override_survives_exit(shell: str, arena: Arena) -> None:
     """EC-CONST-002 — ``C != L.applied`` at exit ⇒ leave C alone; the direnv behaviour ocx refuses."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -494,7 +478,6 @@ def test_ec_const_002_mid_session_override_survives_exit(shell: str, arena: Aren
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_003_mid_session_override_survives_every_recompose(shell: str, arena: Arena) -> None:
     """EC-CONST-003 — the ``D == L`` apply gate: an override survives repeated recomposes, not just exit."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     fragments = [
         matrix.cd_to(shell, project),
@@ -514,7 +497,6 @@ def test_ec_const_003_mid_session_override_survives_every_recompose(shell: str, 
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_004_prior_recaptured_on_project_intent_change(shell: str, arena: Arena) -> None:
     """EC-CONST-004 — the headline re-capture: D != L re-applies AND re-captures the live override as prior."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -542,7 +524,6 @@ def test_ec_const_004_prior_recaptured_on_project_intent_change(shell: str, aren
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_005_coincidence_c_equals_d_restores_not_removes(shell: str, arena: Arena) -> None:
     """EC-CONST-005 — a user value that coincides with D's is restored on exit, not removed."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'WP15_CONST = "alpha"\n')
     outside = arena.projects / "outside"
     outside.mkdir()
@@ -567,7 +548,6 @@ def test_ec_const_005_coincidence_c_equals_d_restores_not_removes(shell: str, ar
 @pytest.mark.parametrize("shell", _PROJECT_SCOPE_SHELLS)
 def test_ec_const_007_retirement_restores_prior_under_the_same_exit_guard(shell: str, arena: Arena) -> None:
     """EC-CONST-007 — retiring a constant (recompose in place) obeys the SAME C==L.applied guard as exit."""
-    _skip_nushell_without_reconcile(shell, arena)
     project = _locked_project(arena, "alpha", 'WP15_CONST = "alpha"\n')
 
     unmodified = _session(
@@ -741,7 +721,11 @@ def test_ec_list_004_remove_global_from_another_terminal_is_gone_not_shadowed(ar
 
 
 def test_ec_list_005_arbitrary_element_stranded_when_ledger_is_lost(arena: Arena) -> None:
-    """EC-LIST-005 — an arbitrary (non-`$OCX_HOME`) element survives a corrupt ledger; is retired when intact."""
+    """EC-LIST-005 — an arbitrary (non-`$OCX_HOME`) element survives an unreadable state; is retired when intact.
+
+    An unreadable value stands the hook down and is never written, so nothing is removed on
+    its authority; an intact state names the element and retires it from the live ``PATH``.
+    """
     project = _locked_project(arena, "alpha", 'PATH = { type = "path", value = "bin" }\n')
     (project / "bin").mkdir()
     outside = arena.projects / "outside"
@@ -752,15 +736,22 @@ def test_ec_list_005_arbitrary_element_stranded_when_ledger_is_lost(arena: Arena
     match = re.search(rf"export {matrix.CARRIER}='([^']+)'", entered.stdout)
     assert match
 
-    corrupted_leave = matrix.reconcile(arena.ocx, "bash", outside, arena.env(), carrier="1.@@@corrupt@@@")
-    assert str(project / "bin") not in corrupted_leave.stdout, (
-        "with L lost, prefix repair covers $OCX_HOME-rooted elements only — the arbitrary element is not named for "
-        f"removal here (it can only be removed by whoever set it):\n{corrupted_leave.stdout}"
-    )
+    live = arena.env()
+    live["PATH"] = os.pathsep.join([str(project / "bin"), live["PATH"]])
 
-    intact_leave = matrix.reconcile(arena.ocx, "bash", outside, arena.env(), carrier=match.group(1))
-    assert "unset" in intact_leave.stdout or "~PATH" in intact_leave.stdout or "PATH=" in intact_leave.stdout, (
-        f"with L intact, the arbitrary element must be recorded and retired correctly:\n{intact_leave.stdout}"
+    corrupted_leave = matrix.reconcile(arena.ocx, "bash", outside, live, carrier="1.@@@corrupt@@@")
+    assert "stopped updating this shell" in corrupted_leave.stdout, (
+        f"fixture sanity: the unreadable state must stand the hook down:\n{corrupted_leave.stdout}"
+    )
+    assert str(project / "bin") not in corrupted_leave.stdout, (
+        "with the state unreadable nothing names the arbitrary element for removal "
+        f"(it can only be removed by whoever set it):\n{corrupted_leave.stdout}"
+    )
+    assert f"export {matrix.CARRIER}=" not in corrupted_leave.stdout, "an unreadable state is never written over"
+
+    intact_leave = matrix.reconcile(arena.ocx, "bash", outside, live, carrier=match.group(1))
+    assert str(project / "bin") in intact_leave.stdout, (
+        f"with the state intact, the arbitrary element it recorded must be retired:\n{intact_leave.stdout}"
     )
 
 
@@ -1195,7 +1186,7 @@ def _guarded_prompt(shell: str) -> str:
         return "if ($__ocx_exe | path exists) { ^$__ocx_exe --offline self activate --reconcile --shell=nushell | ignore }"
     inner = matrix.prompt(shell).replace("\n", "; ")
     if shell == "pwsh":
-        return f"if (Test-Path $__ocx_exe -PathType Leaf) {{ {inner} }}"
+        return f"if ([System.IO.File]::Exists($__ocx_exe)) {{ {inner} }}"
     if shell == "fish":
         return f"if test -x $__ocx_exe; {inner}; end"
     if shell == "elvish":
@@ -1271,7 +1262,7 @@ def test_ec_emit_005_resolved_binary_absent_is_a_silent_no_op(shell: str, arena:
 
 @pytest.mark.parametrize("shell", ("pwsh", "nushell"))
 def test_ec_emit_006_present_but_not_executable_still_degrades_silently(shell: str, arena: Arena) -> None:
-    """EC-EMIT-006 — pwsh/nu probe with ``Test-Path``/``path exists``, which is true for a non-executable file too."""
+    """EC-EMIT-006 — pwsh/nu probe with ``[System.IO.File]::Exists``/``path exists``, which is true for a non-executable file too."""
     _require(shell)
     if shell == "nushell":
         # A-24 forbids the tier-2 hand-written prompt here: nu evaluates no
@@ -1291,6 +1282,10 @@ def test_ec_emit_006_present_but_not_executable_still_degrades_silently(shell: s
         env_nu = arena.ocx_home / "env.nu"
         assert env_nu.is_file(), f"self setup must write {env_nu}; without it nothing below is the shipped guard"
         candidate = arena.ocx_home / _CANDIDATE_REL
+        # The seeded candidate is a hard link shared with every test: replace it
+        # before changing its mode, or the mode change reaches them all.
+        candidate.unlink()
+        shutil.copy2(arena.ocx, candidate)
         candidate.chmod(0o644)  # present, but not executable
         fragments = [
             f"source {matrix.quote('nushell', str(env_nu))}",
@@ -1599,6 +1594,7 @@ def _quiet_prompt_execs(arena: Arena, *, before_measure: Sequence[str] = ()) -> 
     real_binary.chmod(0o755)
     counter = arena.scripts / "hook014-execs"
     counter.write_text("", encoding="utf-8")
+    candidate.unlink()  # a hard link shared with every test: write a new file, not through it
     candidate.write_text(
         f"#!/bin/sh\nprintf 'x' >> {matrix.quote('bash', str(counter))}\nexec {matrix.quote('bash', str(real_binary))} \"$@\"\n",
         encoding="utf-8",
@@ -1803,6 +1799,7 @@ def test_ec_hook_019_a_grant_exported_mid_session_fires_the_real_guard(arena: Ar
     real_binary.chmod(0o755)
     counter = arena.scripts / "hook019-execs"
     counter.write_text("", encoding="utf-8")
+    candidate.unlink()  # a hard link shared with every test: write a new file, not through it
     candidate.write_text(
         f"#!/bin/sh\nprintf 'x' >> {matrix.quote('bash', str(counter))}\nexec {matrix.quote('bash', str(real_binary))} \"$@\"\n",
         encoding="utf-8",
@@ -2166,13 +2163,13 @@ def test_ec_path_004_bash_export_path_strips_empty_ambient_segments(arena: Arena
 
 @pytest.mark.parametrize("shell", ("bash", "zsh"))
 def test_ec_path_005_removing_the_entire_value_yields_empty_not_a_bare_separator(shell: str, arena: Arena) -> None:
-    """EC-PATH-005 — when ocx's element is the ENTIRE PATH, revert leaves the session pair, never a bare separator.
+    """EC-PATH-005 — when ocx's element is added to a ``PATH`` of just the session pair, revert leaves that pair, never a bare separator.
 
-    Under C-059 ``PATH`` can no longer be emptied: the two session directories
-    are desired on every prompt, so the residue after the revert is exactly
-    that pair. The guard itself is unchanged — the assertion below splits on
-    the separator and compares element for element, so a bare separator (or any
-    empty segment the POSIX emit left behind) still fails it.
+    Under C-059 ``PATH`` can no longer be emptied: the two session directories are desired on every
+    prompt, so the residue after the revert is exactly that pair (a value the shell held before the
+    project applied it is not the project's to remove). The guard itself is unchanged: the assertion
+    splits on the separator and compares element for element, so a bare separator (or any empty
+    segment the POSIX emit left behind) still fails it.
 
     fish and pwsh are excluded: fish's ``PATH`` is a builtin list variable
     that this host's fish never reports fully empty via the shared probe
@@ -2188,13 +2185,20 @@ def test_ec_path_005_removing_the_entire_value_yields_empty_not_a_bare_separator
     outside = arena.projects / "outside"
     outside.mkdir()
     env = arena.env(shell_abs)
-    env["PATH"] = str(project / "onlybin")
+    env["PATH"] = os.pathsep.join(matrix.session_path_dirs(arena.ocx_home))
     result = _session(
         shell, arena,
-        [matrix.cd_to(shell, project), matrix.prompt(shell), matrix.cd_to(shell, outside), matrix.prompt(shell), matrix.probe(shell, "path", "PATH")],
+        [
+            matrix.cd_to(shell, project), matrix.prompt(shell),
+            matrix.probe(shell, "applied", "PATH"),
+            matrix.cd_to(shell, outside), matrix.prompt(shell), matrix.probe(shell, "path", "PATH"),
+        ],
         env=env,
     )
     assert result.returncode == 0, f"{shell}: stderr:\n{result.stderr}"
+    assert str(project / "onlybin") in matrix.path_segments(_read(result, "applied")), (
+        f"{shell}: the project's element must be applied first, or the revert proves nothing"
+    )
     raw = _read(result, "path")
     assert raw.split(os.pathsep) == matrix.session_path_dirs(arena.ocx_home), (
         f"{shell}: retiring ocx's only element must leave exactly the session pair, never a bare separator: {raw!r}"
@@ -2225,13 +2229,19 @@ def test_ec_path_007_segment_exact_removal_leaves_prefix_and_substring_near_miss
     outside = arena.projects / "outside"
     outside.mkdir()
     env = arena.env(shell_abs)
-    env["PATH"] = os.pathsep.join(["/usr/bin2", "/usr/binx", "/usr/bin"])
+    # `/usr/bin` is the project's to add, so it is left out of the shell's own `PATH`: an element
+    # the shell already held is not the project's to remove.
+    env["PATH"] = os.pathsep.join(["/usr/bin2", "/usr/binx"])
     result = _session(
         "bash", arena,
-        [matrix.cd_to("bash", project), matrix.prompt("bash"), matrix.cd_to("bash", outside), matrix.prompt("bash"), matrix.probe("bash", "path", "PATH")],
+        [
+            matrix.cd_to("bash", project), matrix.prompt("bash"), matrix.probe("bash", "applied", "PATH"),
+            matrix.cd_to("bash", outside), matrix.prompt("bash"), matrix.probe("bash", "path", "PATH"),
+        ],
         env=env,
     )
     assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    assert "/usr/bin" in matrix.path_segments(_read(result, "applied")), "the project must apply `/usr/bin` first"
     segments = matrix.path_segments(_read(result, "path"))
     assert "/usr/bin2" in segments and "/usr/binx" in segments, f"near-miss segments must survive: {segments}"
     assert "/usr/bin" not in segments, f"the exact segment must be removed: {segments}"
@@ -2262,29 +2272,40 @@ def test_ec_path_014_elvish_export_path_reads_unset_var_without_a_guard_error(ar
 
 
 def test_ec_path_015_a_trailing_slash_spelling_of_an_owned_element_is_retired(arena: Arena) -> None:
-    """EC-PATH-015 — A-09: retirement removes prefix-owned elements by PREFIX, so a spelling variant cannot outlive it."""
+    """EC-PATH-015 — the owned-prefix repair removes a spelling variant of an element the state no longer names.
+
+    The repair runs only after the state dropped every applied record (rung 2), so the project
+    carries enough incompressible ``[env]`` to force that rung. A foreign tool then re-adds the
+    owned directory with a trailing slash; the repair must retire that spelling too.
+    """
     owned_dir = arena.ocx_home / "packages" / "digest" / "bin"
     owned_dir.mkdir(parents=True)
-    project = _locked_project(arena, "alpha", f'PATH = {{ type = "path", value = "{owned_dir}" }}\n')
+    project = _locked_project(
+        arena, "alpha", f'PATH = {{ type = "path", value = "{owned_dir}" }}\n{_over_cap_block()}'
+    )
     outside = arena.projects / "outside"
     outside.mkdir()
 
-    entered = matrix.reconcile(arena.ocx, "bash", project, arena.env())
-    assert str(owned_dir) in entered.stdout, f"fixture must apply:\n{entered.stdout}"
-    match = re.search(rf"export {matrix.CARRIER}='([^']+)'", entered.stdout)
-    assert match
-
-    # Simulate a foreign tool that wrote the SAME directory with a trailing
-    # slash — a live shell holding that spelling, not the one ocx applied.
-    live_env = arena.env()
-    live_env["PATH"] = str(owned_dir) + "/"
-    left = matrix.reconcile(arena.ocx, "bash", outside, live_env, carrier=match.group(1))
-    # The observable proof: the emitted removal must target the prefix-owned
-    # segment as OBSERVED IN C (the trailing-slash spelling), not the byte
-    # value D recorded — assert the emitted text references the live spelling.
-    assert str(owned_dir) + "/" in left.stdout or str(owned_dir) in left.stdout, (
-        f"the retirement must name the OWNED prefix (observed spelling included) for removal:\n{left.stdout}"
+    result = _session(
+        "bash",
+        arena,
+        [
+            matrix.cd_to("bash", project),
+            matrix.prompt("bash"),
+            matrix.probe("bash", "carrier", matrix.CARRIER),
+            f'export PATH={matrix.quote("bash", str(owned_dir) + "/")}":$PATH"',
+            matrix.cd_to("bash", outside),
+            matrix.prompt("bash"),
+            matrix.probe("bash", "path", "PATH"),
+        ],
     )
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    state = matrix.decode_carrier(_read(result, "carrier"))
+    assert state["truncated"] == "all_applied_dropped" and state["applied"] == [], (
+        f"fixture sanity: the repair only runs on a state that lost its applied records: {state['truncated']}"
+    )
+    left = [segment.rstrip("/") for segment in matrix.path_segments(_read(result, "path"))]
+    assert str(owned_dir) not in left, f"every spelling of the owned directory must be retired: {left}"
 
 
 # ---------------------------------------------------------------------------
@@ -2369,6 +2390,61 @@ def test_ec_quote_008_powershell_single_quoted_literal_carries_every_metacharact
     assert _read(result, "const") == hostile, f"stdout:\n{result.stdout}"
 
 
+@pytest.mark.parametrize(
+    "value",
+    ("\u4e2d\u6587", "\u65e5\u672c\u8a9e", "\ud55c\uad6d\uc5b4", "it\u2019s \u201cquoted\u201d", "astral-\U0001f600"),
+)
+def test_powershell_exports_a_non_ascii_value_byte_identical(value: str, arena: Arena) -> None:
+    """Extends EC-QUOTE-008 — a CJK, typographic-quote or astral value is emitted as ASCII and reads back identical in live pwsh."""
+    shell_abs = _require("pwsh")
+    project = _locked_project(arena, "alpha", f'WP15_CONST = "{value}"\n')
+    emitted = subprocess.run(
+        [str(arena.ocx), "--offline", "self", "activate", "--reconcile", "--shell=pwsh"],
+        capture_output=True, check=False, text=True, env=arena.env(shell_abs), cwd=project,
+    )
+    assert emitted.returncode == 0, f"stderr:\n{emitted.stderr}"
+    assert emitted.stdout.isascii(), f"the pwsh export stream must be ASCII only:\n{emitted.stdout}"
+    result = _session("pwsh", arena, [matrix.cd_to("pwsh", project), matrix.prompt("pwsh"), matrix.probe("pwsh", "const", "WP15_CONST")])
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    assert _read(result, "const") == value, f"stdout:\n{result.stdout}"
+
+
+def test_pwsh_hook_finds_its_binary_under_a_non_ascii_ocx_home_holding_brackets(
+    arena: Arena, tmp_path: Path
+) -> None:
+    """Extends EC-HOOK-008 — an ``OCX_HOME`` of ``[x]`` plus CJK is emitted ASCII, found as a file, and the project applies."""
+    shell_abs = _require("pwsh")
+    ocx_home = tmp_path / "[x]\u4e2d\u6587" / ".ocx"
+    candidate = ocx_home / _CANDIDATE_REL
+    candidate.parent.mkdir(parents=True)
+    shutil.copy2(_OCX, candidate)
+    candidate.chmod(0o755)
+    hooked = replace(arena, ocx_home=ocx_home)
+    project = _locked_project(hooked, "alpha", 'WP15_CONST = "\u65e5\u672c\u8a9e"\n')
+    env = hooked.env(shell_abs)
+    env["TERM"] = "dumb"
+    emitted = subprocess.run(
+        [str(_OCX), "--offline", "self", "activate", "--shell=pwsh", "--hook", "--no-completion"],
+        capture_output=True, check=False, text=True, env=env, cwd=project,
+    )
+    assert emitted.returncode == 0, f"stderr:\n{emitted.stderr}"
+    assert emitted.stdout.isascii(), f"the pwsh hook must be ASCII only:\n{emitted.stdout}"
+    assert "Test-Path" not in emitted.stdout, emitted.stdout
+    install = f'Invoke-Expression (& "{_OCX}" --offline self activate --shell=pwsh --hook --no-completion | Out-String)'
+    output = matrix.pty_session(
+        [shell_abs, "-NoProfile", "-NoLogo"],
+        [
+            install,
+            f"Set-Location '{project}'",
+            "$null = $true",
+            'Write-Output ("@" + "@const@" + "@" + $env:WP15_CONST)',
+        ],
+        cwd=arena.projects,
+        env=env,
+    )
+    assert matrix.probes(output).get("const") == "\u65e5\u672c\u8a9e", f"the hook must apply the project:\n{output}"
+
+
 def test_ec_quote_009_bang_survives_non_interactive_bash_c(arena: Arena) -> None:
     """EC-QUOTE-009 — ``a!b`` must round-trip through a non-interactive ``bash -c`` invocation of the reconciler."""
     shell_abs = _require("bash")
@@ -2412,22 +2488,35 @@ def test_ec_quote_windows_only_rows_are_out_of_scope_here(arena: Arena) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ec_nu_001_project_scope_constant_revert_is_unimplemented_on_nu(arena: Arena) -> None:
-    """EC-NU-001 — D6(b): constant revert on nu is unimplementable until the ``hide-env`` spike lands.
+def test_ec_nu_001_project_scope_constant_revert_hides_the_variable_on_nu(arena: Arena) -> None:
+    """EC-NU-001 — leaving a project removes a constant the user never had, and nushell sees it gone.
 
-    Nushell's ``env_change.PWD`` hook never calls ``--reconcile`` (verified by
-    ``_skip_nushell_without_reconcile`` below), so there is no project-scope
-    apply-then-revert path to observe on nu at all today — the row's own
-    "say that rather than claiming parity" is the documented state this test
-    pins.
+    The plan carries a restore-to-unset and the shipped applier answers it with
+    ``hide-env -i``. The spike below (EC-NU-002) says a ``hide-env`` inside a
+    nested block may or may not escape it on a given nu, so this row reads the
+    variable back in the session scope after the applier ran.
     """
-    _skip_nushell_without_reconcile("nushell", arena)
-    # Canary: if this line is ever reached, WP-12b landed and nu now calls
-    # --reconcile — EC-NU-001's premise (project-scope constant revert is
-    # unimplemented on nu) needs re-examination against the new behaviour,
-    # not a silent pass here.
-    pytest.fail(
-        "nu now calls --reconcile (the skip guard above did not fire) — re-examine EC-NU-001 against the new behaviour"
+    project = _locked_project(arena, "alpha", 'WP15_NU_CONST = "inside"\n')
+    outside = arena.projects / "outside"
+    outside.mkdir()
+
+    result = _session(
+        "nushell",
+        arena,
+        [
+            matrix.cd_to("nushell", project),
+            matrix.prompt("nushell"),
+            matrix.probe("nushell", "inside", "WP15_NU_CONST"),
+            matrix.cd_to("nushell", outside),
+            matrix.prompt("nushell"),
+            matrix.probe("nushell", "outside", "WP15_NU_CONST"),
+        ],
+        name="nu001",
+    )
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    assert _read(result, "inside") == "inside", f"the constant must apply inside the project:\n{result.stdout}"
+    assert _read(result, "outside") == matrix.ABSENT, (
+        f"leaving must hide a constant that had no prior value:\n{result.stdout}"
     )
 
 
@@ -2493,7 +2582,6 @@ def test_ec_nu_004b_hooks_key_absent_from_config_does_not_crash_install(arena: A
 def test_ec_nu_005_the_hook_fires_observed_through_a_real_pty(arena: Arena) -> None:
     """EC-NU-005 — a hook that never fires can also produce a correct-looking env; only a real pty distinguishes them."""
     shell_abs = _require("nushell")
-    _skip_nushell_without_reconcile("nushell", arena)
     global_toml = arena.ocx_home / "ocx.toml"
     global_toml.write_text('[env]\nWP15_GLOBAL = "before"\n', encoding="utf-8")
     locked = subprocess.run([str(arena.ocx), "--offline", "--global", "lock"], capture_output=True, check=False, text=True, env=arena.env(), cwd=str(arena.projects))
@@ -2506,14 +2594,152 @@ def test_ec_nu_005_the_hook_fires_observed_through_a_real_pty(arena: Arena) -> N
         [
             f"source {arena.ocx_home / 'env.nu'}",
             "print $'@@before@@($env.WP15_GLOBAL? | default __OCX_ABSENT__)'",
-            "cd /tmp",  # a PWD event, to fire env_change.PWD at least once and prove the hook DID run
+            "cd /tmp",  # a PWD event, so a prompt cycle runs the hook after the directory moved
             "print $'@@after@@($env.WP15_GLOBAL? | default __OCX_ABSENT__)'",
         ],
-        cwd=arena.projects, env=env, timeout=60,
+        cwd=arena.projects, env=env, timeout=60, controlling_tty=True,
     )
     found = matrix.probes(output)
     assert found.get("before") == "before", f"the hook must fire and apply on install\npty transcript:\n{output}"
     assert found.get("after") == "before", f"a PWD event must not clobber the still-correct global value\npty transcript:\n{output}"
+
+
+def _nu_session_env(arena: Arena, shell_abs: str) -> dict[str, str]:
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    return env
+
+
+def test_s028_nushell_applies_a_project_with_a_session_token_and_stands_down_once(arena: Arena) -> None:
+    """S-028 / EC-NU-005 — start in a project, ``cd`` out, ``cd`` back, then an unreadable state, on a real nu pty.
+
+    The project applies at startup, reverts on leaving and applies again on return; the gate string the
+    binary writes starts with the shell's own pid, which it only knows because the shim passed
+    ``--shell-pid``. A state the binary cannot read then stands the shell down: one notice, and a second
+    project applies nothing.
+    """
+    shell_abs = _require("nushell")
+    alpha = _locked_project(arena, "alpha", 'WP15_NU_ALPHA = "inside"\n')
+    beta = _locked_project(arena, "beta", 'WP15_NU_BETA = "inside"\n')
+    outside = arena.projects / "outside"
+    outside.mkdir()
+    _self_setup(arena, "nu")
+    env = _nu_session_env(arena, shell_abs)
+    nu = "nushell"
+    output = matrix.pty_session(
+        [shell_abs, "--no-config-file"],
+        [
+            f"source {matrix.quote(nu, str(arena.ocx_home / 'env.nu'))}",
+            matrix.probe(nu, "start", "WP15_NU_ALPHA"),
+            matrix.probe(nu, "gate", "__OCX_ENV_PWD"),
+            "print $\"@@pid@@($nu.pid)\"",
+            matrix.cd_to(nu, outside),
+            matrix.probe(nu, "left", "WP15_NU_ALPHA"),
+            matrix.cd_to(nu, alpha),
+            matrix.probe(nu, "back", "WP15_NU_ALPHA"),
+            "$env.__OCX_ENV_STATE = \"1.legacy-state\"",
+            matrix.cd_to(nu, beta),
+            matrix.probe(nu, "beta", "WP15_NU_BETA"),
+            matrix.probe(nu, "stood", "__OCX_ENV_STOOD_DOWN"),
+            matrix.cd_to(nu, outside),
+            matrix.probe(nu, "state", "__OCX_ENV_STATE"),
+        ],
+        cwd=alpha,
+        env=env,
+        timeout=120,
+        controlling_tty=True,
+    )
+    found = matrix.probes(output)
+    assert found.get("start") == "inside", f"the project the shell starts in must apply\npty transcript:\n{output}"
+    assert found.get("gate", "").startswith(f"{found.get('pid')} {alpha}"), (
+        f"the gate string must open with the shell's own pid and directory, so the shim passed --shell-pid\n"
+        f"pty transcript:\n{output}"
+    )
+    assert found.get("left") == matrix.ABSENT, f"leaving the project must revert it\npty transcript:\n{output}"
+    assert found.get("back") == "inside", f"returning must apply the project again\npty transcript:\n{output}"
+    assert found.get("beta") == matrix.ABSENT, f"a stood-down shell applies nothing\npty transcript:\n{output}"
+    assert found.get("stood") == "1.legacy-state", f"the stood-down copy must name the state\npty transcript:\n{output}"
+    assert found.get("state") == "1.legacy-state", f"an unreadable state is never rewritten\npty transcript:\n{output}"
+    assert output.count(_STAND_DOWN_NOTICE) == 1, (
+        f"the notice must print once across the prompts that follow\npty transcript:\n{output}"
+    )
+
+
+def test_ec_hook_017_nushell_sourcing_the_shim_twice_registers_one_prompt_hook_and_keeps_the_users(arena: Arena) -> None:
+    """EC-HOOK-017 — on nushell, a re-source replaces ocx's own prompt hook instead of stacking another, and a user's hook still fires.
+
+    Each hook is a closure in ``$env.config.hooks.pre_prompt``; the shim drops the one carrying its
+    marker before appending, so two sources leave the user's hook plus exactly one of ours.
+    """
+    shell_abs = _require("nushell")
+    _self_setup(arena, "nu")
+    shim = matrix.quote("nushell", str(arena.ocx_home / "env.nu"))
+    nu = "nushell"
+    output = matrix.pty_session(
+        [shell_abs, "--no-config-file"],
+        [
+            "$env.config.hooks.pre_prompt = [{|| $env.WP15_USER_HOOK = \"ran\" }]",
+            f"source {shim}",
+            f"source {shim}",
+            "print settle",
+            matrix.probe(nu, "user", "WP15_USER_HOOK"),
+            "print $\"@@hooks@@($env.config.hooks.pre_prompt | length)\"",
+        ],
+        cwd=arena.projects,
+        env=_nu_session_env(arena, shell_abs),
+        timeout=60,
+        controlling_tty=True,
+    )
+    found = matrix.probes(output)
+    assert found.get("user") == "ran", f"the user's own hook must keep firing\npty transcript:\n{output}"
+    assert found.get("hooks") == "2", (
+        f"two sources must leave the user's hook and exactly one of ocx's\npty transcript:\n{output}"
+    )
+
+
+def test_ec_ledger_004_nu_a_stood_down_shim_runs_no_injected_code_stays_silent_and_unset_rearms(arena: Arena) -> None:
+    """EC-LEDGER-004 on nushell — live: the hostile value is never run, the notice prints once, ``hide-env`` re-arms.
+
+    The shim reconciles at startup with a hostile ``1.`` state in its environment; every later prompt
+    skips because the stood-down copy equals the state, and removing the state starts a format 2 session.
+    """
+    shell_abs = _require("nushell")
+    _self_setup(arena, "nu")
+    hostile = _hostile_state(arena)
+    env = _nu_session_env(arena, shell_abs)
+    env[matrix.CARRIER] = hostile
+    nu = "nushell"
+    output = matrix.pty_session(
+        [shell_abs, "--no-config-file"],
+        [
+            f"source {matrix.quote(nu, str(arena.ocx_home / 'env.nu'))}",
+            "print settle",
+            "print settle",
+            "print settle",
+            matrix.probe(nu, "stood", matrix.CARRIER),
+            f"hide-env {matrix.CARRIER}",
+            "print settle",
+            "print settle",
+            matrix.probe(nu, "rearmed", matrix.CARRIER),
+        ],
+        cwd=arena.projects,
+        env=env,
+        timeout=120,
+        controlling_tty=True,
+    )
+    created = [name for name in _PWNED if (arena.scripts / name).exists()]
+    assert not created, f"the inherited value ran as code and created {created}\npty transcript:\n{output}"
+    assert output.count(_STAND_DOWN_NOTICE) == 1, (
+        f"the notice must print once and every later prompt must skip\npty transcript:\n{output}"
+    )
+    found = matrix.probes(output)
+    assert found.get("stood") == hostile.split("\n")[0], (
+        f"the unreadable value must never be rewritten\npty transcript:\n{output}"
+    )
+    assert re.match(r"^2[.;]", found.get("rearmed", "")), (
+        f"removing the state must make the next prompt start a format 2 session, got {found.get('rearmed')!r}"
+        f"\npty transcript:\n{output}"
+    )
 
 
 def test_ec_nu_006_global_list_kind_is_not_silently_misapplied_as_a_constant(arena: Arena) -> None:
@@ -2780,36 +3006,39 @@ def test_ec_proc_006_a_mid_line_global_config_mutation_only_takes_effect_next_pr
 
 def test_ec_proc_007_tmux_detach_reattach_resolves_new_tool_state_on_the_fresh_prompt(arena: Arena) -> None:
     """EC-PROC-007 — a detached tmux pane carries no cached D; reattach + a fresh prompt recomposes from the mutated lock."""
-    tmux = shutil.which("tmux")
-    if tmux is None:
+    tmux_binary = shutil.which("tmux")
+    if tmux_binary is None:
         pytest.skip("tmux is not installed on this host (shutil.which('tmux') is None)")
     project = _locked_project(arena, "alpha", 'WP15_CONST = "v1"\n')
     session = f"wp15proc007-{os.getpid()}"
+    # Its own server: `new-session` otherwise joins the host's running tmux server, whose panes
+    # start from that server's environment and not from `env` below.
+    tmux = [tmux_binary, "-L", session, "-f", "/dev/null"]
     out_fifo = arena.scripts / "proc007_out.txt"
     env = arena.env("/bin/bash")
     try:
         start = subprocess.run(
-            [tmux, "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "/bin/bash", "--noprofile", "--norc"],
+            [*tmux, "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "/bin/bash", "--noprofile", "--norc"],
             capture_output=True, check=False, text=True, env=env,
         )
         assert start.returncode == 0, f"stderr:\n{start.stderr}"
         header_cmd = matrix.header("bash", arena.ocx)
-        subprocess.run([tmux, "send-keys", "-t", session, f"cd {project} && {header_cmd}", "Enter"], check=False)
-        subprocess.run([tmux, "send-keys", "-t", session, matrix.prompt("bash"), "Enter"], check=False)
+        subprocess.run([*tmux, "send-keys", "-t", session, f"cd {project} && {header_cmd}", "Enter"], check=False)
+        subprocess.run([*tmux, "send-keys", "-t", session, matrix.prompt("bash"), "Enter"], check=False)
         time.sleep(0.5)
-        subprocess.run([tmux, "detach-client", "-s", session], check=False)
+        subprocess.run([*tmux, "detach-client", "-s", session], check=False)
         # Mutate the tool declaration from outside the pane while detached.
         matrix.write_project(project, 'WP15_CONST = "v2"\n')
-        subprocess.run([tmux, "send-keys", "-t", session, f"{matrix.prompt('bash')} > {out_fifo} 2>&1", "Enter"], check=False)
+        subprocess.run([*tmux, "send-keys", "-t", session, f"{matrix.prompt('bash')} > {out_fifo} 2>&1", "Enter"], check=False)
         subprocess.run(
-            [tmux, "send-keys", "-t", session, f'printf "%s\\n" "$WP15_CONST" >> {out_fifo}', "Enter"], check=False
+            [*tmux, "send-keys", "-t", session, f'printf "%s\\n" "$WP15_CONST" >> {out_fifo}', "Enter"], check=False
         )
         deadline = time.time() + 10
         while time.time() < deadline and not out_fifo.exists():
             time.sleep(0.2)
         time.sleep(0.5)
     finally:
-        subprocess.run([tmux, "kill-session", "-t", session], check=False, capture_output=True)
+        subprocess.run([*tmux, "kill-session", "-t", session], check=False, capture_output=True)
     assert out_fifo.exists(), "tmux pane never produced output within the deadline"
     text = out_fifo.read_text(encoding="utf-8")
     assert "v2" in text, f"a fresh prompt after reattach must recompose D from the mutated lock, not any cached value:\n{text}"
@@ -2886,8 +3115,7 @@ def test_ec_proc_012_a_scrubbed_env_spawn_resolves_ocx_home_under_the_targets_ow
     candidate = target_ocx_home / _CANDIDATE_REL
     candidate.parent.mkdir(parents=True, exist_ok=True)
     target_home.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(_OCX, candidate)
-    candidate.chmod(0o755)
+    matrix.seed_binary(_OCX, candidate)
     target_arena = Arena(home=target_home, ocx_home=target_ocx_home, scripts=arena.scripts, projects=arena.projects, ocx=arena.ocx)
     _self_setup(target_arena, "bash")
 
@@ -3178,10 +3406,32 @@ def test_ec_ver_002_hook_discards_stderr_and_ignores_exit_status_from_an_incompa
     )
 
 
-def test_ec_ver_003_nushell_structured_plan_schema_skew_needs_nu(arena: Arena) -> None:
-    """EC-VER-003 — needs a real nushell to drive the structured ``Plan`` JSON consumer across a schema-version swap; honest skip when absent."""
+def test_ec_ver_003_nushell_plan_of_another_version_applies_nothing(arena: Arena) -> None:
+    """EC-VER-003 — a plan whose ``v`` is not 1, or has none, is a silent no-op for the shipped nu applier.
+
+    Two staged builds cannot be had from one test binary, so the plan a future build would emit is
+    written by hand and fed to the applier ``env.nu`` carries. The control plan, identical but for
+    ``v``, applies, so a gate that rejected everything cannot pass.
+    """
     _require("nushell")
-    pytest.skip("nushell is present but this row needs two staged builds with different Plan schema versions — not reachable with a single test binary")
+
+    def plan(fields: str) -> str:
+        body = '{' + fields + '"sets":[{"key":"WP15_VER","value":"seen","type":"constant"}],"removes":[],"restores":[]}'
+        return f"let _ocx_plan = ({matrix.quote('nushell', body)} | from json)\n{matrix.shipped_nu_plan_apply()}"
+
+    def applied(label: str, fields: str) -> str:
+        result = _session(
+            "nushell",
+            arena,
+            [plan(fields), matrix.probe("nushell", label, "WP15_VER")],
+            name=f"ver003_{label}",
+        )
+        assert result.returncode == 0, f"{label}: a plan of another version must not fail the prompt\nstderr:\n{result.stderr}"
+        return _read(result, label)
+
+    assert applied("control", '"v":1,') == "seen", "the control plan must apply, or the gate proves nothing"
+    assert applied("future", '"v":2,') == matrix.ABSENT, "a plan of a newer version must apply nothing"
+    assert applied("none", "") == matrix.ABSENT, "a plan with no version must apply nothing"
 
 
 def test_ec_ver_004_the_hook_ignores_ocx_binary_pin_and_always_resolves_through_current(arena: Arena) -> None:
@@ -3268,19 +3518,13 @@ def test_ec_ver_007_nushell_two_hop_update_lag_needs_nu(arena: Arena) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _decode_carrier(carrier: str) -> dict:
-    """Decode a ``__OCX_ENV_STATE`` wire value: ``"1." + base64url(json)``, no padding."""
-    assert carrier.startswith("1."), f"unrecognized envelope tag: {carrier[:8]!r}"
-    payload = carrier[len("1.") :]
-    padded = payload + "=" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded))
-
-
 def test_ec_size_002_a_spawned_child_inherits_the_over_cap_marker_ledger_intact(arena: Arena) -> None:
-    """EC-SIZE-002 — A-01 restated: the over-cap marker ships (never zero bytes); a child process inherits it unaffected, decoding to ``{v, fp, verdict, over_cap}`` with both scope payloads absent."""
-    padding = "x" * 900
-    block = "".join(f'WP15_BIG_{index:02d} = "{padding}"\n' for index in range(24))
-    project = _locked_project(arena, "big", block)
+    """EC-SIZE-002 — the over-cap state ships (never zero bytes); a child inherits it unaffected.
+
+    The overflow ladder drops the applied records whole, never partially, and keeps the session's
+    fingerprint so later prompts do not recompose, re-overflow and re-report.
+    """
+    project = _locked_project(arena, "big", _over_cap_block())
 
     result = _session(
         "bash",
@@ -3288,6 +3532,7 @@ def test_ec_size_002_a_spawned_child_inherits_the_over_cap_marker_ledger_intact(
         [
             matrix.cd_to("bash", project),
             matrix.prompt("bash"),
+            matrix.probe("bash", "own_carrier", matrix.CARRIER),
             'bash -c \'printf "%s%s\\n" "@@child_carrier@@" "${__OCX_ENV_STATE-__OCX_ABSENT__}"\'',
         ],
         name="size002_over_cap_child_inherit",
@@ -3295,17 +3540,15 @@ def test_ec_size_002_a_spawned_child_inherits_the_over_cap_marker_ledger_intact(
     assert result.returncode == 0, f"an over-cap project must not break the prompt:\n{result.stderr}"
     child_carrier = _read(result, "child_carrier")
     assert child_carrier != matrix.ABSENT, f"the spawned child must still inherit a carrier, marker-only or not:\n{result.stdout}"
-    assert len(child_carrier) <= 16384, f"the marker must fit the cap; got {len(child_carrier)} bytes"
-    decoded = _decode_carrier(child_carrier)
-    assert {"v", "fp", "over_cap"} <= decoded.keys(), (
-        f"an over-cap marker must retain v, fp and over_cap; got {sorted(decoded.keys())}"
+    assert child_carrier == _read(result, "own_carrier"), "the child must inherit the shell's state byte for byte"
+    assert len(child_carrier) <= 8_169, f"the state must fit the cap; got {len(child_carrier)} bytes"
+    decoded = matrix.decode_carrier(child_carrier)
+    assert decoded["truncated"] == "all_applied_dropped", (
+        f"an over-cap project must drop its applied records and say so; got {decoded['truncated']!r}"
     )
-    assert decoded.get("verdict") in (None, {}), f"a marker ledger carries no cached verdict payload; got {decoded.get('verdict')!r}"
-    assert decoded["fp"], "the marker must retain the fingerprint"
-    assert "project" in decoded["over_cap"], f"the abandoned project scope must be named; got {decoded['over_cap']}"
-    assert not decoded.get("scopes", {}).get("project"), (
-        f"both scope payloads must be dropped whole, never partially retained: {decoded.get('scopes')}"
-    )
+    assert decoded["applied"] == [], f"applied records are dropped whole, never partially retained: {decoded['applied']}"
+    assert decoded["session"]["fp"], "the state must retain the fingerprint"
+    assert decoded["session"]["project"], "the state must keep naming the project it was composed for"
 
 
 def test_ec_size_003_windows_only_row_is_out_of_scope_here(arena: Arena) -> None:
@@ -4164,6 +4407,130 @@ def test_ec_consent_015_an_env_only_channel_is_gated_by_consent_like_every_other
     )
 
 
+# ---------------------------------------------------------------------------
+# Stand-down on an unreadable execution state
+# ---------------------------------------------------------------------------
+
+# Every hook shell, in `hook.rs` order. Nushell's hook is the static env.nu: its stand-down emission
+# is a golden string, and the JSON plan its shim applies has a live row (`test_ec_ledger_004_nu_...`).
+_STAND_DOWN_SHELLS: tuple[str, ...] = ("bash", "zsh", "fish", "pwsh", "elvish", "nushell")
+
+# The shells this parametrized live row drives an interactive hook in. Elvish has no `edit:` namespace
+# without a terminal, so it is covered by the golden row above; nushell's shim is a static file it
+# sources rather than an emitted stream, so its live row is written out beside the nu rows.
+_STAND_DOWN_LIVE_SHELLS: tuple[str, ...] = ("bash", "zsh", "fish", "pwsh")
+
+_STAND_DOWN_NOTICE = "stopped updating this shell"
+_PWNED = ("pwned-quote", "pwned-sub", "pwned-tick", "pwned-newline")
+
+
+def _hostile_state(arena: Arena) -> str:
+    """A legacy-major value holding ``'``, ``$(...)``, a backtick and a newline, each ready to touch a file."""
+    here = arena.scripts
+    return (
+        f"1.x'; touch {here}/pwned-quote; echo '$(touch {here}/pwned-sub)`touch {here}/pwned-tick`"
+        f"\ntouch {here}/pwned-newline"
+    )
+
+
+@pytest.mark.parametrize("shell", _STAND_DOWN_SHELLS)
+def test_ec_ledger_004_the_stand_down_emission_holds_none_of_the_hostile_value(shell: str, arena: Arena) -> None:
+    """EC-LEDGER-004, EC-QUOTE-001 — golden, host-runnable: code emitted under an unreadable value carries none of its bytes.
+
+    The emitted code copies the value by reference; embedding it as a literal would let a
+    ``'`` or ``$(...)`` in an inherited environment run as the user. The positive control is the
+    stand-down marker, so an emission that is empty (or that errored) cannot pass this row.
+    """
+    hostile = _hostile_state(arena)
+    result = matrix.reconcile(arena.ocx, shell, arena.projects, arena.env(), carrier=hostile)
+    assert result.returncode == 0, f"{shell}: the hook path exits 0 in every state:\n{result.stderr}"
+    assert "stood" in result.stdout.lower(), f"{shell}: the emission must hold the stood-down copy:\n{result.stdout}"
+    for piece in (*_PWNED, "1.x", "touch"):
+        assert piece not in result.stdout, f"{shell}: the emission embeds {piece!r} of the inherited value:\n{result.stdout}"
+    assert not any((arena.scripts / name).exists() for name in _PWNED), f"{shell}: ocx itself must create nothing"
+
+
+def _stand_down_recipe(shell: str, arena: Arena) -> tuple[list[str], str, str, str, str]:
+    """``(argv after the interpreter, install line, unset line, probe-builder name, settle line)`` for a live ``shell``."""
+    ocx = arena.ocx
+    posix_install = f'eval "$("{ocx}" --offline self activate --shell={shell} --hook --no-completion)"'
+    if shell == "bash":
+        return ["--norc", "-i"], posix_install, "unset __OCX_ENV_STATE", "posix", "true"
+    if shell == "zsh":
+        return ["--no-rcs", "-i"], posix_install, "unset __OCX_ENV_STATE", "posix", "true"
+    if shell == "fish":
+        install = f'"{ocx}" --offline self activate --shell=fish --hook --no-completion | source'
+        return ["--no-config", "-i"], install, "set -e __OCX_ENV_STATE", "fish", "true"
+    install = f'Invoke-Expression (& "{ocx}" --offline self activate --shell=pwsh --hook --no-completion | Out-String)'
+    return ["-NoProfile", "-NoLogo"], install, "Remove-Item env:__OCX_ENV_STATE", "pwsh", "$null = $true"
+
+
+def _state_probe(kind: str, label: str) -> str:
+    """Print ``@@label@@<__OCX_ENV_STATE or ABSENT>``; the marker is split so a redrawn echo never claims a label."""
+    if kind == "pwsh":
+        return (
+            '$v = if (Test-Path env:__OCX_ENV_STATE) { $env:__OCX_ENV_STATE } else { "ABSENT" }; '
+            f'Write-Output ("@" + "@{label}@" + "@" + $v)'
+        )
+    if kind == "fish":
+        return (
+            "if set -q __OCX_ENV_STATE; "
+            f"printf '%s\\n' \"@\"\"@{label}@\"\"@$__OCX_ENV_STATE\"; "
+            f"else; printf '%s\\n' \"@\"\"@{label}@\"\"@ABSENT\"; end"
+        )
+    return f'printf "%s\\n" "@""@{label}@""@${{__OCX_ENV_STATE-ABSENT}}"'
+
+
+@pytest.mark.parametrize("shell", _STAND_DOWN_LIVE_SHELLS)
+def test_ec_ledger_004_a_stood_down_hook_runs_no_injected_code_stays_silent_and_unset_rearms(
+    shell: str, arena: Arena
+) -> None:
+    """EC-LEDGER-004 — live, per hook shell: no file is created, the next prompts skip, ``unset`` re-arms.
+
+    One real shell with a hostile ``1.`` value in its environment. The notice appears once across
+    several prompts (a hook that ran again would print it again), the value is never rewritten,
+    and after ``unset __OCX_ENV_STATE`` the next prompt starts a fresh format 2 session.
+    """
+    shell_abs = _require(shell)
+    argv, install, unset, kind, settle = _stand_down_recipe(shell, arena)
+    hostile = _hostile_state(arena)
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    env[matrix.CARRIER] = hostile
+
+    output = matrix.pty_session(
+        [shell_abs, *argv],
+        [
+            install,
+            settle,
+            settle,
+            settle,
+            _state_probe(kind, "stood"),
+            unset,
+            settle,
+            settle,
+            _state_probe(kind, "rearmed"),
+        ],
+        cwd=arena.projects,
+        env=env,
+        controlling_tty=shell == "fish",
+    )
+    created = [name for name in _PWNED if (arena.scripts / name).exists()]
+    assert not created, f"{shell}: the inherited value ran as code and created {created}\npty transcript:\n{output}"
+    assert output.count(_STAND_DOWN_NOTICE) == 1, (
+        f"{shell}: the notice must print once and every later prompt must skip\npty transcript:\n{output}"
+    )
+    found = matrix.probes(output)
+    assert found.get("stood") == hostile.split("\n")[0], (
+        f"{shell}: the unreadable value must never be rewritten\npty transcript:\n{output}"
+    )
+    assert re.match(r"^2[.;]", found.get("rearmed", "")), (
+        f"{shell}: unset __OCX_ENV_STATE must make the next prompt start a format 2 session, got {found.get('rearmed')!r}"
+        f"\npty transcript:\n{output}"
+    )
+
+
 # Rows whose Coverage cell declares the register's own ``uncovered`` vocabulary
 # — no test anywhere executes an assertion for them, and the placeholder that
 # cites them only records WHY. Pinned so a tenth row cannot join them quietly:
@@ -4199,7 +4566,6 @@ def test_ec_consent_015_an_env_only_channel_is_gated_by_consent_like_every_other
 _UNCOVERED_ROWS = frozenset(
     {
         "EC-FP-005",  # fingerprint() folds CARGO_PKG_VERSION with no runtime seam
-        "EC-VER-003",  # needs two staged builds with different Plan schema versions
         "EC-VER-007",  # needs two staged builds across consecutive self-updates
     }
 )
@@ -4405,9 +4771,8 @@ def test_ec_proc_015_a_carrier_crossing_a_host_or_user_boundary_is_treated_as_fo
     assert result.returncode == 0, f"a foreign-fingerprint carrier must never break the prompt:\nstderr:\n{result.stderr}"
     new_carrier_match = re.search(rf"export {matrix.CARRIER}='([^']+)'", result.stdout)
     assert new_carrier_match, f"a fingerprint-mismatched carrier must still recompose and write a fresh, decodable ledger:\n{result.stdout}"
-    decoded = _decode_carrier(new_carrier_match.group(1))
-    project_applied = decoded.get("scopes", {}).get("project", {}).get("applied", [])
-    applied_values = {entry["key"]: entry["value"] for entry in project_applied}
+    decoded = matrix.decode_carrier(new_carrier_match.group(1))
+    applied_values = {entry["key"]: entry["value"].get("literal") for entry in decoded["applied"]}
     assert applied_values.get("WP15_CONST") == "v1", (
         f"a carrier crossing a host/OCX_HOME boundary must never cause the WRONG value to be trusted — the freshly "
         f"recomposed D, not the foreign ledger's bookkeeping, is authoritative for what applies: {applied_values}\n{result.stdout}"
@@ -4415,12 +4780,12 @@ def test_ec_proc_015_a_carrier_crossing_a_host_or_user_boundary_is_treated_as_fo
 
 
 # ---------------------------------------------------------------------------
-# Nested projects: `ocx exec --stack`
+# Nested projects: `ocx exec` layers by default; `--isolate` and `--clean` start over
 # ---------------------------------------------------------------------------
 
 
 def _activated_parent(arena: Arena, parent: Path) -> dict[str, str]:
-    """The environment a hooked shell holds after the prompt applied ``parent``: its PATH entry and its ledger."""
+    """The environment a hooked shell holds after the prompt applied ``parent``: its PATH entry and its state."""
     applied = matrix.reconcile(arena.ocx, "bash", parent, arena.env())
     assert applied.returncode == 0, f"stderr:\n{applied.stderr}"
     # Evaluated, not parsed: PATH is exported through a loop form a regex over `export K='v'` cannot see.
@@ -4430,60 +4795,63 @@ def _activated_parent(arena: Arena, parent: Path) -> dict[str, str]:
     )
     assert evaluated.returncode == 0, f"stderr:\n{evaluated.stderr}"
     path, carrier = evaluated.stdout.split("\0", 1)
-    assert carrier and path, f"the fixture must apply PATH and a ledger:\n{applied.stdout}"
+    assert carrier and path, f"the fixture must apply PATH and a state:\n{applied.stdout}"
     return arena.env() | {"PATH": path, matrix.CARRIER: carrier}
 
 
-def test_exec_stack_keeps_the_active_parent_toolchain_and_puts_the_child_first(arena: Arena) -> None:
-    """EC-SCOPE-004 opt-out — ``ocx exec --stack`` layers a nested project over the active one; without it the parent is replaced."""
+def _nested_projects(arena: Arena) -> tuple[Path, Path, Path, Path]:
+    """``(parent_bin, child_bin, parent, child)``: two consented projects, each adding one directory to ``PATH``."""
     parent_bin = arena.ocx_home / "parent-tc" / "bin"
     child_bin = arena.ocx_home / "child-tc" / "bin"
     parent_bin.mkdir(parents=True)
     child_bin.mkdir(parents=True)
     parent = _locked_project(arena, "parent", f'PATH = {{ type = "path", value = "{parent_bin}" }}\n')
     child = _locked_project(arena, "child", f'PATH = {{ type = "path", value = "{child_bin}" }}\n')
+    return parent_bin, child_bin, parent, child
+
+
+def _child_view(arena: Arena, live: dict[str, str], child: Path, *flags: str) -> tuple[list[str], str]:
+    """``(PATH directories, __OCX_ENV_STATE or the absent sentinel)`` a ``sh`` run by ``ocx exec <flags>`` in ``child`` sees."""
+    result = subprocess.run(
+        [str(arena.ocx), "exec", *flags, "--", "sh", "-c", 'printf "%s\\n%s" "$PATH" "${__OCX_ENV_STATE-__OCX_ABSENT__}"'],
+        capture_output=True, check=False, text=True, cwd=str(child), env=live,
+    )
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    path, carrier = result.stdout.split("\n", 1)
+    return path.split(os.pathsep), carrier
+
+
+def test_exec_layers_over_the_active_parent_toolchain_and_puts_the_child_first(arena: Arena) -> None:
+    """EC-SCOPE-004 — ``ocx exec`` layers a nested project over the active one; ``--isolate`` replaces the parent."""
+    parent_bin, child_bin, parent, child = _nested_projects(arena)
     live = _activated_parent(arena, parent)
     assert str(parent_bin) in live["PATH"].split(os.pathsep), "fixture sanity: the parent is active"
 
-    def child_view(*flags: str) -> tuple[list[str], str]:
-        result = subprocess.run(
-            [str(arena.ocx), "exec", *flags, "--", "sh", "-c", 'printf "%s\\n%s" "$PATH" "${__OCX_ENV_STATE-__OCX_ABSENT__}"'],
-            capture_output=True, check=False, text=True, cwd=str(child), env=live,
-        )
-        assert result.returncode == 0, f"stderr:\n{result.stderr}"
-        path, carrier = result.stdout.split("\n", 1)
-        return path.split(os.pathsep), carrier
+    layered, layered_state = _child_view(arena, live, child)
+    assert str(parent_bin) in layered and str(child_bin) in layered, f"both toolchains must be on PATH: {layered}"
+    assert layered.index(str(child_bin)) < layered.index(str(parent_bin)), f"the child project must come first: {layered}"
+    assert layered_state != "__OCX_ABSENT__", "the child must receive the execution state, or its own hook cannot tell what is loaded"
+    assert layered_state != live[matrix.CARRIER], "the child's state describes the layering, it is not the parent's byte for byte"
 
-    stacked, stacked_carrier = child_view("--stack")
-    assert str(parent_bin) in stacked and str(child_bin) in stacked, f"both toolchains must be on PATH: {stacked}"
-    assert stacked.index(str(child_bin)) < stacked.index(str(parent_bin)), f"the child project must come first: {stacked}"
-    assert stacked_carrier == "__OCX_ABSENT__", "the ledger must not reach the child, stacked or not"
-
-    replaced, replaced_carrier = child_view()
-    assert str(child_bin) in replaced and str(parent_bin) not in replaced, f"without --stack the parent is replaced: {replaced}"
-    assert replaced_carrier == "__OCX_ABSENT__"
+    isolated, _ = _child_view(arena, live, child, "--isolate")
+    assert str(child_bin) in isolated and str(parent_bin) not in isolated, f"`--isolate` drops the parent: {isolated}"
 
 
-def test_exec_clean_stack_keeps_only_the_parent_toolchain(arena: Arena) -> None:
-    """EC-SCOPE-004 opt-out under ``--clean`` — the shell's own environment goes, the active parent project's stays."""
-    parent_bin = arena.ocx_home / "parent-tc" / "bin"
-    child_bin = arena.ocx_home / "child-tc" / "bin"
-    parent_bin.mkdir(parents=True)
-    child_bin.mkdir(parents=True)
-    parent = _locked_project(arena, "parent", f'PATH = {{ type = "path", value = "{parent_bin}" }}\n')
-    child = _locked_project(arena, "child", f'PATH = {{ type = "path", value = "{child_bin}" }}\n')
+def test_exec_clean_keeps_none_of_the_shells_own_environment_or_the_parent_toolchain(arena: Arena) -> None:
+    """EC-SCOPE-004 under ``--clean`` — the shell's own variables and the active parent project's toolchain both go."""
+    parent_bin, child_bin, parent, child = _nested_projects(arena)
     live = _activated_parent(arena, parent) | {"OCX_TEST_USER_VAR": "mine"}
     sh = shutil.which("sh", path=live["PATH"])
     assert sh, "fixture sanity: sh is on the live PATH"
 
     result = subprocess.run(
-        [str(arena.ocx), "exec", "--clean", "--stack", "--", sh, "-c",
+        [str(arena.ocx), "exec", "--clean", "--", sh, "-c",
          'printf "%s\\n%s" "$PATH" "${OCX_TEST_USER_VAR-__OCX_ABSENT__}"'],
         capture_output=True, check=False, text=True, cwd=str(child), env=live,
     )
     assert result.returncode == 0, f"stderr:\n{result.stderr}"
     path, user_var = result.stdout.split("\n", 1)
     dirs = path.split(os.pathsep)
-    assert str(parent_bin) in dirs and str(child_bin) in dirs, f"both toolchains must be on PATH: {dirs}"
-    assert dirs.index(str(child_bin)) < dirs.index(str(parent_bin)), f"the child project must come first: {dirs}"
-    assert user_var == "__OCX_ABSENT__", "--clean still drops the shell's own variables"
+    assert str(child_bin) in dirs, f"the child project's toolchain must be composed: {dirs}"
+    assert str(parent_bin) not in dirs, f"`--clean` starts from nothing, so the parent's toolchain is gone: {dirs}"
+    assert user_var == "__OCX_ABSENT__", "--clean drops the shell's own variables"

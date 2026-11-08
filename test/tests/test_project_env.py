@@ -56,8 +56,9 @@ Boundary-pinning (guard constraints whose consuming feature has not shipped):
   test_project_env_override_reaches_generated_entrypoint_launcher      (R1)
   test_project_env_override_survives_nested_launcher_hop               (R1)
   test_env_flag_path_type_survives_generated_entrypoint_launcher       (R1/L1)
-  test_launcher_forged_ocx_env_fails_closed_on_whole_payload           (R1/X1/X2)
-  test_run_strips_stale_ambient_ocx_env                                (R1)
+  test_launcher_ignores_a_set_ocx_env                                  (R1)
+  test_launcher_refuses_a_crafted_state_with_a_reserved_replay_key     (R1/X1)
+  test_exec_ignores_an_ambient_ocx_env                                 (R1)
 
 Misc:
   test_init_emits_ocx_toml_its_own_parser_accepts                     (Q1)
@@ -78,6 +79,7 @@ from uuid import uuid4
 
 import pytest
 
+from src import exec_state
 from src.helpers import make_package, make_package_with_entrypoints
 from src.runner import OcxRunner
 
@@ -90,7 +92,6 @@ pytestmark = pytest.mark.command("toolchain_env")
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE)
 EXIT_CONFIG = 78  # ConfigError (sysexits EX_CONFIG)
-EXIT_DATA = 65  # DataError (sysexits EX_DATAERR) — malformed/rejected OCX_ENV payload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_BINARY = Path(shutil.which("ocx_schema") or "ocx_schema-not-on-PATH")
@@ -1373,8 +1374,8 @@ def test_project_env_override_reaches_generated_entrypoint_launcher(
     pushed last so ``entrypoints/`` shadows ``bin/``, so a package with
     entrypoints resolves through its launcher under ``ocx run``).
 
-    Without ``OCX_ENV`` forwarding (R1 option 2), the launcher's
-    ``Env::new()`` inherits nothing from the parent's ``[env]`` decision,
+    Without the received state's ``replay.env`` (R1), the launcher
+    inherits nothing from the parent's ``[env]`` decision,
     and the package's own env re-applies on top — silently reverting
     exactly the override C4 names as the feature's declared intent. This
     test is the regression guard for that silent failure, not merely a
@@ -1417,8 +1418,8 @@ tool = "{base_pkg.fq}"
     )
     assert _env_value(result.stdout, var_name) == "project-value", (
         f"a project [env] override must survive launcher re-entry — the "
-        f"PRIMARY path for a package with entrypoints (R1); without OCX_ENV "
-        f"forwarding, the package's own value silently wins instead; "
+        f"PRIMARY path for a package with entrypoints (R1); without the state's "
+        f"replay.env, the package's own value silently wins instead; "
         f"env dump:\n{result.stdout}"
     )
 
@@ -1430,12 +1431,11 @@ def test_project_env_override_survives_nested_launcher_hop(
     when an entrypoint dispatches to another package's generated launcher
     (R1, nested case).
 
-    The first launcher decodes ``OCX_ENV`` and applies the payload, then
-    ``apply_ocx_config`` strips the key (the stale-payload defense). If
-    nothing re-emits the validated payload afterwards, the second launcher
-    sees no project env at all: it re-applies its OWN package env on top of
-    the inherited value, and ``package-value`` beats the project override
-    that stage 4-6 precedence promises. Inheriting the value is not enough —
+    The first launcher applies the received ``replay.env`` after its package
+    env. If it does not pass the same records on, the second launcher sees no
+    project env at all: it re-applies its OWN package env on top of the
+    inherited value, and ``package-value`` beats the project override that
+    stage 4-6 precedence promises. Inheriting the value is not enough —
     ``inner``'s package constant overwrites it — so this discriminates
     between "forwarded" and "merely inherited".
     """
@@ -1491,8 +1491,8 @@ inner = "{inner_pkg.fq}"
     )
     assert _env_value(result.stdout, var_name) == "project-value", (
         f"a project [env] override must survive a SECOND launcher hop — the "
-        f"first launcher has to re-emit the validated OCX_ENV payload after "
-        f"apply_ocx_config strips it, or the nested package's own value wins; "
+        f"first launcher has to pass the received replay.env on, or the "
+        f"nested package's own value wins; "
         f"env dump:\n{result.stdout}"
     )
 
@@ -1503,8 +1503,8 @@ def test_env_flag_path_type_survives_generated_entrypoint_launcher(
     """A ``--env PATH:path=<dir>`` override reaches a tool invoked THROUGH a
     generated entrypoint launcher, still prepending rather than replacing.
 
-    Pins the modifier's survival across the ``OCX_ENV`` wire: the payload
-    carries a ``"type"`` per entry, and a decode that dropped or defaulted it
+    Pins the modifier's survival across the ``replay.env`` wire: the state
+    carries a ``kind`` per record, and a decode that dropped or defaulted it
     would turn this into a constant — leaving ``<dir>`` as the whole of
     ``PATH`` instead of its front. Asserting on the package directories that
     remain behind it is what discriminates the two.
@@ -1551,85 +1551,92 @@ tool = "{pkg.fq}"
     )
     missing = [seg for seg in baseline_path.split(":") if seg not in segments]
     assert not missing, (
-        f"the forwarded entry must keep its `path` modifier across OCX_ENV — a "
+        f"the forwarded entry must keep its `path` modifier across replay.env — a "
         f"constant would have replaced these instead of prepending: {missing}\n"
         f"before:\n{baseline_path}\nafter:\n{path_value}"
     )
 
 
-def test_launcher_forged_ocx_env_fails_closed_on_whole_payload(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> None:
-    """A forged ``OCX_ENV`` envelope carrying an ``OCX_DEFAULT_REGISTRY``
-    entry must fail closed on the WHOLE payload (R1 decode-side gating) —
-    not merely skip the one dangerous key. A benign entry in the SAME
-    payload must not apply either, which is what proves the rejection is
-    payload-wide and not a per-entry skip-and-warn (the X2 behavior the CI
-    flavor writers use, deliberately NOT reused here per the ADR).
-
-    The payload below is **well-formed**: correct envelope, correct
-    sentinel, every entry structurally valid. That is deliberate and is the
-    whole point — a malformed payload would be rejected for the wrong
-    reason and would prove nothing about key gating. The only thing wrong
-    with it is that one key is reserved.
-
-    Envelope per R1a: an object whose ``entries`` array is the mandatory
-    sentinel (a bare array has nowhere to carry one). The modifier field is
-    spelled ``type``, matching the ``[env]`` table grammar and
-    ``Modifier``'s serde tag.
-    """
+def _installed_showenv_root(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> Path:
     base_pkg = make_package_with_entrypoints(
         ocx, unique_repo, tmp_path, entrypoints={"showenv": {"command": "env"}}
     )
     ocx.plain("package", "install", base_pkg.short)
     which = ocx.json("package", "which", base_pkg.short)["paths"]
-    pkg_root = Path(which[base_pkg.short]["path"])
+    return Path(which[base_pkg.short]["path"])
 
-    forged = json.dumps(
-        {
-            "entries": [
-                {"key": "OCX_ENV_TEST_BENIGN", "value": "should-not-apply", "type": "constant"},
-                {"key": "OCX_DEFAULT_REGISTRY", "value": "evil.example.com", "type": "constant"},
-            ]
-        }
-    )
-    env = {**ocx.env, "OCX_NO_CONFIG": "1", "OCX_ENV": forged}
-    result = subprocess.run(
+
+def _launcher_showenv(ocx: OcxRunner, pkg_root: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
         capture_output=True,
         text=True,
-        env=env,
+        env={**ocx.env, "OCX_NO_CONFIG": "1", **extra_env},
         check=False,
     )
-    # The payload is well-formed, so a rejection here can only be the
-    # reserved-key gate firing. Asserting the exit code — not merely
-    # "the key is absent" — is what makes this test discriminate: a decoder
-    # that silently dropped the reserved entry and applied the rest would
-    # exit 0 and fail here.
-    assert result.returncode == EXIT_DATA, (
-        f"a well-formed OCX_ENV payload carrying a reserved OCX_* key must be "
-        f"rejected whole (exit {EXIT_DATA}), not partially applied; "
-        f"rc={result.returncode}, stderr={result.stderr!r}"
+
+
+def test_launcher_ignores_a_set_ocx_env(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """``OCX_ENV`` is no longer a wire: a launcher applies nothing from a set value.
+
+    The project's ``[env]`` and ``--env`` reach a launcher in the received execution
+    state's ``replay.env``. A legacy envelope in ``OCX_ENV`` — even a well-formed one
+    — changes nothing, and does not make the launcher refuse to run.
+    """
+    pkg_root = _installed_showenv_root(ocx, unique_repo, tmp_path)
+    legacy = json.dumps({"entries": [{"key": "OCX_ENV_TEST_BENIGN", "value": "must-not-apply", "type": "constant"}]})
+
+    result = _launcher_showenv(ocx, pkg_root, {"OCX_ENV": legacy})
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"a set OCX_ENV must be ignored, not refused; rc={result.returncode}, stderr={result.stderr!r}"
     )
-    assert "OCX_ENV_TEST_BENIGN" not in result.stdout, (
-        f"a benign entry from a payload that ALSO carries a forged "
-        f"OCX_DEFAULT_REGISTRY key must not apply either — whole-payload "
-        f"fail-closed, not per-entry skip (R1); env dump:\n{result.stdout}"
-    )
-    assert "OCX_DEFAULT_REGISTRY=evil.example.com" not in result.stdout, (
-        f"a forged OCX_DEFAULT_REGISTRY in OCX_ENV must never reach the "
-        f"child's real environment (X1 applies on decode too); "
-        f"env dump:\n{result.stdout}"
+    assert _env_value(result.stdout, "OCX_ENV_TEST_BENIGN") is None, (
+        f"an OCX_ENV entry must not be applied by the launcher; env dump:\n{result.stdout}"
     )
 
 
-def test_run_strips_stale_ambient_ocx_env(ocx: OcxRunner, tmp_path: Path) -> None:
-    """A stale ``OCX_ENV`` inherited from the ambient shell must not leak
-    into an unrelated ``ocx run`` invocation (R1: ``apply_ocx_config``
-    needs an ``OCX_ENV`` remove branch so a stale shell export cannot leak
-    into an invocation that never intended to forward it). ``ocx run``
-    always computes its own payload for its child; the ambient value must
-    be overwritten, never passed through verbatim.
+def test_launcher_refuses_a_crafted_state_with_a_reserved_replay_key(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A state whose ``replay.env`` carries a reserved ``OCX_*`` key is refused whole (X1).
+
+    The state below is **well-formed**: every record is structurally valid, so the
+    only thing wrong with it is the one reserved key. A benign record in the SAME
+    payload must not apply either, which proves the refusal covers the payload and
+    is not a per-entry skip. The launcher keeps running on the state's header alone
+    and says so on stderr.
+    """
+    pkg_root = _installed_showenv_root(ocx, unique_repo, tmp_path)
+    state = exec_state.default_state()
+    state["replay"]["env"] = [
+        {"key": "OCX_ENV_TEST_BENIGN", "kind": "constant", "value": {"literal": "must-not-apply"}},
+        {"key": "OCX_DEFAULT_REGISTRY", "kind": "constant", "value": {"literal": "evil.example.com"}},
+    ]
+    # The same payload without the reserved record decodes, so the key is the only reason for the refusal.
+    benign_only = {**state, "replay": {"env": state["replay"]["env"][:1], "launch_identities": []}}
+    assert isinstance(exec_state.decode(exec_state.encode(benign_only)), dict)
+
+    result = _launcher_showenv(ocx, pkg_root, {"__OCX_ENV_STATE": exec_state.encode(state)})
+
+    assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}, stderr={result.stderr!r}"
+    assert "execution state" in result.stderr, (
+        f"the refusal must be reported on stderr, once; stderr:\n{result.stderr}"
+    )
+    assert _env_value(result.stdout, "OCX_ENV_TEST_BENIGN") is None, (
+        f"a benign record from a payload that ALSO carries a reserved key must not apply "
+        f"either — whole-payload refusal, not a per-entry skip; env dump:\n{result.stdout}"
+    )
+    assert "evil.example.com" not in result.stdout, (
+        f"a reserved key replayed from a crafted state must never reach the child; env dump:\n{result.stdout}"
+    )
+
+
+def test_exec_ignores_an_ambient_ocx_env(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A stale ``OCX_ENV`` in the ambient shell changes nothing for ``ocx exec``.
+
+    The variable is inert input now: the exec succeeds, says nothing about it, and
+    the project's own composition is still what the child sees.
     """
     repo, tag = _published_tool(ocx, tmp_path, "staleenv")
 
@@ -1638,17 +1645,12 @@ def test_run_strips_stale_ambient_ocx_env(ocx: OcxRunner, tmp_path: Path) -> Non
     _write_ocx_toml(project, f'[tools]\n{repo} = "{ocx.registry}/{repo}:{tag}"\n')
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    stale_marker = "STALE_OCX_ENV_MARKER_MUST_NOT_LEAK"
-    result = _run(ocx, project, "exec", "--", "env", extra_env={"OCX_ENV": stale_marker})
+    result = _run(ocx, project, "exec", "--", "env", extra_env={"OCX_ENV": "STALE_OCX_ENV_MARKER"})
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx run must succeed even with a garbage ambient OCX_ENV; "
-        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+        f"ocx exec must succeed with a garbage ambient OCX_ENV; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
-    ocx_env_value = _env_value(result.stdout, "OCX_ENV")
-    assert ocx_env_value != stale_marker, (
-        f"a stale ambient OCX_ENV must not leak verbatim into the child's "
-        f"OCX_ENV — it must be overwritten by this invocation's own payload "
-        f"(or absent); got: {ocx_env_value!r}"
+    assert "STALE_OCX_ENV_MARKER" not in result.stderr, (
+        f"an ambient OCX_ENV must not be reported; stderr:\n{result.stderr}"
     )
 
 

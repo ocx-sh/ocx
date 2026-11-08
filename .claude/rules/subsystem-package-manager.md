@@ -63,7 +63,7 @@ pub struct PackageManager {
 }
 ```
 
-All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network). There is no frozen posture on the manager: `--frozen` scopes to the package tier and is enforced by the index chain's `ChainMode::Frozen` plus two CLI-level refusals — `ocx index update` and `ocx index sync`, each reading the invocation's `env::OcxConfigView` (`context.config_view().frozen`, which `ContextOptions.frozen` populates), one gate per command.
+All fields cheap to clone. `is_offline()` returns `client.is_none()`. `client()` returns `Option<&oci::Client>` (use when missing client should fall back). `require_client()` returns `Err(OfflineMode)` if no client (use at sites that need network). There is no frozen posture on the manager: `--frozen` scopes to the package tier and is enforced by the index chain's `ChainMode::Frozen` plus two CLI-level refusals — `ocx index update` and `ocx index sync`, each reading the invocation's frozen setting (`ContextOptions.frozen`), one gate per command.
 
 ### Patch companions pin in patch state, never the local index
 
@@ -215,9 +215,9 @@ Span-free. Progress is rendered through `ocx_console::progress::ProgressManager`
   `materialize_deferred` swaps the manager for the `lazy-report` channel and
   the download bar must follow that decision, not the process's ambient one.
 
-## OCX Configuration Forwarding
+## Exec-Env Projection
 
-Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Inside `launcher exec`, baked entrypoint `args` (if any) are resolved — with `${installPath}` substituted to the package content directory — and prepended before the user-supplied arguments before the command is executed (wire ABI unchanged). Any subprocess spawn site that may chain back into ocx MUST forward the running ocx's resolution-affecting config onto the child env via `env::Env::apply_ocx_config(ctx.config_view())`. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
+Generated entrypoint launchers re-enter ocx via `ocx launcher exec '<pkg-root>' -- <argv0> [args...]`. Inside `launcher exec`, baked entrypoint `args` (if any) are resolved — with `${installPath}` substituted to the package content directory — and prepended before the user-supplied arguments before the command is executed (wire ABI unchanged). Any subprocess spawn site that may chain back into ocx MUST build the child env through `exec_env::project` (`crates/ocx_package_manager/src/exec_env.rs`, via `apply_child_env`), which writes `__OCX_ENV_STATE` and `OCX_BINARY_PIN` into the child. The firewall test in `launch.rs` pins every call site. Full rule + Block-tier review criteria live in `subsystem-cli.md` "Cross-Cutting: Exec-Env Projection".
 
 ### Hermetic subprocess pattern (env_clear + envs + timeout)
 
@@ -235,7 +235,7 @@ query in `tasks/update_check.rs::query_installed_version`:
   malformed JSON) as `None` → caller routes to `Skipped(Bootstrap)`.
 
 This pattern is **NOT** for re-entering ocx through a launcher (use
-`apply_ocx_config` for that). It is the right shape only when the spawned
+`exec_env::project` for that). It is the right shape only when the spawned
 subcommand must produce a hermetic, side-effect-free response — currently only
 `ocx --format json version`. The invoked command MUST stay pure-version
 (no `HOME`/`PATH`/`OCX_*` reads) or the query silently bootstraps. The

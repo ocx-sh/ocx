@@ -173,13 +173,13 @@ claims and launchers of its dependencies, as for any dependency.
 
 A generated launcher finds its package by directory, and one directory serves every name that
 resolves to its digest. The command that composed the environment passes the names it used in
-[`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. The launcher matches rules against each of
+[`__OCX_ENV_STATE`][env-ocx-env-state]. The launcher matches rules against each of
 them.
 
 So `ocx.sh/java:*` reaches the JDK's launchers when the JDK runs through `ocx exec`,
-`ocx package exec`, `ocx package test` or a lazy tool's shim. It also reaches them from a `PATH`
-that `ocx env --shell`, `ocx direnv export` or the shell hook composed, since those exports carry
-the names too.
+`ocx package exec`, `ocx package test` or a lazy tool's shim. From a `PATH` that `ocx env --shell`,
+`ocx direnv export` or the shell hook composed, the launcher has no names when the shell already
+carries a readable state, and rules match by `*` only.
 
 A launcher run by its absolute path, or from a `PATH` no ocx command composed, matches only `*`
 rules. A digest-only composition passes a name without a tag. Tag-anchored rules skip it, as they
@@ -309,7 +309,7 @@ freeze again, as described in [Freeze for reproducible builds][patches-maintaine
 [reference-visibility]: ../reference/metadata/env.md#env-entry-visibility
 [authoring-env-surface-lists]: ../publishing/env-surface.md#lists
 [env-ocx-patches]: ../reference/environment.md#ocx-patches
-[env-ocx-launch-identities]: ../reference/environment.md#ocx-launch-identities
+[env-ocx-env-state]: ../reference/environment.md#ocx-env-state
 [env-composition]: ../reference/env-composition.md
 [env-composition-surfaces]: ../reference/env-composition.md#visibility-surfaces
 [env-composition-integrations-companions]: ../reference/env-composition.md#integrations-companions

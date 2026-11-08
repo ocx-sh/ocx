@@ -52,11 +52,17 @@ The `env.*` shims and the dedicated fish and nushell files are owned and regener
 
 ### The state carrier \{#activation-state-carrier\}
 
-The reconciler needs to remember, from one prompt to the next, exactly what it applied. Otherwise it cannot tell "a value OCX wrote" from "a value you typed," and reverting one would risk clobbering the other. That memory lives in one private environment variable, [`__OCX_ENV_STATE`][env-ocx-env-state]. It is a compact, base64-encoded ledger recording what is currently applied per scope (global and project, tracked separately). It also records what each constant looked like before OCX touched it. It travels with the shell like any other variable, so a subshell or a nested `bash -c` inherits it along with the environment it describes.
+The reconciler needs to remember, from one prompt to the next, exactly what it applied. Otherwise it cannot tell "a value OCX wrote" from "a value you typed," and reverting one would risk clobbering the other. That memory lives in one private environment variable, [`__OCX_ENV_STATE`][env-ocx-env-state]. It travels with the shell like any other variable, so a subshell or a nested `bash -c` inherits it along with the environment it describes.
 
-It is a deliberate exception to the private `__OCX_*` convention. Every other `__OCX_*` variable is process-internal, but this one has to cross into your interactive shell. A child process cannot mutate its parent's environment any other way. With a documented [repair gesture][ts-repair] it is a user-facing contract, whatever its name looks like. The whole `__OCX_*` namespace is still reserved: a package cannot declare one, `--env` cannot set one, and `ocx exec` strips them from anything it would otherwise forward unchanged. The earlier single-underscore `_OCX_APPLIED` is gone: current OCX neither reads nor writes it, so remove any reference to it from a shell profile.
+The value has two parts. A plaintext header carries the narrowing policy the invocation was started with (`n=offline`, `n=frozen` and the like) and the ocx home (`h=`). A compressed payload follows with the values ocx applied, the policy it received and the session selection. The header stays readable so a consumer that cannot decode the payload still honors the policy.
 
-The ledger is capped at 16 KiB. If it ever grows past that, an unlikely monorepo-scale case, OCX drops to a marker-only record. It never loses track of the fingerprint entirely. The affected scope's binaries then stop being revertible for the rest of that session (one line printed once, not on every prompt). A ledger that is missing, truncated, or unreadable is treated the same way a first prompt is. OCX rebuilds what it knows from the project files on disk and removes anything under `$OCX_HOME` that it no longer recognizes as declared.
+It is a deliberate exception to the private `__OCX_*` convention. A child process cannot mutate its parent's environment any other way, so this one has to cross into your interactive shell. With a documented [repair gesture][ts-repair] it is a user-facing contract, whatever its name looks like. The whole `__OCX_*` namespace is still reserved: a package cannot declare one and `--env` cannot set one.
+
+Two variables cross into every ocx descendant: `__OCX_ENV_STATE` and [`OCX_BINARY_PIN`][env-ocx-binary-pin]. The pin is the stable install path when the running ocx is the installed one, and the running binary otherwise. [Launcher forwarding][launcher-forwarding] covers what else a child inherits.
+
+The value is capped at 8,169 characters. Past that, OCX sheds the least useful parts in a fixed order, and the affected scope's binaries stop being revertible for the rest of that session (one line printed once, not on every prompt). `unset __OCX_ENV_STATE` makes the shell forget everything.
+
+An unreadable value, whether from another major version or garbled, is never an error. Its header still narrows, so an offline shell stays offline. OCX prints one warning, and the hook stands down once with one notice. Missing state is treated like a first prompt: OCX rebuilds what it knows from the project files on disk.
 
 **Per-shell coverage.** A real per-prompt hook fires on every prompt without you doing anything. It needs an append-safe extension point in the shell's own prompt machinery. Not every shell has one:
 
@@ -65,21 +71,31 @@ The ledger is capped at 16 KiB. If it ever grows past that, an unlikely monorepo
 | bash, zsh | `PROMPT_COMMAND` / `precmd_functions` append | global + project |
 | fish | `--on-event fish_prompt` | global + project |
 | PowerShell | wraps `prompt`, restoring the previous definition | global + project |
-| nushell | `env_change.PWD` (fires on directory change, not every prompt) | global toolchain only — no project reconcile, no revert, no consent gate, today |
-| elvish | `$edit:before-readline` append | global + project — guard is carrier-and-`$pwd` only, no watch-set mtime term |
+| nushell | `pre_prompt` hook, appended to your own | global + project — nushell cannot evaluate text, so OCX hands the hook a data plan that it applies; the guard is the same as elvish's, directory and signal variables only |
+| elvish | `$edit:before-readline` append | global + project — guard is carrier-and-`$pwd` only; unlike the presence guard of the other shells, it neither compares watch-set mtimes nor notices a deleted file |
 | ash, dash, ksh, Batch | none — no append-safe prompt-hook point exists | shell start only, both scopes |
 
-The four shells in the last row still activate correctly the moment the shell starts, because the initial compose is unaffected. Nothing re-checks after that. If you add a global package or `cd` into a consented project mid-session in such a shell, open a new one to see it. Nushell sits in between. Its `env_change.PWD` hook keeps the global toolchain live on every directory change. It does not reconcile a project scope at all: no activation, no revert, no consent check. A nushell project still goes through [`ocx direnv export`][cmd-direnv-export] or [`ocx exec`][cmd-run]. Elvish reconciles both scopes at every prompt, same as bash, zsh, fish, and PowerShell, but with a narrower guard. See [Elvish's guard][ts-repair].
+The four shells in the last row still activate correctly the moment the shell starts, because the initial compose is unaffected. Nothing re-checks after that. If you add a global package or `cd` into a consented project mid-session in such a shell, open a new one to see it. Nushell and elvish reconcile both scopes at every prompt, same as bash, zsh, fish, and PowerShell, but with a narrower guard. See [Elvish's guard][ts-repair].
 
 ### Nested projects switch, they do not stack \{#activation-nested-projects\}
 
-The ledger has exactly one project slot, because at any prompt exactly one project is in effect. The walk from your working directory upward stops at the **nearest** `ocx.toml` (or at the first `.git/` boundary it crosses). Whatever a farther ancestor declares is never read.
+At any prompt exactly one project is in effect. The walk from your working directory upward stops at the **nearest** `ocx.toml` (or at the first `.git/` boundary it crosses). Whatever a farther ancestor declares is never read.
 
-That matters the moment a repository holds a second `ocx.toml` below its first. Examples are a `test/` tree that pins its own `uv` and `pytest`, a `website/` that pins its own `bun`, and a vendored sub-repository with a toolchain of its own. Standing at the root, the root's binaries are on `PATH`. `cd test/` and they are gone. The prompt reconciles this as a **switch**: the root's contributions are retired and `test/`'s applied in one pass. The summary line names the project you landed in, `ocx: ~PATH (test)`. `cd ..` and the root's binaries come back the same way. Nothing is pushed onto a stack, so nothing is ever popped out of order. Consent follows the same line. The inner project is its own project, so the outer one's [stamp](#consent) does not cover it. Only a subtree [path grant](#consent) over the enclosing directory reaches both.
+That matters the moment a repository holds a second `ocx.toml` below its first. Examples are a `test/` tree that pins its own `uv` and `pytest`, a `website/` that pins its own `bun`, and a vendored sub-repository with a toolchain of its own. Standing at the root, the root's binaries are on `PATH`. `cd test/` and they are gone. The prompt reconciles this as a **switch**: the root's contributions are retired and `test/`'s applied in one pass. The summary line names the project you landed in, `ocx: ~PATH (test)`. `cd ..` and the root's binaries come back the same way. Consent follows the same line. The inner project is its own project, so the outer one's [stamp](#consent) does not cover it. Only a subtree [path grant](#consent) over the enclosing directory reaches both.
 
-If a nested project needs a package the enclosing one declares, declare it there too. [`ocx add`][cmd-add] inside `test/` writes it into `test/ocx.toml`. That file plus its `ocx.lock` is the whole answer for everything beneath it. [`ocx exec`][cmd-run] follows the same walk, so it composes the nearest file's lock alone. To run against the enclosing project from inside the nested one, name it, as in `ocx --project .. exec -- cmake --version`. The walk never reaches past the nearer file.
+If a nested project needs a package the enclosing one declares, declare it there too. [`ocx add`][cmd-add] inside `test/` writes it into `test/ocx.toml`. That file plus its `ocx.lock` is the whole answer for everything beneath it. [`ocx exec`][cmd-run] follows the same walk, so it composes the nearest file's lock alone. To run against the enclosing project from inside the nested one, name it, as in `ocx --project .. exec -- cmake --version`.
 
-To keep the active project's tools and add the nested one in front of them for a single run, pass `--stack`, as in `ocx exec --stack -- pytest`.
+To keep the tools already loaded and add another group in front of them, nest an explicit exec, as in `ocx exec -- ocx --project test exec -- pytest`. Every `ocx exec` layers what it was asked for over the environment it finds.
+
+### Inherited scopes \{#activation-inherited\}
+
+A shell started by `ocx --project P exec -- bash` inherits P's environment from the exec, and the hook never recomposes a scope the environment already carries. The shell composes nothing inside P, the global toolchain included. `cd` into another project Q and the hook layers global and Q on top. Leaving Q removes them again.
+
+An exec-spawned shell is a snapshot. Editing P's `ocx.toml` changes nothing there, because the hook does not look at P again. Start a new `ocx exec` to pick the edit up.
+
+### A pinned `ocx shell` \{#activation-pinned-shell\}
+
+[`ocx shell`][cmd-shell] opens a **pinned** session. It keeps the groups of its project that you consented to and refreshes them when that `ocx.toml` or `ocx.lock` changes. Values from `--with` and `--env` stay for the life of the session. On `cd` into another project the shell prints one notice and applies nothing.
 
 :::note[direnv's shape, not mise's]
 [direnv][direnv] loads the closest `.envrc` and nothing above it unless that file opts in with `source_up`. By contrast, [mise][mise-config-hierarchy] does the opposite: every `mise.toml` up the tree is merged, and the nearest wins per tool. OCX follows direnv here, minus the opt-in. That gives one file, one lock and one reproducible answer per directory, with no second file able to change what the lock says.
@@ -175,7 +191,6 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op. Someon
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
 [cmd-self-setup]: ../reference/command-line/self.md#self-setup
 [cmd-self-activate]: ../reference/command-line/self.md#self-activate
-[cmd-direnv-export]: ../reference/command-line/direnv.md#direnv-export
 [cmd-run]: ../reference/command-line/commands.md#exec
 [cmd-add]: ../reference/command-line/commands.md#add
 [cmd-init]: ../reference/command-line/commands.md#init
@@ -191,6 +206,9 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op. Someon
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
 [config-project-activate]: toolchain-activation.md#activate
 [env-ocx-env-state]: ../reference/environment.md#ocx-env-state
+[env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
+[launcher-forwarding]: ./launcher-forwarding.md
+[cmd-shell]: ../reference/command-line/shell.md#shell
 [env-ocx-no-consent]: ../reference/environment.md#ocx-no-consent
 [cmd-shell-allow]: ../reference/command-line/shell.md#shell-allow
 [cmd-shell-revoke]: ../reference/command-line/shell.md#shell-revoke

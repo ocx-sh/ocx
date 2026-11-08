@@ -163,17 +163,17 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--clean` |  | Start with a clean environment containing only the package variables, instead of inheriting the current shell environment |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
 | `--records-dir` | `DIRECTORY` | Directory to write this invocation's execution record into |
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
-| `--stack` |  | Layer this project onto the active environment instead of replacing it |
 | `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
 ## `ocx init` {#init}

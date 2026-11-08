@@ -153,6 +153,26 @@ rust_test(
     ),
 )
 
+# The golden SDK's spawner over the spawn conformance fixture (`conformance/spawn/`,
+# part of the `contract` filegroup).
+rust_test(
+    name = "spawn_conformance",
+    srcs = ["tests/spawn_conformance.rs"] + glob(
+        ["tests/golden/rust/**/*.rs"],
+        allow_empty = True,
+    ),
+    aliases = aliases(),
+    crate_root = "tests/spawn_conformance.rs",
+    data = ["//crates/ocx_schema:contract"],
+    edition = "2024",
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sdkgen"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 rust_doc_test(
     name = "ocx_sdkgen_doc_test",
     crate = ":ocx_sdkgen",

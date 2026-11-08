@@ -8,6 +8,17 @@
 
 use crate::Config;
 
+/// Splits a comma-separated `host[:port]` list, the spelling of `OCX_INSECURE_REGISTRIES` and of the
+/// copy a parent ocx hands down in its execution state; absent, blank and empty items read as no host.
+pub fn parse_host_list(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The deduped union of config- and env-declared plain-HTTP hosts, less any host a
 /// system-locked entry states `insecure = false` for (else one env var defeats the lock).
 ///
@@ -122,6 +133,24 @@ mod tests {
             ])),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_host_list_splits_trims_and_drops_blanks() {
+        assert_eq!(parse_host_list(None), Vec::<String>::new());
+        assert_eq!(
+            parse_host_list(Some(" a.corp:5000, ,b.corp,")),
+            vec!["a.corp:5000".to_string(), "b.corp".to_string()]
+        );
+    }
+
+    /// A list a parent ocx handed down enters the same union, so a SYSTEM `insecure = false` clamps it too.
+    #[test]
+    fn a_system_locked_false_clamps_a_received_host_list() {
+        let config = system_config_with("locked.corp:5000", Some(false));
+        let received = parse_host_list(Some("locked.corp:5000,open.corp"));
+
+        assert_eq!(insecure_hosts(&config, &received), vec!["open.corp".to_string()]);
     }
 
     #[test]

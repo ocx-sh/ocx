@@ -260,6 +260,9 @@ mod tests {
 
     const USAGE: u8 = 64;
 
+    /// Stack for the thread a seam run executes on; see [`run_on_seam_stack`].
+    const SEAM_STACK_BYTES: usize = 16 * 1024 * 1024;
+
     struct Outcome {
         code: ExitCode,
         out: String,
@@ -276,13 +279,42 @@ mod tests {
         }
     }
 
+    /// [`run_admitting`] on a thread whose stack is sized for the debug-build frames.
+    ///
+    /// The clap command tree and the config loader add up past libtest's 2 MiB thread stack (the
+    /// production main thread has 8 MiB); boxing the future moves only its state to the heap, not
+    /// the frames polling it.
+    fn run_on_seam_stack(
+        admitted: &'static [&'static str],
+        argv: &[OsString],
+        env: &Environment,
+        out: &mut Vec<u8>,
+        err: &mut Vec<u8>,
+    ) -> ExitCode {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("seam-run".into())
+                .stack_size(SEAM_STACK_BYTES)
+                .spawn_scoped(scope, || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("a current-thread runtime builds")
+                        .block_on(run_admitting(admitted, argv, env, out, err))
+                })
+                .expect("the seam thread spawns")
+                .join()
+                .expect("the seam run does not panic")
+        })
+    }
+
     async fn drive(argv: &[&str], env: &Environment) -> Outcome {
         let argv: Vec<OsString> = std::iter::once("ocx")
             .chain(argv.iter().copied())
             .map(OsString::from)
             .collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run(&argv, env, &mut out, &mut err).await;
+        let code = run_on_seam_stack(ADMITTED, &argv, env, &mut out, &mut err);
         Outcome {
             code,
             out: String::from_utf8(out).expect("stdout is UTF-8"),
@@ -498,14 +530,13 @@ mod tests {
             .map(OsString::from)
             .to_vec();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run_admitting(
+        let code = run_on_seam_stack(
             &["index list"],
             &argv,
             &environment(&[("OCX_HOME", &home)], root.path()),
             &mut out,
             &mut err,
-        )
-        .await;
+        );
         let err = String::from_utf8_lossy(&err);
         assert_eq!(code, ExitCode::from(USAGE), "stderr: {err}");
         assert!(
@@ -535,14 +566,13 @@ mod tests {
             .map(OsString::from)
             .to_vec();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = run_admitting(
+        let code = run_on_seam_stack(
             &["index list"],
             &argv,
             &environment(&[("OCX_HOME", &home)], root.path()),
             &mut out,
             &mut err,
-        )
-        .await;
+        );
         let err = String::from_utf8_lossy(&err);
         assert_eq!(code, ExitCode::from(USAGE), "stderr: {err}");
         assert!(

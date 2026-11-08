@@ -8,22 +8,22 @@ This page explains the extra frames that appear in execution records when an ent
 
 ## Forwarded names and degraded frames {#frames-identity}
 
-The inner frame can name its package only when the parent forwarded the name in [`__OCX_LAUNCH_IDENTITIES`][env-ocx-launch-identities]. A launcher finds its package by directory. Every name that resolves to the same digest shares that directory, so only the parent knows which name it used.
+The inner frame can name its package only when the parent forwarded the name in [`__OCX_ENV_STATE`][env-ocx-env-state]. A launcher finds its package by directory. Every name that resolves to the same digest shares that directory, so only the parent knows which name it used.
 
-OCX sets the variable, never you, and only while a [`[patches]`][config-patches] tier is in effect. The value is a JSON object mapping each content digest a composition resolved to the `registry/repository[:tag]` names it was resolved under. `no_patches` marks a package the project opted out.
+OCX writes the state, never you, and records names only while a [`[patches]`][config-patches] tier is in effect. The names map each content digest a composition resolved to the `registry/repository[:tag]` names it was resolved under. `no_patches` marks a package the project opted out.
 
-These commands write the variable for the process they spawn:
+These commands write the state for the process they spawn:
 
 - [`ocx exec`][cmd-exec], `ocx package exec`, `ocx package test`,
 - a lazy tool's shim.
 
-These commands export it, keeping an inherited value's entries for packages they did not compose:
+These commands export a fresh minimal state carrying the names they composed. A shell that already carries a readable state keeps it, and `ocx env --shell` and `ocx direnv export` add none:
 
 - `ocx env`, `ocx package env`,
 - `ocx direnv export`,
-- the per-prompt shell hook, which also restores the replaced value when you leave a project.
+- the per-prompt shell hook, which keeps its own session records and restores the replaced values when you leave a project.
 
-A malformed value is a hard startup error for the launcher (exit 78) while a patch tier is in effect. Like every `OCX_*` key, it cannot be set from `ocx.toml` or through `--env`. With a forwarded name the frame is `complete`. Its package descriptor carries the real name and a purl without a `tag` qualifier, as a shim frame does.
+An unreadable state is never an error: the launcher stands down to a synthetic identity and ocx prints one warning. With a forwarded name the frame is `complete`. Its package descriptor carries the real name and a purl without a `tag` qualifier, as a shim frame does.
 
 Without a forwarded name, the identifier is a synthetic content digest minted at the launcher. Package directories are content-shared and never persist their own registry or repository. The frame is then `degraded`, even when an outer `exec` or `package exec` frame pairs with it a few milliseconds earlier.
 
@@ -91,7 +91,7 @@ The patch tier's freeze is independent of the package tier's. `resolution.patchS
 
 <!-- reference -->
 [config-patches]: ../reference/configuration.md#keys-patches
-[env-ocx-launch-identities]: ../reference/environment.md#ocx-launch-identities
+[env-ocx-env-state]: ../reference/environment.md#ocx-env-state
 [env-composition-integrations]: ../reference/env-composition.md#integrations-companions
 
 <!-- commands -->

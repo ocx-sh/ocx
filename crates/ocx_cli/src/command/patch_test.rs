@@ -17,13 +17,14 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args;
+use ocx_config::exec_state::{Owner, Selection};
+use ocx_package_manager::exec_env::{self, ChildEnvInputs};
 use ocx_package_manager::launch::{self, ExemptionReason, Launch};
 use ocx_util::child_process;
 
 use crate::error::UsageError;
 use crate::{conventions, options};
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
-use ocx_shell::shell::reconcile;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Arguments for `ocx patch test`.
 #[derive(Args)]
@@ -71,6 +72,9 @@ pub struct PatchTestArgs {
     /// Mutually exclusive with a trailing command.
     #[clap(long, conflicts_with = "command")]
     script: Option<PathBuf>,
+
+    #[clap(flatten)]
+    mode: options::ExecModeOptions,
 
     #[clap(flatten)]
     env: crate::options::EnvOverride,
@@ -234,19 +238,28 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
 
     // ── Step 6: Build the composed process env (mirrors package_test.rs). ──
     //
-    // Composed entries + forwarded ocx config + forwarded overrides, in the one
-    // order that is correct — see `Env::apply_child_env`. A base that declares
-    // entrypoints resolves through its generated launcher here too, so an
-    // unforwarded override would be silently reverted at that hop.
-    let mut process_env = reconcile::inherited_env();
-    process_env.apply_child_env(
-        ChildEnv {
+    // Composed entries, then the written policy, then the replayed overrides, in the
+    // one order the projection fixes. A base that declares entrypoints resolves
+    // through its generated launcher here too, so an unreplayed override would be
+    // silently reverted at that hop.
+    let mode = args.mode.mode();
+    let child = exec_env::apply_child_env(
+        context.inherited(),
+        &ChildEnvInputs {
+            mode,
+            written: context.written_policy(mode.write_mode()),
+            binary_pin: context.binary_pin(),
             composed: &composition.entries,
-            forwarded: &env_overrides,
+            composed_owner: Owner::Inherited,
+            composed_scope: None,
+            invocation: &[],
+            replay_env: &env_overrides,
             identities: None,
+            selection: Selection::FollowCwd,
         },
-        context.config_view(),
     );
+    crate::app::report_projection_warnings(&child.warnings);
+    let process_env = child.env;
 
     // ── Step 7: Dispatch on --script / trailing command / print env. ──
     if let Some(script_path) = &args.script {
@@ -621,6 +634,29 @@ mod tests {
             ExitCode::DataError,
             "the parse the companion branch actually exits through is 65, not 1"
         );
+    }
+
+    /// `ocx patch test` gained the mode flags: layer by default, `--isolate` and `--clean` each select theirs,
+    /// never both.
+    #[test]
+    fn selects_its_mode_from_the_flags() {
+        use clap::Parser as _;
+        use ocx_package_manager::exec_env::ExecMode;
+
+        let mode = |flags: &[&str]| {
+            let argv = ["ocx", "patch", "test", "--descriptor", "p.json", "cmake:1.0"]
+                .into_iter()
+                .chain(flags.iter().copied());
+            crate::app::Cli::try_parse_from(argv).map(|cli| match cli.command {
+                Some(crate::command::Command::Patch(crate::command::patch::PatchGroup::Test(args))) => args.mode.mode(),
+                _ => panic!("expected Patch(Test(..)) subcommand"),
+            })
+        };
+
+        assert_eq!(mode(&[]).ok(), Some(ExecMode::Layer));
+        assert_eq!(mode(&["--isolate"]).ok(), Some(ExecMode::Isolate));
+        assert_eq!(mode(&["--clean"]).ok(), Some(ExecMode::Clean));
+        assert!(mode(&["--isolate", "--clean"]).is_err());
     }
 
     // --- Clap surface: --descriptor rename ---

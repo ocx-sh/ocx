@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_config::env;
+use ocx_config::exec_state::{Owner, Selection};
+use ocx_package_manager::exec_env::{self, ChildEnvInputs};
 use ocx_package_manager::launch::{self, ExemptionReason, Launch};
 use ocx_util::child_process;
 use ocx_util::fs as ocx_fs;
@@ -17,8 +18,7 @@ use crate::api::data::script_run::{AssertionRecord, ScriptRunReport, ScriptStatu
 use crate::error::UsageError;
 use crate::{conventions, options};
 use ocx_package::launch::LaunchIdentities;
-use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
-use ocx_shell::shell::reconcile;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Materialize a package locally and run a command in its env
 ///
@@ -66,10 +66,8 @@ pub struct PackageTest {
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
-    /// Strip ambient parent env before composing - only `OCX_*` config and
-    /// composed package vars reach the child. Mirrors `ocx exec --clean`.
-    #[clap(long, default_value_t = false)]
-    clean: bool,
+    #[clap(flatten)]
+    mode: options::ExecModeOptions,
 
     #[clap(flatten)]
     env: options::EnvOverride,
@@ -321,24 +319,28 @@ impl PackageTest {
         // reaches the forwarded copy.
         reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
-        // Step 6: Compose env (mirrors exec.rs). Composed entries + forwarded
-        // ocx config + forwarded overrides, in the one order that is correct —
-        // see `Env::apply_child_env`. This command materialises packages that
-        // may declare entrypoints, so the launcher hop is the ordinary path
-        // here, not a corner case.
-        let mut process_env = if self.clean {
-            env::Env::clean()
-        } else {
-            reconcile::inherited_env()
-        };
-        process_env.apply_child_env(
-            ChildEnv {
+        // Step 6: Compose env (mirrors exec.rs). Composed entries, then the written
+        // policy, then the replayed overrides, in the one order the projection
+        // fixes. This command materialises packages that may declare entrypoints,
+        // so the launcher hop is the ordinary path here, not a corner case.
+        let mode = self.mode.mode();
+        let child = exec_env::apply_child_env(
+            context.inherited(),
+            &ChildEnvInputs {
+                mode,
+                written: context.written_policy(mode.write_mode()),
+                binary_pin: context.binary_pin(),
                 composed: &entries,
-                forwarded: &env_overrides,
+                composed_owner: Owner::Inherited,
+                composed_scope: None,
+                invocation: &[],
+                replay_env: &env_overrides,
                 identities: Some(&LaunchIdentities::from_infos(&packages)),
+                selection: Selection::FollowCwd,
             },
-            context.config_view(),
         );
+        crate::app::report_projection_warnings(&child.warnings);
+        let process_env = child.env;
         // No PATHEXT manipulation: the Windows launcher is now a native
         // `<name>.exe` shim resolved via the default Windows PATHEXT.
 
@@ -614,6 +616,23 @@ async fn provision_scratch_dir(package_root: &std::path::Path) -> anyhow::Result
 mod tests {
     use super::*;
     use clap::Parser;
+    use ocx_package_manager::exec_env::ExecMode;
+
+    /// `ocx package test` layers by default; `--isolate` and `--clean` each select theirs, never both.
+    #[test]
+    fn selects_its_mode_from_the_flags() {
+        let mode = |flags: &[&str]| {
+            let argv = ["package-test", "-i", "example:1", "--script", "s.star"]
+                .into_iter()
+                .chain(flags.iter().copied());
+            PackageTest::try_parse_from(argv).map(|cmd| cmd.mode.mode())
+        };
+
+        assert_eq!(mode(&[]).ok(), Some(ExecMode::Layer));
+        assert_eq!(mode(&["--isolate"]).ok(), Some(ExecMode::Isolate));
+        assert_eq!(mode(&["--clean"]).ok(), Some(ExecMode::Clean));
+        assert!(mode(&["--isolate", "--clean"]).is_err());
+    }
 
     /// `--junit` with neither `--script` nor a trailing command parses (clap
     /// waives the command positional because `--junit` conflicts with it), then

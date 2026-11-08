@@ -186,12 +186,29 @@ jobs:
       # `task satellite:verify` overlays this checkout over the mirror's
       # `external/ocx` (rsync --delete), so the pinned pointer's tree would
       # only be cloned to be deleted.
+      # A lockstep change upgrades the mirror on a branch named like this one; without it the job
+      # builds the mirror's default branch, the pre-break consumer, and reds every lockstep PR.
+      # Exit 2 is "no such branch"; any other failure stops the job rather than falling back silently.
+      - name: Resolve the lockstep ocx-mirror branch
+        id: mirror-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -eu
+          rc=0
+          git ls-remote --exit-code --heads https://github.com/ocx-sh/ocx-mirror "refs/heads/$BRANCH" >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "ref=$BRANCH" >>"$GITHUB_OUTPUT"; echo "ocx-mirror: lockstep branch $BRANCH" ;;
+            2) echo "ref=" >>"$GITHUB_OUTPUT"; echo "ocx-mirror: no branch $BRANCH, using the default branch" ;;
+            *) echo "ocx-mirror: git ls-remote failed (exit $rc)" >&2; exit "$rc" ;;
+          esac
       - name: Checkout ocx-mirror
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ocx-sh/ocx-mirror
           path: ocx-mirror
-          # The default branch: the template's dispatch passes no ref.
+          # Empty selects the default branch.
+          ref: ${{ steps.mirror-ref.outputs.ref }}
           persist-credentials: false
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -232,11 +249,29 @@ jobs:
           path: ocx
           submodules: true
           persist-credentials: false
+      # A lockstep change upgrades the mirror on a branch named like this one; without it the job
+      # builds the mirror's default branch, the pre-break consumer, and reds every lockstep PR.
+      # Exit 2 is "no such branch"; any other failure stops the job rather than falling back silently.
+      - name: Resolve the lockstep ocx-mirror branch
+        id: mirror-ref
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -eu
+          rc=0
+          git ls-remote --exit-code --heads https://github.com/ocx-sh/ocx-mirror "refs/heads/$BRANCH" >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "ref=$BRANCH" >>"$GITHUB_OUTPUT"; echo "ocx-mirror: lockstep branch $BRANCH" ;;
+            2) echo "ref=" >>"$GITHUB_OUTPUT"; echo "ocx-mirror: no branch $BRANCH, using the default branch" ;;
+            *) echo "ocx-mirror: git ls-remote failed (exit $rc)" >&2; exit "$rc" ;;
+          esac
       - name: Checkout ocx-mirror
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ocx-sh/ocx-mirror
           path: ocx-mirror
+          # Empty selects the default branch.
+          ref: ${{ steps.mirror-ref.outputs.ref }}
           persist-credentials: false
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0

@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use clap::Parser;
-use ocx_config::env::OcxConfigView;
+use ocx_config::exec_state::{Inherited, RootFlags};
 use ocx_console::{ColorMode, ColorModeConfig, DataInterface, Printer};
 
 use crate::{api, options};
@@ -36,8 +36,7 @@ pub struct ContextOptions {
     ///
     /// Mutually exclusive with `--project`. Applies to this invocation only: a child ocx process selects its own tier.
     ///
-    /// Equivalent env var: `OCX_GLOBAL`. The global toolchain never composes into project
-    /// resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
+    /// The global toolchain never composes into project resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
     ///
     /// Before the subcommand `-g` means `--global`; after it, `-g` means `--group`. Nothing
     /// selects the global toolchain implicitly.
@@ -133,6 +132,18 @@ pub struct ContextOptions {
     /// `CLICOLOR` and `CLICOLOR_FORCE`.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = Default::default())]
     pub color: ColorMode,
+
+    /// The three switches as typed, captured by [`Self::apply_env`] before it folds the environment in.
+    #[arg(skip)]
+    typed: Option<TypedSwitches>,
+}
+
+/// `--remote`, `--offline` and `--frozen` exactly as the command line gave them.
+#[derive(Debug, Clone, Copy)]
+struct TypedSwitches {
+    remote: bool,
+    offline: bool,
+    frozen: bool,
 }
 
 impl ContextOptions {
@@ -143,8 +154,14 @@ impl ContextOptions {
     ///
     /// [`ocx_env::InvalidEnv`] when a variable declared to refuse an unparsable value holds one.
     pub fn apply_env(&mut self) -> Result<(), ocx_env::InvalidEnv> {
+        // An ambient `OCX_*` folded in below must never read back as a flag the user typed, so the
+        // first capture stands: a second call would see the first call's fold.
+        let typed = *self.typed.get_or_insert(TypedSwitches {
+            remote: self.remote,
+            offline: self.offline,
+            frozen: self.frozen,
+        });
         for (flag, var) in [
-            (&mut self.global, &ocx_env::OCX_GLOBAL),
             (&mut self.remote, &ocx_env::OCX_REMOTE),
             (&mut self.offline, &ocx_env::OCX_OFFLINE),
             (&mut self.frozen, &ocx_env::OCX_FROZEN),
@@ -152,9 +169,37 @@ impl ContextOptions {
         ] {
             *flag |= var.bool_or(false)?;
         }
-        // A credential helper's ocx must not reach the registry it is resolving credentials for.
-        self.offline |= ocx_env::__OCX_CREDENTIAL_HELPER.bool_or(false)?;
+        // The received header's narrowing outlives a child's `OCX_OFFLINE=0`; `credential_helper`
+        // implies `offline`, so a helper's ocx never reaches the registry it resolves credentials for.
+        // The legacy marker stays read until 0.7. None of this is a typed root flag.
+        let inherited = Inherited::from_process_env();
+        let received = inherited.narrowing();
+        self.offline |= received.offline || ocx_env::__OCX_CREDENTIAL_HELPER.bool_or(false)?;
+        self.frozen |= received.frozen;
+        // `remote` is neutral: the typed flag, then the parent's value, then the ambient variable.
+        if !typed.remote
+            && let Some(remote) = super::context::received_policy(&inherited).and_then(|policy| policy.remote)
+        {
+            self.remote = remote;
+        }
         Ok(())
+    }
+
+    /// The root flags that may reach a child's policy, as typed on the command line: an ambient
+    /// `OCX_OFFLINE`, `OCX_REMOTE` or `OCX_FROZEN` folded in by [`Self::apply_env`] is not one.
+    pub fn root_flags(&self) -> RootFlags {
+        let typed = self.typed.unwrap_or(TypedSwitches {
+            remote: self.remote,
+            offline: self.offline,
+            frozen: self.frozen,
+        });
+        RootFlags {
+            config: self.config.clone(),
+            remote: typed.remote,
+            offline: typed.offline,
+            frozen: typed.frozen,
+            index: self.index.clone(),
+        }
     }
 
     /// Builds the reporting [`Api`](api::Api); the only construction, shared by
@@ -164,32 +209,6 @@ impl ContextOptions {
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let data = DataInterface::new(printer);
         api::Api::new(self.format.mode(), data, self.quiet)
-    }
-
-    /// Builds the resolution-affecting policy snapshot forwarded to child ocx
-    /// processes; `self_exe` is the running `ocx`'s absolute path.
-    pub fn as_view(&self, self_exe: std::path::PathBuf) -> OcxConfigView {
-        // Fields no root flag carries start unset; `Context::try_init` or the spawning command fills
-        // the ones it forwards.
-        OcxConfigView {
-            self_exe,
-            offline: self.offline,
-            remote: self.remote,
-            frozen: self.frozen,
-            config: self.config.clone(),
-            project: self.project.clone(),
-            global: self.global,
-            no_consent: false,
-            index: self.index.clone(),
-            toolchain_dir: None,
-            mirrors: Vec::new(),
-            patches: None,
-            patch_snapshot: None,
-            records: ocx_package_manager::record::RecordsOptions::default(),
-            managed_config_source: None,
-            no_verify: false,
-            no_config: false,
-        }
     }
 }
 
@@ -229,13 +248,12 @@ mod tests {
         for (key, value) in [
             (&ocx_env::OCX_OFFLINE, "1"),
             (&ocx_env::OCX_REMOTE, "yes"),
-            (&ocx_env::OCX_GLOBAL, "true"),
             (&ocx_env::OCX_QUIET, "on"),
         ] {
             env.set(key, value);
         }
         let from_env = parsed(&["ocx"]);
-        assert!(from_env.offline && from_env.remote && from_env.global && from_env.quiet);
+        assert!(from_env.offline && from_env.remote && from_env.quiet && !from_env.global);
         assert!(!from_env.frozen);
     }
 
@@ -251,6 +269,90 @@ mod tests {
         env.set(&ocx_env::__OCX_CREDENTIAL_HELPER, "1");
         let mut options = ContextOptions::try_parse_from(["ocx", "--remote"]).expect("args parse");
         options.apply_env().expect("the marker is a boolean");
+        assert!(options.offline);
+    }
+
+    /// An exported `OCX_GLOBAL` selects nothing: only the `--global` flag does.
+    #[test]
+    fn an_exported_ocx_global_never_selects_the_global_tier() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::OCX_GLOBAL, "1");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
+        assert!(!options.global);
+
+        let mut flagged = ContextOptions::try_parse_from(["ocx", "--global"]).expect("args parse");
+        flagged.apply_env().expect("every variable holds a boolean");
+        assert!(flagged.global);
+    }
+
+    /// A received `offline` narrowing outlives `OCX_OFFLINE=0` yet is not a typed root flag.
+    #[test]
+    fn a_received_offline_narrowing_holds_against_ambient_zero() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::__OCX_ENV_STATE, "2;n=offline");
+        env.set(&ocx_env::OCX_OFFLINE, "0");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
+        assert!(options.offline);
+        assert!(!options.root_flags().offline, "received narrowing is not a typed flag");
+    }
+
+    /// A received `frozen` narrowing outlives `OCX_FROZEN=0` yet is not a typed root flag.
+    #[test]
+    fn a_received_frozen_narrowing_holds_against_ambient_zero() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::__OCX_ENV_STATE, "2;n=frozen");
+        env.set(&ocx_env::OCX_FROZEN, "0");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
+        assert!(options.frozen);
+        assert!(!options.root_flags().frozen, "received narrowing is not a typed flag");
+    }
+
+    /// A parent's `--remote` reaches a child through the state, ahead of the ambient variable, and is no typed flag.
+    #[test]
+    fn a_received_remote_holds_without_the_public_variable() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        let state = ocx_config::exec_state::encode(&ocx_config::exec_state::ExecState {
+            policy: ocx_config::exec_state::Policy {
+                remote: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .value
+        .expect("a default-sized state encodes");
+        env.set(&ocx_env::__OCX_ENV_STATE, state);
+        let apply = |args: &[&str]| {
+            let mut options = ContextOptions::try_parse_from(args).expect("args parse");
+            options.apply_env().expect("every variable holds a boolean");
+            options
+        };
+
+        let plain = apply(&["ocx"]);
+        assert!(plain.remote, "the parent's --remote reaches the child");
+        assert!(!plain.root_flags().remote, "a received value is not a typed flag");
+
+        env.set(&ocx_env::OCX_REMOTE, "0");
+        assert!(
+            apply(&["ocx"]).remote,
+            "neutral: the parent's value outranks the ambient variable"
+        );
+    }
+
+    /// The header's `credential_helper` narrowing implies offline without the legacy marker.
+    #[test]
+    fn a_received_credential_helper_narrowing_forces_offline() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::__OCX_ENV_STATE, "2;n=credential_helper");
+        let mut options = ContextOptions::try_parse_from(["ocx", "--remote"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
         assert!(options.offline);
     }
 
@@ -270,6 +372,59 @@ mod tests {
         let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
         options.apply_env().expect("OCX_REMOTE falls back");
         assert!(!options.remote);
+    }
+
+    /// A typed flag is a root flag; the same value arriving through the environment is not.
+    #[test]
+    fn root_flags_ignore_an_ambient_offline() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::OCX_OFFLINE, "1");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
+        assert!(options.offline, "the environment folds into the switch");
+        let RootFlags {
+            config,
+            remote,
+            offline,
+            frozen,
+            index,
+        } = options.root_flags();
+        assert_eq!(
+            (config, remote, offline, frozen, index),
+            (None, false, false, false, None)
+        );
+
+        let mut typed = ContextOptions::try_parse_from(["ocx", "--offline", "--config", "c.toml", "--index", "i"])
+            .expect("args parse");
+        typed.apply_env().expect("every variable holds a boolean");
+        let RootFlags {
+            config,
+            remote,
+            offline,
+            frozen,
+            index,
+        } = typed.root_flags();
+        assert_eq!(config.as_deref(), Some(std::path::Path::new("c.toml")));
+        assert_eq!(index.as_deref(), Some(std::path::Path::new("i")));
+        assert!(offline && !remote && !frozen);
+    }
+
+    /// A second fold must not capture the first fold's ambient values as typed.
+    #[test]
+    fn root_flags_stay_as_typed_when_the_environment_is_folded_twice() {
+        let env = ocx_env::overrides::lock();
+        env.hermetic(std::env::temp_dir());
+        env.set(&ocx_env::OCX_OFFLINE, "1");
+        env.set(&ocx_env::OCX_FROZEN, "1");
+        let mut options = ContextOptions::try_parse_from(["ocx"]).expect("args parse");
+        options.apply_env().expect("every variable holds a boolean");
+        options.apply_env().expect("every variable holds a boolean");
+        let flags = options.root_flags();
+        assert!(
+            !flags.offline && !flags.frozen,
+            "ambient values became root flags: {flags:?}"
+        );
     }
 
     #[test]

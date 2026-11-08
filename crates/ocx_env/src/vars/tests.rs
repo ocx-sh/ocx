@@ -26,7 +26,7 @@ fn declaration(name: &'static str, visibility: Visibility, secret: bool, doc: &'
         on_invalid: OnInvalid::Default,
         visibility,
         secret,
-        child: Child::Inherit,
+        propagation: Propagation::UserInput,
         reader: Reader::Ocx,
     }))
 }
@@ -50,7 +50,8 @@ fn duplicate_names(vars: &[&EnvVar], retired: &[Retired]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let retired_names = retired
         .iter()
-        .filter(|entry| !matches!(entry.change, Change::ValueRename { .. }))
+        // A value rename shares its variable's name; a withdrawn row keeps its declaration on purpose.
+        .filter(|entry| !matches!(entry.change, Change::ValueRename { .. } | Change::Withdrawn))
         .map(|entry| entry.name);
     vars.iter()
         .map(|var| var.name)
@@ -116,9 +117,9 @@ fn bad_patterns(vars: &[&EnvVar]) -> Vec<String> {
         .collect()
 }
 
-fn scrubbed_but_not_secret(vars: &[&EnvVar]) -> Vec<String> {
+fn credential_but_not_secret(vars: &[&EnvVar]) -> Vec<String> {
     vars.iter()
-        .filter(|var| var.child == Child::Scrub && !var.secret)
+        .filter(|var| var.propagation == Propagation::Credential && !var.secret)
         .map(|var| var.name.to_owned())
         .collect()
 }
@@ -135,14 +136,14 @@ fn names_are_unique_across_declarations_and_retired() {
     assert_eq!(duplicate_names(&[&OCX_LOG_LEVEL, twin], &[]), ["OCX_LOG_LEVEL"]);
     let renamed = [Retired {
         name: "OCX_LOG_LEVEL",
-        replacement: &OCX_QUIET,
+        replacement: Replacement::Env(&OCX_QUIET),
         change: Change::Rename,
         status: Status::Removed,
     }];
     assert_eq!(duplicate_names(&[&OCX_LOG_LEVEL], &renamed), ["OCX_LOG_LEVEL"]);
     let value_rename = [Retired {
         name: "OCX_LAZY_MODE",
-        replacement: &OCX_LAZY_MODE,
+        replacement: Replacement::Env(&OCX_LAZY_MODE),
         change: Change::ValueRename {
             old: "lazy",
             new: "always",
@@ -150,6 +151,13 @@ fn names_are_unique_across_declarations_and_retired() {
         status: Status::Removed,
     }];
     assert_eq!(duplicate_names(&[&OCX_LAZY_MODE], &value_rename), Vec::<String>::new());
+    let withdrawn = [Retired {
+        name: "OCX_LAZY_MODE",
+        replacement: Replacement::Flag("--lazy"),
+        change: Change::Withdrawn,
+        status: Status::Removed,
+    }];
+    assert_eq!(duplicate_names(&[&OCX_LAZY_MODE], &withdrawn), Vec::<String>::new());
 }
 
 #[test]
@@ -217,12 +225,12 @@ fn a_pattern_carries_exactly_one_slot() {
 
 #[test]
 fn only_a_secret_is_scrubbed() {
-    assert_eq!(scrubbed_but_not_secret(&live()), Vec::<String>::new());
+    assert_eq!(credential_but_not_secret(&live()), Vec::<String>::new());
     let leaky: &'static EnvVar = Box::leak(Box::new(EnvVar {
-        child: Child::Scrub,
+        propagation: Propagation::Credential,
         ..*declaration("OCX_X", Visibility::Public, false, "d")
     }));
-    assert_eq!(scrubbed_but_not_secret(&[leaky]), ["OCX_X"]);
+    assert_eq!(credential_but_not_secret(&[leaky]), ["OCX_X"]);
 }
 
 #[test]
@@ -248,4 +256,58 @@ fn secret_declarations_are_secret_vars() {
     let _: &SecretVar = &OCX_AUTH_TOKEN;
     assert!(OCX_IDENTITY_TOKEN.declaration().secret);
     assert!(!OCX_LOG_LEVEL.secret);
+}
+
+/// Reds on: a `secret` declaration filed under a class that is neither Credential nor SecretInput.
+fn secrets_outside_secret_classes(vars: &[&EnvVar]) -> Vec<String> {
+    vars.iter()
+        .filter(|var| var.secret && !matches!(var.propagation, Propagation::Credential | Propagation::SecretInput))
+        .map(|var| var.name.to_owned())
+        .collect()
+}
+
+#[test]
+fn every_secret_declaration_is_credential_or_secret_input() {
+    assert_eq!(secrets_outside_secret_classes(&live()), Vec::<String>::new());
+    let bad = declaration("OCX_SYNTHETIC_TOKEN", Visibility::Public, true, "x");
+    assert_eq!(secrets_outside_secret_classes(&[bad]), ["OCX_SYNTHETIC_TOKEN"]);
+}
+
+#[test]
+fn credential_class_is_exactly_the_scrubbed_secrets() {
+    let credentials: BTreeSet<_> = keys_with(Propagation::Credential).collect();
+    let scrubbed: BTreeSet<_> = credential_keys().collect();
+    assert_eq!(credentials, scrubbed);
+    assert_eq!(credentials.len(), 4);
+}
+
+#[test]
+fn the_singleton_classes_hold_the_variables_the_adr_names() {
+    let keys = |class| keys_with(class).collect::<Vec<_>>();
+    assert_eq!(keys(Propagation::State), ["__OCX_ENV_STATE"]);
+    assert_eq!(keys(Propagation::BinaryPin), ["OCX_BINARY_PIN"]);
+    assert_eq!(keys(Propagation::SetupWritten), ["OCX_HOME"]);
+    assert_eq!(
+        keys(Propagation::HookLocal),
+        ["__OCX_ENV_PWD", "__OCX_ENV_STOOD_DOWN", "__OCX_CREDENTIAL_HELPER"]
+    );
+    let secret_inputs: BTreeSet<_> = keys_with(Propagation::SecretInput).collect();
+    assert_eq!(
+        secret_inputs,
+        BTreeSet::from([
+            "OCX_ANNOUNCE_TOKEN",
+            "OCX_AUTH_{REGISTRY}_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "CI_JOB_TOKEN",
+            "SIGSTORE_ID_TOKEN",
+            "CIRCLE_OIDC_TOKEN_V2",
+        ])
+    );
+}
+
+#[test]
+fn the_stood_down_copy_is_declared_hook_local_plumbing() {
+    assert_eq!(__OCX_ENV_STOOD_DOWN.propagation, Propagation::HookLocal);
+    assert_eq!(__OCX_ENV_STOOD_DOWN.visibility, Visibility::Plumbing);
+    assert!(__OCX_ENV_STOOD_DOWN.doc.contains("never transported"));
 }

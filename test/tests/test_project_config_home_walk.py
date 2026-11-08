@@ -3,7 +3,7 @@
 """The CWD walk never adopts ``$OCX_HOME/ocx.toml`` as a project (#485).
 
 ``$OCX_HOME/ocx.toml`` is the **global toolchain manifest**, reachable only
-through the explicit ``--global`` / ``OCX_GLOBAL`` selector
+through the explicit ``--global`` selector
 (``adr_global_toolchain_tier.md`` §Decision 1). The CWD walk used to return it
 as an ordinary discovery hit, so any command run from a working directory
 *inside* the store silently acquired the global toolchain as its project.
@@ -110,3 +110,56 @@ def test_cwd_inside_ocx_home_is_not_a_project(ocx: OcxRunner, tmp_path: Path) ->
         f"--global must put $OCX_HOME itself in effect as the project from a "
         f"cwd below it; project_dir={global_report['project_dir']!r}"
     )
+
+
+def _project_with_home_manifest(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "ocx.toml").write_text("[tools]\n")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text("[tools]\n")
+    return home, project, {"OCX_HOME": str(home), "OCX_CEILING_PATH": str(tmp_path)}
+
+
+def test_exported_ocx_global_does_not_split_hook_and_shell_allow(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """#678 — with ``OCX_GLOBAL`` exported, ``ocx shell allow`` consents to the project the hook resolves.
+
+    The hook never read ``OCX_GLOBAL``; ``shell allow`` did and answered "is the ocx home".
+    The env form is withdrawn, so both agree on the project the walk finds.
+    """
+    _home, project, env = _project_with_home_manifest(tmp_path)
+    env["OCX_GLOBAL"] = "1"
+
+    state = run_in(ocx, project, "--offline", "--format", "json", "shell", "state", env_extra=env)
+    assert state.returncode == 0, f"stderr={state.stderr!r}"
+    assert Path(json.loads(state.stdout)["project_dir"]).resolve() == project.resolve()
+
+    allowed = run_in(ocx, project, "--offline", "shell", "allow", env_extra=env)
+    assert allowed.returncode == 0, (
+        f"`shell allow` must consent to the walked project, not refuse the home; "
+        f"rc={allowed.returncode}, stderr={allowed.stderr!r}"
+    )
+    assert str(project.resolve()) in allowed.stderr + allowed.stdout, (
+        f"stdout={allowed.stdout!r}, stderr={allowed.stderr!r}"
+    )
+
+
+def test_exported_ocx_project_is_honoured_by_hook_and_shell_allow(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """#678 — an exported ``OCX_PROJECT`` selects the same project for ``shell state`` and ``shell allow``."""
+    _home, project, env = _project_with_home_manifest(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    env["OCX_PROJECT"] = str(project / "ocx.toml")
+
+    state = run_in(ocx, elsewhere, "--offline", "--format", "json", "shell", "state", env_extra=env)
+    assert state.returncode == 0, f"stderr={state.stderr!r}"
+    assert Path(json.loads(state.stdout)["project_dir"]).resolve() == project.resolve()
+
+    allowed = run_in(ocx, elsewhere, "--offline", "shell", "allow", env_extra=env)
+    assert allowed.returncode == 0, f"rc={allowed.returncode}, stderr={allowed.stderr!r}"
+    assert str(project.resolve()) in allowed.stderr + allowed.stdout

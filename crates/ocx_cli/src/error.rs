@@ -123,7 +123,7 @@ impl std::fmt::Display for RetiredEnvError {
             .refused
             .iter()
             .map(|entry| {
-                let (name, replacement) = (entry.name, entry.replacement.name);
+                let (name, replacement) = (entry.name, entry.replacement.name());
                 match entry.change {
                     Change::Rename => format!("{name} is no longer read; set {replacement} instead"),
                     Change::ValueRename { old, new } => {
@@ -132,6 +132,7 @@ impl std::fmt::Display for RetiredEnvError {
                     Change::Polarity => {
                         format!("{name} is no longer read; set {replacement} instead, which has the opposite meaning")
                     }
+                    Change::Withdrawn => format!("{name} is no longer read; pass {replacement} instead"),
                 }
             })
             .collect();

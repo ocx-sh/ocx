@@ -5,7 +5,7 @@ use ocx_config::refresh::RefreshPolicy;
 use ocx_exit::ExitCode as OcxExitCode;
 use ocx_oci::PackageRef;
 use ocx_package_manager::{
-    HandoffFailure, HandoffStdio, PackageManager, SelfUpdateResult, TagProbe, UpdateCheckResult,
+    HandoffFailure, HandoffState, HandoffStdio, PackageManager, SelfUpdateResult, TagProbe, UpdateCheckResult,
 };
 
 use super::update_notice::NoticeRow;
@@ -24,12 +24,16 @@ pub(crate) enum SelfUpdate {
 ///
 /// Skipped under `--frozen`, like the toolchain drift check. Never fails the command: errors are logged at debug level.
 pub(crate) async fn check_for_update(ctx: &Context) -> Option<SelfUpdate> {
-    if let Some(reason) = background_check::skip_reason(&ocx_env::OCX_NO_UPDATE_CHECK, ctx.is_offline()) {
+    if let Some(reason) = background_check::skip_reason(
+        &ocx_env::OCX_NO_UPDATE_CHECK,
+        ctx.env_slot().0.policy.no_update_check,
+        ctx.is_offline(),
+    ) {
         log::debug!("Update check skipped: {reason}");
         return None;
     }
     // A frozen run neither discovers a new release nor replaces the binary under `apply`.
-    if ctx.config_view().frozen {
+    if ctx.frozen() {
         log::debug!("Update check skipped: --frozen");
         return None;
     }
@@ -68,8 +72,10 @@ pub(crate) async fn check_for_update(ctx: &Context) -> Option<SelfUpdate> {
 /// Installs `identifier` after the user's command has finished; never changes its outcome.
 ///
 /// The hand-off child gets no stdin or stdout: the command's stdout is not ours to write.
-pub(crate) async fn apply_pending(manager: &PackageManager, identifier: &PackageRef) {
-    let outcome = manager.self_apply(identifier.clone(), HandoffStdio::Unattended).await;
+pub(crate) async fn apply_pending(manager: &PackageManager, identifier: &PackageRef, handoff: &HandoffState) {
+    let outcome = manager
+        .self_apply(identifier.clone(), HandoffStdio::Unattended, handoff)
+        .await;
     if let Err(err) = &outcome {
         log::debug!("Automatic ocx update failed: {err:?}");
     }
