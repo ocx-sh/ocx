@@ -53,8 +53,6 @@ jobs:
         job:
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm }
-    env:
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       # The taskfile includes every sub-taskfile, so a sparse checkout would
       # fail to load; a plain checkout of the tree is a few seconds and needs
@@ -90,13 +88,14 @@ jobs:
           path: target/cross/unit-junit.xml
           overwrite: true
       - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         uses: ./.github/actions/test-telemetry
         with:
           junit: target/cross/unit-junit.xml
           suite: unit
+          auth: ${{ secrets.OTEL_OTLP_AUTH }}
 
   # The activation matrix on the platforms the per-PR Linux shell zoo cannot reach.
   shell-activation-deep:

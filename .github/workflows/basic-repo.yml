@@ -237,9 +237,6 @@ jobs:
     # leaves room for the registry bring-up, the artifact download and
     # `setup-ocx` ahead of the tier itself.
     timeout-minutes: 10
-    env:
-      # Test telemetry, guarded on a value `if:` can read; empty on a fork PR, where the push is skipped.
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -286,13 +283,14 @@ jobs:
           require_tests: false
           annotate_only: true
       - name: Push smoke test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         uses: ./.github/actions/test-telemetry
         with:
           junit: test/results/junit-smoke.xml
           suite: smoke
+          auth: ${{ secrets.OTEL_OTLP_AUTH }}
 
   # The two targets with a native leg, cross-built on Linux in one Bazel invocation per target
   # (binary, unit-test bundle and acceptance binaries). The deep tier builds all eight from the same
@@ -322,8 +320,6 @@ jobs:
         job:
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-gnullvm }
-    env:
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       # The taskfile includes every sub-taskfile, so a sparse checkout would fail to load; a plain
       # checkout of the tree is a few seconds and needs no submodules.
@@ -359,13 +355,14 @@ jobs:
           require_tests: false
           annotate_only: true
       - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         uses: ./.github/actions/test-telemetry
         with:
           junit: target/cross/unit-junit.xml
           suite: unit
+          auth: ${{ secrets.OTEL_OTLP_AUTH }}
 
   # The smoke tier (`-m smoke`, as `smoke-acceptance` runs on Linux) against the cross-built binaries,
   # on a `zot` each pytest session starts itself. Docker is not on these runners, so `no-docker` declares

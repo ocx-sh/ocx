@@ -14,6 +14,15 @@ inputs:
   suite:
     description: '`ocx.suite`: unit | acceptance | smoke. Dashboards group by it.'
     required: true
+  auth:
+    description: >-
+      The collector credential, as the whole `Authorization` header value
+      (`Basic <base64 of ci:password>`). The caller passes it unconditionally
+      from the org secret `OTEL_OTLP_AUTH`, as this input and never as a job
+      `env:`, which every other step of the job would read. A run that holds no
+      secret passes the empty string and nothing is pushed.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -26,6 +35,7 @@ runs:
       env:
         JUNIT: ${{ inputs.junit }}
         SUITE: ${{ inputs.suite }}
+        OTEL_OTLP_AUTH: ${{ inputs.auth }}
         # OTLP/gRPC, and the scheme is load-bearing. junit2otlp builds
         # `otlptracegrpc` (there is no HTTP exporter and no flag to pick one),
         # and the Go SDK reads this variable as a URL: `https` selects TLS,
@@ -42,9 +52,8 @@ runs:
         # either: every exit from here leaves one line in the log.
         warn() { echo "::warning title=Test telemetry::$*"; exit 0; }
 
-        # The caller's `if:` already skips this action when the org secret is
-        # unset (a fork PR sees no secrets). Repeated here because a composite
-        # action is copied into new callers faster than its guard is.
+        # The fork-PR path: GitHub gives a fork no secrets, and a step `if:`
+        # cannot read `secrets`, so no caller can skip this action for one.
         if [ -z "${OTEL_OTLP_AUTH:-}" ]; then
           echo "test telemetry: OTEL_OTLP_AUTH is empty, nothing pushed"
           exit 0

@@ -350,8 +350,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -381,10 +379,11 @@ jobs:
           require_tests: false
           annotate_only: true
       - name: Push acceptance test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 15
         uses: ./.github/actions/test-telemetry
         with:
           junit: accept-junit/*.xml
           suite: acceptance
+          auth: ${{ secrets.OTEL_OTLP_AUTH }}

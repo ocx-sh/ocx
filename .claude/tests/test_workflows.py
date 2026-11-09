@@ -1307,6 +1307,9 @@ WRITE_SECRET = "BAZEL_CACHE_WRITE_AUTH"
 #: The only binding a cache step may carry: no event predicate, no fallback.
 WRITE_AUTH = "${{ secrets.BAZEL_CACHE_WRITE_AUTH }}"
 RC_ACTION = ".github/actions/bazel-cache-rc"
+TELEMETRY_SECRET = "OTEL_OTLP_AUTH"
+TELEMETRY_AUTH = "${{ secrets.OTEL_OTLP_AUTH }}"
+TELEMETRY_ACTION = ".github/actions/test-telemetry"
 
 #: The conventions template renders these two; a `workflow_call` secret they declare is
 #: the baseline check's to hold, so the declare half of the secret sweep skips them.
@@ -1399,6 +1402,11 @@ _RC_STANZA = re.compile(r"(?m)^[ \t]*(build|common|test)(?::([\w.-]+))?[ \t]+(.*
 #: reusable workflow.
 _WRITE_SECRET_SPOTS = frozenset(
     {("with", "write-auth"), ("with", "cache-write-auth"), ("secrets", WRITE_SECRET)}
+)
+#: Where the telemetry secret may be named: the push action's `auth` input, the template setup
+#: action's `otel-auth`, or a by-name pass-through. Never an `env:`, which reaches other steps.
+_TELEMETRY_SECRET_SPOTS = frozenset(
+    {("with", "auth"), ("with", "otel-auth"), ("secrets", TELEMETRY_SECRET)}
 )
 #: The conventions template's setup action. Its `trusted` cache mode presents the write credential
 #: on every event that carries it, which is `write-auth` under another name; it owns the credential's
@@ -1655,6 +1663,20 @@ def _write_credential_findings(documents: list[tuple[str, dict]]) -> list[str]:
             if _WRITE_SECRET_REF.search(value) and path[-2:] not in _WRITE_SECRET_SPOTS:
                 findings.append(f"{name}:{'.'.join(path)} binds the write secret outside `write-auth`")
     return findings
+
+
+def _telemetry_credential_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    """The telemetry secret is named only where the push step alone reads it.
+
+    A job-level `env:` hands the credential to every step of the job, the ones running the
+    code under test included.
+    """
+    return [
+        f"{name}:{'.'.join(path)} binds the telemetry secret outside the push step's input"
+        for name, document in documents
+        for path, value in _scalars(document)
+        if f"secrets.{TELEMETRY_SECRET}" in value and path[-2:] not in _TELEMETRY_SECRET_SPOTS
+    ]
 
 
 def _upload_flag_findings(documents: list[tuple[str, dict]]) -> list[str]:
@@ -1994,6 +2016,7 @@ def _template_write(auth: str = WRITE_AUTH, mode: str = "trusted", extra: str = 
 
 _SWEEPS = {
     "write-credential": _write_credential_findings,
+    "telemetry-credential": _telemetry_credential_findings,
     "no-upload-flag": _upload_flag_findings,
     "lane-cache-step": _lanes_without_cache_step,
     "caller-secret": _callers_without_the_secret,
@@ -2023,6 +2046,11 @@ _VIOLATIONS = [
         "write-credential",
         _corpus(_write(), f"{_run()}        env:\n          T: {WRITE_AUTH}\n", _CLEANUP),
         id="a-write-secret-bound-in-env",
+    ),
+    pytest.param(
+        "telemetry-credential",
+        _corpus(_write(), f"{_run()}        env:\n          {TELEMETRY_SECRET}: {TELEMETRY_AUTH}\n", _CLEANUP),
+        id="telemetry-secret-bound-in-env",
     ),
     pytest.param("no-upload-flag", _corpus(_write(), _run("task bazel:test:unit -- --remote_upload_local_results=true"), _CLEANUP), id="b-run-body"),
     pytest.param("no-upload-flag", _corpus(_write(), _run("task bazel:test:unit -- --remote_upload_local_results=false"), _CLEANUP), id="b-run-body-false"),
@@ -2154,6 +2182,26 @@ def test_every_cache_step_passes_the_write_secret_and_nothing_else() -> None:
         f"cache; a fork PR holds no secrets, so the empty binding is the fork lane and needs "
         f"no predicate"
     )
+
+
+def test_the_telemetry_credential_reaches_only_the_push_step() -> None:
+    """Floored on its reader: a tree where no push step takes the credential is not a clean one."""
+    documents = _documents()
+    assert any(
+        TELEMETRY_ACTION in str(step.get("uses", "")) and (step.get("with") or {}).get("auth") == TELEMETRY_AUTH
+        for _, _, job in _jobs(documents)
+        for step in job.get("steps") or []
+    ), f"no `{TELEMETRY_ACTION}` step passes `auth: {TELEMETRY_AUTH}` — the reader found nothing"
+    findings = _telemetry_credential_findings(documents)
+    assert not findings, (
+        f"the telemetry secret is bound where steps other than the push can read it: {findings}. "
+        f"Pass it as the push step's `auth` input"
+    )
+
+
+def test_a_telemetry_credential_passed_as_the_push_input_is_green() -> None:
+    push = f"      - uses: ./{TELEMETRY_ACTION}\n        with:\n          auth: {TELEMETRY_AUTH}\n"
+    assert not _telemetry_credential_findings(_corpus(_write(), _run(), push, _CLEANUP))
 
 
 def test_no_step_passes_the_upload_flag() -> None:
