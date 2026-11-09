@@ -1,10 +1,12 @@
 // Offline check of the budgets and page discovery: `node --test scripts/`.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ocxRedirects } from '../plugins/redirects.mjs';
 import { BUDGET, CATEGORIES, assertions, oversizedHtml, pages, pathOf } from '../lighthouse.budgets.mjs';
 
@@ -34,6 +36,23 @@ test('pages: routes from dist HTML, sorted, base-prefixed', () => {
   assert.throws(() => pages(join(d, 'nope')), /missing dist/);
 });
 
+
+test('lighthouse: an oversized page fails on its bytes before Chrome starts', () => {
+  const d = mkdtempSync(join(tmpdir(), 'lh-big-'));
+  mkdirSync(join(d, 'big'), { recursive: true });
+  writeFileSync(join(d, 'index.html'), '<html></html>');
+  writeFileSync(join(d, 'big/index.html'), `<html><body>${randomBytes(20000).toString('hex')}`);
+  const r = spawnSync(process.execPath, ['scripts/lighthouse.mjs', '--page', '/big/'], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: { ...process.env, LH_DIST: d, CHROME_PATH: '/nonexistent', LH_PORT: '4399' },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  const out = `${r.stdout}${r.stderr}`;
+  assert.equal(r.status, 1, out);
+  assert.match(out, /\/big\/: \d+ B gzip > 14200/);
+  assert.ok(!out.includes('Running Lighthouse'), out);
+});
 
 // Lighthouse follows a stub to its destination, so the stub URL would only re-audit another page.
 test('pages: redirect stubs are skipped, a page that only gained a fragment map stays', async () => {

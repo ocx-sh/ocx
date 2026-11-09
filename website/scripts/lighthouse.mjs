@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 // `pnpm run lighthouse [--page /reference/environment/ ...]`: serve dist/docs under /docs/ with a
 // small gzip static server (what the CDN does), run lhci (mobile preset) on each page and assert 100 in all four
-// categories plus lighthouse.budgets.mjs. Needs `task website:build` first. No --page = every built
-// page. Pages run on LH_LANES (default 3) parallel lanes; a failing page gets 3 more runs afterwards, one
-// page at a time on a quiet machine, and is judged on the median run. Chrome: CHROME_PATH, then CHROME_BIN
-// (the GitHub runner images set it), then the Playwright one.
+// categories plus lighthouse.budgets.mjs. Needs `task website:build` first; a page over the HTML byte
+// ceiling fails first, without Chrome. No --page = every built page. LH_LANES (default 3) parallel lanes;
+// a failing page gets 3 more runs, one at a time, judged on the median. Chrome: CHROME_PATH, CHROME_BIN, Playwright.
 // Lanes after ocx-sh/website scripts/lighthouse.mjs, without its cache and memory clamp.
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,10 +11,10 @@ import { createServer } from 'node:http';
 import { extname, join, normalize, sep } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { BASE, CATEGORIES, assertions, pages, pathOf } from '../lighthouse.budgets.mjs';
+import { BASE, CATEGORIES, assertions, oversizedHtml, pages, pathOf } from '../lighthouse.budgets.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const DIST = `${ROOT}dist/docs`;
+const DIST = process.env.LH_DIST || `${ROOT}dist/docs`;
 const OUT = `${ROOT}.lighthouseci`;
 const PORT = process.env.LH_PORT || '4322';
 const LANES = Math.max(1, Number(process.env.LH_LANES) || 3);
@@ -57,7 +56,9 @@ function summary(out) {
   const scores = CATEGORIES.map((c) => Math.round(lhr.categories[c].score * 100)).join('/');
   const dom = lhr.audits['dom-size'].numericValue;
   const bytes = Math.round(lhr.audits['total-byte-weight'].numericValue / 1024);
-  return `${scores} dom=${dom} bytes=${bytes}KiB`;
+  const lcp = lhr.audits['largest-contentful-paint']?.numericValue;
+  const html = lhr.audits['network-requests']?.details?.items?.[0]?.transferSize;
+  return `${scores} dom=${dom} bytes=${bytes}KiB lcp=${lcp === undefined ? '?' : Math.round(lcp)}ms html=${html ?? '?'}B`;
 }
 
 /** lhci collect + assert for one URL in its own directory (lhci writes `.lighthouseci` under its cwd). */
@@ -82,6 +83,11 @@ async function audit(url, runs, chrome) {
 }
 
 const routes = wanted.length ? wanted : pages(DIST);
+const big = oversizedHtml(DIST, routes);
+if (big.length) {
+  console.error(`HTML over Lighthouse's first simulated round trip (~150 ms LCP, shows up as performance 99):\n${big.join('\n')}`);
+  process.exit(1);
+}
 const chrome = await chromePath();
 const bad = [];
 rmSync(OUT, { recursive: true, force: true });

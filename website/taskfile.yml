@@ -78,7 +78,7 @@ tasks:
     desc: 'Run the Lighthouse budgets (scripts/lighthouse.mjs) against the built site'
     # Serves dist/docs under /docs/ and audits every built page (mobile preset):
     # 100 in all four categories plus the budgets in lighthouse.budgets.mjs.
-    # Exits non-zero when any page misses one. Needs a Chrome: CHROME_PATH, CHROME_BIN (set on
+    # Fails any page over the HTML byte ceiling first, without Chrome. Exits non-zero when any page misses one. Needs a Chrome: CHROME_PATH, CHROME_BIN (set on
     # GitHub's Ubuntu runners) or the Playwright one (`pnpm exec playwright install chromium`). Output
     # lands in .lighthouseci (gitignored); `--page <route>` after `--` narrows
     # the run.
