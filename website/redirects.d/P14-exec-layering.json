@@ -1,0 +1,8 @@
+{
+  "/docs/reference/environment/": {
+    "fragments": {
+      "ocx-env": "/docs/explanation/environments/#strict-isolation-exec",
+      "ocx-launch-identities": "/docs/explanation/environments/#launchers-forwarding"
+    }
+  }
+}
