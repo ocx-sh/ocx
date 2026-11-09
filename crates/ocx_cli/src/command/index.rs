@@ -12,7 +12,8 @@ pub enum Index {
     /// Uses the local index by default; with `--remote` it queries the registry directly without
     /// writing through to the local index. Repository names are always prefixed with their registry
     /// (for example `ocx.sh/kitware/cmake`), and the registry defaults to `OCX_DEFAULT_REGISTRY`
-    /// (or `ocx.sh`) when none is given.
+    /// (or `ocx.sh`) when none is given. With `--remote`, a registry served by an index is listed
+    /// from that index's catalog, and fails when the index serves none rather than listing nothing.
     Catalog(super::index_catalog::IndexCatalog),
     /// List available versions of a package
     ///

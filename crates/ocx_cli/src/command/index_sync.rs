@@ -115,8 +115,8 @@ async fn enumerate_catalog(
     registry: &str,
 ) -> anyhow::Result<Vec<String>> {
     let mut packages = match index_sources.iter().find(|source| source.serves_registry(registry)) {
-        // `_strict`: an absent catalog is not an empty one, and the tolerant read would exit 0 having
-        // refreshed nothing.
+        // `_strict`: an absent catalog is an error, never an empty one; read as empty, sync would exit 0
+        // having refreshed nothing.
         Some(source) => {
             index_common::log_published_enumeration(registry);
             source
@@ -380,14 +380,9 @@ mod tests {
         assert_eq!(
             squeezed.matches("fetch_catalog_strict().await?").count(),
             1,
-            "the published branch must use the STRICT fetch AND propagate: the tolerant fetch maps \
-             an absent catalog document to an empty catalog, which is the empty-set success the \
-             authoritative-stop rule forbids, and it happens one call BELOW this function where \
-             the scan cannot see it"
-        );
-        assert!(
-            !enumeration.contains("fetch_catalog()"),
-            "the tolerant fetch has no place in an enumeration that then acts on the result"
+            "the published branch must use the STRICT fetch AND propagate: an absent catalog \
+             document read as an empty catalog is the empty-set success the authoritative-stop \
+             rule forbids"
         );
         assert_eq!(
             squeezed.matches("list_repositories(registry).await?").count(),

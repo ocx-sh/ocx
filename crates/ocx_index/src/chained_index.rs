@@ -563,8 +563,19 @@ impl index_impl::IndexImpl for ChainedIndex {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         // Remote never falls back to the local index: stale repos on a registry outage would hide it.
         if self.mode == ChainMode::Remote {
+            // An index lists nothing for a registry it does not own, and sits ahead of the registry
+            // catch-all, so asking every source in order returns that empty answer for any other
+            // registry. The owning index answers alone, as `candidate_sources` does per name.
+            let owned = self.sources.iter().any(|source| source.serves_registry(registry));
+            let candidates = self.sources.iter().filter(|source| {
+                if owned {
+                    source.serves_registry(registry)
+                } else {
+                    source.index_base_url().is_none()
+                }
+            });
             let mut last_error: Option<super::error::Error> = None;
-            for source in &self.sources {
+            for source in candidates {
                 match source.list_repositories(registry).await {
                     Ok(repos) => return Ok(repos),
                     Err(e) => {
@@ -2099,6 +2110,93 @@ mod chain_refs_tests {
         assert!(
             result.is_err(),
             "Remote mode must propagate source errors, not fall back to cache"
+        );
+    }
+
+    /// Answers a catalog the way `OcxIndex` does: it owns `namespace`, lists nothing
+    /// for any other registry, and fails for its own (an unreachable index).
+    #[derive(Clone)]
+    struct OwningIndexSource {
+        namespace: &'static str,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for OwningIndexSource {
+        async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
+            if registry != self.namespace {
+                return Ok(Vec::new());
+            }
+            Err(super::super::error::Error::RemoteManifestNotFound(
+                "index unreachable".to_string(),
+            ))
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PackageRef,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &PackageRef,
+            _op: super::super::IndexOperation,
+        ) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == self.namespace
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            Some("https://index.example")
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// An index source sits ahead of the registry catch-all in every chain, so its empty
+    /// answer for a registry it does not own must not stand in for the registry's catalog.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_list_repositories_asks_the_registry_when_no_index_owns_it() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let index = super::super::Index::from_impl(OwningIndexSource {
+            namespace: "other.example",
+        });
+        let expected = vec!["cmake".to_string(), "ninja".to_string()];
+        let (spy, registry) = make_source_with_repos(expected.clone());
+        let chained = Index::from_chained(cache, vec![index, registry], ChainMode::Remote);
+
+        let repos = chained.list_repositories(REGISTRY).await.unwrap();
+
+        assert_eq!(repos, expected, "the registry no index owns answers its own catalog");
+        assert!(spy.calls() > 0, "the registry catch-all must be asked");
+    }
+
+    /// The index that owns a registry answers its catalog alone: its failure is final,
+    /// never answered around by the registry catch-all, as for `list_tags`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_list_repositories_answers_an_owned_registry_from_its_index_alone() {
+        let cache_dir = TempDir::new().unwrap();
+        let cache = make_local_index(&cache_dir);
+        let index = super::super::Index::from_impl(OwningIndexSource { namespace: REGISTRY });
+        let (spy, registry) = make_source_with_repos(vec!["cmake".to_string()]);
+        let chained = Index::from_chained(cache, vec![index, registry], ChainMode::Remote);
+
+        let result = chained.list_repositories(REGISTRY).await;
+
+        assert!(result.is_err(), "the owning index's failure must surface: {result:?}");
+        assert_eq!(
+            spy.calls(),
+            0,
+            "the registry catch-all must not answer for an index-owned registry"
         );
     }
 

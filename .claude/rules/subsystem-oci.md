@@ -452,8 +452,11 @@ old sync's keep-the-stale-row logic existed to avoid cannot arise. `ocx index re
 operation that restores the catalog to a pure derivation of `p/` when it has drifted — re-deriving
 every entry from the roots on disk rather than writing from a fetch — which is the only way an entry
 naming a removed root is ever cleared.
-`OcxIndex::fetch_catalog` reads the site's listing live and persists nothing; it exists for
-`ocx index catalog --remote`.
+`OcxIndex::fetch_catalog_strict` reads the site's listing live and persists nothing; it backs
+`ocx index catalog --remote` and `ocx index sync`, and an absent `c/index.json` is an error, never
+an empty listing. Under `--remote`, `ChainedIndex::list_repositories` asks only the index that owns
+the registry, or the registry catch-all when none does — an index's empty answer for a registry it
+does not own never stands in for that registry's catalog.
 
 Consequence for listing: default-mode `ocx index catalog` lists what this machine has materialized
 (the catalog keys are exactly the roots on disk); `--remote` asks the site. That is the intended

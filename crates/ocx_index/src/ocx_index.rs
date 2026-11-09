@@ -988,32 +988,18 @@ impl OcxIndex {
 
     /// Fetches this source's live `c/index.json`; nothing is persisted from it.
     ///
-    /// A 404 yields an empty catalog; a caller acting on the enumeration wants
-    /// [`Self::fetch_catalog_strict`].
-    pub async fn fetch_catalog(&self) -> Result<CatalogIndex> {
-        Ok(self.fetch_catalog_document().await?.unwrap_or_else(CatalogIndex::new))
-    }
-
-    /// [`Self::fetch_catalog`], but an absent catalog is an error: read as empty, `index sync`
-    /// would exit 0 having refreshed nothing. A served catalog with zero packages is still `Ok`.
+    /// An absent catalog is an error: read as empty, `index sync` and `index catalog --remote`
+    /// would exit 0 having listed nothing. A served catalog with zero packages is still `Ok`.
     pub async fn fetch_catalog_strict(&self) -> Result<CatalogIndex> {
-        let url = format!("{}/c/index.json", self.base_url);
-        self.fetch_catalog_document()
-            .await?
-            .ok_or_else(|| super::error::Error::CatalogDocumentAbsent {
-                index_source: self.namespace.clone(),
-                url,
-            })
-    }
-
-    /// The catalog document, or `None` when the source serves none.
-    async fn fetch_catalog_document(&self) -> Result<Option<CatalogIndex>> {
         self.check_format_version().await?;
         let url = format!("{}/c/index.json", self.base_url);
-        Ok(match self.transport.get(&url).await? {
-            IndexFetch::NotFound => None,
-            IndexFetch::Found { bytes } => Some(parse_document::<CatalogDocument>(&bytes, &url)?.into_packages()?),
-        })
+        match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => Ok(parse_document::<CatalogDocument>(&bytes, &url)?.into_packages()?),
+            IndexFetch::NotFound => Err(super::error::Error::CatalogDocumentAbsent {
+                index_source: self.namespace.clone(),
+                url,
+            }),
+        }
     }
 }
 
@@ -1068,7 +1054,7 @@ impl index_impl::IndexImpl for OcxIndex {
         if registry != self.namespace {
             return Ok(Vec::new());
         }
-        let mut repositories: Vec<String> = self.fetch_catalog().await?.into_keys().collect();
+        let mut repositories: Vec<String> = self.fetch_catalog_strict().await?.into_keys().collect();
         repositories.sort();
         repositories.dedup();
         Ok(repositories)
@@ -2217,8 +2203,13 @@ mod tests {
         let transport = StubIndexTransport::new();
         let source = make_source(transport.clone(), false);
 
-        assert!(source.fetch_catalog().await.unwrap().is_empty());
-        assert!(source.fetch_catalog().await.unwrap().is_empty());
+        for _ in 0..2 {
+            let absent = source.fetch_catalog_strict().await;
+            assert!(
+                matches!(absent, Err(super::super::error::Error::CatalogDocumentAbsent { .. })),
+                "the format gate passes on an assumed v1, then the catalog is absent: {absent:?}"
+            );
+        }
 
         assert_eq!(
             transport.request_count(&config_url()),
@@ -2906,6 +2897,22 @@ mod tests {
         assert!(
             !transport.request_urls().iter().any(|url| url.contains("ghcr.io")),
             "a foreign identifier must not reach the index transport at all"
+        );
+    }
+
+    /// `ocx --remote index catalog` must not print an empty listing, exit 0, for an index
+    /// (or a mirror of one) that serves no `c/index.json`.
+    #[tokio::test]
+    async fn list_repositories_refuses_an_absent_catalog() {
+        let transport = StubIndexTransport::new();
+        seed_with_config(&transport, br#"{"format_version":1}"#);
+        let source = make_source(transport.clone(), false);
+
+        let result = source.list_repositories(NAMESPACE).await;
+
+        assert!(
+            matches!(result, Err(super::super::error::Error::CatalogDocumentAbsent { .. })),
+            "an absent catalog is a failure, never an empty listing: {result:?}"
         );
     }
 

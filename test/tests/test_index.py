@@ -530,6 +530,57 @@ def test_index_catalog_tags_remote_fetch_failure_exits_nonzero(
     )
 
 
+def test_remote_index_catalog_lists_a_registry_no_index_owns(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    index_server: static_index.StaticIndexServer,
+):
+    """`ocx --remote index catalog <registry>` lists a plain registry's catalog
+    even when an index source for another namespace sits ahead of it.
+
+    Regression test: every index source answers an empty list for a registry it
+    does not own, and index sources are asked before the registry catch-all, so
+    the first empty answer used to stand in for the registry's own catalog and
+    the command printed nothing, exit 0. The unrelated index is configured
+    explicitly so the ordering does not depend on the compiled-in default.
+    """
+    pkg = published_package
+    static_index.write_config(index_server.root)
+    static_index.write_catalog(index_server.root, {})
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(f'[registries."127.0.0.1:1"]\nindex = "{index_server.base_url}"\n')
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    catalog = ocx.json("--remote", "index", "catalog", ocx.registry)
+
+    listed = [item["repository"] for item in catalog["items"]]
+    assert f"{ocx.registry}/{pkg.repo}" in listed, f"the registry's own catalog must be listed: {listed}"
+
+
+def test_remote_index_catalog_fails_when_the_index_serves_no_catalog(
+    ocx: OcxRunner,
+    index_server: static_index.StaticIndexServer,
+):
+    """`ocx --remote index catalog <ns>` against an index (or a mirror of one)
+    that serves no `c/index.json` fails with exit 69, never an empty listing.
+
+    Regression test: the listing read an absent catalog document as an empty
+    catalog, so a mirror missing its catalog printed nothing and exited 0.
+    """
+    namespace = "127.0.0.1:1"
+    static_index.write_config(index_server.root)
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    result = ocx.plain("--remote", "index", "catalog", namespace, check=False)
+
+    assert result.returncode == 69, (
+        f"an absent catalog must fail as unavailable, not list nothing: "
+        f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
 # `CATALOG_TAG_CONCURRENCY` in `crates/ocx_cli/src/command/index_catalog.rs`.
 # Duplicated rather than imported because the constant is Rust and this suite is
 # not; the assertion below names it so a reader can find the pair, and the
