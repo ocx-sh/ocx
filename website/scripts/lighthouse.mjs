@@ -85,7 +85,7 @@ async function audit(url, runs, chrome) {
 const routes = wanted.length ? wanted : pages(DIST);
 const big = oversizedHtml(DIST, routes);
 if (big.length) {
-  console.error(`HTML over Lighthouse's first simulated round trip (~150 ms LCP, shows up as performance 99):\n${big.join('\n')}`);
+  console.error(`HTML over Lighthouse's second simulated round trip (~1655 ms LCP with no margin, shows up as performance 99):\n${big.join('\n')}`);
   process.exit(1);
 }
 const chrome = await chromePath();

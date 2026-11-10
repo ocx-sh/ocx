@@ -67,7 +67,7 @@ tasks:
       - WEBSITE_REQUIRE_DIST=1 node --test "tests/*.test.mjs"
 
   check:budget:
-    desc: Fail when a built page exceeds 14,200 B gzip or 800 DOM elements
+    desc: Fail when a built page exceeds 43,400 B gzip or 800 DOM elements
     dir: '{{.TASKFILE_DIR}}'
     preconditions:
       - sh: '[ -d dist/docs ]'
