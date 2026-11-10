@@ -185,7 +185,7 @@ pub enum ProjectErrorKind {
     NoncanonicalPlatformKey { key: String },
 
     /// `metadata.lock_version` is not the version this build reads.
-    #[error("unsupported ocx.lock version {found}; regenerate with `ocx lock`")]
+    #[error("{}", crate::lock::unsupported_version_message(*found))]
     #[exit(
         ConfigError,
         slug = "unsupported_lock_version",
@@ -840,6 +840,21 @@ mod tests {
         assert!(
             rendered.contains("sha256:aaa") && rendered.contains("sha256:bbb"),
             "both the locked and current hashes must be surfaced; got {rendered:?}"
+        );
+    }
+
+    /// A lock written by a newer ocx must tell the user to upgrade ocx, never to
+    /// regenerate (regenerating with an older binary downgrades the team's lock).
+    #[test]
+    fn unsupported_lock_version_too_new_says_upgrade_ocx() {
+        let rendered = ProjectErrorKind::UnsupportedLockVersion { found: 5 }.to_string();
+        assert!(
+            rendered.contains("newer ocx") && rendered.contains("upgrade") && rendered.contains('5'),
+            "too-new message must name the version and say upgrade; got {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("regenerate"),
+            "too-new message must not suggest regenerating; got {rendered:?}"
         );
     }
 
