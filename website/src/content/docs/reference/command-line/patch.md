@@ -99,7 +99,7 @@ ocx patch test [OPTIONS] --descriptor <DESCRIPTOR> <BASE-ID> [-- <COMMAND>...]
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--clean` |  | Start the child from an empty environment holding only the composed variables |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--companion-archive` | `PATH` | Path to a local archive for a companion package, read without a registry round-trip; needs a `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor lists. Repeatable |
 | `--descriptor` | `DESCRIPTOR` | Path to the patch descriptor JSON file to compose |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |

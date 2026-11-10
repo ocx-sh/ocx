@@ -20,7 +20,7 @@ ocx shell <COMMAND>
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--clean` |  | Start the child from an empty environment holding only the composed variables |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |

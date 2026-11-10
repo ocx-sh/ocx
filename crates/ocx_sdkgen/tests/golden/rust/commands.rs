@@ -322,7 +322,8 @@ pub struct ExecArgs {
     pub groups: Vec<String>,
     /// Remove every value ocx applied to the calling environment before composing
     pub isolate: bool,
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus
+    /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -1151,7 +1152,8 @@ impl PackageEnvArgs {
 pub struct PackageExecArgs {
     /// Remove every value ocx applied to the calling environment before composing
     pub isolate: bool,
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus
+    /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Expose the package's full env, including its private (self-only) entries. Off by default:
     /// only public + interface entries are loaded (the consumer view). Generated launchers use `ocx
@@ -1612,7 +1614,8 @@ pub struct PackageTestArgs {
     pub self_view: bool,
     /// Remove every value ocx applied to the calling environment before composing
     pub isolate: bool,
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus
+    /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -1837,7 +1840,8 @@ pub struct PatchTestArgs {
     pub script: Option<PathBuf>,
     /// Remove every value ocx applied to the calling environment before composing
     pub isolate: bool,
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus
+    /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without
     /// a value exits 64
@@ -2066,7 +2070,8 @@ pub struct ShellArgs {
     pub no_pinned: bool,
     /// Remove every value ocx applied to the calling environment before composing
     pub isolate: bool,
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus
+    /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     pub consent: bool,

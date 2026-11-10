@@ -104,7 +104,7 @@ ocx package exec [OPTIONS] <PACKAGES>... <COMMAND>...
 | Flag | Value | Description |
 | --- | --- | --- |
 | `--candidate` |  | Resolve the content path via the installed candidate symlink (`~/.ocx/symlinks/<registry>/<repo>/candidates/<tag>`) |
-| `--clean` |  | Start the child from an empty environment holding only the composed variables |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--current` |  | Resolve the content path via the current-selected symlink (`~/.ocx/symlinks/<registry>/<repo>/current`) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--isolate` |  | Remove every value ocx applied to the calling environment before composing |

@@ -177,7 +177,13 @@ impl std::fmt::Display for ProjectionWarning {
 pub fn compose(inherited: &Inherited, spawn: &Spawn<'_>) -> Projected {
     let mut warnings = Vec::new();
     let mut env = match spawn.mode {
-        ExecMode::Clean => Env::clean(),
+        ExecMode::Clean => {
+            let mut env = Env::clean();
+            if cfg!(windows) {
+                carry_system_root(&mut env, &Env::new());
+            }
+            env
+        }
         ExecMode::Layer | ExecMode::Isolate => Env::new(),
     };
 
@@ -221,6 +227,20 @@ fn isolate(env: &mut Env, state: &ExecState) -> Option<ProjectionWarning> {
         kept_withheld,
     })
 }
+
+/// Copies the caller's `SystemRoot` into `env` unless `env` already has one.
+///
+/// Windows cannot start a child without it: a native arm64 `cmd.exe` exits 1 silently. Go's `os/exec`
+/// adds it for the same reason.
+fn carry_system_root(env: &mut Env, ambient: &Env) {
+    if env.get(SYSTEM_ROOT).is_none()
+        && let Some(root) = ambient.get(SYSTEM_ROOT)
+    {
+        env.set(SYSTEM_ROOT, root);
+    }
+}
+
+const SYSTEM_ROOT: &str = "SystemRoot";
 
 /// Removes what never reaches a child from the caller: credentials, hook-local bookkeeping and the
 /// received state, which [`project`] replaces with the one it encodes.
@@ -480,6 +500,8 @@ fn launch_identities_of(identities: Option<&LaunchIdentities>) -> Vec<LaunchIden
 
 #[cfg(test)]
 mod adapter_tests;
+#[cfg(test)]
+mod baseline_tests;
 #[cfg(test)]
 mod compose_tests;
 #[cfg(test)]

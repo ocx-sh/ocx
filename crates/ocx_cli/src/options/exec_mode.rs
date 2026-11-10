@@ -13,7 +13,7 @@ pub struct ExecModeOptions {
     #[clap(long = "isolate", conflicts_with = "clean")]
     isolate: bool,
 
-    /// Start the child from an empty environment holding only the composed variables
+    /// Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)
     ///
     /// Conflicts with `--isolate`.
     #[clap(long = "clean")]

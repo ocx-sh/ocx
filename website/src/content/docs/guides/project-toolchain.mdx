@@ -338,7 +338,7 @@ The extra packages compose after the project's tools, so a project tool wins a `
 
 `ocx exec` layers this project's tools in front of whatever the shell already carries, an activated parent project's tools included. `--isolate` first reverts what earlier ocx layers applied, so the parent's tools leave and only this project's remain. Your own variables stay either way.
 
-`--clean` starts from an empty environment instead, so the child gets only this project's package-declared variables. `--isolate` and `--clean` together are a usage error (exit 64).
+`--clean` starts from an empty environment instead, so the child gets only this project's package-declared variables (on Windows, plus the caller's `SystemRoot`). `--isolate` and `--clean` together are a usage error (exit 64).
 
 ## Open a shell in the project \{#project-shell-open\}
 

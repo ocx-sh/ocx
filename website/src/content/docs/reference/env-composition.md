@@ -40,7 +40,7 @@ See [Idempotent re-application][env-strict-isolation-idempotent].
 
 - Default: the caller's environment, unchanged underneath the layer
 - `--isolate`: reverts what earlier ocx layers applied before composing, and your own pre-existing values stay
-- `--clean`: starts from an empty environment, so only package-declared variables reach the child
+- `--clean`: starts from an empty environment, so only package-declared variables reach the child (on Windows, plus the caller's `SystemRoot`, without which a process cannot start)
 - `--isolate --clean`: a usage error (exit 64)
 - Explicit exec: always composes what it was asked for, whatever is already loaded. The same project and group nested yields each value once, and another group layers on top
 - Named bindings: `ocx exec cmake -- …` resolves only the named bindings to a host leaf. Omit the names and the whole scope must resolve
