@@ -82,7 +82,7 @@ jobs:
       matrix:
         # Equal to `targets` in dist-workspace.toml; test_workflows.py holds it there.
         include:
-          - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: aarch64-apple-darwin, runner: macos-15 }
           - { target: x86_64-apple-darwin, runner: macos-15-intel }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
           - { target: aarch64-unknown-linux-musl, runner: ubuntu-22.04-arm, musl: true }
