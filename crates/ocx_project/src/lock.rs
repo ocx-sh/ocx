@@ -70,6 +70,19 @@ struct LockVersionPeekMetadata {
 
 const SUPPORTED_LOCK_VERSIONS: [u8; 2] = [LockVersion::V3 as u8, LockVersion::V4 as u8];
 
+/// Message for a `lock_version` this build cannot read: a version newer than
+/// the newest supported one needs a newer ocx, an older one needs `ocx lock`.
+pub(crate) fn unsupported_version_message(found: u8) -> String {
+    let max = SUPPORTED_LOCK_VERSIONS.iter().copied().max().unwrap_or_default();
+    if found > max {
+        format!(
+            "ocx.lock version {found} was written by a newer ocx (this build reads up to version {max}); upgrade ocx"
+        )
+    } else {
+        format!("unsupported ocx.lock version {found}; regenerate with `ocx lock`")
+    }
+}
+
 /// Lock metadata header.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -974,6 +987,29 @@ generated_at = "2099-01-01T00:00:00Z"
             abc = sha256_of('a'),
         );
         let err = ProjectLock::from_toml_str(&toml_str).expect_err("unknown future version must reject");
+        assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 5 });
+    }
+
+    /// The version check runs before the strict parse, so a future lock with
+    /// fields this build does not know still reports the version.
+    #[test]
+    fn read_rejects_future_version_before_unknown_fields() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 5
+declaration_hash_version = 1
+declaration_hash = "sha256:{abc}"
+generated_by = "ocx 99.0.0"
+generated_at = "2099-01-01T00:00:00Z"
+brand_new_field = "x"
+
+[[tool]]
+unknown_shape = true
+"#,
+            abc = sha256_of('a'),
+        );
+        let err = ProjectLock::from_toml_str(&toml_str).expect_err("future version must reject");
         assert_kind!(err, ProjectErrorKind::UnsupportedLockVersion { found: 5 });
     }
 
