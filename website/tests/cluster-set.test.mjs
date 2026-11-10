@@ -14,8 +14,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const IA = join(HERE, '..', '..', '.claude', 'artifacts', 'docs_ia.md');
 const DIST_DOCS = join(HERE, '..', 'dist', 'docs');
 const CLUSTERS = ['first-steps', 'everyday', 'publishing', 'explanation', 'integration', 'misc', 'generated'];
-// Output that is not a content page: assets, the search index and the not-found page.
-const NOT_PAGES = new Set(['_astro', 'pagefind', '404']);
+// Output that is not a content page: assets, the search index, the theme's deferred page-part fragments and the not-found page.
+const NOT_PAGES = new Set(['_astro', 'pagefind', 'frag', '404']);
 
 /** The `{ old, new, cluster }` rows of the section 5 table. */
 function inventoryRows(markdown) {
