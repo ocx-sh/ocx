@@ -220,13 +220,15 @@ tasks:
       - task: provenance:proof
 
   bump-files:
-    desc: 'Set the release version in the workspace manifests (cargo set-version); VERSION=x.y.z'
+    desc: 'Set the release version in the workspace manifests and MODULE.bazel (cargo set-version); VERSION=x.y.z'
     deps:
       - install:cargo-edit
     requires:
       vars: [VERSION]
     cmds:
       - cargo set-version "{{.VERSION | trimPrefix "v"}}"
+      # MODULE.bazel carries its own module version; bazel:pin:check fails when it trails Cargo.toml.
+      - python3 "{{.ROOT_DIR}}/scripts/bazel_pin_check.py" --set-module-version "{{.VERSION | trimPrefix "v"}}"
 
   validate:
     desc: 'Validate what the release rewrote (changelog:validate)'

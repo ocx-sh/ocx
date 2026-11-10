@@ -165,6 +165,47 @@ def module_pin_drift(module_bazel_text: str | None) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# The module's own version tracks the workspace version (#621).
+# ---------------------------------------------------------------------------
+
+#: Anchored on the `module(` block so no `bazel_dep(... version = ...)` line is hit.
+MODULE_CALL = re.compile(r'(?P<head>\bmodule\((?:[^)"]|"[^"]*")*?\bversion\s*=\s*")(?P<v>[^"]*)"')
+MODULE_VERSION_MSG = (
+    "MODULE.bazel module(version={module!r}) differs from the workspace version {cargo!r} in "
+    "Cargo.toml — `task release:bump-files` sets both; run `scripts/bazel_pin_check.py "
+    "--set-module-version {cargo}`"
+)
+MODULE_VERSION_READ_MSG = "could not read {what} version: {reason}"
+
+
+def module_version_drift(module_bazel_text: str | None, cargo_toml_text: str | None) -> list[Finding]:
+    """Two reader floors, then a compare — absent or malformed is never agreement."""
+    findings: list[Finding] = []
+    module = MODULE_CALL.search(module_bazel_text) if module_bazel_text is not None else None
+    if module is None:
+        findings.append(Finding("module-version", MODULE_VERSION_READ_MSG.format(what="MODULE.bazel module()", reason="no module(version=...)")))
+    cargo = None
+    if cargo_toml_text is not None:
+        try:
+            cargo = tomllib.loads(cargo_toml_text)["workspace"]["package"]["version"]
+        except (tomllib.TOMLDecodeError, KeyError):
+            cargo = None
+    if cargo is None:
+        findings.append(Finding("module-version", MODULE_VERSION_READ_MSG.format(what="Cargo.toml [workspace.package]", reason="not readable")))
+    if module is not None and cargo is not None and module.group("v") != cargo:
+        findings.append(Finding("module-version", MODULE_VERSION_MSG.format(module=module.group("v"), cargo=cargo)))
+    return findings
+
+
+def set_module_version(module_bazel_text: str, version: str) -> str:
+    """Rewrite only the `module(version=...)` value; raises if there is none."""
+    new, n = MODULE_CALL.subn(lambda m: f'{m.group("head")}{version}"', module_bazel_text, count=1)
+    if n != 1:
+        raise SystemExit("MODULE.bazel has no module(version = ...) to set")
+    return new
+
+
+# ---------------------------------------------------------------------------
 # C-003 — the binary reading WP-14 owns. The comparator itself is imported.
 # ---------------------------------------------------------------------------
 
@@ -212,11 +253,13 @@ def run_check(
     bazel_bin: str,
     rust_toolchain_path: Path,
     module_bazel_path: Path,
+    cargo_toml_path: Path,
 ) -> list[Finding]:
     return (
         check_pin(bazelversion_path=bazelversion_path, bazel_bin=bazel_bin)
         + check_toolchain(rust_toolchain_path=rust_toolchain_path, module_bazel_path=module_bazel_path)
         + module_pin_drift(read_bazelversion(module_bazel_path))
+        + module_version_drift(read_bazelversion(module_bazel_path), read_bazelversion(cargo_toml_path))
     )
 
 
@@ -464,6 +507,25 @@ def prove_dep_pins(scratch: Path) -> int:
     return checks
 
 
+def prove_module_version(scratch: Path) -> int:
+    """#621: red on a stale module version, green when equal; the setter touches
+    only the `module()` block, never a `bazel_dep` version."""
+    cargo = '[workspace.package]\nversion = "0.6.5"\n'
+    module = 'module(\n    name = "ocx",\n    version = "0.6.2",\n)\nbazel_dep(name = "llvm", version = "0.8.25")\n'
+    drift = module_version_drift(module, cargo)
+    expect(codes(drift) == ["module-version"], f"stale module version must red, got {codes(drift)}")
+    print(f"module-version RED  : {drift[0].message}")
+    fixed = set_module_version(module, "0.6.5")
+    expect('version = "0.6.5"' in fixed and 'name = "llvm", version = "0.8.25"' in fixed, "setter must change only module()")
+    expect(fixed.count("0.6.5") == 1 and "0.6.2" not in fixed, "setter must rewrite exactly the module version")
+    expect(module_version_drift(fixed, cargo) == [], "after the setter the check must be silent")
+    print("module-version GREEN: set_module_version leaves bazel_dep versions alone and the check is silent")
+    for text in (None, "name = 1"):
+        expect(codes(module_version_drift(text, cargo)) == ["module-version"], "absent module() must red")
+    expect(codes(module_version_drift(module, None)) == ["module-version"], "absent Cargo.toml must red")
+    return 5
+
+
 def prove_entry_point(scratch: Path) -> int:
     """The shipped `--check` path (`run_check` + `report`), not just the two
     comparators in isolation — a green run and a red run through the same
@@ -476,8 +538,10 @@ def prove_entry_point(scratch: Path) -> int:
 
     pin.write_text("9.2.0\n", encoding="utf-8")
     rust_toolchain.write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
+    cargo_toml = scratch / "Cargo.toml"
+    cargo_toml.write_text('[workspace.package]\nversion = "1.2.3"\n', encoding="utf-8")
     module_bazel.write_text(
-        'bazel_dep(name = "rules_rs", version = "0.1.3")\nbazel_dep(name = "llvm", version = "0.8.25")\n'
+        'module(name = "ocx", version = "1.2.3")\nbazel_dep(name = "rules_rs", version = "0.1.3")\nbazel_dep(name = "llvm", version = "0.8.25")\n'
         'toolchains.toolchain(\n    version = "1.95.0",\n)\n',
         encoding="utf-8",
     )
@@ -486,6 +550,7 @@ def prove_entry_point(scratch: Path) -> int:
         bazel_bin=str(ok_bin),
         rust_toolchain_path=rust_toolchain,
         module_bazel_path=module_bazel,
+        cargo_toml_path=cargo_toml,
     )
     expect(report(clean) == 0, "run_check + report must exit 0 when every pair agrees")
     print("entry point GREEN: run_check() -> report() exits 0 when pin and toolchain both agree")
@@ -498,6 +563,7 @@ def prove_entry_point(scratch: Path) -> int:
         bazel_bin=str(ok_bin),
         rust_toolchain_path=rust_toolchain,
         module_bazel_path=module_bazel,
+        cargo_toml_path=cargo_toml,
     )
     expect(codes(dirty) == ["pin-drift"], f"got {codes(dirty)}")
     expect(report(dirty) == 1, "run_check + report must exit 1 on pin drift")
@@ -511,7 +577,11 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--check", action="store_true", required=True,
+        "--set-module-version", metavar="X.Y.Z",
+        help="rewrite MODULE.bazel's module(version=...) and exit (used by `task release:bump-files`)",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
         help="gate the live tree: C-003 pin drift, C-026 toolchain twin",
     )
     parser.add_argument(
@@ -523,13 +593,23 @@ def main() -> int:
     parser.add_argument("--bazelversion", type=Path, default=REPO_ROOT / ".bazelversion")
     parser.add_argument("--rust-toolchain", type=Path, default=REPO_ROOT / "rust-toolchain.toml")
     parser.add_argument("--module-bazel", type=Path, default=REPO_ROOT / "MODULE.bazel")
+    parser.add_argument("--cargo-toml", type=Path, default=REPO_ROOT / "Cargo.toml")
     args = parser.parse_args()
+    if args.set_module_version:
+        args.module_bazel.write_text(
+            set_module_version(args.module_bazel.read_text(encoding="utf-8"), args.set_module_version),
+            encoding="utf-8",
+        )
+        return 0
+    if not args.check:
+        parser.error("one of --check or --set-module-version is required")
 
     findings = run_check(
         bazelversion_path=args.bazelversion,
         bazel_bin=args.bazel,
         rust_toolchain_path=args.rust_toolchain,
         module_bazel_path=args.module_bazel,
+        cargo_toml_path=args.cargo_toml,
     )
     return report(findings)
 

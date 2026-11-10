@@ -131,7 +131,7 @@ task release:tag
 | Step | Owner | What it does |
 |---|---|---|
 | `release:gate` | ocx | Refuses without a fresh **full** mark from `task verify` (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
-| `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, from the version the template computed with `git-cliff --bumped-version`. |
+| `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, then `scripts/bazel_pin_check.py --set-module-version` on `MODULE.bazel`'s `module(version=)` (`bazel:pin:check` fails when the two differ), from the version the template computed with `git-cliff --bumped-version`. |
 | git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
 | `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
 | `release:verify` | ocx | `task verify NOCACHE=1` in a fresh process: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict. A release re-runs the suite, it never believes a key. |

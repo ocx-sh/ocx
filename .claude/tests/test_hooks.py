@@ -351,7 +351,10 @@ class TestReleasePrepareGuard:
 
     def test_release_bump_files_sets_the_version_the_template_passes(self) -> None:
         cmds = _task_cmds(RELEASE_TASKFILE, "bump-files")
-        assert cmds == ['cargo set-version "{{.VERSION | trimPrefix "v"}}"'], cmds
+        assert cmds == [
+            'cargo set-version "{{.VERSION | trimPrefix "v"}}"',
+            'python3 "{{.ROOT_DIR}}/scripts/bazel_pin_check.py" --set-module-version "{{.VERSION | trimPrefix "v"}}"',
+        ], cmds
 
     @pytest.mark.parametrize(("cli_vars", "expect_nocache"), [([], False), (["NOCACHE=1"], True)])
     def test_nocache_reaches_the_acceptance_bazel_test(self, cli_vars: list[str], expect_nocache: bool) -> None:
