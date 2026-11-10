@@ -12,8 +12,8 @@ importers:
         specifier: 0.42.6
         version: 0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0)
       '@ocx-sh/theme':
-        specifier: 0.3.0
-        version: 0.3.0(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))
+        specifier: 0.4.0
+        version: 0.4.0(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))
       astro:
         specifier: 7.4.0
         version: 7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1)
@@ -432,12 +432,6 @@ packages:
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
 
-  '@fontsource/ibm-plex-mono@5.3.0':
-    resolution: {integrity: sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q==}
-
-  '@fontsource/ibm-plex-sans@5.3.0':
-    resolution: {integrity: sha512-CbE4CbbEEZJX860XyUiRpsksXIQR8Rp2XDva2VO53NJox9tVNtusrysd2x5YkUEY3ErQ66W1IiiQL8/wihhw5w==}
-
   '@formatjs/ecma402-abstract@2.3.6':
     resolution: {integrity: sha512-HJnTFeRM2kVFVr5gr5kH1XP6K0JcJtE7Lzvtr3FS/so5f1kpsqqqxy5JF+FRaO6H2qmcMfAUIox7AJteieRtVw==}
 
@@ -635,8 +629,8 @@ packages:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
-  '@ocx-sh/theme@0.3.0':
-    resolution: {integrity: sha512-bF1XLM10MGM9cOBU1r0yEewRaFbTgxEzVmx3/Dxe5rUxZizsrO9AsPBUPmkvG/BQDIsary3LYVyNUHSDw/hxhg==}
+  '@ocx-sh/theme@0.4.0':
+    resolution: {integrity: sha512-q/3XdZQ3k1AycrrD0Dtz9Ds/cyiO+K/wpaefdY7Z0HIvLpC0BlhC2o3Jny4AWF5YnoAbS74yAjPD0QRRUTP/1Q==}
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -3965,10 +3959,6 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
-  '@fontsource/ibm-plex-mono@5.3.0': {}
-
-  '@fontsource/ibm-plex-sans@5.3.0': {}
-
   '@formatjs/ecma402-abstract@2.3.6':
     dependencies:
       '@formatjs/fast-memoize': 2.2.7
@@ -4191,10 +4181,9 @@ snapshots:
       '@tybys/wasm-util': 0.10.4
     optional: true
 
-  '@ocx-sh/theme@0.3.0(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))':
+  '@ocx-sh/theme@0.4.0(@astrojs/starlight@0.42.6(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))(supports-color@5.5.0))(astro@7.4.0(@astrojs/markdown-remark@7.3.3(supports-color@5.5.0))(@types/node@24.19.2)(esbuild@0.28.2)(yaml@2.9.1))':
     dependencies:
-      '@fontsource/ibm-plex-mono': 5.3.0
-      '@fontsource/ibm-plex-sans': 5.3.0
+      '@astrojs/sitemap': 3.7.4
       '@pagefind/default-ui': 1.5.2
       '@zag-js/accordion': 1.44.0
       '@zag-js/async-list': 1.44.0
