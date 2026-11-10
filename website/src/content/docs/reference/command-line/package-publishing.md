@@ -578,7 +578,7 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... [-- <COMMAND>..
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--clean` |  | Start the child from an empty environment holding only the composed variables |
+| `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--identifier`, `-i` | `IDENTIFIER` | Identifier under which the package is materialized. Tag form (`repo:tag`) only; an explicit `@digest` is rejected (the digest is computed locally during this command and supplying one would conflict) |
 | `--isolate` |  | Remove every value ocx applied to the calling environment before composing |

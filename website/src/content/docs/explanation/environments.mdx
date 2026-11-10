@@ -202,7 +202,7 @@ Two flags change what sits underneath the layer:
 |---|---|
 | none | The caller's environment, unchanged |
 | `--isolate` | The caller's environment with what earlier ocx layers applied reverted first |
-| `--clean` | Empty, so only package-declared variables reach the child |
+| `--clean` | Empty, so only package-declared variables reach the child; on Windows the caller's `SystemRoot` is kept |
 
 `--isolate --clean` is a usage error (exit 64), because `--clean` already drops everything `--isolate` would revert. The same flags exist on [`ocx shell`][cmd-shell], [`ocx package exec`][cmd-package-exec], [`ocx package test`][cmd-package-test] and `ocx patch test`.
 

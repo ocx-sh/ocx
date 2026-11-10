@@ -9636,7 +9636,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Start the child from an empty environment holding only the composed variables"
+                "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
               },
               {
                 "id": "env",
@@ -10231,7 +10231,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Start the child from an empty environment holding only the composed variables"
+                "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
               },
               {
                 "id": "self_view",
@@ -11363,7 +11363,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Start the child from an empty environment holding only the composed variables"
+                "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
               },
               {
                 "id": "env",
@@ -11968,7 +11968,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Start the child from an empty environment holding only the composed variables"
+            "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
           },
           {
             "id": "env",
@@ -12371,7 +12371,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Start the child from an empty environment holding only the composed variables"
+            "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
           },
           {
             "id": "env",
@@ -12854,7 +12854,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Start the child from an empty environment holding only the composed variables"
+            "help": "Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows)"
           },
           {
             "id": "consent",

@@ -457,10 +457,18 @@ def test_exec_records_the_env_mode_it_ran_in(
     result = _run_in(ocx, project, "exec", "--records-dir", str(sink), *flags, "--", "hello")
 
     assert result.returncode == EXIT_SUCCESS, f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    assert published_package.marker in result.stdout, f"the child ran and printed its marker: {result.stdout!r}"
     record = _one_record(sink)
     assert record["envMode"] == expected, f"`ocx exec {' '.join(flags)}` records envMode={expected!r}; got {record}"
     assert record["scope"]["cleanEnv"] is (expected == "clean"), record["scope"]
     assert "stack" not in record["scope"], record["scope"]
+
+    if expected == "clean" and sys.platform == "win32":
+        # Windows cannot start a child without SystemRoot (native arm64 cmd.exe exits 1 silently), so --clean carries it.
+        comspec = os.environ["ComSpec"]
+        shown = _run_in(ocx, project, "exec", "--clean", "--", comspec, "/d", "/c", "echo", "%SystemRoot%")
+        assert shown.returncode == EXIT_SUCCESS, f"rc={shown.returncode}\nstderr:\n{shown.stderr}"
+        assert shown.stdout.strip() == os.environ["SystemRoot"], f"--clean child sees SystemRoot: {shown.stdout!r}"
 
 
 def test_package_exec_frame_emits_record(

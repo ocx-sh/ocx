@@ -10,7 +10,7 @@ use ocx_config::exec_state::Inherited;
 use ocx_env::{EnvVar, Propagation, Visibility};
 
 use super::compose_tests::{Fixture, ambient, constant, get, hermetic};
-use super::{ExecMode, compose};
+use super::{ExecMode, SYSTEM_ROOT, compose};
 
 const MODES: [ExecMode; 3] = [ExecMode::Layer, ExecMode::Isolate, ExecMode::Clean];
 const SENTINEL: &str = "fixture-secret-value";
@@ -78,9 +78,11 @@ fn every_declaration_reaches_a_child_the_way_its_class_says_under_every_mode() {
             let seen = child_value(var, mode, None);
             let name = var.name;
             match var.propagation {
-                // Inherited as the caller had them under layer and isolate; absent under clean.
+                // Inherited as the caller had them under layer and isolate; absent under clean,
+                // except `SystemRoot` on Windows, which clean carries so a child can start.
                 Propagation::UserInput | Propagation::SecretInput | Propagation::SetupWritten => {
-                    let expected = (mode != ExecMode::Clean).then_some(SENTINEL);
+                    let carried = cfg!(windows) && name.eq_ignore_ascii_case(SYSTEM_ROOT);
+                    let expected = (mode != ExecMode::Clean || carried).then_some(SENTINEL);
                     assert_eq!(
                         seen.as_deref(),
                         expected,
