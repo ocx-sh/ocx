@@ -3,7 +3,7 @@
 
 Usage: check_budget.py <dist-docs-dir>
 
-Budget per HTML page: at most 14,200 bytes gzipped and 800 DOM elements.
+Budget per HTML page: at most 43,400 bytes gzipped and 800 DOM elements.
 Exit 0 clean, 1 findings, 2 nothing to check.
 """
 
@@ -12,7 +12,7 @@ import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
-MAX_GZIP_BYTES = 14_200
+MAX_GZIP_BYTES = 43_400
 MAX_ELEMENTS = 800
 
 

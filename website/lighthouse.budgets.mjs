@@ -13,8 +13,9 @@ export const BASE = '/docs/';
 /** Bytes, gzip of the response body, except `domElements`. */
 export const BUDGET = { preJsGz: 11 * KB, totalBytes: 147 * KB, domElements: 900 };
 
-/** Gzipped HTML must fit Lighthouse's first simulated round trip (10 TCP packets). */
-export const HTML_GZ_MAX = 14_200;
+/** Gzipped HTML must fit two simulated round trips (30 TCP segments, 43.8 KB on the wire): one costs ~1355 ms LCP, two ~1505 ms,
+ * both score 100 (theme 0.4.0, measured to 31.6 KB); past the second a page is back to ~1655 ms with no margin. */
+export const HTML_GZ_MAX = 43_400;
 
 export const CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
 

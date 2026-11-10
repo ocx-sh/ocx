@@ -95,21 +95,29 @@ tasks:
     cmds:
       - task: :git:submodules
       - task: :website:build
-      # ponytail: audits only the pages that met every budget on the 2026-10-25 full build (35 of the
-      # 113 built pages, redirect stubs excluded; the rest miss performance 100 or dom <= 900). A page
-      # joins once it passes; the `ocx index` reference page left (HTML over the byte ceiling) and rejoins
-      # when the shared header shrinks (ocx-sh/website#38). Drop the list once the docs backlog is empty.
+      # ponytail: audits only the 60 pages that met every budget on the 2026-11-10 full build with theme 0.4.0
+      # (of 113 built pages, redirect stubs excluded). The rest miss the DOM budget (more than 900 elements);
+      # HTML bytes no longer decide it (ceiling: lighthouse.budgets.mjs). A page joins once it passes;
+      # drop the list once the docs backlog is empty (ocx-sh/ocx#641).
       - task: :website:lighthouse
         vars:
           CLI_ARGS: >-
             --page /
             --page /404.html
+            --page /changelog/
+            --page /explanation/deferred-packages/
+            --page /explanation/dependencies/
+            --page /explanation/integrations/
             --page /explanation/launcher-forwarding/
+            --page /explanation/local-index/
             --page /explanation/project-groups/
+            --page /explanation/public-index/
             --page /explanation/records-and-sbom/
             --page /explanation/records-launcher-frames/
+            --page /explanation/shell-consent/
             --page /explanation/toolchain-render/
             --page /explanation/toolchain-tree/
+            --page /explanation/versioning/
             --page /getting-started/first-package/
             --page /getting-started/first-project/
             --page /guides/authenticate/
@@ -118,25 +126,42 @@ tasks:
             --page /guides/configure-ocx/
             --page /guides/find-packages/
             --page /guides/lock-and-reproduce/
+            --page /guides/manage-config-centrally/
             --page /guides/run-with-dependencies/
+            --page /guides/serve-an-index/
             --page /guides/stable-paths/
+            --page /guides/update-tools/
+            --page /guides/verify-installs/
             --page /guides/work-offline/
             --page /integration/
             --page /integration/bazel/
             --page /integration/devcontainers-and-editors/
+            --page /integration/docker/
             --page /integration/publisher-ci/
             --page /integration/python/
             --page /integration/registry-auth-recipes/
             --page /integration/scripts-and-json/
+            --page /integration/unattended-ci/
+            --page /publishing/
+            --page /publishing/bundle-anatomy/
+            --page /publishing/declare-dependencies/
+            --page /publishing/libc-variants/
+            --page /publishing/promote-packages/
             --page /reference/command-line/config/
             --page /reference/command-line/direnv/
+            --page /reference/command-line/index-commands/
             --page /reference/command-line/patch/
+            --page /reference/command-line/self/
             --page /reference/command-line/shell/
+            --page /reference/dependencies/
+            --page /reference/machine-interface/
             --page /reference/metadata/dependencies/
+            --page /reference/metadata/entry-points/
             --page /reference/metadata/integrations/
             --page /reference/platforms/
             --page /roadmap/
             --page /security/
+            --page /troubleshooting/platforms/
 
   deep:
     desc: 'Deep tier: suite rows check, contract-baseline repository tests and the full self-tests of the gate scripts'

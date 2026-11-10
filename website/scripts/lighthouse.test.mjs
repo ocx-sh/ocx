@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ocxRedirects } from '../plugins/redirects.mjs';
-import { BUDGET, CATEGORIES, assertions, oversizedHtml, pages, pathOf } from '../lighthouse.budgets.mjs';
+import { BUDGET, CATEGORIES, HTML_GZ_MAX, assertions, oversizedHtml, pages, pathOf } from '../lighthouse.budgets.mjs';
 
 // ocx-sh/website tests/budgets.mjs `content` class: ceilings, never exceeded here.
 const WEBSITE = { preJsGz: 11 * 1024, totalBytes: 147 * 1024, domElements: 900 };
@@ -41,7 +41,7 @@ test('lighthouse: an oversized page fails on its bytes before Chrome starts', ()
   const d = mkdtempSync(join(tmpdir(), 'lh-big-'));
   mkdirSync(join(d, 'big'), { recursive: true });
   writeFileSync(join(d, 'index.html'), '<html></html>');
-  writeFileSync(join(d, 'big/index.html'), `<html><body>${randomBytes(20000).toString('hex')}`);
+  writeFileSync(join(d, 'big/index.html'), `<html><body>${randomBytes(HTML_GZ_MAX).toString('hex')}`);
   const r = spawnSync(process.execPath, ['scripts/lighthouse.mjs', '--page', '/big/'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, LH_DIST: d, CHROME_PATH: '/nonexistent', LH_PORT: '4399' },
@@ -50,7 +50,7 @@ test('lighthouse: an oversized page fails on its bytes before Chrome starts', ()
   });
   const out = `${r.stdout}${r.stderr}`;
   assert.equal(r.status, 1, out);
-  assert.match(out, /\/big\/: \d+ B gzip > 14200/);
+  assert.match(out, new RegExp(`/big/: \\d+ B gzip > ${HTML_GZ_MAX}`));
   assert.ok(!out.includes('Running Lighthouse'), out);
 });
 
