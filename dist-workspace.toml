@@ -54,3 +54,6 @@ cargo-cyclonedx = true
 [dist.github-custom-runners.aarch64-pc-windows-msvc]
 runner = "windows-11-arm"
 host = "aarch64-pc-windows-msvc"
+
+[dist.github-custom-runners.aarch64-apple-darwin]
+runner = "macos-15"

@@ -72,7 +72,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 VERIFY_DEEP = ROOT / ".github" / "workflows" / "verify-deep.yml"
 VERIFY_BASIC = ROOT / ".github" / "workflows" / "verify-basic.yml"
-# Runner-label prefixes: `ubuntu-latest`, `macos-14`, `windows-2025` all
+# Runner-label prefixes: `ubuntu-latest`, `macos-15`, `windows-2025` all
 # belong to their family, so a version pin never reads as a lost OS.
 OS_FAMILIES = ("ubuntu", "macos", "windows")
 
