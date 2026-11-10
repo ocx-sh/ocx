@@ -12,7 +12,7 @@ keeps the pair honest.
 
 module(
     name = "ocx",
-    version = "0.6.2",
+    version = "0.6.5",
 )
 
 # Every dependency carries an explicit version. A `bazel_dep` without one
