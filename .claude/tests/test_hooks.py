@@ -283,7 +283,7 @@ class TestReleasePrepareGuard:
     The predicates are shown red and green by `scripts/tests/test_commit_gate.py`;
     what this catches is the *call sites* drifting: a hook ocx stopped defining
     (the template then skips it without a word), a gate that no longer asks for
-    the full mark or runs the provenance proof, a verify that trusts cached verdicts.
+    the readiness run or runs the provenance proof, a verify hook that runs the suite again.
     """
 
     HOOKS = ("gate", "bump-files", "validate", "verify")
@@ -336,18 +336,20 @@ class TestReleasePrepareGuard:
         taken = [line for line in self._dry_prepare() if line.startswith("task: [release:run] task verify")]
         assert not taken, taken
 
-    def test_release_gate_asks_for_the_full_mark_first(self) -> None:
+    def test_release_gate_asks_for_the_readiness_run_first(self) -> None:
         cmds = _task_cmds(RELEASE_TASKFILE, "gate")
-        assert 'commit_gate.py" --require-full-mark' in cmds[0], cmds
+        assert "release_readiness_gate.py" in cmds[0] and '--sha "$(git rev-parse HEAD)"' in cmds[0], cmds
+        assert not any("commit_gate.py" in cmd or "NOCACHE" in cmd for cmd in cmds), cmds
 
     def test_release_gate_runs_the_provenance_proof(self) -> None:
         """C-006 / S-019: the real-bytes proof (release build green, `__testing` build red)
         runs inside the gate, which the template runs before `release:bump-files`."""
         assert "task: provenance:proof" in _task_cmds(RELEASE_TASKFILE, "gate")
 
-    def test_release_verify_runs_with_no_cached_verdicts(self) -> None:
-        """C-006 / P-7: a release re-executes every acceptance module (`NOCACHE=1`)."""
-        assert _task_cmds(RELEASE_TASKFILE, "verify") == ["{{.TASK_EXE}} verify NOCACHE=1"]
+    def test_release_verify_runs_no_local_suite(self) -> None:
+        """Readiness on the release commit is the gate; the hook only keeps the template off its `verify` fallback."""
+        cmds = _task_cmds(RELEASE_TASKFILE, "verify")
+        assert len(cmds) == 1 and cmds[0].startswith("echo "), cmds
 
     def test_release_bump_files_sets_the_version_the_template_passes(self) -> None:
         cmds = _task_cmds(RELEASE_TASKFILE, "bump-files")

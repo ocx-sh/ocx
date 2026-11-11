@@ -209,12 +209,11 @@ tasks:
   # from taskfiles/baseline.taskfile.yml): gate -> bump-files -> git-cliff -> validate -> verify. It never
   # tags or pushes (workflow-release.md).
   gate:
-    desc: 'Release gate: a fresh full verify mark (commit_gate.py --require-full-mark) and the release provenance proof'
+    desc: 'Release gate: a green Release Readiness run for HEAD (release_readiness_gate.py) and the release provenance proof'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # The predicate the commit gate applies to a `release:` subject, run from the same module so the two
-      # cannot drift. `task verify:mark` writes a scoped mark and does not satisfy it; `task verify` does.
-      - python3 "{{.ROOT_DIR}}/scripts/commit_gate.py" --require-full-mark "{{.ROOT_DIR}}"
+      # The readiness run is the release's test gate; no local full verify stands in for it.
+      - python3 "{{.ROOT_DIR}}/scripts/release_readiness_gate.py" --sha "$(git rev-parse HEAD)"
       # Before any file is touched: a release whose build would carry test provenance stops here, not
       # after the version bump.
       - task: provenance:proof
@@ -235,13 +234,12 @@ tasks:
     cmds:
       - task: changelog:validate
 
+  # Defined only because the template's `release:prepare` falls back to a full `task verify` when this
+  # hook is absent; the readiness run on the release commit (`release:gate`) is the gate.
   verify:
-    desc: 'The release verification gate: task verify NOCACHE=1'
+    desc: 'No local verify: the Release Readiness run checked in release:gate is the release test gate'
     cmds:
-      # A fresh process, not `task: :verify`: NOCACHE reaches `bazel:test:accept` as a CLI var (CLI vars are
-      # global; a `vars:` on a task call is not), and a release re-executes every acceptance module
-      # instead of trusting cached verdicts.
-      - '{{.TASK_EXE}} verify NOCACHE=1'
+      - echo "release:verify - Release Readiness on the release commit is the gate; nothing to run locally"
 
   # Step 3 of the release flow (workflow-release.md): the tag exists only after readiness is green on
   # this exact commit. `release:prepare` cannot ask - the bump commit it prepares does not exist

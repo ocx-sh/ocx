@@ -13,7 +13,6 @@ or a ref-creating `--all`, which the push gate must see. Both armed by
 
     scripts/commit_gate.py --check-message <msg-file>   # prek appends it
     scripts/commit_gate.py --check-push <repo-root>          # git's pre-push stdin
-    scripts/commit_gate.py --require-full-mark <repo-root>   # release:prepare's guard
 
 Why git runs this and not a Claude PreToolUse hook: deciding "is this shell
 command a git commit" means parsing an arbitrary shell string, and every round
@@ -57,10 +56,10 @@ than fixed.
      `release:` is admitted here — it is not one of the conventional types, and
      rule 4 exists to gate it, so refusing it at rule 3 would make rule 4's
      release arm unreachable and refuse `task release:prepare`'s own commit.
-  4. `release:` or a commit on main/master needs a *full* mark; anything else
-     a *scoped* one (plan_crate_split_workspace.md C-021). A `release:` commit
-     needs a full mark recording `nocache` — `task verify NOCACHE=1`, which
-     re-executes every acceptance module rather than replaying cached verdicts.
+  4. Every commit needs a fresh mark, full or scoped, whatever its subject or
+     branch — `task verify:mark` writes one. A `release:` commit is gated on the
+     remote Release Readiness run (`task release:gate`), not on a local full
+     verify.
   5. The mark must be fresh (5-minute TTL), written at the current HEAD, of at
      least the required scope, and written BY THIS WORKING TREE. A mark
      carrying no `toplevel` reads as unverified.
@@ -285,21 +284,15 @@ def is_recently_verified(
     *,
     head: str | None,
     toplevel: str | None,
-    require_full: bool,
-    require_nocache: bool = False,
     ttl_seconds: int = TTL_SECONDS,
 ) -> bool:
-    """True when ``mark`` certifies THIS tree, at THIS head, at the needed scope.
+    """True when ``mark`` certifies THIS tree at THIS head, at any scope.
 
     Fail-closed on every unknown: a missing, unparseable, bare-integer,
     scope-less, head-less, toplevel-less or timestamp-less mark is "not
-    verified", and a `scoped` mark never satisfies ``require_full``.
+    verified".
     """
     if mark.get("scope") not in ("full", "scoped"):
-        return False
-    if require_full and mark["scope"] != "full":
-        return False
-    if require_nocache and mark.get("nocache") is not True:
         return False
     # A mark certifies the tree it was written on: same HEAD, same working
     # tree. Either unknown is a refusal, so one mark never covers a second
@@ -318,51 +311,26 @@ def is_recently_verified(
     return 0 <= time.time() - verified_time < ttl_seconds
 
 
-def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
+def build_deny_reason(mark: dict, state_path: str) -> str:
     """The refusal text, carrying the remediation a blocked commit needs."""
     found = f"scope: {mark.get('scope', 'none')}" if mark else "no JSON mark"
     if mark and mark.get("head"):
         found += f" for HEAD {str(mark['head'])[:10]} (a mark certifies the HEAD it was written on)"
     if mark and mark.get("toplevel"):
         found += f", written by {mark['toplevel']} (and the working tree that earned it)"
-    if mark and "nocache" in mark:
-        # A `release:` commit is the one caller that can be denied over a mark
-        # that is otherwise full: `nocache` false means the run replayed a
-        # cached verdict, which a release cannot accept. Print the value so
-        # the refusal names its own cause instead of reading like a missing
-        # mark — `why_full`, when set, already points at `task verify
-        # NOCACHE=1` (requires_full_mark's release branch).
-        found += f", nocache: {mark['nocache']}"
-    if why_full:
-        how = (
-            f"This commit needs a FULL verify mark ({why_full}); found {found}.\n"
-            "Run `task verify` (format, clippy, lint, license, build, tests) — it writes the"
-            " full mark. A scoped run or `task verify:mark` does not count here.\n"
-        )
-    else:
-        how = (
-            f"Found {found} at {state_path}.\n"
-            "Run `task verify:scoped --force` or `task verify`; both write the mark.\n"
-            "Not finalizing yet? `task verify:mark` is the allowed escape hatch: run the"
-            " checks your change actually needs, mark, and name what you deferred in the"
-            " commit body. The full `task verify` runs once, before the branch lands.\n"
-        )
+    how = (
+        f"Found {found} at {state_path}.\n"
+        "Run `task verify:scoped --force` or `task verify`; both write the mark.\n"
+        "Not finalizing yet? `task verify:mark` is the allowed escape hatch: run the"
+        " checks your change actually needs, mark, and name what you deferred in the"
+        " commit body. CI runs the full `task verify`.\n"
+    )
     return "BLOCKED: Cannot commit without passing verification.\n\n" + how + "\nThen retry."
 
 
 # ---------------------------------------------------------------------------
 # The three modes
 # ---------------------------------------------------------------------------
-
-
-def requires_full_mark(subject: str, repo_root: str) -> str | None:
-    """Why this commit needs a *full* mark, or None when a scoped one will do."""
-    if subject.startswith(RELEASE_PREFIX):
-        return f"subject {subject!r} is a release, which needs `task verify NOCACHE=1`"
-    branch = git_out(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
-    if branch in TRUNK_BRANCHES:
-        return f"the branch is {branch}"
-    return None
 
 
 def check_message(msg_path: str, repo_root: str) -> str | None:
@@ -401,18 +369,15 @@ def check_message(msg_path: str, repo_root: str) -> str | None:
         if handback:
             refusal += _CONCLUDING.format(operation=handback)
         return refusal
-    why_full = requires_full_mark(subject, repo_root)
     path = mark_file()
     mark = read_mark(path)
     if is_recently_verified(
         mark,
         head=git_out(repo_root, "rev-parse", "HEAD"),
         toplevel=worktree_id(Path(repo_root)),
-        require_full=why_full is not None,
-        require_nocache=subject.startswith(RELEASE_PREFIX),
     ):
         return None
-    return build_deny_reason(mark, str(path), why_full)
+    return build_deny_reason(mark, str(path))
 
 
 def check_push(stdin_text: str, repo_root: str) -> str | None:
@@ -434,27 +399,6 @@ def check_push(stdin_text: str, repo_root: str) -> str | None:
             branch = git_out(repo_root, "rev-parse", "--abbrev-ref", "HEAD") or "unknown"
             return _PUSH_DENY.format(ref=remote_ref, branch=branch)
     return None
-
-
-def require_full_mark_cli(repo_root: str) -> int:
-    """`task release:prepare`'s guard: 0 on a fresh full mark, 1 otherwise."""
-    path = mark_file()
-    mark = read_mark(path)
-    if is_recently_verified(
-        mark,
-        head=git_out(repo_root, "rev-parse", "HEAD"),
-        toplevel=worktree_id(Path(repo_root)),
-        require_full=True,
-    ):
-        print("verify mark: fresh full mark")
-        return 0
-    print(
-        "BLOCKED: a fresh full verify mark (scope: full, 5-minute TTL) is required;"
-        f" found scope: {mark.get('scope', 'none')}. Run `task verify` — `task verify:mark`"
-        " writes a scoped mark and does not count.",
-        file=sys.stderr,
-    )
-    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -553,12 +497,12 @@ def _mark(
     *,
     age: int = 0,
     toplevel: Path | None = None,
-    nocache: bool = False,
+
 ) -> None:
     """Write a verify mark for ``repo`` into ``project_dir``'s mark home."""
     path = project_dir / ".claude" / "hooks" / ".state" / "commit-verified"
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    write_mark(path, scope, [], head, str((toplevel or repo).resolve()), nocache=nocache)
+    write_mark(path, scope, [], head, str((toplevel or repo).resolve()))
     if age:
         mark = json.loads(path.read_text(encoding="utf-8"))
         mark["timestamp"] -= age
@@ -672,27 +616,22 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         bad = _shell(repo, "git commit -m 'made some changes'", repo)
         if bad.returncode == 0 or "does not follow conventional commits" not in bad.stderr:
             return f"a non-conventional subject must be refused: {bad.stderr!r}"
+        # No subject or branch needs more than a fresh mark: a release is gated on
+        # the remote readiness run, and a scoped mark commits on main too.
         _mark(repo, repo, "scoped")
         release = _shell(repo, "git commit -m 'release: v9.9.9'", repo)
-        if release.returncode == 0 or "needs a FULL verify mark" not in release.stderr:
-            return f"`release:` must refuse a scoped mark: {release.stderr!r}"
-        _mark(repo, repo, "full")
-        cached = _shell(repo, "git commit -m 'release: v9.9.9'", repo)
-        if cached.returncode == 0 or "NOCACHE=1" not in cached.stderr:
-            return f"`release:` must refuse a full mark that replayed cached verdicts: {cached.stderr!r}"
-        if "nocache: False" not in cached.stderr:
-            return f"the refusal must print the mark's own nocache value: {cached.stderr!r}"
-        _mark(repo, repo, "full", nocache=True)
-        released = _shell(repo, "git commit -m 'release: v9.9.9'", repo)
-        if released.returncode != 0:
-            return f"`release:` must accept a NOCACHE full mark: {released.stderr!r}"
-        # A commit on main needs the full mark too, on the same tree.
+        if release.returncode != 0:
+            return f"`release:` must accept a scoped mark: {release.stderr!r}"
         _git(repo, "switch", "-q", "-c", "main")
         _dirty(repo)
         _mark(repo, repo, "scoped")
         on_main = _shell(repo, "git commit -m 'chore: x'", repo)
-        if on_main.returncode == 0 or "the branch is main" not in on_main.stderr:
-            return f"a commit on main must need the full mark: {on_main.stderr!r}"
+        if on_main.returncode != 0:
+            return f"a commit on main must accept a scoped mark: {on_main.stderr!r}"
+        _dirty(repo)
+        stale = _shell(repo, "git commit -m 'chore: y'", repo)
+        if stale.returncode == 0 or "BLOCKED" not in stale.stderr:
+            return f"a commit on main with no fresh mark must still be refused: {stale.stderr!r}"
         return None
 
     def a_subject_cannot_hide_from_rule_3() -> str | None:
@@ -1097,31 +1036,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         run = _shell(repo, "git commit -m 'chore: x'", repo)
         return expect(run.returncode != 0, "a mark with no `toplevel` must read as unverified")
 
-    def the_release_prepare_guard() -> str | None:
-        """`--require-full-mark`'s exit contract, which release:prepare scripts."""
-        repo = _make_repo(tmp / "guard")
-
-        def run(project_dir: Path) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [sys.executable, str(Path(__file__).resolve()), "--require-full-mark", str(repo)],
-                capture_output=True,
-                encoding="utf-8",
-                env=_env_for(project_dir),
-                check=False,
-            )
-
-        _mark(repo, repo, "scoped")
-        scoped = run(repo)
-        if scoped.returncode != 1 or "task verify" not in scoped.stderr:
-            return f"a scoped mark must exit 1 with the remedy: {scoped.returncode} {scoped.stderr!r}"
-        _mark(repo, repo, "full")
-        full = run(repo)
-        if full.returncode != 0:
-            return f"a full mark must exit 0: {full.stderr!r}"
-        path = repo / ".claude" / "hooks" / ".state" / "commit-verified"
-        path.write_text(str(int(time.time())), encoding="utf-8")
-        return expect(run(repo).returncode == 1, "a bare-integer stamp must exit 1")
-
     # -- The hatch admits a merge -------------------------------------------
 
     def a_merge_commits_on_a_scoped_mark() -> str | None:
@@ -1167,7 +1081,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("prek's stash does not hide the mark", preks_stash_does_not_hide_the_mark),
         ("a sibling worktree's mark certifies nothing", a_mark_from_a_sibling_worktree_certifies_nothing),
         ("a mark with no writer reads as unverified", a_mark_with_no_writer_reads_as_unverified),
-        ("the release:prepare guard", the_release_prepare_guard),
         ("a merge commits on a scoped mark", a_merge_commits_on_a_scoped_mark),
     ]
 
@@ -1187,12 +1100,7 @@ def main(argv: list[str]) -> int:
         "--check-message", nargs=1, metavar="MSG_FILE", help="the commit-msg hook"
     )
     mode.add_argument("--check-push", nargs=1, metavar="REPO_ROOT", help="the pre-push hook")
-    mode.add_argument(
-        "--require-full-mark", nargs=1, metavar="REPO_ROOT", help="release:prepare's guard"
-    )
     ns = parser.parse_args(argv)
-    if ns.require_full_mark:
-        return require_full_mark_cli(ns.require_full_mark[0])
     reason = (
         check_message(ns.check_message[0], git_out(".", "rev-parse", "--show-toplevel") or ".")
         if ns.check_message
