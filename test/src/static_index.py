@@ -26,6 +26,7 @@ import hashlib
 import http.server
 import json
 import socket
+import sys
 import threading
 import time
 from collections.abc import Iterator, Sequence
@@ -312,6 +313,18 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
     """A session-free `index.ocx.sh`-shaped fixture: one instance per test,
     bound to an ephemeral port, serving `root` verbatim.
     """
+
+    # Handlers must be joined by `server_close()`: a daemon handler still
+    # dribbling a slow body outlives the test and writes to stderr while the
+    # interpreter finalizes, which aborts the process.
+    daemon_threads = False
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # A client that hangs up mid-body is expected; the default would print
+        # a traceback from the handler thread.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)  # type: ignore[arg-type]
 
     def __init__(self, root: Path) -> None:
         self.root = root
