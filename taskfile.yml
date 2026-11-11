@@ -459,15 +459,8 @@ tasks:
       questions asked — the unconditional escape hatch for any commit on a
       branch, merge commits included. Run whatever checks the change needs
       (none for a docs-only change), mark, commit; name the deferral in the
-      commit body. Only `main` and `release:` commits need `task verify`.
+      commit body. `main` and `release:` commits take it too.
     cmds:
-      # On main the gate refuses a scoped mark, so writing one reads as
-      # "verify:mark does nothing". Say so instead of marking.
-      - cmd: >-
-          b=$(git rev-parse --abbrev-ref HEAD);
-          case "$b" in main|master)
-            echo "verify:mark: branch is '$b', where the commit gate accepts only a FULL mark — run 'task verify' (a scoped mark would be written and then refused)" >&2;
-            exit 1;; esac
       # Pinned, not defaulted: a CLI var (`task verify:mark SCOPE=full`) beats
       # the callee's `default`, and a hand mark must never be `full`.
       - task: .verify:mark

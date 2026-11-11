@@ -130,13 +130,13 @@ task release:tag
 
 | Step | Owner | What it does |
 |---|---|---|
-| `release:gate` | ocx | Refuses without a fresh **full** mark from `task verify` (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
+| `release:gate` | ocx | Refuses without a green Release Readiness run for HEAD (`scripts/release_readiness_gate.py --sha HEAD`), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
 | `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, then `scripts/bazel_pin_check.py --set-module-version` on `MODULE.bazel`'s `module(version=)` (`bazel:pin:check` fails when the two differ), from the version the template computed with `git-cliff --bumped-version`. |
 | git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
 | `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
-| `release:verify` | ocx | `task verify NOCACHE=1` in a fresh process: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict. A release re-runs the suite, it never believes a key. |
+| `release:verify` | ocx | An echo and nothing else: the template falls back to a full `task verify` when the hook is undefined, and readiness on the release commit (`release:gate`) is the test gate. |
 
-The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify without `NOCACHE=1` and a gate without its full-mark or provenance step each turn it red.
+The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify hook that runs the suite and a gate without its readiness or provenance step each turn it red.
 
 After the tag is pushed, CI takes over: readiness gate → build → provenance scan → GitHub Release → publish to registry → deploy website.
 

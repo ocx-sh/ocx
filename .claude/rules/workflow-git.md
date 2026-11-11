@@ -73,7 +73,7 @@ Every commit needs a verify mark. Git enforces it itself: the `commit-msg` hook 
    ```sh
    task verify:mark
    ```
-   No justification is checked, no tree is pinned; it writes a scoped mark at HEAD with a 5-minute TTL. Say in the commit body what was deferred. Only a `release:` commit and a commit on `main` need `task verify` — that is where deferral ends. A bare `echo $(date +%s) > …/commit-verified` reads as *not verified*. A mark certifies one HEAD **and one working tree**: a sibling agent worktree at the same HEAD marks its own.
+   No justification is checked, no tree is pinned; it writes a scoped mark at HEAD with a 5-minute TTL. Say in the commit body what was deferred. `release:` commits and commits on `main` take the same mark; the release's test gate is the remote Release Readiness run (`task release:gate`). A bare `echo $(date +%s) > …/commit-verified` reads as *not verified*. A mark certifies one HEAD **and one working tree**: a sibling agent worktree at the same HEAD marks its own.
 3. Retry commit. Staging survives a refusal — the commit was aborted, not the `git add`.
 
 Carve-outs, all deliberate: a rebase in progress commits ungated (git rewrites HEAD through states no mark can certify); a cherry-pick, revert or merge handed back to you keeps only the *subject* carve-out — the subject git prepared commits as it stands (`git commit --no-edit`), a hand-written one must be conventional, and a mark is required either way; and the subject `Checkpoint` commits without a mark so `task checkpoint` keeps working.
@@ -90,7 +90,7 @@ Pick the level the change needs; the agent decides, nobody audits the choice. **
 | `verify:scoped` escalates (taskfile, BUILD/bzl, `scripts/**`, workflows) but the edit is small | run what the edit touches, then `task verify:mark` |
 | A work-package merge | `git merge`, then `task verify:mark` or a scoped run — no full verify per merge |
 | Finalize | what the series touched, then `task verify:mark`; CI is the full gate |
-| `release:` | full `task verify NOCACHE=1` (mechanically required by `release:gate`) |
+| `release:` | `task verify:mark`; the test gate is the remote Release Readiness run, which `release:gate` requires green for HEAD |
 
 Never a full `task verify` otherwise, not even "for the signal" — push and read CI.
 

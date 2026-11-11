@@ -793,7 +793,7 @@ def write_mark(
     """Write the mark; a scoped one carries the previous full head forward.
 
     `nocache` records a run that re-executed the acceptance suite
-    (`task verify NOCACHE=1`) — the only full mark a `release:` commit takes.
+    (`task verify NOCACHE=1`).
     """
     mark = {
         "timestamp": int(time.time()),
