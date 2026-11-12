@@ -213,7 +213,12 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       # The readiness run is the release's test gate; no local full verify stands in for it.
-      - python3 "{{.ROOT_DIR}}/scripts/release_readiness_gate.py" --sha "$(git rev-parse HEAD)"
+      # `task --force release:prepare` (forwarded here as --force) skips it here only; release:tag and
+      # readiness-gate.yml still ask.
+      - cmd: python3 "{{.ROOT_DIR}}/scripts/release_readiness_gate.py" --sha "$(git rev-parse HEAD)"
+        if: '{{if .CLI_FORCE}}false{{else}}true{{end}}'
+      - cmd: 'echo "release:gate: --force, readiness check skipped" >&2'
+        if: '{{if .CLI_FORCE}}true{{else}}false{{end}}'
       # Before any file is touched: a release whose build would carry test provenance stops here, not
       # after the version bump.
       - task: provenance:proof

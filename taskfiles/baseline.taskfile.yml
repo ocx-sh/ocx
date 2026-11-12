@@ -152,7 +152,7 @@ tasks:
           exit $rc
 
   release:prepare:
-    desc: "Prepare a release: BUMP=auto|patch|minor|major or VERSION=x.y.z (task --interactive offers a menu); never tags or pushes"
+    desc: "Prepare a release: BUMP=auto|patch|minor|major or VERSION=x.y.z (task --interactive offers a menu; task --force skips the release gate); never tags or pushes"
     cmds:
       - cmd: |
           if [ -z "{{.VERSION}}" ] && [ -z "{{.BUMP}}" ] && [ ! -t 0 ]; then
@@ -162,7 +162,9 @@ tasks:
       # Gate: the latest completed scheduled/dispatched verify-deep run on the default branch must be green.
       # A repo-owned `release:gate` task replaces this check (readiness that spans the repo's own workflows).
       # The negated form is `! ( ... )`: Task's `if:` skips the command when it starts with a bare `!`.
-      - cmd: '{{.TASK_EXE}} release:gate'
+      # `task --force release:prepare` skips the built-in check and hands --force to the hook, which
+      # decides what it skips: a subprocess sees only the flags it is given (CLI_FORCE).
+      - cmd: '{{.TASK_EXE}} release:gate{{if .CLI_FORCE}} --force{{end}}'
         if: '{{.TASK_EXE}} --list-all --silent | grep -qx release:gate'
       - cmd: |
           if ! gh auth status >/dev/null 2>&1; then
@@ -189,7 +191,9 @@ tasks:
             *)
               echo "release:prepare: the latest verify-deep run on $branch is not green: $latest" >&2; exit 1 ;;
           esac
-        if: '! ({{.TASK_EXE}} --list-all --silent | grep -qx release:gate)'
+        if: '{{if .CLI_FORCE}}false{{else}}! ({{.TASK_EXE}} --list-all --silent | grep -qx release:gate){{end}}'
+      - cmd: 'echo "release:prepare: --force, verify-deep gate skipped" >&2'
+        if: '{{if .CLI_FORCE}}! ({{.TASK_EXE}} --list-all --silent | grep -qx release:gate){{else}}false{{end}}'
       - task: release:run
         vars: { BUMP: auto }
         if: '[ -n "{{.VERSION}}" ]'
@@ -202,6 +206,14 @@ tasks:
       vars:
         - name: BUMP
           enum: [auto, patch, minor, major]
+    # The prompt for a missing BUMP fires only after this task's `sh:` vars are evaluated,
+    # so NEXT_VERSION lives one call down, where BUMP is already answered.
+    cmds:
+      - task: release:apply
+        vars: { BUMP: '{{.BUMP}}' }
+
+  release:apply:
+    internal: true
     vars:
       NEXT_VERSION:
         sh: |
