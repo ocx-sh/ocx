@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-11-12
+
+### Added
+
+- OCX machine-interface contract, the ocx-sdkgen Rust SDK generator, and exit codes 83–87 folded into the next-action codes **BREAKING**
+- Cli.json marks a flag that repeats with repeatable: true *(cli)*
+- Every CLI-level refusal names its cause in error.detail *(cli)*
+- --purge on add, remove, lock, update and upgrade deletes the packages they unpin when nothing else references them *(cli)*
+- The PR body names carried tags and a rebuild onto the base *(announce)*
+- Warn when joining an announce PR opened by someone else *(announce)*
+- The JSON report states the branch state, base, ref update, carried tags and PR author *(announce)*
+- A group tool can reuse the default pin with { from = "default" } *(project)*
+- Ocx exec and ocx env --with &lt;package&gt; add packages not in the project *(exec)*
+- Ocx exec --stack layers the project onto the already active environment instead of replacing it *(exec)*
+- Ocx pull without -g pulls only the default group, and takes package names *(pull)* **BREAKING**
+- Bare ocx shell opens your shell inside the project environment *(shell)*
+- Ocx update and ocx upgrade without -g re-resolve only the default group *(update)* **BREAKING**
+- Ocx lock re-resolves only the tools whose ocx.toml entry changed *(lock)* **BREAKING**
+- Ocx exec layers onto the caller's environment, and only __OCX_ENV_STATE and OCX_BINARY_PIN reach child processes *(exec)* **BREAKING**
+
+### Changed
+
+- OCX_LAUNCH_IDENTITIES is renamed __OCX_LAUNCH_IDENTITIES, marking it ocx-internal *(patches)* **BREAKING**
+
+### Documentation
+
+- Home nav and logo leave the SPA for the ocx.sh root site *(website)*
+- The docs move to Starlight with task-first pages and a reference generated from the CLI, environment and config...
+- Render Markdown with the theme on Sätteri *(website)*
+
+### Fixed
+
+- Pin the uv projects to Python 3.14 *(test)*
+- Keep the reports and errors contracts at v1 while the interface hardens *(schema)*
+- A transient GitHub OIDC token fetch failure exits 75 so CI retries it *(sign)*
+- Repeatable flags such as --env and --group take a list *(sdkgen)*
+- Commands that return raw output fail on a non-zero ocx exit *(sdkgen)*
+- The generated SDK builds warning-free in repos that do not ban std::env reads *(sdkgen)*
+- The compat gate checks both args when a flag's long and short spellings split *(sdkgen)*
+- PowerShell emits escape the typographic quotes PowerShell also reads as quote delimiters *(shell)*
+- Patch sync fans out to windows/arm64 like every other platform OCX ships *(patch)*
+- The docs deploy builds the ocx binary its terminal recordings run instead of failing on a missing test/bin/ocx *(website)*
+- Ocx.sh/schemas/ lists the published JSON Schemas *(website)*
+- Ocx remove drops only the binding and leaves package install symlinks alone *(cli)*
+- The changelog page shows the release notes again instead of an empty body *(website)*
+- A credential helper installed through ocx no longer deadlocks ocx update and ocx pull
+- `ocx patch sync` fetches each descriptor and installs each companion once instead of once per base and platform *(patch)*
+- `ocx package create`'s binary scan claims only programs on PATH, never shared libraries *(package)*
+- A pre-release no longer blocks a stable release's cascade to X.Y, X and latest *(package)*
+- A stale-branch rebuild commits every carried tag's object *(announce)*
+- Refuse to commit or write a root that references an object it does not carry *(announce)*
+- A rerun over a missing object commits it instead of reporting unchanged *(announce)*
+- A private index read without a token says to set OCX_ANNOUNCE_TOKEN *(announce)*
+- A Windows lock wait never outlasts its timeout, and a try-lock never sleeps *(store)*
+- An env package no longer exposes its private interpreter as a `python` entrypoint *(python)*
+- A tool run under `ocx --global exec` no longer inherits `OCX_GLOBAL` *(config)*
+- Quote the Bazel cache rc paths so a RUNNER_TEMP with a space stays one token *(ci)*
+- Ship Windows arm64 from a native build, the bytes readiness tests, and gate the Linux glibc floor *(release)*
+- A tool run under `ocx --project &lt;p&gt; exec` no longer inherits `OCX_PROJECT` *(config)*
+- The per-prompt `ocx:` summary no longer lists ocx-private `__OCX_*` variables *(shell)*
+- A --fork into your own GitHub account creates the fork instead of failing with 422 *(announce)*
+- Packages addressed by their ocx.sh index name verify against the backing registry instead of failing with 401 *(verify)*
+- Ocx lock honours lazy-mode, and names tools it could not render offline *(lock)*
+- An interactive shell started by ocx exec -g keeps the selected groups instead of the default set *(exec)*
+- Ocx pull declares its NAME positional after every flag *(pull)*
+- A from = "default" follower moves with its source, and ocx clean keeps patch companions matched through a dependency *(toolchain)* **BREAKING**
+- Old environment-reference links to OCX_ENV and __OCX_LAUNCH_IDENTITIES resolve again *(docs)*
+- Ocx --remote index catalog lists registries no index owns, and fails when an index serves no catalog *(index)*
+- The telemetry credential reaches only the step that exports test timings *(ci)*
+- The docs job names a page whose HTML outgrew Lighthouse's first round trip instead of failing on performance 99 *(ci)*
+- A lock written by a newer ocx tells you to upgrade ocx, and ocx 0.6.5 and older cannot read a version 4 lock *(lock)*
+- The release bump also sets the Bazel module version, and a stale one fails bazel:pin:check *(release)*
+- Ocx exec --clean keeps SystemRoot on Windows, without which a child process cannot start there *(exec)*
+
 ## [0.6.5] - 2026-10-07
 
 ### Added
@@ -26,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ocx package push` refreshes the local index for the tags it wrote, so a moved tag no longer resolves to the old digest *(package)*
 - `ocx status` no longer reports a tool as unlocked for this platform when its lock entry names no libc variant *(project)*
 - The render leaves .DS_Store, desktop.ini and other OS metadata files alone instead of warning about them *(toolchain)*
+
+### Release
+
+- V0.6.5
 
 ## [0.6.4] - 2026-10-01
 
@@ -1271,6 +1349,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.6]: https://github.com/ocx-sh/ocx/compare/v0.6.5..v0.6.6
 [0.6.5]: https://github.com/ocx-sh/ocx/compare/v0.6.4..v0.6.5
 [0.6.4]: https://github.com/ocx-sh/ocx/compare/v0.6.3..v0.6.4
 [0.6.3]: https://github.com/ocx-sh/ocx/compare/v0.6.2..v0.6.3
