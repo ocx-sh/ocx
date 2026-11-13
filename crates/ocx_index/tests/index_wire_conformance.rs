@@ -220,6 +220,11 @@ fn full_fields_root_parses_into_the_typed_index_root_with_the_real_yanked_object
     let bytes = std::fs::read(&path).expect("read full-fields fixture");
     let root: IndexRoot = serde_json::from_slice(&bytes).expect("typed IndexRoot parse of full-fields.json");
 
+    assert_eq!(
+        root.publishers.as_ref().and_then(|p| p[0]["kind"].as_str()),
+        Some("keyless"),
+        "publishers is carried raw"
+    );
     let tag = root.tags.get("1.0.0").expect("1.0.0 tag present");
     assert_eq!(
         tag.yanked,

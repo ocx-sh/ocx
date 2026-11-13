@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from src import registry as reg
@@ -369,19 +370,22 @@ def test_sbom_output_writes_back_the_exact_bytes_that_were_signed(
     assert "模块".encode() in written
 
 
-def test_sbom_output_refuses_to_choose_between_two_attestations_of_one_type(
+def test_sbom_output_picks_the_newest_of_two_logged_attestations_of_one_type(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
     tmp_path: Path,
 ) -> None:
-    """S-007 error case: >1 match is 65 ``multiple_attestations`` naming each digest.
+    """two verified, logged SBOMs of one type resolve to the newer one.
 
-    Picking one would let the registry's listing order decide which document a
-    consumer reads — a silent, reproducible-looking wrong answer. The refusal
-    names both referrer digests because "narrow with --type" is not actionable
-    when both candidates already carry the requested type.
+    Replaces the earlier refusal of this set: with both documents logged and one
+    strictly newest, the registry's listing order no longer decides anything,
+    the transparency-log time does. The log time has second resolution, so the
+    second attestation waits out the clock; two documents sharing the newest
+    time still refuse as ambiguous; that tie is covered by the unit test
+    `c017_a_tie_on_the_newest_time_refuses_as_ambiguous` in
+    `crates/ocx_cli/src/command/package_sbom.rs`, where the time is controllable.
     """
     first = write_json(tmp_path / "a.cdx.json", {
         "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1, "components": [],
@@ -389,30 +393,21 @@ def test_sbom_output_refuses_to_choose_between_two_attestations_of_one_type(
     second = write_json(tmp_path / "b.cdx.json", {
         "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 2, "components": [],
     })
-    digests = {
-        attest(ocx, sigstore_stack, identity_token, published_package, first)["referrer_digest"],
-        attest(ocx, sigstore_stack, identity_token, published_package, second)["referrer_digest"],
-    }
+    attest(ocx, sigstore_stack, identity_token, published_package, first)
+    time.sleep(2.5)
+    attest(ocx, sigstore_stack, identity_token, published_package, second)
+    output = tmp_path / "out.json"
 
     result = ocx.run(
         "package", "sbom", *sbom_args(sigstore_stack),
         "--type", "cyclonedx",
-        "--output", str(tmp_path / "never-written.json"),
+        "--output", str(output),
         published_package.short,
         check=False,
     )
 
-    assert result.returncode == 65, f"expected a data error, got {result.returncode}"
-    envelope = json.loads(result.stdout)
-    assert envelope["error"]["detail"] == "multiple_attestations"
-    for digest in digests:
-        assert digest in envelope["error"]["message"], (
-            f"the refusal must name every candidate; {digest} is missing from "
-            f"{envelope['error']['message']!r}"
-        )
-    assert not (tmp_path / "never-written.json").exists(), (
-        "a refused extraction must not leave a partial file behind"
-    )
+    assert result.returncode == 0, f"newest-wins must select, got {result.returncode}\n{result.stdout}"
+    assert json.loads(output.read_text())["version"] == 2, "the newer attestation must be the one written"
 
 
 def test_sbom_output_names_every_predicate_type_when_the_match_set_is_mixed(

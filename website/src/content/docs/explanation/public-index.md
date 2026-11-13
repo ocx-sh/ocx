@@ -118,6 +118,10 @@ The root document of a package carries status fields set by the publisher. OCX s
 | `deprecated` + message | Resolve prints a warning. The message is surfaced in [`ocx package description pull`][cmd-package-info]. |
 | `superseded_by` | Shown as advisory information in [`ocx package description pull`][cmd-package-info] and in resolve diagnostics. OCX never auto-follows it, because that would silently substitute a different package than the one you asked for. |
 
+### Declared publishers {#public-index-publishers}
+
+A package's root document can list who signs its releases, in a `publishers` array. The list reaches a client with the root, so verifying a package needs no operator configuration. The entry kinds, claim matching, registry `signatures` policy and refusal codes are described in [Pin a signer identity][verify-publishers].
+
 :::note[Open interop point: description assets]
 Index objects share one object store with the `desc` blobs (README text and logo images) that the index may carry for a package. That part of the wire format is not frozen yet. [`ocx package description pull --save-readme`][cmd-package-info] and `--save-logo` stay driven by registry-side metadata. They are independent of `index.ocx.sh`.
 :::
@@ -152,6 +156,7 @@ Index objects share one object store with the `desc` blobs (README text and logo
 
 <!-- internal -->
 [indices]: ./indices.md
+[verify-publishers]: ../guides/pin-signer-identity.mdx#supply-chain-publishers
 [indices-format]: ./indices.md#format
 [indices-bundled]: ./indices.md#bundled
 [local-index]: ./local-index.md

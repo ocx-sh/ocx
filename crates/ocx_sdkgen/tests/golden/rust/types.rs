@@ -3578,6 +3578,14 @@ pub enum ErrorDetail {
     PruneRefusedPending,
     /// A deleted tag is still present in the registry
     PruneTagStillPresent,
+    /// No publisher listed by the index signed the package
+    PublisherMismatch,
+    /// The index lists publishers that are malformed
+    PublishersInvalid,
+    /// The registry requires index-declared publishers and the package has none
+    PublishersRequired,
+    /// The index lists publishers only a newer ocx understands
+    PublishersUnrecognized,
     /// The open announce pull request conflicts with the index
     PullRequestUnmergeable,
     /// The forge refused a git push option
@@ -4258,6 +4266,10 @@ impl ErrorDetail {
             Self::PruneRefusedDurable => "prune_refused_durable",
             Self::PruneRefusedPending => "prune_refused_pending",
             Self::PruneTagStillPresent => "prune_tag_still_present",
+            Self::PublisherMismatch => "publisher_mismatch",
+            Self::PublishersInvalid => "publishers_invalid",
+            Self::PublishersRequired => "publishers_required",
+            Self::PublishersUnrecognized => "publishers_unrecognized",
             Self::PullRequestUnmergeable => "pull_request_unmergeable",
             Self::PushOptionRefused => "push_option_refused",
             Self::RecordExemptionRefused => "record_exemption_refused",
@@ -4783,6 +4795,10 @@ impl ErrorDetail {
             "prune_refused_durable" => Self::PruneRefusedDurable,
             "prune_refused_pending" => Self::PruneRefusedPending,
             "prune_tag_still_present" => Self::PruneTagStillPresent,
+            "publisher_mismatch" => Self::PublisherMismatch,
+            "publishers_invalid" => Self::PublishersInvalid,
+            "publishers_required" => Self::PublishersRequired,
+            "publishers_unrecognized" => Self::PublishersUnrecognized,
             "pull_request_unmergeable" => Self::PullRequestUnmergeable,
             "push_option_refused" => Self::PushOptionRefused,
             "record_exemption_refused" => Self::RecordExemptionRefused,

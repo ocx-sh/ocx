@@ -64,6 +64,16 @@ pub struct IndexRoot {
     pub deprecated_message: Option<String>,
     #[serde(default)]
     pub superseded_by: Option<String>,
+    /// Raw `publishers`, uninterpreted here; `ocx_trust::parse_publishers` decides.
+    ///
+    /// Presence-preserving: `null` is `Some(Value::Null)`, absent is `None`, and no value fails the root parse.
+    #[serde(default, deserialize_with = "present_value")]
+    pub publishers: Option<serde_json::Value>,
+}
+
+// Plain `Option<Value>` reads `null` as `None`, which would turn an invalid declaration into an undeclared one.
+fn present_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// A single tag pointer in a root's machine lane (●).
@@ -542,5 +552,27 @@ mod tests {
             error.to_string().contains("format_version 2"),
             "the refusal must name the served version, got: {error}"
         );
+    }
+
+    fn root_with_publishers(extra: &str) -> IndexRoot {
+        let json = format!(r#"{{"repository":"oci://ghcr.io/kitware/cmake"{extra}}}"#);
+        serde_json::from_str(&json).unwrap_or_else(|error| panic!("`{extra}` must not fail the root parse: {error}"))
+    }
+
+    /// Every JSON shape under `publishers` is carried raw; absent is `None`; none fails the parse.
+    #[test]
+    fn c001_publishers_is_carried_raw_in_every_shape() {
+        use serde_json::{Value, json};
+        assert_eq!(root_with_publishers("").publishers, None);
+        let cases = [
+            (r#","publishers":[{"kind":"key"}]"#, json!([{"kind": "key"}])),
+            (r#","publishers":{"kind":"key"}"#, json!({"kind": "key"})),
+            (r#","publishers":"x""#, json!("x")),
+            (r#","publishers":7"#, json!(7)),
+            (r#","publishers":null"#, Value::Null),
+        ];
+        for (extra, expected) in cases {
+            assert_eq!(root_with_publishers(extra).publishers, Some(expected), "{extra}");
+        }
     }
 }

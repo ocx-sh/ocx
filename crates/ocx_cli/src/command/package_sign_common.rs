@@ -6,6 +6,7 @@
 //! Shared here, never imported command-to-command: the token resolver is security-critical and must not fork.
 
 use ocx_package_manager::Error as PmError;
+use ocx_package_manager::Round;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -266,32 +267,12 @@ pub(super) fn signed_at(epoch_secs: u64) -> Option<ocx_util::time::Timestamp> {
     timestamp
 }
 
-/// The ANY-of identity constraints the signing certificate must satisfy: the flag pair, else the
-/// scope-matched `[[trust.policy]]` set; `key` names the one public key that may have signed.
+/// The single policy set a signer flag names: `--key`, else the `--certificate-*` pair.
 ///
 /// # Errors
 ///
-/// Exit 64 with no identity source (`NoIdentityProvided`), 78 for a malformed matched policy
-/// ([`VerifyErrorKind::TrustPolicyInvalid`]), 74 for an unreadable signer `key` file.
-pub(super) async fn resolve_policies(
-    context: &crate::app::Context,
-    identifier: &ocx_oci::PackageRef,
-    certificate_identity: Option<&str>,
-    certificate_oidc_issuer: Option<&str>,
-    key: Option<&KeyRef>,
-) -> anyhow::Result<Vec<CompiledPolicy>> {
-    let compiled =
-        resolve_policies_lenient(context, identifier, certificate_identity, certificate_oidc_issuer, key).await?;
-    if compiled.is_empty() {
-        return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
-    }
-    Ok(compiled)
-}
-
-/// [`resolve_policies`] without the empty-set refusal, for `sbom`'s permissive default; key mode
-/// still returns exactly one policy or an error.
-pub(super) async fn resolve_policies_lenient(
-    context: &crate::app::Context,
+/// 74 for an unreadable signer `key` file, a [`VerifyErrorKind`] for an uncompilable key.
+fn flag_policies(
     identifier: &ocx_oci::PackageRef,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
@@ -303,16 +284,64 @@ pub(super) async fn resolve_policies_lenient(
             .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
         return Ok(vec![policy]);
     }
+    let (Some(identity), Some(issuer)) = (certificate_identity, certificate_oidc_issuer) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![CompiledPolicy::exact(identity.to_owned(), issuer.to_owned())])
+}
 
-    if let (Some(identity), Some(issuer)) = (certificate_identity, certificate_oidc_issuer) {
-        return Ok(vec![CompiledPolicy::exact(identity.to_owned(), issuer.to_owned())]);
+/// Every signer round a verifying command must pass, in order; empty when nothing covers the package.
+///
+/// A signer flag replaces every round. Without one the identifier is resolved first, because the resolve may
+/// commit or memo the index root, and only then are the declared publishers read.
+///
+/// # Errors
+///
+/// The resolve's own failure, the refusals of `ocx_package_manager::signer_rounds` (77/81/82/65 as classified there), 78 for a malformed
+/// matched operator policy, 74 for an unreadable signer `key` file.
+pub(super) async fn resolve_rounds(
+    context: &crate::app::Context,
+    identifier: &ocx_oci::PackageRef,
+    certificate_identity: Option<&str>,
+    certificate_oidc_issuer: Option<&str>,
+    key: Option<&KeyRef>,
+) -> anyhow::Result<Vec<Round>> {
+    if key.is_some() || certificate_identity.is_some() {
+        let flags = flag_policies(identifier, certificate_identity, certificate_oidc_issuer, key)?;
+        return Ok(vec![Round::flags(flags)]);
     }
 
-    let target = format!("{}/{}", identifier.registry(), identifier.repository());
+    // The resolve commits or memoizes the index root the publisher read depends on; a failure here must refuse,
+    // since a fresh home would otherwise read "no root" as "no publishers declared" and skip the round.
+    context
+        .manager()
+        .index()
+        .fetch_manifest(identifier, ocx_index::IndexOperation::Resolve)
+        .await?;
+
     let project_policies = project_trust_policies(context, identifier).await?;
-    // Operator `config.toml` is authoritative; `ocx.toml` only adds trust for ungoverned scopes.
-    ocx_trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
-        .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)).into())
+    let decision = ocx_package_manager::signer_rounds(ocx_package_manager::SignerRoundsInput {
+        logical: identifier,
+        index: context.manager().index(),
+        config: context.config(),
+        operator_policies: context.config_trust_policies(),
+        project_policies: &project_policies,
+    })
+    .await?;
+    match decision {
+        ocx_package_manager::RoundsDecision::Uncovered => Ok(Vec::new()),
+        ocx_package_manager::RoundsDecision::Refused(refusal) => Err(refusal.into()),
+        ocx_package_manager::RoundsDecision::Covered(rounds) => Ok(rounds.ordered()),
+    }
+}
+
+/// Whether any round holds a keyless backend, i.e. whether a Sigstore trust root is needed at all.
+pub(super) fn rounds_need_trust_root(rounds: &[Round]) -> bool {
+    rounds
+        .iter()
+        .flat_map(|round| &round.policies)
+        .flat_map(|policy| &policy.backends)
+        .any(|backend| matches!(backend, ocx_trust::PolicyBackend::Keyless(_)))
 }
 
 /// The in-effect project's `[[trust.policy]]` set, empty without a project file: the one OCI-tier
@@ -355,6 +384,18 @@ pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::
     }
 }
 
+/// The operator-named trust-root override: `--sigstore-trusted-root`, then `OCX_SIGSTORE_TRUSTED_ROOT`.
+fn explicit_trust_root(trusted_root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    trusted_root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| {
+            ocx_env::OCX_SIGSTORE_TRUSTED_ROOT
+                .get_raw()
+                .map(std::path::PathBuf::from)
+        })
+        .map(explicit_trust_root_path)
+}
+
 /// Resolves the trust root: `--sigstore-trusted-root`, then `OCX_SIGSTORE_TRUSTED_ROOT`, on top of
 /// `ocx_sign::verify::resolve_trust_root`'s ladder, which auto-verify shares.
 pub(super) async fn resolve_trust_root(
@@ -364,14 +405,7 @@ pub(super) async fn resolve_trust_root(
     offline: bool,
     trusted_root: Option<&std::path::Path>,
 ) -> anyhow::Result<TrustRoot> {
-    let explicit = trusted_root
-        .map(std::path::Path::to_path_buf)
-        .or_else(|| {
-            ocx_env::OCX_SIGSTORE_TRUSTED_ROOT
-                .get_raw()
-                .map(std::path::PathBuf::from)
-        })
-        .map(explicit_trust_root_path);
+    let explicit = explicit_trust_root(trusted_root);
     let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
     ocx_sign::verify::resolve_trust_root(
         explicit.as_deref(),
@@ -383,6 +417,66 @@ pub(super) async fn resolve_trust_root(
     )
     .await
     .map_err(|kind| VerifyError::new(identifier.clone(), kind).into())
+}
+
+/// The trust root and transparency treatment for `rounds`: the full root where a keyless candidate needs
+/// one, else whatever is already local with log evidence checked only where that root can check it.
+///
+/// Boxed at the call site: inlined, its future widens every command's, and the root `execute` overflows a test
+/// thread's stack in a debug build.
+pub(super) async fn trust_for_rounds(
+    context: &crate::app::Context,
+    identifier: &ocx_oci::PackageRef,
+    rounds: &[Round],
+    rekor_cache_key: &str,
+    offline: bool,
+    trusted_root: Option<&std::path::Path>,
+) -> anyhow::Result<(TrustRoot, ocx_sign::verify::Transparency)> {
+    if rounds_need_trust_root(rounds) {
+        let root = resolve_trust_root(context, identifier, rekor_cache_key, offline, trusted_root).await?;
+        Ok((root, ocx_sign::verify::Transparency::Verify))
+    } else {
+        let root = resolve_local_trust_root_or_empty(context, identifier, rekor_cache_key, trusted_root).await?;
+        Ok((root, ocx_sign::verify::Transparency::VerifyIfRootAvailable))
+    }
+}
+
+/// Reads an operator-named trust root (flag or `OCX_SIGSTORE_TRUSTED_ROOT`) before the identity gate, or an
+/// unreadable path exits 64 `no trusted identity` instead of 74 naming the path. The default root stays lazy.
+pub(super) async fn validate_explicit_trust_root(
+    context: &crate::app::Context,
+    identifier: &ocx_oci::PackageRef,
+    rekor_cache_key: &str,
+    trusted_root: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    if explicit_trust_root(trusted_root).is_none() {
+        return Ok(());
+    }
+    resolve_local_trust_root_or_empty(context, identifier, rekor_cache_key, trusted_root)
+        .await
+        .map(drop)
+}
+
+/// The trust root a key-only run uses: one already local with no network, else an empty one, so a key
+/// candidate's log entry is checked only where it can be and no Sigstore request is made.
+pub(super) async fn resolve_local_trust_root_or_empty(
+    context: &crate::app::Context,
+    identifier: &ocx_oci::PackageRef,
+    rekor_cache_key: &str,
+    trusted_root: Option<&std::path::Path>,
+) -> anyhow::Result<TrustRoot> {
+    let explicit = explicit_trust_root(trusted_root);
+    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
+    let local = ocx_sign::verify::resolve_local_trust_root(
+        explicit.as_deref(),
+        context.config_trust_sigstore(),
+        home_trusted_root.as_deref(),
+        &ocx_sign::sign::state::SigningStatePaths::new(context.file_structure().state.root()),
+        rekor_cache_key,
+    )
+    .await
+    .map_err(|kind| anyhow::Error::from(VerifyError::new(identifier.clone(), kind)))?;
+    Ok(local.unwrap_or_default())
 }
 
 /// Unwraps the inner [`VerifyError`], or the JSON envelope's `context.identifier` is empty:
@@ -1257,5 +1351,21 @@ mod sweep_exit_code_tests {
             "503".into(),
         )));
         assert_eq!(super::leg_slug(&transient), "registry_transient");
+    }
+}
+
+#[cfg(test)]
+mod rounds_tests {
+    use super::*;
+
+    /// an exact keyless policy needs the trust root, no policy at all does not.
+    #[test]
+    fn a_keyless_round_needs_the_trust_root_and_an_empty_set_does_not() {
+        let keyless = vec![Round::flags(vec![CompiledPolicy::exact(
+            "id".into(),
+            "https://issuer.example".into(),
+        )])];
+        assert!(rounds_need_trust_root(&keyless));
+        assert!(!rounds_need_trust_root(&[]));
     }
 }

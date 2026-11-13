@@ -140,7 +140,7 @@ Once `ocx.lock` is current, [`ocx exec`][cmd-run] spawns a child process whose e
 
 The project is the nearest `ocx.toml` above the current directory, the same walk [`--project`][cmd-arg-project] describes, and only that file's lock is composed. Inside a project nested in another one, the enclosing project's packages are not part of the child environment. Name the enclosing project with `ocx --project <dir> exec` to run against it instead. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested].
 
-A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first, the same gate as [`package install`][cmd-package-install].
+A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust], or whose index root lists publishers, is signature-verified first, the same gate as [`package install`][cmd-package-install].
 
 The first token after `--` is resolved once, before the child starts. `exec` searches only the composed environment's `PATH` contributions, the resolved packages' own directories, never the ambient `PATH` and never a working-directory fallback. It also refuses a match that is itself an ocx-generated launcher trampoline, rather than let the child re-enter `ocx exec` through it. A command that does not resolve this way, and a trampoline match, both exit 65. Exit 1 is reserved for a spawn that fails after resolution succeeded, such as the resolved binary vanishing before `execvp`.
 

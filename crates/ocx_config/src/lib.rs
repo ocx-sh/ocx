@@ -36,7 +36,7 @@ use ocx_util::fs::path::FileReference;
 pub use self::managed::ManagedConfig;
 pub use self::mirror::MirrorConfig;
 pub use self::patch::PatchConfig;
-pub use self::registry::RegistryConfig;
+pub use self::registry::{RegistryConfig, SignatureRequirement};
 pub use self::shell::ShellConfig;
 pub use self::update::UpdateConfig;
 
@@ -227,7 +227,57 @@ pub struct RegistryDefaults {
     pub system_locked: bool,
 }
 
+fn unknown_signatures_warning(registry: &str, value: &str) -> String {
+    format!(
+        "`signatures = \"{value}\"` for registry `{registry}` is not a value this ocx knows (accepted: `if_declared`, `required`, `off`); treating it as `required`"
+    )
+}
+
 impl Config {
+    /// The `signatures` setting for `registry`: default `IfDeclared`, an unknown value reads as `Required`.
+    #[must_use]
+    pub fn signature_requirement(&self, registry: &str) -> SignatureRequirement {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        let rank = |requirement: &SignatureRequirement| match requirement {
+            SignatureRequirement::Off => 0,
+            SignatureRequirement::IfDeclared => 1,
+            _ => 2,
+        };
+        let mut winner: Option<SignatureRequirement> = None;
+        let mut locked = false;
+        let mut unknown = None;
+        // Keys differing only in case are distinct map entries, so scan them all: a system-locked one wins, else the strictest.
+        for (name, entry) in self.registries.iter().flatten() {
+            let Some(setting) = entry.signatures.as_ref() else {
+                continue;
+            };
+            if !insecure::same_registry_name(name, registry) {
+                continue;
+            }
+            let effective = match setting {
+                SignatureRequirement::Unknown(value) => {
+                    unknown.get_or_insert((name.as_str(), value.as_str()));
+                    SignatureRequirement::Required
+                }
+                known => known.clone(),
+            };
+            let take = match (&winner, locked, entry.system_locked) {
+                (None, _, _) => true,
+                (_, true, false) => false,
+                (_, false, true) => true,
+                (Some(current), _, _) => rank(&effective) > rank(current),
+            };
+            if take {
+                winner = Some(effective);
+                locked = entry.system_locked;
+            }
+        }
+        if let Some((name, value)) = unknown {
+            WARNED.call_once(|| log::warn!("{}", unknown_signatures_warning(name, value)));
+        }
+        winner.unwrap_or(SignatureRequirement::IfDeclared)
+    }
+
     /// Merge higher-precedence `other` into `self`: set scalars win, tables merge key-by-key.
     pub fn merge(&mut self, other: Config) {
         if let Some(other_registry) = other.registry {
@@ -3336,5 +3386,131 @@ mod toolchain_root_tests {
             windows_system_prefixes(),
             "C-018's Windows locations and the implementation's fallbacks must name the same directories"
         );
+    }
+
+    fn signatures_config(body: &str) -> Config {
+        toml::from_str(body).expect("config parses")
+    }
+
+    /// Default, each value, and an unknown value reading as `Required`.
+    #[test]
+    fn c009_signature_requirement_default_values_and_unknown() {
+        assert_eq!(
+            signatures_config("").signature_requirement("ocx.sh"),
+            SignatureRequirement::IfDeclared
+        );
+        for (value, expected) in [
+            ("if_declared", SignatureRequirement::IfDeclared),
+            ("required", SignatureRequirement::Required),
+            ("off", SignatureRequirement::Off),
+            ("strict", SignatureRequirement::Required),
+        ] {
+            let config = signatures_config(&format!("[registries.\"ocx.sh\"]\nsignatures = \"{value}\"\n"));
+            assert_eq!(config.signature_requirement("ocx.sh"), expected, "{value}");
+        }
+    }
+
+    /// A higher tier's `Some` wins, an absent value keeps the lower tier's.
+    #[test]
+    fn c009_signature_requirement_tier_override() {
+        let mut lower = signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"off\"\n");
+        lower.merge(signatures_config(
+            "[registries.\"ocx.sh\"]\nsignatures = \"required\"\n",
+        ));
+        assert_eq!(lower.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+        lower.merge(signatures_config(
+            "[registries.\"ocx.sh\"]\nindex = \"https://x.example\"\n",
+        ));
+        assert_eq!(lower.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+    }
+
+    /// `[registries]` keys are matched like registry identifiers (case, numeric port).
+    #[test]
+    fn c009_signature_requirement_key_is_normalised() {
+        let config = signatures_config("[registries.\"OCX.sh:05000\"]\nsignatures = \"off\"\n");
+        assert_eq!(config.signature_requirement("ocx.sh:5000"), SignatureRequirement::Off);
+        assert_eq!(config.signature_requirement("ocx.sh"), SignatureRequirement::IfDeclared);
+    }
+
+    /// A system-tier entry is not overridden by a lower tier's `signatures`.
+    #[test]
+    fn c009_signature_requirement_system_lock() {
+        let mut system = signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"required\"\n");
+        for entry in system.registries.iter_mut().flatten() {
+            entry.1.lock_as_system();
+        }
+        let mut merged = Config::default();
+        merged.merge(system);
+        merged.merge(signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"off\"\n"));
+        assert_eq!(merged.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+    }
+
+    /// The warning names the unknown value, which deserialization must keep.
+    #[test]
+    fn c009_unknown_value_is_kept_for_the_warning() {
+        let config = signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"strict\"\n");
+        let kept = config
+            .registries
+            .iter()
+            .flatten()
+            .find_map(|(_, entry)| entry.signatures.clone());
+        assert_eq!(kept, Some(SignatureRequirement::Unknown("strict".into())));
+        let message = unknown_signatures_warning("ocx.sh", "strict");
+        for needle in ["strict", "ocx.sh", "if_declared", "required", "off"] {
+            assert!(message.contains(needle), "{needle} missing: {message}");
+        }
+    }
+
+    fn locked(body: &str) -> Config {
+        let mut config = signatures_config(body);
+        for entry in config.registries.iter_mut().flatten() {
+            entry.1.lock_as_system();
+        }
+        config
+    }
+
+    /// Case-variant keys are distinct map entries: a locked `required` beats an unlocked `off`, in any map order.
+    #[test]
+    fn c009_signature_requirement_locked_entry_beats_case_variant() {
+        for _ in 0..32 {
+            let mut merged = Config::default();
+            merged.merge(locked("[registries.\"ocx.sh\"]\nsignatures = \"required\"\n"));
+            merged.merge(signatures_config("[registries.\"OCX.sh\"]\nsignatures = \"off\"\n"));
+            assert_eq!(merged.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+        }
+    }
+
+    /// Without a lock, the strictest case-variant entry wins.
+    #[test]
+    fn c009_signature_requirement_strictest_case_variant_wins() {
+        for _ in 0..32 {
+            let config = signatures_config(
+                "[registries.\"ocx.sh\"]\nsignatures = \"off\"\n[registries.\"OCX.sh\"]\nsignatures = \"if_declared\"\n[registries.\"Ocx.sh\"]\nsignatures = \"required\"\n",
+            );
+            assert_eq!(config.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+        }
+    }
+
+    /// A managed payload's `signatures` folds like any other tier: `Some` wins, absent keeps the lower value.
+    #[test]
+    fn c009_signature_requirement_managed_payload_some_wins() {
+        let mut accumulator = signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"off\"\n");
+        accumulator.merge(signatures_config(
+            "[registries.\"ocx.sh\"]\nsignatures = \"required\"\n",
+        ));
+        assert_eq!(
+            accumulator.signature_requirement("ocx.sh"),
+            SignatureRequirement::Required
+        );
+    }
+
+    /// `Unknown` is an internal fallback and never reaches the published schema.
+    #[test]
+    fn c009_unknown_is_absent_from_the_schema() {
+        let schema = serde_json::to_string(&schemars::schema_for!(SignatureRequirement)).expect("serializes");
+        for known in ["if_declared", "required", "off"] {
+            assert!(schema.contains(known), "{known} missing: {schema}");
+        }
+        assert!(!schema.to_lowercase().contains("unknown"), "{schema}");
     }
 }

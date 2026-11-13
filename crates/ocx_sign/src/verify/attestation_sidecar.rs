@@ -619,8 +619,9 @@ mod tests {
         CompiledPolicy {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
-                identity: IdentityRule::Exact(identity.to_owned()),
+                identity: Some(IdentityRule::Exact(identity.to_owned())),
                 issuer: issuer.to_owned(),
+                claims: Vec::new(),
             })],
         }
     }
@@ -1496,8 +1497,9 @@ mod tests {
             let policies = [CompiledPolicy {
                 builder: Some(pin.to_owned()),
                 backends: vec![PolicyBackend::Keyless(CompiledKeyless {
-                    identity: IdentityRule::Exact(GOLDEN_IDENTITY.to_owned()),
+                    identity: Some(IdentityRule::Exact(GOLDEN_IDENTITY.to_owned())),
                     issuer: GOLDEN_ISSUER.to_owned(),
+                    claims: Vec::new(),
                 })],
             }];
             let verify = permissive_gate(&verifier, &policies, &root, &url);

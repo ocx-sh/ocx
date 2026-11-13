@@ -7,6 +7,17 @@ use super::error::Result;
 
 use super::IndexOperation;
 
+/// What an index knows about the `publishers` of one package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredPublishers {
+    /// Nothing declares `publishers` for the package.
+    Undeclared,
+    /// The effective raw list, uninterpreted; a declared `[]` is carried as is.
+    Declared(serde_json::Value),
+    /// Both the committed and the fetched list are non-empty and share no entry.
+    Diverged,
+}
+
 #[async_trait]
 pub trait IndexImpl: Send + Sync {
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
@@ -73,6 +84,23 @@ pub trait IndexImpl: Send + Sync {
         identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, super::IndexRoot)>> {
         self.fetch_root_document(identifier).await
+    }
+
+    /// The effective `publishers` of `identifier` from state this process already holds; never a request.
+    ///
+    /// [`DeclaredPublishers::Undeclared`] for a derived source and for a name nothing declares `publishers` for.
+    async fn declared_publishers(&self, identifier: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        let _ = identifier;
+        Ok(DeclaredPublishers::Undeclared)
+    }
+
+    /// The `publishers` of the root committed locally only: what a source fetched in this process never adds.
+    ///
+    /// For an install the user named by digest or an `ocx.lock` pin, which asks the index for no declaration.
+    /// [`DeclaredPublishers::Undeclared`] for a derived source and when no root is committed.
+    async fn committed_publishers(&self, identifier: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        let _ = identifier;
+        Ok(DeclaredPublishers::Undeclared)
     }
 
     /// The physical transport identifier a root's `repository` pointer rewrites

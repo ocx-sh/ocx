@@ -691,8 +691,9 @@ mod tests {
         CompiledPolicy {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
-                identity: IdentityRule::Exact(identity.to_owned()),
+                identity: Some(IdentityRule::Exact(identity.to_owned())),
                 issuer: issuer.to_owned(),
+                claims: Vec::new(),
             })],
         }
     }

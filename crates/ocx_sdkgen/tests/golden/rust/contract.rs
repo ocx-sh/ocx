@@ -71,7 +71,7 @@ pub const COMMANDS: &[(&str, u32)] = &[
     ("package pull", 1),
     ("package push", 1),
     ("package receipt", 1),
-    ("package sbom", 1),
+    ("package sbom", 2),
     ("package select", 1),
     ("package sign", 1),
     ("package test", 1),

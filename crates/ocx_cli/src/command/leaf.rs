@@ -328,7 +328,7 @@ impl Leaf {
                 const { &[OutputMode::report::<data::package_receipt::PackageReceipt>()] },
             ),
             Self::PackageSbom => (
-                1,
+                2,
                 const {
                     &[
                         OutputMode::report::<data::sbom::SbomListingReport>(),

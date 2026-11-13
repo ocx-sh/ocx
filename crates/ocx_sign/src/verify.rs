@@ -32,10 +32,10 @@ pub use dsse::VerifiedAttestation;
 pub use error::{TrustRootLoadReason, VerifyError, VerifyErrorKind};
 pub use ocx_oci::referrer::DiscoveryMethod;
 pub use pipeline::{
-    AttestationMatch, AttestationScan, RefusedCandidate, UnverifiedSbom, VerificationMode, VerifyContentMode,
-    VerifyContext, VerifyPipeline, VerifyResult,
+    AttestationMatch, AttestationScan, RefusedCandidate, Transparency, UnverifiedSbom, VerificationMode,
+    VerifyContentMode, VerifyContext, VerifyPipeline, VerifyResult,
 };
 pub use simplesigning_read::{SidecarKind, SidecarScan, read_sidecar_manifest, read_sidecar_tag, sidecar_tag};
 pub use trust_cache::TrustRootCache;
-pub use trust_resolve::{MAX_TRUSTED_ROOT_BYTES, resolve_trust_root};
+pub use trust_resolve::{MAX_TRUSTED_ROOT_BYTES, resolve_local_trust_root, resolve_trust_root};
 pub use trust_root::TrustRoot;

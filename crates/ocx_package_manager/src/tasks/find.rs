@@ -28,6 +28,9 @@ impl PackageManager {
         if let Ok(pinned) = ocx_oci::PinnedPackageRef::try_from(package.clone())
             && let Some(info) = self.find_plain(&pinned).await?
         {
+            if !self.origin_gate_open(pinned.as_identifier(), &info, true).await? {
+                return Err(PackageErrorKind::NotFound);
+            }
             log::debug!("Found package in store without resolving: {}", pinned);
             // `any()`: a store hit proves a flat platform leaf, which `resolve`'s flat arm also stamps `any()`.
             let info = info.with_platform(ocx_oci::Platform::any());
@@ -55,6 +58,12 @@ impl PackageManager {
             log::debug!("Package not found locally for '{}'.", identifier);
             PackageErrorKind::NotFound
         })?;
+        if !self
+            .origin_gate_open(identifier.as_identifier(), &info, package.digest().is_some())
+            .await?
+        {
+            return Err(PackageErrorKind::NotFound);
+        }
         // Stamp as `setup_owned` does, or a cached find reports no platform and no registry.
         let info = info.with_platform(resolved.platform.clone());
         let info = match &resolved.transport_pinned {

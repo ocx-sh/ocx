@@ -54,6 +54,8 @@ exports_files(
         "tests/fixtures/golden/simplesigning_key_payload.json",
         "tests/fixtures/golden/simplesigning_keyless_manifest.json",
         "tests/fixtures/golden/simplesigning_keyless_payload.json",
+        "tests/fixtures/public_leaf/github_actions_leaf.json",
+        "tests/fixtures/public_leaf/github_actions_leaf.pem",
         "tests/fixtures/simplesigning/foreign_claim_type_payload.json",
         "tests/fixtures/simplesigning/foreign_subject_payload.json",
         "tests/fixtures/simplesigning/publisher_formatted_manifest.json",
@@ -265,6 +267,11 @@ acceptance_suite(
         # `src/previous_release.py` asks `ocx --project <root>/ocx.toml env -g test`
         # for the pinned previous-release binary, which reads the lock beside it.
         "tests/test_hardening_nesting.py": _PROJECT_TOOLCHAIN,
+        # Imports `attest` helpers from a sibling; `fixtures/cosign.py` mints the
+        # per-test keys through `ocx --project <root>/ocx.toml env`.
+        "tests/test_publisher_trust.py": ["tests/test_attest.py"] + _PROJECT_TOOLCHAIN,
+        # The previous release comes from the same toolchain lookup.
+        "tests/test_publisher_trust_previous.py": _PROJECT_TOOLCHAIN,
         "tests/test_doc_scripts.py": _PROJECT_TOOLCHAIN + [
             ":recording_sources",
             "//test/doc_scripts:doc_script_sources",

@@ -58,7 +58,7 @@ fn system_locked_shut(config: &Config, host: &str) -> bool {
 ///
 /// A non-`u16` port is not normalised, or `registry.corp:99999` would revoke `registry.corp`.
 /// No default-port fill: the four gates span two schemes, so any default is wrong for some.
-fn same_registry_name(left: &str, right: &str) -> bool {
+pub(crate) fn same_registry_name(left: &str, right: &str) -> bool {
     fn normalize(name: &str) -> String {
         match name.rsplit_once(':') {
             Some((host, port)) => port.parse::<u16>().map_or_else(

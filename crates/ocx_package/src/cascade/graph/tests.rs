@@ -200,6 +200,7 @@ impl Graph {
                 status: None,
                 deprecated_message: None,
                 superseded_by: None,
+                publishers: None,
             }),
         }
     }

@@ -4,7 +4,8 @@
 //! `ocx package verify` — Sigstore verification of a package's signature referrer. State machine:
 //! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 //!
-//! No default identity or issuer: the pair comes from the flags or a matching `[[trust.policy]]`.
+//! No default identity or issuer: the signer comes from the flags, the publishers the index lists for the
+//! package, or a matching `[[trust.policy]]`.
 //! `--offline` scopes to the Sigstore trust services only, and without cached or supplied trust
 //! material it fails rather than skips verification.
 
@@ -34,9 +35,9 @@ pub struct PackageVerify {
 
     /// Expected certificate SAN (exact match).
     ///
-    /// Optional when a `[trust.policy]` whose scope covers the target supplies
-    /// the identity; when given, this flag and `--certificate-oidc-issuer`
-    /// override any policy. The two flags are used together; supplying one
+    /// Without this flag the identity comes from the publishers the index
+    /// lists for the package or a matching `[trust.policy]`. Given with
+    /// `--certificate-oidc-issuer`, the two replace both. Supplying one
     /// without the other is an error. Not usable with `--key`: a key signature
     /// carries no certificate, so there is no SAN to match.
     ///
@@ -51,9 +52,10 @@ pub struct PackageVerify {
 
     /// Expected certificate OIDC issuer (exact match).
     ///
-    /// Optional when a matching `[trust.policy]` supplies the issuer; used
-    /// together with `--certificate-identity` to override any policy. Not
-    /// usable with `--key`, which names a public key rather than an issuer.
+    /// Without this flag the issuer comes from the index's listed publishers
+    /// or a matching `[trust.policy]`; given with `--certificate-identity`,
+    /// the pair replaces both. Not usable with `--key`, which names a public
+    /// key rather than an issuer.
     ///
     /// Example: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com`.
     #[clap(
@@ -153,16 +155,16 @@ impl PackageVerify {
         let offline = context.is_offline();
 
         let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
-        let trust_root = package_sign_common::resolve_trust_root(
+        package_sign_common::validate_explicit_trust_root(
             &context,
             &identifier,
             &rekor_cache_key,
-            offline,
             self.trusted_root.as_deref(),
         )
         .await?;
 
-        let policies = package_sign_common::resolve_policies(
+        // Resolve first, then read publishers: a fresh home sees the declaration the resolve commits.
+        let rounds = package_sign_common::resolve_rounds(
             &context,
             &identifier,
             self.certificate_identity.as_deref(),
@@ -170,9 +172,23 @@ impl PackageVerify {
             key.as_ref(),
         )
         .await?;
+        if rounds.iter().all(|round| round.policies.is_empty()) {
+            return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
+        }
+
+        // A key-only run needs no Sigstore trust root, so it must not resolve (or fetch) one.
+        let (trust_root, transparency) = Box::pin(package_sign_common::trust_for_rounds(
+            &context,
+            &identifier,
+            &rounds,
+            &rekor_cache_key,
+            offline,
+            self.trusted_root.as_deref(),
+        ))
+        .await?;
 
         let options = VerifyOptions {
-            policies: &policies,
+            policies: &[],
             client,
             trust_root: &trust_root,
             rekor_url: &rekor_url,
@@ -184,10 +200,12 @@ impl PackageVerify {
             allow_unlogged_signature: self.allow_unlogged_signature,
             // `signatures[]` reports every signature, so the scan must not stop at the first pass.
             report_all: true,
+            transparency,
         };
+        // A signature counts only when it verifies in every round (matched by referrer digest).
         let verified = context
             .manager()
-            .verify_one(&identifier, self.platform.as_ref(), options)
+            .verify_rounds(&identifier, self.platform.as_ref(), &rounds, options)
             .await
             .map_err(package_sign_common::verify_error_into_anyhow)?
             .signatures;

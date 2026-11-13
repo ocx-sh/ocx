@@ -400,11 +400,12 @@ pub fn manager_with_verify_flag(
     verify: &crate::options::SignatureVerify,
 ) -> ocx_package_manager::PackageManager {
     let manager = context.manager().clone();
-    let Some(auto_verify) = manager.auto_verify().cloned() else {
-        return manager;
-    };
     let opted_out = !verify.resolve(context.no_verify());
-    manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
+    let auto_verify = manager
+        .auto_verify()
+        .cloned()
+        .map(|auto_verify| auto_verify.with_user_opted_out(opted_out));
+    manager.with_auto_verify(auto_verify)
 }
 
 /// The "not eval-safe" advisory for a non-JSON report on a non-terminal stdout, where `eval "$(ocx env)"` breaks.

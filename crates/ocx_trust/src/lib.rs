@@ -8,6 +8,7 @@
 //! and a `system_locked` policy displaces lower tiers ([`resolve_tiered`], [`resolve`]). Certificate matching lives
 //! in `ocx_sign::verify::identity`; nothing here reaches back. See `adr_trust_policy.md`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,12 @@ use serde::{Deserialize, Serialize};
 use key_ref::MAX_KEY_PEM_BYTES;
 use ocx_util::fs::path::FileReference;
 
+pub mod claims;
 pub mod key_ref;
+pub mod publishers;
+
+pub use claims::{ClaimEncoding, ClaimKeyError, ClaimSelector, CompiledClaim};
+pub use publishers::{PublisherEntry, PublisherSet, PublishersRefusal, parse_publishers};
 
 /// Container for the `[trust]` config section (`[[trust.policy]]` entries).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
@@ -430,6 +436,17 @@ pub struct KeylessMatcher {
     /// Exact expected OIDC issuer URL (byte-equal).
     #[serde(default)]
     pub oidc_issuer: Option<String>,
+
+    /// Fulcio certificate claims that must all match, keyed by claim name or raw OID.
+    ///
+    /// Every listed claim must match, and values compare as exact strings. A key is a known claim name
+    /// (`build_signer_uri`, `source_repository_identifier`, `source_repository_owner_identifier`,
+    /// `build_trigger`, `build_signer_digest`) or a raw OID under `1.3.6.1.4.1.57264.1.`; an unknown
+    /// name matches nobody.
+    ///
+    /// Alone or beside `identity` / `identity_regexp`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claims: BTreeMap<String, String>,
 }
 
 /// One entry of a policy's `signers = [...]` array, tagged on `kind` with the
@@ -607,12 +624,13 @@ impl TrustPolicy {
     }
 }
 
-/// Enforce identity XOR identity_regexp and a present issuer, then compile; the one implementation, shared by
+/// Enforce at most one identity form, at least one of identity / claims, and a present issuer, then compile; the one implementation, shared by
 /// [`validate_signers`] and [`TrustPolicy::compile`] so they cannot accept different things.
 ///
 /// # Errors
 /// [`TrustPolicyError::IdentityConflict`] when both identity forms are set,
-/// [`TrustPolicyError::IdentityUnset`] when neither is,
+/// [`TrustPolicyError::IdentityUnset`] when neither is and `claims` is empty,
+/// [`TrustPolicyError::ClaimKeyInvalid`] when a claims key resolves to no Fulcio extension,
 /// [`TrustPolicyError::IssuerUnset`] when `oidc_issuer` is absent, and
 /// [`TrustPolicyError::InvalidRegex`] when `identity_regexp` does not compile.
 fn compile_keyless_matcher(keyless: &KeylessMatcher, scope: &str) -> Result<CompiledKeyless, TrustPolicyError> {
@@ -622,17 +640,20 @@ fn compile_keyless_matcher(keyless: &KeylessMatcher, scope: &str) -> Result<Comp
                 scope: scope.to_owned(),
             });
         }
-        (None, None) => {
+        (None, None) if keyless.claims.is_empty() => {
             return Err(TrustPolicyError::IdentityUnset {
                 scope: scope.to_owned(),
             });
         }
-        (Some(exact), None) => IdentityRule::Exact(exact.clone()),
+        (None, None) => None,
+        (Some(exact), None) => Some(IdentityRule::Exact(exact.clone())),
         (None, Some(pattern)) => {
-            IdentityRule::compile_regex(pattern).map_err(|source| TrustPolicyError::InvalidRegex {
-                scope: scope.to_owned(),
-                source,
-            })?
+            Some(
+                IdentityRule::compile_regex(pattern).map_err(|source| TrustPolicyError::InvalidRegex {
+                    scope: scope.to_owned(),
+                    source,
+                })?,
+            )
         }
     };
     let issuer = keyless
@@ -641,7 +662,26 @@ fn compile_keyless_matcher(keyless: &KeylessMatcher, scope: &str) -> Result<Comp
         .ok_or_else(|| TrustPolicyError::IssuerUnset {
             scope: scope.to_owned(),
         })?;
-    Ok(CompiledKeyless { identity, issuer })
+    let claims = keyless
+        .claims
+        .iter()
+        .map(|(key, expected)| {
+            claims::resolve_claim_key(key)
+                .map(|selector| CompiledClaim {
+                    selector,
+                    expected: expected.clone(),
+                })
+                .map_err(|source| TrustPolicyError::ClaimKeyInvalid {
+                    scope: scope.to_owned(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CompiledKeyless {
+        identity,
+        issuer,
+        claims,
+    })
 }
 
 /// A compiled, ready-to-match policy: every acceptable signer, plus the pins
@@ -670,10 +710,12 @@ pub enum PolicyBackend {
 /// A compiled `kind = "keyless"` signer.
 #[derive(Debug, Clone)]
 pub struct CompiledKeyless {
-    /// The identity constraint (exact or anchored regex).
-    pub identity: IdentityRule,
+    /// The identity constraint (exact or anchored regex); `None` when the signer pins claims alone.
+    pub identity: Option<IdentityRule>,
     /// The exact expected OIDC issuer URL.
     pub issuer: String,
+    /// Fulcio certificate claims every one of which must match.
+    pub claims: Vec<CompiledClaim>,
 }
 
 impl CompiledPolicy {
@@ -684,8 +726,9 @@ impl CompiledPolicy {
         Self {
             builder: None,
             backends: vec![PolicyBackend::Keyless(CompiledKeyless {
-                identity: IdentityRule::Exact(identity),
+                identity: Some(IdentityRule::Exact(identity)),
                 issuer,
+                claims: Vec::new(),
             })],
         }
     }
@@ -823,6 +866,16 @@ impl IdentityRule {
         Ok(Self::Regex(regex::Regex::new(&anchored)?))
     }
 
+    /// [`Self::compile_regex`] with a compiled-size ceiling, for a pattern an untrusted document supplies.
+    ///
+    /// # Errors
+    /// Returns the [`regex::Error`] when the pattern does not compile or exceeds `size_limit` bytes.
+    pub fn compile_regex_bounded(pattern: &str, size_limit: usize) -> Result<Self, regex::Error> {
+        let anchored = format!(r"\A(?:{pattern})\z");
+        let regex = regex::RegexBuilder::new(&anchored).size_limit(size_limit).build()?;
+        Ok(Self::Regex(regex))
+    }
+
     /// Whether the certificate SAN satisfies this rule.
     #[must_use]
     pub fn matches(&self, san: &str) -> bool {
@@ -935,6 +988,15 @@ pub enum TrustPolicyError {
     IssuerUnset {
         /// The offending policy's scope.
         scope: String,
+    },
+    /// A `claims` key is neither a Fulcio claim name nor a canonical Fulcio OID.
+    #[error("trust policy for scope {scope:?} has an invalid claims key")]
+    ClaimKeyInvalid {
+        /// The offending policy's scope.
+        scope: String,
+        /// Why the key matches no certificate extension.
+        #[source]
+        source: claims::ClaimKeyError,
     },
     /// Both `identity` and `identity_regexp` are set on one entry.
     #[error("trust policy for scope {scope:?} sets both identity and identity_regexp (choose one)")]
@@ -1076,6 +1138,7 @@ mod tests {
                 identity: identity.map(str::to_string),
                 identity_regexp: regexp.map(str::to_string),
                 oidc_issuer: Some(issuer.to_string()),
+                claims: Default::default(),
             })],
             system_locked: false,
         }
@@ -1112,7 +1175,10 @@ mod tests {
         let [PolicyBackend::Keyless(keyless)] = policy.backends.as_slice() else {
             panic!("expected exactly one keyless backend, got {:?}", policy.backends);
         };
-        &keyless.identity
+        keyless
+            .identity
+            .as_ref()
+            .expect("the keyless backend carries an identity")
     }
 
     /// The same entry as [`policy`], but marked as declared at the system config
@@ -1710,7 +1776,7 @@ signers = [
                 compiled.backends
             );
         };
-        assert!(matches!(&keyless.identity, IdentityRule::Exact(id) if id == "release@acme.example"));
+        assert!(matches!(&keyless.identity, Some(IdentityRule::Exact(id)) if id == "release@acme.example"));
         assert_eq!(keyless.issuer, "https://token.actions.githubusercontent.com");
     }
 
@@ -1782,6 +1848,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
                 identity: Some("release@acme.example".to_string()),
                 identity_regexp: None,
                 oidc_issuer: None,
+                claims: Default::default(),
             })],
             system_locked: false,
         };
@@ -1842,6 +1909,7 @@ signers = [
                 identity: Some("release@acme.example".to_string()),
                 identity_regexp: None,
                 oidc_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+                claims: Default::default(),
             })],
             system_locked: false,
         };
@@ -2327,6 +2395,7 @@ future_field = "added by a newer ocx"
             identity: Some("release@acme.example".to_string()),
             identity_regexp: None,
             oidc_issuer: Some("https://accounts.google.com".to_string()),
+            claims: Default::default(),
         })];
         assert!(
             validate_signers(&one, "ghcr.io/acme/*").is_ok(),
@@ -2372,6 +2441,7 @@ future_field = "added by a newer ocx"
             identity: identity.map(str::to_string),
             identity_regexp: regexp.map(str::to_string),
             oidc_issuer: issuer.map(str::to_string),
+            claims: Default::default(),
         })]
     }
 
@@ -2677,6 +2747,7 @@ signers = [
                     identity: Some("release@acme.example".to_string()),
                     identity_regexp: None,
                     oidc_issuer: Some("https://accounts.google.com".to_string()),
+                    claims: Default::default(),
                 }),
                 SignerSpec::Key(KeyMatcher {
                     key: None,
@@ -3070,5 +3141,100 @@ signers = [
             ..SigstoreTrust::default()
         });
         assert_eq!(lower.rekor_upload, Some(false), "a set higher tier wins");
+    }
+
+    fn keyless_with_claims(claims: &[(&str, &str)], identity: Option<&str>) -> [SignerSpec; 1] {
+        [SignerSpec::Keyless(KeylessMatcher {
+            identity: identity.map(str::to_string),
+            identity_regexp: None,
+            oidc_issuer: Some("https://token.actions.githubusercontent.com".to_owned()),
+            claims: claims.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        })]
+    }
+
+    /// Claims alone satisfy the identity requirement and compile to selectors.
+    #[test]
+    fn c007_claims_alone_compile() {
+        let signers = keyless_with_claims(
+            &[
+                ("source_repository_identifier", "42"),
+                ("1.3.6.1.4.1.57264.1.2", "push"),
+            ],
+            None,
+        );
+        validate_signers(&signers, "s").expect("claims alone are a valid keyless signer");
+        let SignerSpec::Keyless(matcher) = &signers[0] else {
+            unreachable!()
+        };
+        let compiled = compile_keyless_matcher(matcher, "s").expect("compiles");
+        assert!(compiled.identity.is_none());
+        assert_eq!(compiled.claims.len(), 2);
+        let by_oid: Vec<_> = compiled
+            .claims
+            .iter()
+            .map(|c| (c.selector.oid.as_str(), c.selector.encoding))
+            .collect();
+        assert!(by_oid.contains(&("1.3.6.1.4.1.57264.1.15", claims::ClaimEncoding::Der)));
+        assert!(by_oid.contains(&("1.3.6.1.4.1.57264.1.2", claims::ClaimEncoding::Raw)));
+    }
+
+    /// Claims beside an identity keep the identity; no identity and no claims is still refused.
+    #[test]
+    fn c007_claims_beside_identity_and_the_empty_refusal() {
+        let both = keyless_with_claims(&[("build_trigger", "push")], Some("a@b.example"));
+        let SignerSpec::Keyless(matcher) = &both[0] else {
+            unreachable!()
+        };
+        let compiled = compile_keyless_matcher(matcher, "s").expect("compiles");
+        assert!(matches!(compiled.identity, Some(IdentityRule::Exact(_))));
+        assert_eq!(compiled.claims.len(), 1);
+        let none = keyless_with_claims(&[], None);
+        assert!(matches!(
+            validate_signers(&none, "s"),
+            Err(TrustPolicyError::IdentityUnset { .. })
+        ));
+    }
+
+    /// An unknown claim name or a bad OID key is a policy error carrying the claim error.
+    #[test]
+    fn c007_bad_claim_key_is_refused() {
+        for (key, expected) in [
+            (
+                "not_a_claim",
+                claims::ClaimKeyError::UnknownName("not_a_claim".to_owned()),
+            ),
+            ("1.2.3", claims::ClaimKeyError::OutsideFulcioArc("1.2.3".to_owned())),
+            (
+                "1.3.6.1.4.1.57264.1.7",
+                claims::ClaimKeyError::NotAClaim("1.3.6.1.4.1.57264.1.7".to_owned()),
+            ),
+        ] {
+            let signers = keyless_with_claims(&[(key, "x")], Some("a@b.example"));
+            let error = validate_signers(&signers, "s").expect_err("bad key refused");
+            assert!(
+                matches!(&error, TrustPolicyError::ClaimKeyInvalid { scope, source } if scope == "s" && *source == expected),
+                "{key}: {error:?}"
+            );
+        }
+    }
+
+    /// `claims` parses from operator TOML, and unknown signer fields stay tolerated.
+    #[test]
+    fn c007_operator_toml_carries_claims_and_tolerates_unknown_fields() {
+        let toml = r#"
+            [[trust.policy]]
+            scope = "ghcr.io/acme/*"
+            signers = [
+              { kind = "keyless", oidc_issuer = "https://token.actions.githubusercontent.com",
+                claims = { source_repository_identifier = "42" }, future_field = "x" },
+            ]
+        "#;
+        let config: toml::Table = toml::from_str(toml).expect("parses");
+        let trust: TrustConfig = config["trust"].clone().try_into().expect("unknown field tolerated");
+        let compiled = trust.policy[0].compile().expect("claims-only signer compiles");
+        let [PolicyBackend::Keyless(keyless)] = compiled.backends.as_slice() else {
+            panic!("one keyless backend");
+        };
+        assert_eq!(keyless.claims.len(), 1);
     }
 }

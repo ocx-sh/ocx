@@ -22,6 +22,7 @@ use ocx_store::file_structure::StateStore;
 use ocx_trust::CompiledPolicy;
 
 use super::super::PackageManager;
+use super::signer_rounds::{Round, remap_round_failure};
 use super::verify::map_verify_error;
 
 /// External dependencies forwarded to [`PackageManager::sbom_one`].
@@ -46,6 +47,8 @@ pub struct SbomOptions<'a> {
     pub predicate_type: Option<PredicateType>,
     /// The cosign wire shape this run pins (`--signature-format`).
     pub signature_format: Option<ocx_sign::sign::SignatureFormat>,
+    /// How a key candidate's transparency-log evidence is treated; see [`ocx_sign::verify::Transparency`].
+    pub transparency: ocx_sign::verify::Transparency,
 }
 
 /// Success payload returned by [`PackageManager::sbom_one`]; refusals ride beside the matches so the
@@ -77,6 +80,49 @@ impl PackageManager {
         platform: Option<&ocx_oci::Platform>,
         opts: SbomOptions<'_>,
     ) -> Result<SbomReport, PackageError> {
+        Ok(report_from(
+            self.scan_against(package, platform, &opts, opts.policies).await?,
+        ))
+    }
+
+    /// [`sbom_one`](Self::sbom_one) once per round in `rounds`, keeping only the documents that verified in
+    /// **every** round (matched by referrer digest): two signers can each vouch for one document and neither alone
+    /// is enough. Supersession is decided over that eligible set, so a document that failed a round hides nothing.
+    /// `opts.policies` is ignored; no round at all scans with it. A `RoundKind::Publisher` round's failures remap
+    /// to `PublisherMismatch`.
+    ///
+    /// Unverified, refused and platform-subject facts come from the first round, which scans the same referrers.
+    ///
+    /// # Errors
+    /// A [`PackageError`] from a round, tagged with `package`.
+    pub async fn sbom_rounds(
+        &self,
+        package: &ocx_oci::PackageRef,
+        platform: Option<&ocx_oci::Platform>,
+        rounds: &[Round],
+        opts: SbomOptions<'_>,
+    ) -> Result<SbomReport, PackageError> {
+        if rounds.is_empty() {
+            return self.sbom_one(package, platform, opts).await;
+        }
+        let mut scans = Vec::with_capacity(rounds.len());
+        for round in rounds {
+            scans.push(
+                self.scan_against(package, platform, &opts, &round.policies)
+                    .await
+                    .map_err(|err| remap_round_failure(round, err))?,
+            );
+        }
+        Ok(report_from(eligible_in_every_round(scans)))
+    }
+
+    async fn scan_against(
+        &self,
+        package: &ocx_oci::PackageRef,
+        platform: Option<&ocx_oci::Platform>,
+        opts: &SbomOptions<'_>,
+        policies: &[CompiledPolicy],
+    ) -> Result<AttestationScan, PackageError> {
         // Read-only view: reading must never grow the permanent local index (`adr_index_indirection.md`).
         let mgr = self.read_only_view();
         let resolve = super::resolve_subject::verify_resolver(mgr.index());
@@ -84,7 +130,7 @@ impl PackageManager {
         let context = VerifyContext {
             identifier: package,
             platform,
-            policies: opts.policies,
+            policies,
             no_cache: opts.no_cache,
             dial: mgr.index().dial_policy(package.registry()),
             resolve,
@@ -93,19 +139,32 @@ impl PackageManager {
             state,
             offline: opts.offline,
             content: VerifyContentMode::Attestation {
-                predicate_type: opts.predicate_type,
+                predicate_type: opts.predicate_type.clone(),
             },
             verification: opts.verification,
             signature_format: opts.signature_format,
             // Not inert: gates a keyless `.att` like a `.sig`, and `sbom` has no opt-out flag.
             allow_unlogged_signature: false,
             report_all: true,
+            transparency: opts.transparency,
         };
-        let scan = VerifyPipeline::run_attestations(opts.client, context)
+        VerifyPipeline::run_attestations(opts.client, context)
             .await
-            .map_err(|err| map_verify_error(package.clone(), err))?;
-        Ok(report_from(scan))
+            .map_err(|err| map_verify_error(package.clone(), err))
     }
+}
+
+/// The first scan with its matches narrowed to the documents every other scan also verified.
+fn eligible_in_every_round(mut scans: Vec<AttestationScan>) -> AttestationScan {
+    let mut first = scans.remove(0);
+    let later: Vec<Vec<AttestationMatch>> = scans.into_iter().map(|scan| scan.matches).collect();
+    first.matches = super::verify::retain_in_every_round(
+        std::iter::once(std::mem::take(&mut first.matches))
+            .chain(later)
+            .collect(),
+        |candidate| &candidate.verify.referrer_digest,
+    );
+    first
 }
 
 /// Carry a finished scan into the report shape, refusals included.
@@ -566,6 +625,7 @@ mod tests {
             predicate_type: None,
             verification: VerificationMode::Demand,
             signature_format: None,
+            transparency: ocx_sign::verify::Transparency::Verify,
         };
 
         match manager.sbom_one(&tagged_id(), Some(&platform), opts).await {
@@ -605,5 +665,126 @@ mod tests {
                 .is_none(),
             "sbom_one must not commit a tag pointer; an offline probe found one"
         );
+    }
+
+    // ── Rounds ─────────────────────────────────────────────────────────
+
+    fn referrers(report: &SbomReport) -> Vec<ocx_oci::Digest> {
+        report
+            .attestations
+            .iter()
+            .map(|candidate| candidate.verify.referrer_digest.clone())
+            .collect()
+    }
+
+    /// A document the publisher round verified and a different one the operator round verified: neither is
+    /// eligible, since each round must pass on the same document.
+    #[test]
+    fn a_document_one_round_alone_verified_is_not_eligible() {
+        let publisher_round = scan_over(None, vec![a_match_on(&enclosing_subject(), "A", SPDX)], Vec::new());
+        let operator_round = scan_over(None, vec![a_match_on(&enclosing_subject(), "B", SPDX)], Vec::new());
+
+        let report = report_from(eligible_in_every_round(vec![publisher_round, operator_round]));
+
+        assert!(report.attestations.is_empty());
+    }
+
+    #[test]
+    fn a_document_both_rounds_verified_is_eligible() {
+        let publisher_round = scan_over(
+            None,
+            vec![
+                a_match_on(&enclosing_subject(), "A", SPDX),
+                a_match_on(&enclosing_subject(), "both", SPDX),
+            ],
+            Vec::new(),
+        );
+        let operator_round = scan_over(
+            None,
+            vec![
+                a_match_on(&enclosing_subject(), "both", SPDX),
+                a_match_on(&enclosing_subject(), "B", SPDX),
+            ],
+            Vec::new(),
+        );
+
+        let report = report_from(eligible_in_every_round(vec![publisher_round, operator_round]));
+
+        assert_eq!(referrers(&report), vec![digest_of(b"both")]);
+    }
+
+    /// A platform-level SBOM that failed the operator round supersedes nothing: the index-level one both rounds
+    /// verified stays visible.
+    #[test]
+    fn a_document_that_failed_a_round_shadows_nothing() {
+        let first = scan_over(
+            Some(platform_subject()),
+            vec![
+                a_match_on(&platform_subject(), "platform-cyclonedx", CYCLONEDX),
+                a_match_on(&enclosing_subject(), "index-cyclonedx", CYCLONEDX),
+            ],
+            Vec::new(),
+        );
+        let second = scan_over(
+            Some(platform_subject()),
+            vec![a_match_on(&enclosing_subject(), "index-cyclonedx", CYCLONEDX)],
+            Vec::new(),
+        );
+
+        let report = report_from(eligible_in_every_round(vec![first, second]));
+
+        assert_eq!(referrers(&report), vec![digest_of(b"index-cyclonedx")]);
+        assert!(report.shadowed.is_empty(), "got {:?}", report.shadowed);
+    }
+
+    /// A round that verified nothing leaves nothing eligible, however many documents the other rounds verified.
+    #[test]
+    fn a_round_with_nothing_verified_leaves_nothing_eligible() {
+        let nothing = || scan_over(None, Vec::new(), Vec::new());
+        let one = || scan_over(None, vec![a_match_on(&enclosing_subject(), "A", SPDX)], Vec::new());
+
+        assert!(referrers(&report_from(eligible_in_every_round(vec![nothing()]))).is_empty());
+        assert!(referrers(&report_from(eligible_in_every_round(vec![one(), nothing()]))).is_empty());
+        assert!(referrers(&report_from(eligible_in_every_round(vec![nothing(), one()]))).is_empty());
+    }
+
+    /// One round is the identity: every document it verified is eligible, in listing order.
+    #[test]
+    fn a_single_round_keeps_everything_it_verified() {
+        let only = scan_over(
+            None,
+            vec![
+                a_match_on(&enclosing_subject(), "A", SPDX),
+                a_match_on(&enclosing_subject(), "B", CYCLONEDX),
+            ],
+            Vec::new(),
+        );
+
+        let report = report_from(eligible_in_every_round(vec![only]));
+
+        assert_eq!(referrers(&report), vec![digest_of(b"A"), digest_of(b"B")]);
+    }
+
+    /// Three rounds: a document absent from any one of them is dropped, whichever one it is.
+    #[test]
+    fn a_document_absent_from_one_of_three_rounds_is_not_eligible() {
+        let round = |referrers: &[&str]| {
+            scan_over(
+                None,
+                referrers
+                    .iter()
+                    .map(|referrer| a_match_on(&enclosing_subject(), referrer, SPDX))
+                    .collect(),
+                Vec::new(),
+            )
+        };
+
+        let report = report_from(eligible_in_every_round(vec![
+            round(&["all", "not-in-third"]),
+            round(&["all", "not-in-third", "only-second"]),
+            round(&["all", "only-third"]),
+        ]));
+
+        assert_eq!(referrers(&report), vec![digest_of(b"all")]);
     }
 }

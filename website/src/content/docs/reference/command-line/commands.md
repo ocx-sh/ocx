@@ -103,7 +103,7 @@ Under `--global` an unusable toolchain (none configured, or a corrupt or stale l
 
 With `--format json` the document also carries `binaries`, `entrypoints` and `integrations` arrays beside `items`, plus an `advisories` array for any deferred package in the composition. A package missing from the object store is installed as part of composition.
 
-`--no-pull` skips that and never contacts the registry: an unmaterialized package is warned about on stderr and omitted, and the exit code stays 0. One a `[[trust.policy]]` covers is signature-verified first.
+`--no-pull` skips that and never contacts the registry: an unmaterialized package is warned about on stderr and omitted, and the exit code stays 0. One with index-listed publishers or a covering `[[trust.policy]]` is signature-verified first.
 
 Opt out with `OCX_NO_VERIFY`.
 
@@ -147,7 +147,7 @@ With names, only those bindings must resolve and install. An unrelated binding t
 
 Without names, every binding in scope is composed.
 
-A binding missing from the object store is installed during composition, and one a `[[trust.policy]]` covers is signature-verified first (opt out with `OCX_NO_VERIFY`). Entries compose in `-g` selection order after `all` expansion, then alphabetically by binding name within a group.
+A binding missing from the object store is installed during composition, and one with index-listed publishers or a covering `[[trust.policy]]` is signature-verified first (opt out with `OCX_NO_VERIFY`). Entries compose in `-g` selection order after `all` expansion, then alphabetically by binding name within a group.
 
 Later entries are prepended, so the last group listed has its `bin/` searched first on `PATH`.
 

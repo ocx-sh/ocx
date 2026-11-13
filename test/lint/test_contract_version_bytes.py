@@ -2,13 +2,13 @@
 # Copyright 2026 The OCX Authors
 """Interim bump rule: a contract golden that changes bytes bumps that item's version.
 
-Compares the tree's goldens with the newest release tag's, item by item: a report
-root (wrapper plus reached `$defs`, `schema_version` excluded; version = the
-wrapper's `schema_version` const), `errors` (whole document minus `$id` and
-`schema_version`; version = the `$id` major) and each `cli.json` command node (own
-fields and args; version = its `version`). Changed -> the tag's version + 1,
-unchanged -> the tag's, added -> 1, removed -> unchecked. Inert once the compat
-gate is live (`baseline/` present and `ocx_sdkgen`'s differ in the tree).
+Compares the tree's goldens with the newest release tag's: report roots (version =
+`schema_version` const) and `cli.json` command nodes (version = `version`). Changed ->
+tag's version + 1, unchanged -> tag's, added -> 1, removed -> unchecked. Inert once the
+compat gate is live (`baseline/` present and `ocx_sdkgen`'s differ in the tree).
+`errors` is exempt from the byte rule by owner decision: it stays at v1 and edits the
+unpublished v1 document in place until `task contract:rotate` cuts a baseline. Only the
+`schema_version` const vs `$id` major agreement is checked.
 """
 
 from __future__ import annotations
@@ -158,8 +158,9 @@ def version_byte_problems(repo: Path) -> list[str]:
                 f"{name}: read {len(head)} items at HEAD and {len(at_tag)} at {tag}"
             )
             continue
-        problems += _bump_problems(head, at_tag, tag)
-        if name == "errors.json":
+        if name != "errors.json":
+            problems += _bump_problems(head, at_tag, tag)
+        else:
             const = (
                 head_doc.get("properties", {}).get("schema_version", {}).get("const")
             )
@@ -314,17 +315,11 @@ def test_a_bump_without_a_byte_change_is_red(tmp_path: Path) -> None:
     ]
 
 
-def test_an_errors_change_without_an_id_bump_is_red(tmp_path: Path) -> None:
+def test_an_errors_change_without_an_id_bump_is_green_while_no_baseline_exists(
+    tmp_path: Path,
+) -> None:
     repo = tagged(tmp_path)
     edit(repo, errors=_errors(command="The command path."))
-    assert version_byte_problems(repo.path) == [
-        "errors document: version 1, expected 2 (bytes changed since v1.0.0 at version 1)"
-    ]
-
-
-def test_an_errors_change_with_an_id_bump_is_green(tmp_path: Path) -> None:
-    repo = tagged(tmp_path)
-    edit(repo, errors=_errors(major=2, command="The command path."))
     assert version_byte_problems(repo.path) == []
 
 

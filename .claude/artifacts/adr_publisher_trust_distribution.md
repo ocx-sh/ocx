@@ -1,531 +1,234 @@
-# ADR: Publisher trust distribution — minimal TUF over the index, ingest-verified releases
+# ADR: Publisher trust distribution — index-declared `publishers`, checked by the client
 
 ## Metadata
 
-**Status:** Proposed
-**Date:** 2026-10-25
-**Deciders:** Michael Herwig (owner); architect draft, round-1 fix pass
-**Beads Issue:** N/A — related [ocx-sh/ocx#199](https://github.com/ocx-sh/ocx/issues/199), [ocx-sh/ocx#102](https://github.com/ocx-sh/ocx/issues/102), [ocx-sh/ocx#108](https://github.com/ocx-sh/ocx/issues/108), [ocx-sh/ocx#109](https://github.com/ocx-sh/ocx/issues/109), [ocx-sh/ocx#403](https://github.com/ocx-sh/ocx/issues/403), [ocx-sh/ocx-mirror#7](https://github.com/ocx-sh/ocx-mirror/issues/7)
-**Related PRD:** `prd_release_signing_trust_default.md` (handed off to architect, 2026-10-25)
+**Status:** Accepted (goal-loop authority, 2026-11-13; the owner may revisit)
+**Date:** 2026-10-25 (drafted) · 2026-11-13 (Decision Outcome replaced for slice 1)
+**Deciders:** Michael Herwig (owner); architect (Opus)
+**Beads Issue:** N/A — related [ocx-sh/ocx#199](https://github.com/ocx-sh/ocx/issues/199), [ocx-sh/ocx#102](https://github.com/ocx-sh/ocx/issues/102), [ocx-sh/ocx#392](https://github.com/ocx-sh/ocx/issues/392), [ocx-sh/ocx#403](https://github.com/ocx-sh/ocx/issues/403), [ocx-sh/ocx-mirror#7](https://github.com/ocx-sh/ocx-mirror/issues/7)
+**Source discussion:** `.agents/discussions/release-signing-trust-default-2026-11-12.md` (ratified 2026-11-13). It supersedes the 2026-10-25 Decision Outcome of this ADR where they conflict; this revision states that design.
+**Related PRD:** `prd_release_signing_trust_default.md`
 **Tech Strategy Alignment:**
-- [x] GitHub Actions + OIDC, Rust/Tokio; `tough` is already in `Cargo.lock` (0.22.0, line 7150) — a direct dependency, no new crate
-- [ ] No deviation — an online key in a cloud KMS deviates from "Secrets: GitHub Secrets" (Q1); the environment-secret fallback does not
-**Domain Tags:** security | integration | api | infrastructure
-**Tier:** xhigh · **One-way door:** high · **Blast radius:** external contract (index wire format, config grammar, signer-identity scheme every own release is signed under)
-**Supersedes:** none
-**Amends:** `adr_trust_policy.md`, `adr_servable_index_snapshot.md`, `adr_index_indirection.md`, `adr_managed_config_tier.md`, `adr_oci_referrers_signing_v1.md`, `adr_announce_publisher_surface.md` (see [ADR amendments](#adr-amendments))
+- [x] Rust 2024 / Tokio; GitHub Actions + OIDC; no new crate (the 2026-10-25 `tough` dependency is dropped with TUF)
+- [x] Secrets: none on the client; keyless signing needs none either
+**Domain Tags:** security | integration | api
+**Tier:** xhigh · **One-way door:** high (the `publishers` wire shape and the `claims` vocabulary ship in every client) · **Blast radius:** external contract (index wire format, config grammar, install exit codes)
+**Supersedes:** the 2026-10-25 Decision Outcome of this ADR (option C1, TUF over the index)
+**Amends:** `adr_trust_policy.md`, `adr_sbom_attestations.md`, `adr_offline_verify_trust_cache.md`, `adr_oci_referrers_signing_v1.md` (see [ADR amendments](#adr-amendments))
 **Superseded By:** —
 
-Citation keys:
-**[ECO]** `research_publisher_trust_package_ecosystems.md` ·
-**[FW]** `research_publisher_trust_frameworks.md` ·
-**[OCI]** `research_publisher_trust_oci_policy.md` ·
-**[GAP]** `research_publisher_trust_gapcheck.md` ·
-**[MAP]** `discover_publisher_trust_architecture_map.md` ·
-**[SSI]** `research_stable_signer_identity.md` ·
-**[TRI]** `research_publisher_trust_round1_triage.md` (all `.claude/artifacts/`).
-Every mechanism names a production adopter, or is labelled **NOVEL** or **variant** in [Labels](#labels).
+Citation keys: **[ECO]** `research_publisher_trust_package_ecosystems.md` · **[FW]** `research_publisher_trust_frameworks.md` · **[OCI]** `research_publisher_trust_oci_policy.md` · **[GAP]** `research_publisher_trust_gapcheck.md` · **[SSI]** `research_stable_signer_identity.md` · **[OID]** `research_fulcio_claim_oids.md` (all `.claude/artifacts/`).
 
 ## Context
 
-The signing and verification machinery exists (`crates/ocx_sign`, `crates/ocx_trust`), but no own release is signed and no default policy exists. With no matching `[[trust.policy]]`, install skips verification with an INFO line (`crates/ocx_package_manager/src/tasks/auto_verify.rs`). Verification is opt-in everywhere.
+The signing and verification machinery exists (`crates/ocx_sign`, `crates/ocx_trust`). No own release is signed, and verification on install runs only for a package an operator `[[trust.policy]]` covers (`crates/ocx_package_manager/src/tasks/auto_verify.rs`). Without one, install logs an INFO line and proceeds.
 
-A default client trusts only the transport on the resolution path:
+The 2026-10-25 draft made the index the trust point: the index bot checks publisher signatures at ingest, and clients trust whatever a TUF-signed index says. The owner rejected that premise on 2026-11-13. **The packages themselves must be validated by the client.** A mirror operator or a pass-through proxy has not validated every digest it serves, so it must not become the trust point. "The digest is enough" is not accepted. The product is decentralised: registries belong to different companies, each with its own public or private Sigstore instance, or a plain key.
 
-- `OcxIndex` fetches `p/<ns>/<pkg>.json` directly; the root's bytes are never checked against `c/index.json`. `adr_servable_index_snapshot.md` records that "the index path's real trust boundary is the transport" (line 236).
-- `c/index.json` (`CatalogDocument { format_version, packages }`) carries no version, expiry or signature. Nothing detects a rolled-back or frozen index.
-- The local index is the package-tier lock (`subsystem-oci.md`): whatever a first resolve commits is trusted forever.
-
-The index repository (`ocx-sh/index`) already has registry governance: human lanes for `repository`/`owners`/`status`/yank (G-05), new packages always human (G-04), owner-authored tag refreshes auto-merged (G-19). `render-deploy.yml` deploys to Cloudflare Pages on every merge and on a `*/15` cron.
-
-Owner requirements (discussion artifact): (1) onboarding without an ocx release, (2) signer add/rotate/revoke without breaking old releases, including compromise, (3) offline, air-gapped and frozen-lock installs keep verifying, (4) operator override per scope, (5) a stated home, mutation path and staleness/rollback detection for trust data. Four improvised designs were rejected as bespoke: per-family client anchors; a client-consumed per-package `signers` list; append-only signer entries with validity windows; the verifying signer in `ocx.lock`.
+The owner also dropped TUF metadata over the index. The index will be signed the way a package is, with an accepted-signer list in the same vocabulary (slice 4).
 
 ## Decision Drivers
 
-- **No client release for onboarding or anchor rotation** (req 1, 2).
-- **Prior art only** — every mechanism cites an adopter; the owner rejects bespoke shapes.
-- **Solo-maintainer operations** — one person holds every role; thresholds buy nothing ([FW] M3).
-- **Offline-first** — committed resolves must stay network-free (Principle 2, `product-context.md`).
-- **Don't own non-domain code** — TUF rules belong in a maintained library (`quality-core.md`).
-- **Dossier constraint "no long-lived keys"** (Decisions, line 39) — written for release signing; whether it binds the index anchor is Q1.
+- **Client-side validation.** A mirror or proxy never becomes the trust point (owner, 2026-11-13).
+- **No client release for onboarding, rotation or a new signer kind.** An index edit is enough.
+- **One signer vocabulary.** The index uses `[[trust.policy]]`'s signer shapes; GitLab and other forges are reached through generic claims, not a forge-specific kind.
+- **Offline-first.** A committed local resolve stays network-free (Principle 2, `product-context.md`).
+- **Fail closed on the unknown.** An entry a client does not understand matches nobody. It never matches everybody.
+- **Prior art only.** Every mechanism has an adopter (table below).
 
 ## Industry Context & Research
 
-**Trending:** registry-side trusted publishing on immutable CI identity (npm, PyPI, crates.io, RubyGems, NuGet; [ECO] P1). Signed, expiring repository metadata (apt `InRelease`, Nix, npm; [ECO] P2). TUF for low-churn anchor documents (Sigstore root-signing, GitHub; [FW] F10, F11). Per-publisher repository keys failed in the field (Docker Content Trust, PEP 480; [ECO] P3, [FW] F7).
-
-### Lane disagreement
-
-| Lane | Recommends | Against |
+| Mechanism | Adopter | Source |
 |---|---|---|
-| [FW] | TUF Variant 2: offline root and targets, online snapshot/timestamp, one online delegation | A pinned CI identity as anchor (no chain, F15) |
-| [OCI] | Signed snapshot plus a client-consumed per-package signer record | — |
-| [ECO] | Signed snapshot, anchor key or TUF root delivered via the managed channel (P2a) | Per-publisher client keys |
-
-All three agree the repository vouches for ingest-verified content. They disagree on anchor weight and on client-side publisher checks. C1 is [FW] Variant 1: its anchor, without Variant 2's offline targets role.
-
-### Prior art per requirement
-
-| Req | Mechanism | Named adopters | Source |
-|---|---|---|---|
-| 1 Onboarding | `publishers` in the root, human-gated, consumed at ingest by the bot; online-signed TUF targets carry new roots to clients | PyPI, npm, crates.io trusted publishing (ingest); RFC 3724 crates.io index as TUF target, single online key | [ECO] P1; [FW] F13 |
-| 2 Change safety | ANY-of `publishers` overlap; old rows never re-verified; anchor rotates and revokes by root chaining | npm, NuGet ("existing packages aren't affected"); Sigstore and GitHub TUF roots | [ECO] P2; [FW] F1, F10 |
-| 3 Offline | TUF checks only when remote data is written into the local index | apt checks `Valid-Until` when acquiring lists (`Check-Valid-Until`, sources.list(5)); Go `go.sum`; TUF update-only checks | [FW] F1, F15 |
-| 4 Operator override | Per-source `index_trust` level and `index_trust_root` | cosign `initialize --root`, `gh attestation trusted-root --tuf-root`, Go `GOSUMDB`, apt `Signed-By` | [FW] F11, F15 |
-| 5 Freshness, rollback | TUF timestamp (7 d), snapshot and targets versions, client datastore | Sigstore root-signing (7 d timestamp, 6 d re-sign), PEP 458 | [FW] F10 |
-
-Caveat on apt: apt replaces lists wholesale on update; OCX keeps committed roots, like `go.sum`.
-
-### Labels
-
-| Mechanism | Label | Closest precedent / reason |
-|---|---|---|
-| Variant 1 shape (one online key over targets, snapshot, timestamp; offline root) | proposed precedent | RFC 3724 (open; 2026 prototype goal); components run at Sigstore ([FW] F10, F13) |
-| `warn` never persists unverified data | **variant** | policy-controller `warn` admits; OCX cannot, because the local index is a lock |
-| G-21 checks a pushed signature, not an upload token | **variant** | Trusted publishing verifies the CI token at upload ([ECO] P1) |
-| `publishers` public in git; no pending/activation states | **variant** | aqua registry is public ([ECO] P4); registries keep it private. Every edit is human-reviewed, so activation windows add nothing |
-| Backfill identity retired by deleting its workflow | **NOVEL** | Homebrew's backfill cutoff needs validity windows, which the owner rejected |
-| Signing job guarded by `if: github.repository_id == …` | **NOVEL** | Defence in depth; the `.15` pin is the control (SLSA verifier source-repo pin, [GAP] G5) |
-| Per-source update lock across fetch and commit | precedent | apt `lists/lock` |
-| Levels `enforce` / `warn` / `off` | precedent | policy-controller `enforce`/`warn`, Go `GOSUMDB=off` |
-
-### Partial precedent for the rejected designs
-
-| Rejected design | What this ADR does | Precedent found |
-|---|---|---|
-| Per-family client anchors | Not adopted. One embedded TUF root for the index, the Sigstore/gh client shape. Draft B's compiled-in CI identity was this design at infrastructure scope; Homebrew's compiled-in identity costs a client release per change ([ECO] P6) | Infrastructure roots only |
-| Client-consumed `signers` list | `publishers` sits in the root; only the bot consumes it | PyPI/npm enforce at upload, not on clients; aqua alone consumes client-side ([ECO] P4) |
-| Validity windows | Not adopted | Windows exist for infrastructure keys only ([OCI] row 3, [FW] F17) |
-| Signer in `ocx.lock` | Not adopted | PEP 751 `attestation-identities`, read by no installer ([FW] F16) |
+| Publisher identity declared beside the package and checked on the consumer | aqua registry (`slsa_provenance`, `cosign` per package); Homebrew attestation checks; `gh attestation verify --repo` | [ECO] P4, P6 |
+| Identity by immutable numeric repository and owner IDs | PyPI trusted publishing, sigstore-go `CertificateIdentity` extension matching, SLSA verifier | [GAP] G5, [SSI] |
+| Generic certificate-extension match by OID | sigstore-go `certificate.Extensions`, cosign `--certificate-github-workflow-*`, policy-controller `subjectRegExp` + extensions | [OID], [GAP] G4 |
+| An unknown entry kind disables only that entry | TUF delegations; npm provenance ignores unknown predicates | [FW] F18 |
+| Several signed statements, the newest by log time wins | Sigstore bundle `integratedTime`; Rekor-ordered attestations in `gh attestation` | [OCI] |
+| Per-repository verification mode `off` / `if-declared` / `required` | Go `GOSUMDB`/`GONOSUMCHECK`, pip `--require-hashes`, apt `Signed-By` | [FW] F15 |
+| Operator policy ANDs over publisher declarations | policy-controller multiple `ClusterImagePolicy` (all must pass) | [OCI] |
 
 ## Considered Options
 
-**A — operator policy only.** ocx ships a pointer to a default policy package; auto-verify checks artifacts; the index stays unsigned.
-**B — index signs its catalog keylessly.** Render workflow signs `c/index.json` with its Sigstore identity, plus bespoke `version`/`expires`/high-water rules; compiled-in identity anchor.
-**C1 — minimal TUF over the index** ([FW] Variant 1, RFC 3724 shape). Offline root (owner keys, threshold 1), one online key for targets, snapshot and timestamp, no delegations, no wire split.
-**C2 — TUF Variant 2.** C1 plus offline targets for declarations and one online delegation for tag rows; roots split into human-lane and bot files.
-**D — unsigned client-consumed declaration (aqua).** **Eliminated by owner ruling** (rejected design #2); not scored.
-
-All of A, B, C1 and C2 keep the ingest gate (G-21) and the `github_actions` signer kind.
+**A — operator policy only.** ocx ships a pointer to a default policy package; the index stays unsigned and declares nothing.
+**B — index signs its catalog keylessly** with a compiled-in CI identity and bespoke `version`/`expires` rules; only the bot checks publishers.
+**C1 — minimal TUF over the index** (2026-10-25 choice): offline root, one online key, the bot checks publishers, clients trust the TUF-signed index.
+**C2 — TUF Variant 2:** C1 plus offline targets for declarations.
+**E — package-style signer list (chosen).** The index package file declares `publishers` in the `[[trust.policy]]` signer vocabulary; the client verifies every fetched package against it. The catalog is later signed the same way, by a signer list per registry (slice 4). No TUF.
+**D — unsigned declaration the client trusts blindly.** Eliminated by the 2026-10-25 owner ruling; E differs because the client checks the package signature itself and the index signature follows.
 
 ### Weighted matrix
 
-Scores 1–5; weight × score; maximum 500. One clause per cell.
+Scores 1–5, weight × score. R6 is new (owner, 2026-11-13); the other rows keep their 2026-10-25 scores. Maximum 570.
 
-| Criterion (weight) | A | B | C1 | C2 |
-|---|---|---|---|---|
-| R1 onboarding (12) | 3 — fleet pulls a republished policy | 5 — index PR only | 5 — index PR; online key signs | 3 — each declaration needs an offline signature |
-| R2 change safety (12) | 2 — compiled pointer; no anchor revocation | 3 — anchor rotation needs a client release; keyless anchor unrevocable | 5 — root chaining rotates and revokes, no release | 5 — same |
-| R3 offline (10) | 4 — write-time checks only | 4 — same | 4 — same | 4 — same |
-| R4 override (8) | 5 — it is the override | 5 — name a signer | 4 — operator supplies a `root.json` | 4 — same |
-| R5 freshness (12) | 2 — none | 3 — OCX-own window constants | 5 — TUF timestamp/snapshot | 5 — same |
-| Threats (14) | 3 — tag map unauthenticated (T1, T6, T7) | 4 — T2 total | 4 — same verdicts as B; T2 recoverable | 5 — offline targets bound T2 |
-| Solo cost (12) | 4 — republish a package | 4 — no keys; daily re-sign | 3 — yearly root re-sign, one online key | 1 — offline ceremony per onboarding |
-| Client complexity (8) | 5 — existing auto-verify | 3 — verifier, high-water, windows all owned | 4 — `tough` owns TUF; adapter owned | 3 — plus delegations; `tough` lacks succinct roles |
-| Reversibility (6) | 4 — pointer swap | 2 — anchor in shipped binaries for years | 4 — chain changes keys, threshold, expiry | 3 — wire split is one-way |
-| Fit (6) | 5 — managed + `[[trust.policy]]` end to end | 3 — new verifier seam | 3 — `tough` linked; new datastore | 2 — plus indexbot delegation |
-| **Total** | **348 (70 %)** | **370 (74 %)** | **418 (84 %)** | **364 (73 %)** |
+| Criterion (weight) | A | B | C1 | C2 | E |
+|---|---|---|---|---|---|
+| R1 onboarding (12) | 3 | 5 | 5 | 3 | 5 — index PR only |
+| R2 change safety (12) | 2 | 3 | 5 | 5 | 4 — add or drop entries; index-signer rotation by client release or operator config (slice 4) |
+| R3 offline (10) | 4 | 4 | 4 | 4 | 4 — checks on fetch only |
+| R4 override (8) | 5 | 5 | 4 | 4 | 5 — `signatures` per registry, `[[trust.policy]]` ANDs on top |
+| R5 freshness (12) | 2 | 3 | 5 | 5 | 3 — `expires` arrives with slice 4 |
+| Threats (14) | 3 | 4 | 4 | 5 | 4 — mirror and proxy are no trust point; index host partial until slice 4 |
+| Solo cost (12) | 4 | 4 | 3 | 1 | 5 — no keys to guard |
+| Client complexity (8) | 5 | 3 | 4 | 3 | 4 — reuses the verify pipeline; owns a claims matcher |
+| Reversibility (6) | 4 | 2 | 4 | 3 | 4 — additive list, fail-closed growth |
+| Fit (6) | 5 | 3 | 3 | 2 | 5 — same vocabulary as `[[trust.policy]]` |
+| R6 packages validated by the client (14) | 2 | 1 | 1 | 1 | 5 |
+| **Total** | **376 (66 %)** | **384 (67 %)** | **432 (76 %)** | **378 (66 %)** | **496 (87 %)** |
 
-### Flip points
+Flip points: E leads C1 by 64, of which R6 alone is 56. C1 wins only if R6 is weighted at 0, which the owner's ruling forbids. Without R6, E (426) and C1 (418) are within one score step on R5; slice 4's `expires` closes that gap.
 
-- C1 leads B by 48: R2 +24, R5 +24, client +8, reversibility +12; B leads R4 +8, solo +12.
-- **B wins only if** the owner keeps "no long-lived keys" binding for the index anchor (C1 and C2 become infeasible), or the solo weight exceeds 60 (5× today).
-- Valuing root chaining and TUF freshness at B's level (R2 = R5 = 3) ties C1 and B at 370.
-- A failed `tough` spike (client 1, fit 1) leaves C1 at 382, still above B.
-- C2 never overtakes C1 under these weights: its onboarding ceremony costs R1 as well as solo. It becomes relevant when third-party namespaces make bounding T2 worth that ceremony (Q2).
+### Rejected: TUF metadata over the index (C1, C2)
 
-### Reversibility per mechanism
-
-| Mechanism | Reversible? | How |
-|---|---|---|
-| Embedded `root.json` v1 | Yes, by chain | Root versions change keys, threshold, expiry; losing every root key needs a client release |
-| Online key | Yes | Root revokes it; clients recover on next fetch (TUF spec 5.3.11) |
-| TUF metadata format read by `tough` 0.22 | **One-way** | Spec bumps can force a client release ([FW] F18) |
-| `/tuf/` layout and target names | **One-way** | Shipped clients fetch these paths |
-| `github_actions` key set | **One-way** | Later narrowing keys ship as a new kind ([GAP] G4) |
-| Name-based `signer_workflow` | Yes, per PR | A publisher repo rename costs one human PR to `publishers` (PyPI, crates.io parity). No client impact: the anchor is a TUF root, not a workflow name |
-| RFC 3161 `SigningInstant` variant | **One-way** once shipped | Needed before Rekor v1 freezes ([GAP] G7) |
-| Phase-1 SANs | **One-way per artifact** | Rekor entries are permanent; new SANs can be added |
-| Rekor v1 / bundle v0.3 in the artifact verifier | **One-way** for shipped clients | Publisher path only; spike in P1 (A22) |
-| Levels and override keys | Yes | Additive config |
-| cargo-dist `dispatch-releases` | Yes | One config line |
+Dropped by the owner on 2026-11-13 for the package-style signer list. TUF made the index the trust point (contradicts R6), needed two offline root keys and an online key for a solo maintainer, and added `tough` plus a client datastore. Trust on first use for an index key is rejected as well: a CI runner is a first use on every run.
 
 ## Decision Outcome
 
-**Chosen Option:** C1 — minimal TUF over the index, ingest-verified releases. Conditional on Q1; if Q1 is "no", B with the fixes in [Fallback](#fallback-if-q1-is-no).
+**Chosen option: E.** Delivered in four slices (§ [Sequencing](#sequencing)). This section designs slice 1, the client, in full; the later slices are designed but not built.
 
-**Why B loses** (evidence):
-1. A keyless identity cannot be revoked or rotated without a client release; [FW] F15 finds no chain for pinned CI identities. That fails req 2 for the anchor.
-2. B owns a bespoke freshness protocol (Unix-seconds version, 8-day window, 1-day future bound, equivocation rule). Codex called it recreated repository-metadata machinery ([TRI] A23, C11).
-3. B needed four Block/High patches (A2 Rekor-time binding, A9 root-cache isolation, A17 Sigstore egress, A19 monitoring gate) that C1 does not need.
+### Decision log (slice 1)
 
-**Why not C2:** declarations sit under the offline targets role ([FW] § Recommendation, Variant 2), so every onboarding needs the owner's offline key. With one key holder that buys no separation.
-**Why not A:** the tag→digest map stays unauthenticated, so rollback, freeze and host compromise stay open.
+Each row: question → evidence → decision.
 
-### Fallback if Q1 is "no"
+| # | Question | Evidence | Decision |
+|---|---|---|---|
+| D-1 | Where does the index-side signer type live, and which crate edge? | `crate_map.toml:33`: `ocx_index` may not depend on `ocx_trust`; `ocx_trust` depends on `ocx_oci`, `ocx_util`, `ocx_env`; `ocx_package_manager` depends on both | `IndexRoot.publishers: Option<serde_json::Value>`, tolerant and uninterpreted in `ocx_index`. `ocx_trust` gains a fail-closed parser from that value. `ocx_package_manager` joins them. No new crate edge. |
+| D-2 | Which fields does an index entry accept? Do operator signers gain `claims`? | `SignerSpec` (`ocx_trust/src/lib.rs:448-466`) tolerates unknown *fields* inside a known kind (tests ~:2060-2130); `KeyMatcher.key` reads a local path | Index entries parse strictly. `keyless`: `oidc_issuer` required, plus one or more of `identity` / `identity_regexp` / non-empty `claims`, and never both `identity` and `identity_regexp`. `key`: `key_pem` only. Unknown kind, unknown field, or `sigstore` (reserved) → the entry is *unrecognised* and matches nobody. A `key` field (a path) is *invalid* and is checked before the unknown-field rule; a `key_pem` of an unsupported key type → *unrecognised*, a malformed one → *invalid*; a malformed value, `null`, an empty or non-array `publishers` → *invalid*, matches nobody (`IndexRoot` carries every present value, `null` included). A remote `identity_regexp` compiles under a 64 KiB size limit. Operator `[[trust.policy]]` keyless signers gain the same `claims` map; their unknown-field tolerance is unchanged (known limitation, § Consequences). |
+| D-3 | How do `claims` match? | [OID] decoding rules 1–9 | Key = a name from the table (`.1.8`–`.1.24`, minus `.1.7`) or a raw dotted OID under `1.3.6.1.4.1.57264.1.`. Canonical decimal arcs only (no leading zeros, u32, no sub-arcs). Raw value for N ≤ 6, strict minimal DER UTF8String for N ≥ 8 (and any N above the table); non-minimal DER or another tag is a non-match. Byte-exact string equality; every listed claim must match; an absent extension never matches; an extension present more than once is a non-match, for claims, `.1.8` and the SAN alike. `oidc_issuer` keeps comparing against `.1.8`; a certificate carrying only the deprecated `.1.1` is refused with a message naming `.1.8`. |
+| D-4 | Check order and semantics | `maybe_auto_verify` (`auto_verify.rs:119`) checks opt-out after coverage; `AutoVerify` is built only with operator policies (`context.rs:467-486`) | `AutoVerify` is always built. Order: coverage (publishers lookup, registry mode, operator policy) → opt-out → publisher round → operator round. Each round is first-match ANY-of; both must pass, and both bind the same document for attestations. The Sigstore trust root resolves lazily, per candidate (D-13). |
+| D-5 | What does "make no request" mean, and what of `ocx.lock` / digest pulls with no local root? | `setup_impl` (`pull.rs:252`) verifies before download; the store keys content by digest, so content installed unverified under another name (`pull_local`, `--no-verify`) would otherwise link unverified under a declared name; the registry client is live under `--offline`; digest pulls on an indexed namespace already commit the root on first sight (`RootScope::Routing`, `chained_index.rs:888`) | This feature adds **no index request**: `publishers` is read from the local roots (D-11), never fetched for the check. Every `setup_impl` leader verifies, as today. `find` / `find_or_install` of a package whose root declares `publishers` treats content as installed only when its `refs/origins/` holds a marker for that logical repository (written only on a genuine fetch, after the leader's check or an explicit `--no-verify`); otherwise it falls through to the pull, which verifies. Undeclared packages keep today's fast path. A lock or digest install on a home with no root for the package is *undeclared*: it installs as today with the INFO line, operator policy still applies, and `signatures = "required"` refuses 81 naming `ocx index update <pkg>` (S-016). Signature referrer fetches follow today's rules. |
+| D-6 | The `signatures` setting | `RegistryConfig` (`ocx_config/src/registry.rs:13-52`), Some-wins merge, `system_locked`; IC-06 (snake_case values); unknown enum values fail a config parse | `[registries."<registry>"] signatures = "if_declared" \| "required" \| "off"`, default `if_declared`, keyed by the package's **logical** registry, exact match. `config.toml` tiers only (system, user, home, managed, explicit); never `ocx.toml`. An unknown value reads as `required` and logs one WARN (the variant is skipped in the JSON schema). `[registries]` keys are normalised like registry identifiers before the lookup. `off` skips the publisher round only; operator policy still applies. |
+| D-7 | Exit codes and slugs (IC-22) | `adr_exit_code_taxonomy.md`; existing `identity_mismatch` 77, `no_signatures_found` 79, `signature_invalid` 65; the `ocx index update` hint belongs to the operations tier, not the ecosystem `ocx_sign` | Four new slugs, no new code, on `ocx_package_manager::tasks::signer_rounds::RoundsError` (`#[derive(Classify)]`; `ocx_sign::VerifyErrorKind` is unchanged; `ocx_trust::PublishersRefusal` stays unclassified): `publisher_mismatch` 77 (no listed publisher signed it; claims mismatch included), `publishers_unrecognized` 82 (no usable entry, at least one unrecognised: this build lacks a kind or field), `publishers_invalid` 65 (no usable entry, all invalid: fix the index data), `publishers_required` 81 (`signatures = "required"`, package undeclared: loosen the setting). |
+| D-8 | Attestations | `package_sbom.rs:430-504` refuses several verified SBOMs (`multiple_attestations` 65); attestation signers come from `resolve_policies_lenient` (`package_sign_common.rs:293-316`); `signing_instant.rs` holds the log time | Without explicit signer flags, `ocx package verify` (both modes) and `ocx package sbom` resolve first, then read publishers, then verify with the same rounds as install. Explicit `--certificate-identity` / `--key` flags replace every round, as today. A document is eligible only when it verifies in every applicable round (matched by referrer digest). Among eligible attestations of one predicate type the newest by SET-verified transparency-log time wins; any candidate without a logged time, or a tie between different documents, refuses as today. With nothing covering (no flags, no policy, no publishers) the SBOM command keeps today's permissive mode. |
+| D-9 | `--no-verify` / `OCX_NO_VERIFY` | `auto_verify.rs:135-142`; `test/tests/test_auto_verify.py:170` greps the warning | Skips both rounds and the `required` refusal. The warning text stays byte-identical, once per batch, and fires when any check would have run. |
+| D-10 | Does `[[trust.policy]]` move into the registry table? | Discussion § Client: scopes span registries, carry `builder` and the system lock, and are the only signer source for a plain OCI address | It stays as is. Open question closed. |
+| D-11 | Previous release, and the local-index merge of `publishers` | `IndexRoot` has no `deny_unknown_fields` (`wire.rs:52`); `merge_root` walks `serde_json::Value` (`local_index.rs:795`) and adopts package-level fields only on first sight and under `RootScope::Package`, overwrite-only | `merge_root` is unchanged: first sight carries `publishers`; `ocx index update <pkg>` overwrites it; a tag grow and a routing write never touch it. The list in force is computed at read time. Committed and a root fetched by this process both present → the element-wise intersection (JSON value equality); committed absent, fetched present → fetched (an index can only add a check to an undeclared package); fetched absent → committed (deleting the field never removes a check). An empty intersection refuses `publisher_mismatch` naming `ocx index update <pkg>`. The effective list never widens the committed one; an unreadable or unparsable committed root is an error, not "undeclared". The previous release ignores the field and installs unverified. |
+| D-12 | End-to-end fixtures | Discussion § Sequencing; goal criterion 10 | `ocx-sh/e2e-package` publishes fixed cases with real GitHub-issued certificates; `ocx-sh/e2e-index` serves a static index on GitHub Pages; a `workflow_dispatch` workflow `client-e2e.yml` in `ocx-sh/e2e-index` (input `ocx_ref`) checks out this repository at that ref, builds the client and runs `test/e2e/` read-only against both. It lives there because GitHub dispatches a `workflow_dispatch` workflow only when its file is on the default branch, which this repository's branch is not. Out of `task verify`. Shape in system design C-019. |
+| D-13 | Key candidates and transparency evidence | Requirement "a `key` publisher verifies without any Sigstore network"; the trust root resolves through the TUF ladder in `auto_verify.rs:150-153`, `package_verify.rs:156`, `package_sbom.rs:180-192`; a round may mix key and keyless entries | Transparency is decided per candidate: `Verify` or `VerifyIfRootAvailable`. A key candidate's log evidence is checked when a trust root is available with no network (override, home file, cache) and ignored otherwise (`signed_at = None`); `signed_at` comes from a verified SET only. The trust root resolves lazily on the first keyless candidate; its unavailability fails that candidate only and the round continues. Operator key-only policies keep log checks whenever the root is local. |
+| D-14 | Status | Goal loop is unattended; owner ratified the source on 2026-11-13 | Accepted under goal-loop authority; owner may revisit. |
 
-B as drafted, plus:
+### Requirement → mechanism (slice 1)
 
-- freshness bound to signing time (A2): `|version − T| ≤ 1 h`, `expires ≤ T + 8 d`, where T is the Rekor integrated time or an RFC 3161 TSA time; a bundle carrying neither is refused (needs the `SigningInstant` TSA variant, [GAP] G7);
-- per-source window min/max, the apt `Valid-Until-Min`/`-Max` shape ([GAP] G3);
-- keyless index signing stays labelled **NOVEL** (no production keyless-signed index; TAP 18 Draft, [GAP] confirmations);
-- public-good Sigstore root from TUF only, in separate storage (A9);
-- a restricted-egress lane or an embedded Sigstore root (A17);
-- Rekor monitoring of the index identity as an S2 gate (A19);
-- the compiled-in identity labelled rejected design #1 at infrastructure scope, Homebrew as precedent.
-
-Under this fallback, D1 (TUF repository), D2 (embedded `root.json`), D3 (`tough` client and datastore) and the TUF-specific parts of D4 (TUF refresh, the update lock through root commit) are **replaced** by the bullets above: the catalog is signed keylessly, and the trust anchor is a compiled-in identity, not a root. D4's placement rule survives, because it does not depend on the metadata format: verify only on the remote-to-local write path, through one seam, with committed resolves, `--offline`, `--frozen` and `ocx.lock` making no check. D5 (levels), D6 (`github_actions` signer kind), D7 (`publishers` and the G-21 ingest gate), D8 (sign in the run that pushed) and D10 (rollout, external watchdog) survive unchanged, since every option keeps the ingest gate and the signer kind. D9 survives except that `index_trust_root` names an operator-supplied signer identity instead of a TUF root. The threat model, the rotation table and the offline semantics are written for C1; under the fallback, the rows about root keys, the online key and TUF metadata errors are replaced by the signing-identity and freshness rules above.
-
-### Decision summary
-
-| # | Decision |
+| Requirement (discussion § Requirements) | Mechanism |
 |---|---|
-| D1 | **TUF repository over the index.** Served under `/tuf/`. Root: two offline owner keys, threshold 1, 365-day expiry. One online key signs targets, snapshot (365 d) and timestamp (7 d, re-signed daily). No delegations, `consistent_snapshot: false`. Targets: `c/index.json` and every `p/<ns>/<pkg>.json`; dispatch objects stay content-addressed below roots. |
-| D2 | **Anchor = embedded initial `root.json`** for the `ocx.sh` namespace only. It rotates by root chaining; no client release for key changes. |
-| D3 | **Client = `tough`** (direct dependency, unified with the fork's 0.22) in `ocx_index`. A `tough::Transport` adapter wraps `OcxIndex`'s HTTP stack (retry, SSRF guard, proxy); the fork's `ReqwestTransport` (`external/sigstore-rs/src/trust/sigstore/transport.rs:51`) is the in-tree precedent. Datastore: `$OCX_HOME/state/index-tuf/<source-slug>/`. |
-| D4 | **Checks only on the remote→local write path.** Every root GET goes through one verified seam; committed resolves, `--offline`, `--frozen`, `ocx.lock` and shipped index copies make no check and no request. A per-source update lock spans TUF refresh through root commit. |
-| D5 | **Levels** `enforce` / `warn` / `off` per source. `warn` reports and never persists unverified data. `off` exists only in operator config tiers. No global switch: `--no-verify`, `OCX_NO_VERIFY` and every other flag or variable leave index checks on ([GAP] G9). |
-| D6 | **`github_actions` signer kind:** `owner_id` (`.17`), `repository_id` (`.15`), `signer_workflow`, `ref` all required; IDs are `u64`, read as DER UTF8String decimals. `trigger` (`.20`, an allowlist, stricter than PyPI's forbidden-trigger list) and `environment` (`.23`, emitted only when the job names one) optional. `.24` Token Subject is never pinned: its form depends on repository age since 2026-04-23. Zero or empty values fail compile. An unknown key makes that entry accept nobody; `TrustPolicy::compile` never fails the policy for it. |
-| D7 | **`publishers`** (array of `github_actions` matchers) in the root: human-lane key (G-05), mandatory for new roots. G-21 verifies every new or changed tag row at ingest (hardened gate, [Ingest gate](#ingest-gate-g-21)). Old rows are grandfathered (NuGet); clients never re-verify them. |
-| D8 | **Phase-1 identity: sign in the run that pushed.** A `sign` job inside each publishing workflow signs the digest its own run pushed (uv, ruff, Chainguard). Releases run via cargo-dist `dispatch-releases` on `refs/heads/main`, so the SAN is constant. No dispatched signing oracle. |
-| D9 | **Operator override:** `[registries."<ns>"] index_trust` and `index_trust_root` from operator config tiers only. From a managed snapshot they, and any `index` change on an anchored namespace, apply only with a digest-pinned `[managed] source`. An explicit `index_trust_root` defaults to `enforce`. |
-| D10 | **Rollout:** `off` (inert) → `warn` → `enforce`; an external watchdog is live before `warn`. The flip ships as a breaking-marked commit subject. |
+| Index package file declares `publishers`; any one match passes; unknown kind or field (incl. `sigstore`) matches nobody; none understood refuses | `IndexRoot.publishers` raw (D-1); strict per-entry parse into usable / unrecognised / invalid (D-2); refusal `publishers_unrecognized` 82 or `publishers_invalid` 65 (D-7) |
+| Client checks on install, pull and on-demand installs with no local config; committed local resolves, `--offline`, `--frozen`, `ocx.lock` make no request | `AutoVerify` always built, hook stays in `setup_impl` (D-4); publishers from the local roots, never fetched; origin gate on the find fast path (D-5) |
+| Missing `publishers` → no check unless `required`; `off` never checks; default `if_declared`; per registry | `signatures` (D-6), `publishers_required` 81 (D-7) |
+| `keyless` pins certificate claims generically | `claims` map, name table plus raw OID (D-3) |
+| `key` publisher verifies without Sigstore network | Per-candidate transparency, lazy trust root (D-13) |
+| `publishers` and operator `[[trust.policy]]` both pass | Two rounds, AND (D-4) |
+| `--no-verify` / `OCX_NO_VERIFY` skip with today's warning | D-9 |
+| `publishers` is the attestation signer set; `ocx package sbom` takes the newest verified SBOM | D-8 |
+| Previous release still installs | D-11; acceptance test with `ocx-previous` |
+| E2E fixtures exist and are exercised | D-12 |
+| ADR, system design, user reference state this design | This ADR, `system_design_publisher_trust.md`, `website/src/content/docs/reference/configuration.md` |
 
-### Ingest gate (G-21)
+### Check table
 
-| Rule | Fixes |
-|---|---|
-| Runs under `pull_request_target`; reads head JSON as data, never executes head code | A5 |
-| `publishers` read from the **base**; a new root's comes from head, which G-04 sends to a human anyway | A5 |
-| Auto-merge classifier is an allowlist: only `tags`, `desc`, `source` changes qualify | A5 |
-| A PR touching `publishers` and `tags` together is refused; "base has `publishers`, head lacks it" goes to a human | A5 |
-| Pinned `ocx` (bootstrapped by digest) runs from an empty temp dir with `OCX_NO_CONFIG=1` and a generated policy | A5 |
-| Exit 0 is the only pass; 75 and every other code fail the required check (rerun on outage) | A3 |
-| Branch protection requires up-to-date branches on index `main`, so G-21 re-runs on every base change | A7 |
-| indexbot ships before the schema change | A5 |
+| Index `publishers` | Operator policy | `signatures` | Install needs |
+|---|---|---|---|
+| present | none | `if_declared` / `required` | a listed publisher's signature |
+| present | covers package | `if_declared` / `required` | listed publisher **and** operator signer |
+| absent | covers package | `if_declared` | operator signer |
+| absent, or no root known (lock / digest install on an empty home, D-5) | none | `if_declared` | nothing (INFO line, as today) |
+| absent | any | `required` | refused, 81 `publishers_required` (`--no-verify` skips) |
+| present | covers package | `off` | operator signer only |
+| present | none | `off` | nothing |
+| present, nothing usable | any | `if_declared` / `required` | refused, 82 or 65 |
 
-### Threat model
+The `signatures` values are snake_case (IC-06); the discussion's spellings were working names.
+
+### Threat model (client verifies packages)
+
+Until slice 4, `publishers` is as trustworthy as the index server and TLS.
 
 | # | Threat | Verdict | Mechanism |
 |---|---|---|---|
-| T1 | Index host, CDN or DNS compromise | **Covered** | Targets signed by a key the host does not hold |
-| T2 | Index repo, render workflow or online key compromise | **Accepted, recoverable** | The online key is a full authority until root revokes it ([FW] Variant 1). Recovery needs no client release. Removal trigger: C2 (Q2) |
-| T3 | Registry compromise | **Covered** | Every hop below targets is digest-pinned |
-| T4 | Stolen publisher push credential or announce token | **Covered; Partial under a shared signer** | G-21 at ingest. Under one signer for many products, a genuine artifact can be mapped to another package (A13) |
-| T5 | Publisher CI compromise | **Accepted** | Passes every identity check everywhere ([FW] M2). Mitigated by `ref` and `trigger` pins and yank |
-| T6 | Rollback or freeze | **Partial** | Returning clients refuse older versions. A first-contact client (fresh CI runner) is bounded by the 7-day timestamp only |
-| T7 | Mix-and-match | **Covered** | Snapshot pins targets; targets pin root hashes |
-| T8 | Compromised render environment or indexbot release | **Partial** | The sign job re-renders without cache and signs only byte-identical output (A4). An indexbot release compromise equals T2; bumps are human-reviewed and digest-pinned |
-| T9 | Repo-name reuse (SlugFest class) | **Covered** | `owner_id` and `repository_id` pins ([GAP] confirmations) |
-| T10 | Package owner forge takeover editing `publishers` | **Partial** | Human lane (G-05) |
-| T11 | Sigstore compromise | **Inherited** for publisher signatures | The index path no longer depends on Sigstore |
-| T12 | Write access to an operator config tier (user tier, `$OCX_HOME`, `OCX_CONFIG`, a pinned managed payload) | **Accepted** | Equals replacing the anchor; same as `GOSUMDB` or `sources.list.d`. Only a system-tier entry locks it. Older binaries ignore `index_trust*` and verify nothing |
-| T13 | Clock set back on the client | **Accepted residual** | Expired metadata looks valid; same in every TUF client |
+| T1 | Index host, CDN or DNS compromise | **Partial until slice 4** | A fresh client takes whatever root the attacker serves, `publishers` included. A machine with a committed root keeps its list: a tag grow never replaces it and the effective list never widens it (D-11), so an attacker's new tag signed by the attacker fails `publisher_mismatch`. `ocx index update <pkg>` adopts the served list (explicit act). Slice 4 closes it with the catalog signature. |
+| T2 | Index mirror or pass-through proxy | **Covered** | The client verifies each package signature against `publishers`; the mirror holds no signing identity. A mirror that strips `publishers` is T1. |
+| T3 | Registry or registry-proxy compromise | **Covered for declared packages** | A swapped digest has no listed signature. Undeclared packages are unprotected unless an operator policy covers them. |
+| T4 | Stolen push credential | **Covered** | A pushed artifact lacks a listed signer's signature. |
+| T5 | Publisher CI compromise | **Accepted** | Passes every identity check. Mitigated by claim pins on ref, trigger and workflow, and by yank. |
+| T6 | Repository-name reuse (SlugFest class) | **Covered with ID claims** | `source_repository_identifier`, `source_repository_owner_identifier` pins ([OID] decision 8). Name-only `identity` entries stay exposed. |
+| T7 | Wider trust from an unknown field or kind | **Covered for index entries; accepted for operator config** | Index entries fail closed (D-2). Operator `[[trust.policy]]` keeps tolerating unknown fields: a binary that predates `claims` parses the signer, ignores the map and matches wider. An older binary ignores index `publishers` altogether (no check). |
+| T8 | Downgrade by stripping `publishers` from a root | **Partial** | Committed copies keep the field (overwrite-only merge; fetched-absent → committed, D-11). Fresh clients see none: T1. `signatures = "required"` turns a stripped root into a refusal. |
+| T9 | Sigstore compromise | **Inherited** | Keyless publishers trust public Sigstore; `key` publishers do not. Per-host instances are slice 4. |
+| T10 | Write access to an operator config tier | **Accepted** | Can set `signatures = "off"`; equal to replacing `[[trust.policy]]` today. `system_locked` pins it. |
+| T11 | Replay of an older valid signature onto another package | **Partial** | Signatures bind digests, not names. A shared signer across packages lets an indexed row point at another package's genuine artifact; ingest may compare `docker-reference` (slice 3 hardening). |
+| T12 | Replay of an older SBOM | **Covered** | Newest by log time among *verified* attestations; an unverified document never wins (D-8). |
+| T13 | Content installed unverified (`pull_local`, `--no-verify`, undeclared name) then reached under a declared name | **Covered** | The origin gate (D-5): content without an origin marker for the declared repository falls through to the pull, which verifies. `ocx package verify` audits content on demand. |
+| T14 | Lock or digest install on a home with no root for the package | **Accepted** | Undeclared (D-5, S-016): installs as today; `signatures = "required"` refuses 81. The owner's "`ocx.lock` makes no request" wins over a fetch for the check. |
 
-### Rotation and revocation
+**Known limits.** Rekor v2 entries carry no integrated time, so newest-wins (D-8) refuses them as unlogged. Slice 3's ingest parser must apply `serde_json`'s duplicate-key rule. Docs pair `build_signer_uri` with `source_repository_identifier` and mention `build_signer_digest` for reusable workflows.
 
-| Event | Procedure | Old releases | Precedent |
+### Wire, config, CLI and exit-code changes
+
+| Surface | Change | Read-path compatibility for published packages | Contract record |
 |---|---|---|---|
-| Publisher rotation | PR adds the new matcher (overlap); first release verifies at ingest; PR removes the old one | Untouched | npm overlap, Debian keyring staging ([ECO] T2) |
-| Publisher removal or compromise | Human PR edits `publishers` (no CLI in v1) and yanks affected tags; G-21 applies to the PR | Pre-compromise rows stay vouched; local pins persist until `ocx index update` | NuGet, npm deprecate ([ECO] P2) |
-| Online key rotation | Root v+1 lists the new key; owner signs offline | Unaffected | Sigstore root-signing |
-| Online key compromise | Root v+1 revokes it; clients discard trusted timestamp and snapshot on key rotation (TUF spec 5.3.11) | Rows committed meanwhile persist locally; advisory asks for `ocx index update` | TUF fast-forward recovery |
-| Root key loss | 1-of-2 threshold: the backup key signs root v+1 with a new second key | Unaffected | Sigstore keyholder turnover ([FW] F10) |
-| Root expiry | Re-sign yearly; watchdog alerts 30 days ahead | Unaffected | Sigstore 197-day root |
-| Loss of both root keys | Client release with a new embedded root | Unaffected | Same as every TUF deployment |
+| `p/<ns>/<pkg>.json` | + optional `publishers` array | Older clients ignore it (no `deny_unknown_fields`); `merge_root` preserves it verbatim | Index wire; `ocx-sh/index` schema in slice 3 |
+| `c/index.json`, dispatch objects, OCI manifests, package metadata | **No change** | — | — |
+| `config.toml` `[registries."<registry>"]` | + `signatures` | Older binaries ignore the key; an unknown value reads as `required` | Config schema regenerates additively |
+| `config.toml` `[[trust.policy]]` keyless signer | + `claims` map | Older binaries ignore it (wider match, T7) | Config schema regenerates additively |
+| `ocx.toml`, `ocx.lock` | **No change** | — | — |
+| CLI flags, `cli.json` | **No change** | — | — |
+| `OCX_*` environment | **No change** (`OCX_NO_VERIFY` gains scope, not a value) | — | — |
+| `--format json` reports | **No change** in shape | `ocx package sbom` returns one document where it refused before | `semantic` ledger entry if the compat gate flags the behaviour; otherwise none |
+| Error document `error.detail` | + `publisher_mismatch` (77), `publishers_unrecognized` (82), `publishers_invalid` (65), `publishers_required` (81), classified on `RoundsError` | Additive | Detail rows, `errors.json` golden, sdkgen goldens; a ledger entry for whatever the compat differ reports |
+| Exit codes on install, pull, exec, on-demand installs | New possible exits for a package that declares `publishers`: 65, 77, 78, 79, 81, 82 (and 75 for a log outage, as today) | Packages without `publishers` behave as today | Breaking-marked commit subject (`feat(trust)!: …`) |
+| `ocx package verify` / `sbom` with no signer flags | Uses publishers + operator policy | Explicit flags unchanged | Same commit subject |
 
-### Offline and freshness semantics
+### Sequencing
 
-| Situation | Network | Check | Outcome |
-|---|---|---|---|
-| Committed local resolve | none | none — verified when written | proceeds |
-| `--offline` | none | none | proceeds; an uncommitted tag stays `index_resolution_blocked` (81) |
-| `--frozen`, `ocx.lock` | content by digest | none | proceeds; trust rests on the lock author's verified resolve (`go.sum` shape) |
-| Shipped `--index` / `OCX_INDEX` copy | none | none | proceeds; grow-on-resolve from a remote source is verified |
-| Online, no TUF metadata at an anchored source | yes | unsigned | `enforce`: 78 `index_trust_unsigned` |
-| Online, signature, hash or length mismatch | yes | invalid | one uncached retry, then `enforce`: 65 `index_trust_invalid` |
-| Online, timestamp expired | yes | expired | `enforce`: 75 `index_trust_expired` (retry later, check clock) |
-| Online, version below the datastore | yes | rollback | one uncached retry, then `enforce`: 81 `index_trust_rollback` |
-| Any failure at `warn` | yes | — | WARN once per source per process; resolve proceeds in memory; nothing committed |
-
-`ocx self update` uses the remote view, so an expired index blocks it under `enforce`. Workaround: `index_trust = "warn"` for `ocx.sh` in user config, or the GitHub Releases binary.
-
-### Phase-1 signer identity (own repositories)
-
-| Repository | Signs | Identity (exact SAN; issuer `https://token.actions.githubusercontent.com`) |
-|---|---|---|
-| `ocx-sh/ocx` | `ocx.sh/ocx/cli`, sdkgen packages | `https://github.com/ocx-sh/ocx/.github/workflows/oci-publish.yml@refs/heads/main`, `https://github.com/ocx-sh/ocx/.github/workflows/sdkgen-publish.yml@refs/heads/main` |
-| `ocx-sh/ocx-mirror` | ocx-mirror releases, mirror-published `ocx.sh/*` | the publishing workflow holding the `sign` job (named in P0) `@refs/heads/main` |
-| `grimoire-rs/grimoire` | grimoire releases | same pattern |
-
-Rules:
-
-- The `sign` job lives in the reusable workflow that pushed the digest (template `sdkgen-publish.yml:209-256`). It signs only the digest its own run produced.
-- Releases switch to cargo-dist `dispatch-releases`, so `release.yml` runs on `workflow_dispatch` at `refs/heads/main`. uv and ruff run exactly this ([SSI] § 1). Called workflows inherit the caller's ref, so every SAN ends `@refs/heads/main`.
-- Every `sign` job carries `if: github.repository_id == <id>`: a foreign caller of a public reusable workflow gets no certificate. The old `workflow_call` ban mattered only for SAN-only pins; with `.15`/`.17` pins a reusable signer is safe ([GAP] G5).
-- Root `publishers` pin `trigger = "workflow_dispatch"`, so dev publishes (push-triggered) never pass G-21.
-- A structural check per repository (actionlint plus a test) asserts: every job holding `id-token: write` carries the repository guard, and `publishers` names only workflows whose `sign` job does.
-- Each `sign` job self-verifies with the pinned `ocx package verify` against the exact SAN. Phase 1 is proven when that step is red on a wrong identity and green on the right one.
-- The signature asserts "built by this repository's main-branch release run", not provenance and not package identity. DSSE/in-toto predicates are the deferred path to a build binding ([GAP] G5).
-- **Backfill:** a separate `backfill-sign.yml` (dispatch, environment with a required reviewer). Subjects come from release records, using the last merged image-index digest per multi-platform push, never registry listings. The workflow is deleted after the run. Its SAN never enters `publishers` (old rows are grandfathered); operators may opt in via `[[trust.policy]]`.
-
-### Wire and persisted changes
-
-This table describes the chosen option, C1. Under the fallback, the `/tuf/` rows and the `index-tuf` datastore row do not exist and are replaced by a signature bundle beside `c/index.json`, whose location the fallback does not yet specify; the other rows hold.
-
-| Surface | Change | Read-path back-compat | Contract ledger |
-|---|---|---|---|
-| `/tuf/<N>.root.json`, `timestamp.json`, `snapshot.json`, `targets.json` (served, new) | TUF 1.0 metadata | New URLs; old clients never request them | none |
-| `c/index.json` | **No change** | — | — |
-| `p/<ns>/<pkg>.json` | + `publishers` | `IndexRoot` has no `deny_unknown_fields` | none |
-| `ocx-sh/index` `root.schema.json` | + `publishers`, required once the P3 backfill PR lands | n/a | none |
-| `config.toml` | `index_trust`, `index_trust_root`; `SignerSpec` kind `github_actions` | Older binaries ignore unknown keys; an unknown level reads as `enforce` | Config schema regenerates additively |
-| `error.detail` | Four slugs under existing codes 65, 75, 78, 81 | Additive | Additive slugs need no entry |
-| `cli.json` | **No change** (claim flags cut) | — | — |
-| `$OCX_HOME/state/index-tuf/<source-slug>/` | `tough` datastore | Deletion = TUF first contact (expiry-bounded) | Internal |
-| `ocx.lock`, `ocx.toml` | **No change** | — | — |
-| Exit codes | No new code; behaviour change at the `enforce` flip | — | Announced by the `!` commit subject |
-
-### Default enforcement rollout
-
-| Stage | Client default for `ocx.sh` | Gate to advance |
-|---|---|---|
-| S0 | none | Phase-1 signing live in all three repositories; backfill done; own-certificate decode gate green |
-| S1 | `off` (code merged, inert) | Index serves TUF metadata; external watchdog live and green for 14 days |
-| S2 | `warn` | 30 days or two releases with zero warnings in dogfood CI and the real-index acceptance probe |
-| S3 | `enforce` | — |
-
-Docker Content Trust's lesson: opt-in is unused, and scheduled expiry became mass failure ([OCI] § Content-trust deployments). Hence warn first, an alarm outside GitHub, and expiry checked only online.
-
-### Quantified Impact
-
-| Metric | Before | After | Notes |
-|---|---|---|---|
-| Requests on a committed local resolve | 0 | 0 | Acceptance test (silence principle) |
-| Requests on a remote write path | root (+ dispatch) | + ≤ 4 per source per process (root probe, timestamp, snapshot, targets) | Roots are targets: no extra request per root |
-| Catalog size | 13,059 B, 132 packages (measured 2026-10-25) | unchanged | `targets.json` ≈ 25 KB (estimate) |
-| Freeze window | unbounded | 7 days for first contact; none for returning clients | Timestamp expiry |
-| Key custody | none | 2 offline root keys, 1 online key | Q1 |
-| Infra cost | $0 | $0 (environment secret) or ≈ $1/month (KMS) | Q1 |
-| Recurring duties | none | daily timestamp (automated); yearly root re-sign | Watchdog covers both |
+1. **Client (this repository, slice 1).** Everything above. An entry carrying `sigstore` matches nobody until slice 4. Fully testable locally, plus the e2e dispatch.
+2. **Release signing (designed, later; owner-driven).** Sign in the run that pushed: an own `release.yml` dispatched by hand from `refs/heads/main` (no cargo-dist feature relied on), a `sign` job in the reusable publishing workflow guarded by `if: github.repository_id == <id>`, self-verify against the exact identity. A separate reviewer-gated maintenance workflow signs backfills and corrected SBOMs; **its identity is listed in `publishers`**. An own package lists two entries: release workflow and maintenance workflow. No `publishers` enters an `ocx.sh` entry before its releases are signed and backfilled.
+3. **Index repository (designed, later).** `publishers` in `schema/root.schema.json` (before any entry carries it), then the ingest gate: verify new or changed tag rows against the **base** `publishers`, `pull_request_target`, data-only, exit 0 the only pass; removing `publishers` is a human-review change. `ocx.sh` bot policy accepts `keyless` on public Sigstore and `key`. With the client checking, the gate is early feedback, not the boundary.
+4. **Catalog signature and Sigstore instances (designed, later).** One signature over the exact bytes of `c/index.json`, served beside it, by a signer list in the `publishers` vocabulary: built in for `ocx.sh` (keyless, the index repository's deploy workflow), replaced per registry by `index_publishers`. `index_signature = "enforce" | "warn" | "off"` rolled out `off` → `warn` → `enforce`. The signed catalog carries `expires` (30 days for `ocx.sh`, re-signed every 7 days and on each change), refused on the remote-to-local write path; `index_expiry = "ignore"` opt-out; an external alert at less than 21 days. Package-file hash checked against its catalog entry. `ocx index sign --key <pem> <dir>`. `[trust.sigstore]` becomes address-keyed `[sigstore."<host>"]` plus `[registry] sigstore` / `[registries."<host>"] sigstore`; TUF mirrors move to `[mirrors]`; the `sigstore` field of a publisher entry becomes usable. `--no-verify` then also skips the index check.
 
 ### Consequences
 
-**Positive:**
-- Default trust for `ocx.sh` with no per-publisher client state; onboarding by index PR.
-- Anchor rotation and revocation without a client release.
-- `ocx self update` gains index authentication.
-- The index path drops its Sigstore dependency; Sigstore stays on the publisher path only.
+**Positive:** every ocx client verifies declared packages with no config and no release; a mirror or proxy is never a trust point; GitLab and future forges are reached by claims; key publishers work offline from Sigstore; no keys to guard.
 
 **Negative:**
-- Key custody: two offline root keys and one online key.
-- Daily timestamp liveness duty; an outage over 6 days blocks new online resolves at `enforce`.
-- Whole-targets fetch per process on the remote path. Ceiling ≈ 10⁴ packages (≈ 2 MB); upgrade path: hash-bin delegations or TAP 16.
-- An operator pointing `ocx.sh` at a non-faithful private index must set `index_trust_root` or `off` (fail-closed).
+- Until slice 4 the index server can rewrite `publishers` for fresh clients (T1).
+- Rotation on a machine with a committed root needs `ocx index update <pkg>`; a release signed only by a new signer fails `publisher_mismatch` there until then. The error message names the command.
+- Removing `publishers` from a root never reaches a committed or effective list (D-11); publishers rotate entries instead of dropping the field. A machine escapes with `signatures = "off"` for that registry.
+- Operator `[[trust.policy]]` stays tolerant of unknown fields (T7).
+- A lock or digest install on a home with no root installs undeclared (T14).
+- Two verify rounds fetch referrers twice when both apply (≤ 16 candidates each).
 
-**Risks:**
-- **`tough` lag** — spec bumps broke the Rust client before ([FW] F18). Mitigation: P1 spike; pin the spec version published.
-- **Extension pin silently dropped** — CVE-2026-48815 ([GAP] G6). Mitigation: red test per pinned field; golden certificate cross-checked by sigstore-go.
-- **Rekor v1 freeze** — announced with a year's notice ([GAP] G7). Mitigation: P1 v2/TSA spike; `sigstore-rust` as the fallback library.
+**Risks:** an extension pin silently ignored (CVE-2026-48815 class) — mitigated by a red unit test per decode branch and one recorded GitHub-issued certificate fixture; claim names `.1.23`/`.1.24` unconfirmed on a real certificate ([OID]) — no guide recommends them until the e2e certificate confirms them.
 
 ### ADR amendments
 
-| ADR or rule | Amendment |
+| ADR | Amendment |
 |---|---|
-| `adr_trust_policy.md` | `SignerSpec` gains `github_actions`. An unknown key inside a known kind drops that entry with a log line; `TrustPolicy::compile` (`crates/ocx_trust/src/lib.rs:561`) never fails the policy for it. Index trust is not a `[[trust.policy]]` tier. |
-| `adr_servable_index_snapshot.md` | "The real trust boundary is the transport" (line 236) is superseded for anchored sources. **DR2 amended** (line 125): the check is selected by source and by write path, not uniform over bytes. Known tension 1 dissolves: TUF hashes served bytes. |
-| `adr_index_indirection.md` | A fetched root is verified before commit; a per-source update lock spans fetch and commit. The local catalog is unchanged. |
-| `adr_managed_config_tier.md` | `index_trust*`, and `index` on an anchored namespace, apply from a managed snapshot only with a digest-pinned source. |
-| `adr_oci_referrers_signing_v1.md` | Own releases sign under D8. **S1-H amended:** `index_trust = "off"` is an operator-tier escape hatch for index metadata only. No CLI flag or env var; artifact verify keeps no escape hatch. |
-| `adr_announce_publisher_surface.md` | "Nothing claimed is trusted" (line 38) holds: `publishers` is human-lane data, verified against registry truth by G-21. |
-| `subsystem-file-structure.md` `state/` contract (line 28) | `state/index-tuf/` deletion drops a source to TUF first contact, not data loss. Rule text updated in P1. |
-| `workflow-release.md` | Release ceremony dispatches `release.yml` instead of pushing a tag (deferred decision 6). |
-
-## Technical Details
-
-### Architecture
-
-```
-publisher repo                         ocx-sh/index (git)                         Cloudflare Pages      client
-──────────────                         ──────────────────                         ────────────────      ──────
-release.yml (workflow_dispatch, main)  PR: tag row / publishers
-  └─ oci-publish.yml                     │ G-21 (pull_request_target, data only):
-       push ─> sign job (id-token,       │   pinned ocx verify <repo>@<digest>
-       repo guard) ─> ghcr referrer      │   against base publishers
-                                         v
-                                       main ──> render-deploy.yml (workflow concurrency)
-                                         guard: content changed or timestamp age ≥ 1 d
-                                         render (no secrets)
-                                         sign (env index-signing, online key):
-                                           re-render, byte-identical gate,
-                                           targets/snapshot/timestamp, verify with pinned ocx
-                                         deploy ─────────────────────────────> /tuf/*.json
-                                         smoke                                  /c/index.json
-                                                                                /p/<ns>/<pkg>.json
-external watchdog (outside GitHub) ── probes /tuf/timestamp.json, root expiry ──┘
-                                                                                     │ remote write path:
-                                                                                     │ tough refresh, targets verify,
-                                                                                     │ under per-source lock
-                                                                                     v
-                                                                  $OCX_HOME/index/<source>/ (lock)
-                                                                  $OCX_HOME/state/index-tuf/<source>/
-```
-
-### API Contract
-
-```
-index (served, static):
-  GET /tuf/<N>.root.json   -> root, offline keys; clients chain from the embedded v1
-  GET /tuf/timestamp.json  -> online key, expires <= 7 d
-  GET /tuf/snapshot.json   -> online key
-  GET /tuf/targets.json    -> online key; c/index.json and p/<ns>/<pkg>.json with sha256 + length
-  GET /c/index.json, /p/<ns>/<pkg>.json -> unchanged bytes, verified as TUF targets
-
-config.toml:
-  [registries."ocx.sh"]
-  index = "https://index.mirror.corp.example"      # re-signed mirror
-  index_trust = "enforce" | "warn" | "off"
-  index_trust_root = "/etc/ocx/index-mirror-root.json"
-```
-
-Rust contracts, error rows and index-side components: `system_design_publisher_trust.md` § 3, § 5.
-
-### Data Model
-
-```
-root (p/<ns>/<pkg>.json) += "publishers": [
-  { "kind": "github_actions", "owner_id": <int ≥ 1>, "repository_id": <int ≥ 1>,
-    "signer_workflow": "<owner>/<repo>/.github/workflows/<file>",
-    "ref": "refs/heads/main", "trigger": "workflow_dispatch" } ]     # human-review key (G-05)
-```
-
-## Implementation Plan
-
-Dependency order (work split: system design § 12):
-
-1. [ ] **P0 — phase-1 signing** (ocx, ocx-mirror, grimoire): `dispatch-releases`, `sign` jobs, repository guard, structural check, self-verify red/green, own-certificate decode gate (`.15`, `.17`, `.20` present and decimal), backfill.
-2. [ ] **R0 — root ceremony:** two offline keys, root v1, committed to `ocx-sh/index` `tuf/`.
-3. [ ] **P1 — ocx client** (inert, `off`): `tough` spike first; `github_actions` kind; `index_trust*` config and managed guard; verified root seam and lock; error rows; docs. `task satellite:verify` keeps ocx-mirror green.
-4. [ ] **P1′ — index schemas** (parallel): root `publishers`; CONTRIBUTING G-05 list.
-5. [ ] **P2 — indexbot:** G-21 hardened gate; tests in `tests/security/`.
-6. [ ] **P3 — index signing:** signing-tool spike, `render-deploy.yml` sign job, watchdog, `publishers` PR for every existing root.
-7. [ ] **P4 — `warn` release** (S2). **P5 — `enforce`** after the soak (S3).
+| `adr_trust_policy.md` | Keyless signers gain `claims`; at least one of `identity`, `identity_regexp`, `claims`. `resolve_tiered` output is ANDed with index `publishers`, never ORed. The index publisher list is not a policy tier. |
+| `adr_sbom_attestations.md` | Several verified attestations of one predicate type: newest by transparency-log time wins; refusal stays for an unlogged candidate or a tie. Index packages use `publishers` as the attestation signer set when no signer flag is given. |
+| `adr_offline_verify_trust_cache.md` | A `key` candidate needs no Sigstore network; the trust root resolves lazily on the first keyless candidate. |
+| `adr_oci_referrers_signing_v1.md` | Auto-verify covers packages that declare `publishers`; every fetch leader verifies, and content found without an origin marker for a declared package is pulled and verified. |
 
 ## Validation
 
-Acceptance tests (pytest, local static-index fixture serving a TUF repository built by the P3 tool; test roots configured via `index_trust_root`, which also covers the override):
+Each check shown red on the failing case and green on the passing one.
 
-- [ ] **Signer rotation keeps an old release verifying.** Tag `1.0` under publisher A; rotate to B; ingest `2.0` signed by B; fresh client at `enforce` resolves both. Bot test: unchanged `1.0` is not re-verified; `2.0` signed by A is refused.
-- [ ] **Onboarding on an unchanged binary.** Add root Q and re-sign; the same binary resolves Q (exit 0). Mutated Q bytes: exit 65 `index_trust_invalid`.
-- [ ] **Offline frozen install.** Resolve and lock at `enforce`; expire the timestamp. `--offline` and `--frozen` exit 0 with zero requests; a new online resolve exits 75.
-- [ ] **Operator override.** `index_trust_root` for a fixture repo verifies; metadata signed by another key exits 65. An unpinned managed tier setting `index = ""` or `index_trust = "off"` is ignored with a WARN (A8).
-- [ ] **Rollback refused.** Serve version N, then a valid N−1: exit 81. Delete the datastore: accepted as first contact.
-- [ ] **Root chaining.** A binary embedding root v1 verifies a repository at root v3.
-- [ ] **Online-key compromise recovery.** Far-future timestamp under key K1, then root v2 revokes K1: client accepts the K2 timestamp (spec 5.3.11).
-- [ ] **Every root GET verified (A1).** One red test each: grow-on-resolve, routing grow, `ocx index update`, `--remote` resolve, `remote_view`, `ocx index catalog --remote`, prune.
-- [ ] **`warn` persists nothing (A14).** Failing check at `warn`: WARN, exit 0, then `--offline` on that tag exits 81.
-- [ ] **Unsigned source.** Anchored `ocx.sh` pointed at a `file://` or HTTP index without `/tuf/`: exit 78.
-- [ ] **Escape hatches inert (W2).** `--no-verify` and `OCX_NO_VERIFY=1` leave index checks on.
-- [ ] **Concurrent writers (A15).** Two processes refresh across a yank; the local index never regresses.
-- [ ] **Silence.** A committed local resolve makes zero requests.
-- [ ] **Matcher red tests.** Missing `.17`, wrong `.15`, wrong ref, wrong `.20`, duplicate extension OID, zero ID (compile error), unknown key (entry accepts nobody, sibling still matches).
-- [ ] **Golden certificate.** A real own-release bundle decodes and verifies; sigstore-go verifies the same pins.
-- [ ] **G-21 bot tests.** Base-read `publishers`; allowlist classifier; `publishers` + `tags` refused; base-has/head-lacks → human; exit 75 fails the check; ID-repo reuse (T9).
-- [ ] **Watchdog** shown red on a stale timestamp and green on a fresh one.
-- [ ] **Phase 1** self-verify red/green, one recorded run per repository.
-- [ ] Security review of auth/credential paths (`security-auditor`); one Codex `sol` pass (one-way door).
-
-## Fix-pass resolution (round 1)
-
-Counts: **34 fixed, 7 moot under C1, 1 kept with reason** (42 rows: A1–A28 plus 14 Warn rows).
-
-| Row | Status | Resolution |
-|---|---|---|
-| A1 verify seam | fixed | One verified root fetch for `fetch_root` and `fetch_root_document`'s inline GET, before memo or commit; test per entry |
-| A2 pre-signed future catalogs | moot | Root revokes the online key; spec 5.3.11 discards trusted timestamp and snapshot |
-| A3 neutral admits | fixed | Exit 0 is the only pass |
-| A4 renderer compromise | fixed | Independent re-render, byte-identical gate; T8 regraded; indexbot bumps reviewed |
-| A5 G-21 holes | fixed | [Ingest gate](#ingest-gate-g-21) rows |
-| A6 optional `publishers` | fixed | Mandatory for new roots; schema-required after the P3 PR |
-| A7 revocation TOCTOU | fixed | Up-to-date branch rule on index `main` |
-| A8 managed protocol downgrade | fixed | Guard drops `index`/`index_trust*` from unpinned managed tiers on anchored namespaces |
-| A9 trust-root cache poisoning | moot | Index path uses no Sigstore root |
-| A10 signing oracle | fixed | Sign in the pushing run; `dispatch-releases` (uv, ruff) |
-| A11 trigger ban too narrow | fixed | Structural check; `trigger` key (`.20`) |
-| A12 `ref` optional | fixed | `ref` and `repository_id` required; example fixed |
-| A13 cross-product substitution | kept | Claim narrowed to repository and run; `trigger` pin excludes dev runs; in-toto binding deferred |
-| A14 audit poisoning persists | fixed | `warn` never persists |
-| A15 high-water race | fixed | Per-source lock across fetch and commit (apt) |
-| A16 high-water in `state/` | fixed | TUF datastore; `state/` amendment row |
-| A17 offline claim false | moot | No Sigstore egress on the index path |
-| A18 alarm inside workflow | fixed | External watchdog; workflow concurrency; versions only increase |
-| A19 Rekor monitoring optional | moot | Index has no Sigstore identity; publisher monitoring cut ([GAP] G8) |
-| A20 compile errors | fixed | `serde_json::Value` flatten; blob-verify API dropped |
-| A21 unknown key errs | fixed | Entry dropped, never `Err` |
-| A22 real-cert / Rekor v2 | fixed | P0 decode gate; P1 v2/TSA spike; one-way doors named |
-| A23 option analysis | fixed | C1 added, re-scored, decision follows score |
-| A24 NOVEL labels | fixed | [Labels](#labels); Homebrew cited; apt citation corrected |
-| A25 amendments | fixed | S1-H, DR2, `state/`, announce-surface rows |
-| A26 deploy before verify ([GAP] G2) | fixed | Sign job verifies with pinned ocx before deploy. No cosign on the index path; `ocx package sign` dials an explicit `rekor_url` (`crates/ocx_sign/src/sign/pipeline.rs:67`), so a public signing-config flip cannot change publisher bundles; self-verify gates publish |
-| A27 operator window ([GAP] G3) | moot | No window constants: each TUF repository sets its own expiries, so an operator mirror's own root is the per-source min/max. The index path reads no Sigstore root, so no 24 h cache expiry; byte-faithful mirror route in system design § 5.2 |
-| A28 empty pins ([GAP] G6) | fixed | Zero/empty fails compile; sigstore-go cross-check |
-| W T6 / `permissive` | fixed | T6 Partial; `permissive` cut |
-| W `--no-verify` | fixed | Never affects index checks; test |
-| W override surface | fixed | T12 |
-| W operator default | fixed | Explicit `index_trust_root` → `enforce` |
-| W backfill | fixed | Release records, last merged digest, dedicated identity |
-| W claim forge split | moot | Claim flags cut |
-| W clock scan / `file://` / diagram | fixed | No clock read in OCX code; `file://` test; new index-repo work in system design § 2 |
-| W P14 tests | fixed | [Validation](#validation) |
-| W exit codes (IC-22) | fixed | 78 / 65 / 75 / 81, each naming the next action |
-| W solo cut list | fixed | Table below |
-| W stale numbers | fixed | 132 packages, 13,059 B |
-| W cold runner / self update | fixed | NFR row; workaround stated |
-| W rename `version` | moot | Catalog gains no field |
-| W S2/S3/S5 | fixed | Duplicate OID, chain-checked leaf, full URL; grow-on-resolve verified; T13 |
-
-### Solo-maintainer cut list
-
-| Item | Verdict | Reason |
-|---|---|---|
-| `permissive` level | cut | `warn` covers rollout; TUF has no partial mode |
-| `invalid_window`, future bound, equivocation | cut | `tough` enforces TUF rules |
-| Staged successor anchor | cut | Root chaining |
-| Managed digest-pin guard | keep | Carries the A8 fix; extends an existing guard |
-| Claim flags and forge ID lookup | cut | `publishers` is hand-written in a human-lane PR; revisit at Q2 |
-| `rekor-monitor` | cut | Lists entries only; reconciliation is bespoke ([GAP] G8) |
-| Serving `publishers` to clients | keep | Public audit trail; costs bytes only |
-| `trigger` / `environment` keys | keep | Key set is one-way ([GAP] G4); one compare each |
-| High-water file, snapshot-verifier trait | cut | Replaced by the `tough` datastore |
-| External watchdog | keep | Only alarm that survives a dead schedule ([GAP] G1) |
-
-## Open questions
-
-- [NEEDS CLARIFICATION: Q1 — Lift "no long-lived keys" for the index anchor: two offline owner keys plus one online key?]
-  Recommended: yes. Root chaining is the only anchor rotation without a client release (req 2). Online key in a cloud KMS via GitHub OIDC (Sigstore GCP KMS, RFC 3724 AWS KMS); a GitHub environment secret is the golden-path fallback, at the cost of exfiltration lasting until root revokes it. If no: [Fallback](#fallback-if-q1-is-no).
-- [NEEDS CLARIFICATION: Q2 — May third-party packages enter the vouched index before split signing authority (C2)?]
-  Recommended: no. The first third-party namespace triggers C2 (offline targets for declarations) and the claim flags.
-- [NEEDS CLARIFICATION: Q3 — Revocation for `ocx.lock`-pinned and frozen digests (deny or advisory channel)?]
-  Recommended: not in v1. Locks are digest pins like `go.sum`; the yank gate covers the tag path. Upgrade path: a signed advisory target in the same TUF repository.
-
-## Deferred owner decisions
-
-| # | Decision | Recommended |
-|---|---|---|
-| 1 | Anchor shape: compiled-in CI identity vs TUF root ([TRI] Deferred 1) | TUF root (C1) |
-| 2 | Owner account single point of failure | Hardware-key 2FA plus watchdog now; C2 at the first co-maintainer |
-| 3 | Admins bound by required checks on index `main` and publisher repos; direct push off | Yes |
-| 4 | Index-declared publishers only ever AND on top of `[[trust.policy]]`, never ANY-of at system level | Yes |
-| 5 | Reviewer on every signing run, or backfill only | Backfill only; releases are owner-dispatched |
-| 6 | Release trigger moves to cargo-dist `dispatch-releases` | Yes (uv, ruff) |
-| 7 | TUF datastore under `state/` with the amended contract | Accept |
-| 8 | S1-H amendment for operator-tier `off` | Accept |
+- [ ] Signed by a listed publisher installs; signed by another fails 77 `publisher_mismatch`; unsigned fails 79.
+- [ ] No `publishers` installs unchanged; `signatures = "required"` fails it 81; `off` skips the publisher round.
+- [ ] An unchanged binary honours `publishers` added to a root (fresh home; committed home after `ocx index update <pkg>`).
+- [ ] A second entry lets releases signed either way install; removing an entry stops fresh installs of its releases.
+- [ ] Only unrecognised entries (unknown kind, unknown field, `sigstore`) → 82; only invalid entries → 65; one usable entry beside unrecognised ones still matches.
+- [ ] A `key` publisher verifies with Sigstore endpoints unreachable and no trust-root cache, also beside a keyless entry.
+- [ ] Content installed under an undeclared name, then run under a declared name signed by nobody listed, fails 77 (S-017); a lock install on an empty home installs undeclared, 81 under `required` (S-016).
+- [ ] Both `publishers` and an operator policy: installs only with both signatures.
+- [ ] `--no-verify` and `OCX_NO_VERIFY=1` skip with exactly one warning line.
+- [ ] `claims` matches a real GitHub-issued certificate by repository and owner ID, by name and by raw OID, and rejects the second-workflow case.
+- [ ] Two verified SBOMs: `ocx package sbom` returns the newer; one unlogged candidate refuses 65.
+- [ ] The previous ocx release installs a package whose root carries `publishers`.
+- [ ] A committed local resolve makes zero requests; an offline frozen find of content carrying its origin marker succeeds with zero requests.
 
 ## Links
 
-- [`system_design_publisher_trust.md`](./system_design_publisher_trust.md) — components, contracts, NFRs, cross-repo work split
-- [`adr_trust_policy.md`](./adr_trust_policy.md), [`adr_servable_index_snapshot.md`](./adr_servable_index_snapshot.md), [`adr_index_indirection.md`](./adr_index_indirection.md), [`adr_managed_config_tier.md`](./adr_managed_config_tier.md), [`adr_offline_verify_trust_cache.md`](./adr_offline_verify_trust_cache.md), [`adr_oci_referrers_signing_v1.md`](./adr_oci_referrers_signing_v1.md), [`adr_announce_publisher_surface.md`](./adr_announce_publisher_surface.md), [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md)
-- Research: [ECO], [FW], [OCI], [GAP], [MAP], [SSI]; triage [TRI]
-- External: TUF specification 1.0 (client workflow 5.3.11); Rust RFC 3724; `sigstore/root-signing`; `awslabs/tough`; `sources.list(5)`; Go modules reference § Authenticating modules; cargo-dist `dispatch-releases`
+- [`system_design_publisher_trust.md`](./system_design_publisher_trust.md) — components, contracts C-001…, scenarios S-001…
+- [`research_fulcio_claim_oids.md`](./research_fulcio_claim_oids.md), [`adr_trust_policy.md`](./adr_trust_policy.md), [`adr_exit_code_taxonomy.md`](./adr_exit_code_taxonomy.md), [`adr_sbom_attestations.md`](./adr_sbom_attestations.md), [`adr_offline_verify_trust_cache.md`](./adr_offline_verify_trust_cache.md), [`adr_index_indirection.md`](./adr_index_indirection.md)
 
 ---
 
@@ -534,4 +237,6 @@ Counts: **34 fixed, 7 moot under C1, 1 kept with reason** (42 rows: A1–A28 plu
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-10-25 | architect (Opus) | Initial draft (option B) |
-| 2026-10-25 | architect (Opus) | Round-1 fix pass: C1 added and re-scored; decision moves to C1; triage A1–A28 and Warn rows resolved; gap-check G1–G9 folded |
+| 2026-10-25 | architect (Opus) | Round-1 fix pass: C1 (minimal TUF) chosen |
+| 2026-11-13 | architect (Opus) | Decision Outcome replaced per the 2026-11-12 discussion: option E (client-checked `publishers`), TUF dropped, slice-1 decisions D-1…D-14, threat model rewritten for a verifying client, status Accepted. TUF decision summary, fallback, ingest-gate detail and the round-1 fix-pass table deleted |
+| 2026-11-13 | hex-plan review | Round 1 fixes R-1…R-14, P-D-1, P-D-2 |

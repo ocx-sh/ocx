@@ -467,6 +467,9 @@ pub use tasks::resolve::{
 };
 pub use tasks::sbom::{SbomOptions, SbomReport};
 pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
+pub use tasks::signer_rounds::{
+    Round, RoundKind, RoundsDecision, RoundsError, SignerRounds, SignerRoundsInput, signer_rounds,
+};
 pub use tasks::toolchain_drift::{DRIFT_DEADLINE, DriftedTool};
 pub use tasks::update_check::{
     HandoffFailure, HandoffState, HandoffStdio, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult,

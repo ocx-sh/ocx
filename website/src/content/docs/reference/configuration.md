@@ -274,6 +274,24 @@ Unioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating
 - Default: `false`
 - See: [Corporate mirror](../guides/corporate-mirror.mdx)
 
+## `registries.<name>.signatures` {#keys-registries-signatures}
+
+Whether packages of this registry must carry publisher identities declared in the index.
+
+One of `if_declared` (verify when the package declares publishers), `required` (refuse a package without them) or `off` (skip the check). Defaults to `if_declared`.
+
+An unknown value is treated as `required`, with one warning per run.
+
+A lock-first install in a fresh home makes no index request, so it installs without the publisher check.
+Set `required` to check those installs too: a package whose committed root declares no publishers is
+then refused (exit 81, `publishers_required`), and the error names `ocx index update`.
+
+- Type: `string`
+- Values:
+  - `if_declared`: Verify against the index-declared publishers when the package declares any (the default).
+  - `required`: Refuse a package whose index declares no publishers.
+  - `off`: Skip the publisher check.
+
 ## `registries.<name>.trusted_hosts` {#keys-registries-trusted-hosts}
 
 SSRF escape hatch for this namespace's physical registry hosts. Each
@@ -497,6 +515,20 @@ catch-all.
 
 - Type: `array`
 - Default: `[]`
+- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+
+## `trust.policy.signers.claims.<name>` {#keys-trust-policy-signers-claims}
+
+Fulcio certificate claims that must all match, keyed by claim name or raw OID.
+
+Every listed claim must match, and values compare as exact strings. A key is a known claim name
+(`build_signer_uri`, `source_repository_identifier`, `source_repository_owner_identifier`,
+`build_trigger`, `build_signer_digest`) or a raw OID under `1.3.6.1.4.1.57264.1.`; an unknown
+name matches nobody.
+
+Alone or beside `identity` / `identity_regexp`.
+
+- Type: `string`
 - See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.identity` {#keys-trust-policy-signers-identity}

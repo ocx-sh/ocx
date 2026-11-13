@@ -49,6 +49,34 @@ pub struct RegistryConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub index_is_compiled_default: bool,
+
+    /// Whether packages of this registry must carry publisher identities declared in the index.
+    ///
+    /// One of `if_declared` (verify when the package declares publishers), `required` (refuse a package without
+    /// them) or `off` (skip the check). Defaults to `if_declared`. An unknown value is treated as `required`,
+    /// with one warning per run.
+    ///
+    /// A lock-first install in a fresh home makes no index request, so it installs without the publisher check.
+    /// Set `required` to check those installs too: a package whose committed root declares no publishers is
+    /// then refused (exit 81, `publishers_required`), and the error names `ocx index update`.
+    #[serde(default)]
+    pub signatures: Option<SignatureRequirement>,
+}
+
+/// The `signatures` setting of a `[registries."<registry>"]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureRequirement {
+    /// Verify against the index-declared publishers when the package declares any (the default).
+    IfDeclared,
+    /// Refuse a package whose index declares no publishers.
+    Required,
+    /// Skip the publisher check.
+    Off,
+    /// A value from a newer ocx, kept so the warning can name it; reads as [`Self::Required`].
+    #[serde(untagged)]
+    #[schemars(skip)]
+    Unknown(String),
 }
 
 impl RegistryConfig {
@@ -76,6 +104,9 @@ impl RegistryConfig {
         }
         if other.insecure.is_some() {
             self.insecure = other.insecure;
+        }
+        if other.signatures.is_some() {
+            self.signatures = other.signatures;
         }
     }
 }
@@ -138,6 +169,7 @@ mod tests {
         let mut builtin = RegistryConfig {
             index: Some("https://index.ocx.sh".to_string()),
             index_is_compiled_default: true,
+            signatures: None,
             ..Default::default()
         };
         builtin.merge(RegistryConfig {
@@ -158,6 +190,7 @@ mod tests {
         let mut builtin = RegistryConfig {
             index: Some("https://index.ocx.sh".to_string()),
             index_is_compiled_default: true,
+            signatures: None,
             ..Default::default()
         };
         builtin.merge(RegistryConfig {

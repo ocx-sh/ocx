@@ -16,6 +16,7 @@ use ocx_store::file_structure::StateStore;
 use ocx_trust::CompiledPolicy;
 
 use super::super::PackageManager;
+use super::signer_rounds::{Round, remap_round_failure};
 
 /// External dependencies forwarded to [`PackageManager::verify_one`].
 pub struct VerifyOptions<'a> {
@@ -42,6 +43,8 @@ pub struct VerifyOptions<'a> {
     pub allow_unlogged_signature: bool,
     /// Collect every verified candidate, not just the first; widens the report, never the verdict.
     pub report_all: bool,
+    /// How a key candidate's transparency-log evidence is treated; see [`ocx_sign::verify::Transparency`].
+    pub transparency: ocx_sign::verify::Transparency,
 }
 
 /// Success payload returned by [`PackageManager::verify_one`].
@@ -64,6 +67,54 @@ impl PackageManager {
         platform: Option<&ocx_oci::Platform>,
         opts: VerifyOptions<'_>,
     ) -> Result<VerifyReport, PackageError> {
+        self.verify_against(package, platform, &opts, opts.policies).await
+    }
+
+    /// Verify `package` once per round in `rounds`; every round must pass. A signature check reports each round's
+    /// signatures, so a publisher-signed and an operator-signed release can both hold; an attestation check keeps
+    /// only the documents that verified in **every** round, matched by referrer digest, so two signers can each vouch
+    /// for one document and neither alone is enough. `opts.policies` is ignored.
+    ///
+    /// A `RoundKind::Publisher` round's "nobody I list signed it" failures become `PublisherMismatch`. The first
+    /// failing round's error is returned. No round at all verifies against `opts.policies`.
+    ///
+    /// # Errors
+    /// A [`PackageError`] from a round, or `NoSignaturesFound` when no signature verified in every round.
+    pub async fn verify_rounds(
+        &self,
+        package: &ocx_oci::PackageRef,
+        platform: Option<&ocx_oci::Platform>,
+        rounds: &[Round],
+        opts: VerifyOptions<'_>,
+    ) -> Result<VerifyReport, PackageError> {
+        if rounds.is_empty() {
+            return self.verify_one(package, platform, opts).await;
+        }
+        let mut per_round = Vec::with_capacity(rounds.len());
+        for round in rounds {
+            let report = self
+                .verify_against(package, platform, &opts, &round.policies)
+                .await
+                .map_err(|err| remap_round_failure(round, err))?;
+            per_round.push(report.signatures);
+        }
+        let signatures = combine_rounds(&opts.content, per_round, |result| &result.referrer_digest);
+        if signatures.is_empty() {
+            return Err(map_verify_error(
+                package.clone(),
+                VerifyError::new(package.clone(), ocx_sign::verify::VerifyErrorKind::NoSignaturesFound),
+            ));
+        }
+        Ok(VerifyReport { signatures })
+    }
+
+    async fn verify_against(
+        &self,
+        package: &ocx_oci::PackageRef,
+        platform: Option<&ocx_oci::Platform>,
+        opts: &VerifyOptions<'_>,
+        policies: &[ocx_trust::CompiledPolicy],
+    ) -> Result<VerifyReport, PackageError> {
         // Read-only view: verifying must never grow the permanent local index (`adr_index_indirection.md`).
         let mgr = self.read_only_view();
         let resolve = super::resolve_subject::verify_resolver(mgr.index());
@@ -71,7 +122,7 @@ impl PackageManager {
         let context = VerifyContext {
             identifier: package,
             platform,
-            policies: opts.policies,
+            policies,
             no_cache: opts.no_cache,
             dial: mgr.index().dial_policy(package.registry()),
             resolve,
@@ -79,17 +130,56 @@ impl PackageManager {
             rekor_url: opts.rekor_url,
             state,
             offline: opts.offline,
-            content: opts.content,
+            content: opts.content.clone(),
             signature_format: opts.signature_format,
             allow_unlogged_signature: opts.allow_unlogged_signature,
             report_all: opts.report_all,
             verification: ocx_sign::verify::VerificationMode::Demand,
+            transparency: opts.transparency,
         };
         let signatures = VerifyPipeline::run(opts.client, context)
             .await
             .map_err(|err| map_verify_error(package.clone(), err))?;
         Ok(VerifyReport { signatures })
     }
+}
+
+/// Merges what each (all passing) round verified. Signatures are independent facts, so they union without
+/// duplicates; attestation documents are per-document, so only those every round verified survive.
+pub(super) fn combine_rounds<T, K: PartialEq + ?Sized>(
+    content: &VerifyContentMode,
+    per_round: Vec<Vec<T>>,
+    key: impl Fn(&T) -> &K,
+) -> Vec<T> {
+    match content {
+        VerifyContentMode::Signature => {
+            let mut merged: Vec<T> = Vec::new();
+            for item in per_round.into_iter().flatten() {
+                if !merged.iter().any(|kept| key(kept) == key(&item)) {
+                    merged.push(item);
+                }
+            }
+            merged
+        }
+        VerifyContentMode::Attestation { .. } => retain_in_every_round(per_round, key),
+    }
+}
+
+/// Keeps the items of the first round whose key every other round also produced.
+pub(super) fn retain_in_every_round<T, K: PartialEq + ?Sized>(
+    mut rounds: Vec<Vec<T>>,
+    key: impl Fn(&T) -> &K,
+) -> Vec<T> {
+    if rounds.is_empty() {
+        return Vec::new();
+    }
+    let mut first = rounds.remove(0);
+    first.retain(|item| {
+        rounds
+            .iter()
+            .all(|round| round.iter().any(|other| key(other) == key(item)))
+    });
+    first
 }
 
 /// Wrap a [`VerifyError`] in a [`PackageError`] tagged with `identifier`,
@@ -110,11 +200,39 @@ pub(crate) mod tests {
     use tempfile::TempDir;
     use url::Url;
 
+    use super::super::signer_rounds::RoundKind;
     use super::*;
     use ocx_index::{ChainMode, Index, IndexImpl, IndexOperation, LocalConfig, LocalIndex, SelectResult};
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
     use ocx_sign::verify::VerifyErrorKind;
     use ocx_store::file_structure::{FileStructure, StateStore};
+
+    /// Only a publisher round remaps a mismatch; the operator and flag rounds keep their own kind.
+    #[test]
+    fn only_the_publisher_round_remaps_a_mismatch() {
+        let package = ocx_oci::PackageRef::parse(&format!("{REGISTRY}/{REPO}:1.0")).expect("valid identifier");
+        let round = |kind| Round {
+            kind,
+            policies: vec![ocx_trust::CompiledPolicy::exact("a".into(), "https://i".into())],
+        };
+        let failure = || {
+            map_verify_error(
+                package.clone(),
+                VerifyError::new(package.clone(), VerifyErrorKind::IdentityMismatch),
+            )
+        };
+        let publisher = remap_round_failure(&round(RoundKind::Publisher), failure());
+        assert!(matches!(
+            publisher.kind,
+            PackageErrorKind::Internal(crate::Error::Rounds(
+                super::super::signer_rounds::RoundsError::PublisherMismatch { .. }
+            ))
+        ));
+        for kind in [RoundKind::Operator, RoundKind::Flags] {
+            let kept = remap_round_failure(&round(kind), failure());
+            assert!(matches!(kept.kind, PackageErrorKind::Internal(crate::Error::Verify(_))));
+        }
+    }
 
     pub(crate) const REGISTRY: &str = "example.com";
     pub(crate) const REPO: &str = "widget";
@@ -236,6 +354,7 @@ pub(crate) mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: ocx_sign::verify::Transparency::Verify,
         };
 
         // `VerifyReport`/`VerifyResult` (the `Ok` payload) do not implement
@@ -302,5 +421,40 @@ pub(crate) mod tests {
             tag_pointer_after.is_some(),
             "the writable index (verify_one's pre-fix routing) must commit a tag pointer"
         );
+    }
+
+    fn digest(seed: &str) -> ocx_oci::Digest {
+        ocx_oci::Algorithm::Sha256.hash(seed.as_bytes())
+    }
+
+    /// A document the publisher round alone verified is not eligible; one in both rounds is.
+    #[test]
+    fn only_a_document_verified_in_every_round_is_kept() {
+        let kept = retain_in_every_round(
+            vec![vec![digest("a"), digest("b")], vec![digest("b"), digest("c")]],
+            |item| item,
+        );
+        assert_eq!(kept, vec![digest("b")]);
+    }
+
+    /// Publisher-signed A beside operator-signed B passes both rounds, so both are reported; the
+    /// intersection would be empty and fail a release every round accepted.
+    #[test]
+    fn signature_rounds_report_each_rounds_signatures_without_intersecting() {
+        let per_round = || vec![vec![digest("a")], vec![digest("b"), digest("a")]];
+        let merged = combine_rounds(&VerifyContentMode::Signature, per_round(), |item| item);
+        assert_eq!(merged, vec![digest("a"), digest("b")]);
+
+        let documents = combine_rounds(
+            &VerifyContentMode::Attestation { predicate_type: None },
+            per_round(),
+            |item| item,
+        );
+        assert_eq!(documents, vec![digest("a")]);
+    }
+
+    #[test]
+    fn no_rounds_keep_nothing() {
+        assert!(retain_in_every_round(Vec::<Vec<ocx_oci::Digest>>::new(), |item| item).is_empty());
     }
 }

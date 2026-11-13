@@ -21,3 +21,10 @@
 # A listed root or command carries version baseline + 1; one no entry lists,
 # its baseline version. A `doc` entry bumps nothing. An entry that matches no
 # finding is stale and reds, except a `semantic` entry.
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "semantic"
+pointer = "/root/commands/14/commands/17/args/1"
+reason = "several SBOM candidates of one type now resolve to the newest instead of exiting 65 (multiple_attestations)"

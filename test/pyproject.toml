@@ -36,6 +36,7 @@ markers = [
     # tier's whole point is a gate that runs without the seven-container
     # Sigstore stack. `lint/test_smoke_coverage.py` enforces both.
     "smoke: the per-verb smoke tier — cheap, registry-only, no Sigstore stack (see task test:smoke)",
+    "e2e_public: dispatched public end-to-end run (test/e2e, ocx-sh/e2e-index client-e2e.yml); needs OCX_E2E_BINARY and network",
     "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
     # A module or helper naming a `__OCX_TESTING_*` seam: release bytes lack the `__testing`
     # feature, so `OCX_TEST_RELEASE_BINARY=1` skips these (`conftest.py`); `lint/test_testing_marker.py` holds the set.

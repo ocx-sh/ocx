@@ -167,6 +167,17 @@ pub struct VerifyContext<'a> {
     pub allow_unlogged_signature: bool,
     /// Widen the scan from first-match to every candidate the caps allow; widens the report, never the verdict.
     pub report_all: bool,
+    /// How a key candidate's transparency-log evidence is treated; see [`Transparency`].
+    pub transparency: Transparency,
+}
+
+/// Whether transparency-log evidence is mandatory for a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transparency {
+    /// Check log evidence; fail when it cannot be checked (today's behaviour).
+    Verify,
+    /// Check log evidence when a trust root is available with no network, ignore it otherwise.
+    VerifyIfRootAvailable,
 }
 
 /// Result emitted by a successful verify pipeline run.
@@ -1417,20 +1428,50 @@ impl VerifyPipeline {
                         );
                     })?;
 
-                // Optional in key mode, but when present checked in full like the keyless arm.
+                // Optional in key mode, but when present checked in full like the keyless arm, unless the run
+                // checks it only where a trust root is already local and none is.
                 let signed_at = match tlog {
                     Some(entry) => {
-                        let rekor_key_pem = verify_rekor_set(ctx, &entry, rekor_keys).await?;
-                        rekor_log_index = Some(entry.log_index);
-                        dsse::verify_tlog_binding(
-                            &entry.canonicalized_body,
-                            &envelope.attestation.payload,
-                            &envelope.signatures,
-                        )?;
-                        if !ctx.offline {
-                            cache_trust_material(ctx, rekor_key_pem).await;
+                        let local_key = match ctx.transparency {
+                            Transparency::Verify => None,
+                            Transparency::VerifyIfRootAvailable => {
+                                match rekor_keys.resolve_local(ctx.trust_root, &entry.log_id_hex) {
+                                    Some(pem) => Some(pem),
+                                    // The key signature already verified; an unchecked entry earns no `signed_at`
+                                    // and no log index, since neither was proved.
+                                    None => {
+                                        tracing::debug!(
+                                            "no local trust root holds the Rekor key for referrer {referrer_digest}; \
+                                             its log entry is not checked"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                        };
+                        let skip_log =
+                            matches!(ctx.transparency, Transparency::VerifyIfRootAvailable) && local_key.is_none();
+                        if skip_log {
+                            None
+                        } else {
+                            let rekor_key_pem = match local_key {
+                                Some(pem) => {
+                                    verify_rekor_entry(&pem, &entry)?;
+                                    pem
+                                }
+                                None => verify_rekor_set(ctx, &entry, rekor_keys).await?,
+                            };
+                            rekor_log_index = Some(entry.log_index);
+                            dsse::verify_tlog_binding(
+                                &entry.canonicalized_body,
+                                &envelope.attestation.payload,
+                                &envelope.signatures,
+                            )?;
+                            if !ctx.offline {
+                                cache_trust_material(ctx, rekor_key_pem).await;
+                            }
+                            Some(entry.integrated_time)
                         }
-                        Some(entry.integrated_time)
                     }
                     // No logged instant exists, and none is invented.
                     None => None,
@@ -1622,7 +1663,13 @@ async fn verify_rekor_set(
     let pem = rekor_keys
         .resolve(ctx.trust_root, ctx.rekor_url, ctx.offline, &entry.log_id_hex)
         .await?;
-    let key = tlog::rekor_key(&pem)?;
+    verify_rekor_entry(&pem, entry)?;
+    Ok(pem)
+}
+
+/// Check the SET and inclusion proof of `entry` against the log key `pem`.
+fn verify_rekor_entry(pem: &str, entry: &BundleTlog) -> Result<(), VerifyErrorKind> {
+    let key = tlog::rekor_key(pem)?;
     tlog::verify_set(
         &key,
         &tlog::TlogEntry {
@@ -1634,8 +1681,7 @@ async fn verify_rekor_set(
         },
     )?;
 
-    tlog::verify_inclusion(&key, &entry.inclusion_proof, &entry.canonicalized_body)?;
-    Ok(pem)
+    tlog::verify_inclusion(&key, &entry.inclusion_proof, &entry.canonicalized_body)
 }
 
 /// The Rekor log public keys this verify run has resolved, so N candidates cost one fetch.
@@ -1674,6 +1720,18 @@ impl RekorKeyMemo {
         };
         self.lock().insert(log_id_hex.to_owned(), pem.clone());
         Ok(pem)
+    }
+
+    /// The Rekor public key PEM for `log_id_hex` from the memo or the trust root alone, never the network.
+    ///
+    /// A hit is memoized so the offline cache writer sees the same key a full resolve would have left.
+    pub(super) fn resolve_local(&self, trust_root: &TrustRoot, log_id_hex: &str) -> Option<String> {
+        if let Some(memoized) = self.lock().get(log_id_hex).cloned() {
+            return Some(memoized);
+        }
+        let pinned = trust_root.rekor_public_key_pem_for(log_id_hex)?;
+        self.lock().insert(log_id_hex.to_owned(), pinned.clone());
+        Some(pinned)
     }
 
     /// The one Rekor log key this run resolved, when it resolved exactly one.
@@ -2625,6 +2683,7 @@ mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: crate::verify::Transparency::Verify,
         };
 
         // A well-formed referrer manifest whose one layer names the blob. The
@@ -3119,6 +3178,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: false,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await;
@@ -3353,6 +3413,7 @@ mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: crate::verify::Transparency::Verify,
         }
     }
 
@@ -3647,6 +3708,7 @@ mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: crate::verify::Transparency::Verify,
         };
         let caps = ctx.content.caps();
         let mut budget = ScanBudget::new(caps);
@@ -4107,8 +4169,9 @@ mod tests {
         let policies = [ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
-                identity: ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string()),
+                identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
+                claims: Vec::new(),
             })],
         }];
         let identifier = verify_id();
@@ -4135,6 +4198,7 @@ mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: crate::verify::Transparency::Verify,
         };
 
         let (descriptor, bytes) = referrer_with(
@@ -4247,8 +4311,9 @@ mod tests {
         ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
-                identity: ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string()),
+                identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
+                claims: Vec::new(),
             })],
         }
     }
@@ -4307,6 +4372,32 @@ mod tests {
         annotated_predicate_type: &str,
         policies: &[ocx_trust::CompiledPolicy],
     ) -> Result<CandidateOutcome, VerifyErrorKind> {
+        let environment = GoldenEnvironment {
+            trust_root: TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes())
+                .expect("the committed trust root loads"),
+            // No Sigstore network at all: the Rekor key must come from the committed root, and a `rekor_url` that
+            // resolves to nothing is the second half of that proof.
+            offline: true,
+            transparency: crate::verify::Transparency::Verify,
+            rekor_url: Url::parse("http://127.0.0.1:3000").expect("rekor url"),
+        };
+        verify_golden_candidate_in(bundle_json, annotated_predicate_type, policies, &environment).await
+    }
+
+    /// The conditions [`verify_golden_candidate_in`] runs one candidate under.
+    struct GoldenEnvironment {
+        trust_root: TrustRoot,
+        offline: bool,
+        transparency: crate::verify::Transparency,
+        rekor_url: Url,
+    }
+
+    async fn verify_golden_candidate_in(
+        bundle_json: &str,
+        annotated_predicate_type: &str,
+        policies: &[ocx_trust::CompiledPolicy],
+        environment: &GoldenEnvironment,
+    ) -> Result<CandidateOutcome, VerifyErrorKind> {
         use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
         let subject_bytes = GOLDEN_SUBJECT_MANIFEST.as_bytes();
@@ -4319,12 +4410,11 @@ mod tests {
         let transport = StubTransport::new(data);
         let image: native::Reference = "registry.example/repo:latest".parse().expect("stub reference");
 
-        let trust_root =
-            TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes()).expect("the committed trust root loads");
+        let trust_root = environment.trust_root.clone();
         let verifier = Verifier::new(RekorConfiguration::default(), trust_root.clone()).expect("verifier");
         let identifier = verify_id();
         let dial = TestDial::new();
-        let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+        let rekor_url = environment.rekor_url.clone();
         let temp = tempfile::TempDir::new().expect("state dir");
         let state = SigningStatePaths::new(temp.path());
         let ctx = VerifyContext {
@@ -4337,15 +4427,13 @@ mod tests {
             trust_root: &trust_root,
             rekor_url: &rekor_url,
             state: state.clone(),
-            // No Sigstore network at all: the Rekor key must come from the
-            // committed root, and a `rekor_url` that resolves to nothing is the
-            // second half of that proof.
-            offline: true,
+            offline: environment.offline,
             content: VerifyContentMode::Signature,
             verification: VerificationMode::Demand,
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: environment.transparency,
         };
 
         let (descriptor, bytes) = referrer_with(
@@ -4462,6 +4550,170 @@ mod tests {
         assert!(
             matches!(outcome, Err(VerifyErrorKind::RekorSetInvalid)),
             "a SET signed over another log entry must refuse the candidate: {outcome:?}",
+        );
+    }
+
+    /// A root carrying no Fulcio CA and no Rekor key: what a caller hands the pipeline when no trust root is local.
+    fn no_local_trust_root() -> TrustRoot {
+        TrustRoot::from_material(
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    fn key_predicate() -> String {
+        golden_key_referrer_field("/annotations/dev.sigstore.bundle.predicateType")
+    }
+
+    /// a key candidate needs no Sigstore network. Under `VerifyIfRootAvailable` with no local root, an
+    /// unreachable Rekor URL and no cache, the logged entry is left unchecked and the key signature still verifies,
+    /// reporting no `signed_at` since no verified SET stands behind one.
+    #[tokio::test]
+    async fn c012_a_key_candidate_passes_with_an_unreachable_rekor_and_no_local_root() {
+        let environment = GoldenEnvironment {
+            trust_root: no_local_trust_root(),
+            offline: false,
+            transparency: crate::verify::Transparency::VerifyIfRootAvailable,
+            // Port 1 refuses the connection: any attempt to fetch the Rekor key fails this test.
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let outcome = verify_golden_candidate_in(
+            GOLDEN_KEY_BUNDLE,
+            &key_predicate(),
+            &[key_policy(GOLDEN_PUBLIC_KEY_PEM)],
+            &environment,
+        )
+        .await;
+        let Ok(CandidateOutcome::Verified { verified, .. }) = outcome else {
+            panic!("a key candidate must verify without a trust root, got: {outcome:?}");
+        };
+        assert_eq!(verified.result.key_backend, KeyBackendKind::File);
+        assert_eq!(verified.result.signed_at, None);
+        assert_eq!(verified.result.rekor_log_index, None);
+    }
+
+    /// The skip is for a root holding NO Rekor key (`no_local_trust_root`, covered above). A local root that
+    /// holds a key, even one for another log, is used: its failure to verify the entry's SET refuses the
+    /// candidate instead of silently dropping the log check.
+    #[tokio::test]
+    async fn c012_a_local_root_holding_a_wrong_rekor_key_refuses_instead_of_skipping() {
+        let other_log = std::collections::BTreeMap::from([("00".repeat(32), b"not this log's key".to_vec())]);
+        let environment = GoldenEnvironment {
+            trust_root: TrustRoot::from_material(Vec::new(), std::collections::BTreeMap::new(), other_log),
+            offline: false,
+            transparency: crate::verify::Transparency::VerifyIfRootAvailable,
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let outcome = verify_golden_candidate_in(
+            GOLDEN_KEY_BUNDLE,
+            &key_predicate(),
+            &[key_policy(GOLDEN_PUBLIC_KEY_PEM)],
+            &environment,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(VerifyErrorKind::RekorSetInvalid)),
+            "got: {outcome:?}"
+        );
+    }
+
+    /// The same candidate under `Transparency::Verify` still needs the log key, so the relaxation is the flag's and
+    /// not an accident of the environment.
+    #[tokio::test]
+    async fn c012_the_strict_mode_still_fails_a_key_candidate_without_a_log_key() {
+        let environment = GoldenEnvironment {
+            trust_root: no_local_trust_root(),
+            offline: true,
+            transparency: crate::verify::Transparency::Verify,
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let outcome = verify_golden_candidate_in(
+            GOLDEN_KEY_BUNDLE,
+            &key_predicate(),
+            &[key_policy(GOLDEN_PUBLIC_KEY_PEM)],
+            &environment,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(VerifyErrorKind::OfflineNoPinnedRekorKey)),
+            "got: {outcome:?}"
+        );
+    }
+
+    /// mixed set: offline with no local root, the key candidate is accepted while the keyless candidate of the
+    /// same policy set fails by itself, so one candidate's missing trust root never decides the other's verdict.
+    #[tokio::test]
+    async fn c012_a_mixed_set_offline_with_no_root_accepts_the_key_candidate_and_refuses_only_the_keyless_one() {
+        let environment = || GoldenEnvironment {
+            trust_root: no_local_trust_root(),
+            offline: true,
+            transparency: crate::verify::Transparency::VerifyIfRootAvailable,
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let mixed = [key_policy(GOLDEN_PUBLIC_KEY_PEM), golden_keyless_policy()];
+
+        let key = verify_golden_candidate_in(GOLDEN_KEY_BUNDLE, &key_predicate(), &mixed, &environment()).await;
+        assert!(
+            matches!(key, Ok(CandidateOutcome::Verified { .. })),
+            "the key candidate must be accepted: {key:?}"
+        );
+
+        let keyless = verify_golden_candidate_in(
+            GOLDEN_KEYLESS_BUNDLE,
+            COSIGN_SIGN_PREDICATE_TYPE,
+            &mixed,
+            &environment(),
+        )
+        .await;
+        assert!(keyless.is_err(), "the keyless candidate has no trust root: {keyless:?}");
+    }
+
+    /// with a local root the log evidence is checked and `signed_at` comes from the verified SET.
+    #[tokio::test]
+    async fn c012_a_logged_key_candidate_with_a_local_root_reports_signed_at() {
+        let environment = GoldenEnvironment {
+            trust_root: TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes())
+                .expect("the committed trust root loads"),
+            offline: true,
+            transparency: crate::verify::Transparency::VerifyIfRootAvailable,
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let outcome = verify_golden_candidate_in(
+            GOLDEN_KEY_BUNDLE,
+            &key_predicate(),
+            &[key_policy(GOLDEN_PUBLIC_KEY_PEM)],
+            &environment,
+        )
+        .await;
+        let Ok(CandidateOutcome::Verified { verified, .. }) = outcome else {
+            panic!("got: {outcome:?}");
+        };
+        assert_eq!(verified.result.signed_at, Some(GOLDEN_INTEGRATED_TIME));
+        assert!(verified.result.rekor_log_index.is_some());
+    }
+
+    /// "when a root is available" never means "ignore a bad entry": a spliced SET under a local root is still
+    /// refused, so the relaxed mode cannot launder a forged log entry.
+    #[tokio::test]
+    async fn c012_a_forged_set_is_refused_when_a_local_root_can_check_it() {
+        let environment = GoldenEnvironment {
+            trust_root: TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes())
+                .expect("the committed trust root loads"),
+            offline: true,
+            transparency: crate::verify::Transparency::VerifyIfRootAvailable,
+            rekor_url: Url::parse("http://127.0.0.1:1").expect("rekor url"),
+        };
+        let outcome = verify_golden_candidate_in(
+            &with_a_foreign_rekor_set(GOLDEN_KEY_BUNDLE),
+            &key_predicate(),
+            &[key_policy(GOLDEN_PUBLIC_KEY_PEM)],
+            &environment,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(VerifyErrorKind::RekorSetInvalid)),
+            "got: {outcome:?}"
         );
     }
 
@@ -4637,6 +4889,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: false,
+                transparency: crate::verify::Transparency::Verify,
             };
             let mut budget = ScanBudget::new(ctx.content.caps());
             let verdict = VerifyPipeline::verify_one_referrer(
@@ -4955,6 +5208,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: true,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await;
@@ -5000,6 +5254,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: true,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await;
@@ -5141,6 +5396,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: false,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await;
@@ -5726,6 +5982,7 @@ mod tests {
             signature_format,
             allow_unlogged_signature: false,
             report_all: arity == ScanArity::All,
+            transparency: crate::verify::Transparency::Verify,
         };
         let target = ScanTarget {
             image,
@@ -5902,6 +6159,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: true,
+                transparency: crate::verify::Transparency::Verify,
             };
             let (found, refused) = VerifyPipeline::scan_unverified(&client, &ctx, &target, &mut budget)
                 .await
@@ -6267,6 +6525,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: true,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await
@@ -6855,6 +7114,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: false,
+                transparency: crate::verify::Transparency::Verify,
             };
 
             let memo = RekorKeyMemo::default();
@@ -7038,6 +7298,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: true,
+                transparency: crate::verify::Transparency::Verify,
             };
             let target = ScanTarget {
                 image,
@@ -7102,8 +7363,9 @@ mod tests {
         let policies = [ocx_trust::CompiledPolicy {
             builder: None,
             backends: vec![ocx_trust::PolicyBackend::Keyless(ocx_trust::CompiledKeyless {
-                identity: ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string()),
+                identity: Some(ocx_trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string())),
                 issuer: GOLDEN_ISSUER.to_string(),
+                claims: Vec::new(),
             })],
         }];
 
@@ -8178,6 +8440,7 @@ mod tests {
                 signature_format: None,
                 allow_unlogged_signature: false,
                 report_all: false,
+                transparency: crate::verify::Transparency::Verify,
             },
         )
         .await
@@ -8330,6 +8593,7 @@ mod tests {
             signature_format: None,
             allow_unlogged_signature: false,
             report_all: false,
+            transparency: crate::verify::Transparency::Verify,
         };
         let mut budget = ScanBudget::new(ctx.content.caps());
         VerifyPipeline::scan_with_index_fallback(&client, &ctx, &target, ScanArity::FirstMatch, &mut budget).await

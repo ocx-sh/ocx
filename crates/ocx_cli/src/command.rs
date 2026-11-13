@@ -102,7 +102,7 @@ pub enum Command {
         `integrations` arrays beside `items`, plus an `advisories` array for any deferred package \
         in the composition. A package missing from the object store is installed as part of \
         composition. `--no-pull` skips that and never contacts the registry: an unmaterialized \
-        package is warned about on stderr and omitted, and the exit code stays 0. One a `[[trust.policy]]` covers is \
+        package is warned about on stderr and omitted, and the exit code stays 0. One with index-listed publishers or a covering `[[trust.policy]]` is \
         signature-verified first. Opt out with `OCX_NO_VERIFY`.\n\n\
         `--shell` needs the equals form (`--shell=bash`) so an unquoted positional token cannot \
         inject shell.")]
@@ -384,8 +384,8 @@ pub enum Command {
         With names, only those bindings must resolve and install. An unrelated binding that \
         ships no leaf for this host (exit 78) does not block the run. Without names, every \
         binding in scope is composed.\n\n\
-        A binding missing from the object store is installed during composition, and one a \
-        `[[trust.policy]]` covers is signature-verified first (opt out with `OCX_NO_VERIFY`). \
+        A binding missing from the object store is installed during composition, and one with \
+        index-listed publishers or a covering `[[trust.policy]]` is signature-verified first (opt out with `OCX_NO_VERIFY`). \
         Entries compose in `-g` selection order after `all` expansion, then alphabetically by \
         binding name within a group.\n\n\
         Later entries are prepended, so the last group listed has its `bin/` searched first on \

@@ -32,6 +32,13 @@
     "disclaimer": "Community-maintained mirror, not officially endorsed by Acme Org."
   },
   "superseded_by": "acme/widget2",
+  "publishers": [
+    {
+      "kind": "keyless",
+      "identity": "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/main",
+      "oidc_issuer": "https://token.actions.githubusercontent.com"
+    }
+  ],
   "tags": {
     "2.0.0": {
       "content": "sha256:2222222222222222222222222222222222222222222222222222222222222222",

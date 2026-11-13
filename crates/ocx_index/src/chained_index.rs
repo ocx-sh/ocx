@@ -7,12 +7,40 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::error::Result;
-use super::index_impl::IndexImpl;
+use super::index_impl::{DeclaredPublishers, IndexImpl};
 use super::local_index::{DispatchResolution, RootScope, SourceKind};
 use super::{ChainMode, Index, IndexOperation, Jurisdiction, LocalIndex, index_impl};
 use ocx_store::file_structure::BlobStore;
 
 use ocx_util::singleflight;
+
+/// The effective `publishers`: an index can add a check or narrow one, never widen or delete it.
+///
+/// Both present: the committed entries the fetched list also carries (JSON value equality), in
+/// committed order; none left is [`DeclaredPublishers::Diverged`]. A committed value that is not an array,
+/// or is itself `[]`, stays as it is: it is already refused downstream, and a fetched list must not repair
+/// it. Fetched alone adopts (an undeclared package gains a check); committed alone stays (a dropped field
+/// removes nothing).
+fn effective_publishers(
+    committed: Option<serde_json::Value>,
+    fetched: Option<serde_json::Value>,
+) -> DeclaredPublishers {
+    use serde_json::Value;
+    match (committed, fetched) {
+        (Some(Value::Array(committed)), Some(fetched)) if !committed.is_empty() => {
+            let fetched = fetched.as_array().map(Vec::as_slice).unwrap_or_default();
+            let shared: Vec<Value> = committed.into_iter().filter(|entry| fetched.contains(entry)).collect();
+            if shared.is_empty() {
+                DeclaredPublishers::Diverged
+            } else {
+                DeclaredPublishers::Declared(Value::Array(shared))
+            }
+        }
+        (Some(committed), _) => DeclaredPublishers::Declared(committed),
+        (None, Some(fetched)) => DeclaredPublishers::Declared(fetched),
+        (None, None) => DeclaredPublishers::Undeclared,
+    }
+}
 
 /// Whether `err` reports a present-but-corrupt dispatch object: bytes that fail their digest
 /// (`adr_index_indirection.md § The object store holds dispatch objects only`) or are not an OCI
@@ -855,6 +883,35 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
+    /// Committed `publishers` against what a source fetched in this process; see [`effective_publishers`].
+    async fn declared_publishers(&self, identifier: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        let kind = self.kind_for(identifier);
+        if kind != SourceKind::Published {
+            return Ok(DeclaredPublishers::Undeclared);
+        }
+        let committed = self.local_index.committed_publishers(identifier, kind).await?;
+        let mut fetched = None;
+        for (source, _) in self.candidate_sources(identifier).await {
+            if let DeclaredPublishers::Declared(value) = source.declared_publishers(identifier).await? {
+                fetched = Some(value);
+                break;
+            }
+        }
+        Ok(effective_publishers(committed, fetched))
+    }
+
+    async fn committed_publishers(&self, identifier: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        let kind = self.kind_for(identifier);
+        if kind != SourceKind::Published {
+            return Ok(DeclaredPublishers::Undeclared);
+        }
+        Ok(self
+            .local_index
+            .committed_publishers(identifier, kind)
+            .await?
+            .map_or(DeclaredPublishers::Undeclared, DeclaredPublishers::Declared))
+    }
+
     /// The committed local root's answer only, with [`Self::physical_reference`]'s guard and refusal semantics.
     async fn physical_reference_local(
         &self,
@@ -997,6 +1054,8 @@ mod chain_refs_tests {
 
     use async_trait::async_trait;
     use tempfile::TempDir;
+
+    use super::super::index_impl::DeclaredPublishers;
 
     use crate::error::Result;
     use crate::{
@@ -2658,6 +2717,8 @@ mod chain_refs_tests {
     #[derive(Clone)]
     struct PublishedSource {
         fetch_root_document_calls: Arc<Mutex<usize>>,
+        /// What this source's process-local memo holds for `publishers`.
+        publishers: Option<serde_json::Value>,
     }
 
     #[async_trait]
@@ -2710,6 +2771,12 @@ mod chain_refs_tests {
             *self.fetch_root_document_calls.lock().unwrap() += 1;
             Ok(None)
         }
+        async fn declared_publishers(&self, _: &PackageRef) -> Result<DeclaredPublishers> {
+            Ok(self
+                .publishers
+                .clone()
+                .map_or(DeclaredPublishers::Undeclared, DeclaredPublishers::Declared))
+        }
         fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
@@ -2728,6 +2795,171 @@ mod chain_refs_tests {
         }
     }
 
+    // ── the effective `publishers` list ──────────────────────────────
+
+    /// `declared_publishers` over a committed root (raw bytes, `None` = nothing committed) and a source
+    /// whose memo holds `fetched`; also returns how many root fetches the call issued.
+    async fn declared(
+        committed: Option<&[u8]>,
+        fetched: Option<serde_json::Value>,
+    ) -> (Result<DeclaredPublishers>, usize) {
+        let dir = TempDir::new().unwrap();
+        if let Some(bytes) = committed {
+            index_store(&dir)
+                .write_root_document(REGISTRY, REPO, bytes)
+                .await
+                .unwrap();
+        }
+        let calls = Arc::new(Mutex::new(0));
+        let source = PublishedSource {
+            fetch_root_document_calls: calls.clone(),
+            publishers: fetched,
+        };
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+        );
+        let result = chained
+            .declared_publishers(&PackageRef::new_registry(REPO, REGISTRY))
+            .await;
+        let issued = *calls.lock().unwrap();
+        (result, issued)
+    }
+
+    fn root_declaring(publishers: &str) -> Vec<u8> {
+        format!(r#"{{"repository":"oci://{REGISTRY}/{REPO}","publishers":{publishers},"tags":{{}}}}"#).into_bytes()
+    }
+
+    fn key(pem: &str) -> serde_json::Value {
+        serde_json::json!({"kind": "key", "key_pem": pem})
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_adopts_the_fetched_list_for_an_undeclared_committed_root() {
+        let committed = br#"{"repository":"oci://example.com/cmake","tags":{}}"#;
+        let (result, requests) = declared(Some(committed), Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([key("a")]))
+        );
+        assert_eq!(requests, 0, "declared_publishers never asks a source for a root");
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_adopts_the_fetched_list_when_nothing_is_committed() {
+        let (result, requests) = declared(None, Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([key("a")]))
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_keeps_the_committed_list_when_the_fetched_root_dropped_it() {
+        let (result, requests) = declared(Some(&root_declaring(r#"[{"kind":"key","key_pem":"a"}]"#)), None).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([key("a")]))
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_narrows_to_the_intersection_in_committed_order() {
+        let committed = root_declaring(r#"[{"kind":"key","key_pem":"a"},{"kind":"key","key_pem":"b"}]"#);
+        let fetched = serde_json::json!([key("c"), key("b")]);
+        let (result, requests) = declared(Some(&committed), Some(fetched)).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([key("b")])),
+            "a fetched extra never widens"
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_surfaces_an_empty_intersection_as_diverged() {
+        let committed = root_declaring(r#"[{"kind":"key","key_pem":"a"}]"#);
+        let (result, requests) = declared(Some(&committed), Some(serde_json::json!([key("z")]))).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Diverged,
+            "a divergence is never `Undeclared`, and never a declared `[]`"
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_keeps_a_committed_empty_list_as_declared() {
+        let (result, requests) = declared(Some(&root_declaring("[]")), Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(result.unwrap(), DeclaredPublishers::Declared(serde_json::json!([])));
+        let (result, _) = declared(Some(&root_declaring("[]")), None).await;
+        assert_eq!(result.unwrap(), DeclaredPublishers::Declared(serde_json::json!([])));
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_diverges_when_the_fetched_value_is_not_a_usable_list() {
+        let committed = root_declaring(r#"[{"kind":"key","key_pem":"a"}]"#);
+        for fetched in [
+            serde_json::json!("nope"),
+            serde_json::json!({"kind": "key"}),
+            serde_json::json!([]),
+        ] {
+            let (result, _) = declared(Some(&committed), Some(fetched.clone())).await;
+            assert_eq!(result.unwrap(), DeclaredPublishers::Diverged, "fetched {fetched}");
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_keeps_a_committed_non_array_value_over_a_fetched_list() {
+        let (result, _) = declared(Some(&root_declaring("null")), Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(result.unwrap(), DeclaredPublishers::Declared(serde_json::Value::Null));
+        let (result, _) = declared(Some(&root_declaring(r#""x""#)), Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(result.unwrap(), DeclaredPublishers::Declared(serde_json::json!("x")));
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_keeps_committed_duplicates_that_the_fetched_list_carries() {
+        let committed = root_declaring(r#"[{"kind":"key","key_pem":"a"},{"kind":"key","key_pem":"a"}]"#);
+        let (result, _) = declared(Some(&committed), Some(serde_json::json!([key("a")]))).await;
+        assert_eq!(
+            result.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([key("a"), key("a")]))
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_is_none_when_neither_side_declares() {
+        let committed = br#"{"repository":"oci://example.com/cmake","tags":{}}"#;
+        let (result, requests) = declared(Some(committed), None).await;
+        assert_eq!(result.unwrap(), DeclaredPublishers::Undeclared);
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_refuses_an_unparsable_committed_root() {
+        let (result, requests) = declared(Some(b"{ not json"), Some(serde_json::json!([key("a")]))).await;
+        assert!(
+            result.is_err(),
+            "an unreadable committed root must fail closed, not read as undeclared"
+        );
+        assert_eq!(requests, 0);
+    }
+
+    #[tokio::test]
+    async fn declared_publishers_is_none_for_a_derived_source() {
+        let dir = TempDir::new().unwrap();
+        let chained = Index::from_chained(make_local_index(&dir), Vec::new(), ChainMode::Default);
+        let declared = chained
+            .declared_publishers(&PackageRef::new_registry(REPO, REGISTRY))
+            .await
+            .unwrap();
+        assert_eq!(declared, DeclaredPublishers::Undeclared);
+    }
+
     // ── provenance is per REGISTRY, never per name (R3) ──────────────────────
 
     /// A published source's provenance decides the LOCAL subtree layout
@@ -2742,6 +2974,7 @@ mod chain_refs_tests {
             make_local_index(&dir),
             vec![Index::from_impl(PublishedSource {
                 fetch_root_document_calls: Arc::new(Mutex::new(0)),
+                publishers: None,
             })],
             ChainMode::Default,
         );
@@ -2770,6 +3003,7 @@ mod chain_refs_tests {
             make_local_index(&dir),
             vec![Index::from_impl(PublishedSource {
                 fetch_root_document_calls: Arc::new(Mutex::new(0)),
+                publishers: None,
             })],
             ChainMode::Default,
         );
@@ -2811,6 +3045,7 @@ mod chain_refs_tests {
         let fetch_root_document_calls = Arc::new(Mutex::new(0));
         let source = PublishedSource {
             fetch_root_document_calls: fetch_root_document_calls.clone(),
+            publishers: None,
         };
         let src_idx = super::super::Index::from_impl(source);
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
@@ -2875,6 +3110,7 @@ mod chain_refs_tests {
 
         let source = PublishedSource {
             fetch_root_document_calls: Arc::new(Mutex::new(0)),
+            publishers: None,
         };
         let chained = Index::from_chained(cache, vec![super::super::Index::from_impl(source)], ChainMode::Offline);
 

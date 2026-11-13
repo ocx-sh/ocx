@@ -83,7 +83,7 @@ Attaching and reading answer two separate questions. Attaching asks whether a si
 
 Reading asks whether verification is *demanded*. If it is, OCX runs the full pipeline and refuses anything unsigned. If not, it runs no cryptography and reads whatever is there. [`ocx package sbom`][cmd-package-sbom] answers this second question.
 
-A consumer auditing a dependency has usually configured nothing. There is no `[[trust.policy]]` and no certificate identity to check against. Refusing to hand them an SBOM until they set up Sigstore turns a read into a wall.
+A consumer auditing a dependency has usually configured nothing. There is no `[[trust.policy]]`, no certificate identity to check against, and often no [publishers][guide-publishers] declared in the index. Refusing to hand them an SBOM until they set up Sigstore turns a read into a wall.
 
 A consumer who *did* configure a policy, or who typed `--certificate-identity` expecting a check, gets a different answer. They must never receive an unsigned document dressed up as if it passed. That would make the policy decorative.
 
@@ -92,9 +92,9 @@ A consumer who *did* configure a policy, or who typed `--certificate-identity` e
 - **Demand**: every listed document carries a signature that passed the full pipeline. That covers referrer discovery, the Fulcio, Rekor and identity chain, and the Statement's subject-digest binding. OCX **refuses** an unsigned attach and never lists it. The policy names who must have signed, and a raw attachment has no signer at all.
 - **Permissive**: nothing is checked and no cryptography runs. OCX extracts a signed bundle's [DSSE][dsse] payload exactly as it reads a raw attachment's bytes. It reports both as `verified: false` with no signer identity, because none was checked. The command is usable with no Sigstore setup at all, and the consumer above gets the SBOM either way.
 
-The mode follows from what you asked for and what your environment already resolves to. There is never a silent default with no way to see which one you got:
+The mode follows from what you asked for and what your environment already resolves to. Declared publishers are an identity source exactly like a covering policy. There is never a silent default with no way to see which one you got:
 
-| You pass | A `[[trust.policy]]` covers the package? | Mode |
+| You pass | Publishers declared or a `[[trust.policy]]` covers the package? | Mode |
 |---|---|---|
 | nothing | no | Permissive |
 | nothing | yes | Demand |
@@ -105,10 +105,10 @@ The mode follows from what you asked for and what your environment already resol
 
 `--verify` and `--no-verify` last-win when both are typed, like every `--x`/`--no-x` pair in ocx. Combining them is not an error.
 
-`--no-verify` **does** conflict with the certificate flags. Supplying an identity while refusing to check it is contradictory, so that combination is a usage error in either order. `--verify` with nothing to verify against is also a usage error (`no_identity_provided`, exit 64). It never falls back silently to permissive, because an operator who typed `--verify` must not have it quietly ignored.
+`--no-verify` **does** conflict with the certificate flags. Supplying an identity while refusing to check it is contradictory, so that combination is a usage error in either order. The registry's [`signatures`][config-signatures] setting adjusts the default: `off` ignores declared publishers and gives Permissive, and `required` refuses a package that declares none (exit 81, `publishers_required`). `--verify` with nothing to verify against is also a usage error (`no_identity_provided`, exit 64). It never falls back silently to permissive, because an operator who typed `--verify` must not have it quietly ignored.
 
 :::note[Reading the reader's own polarity]
-Attach and read mirror each other on purpose. **Attach** signs when a signing identity is *visible*. **Read** demands verification when an identity *source*, meaning flags or policy, is visible. Neither side downgrades silently when a check that should run then fails. Both fail loudly.
+Attach and read mirror each other on purpose. **Attach** signs when a signing identity is *visible*. **Read** demands verification when an identity *source*, meaning flags, declared publishers or policy, is visible. Neither side downgrades silently when a check that should run then fails. Both fail loudly.
 :::
 
 A verified entry carries `verified: true` plus the certificate identity, issuer and signed-at timestamp that vouch for it. An unverified entry carries `verified: false` and **omits** those three fields. OCX never emits them empty, because an empty identity would read as a verification that failed to render, not as "there was nothing to verify."
@@ -195,3 +195,5 @@ That caveat applies inside Demand mode only. Permissive mode proves nothing abou
 
 [in-depth-signing]: ../explanation/signing.mdx
 [guide-auto-verify]: ../guides/verify-installs.mdx#supply-chain-auto-verify
+[guide-publishers]: ../guides/pin-signer-identity.mdx#supply-chain-publishers
+[config-signatures]: ../reference/configuration.md#keys-registries-signatures

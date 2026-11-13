@@ -34,7 +34,7 @@ ocx package verify \
 Exit 0 means the signature matched the identity and issuer you passed. Any other exit code is a failure from the table below.
 
 :::tip[Want this to happen automatically?]
-Once you [pin a signer identity](./pin-signer-identity.mdx#supply-chain-trust-policy), [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install. You pass no flags and add no step. See [Verify by default](#supply-chain-auto-verify).
+Once you [pin a signer identity](./pin-signer-identity.mdx#supply-chain-trust-policy), or the package's index root [lists publishers][index-publishers], [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install. You pass no flags and add no step. See [Verify by default](#supply-chain-auto-verify).
 :::
 
 ## Verify without network access \{#supply-chain-offline\}
@@ -64,7 +64,9 @@ With no trusted-root file and no cached material, offline verify fails with exit
 
 A [`[[trust.policy]]`][config-trust] entry only helps if the check it describes runs. Left as a manual step, verification is the first thing skipped when a deploy runs late.
 
-Once a policy covers a package, every command that fetches it verifies its signature. That includes [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull]. It also includes every command that installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] and [`ocx patch test`][cmd-patch-test]). You add no flag and no separate step:
+Two sources can cover a package. A policy in the operator `config.toml` covers it by scope. A root that lists [`publishers`][index-publishers] covers it with no local configuration. When both apply, both must accept the signature.
+
+Once a package is covered, every command that fetches it verifies its signature. That includes [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull]. It also includes every command that installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] and [`ocx patch test`][cmd-patch-test]). You add no flag and no separate step:
 
 ```shell
 # with the ghcr.io/acme/* policy from the previous section in place
@@ -75,15 +77,18 @@ The check runs once the manifest digest resolves, before OCX downloads any layer
 
 | Exit code | Meaning |
 |---|---|
-| `77` | Certificate identity or issuer mismatch |
+| `77` | Certificate identity or issuer mismatch, or no listed publisher signed the release (`publisher_mismatch`) |
 | `78` | Trust-root or policy problem |
-| `81` | Offline with no pinned Rekor key in any trust-root rung or the cache |
+| `81` | Offline with no pinned Rekor key in any trust-root rung or the cache (`offline_mode`), or the root lists no publishers under `signatures = "required"` (`publishers_required`) |
+| `82` | The root lists a publisher kind or claim this OCX does not recognise (`publishers_unrecognized`) |
 | `79` | Missing signature |
-| `65` | Tampered bundle |
+| `65` | Tampered bundle, or a malformed publisher entry (`publishers_invalid`) |
 
 Nothing has reached the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
 
-Trust is opt-in per scope. A package outside every `[[trust.policy]]` scope installs as it always did. OCX logs an `INFO` line that no policy covered it, and nothing blocks. The same rule applies to transitive dependencies, which are verified only if a policy also covers their scope. Pin a broad scope such as `ghcr.io/acme/*` to verify a whole dependency closure, and use `exclude` to carve out any subtree that must stay unsigned.
+Trust applies per package. A package whose root lists no publishers and that lies outside every `[[trust.policy]]` scope installs unverified. OCX logs an `INFO` line that nothing covered it, and nothing blocks. The same rule applies to transitive dependencies, which are verified only if their own root or a policy covers them.
+
+A registry can demand coverage with `signatures = "required"`, which refuses a package that lists no publishers. See [Registry policy][index-publishers-signatures] for the values. An install from `ocx.lock` in a fresh home makes no index request, so it installs without the publisher check; a CI that wants the check there sets `signatures = "required"`, which refuses the package (exit 81, `publishers_required`) until `ocx index update` has committed a root that lists its publishers. Pin a broad scope such as `ghcr.io/acme/*` to verify a whole dependency closure, and use `exclude` to carve out any subtree that must stay unsigned.
 
 A scope matches the name you install by, not the registry behind it. A package installed by its index name, such as `ocx.sh/acme/tool`, needs a scope on `ocx.sh/acme/tool` even when its index entry points at `ghcr.io/acme/tool`.
 
@@ -118,4 +123,6 @@ Under [`--offline`][arg-offline], a policy-covered install needs its trust mater
 [env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
 [env-no-verify]: ../reference/environment.md#ocx-no-verify
 [config-trust]: ../reference/configuration.md#keys-trust
+[index-publishers]: ./pin-signer-identity.mdx#supply-chain-publishers
+[index-publishers-signatures]: ./pin-signer-identity.mdx#supply-chain-publishers-signatures
 [in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md

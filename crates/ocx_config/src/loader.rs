@@ -177,6 +177,7 @@ impl ConfigLoader {
                 crate::RegistryConfig {
                     index: Some(crate::index::DEFAULT_INDEX_BASE_URL.to_string()),
                     index_is_compiled_default: true,
+                    signatures: None,
                     ..Default::default()
                 },
             )])),

@@ -615,6 +615,22 @@ impl LocalIndex {
         Ok(Some(physical.at_version_of(identifier)))
     }
 
+    /// The committed root's raw `publishers`; `Ok(None)` when no root is committed or it omits the key.
+    ///
+    /// # Errors
+    ///
+    /// An unreadable or unparsable committed root: a root that cannot be read must never read as undeclared.
+    pub(super) async fn committed_publishers(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        kind: SourceKind,
+    ) -> Result<Option<serde_json::Value>> {
+        Ok(self
+            .read_root_by_kind(identifier.registry(), identifier.repository(), kind)
+            .await?
+            .and_then(|result| result.root.publishers))
+    }
+
     /// [`commit_published_root`](Self::commit_published_root), then sweep the dispatch objects no
     /// surviving pin references.
     pub(super) async fn commit_and_sweep_published_root(
@@ -650,6 +666,12 @@ impl LocalIndex {
         let mut current = previous.clone();
         // `None` skips the write, so a no-op update leaves the committed tree's mtime alone.
         if let Some(bytes) = merge_root(committed.as_deref(), fetched_bytes, scope) {
+            if let Some((added, removed)) = publishers_replaced(committed.as_deref(), &bytes) {
+                log::warn!(
+                    "The publishers declared for '{identifier}' changed on update: {added} entries added, {removed} removed. \
+                     Installs now verify against the new list."
+                );
+            }
             transaction.write_root(repository, &bytes, repository_check).await?;
             // From the committed bytes, never the fetched root the merge may have taken only part of.
             current = published_pins(Some(&bytes));
@@ -788,6 +810,23 @@ fn published_pins(bytes: Option<&[u8]>) -> Vec<ocx_oci::Digest> {
         .unwrap_or_default()
 }
 
+/// The `(added, removed)` entry counts when `merged` replaces a non-empty committed `publishers` list with a
+/// different one; `None` otherwise. Entries compare as JSON values, so a reorder alone is not a change.
+fn publishers_replaced(committed: Option<&[u8]>, merged: &[u8]) -> Option<(usize, usize)> {
+    let publishers = |bytes: &[u8]| -> Option<Vec<serde_json::Value>> {
+        let root: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        match root.get("publishers")? {
+            serde_json::Value::Array(entries) => Some(entries.clone()),
+            _ => Some(Vec::new()),
+        }
+    };
+    let old = publishers(committed?).filter(|entries| !entries.is_empty())?;
+    let new = publishers(merged)?;
+    let added = new.iter().filter(|entry| !old.contains(entry)).count();
+    let removed = old.iter().filter(|entry| !new.contains(entry)).count();
+    (added + removed > 0).then_some((added, removed))
+}
+
 /// Merge a fetched published root into `committed` within `scope`; `None` when nothing in scope changed.
 ///
 /// Walked as a [`serde_json::Value`], not the typed [`super::wire::IndexRoot`], which would drop
@@ -833,6 +872,10 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
             let mut base = fetched_root.clone();
             if let Some(object) = base.as_object_mut() {
                 object.insert("tags".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+                // The pointer only: `publishers` is adopted by a tag or package write, never by routing.
+                if matches!(scope, RootScope::Routing) {
+                    object.remove("publishers");
+                }
             }
             base
         }
@@ -1171,20 +1214,24 @@ mod tests {
 
         assert_eq!(
             production.matches("log::warn!").count(),
-            3,
-            "the three warnings below are the whole warn budget of this module"
+            4,
+            "the four warnings below are the whole warn budget of this module"
         );
         assert!(
             production.contains("derived root for '{source}/{repository}' is unparseable"),
-            "warn 1 of 3: the kill-9 recovery of an unparseable derived root"
+            "warn 1 of 4: the kill-9 recovery of an unparseable derived root"
         );
         assert!(
             production.contains("was published without a 'config.json'"),
-            "warn 2 of 3: the config.json hook losing its second lock"
+            "warn 2 of 4: the config.json hook losing its second lock"
         );
         assert!(
             production.contains("could not commit the tags that did refresh"),
-            "warn 3 of 3: the D-008 double fault, the only record of the withheld tag failure"
+            "warn 3 of 4: the D-008 double fault, the only record of the withheld tag failure"
+        );
+        assert!(
+            production.contains("changed on update"),
+            "warn 4 of 4: a committed publishers list replaced by a different one, one line per package"
         );
 
         assert_eq!(
@@ -2086,6 +2133,158 @@ mod tests {
             "a committed root is left exactly as committed: replacing its \
              repository is a routing migration, which is `ocx index update`'s"
         );
+    }
+
+    /// A one-row root carrying `publishers` (raw JSON text, or `None` for the key absent).
+    fn root_with_publishers(publishers: Option<&str>, leaf: char) -> String {
+        let key = publishers
+            .map(|raw| format!(r#","publishers":{raw}"#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"repository":"oci://{REGISTRY}/{REPO}"{key},"tags":{{"a":{{"content":"{}"}}}}}}"#,
+            content_for(leaf)
+        )
+    }
+
+    fn publishers_of(bytes: &[u8]) -> Option<serde_json::Value> {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .unwrap()
+            .get("publishers")
+            .cloned()
+    }
+
+    /// `publishers` rides the existing merge, which this change leaves alone.
+    #[test]
+    fn publishers_first_sight_carries_the_fetched_value() {
+        let fetched = root_with_publishers(Some(r#"[{"kind":"key"}]"#), '1');
+        let merged = merge_root(None, fetched.as_bytes(), RootScope::Package).expect("first sight writes");
+        assert_eq!(publishers_of(&merged), Some(serde_json::json!([{"kind": "key"}])));
+    }
+
+    /// A routing pointer is recorded by a digest or lock resolve with nothing committed, and the install-side
+    /// rounds read `publishers` off the committed root alone: carrying the fetched list would make the pointer
+    /// a declaration the user never adopted, and refuse a lock install in a fresh home.
+    #[test]
+    fn publishers_routing_first_sight_commits_the_pointer_without_the_list() {
+        let fetched = root_with_publishers(Some(r#"[{"kind":"key"}]"#), '1');
+        let merged = merge_root(None, fetched.as_bytes(), RootScope::Routing).expect("first sight writes");
+        assert_eq!(publishers_of(&merged), None);
+        let root: serde_json::Value = serde_json::from_slice(&merged).unwrap();
+        assert_eq!(
+            root["repository"],
+            format!("oci://{REGISTRY}/{REPO}"),
+            "the pointer itself is kept"
+        );
+
+        // Control: the scope is what differs, not the fixture.
+        let adopted = merge_root(None, fetched.as_bytes(), RootScope::Package).expect("first sight writes");
+        assert_eq!(publishers_of(&adopted), Some(serde_json::json!([{"kind": "key"}])));
+    }
+
+    #[test]
+    fn publishers_package_scope_overwrites_a_different_value() {
+        let committed = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"old"}]"#), '1');
+        let fetched = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"new"}]"#), '1');
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package)
+            .expect("a changed publishers value is a change");
+        assert_eq!(
+            publishers_of(&merged),
+            Some(serde_json::json!([{"kind": "key", "key_pem": "new"}]))
+        );
+    }
+
+    #[test]
+    fn publishers_replaced_counts_added_and_removed_entries_by_value() {
+        let old = root_with_publishers(
+            Some(r#"[{"kind":"key","key_pem":"a"},{"kind":"key","key_pem":"b"}]"#),
+            '1',
+        );
+        let new = root_with_publishers(
+            Some(r#"[{"kind":"key","key_pem":"b"},{"kind":"key","key_pem":"c"}]"#),
+            '1',
+        );
+        assert_eq!(publishers_replaced(Some(old.as_bytes()), new.as_bytes()), Some((1, 1)));
+
+        let reordered = root_with_publishers(
+            Some(r#"[{"kind":"key","key_pem":"b"},{"kind":"key","key_pem":"a"}]"#),
+            '1',
+        );
+        assert_eq!(
+            publishers_replaced(Some(old.as_bytes()), reordered.as_bytes()),
+            None,
+            "a reorder is no change"
+        );
+
+        let empty = root_with_publishers(Some("[]"), '1');
+        assert_eq!(
+            publishers_replaced(Some(empty.as_bytes()), new.as_bytes()),
+            None,
+            "empty committed list"
+        );
+        assert_eq!(publishers_replaced(None, new.as_bytes()), None, "nothing committed");
+    }
+
+    /// An update that swaps a committed non-empty `publishers` list warns once; one that changes nothing is silent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_replacing_the_publishers_list_warns_with_the_entry_counts() {
+        install_warning_capture();
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let first = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"a"}]"#), '1');
+        let second = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"b"}]"#), '1');
+        let id = tagged_id("a");
+        let count = || {
+            CAPTURED_WARNINGS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| {
+                    line.contains(
+                        "publishers declared for 'example.com/cmake:a' changed on update: 1 entries added, 1 removed",
+                    )
+                })
+                .count()
+        };
+
+        index
+            .commit_published_root(&id, first.as_bytes(), RootScope::Package)
+            .await
+            .unwrap();
+        index
+            .commit_published_root(&id, first.as_bytes(), RootScope::Package)
+            .await
+            .unwrap();
+        assert_eq!(count(), 0, "first sight and an unchanged list are silent");
+
+        index
+            .commit_published_root(&id, second.as_bytes(), RootScope::Package)
+            .await
+            .unwrap();
+        assert_eq!(count(), 1);
+    }
+
+    #[test]
+    fn publishers_tags_and_routing_scopes_leave_the_committed_value() {
+        let committed = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"old"}]"#), '1');
+        let fetched = root_with_publishers(Some(r#"[{"kind":"key","key_pem":"new"}]"#), '2');
+        let old = Some(serde_json::json!([{"kind": "key", "key_pem": "old"}]));
+
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Tags(&["a"]))
+            .expect("the moved tag is a change");
+        assert_eq!(publishers_of(&merged), old, "Tags scope");
+        assert!(
+            merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Routing).is_none(),
+            "Routing scope writes nothing over a committed root"
+        );
+    }
+
+    #[test]
+    fn publishers_absent_from_the_fetched_root_never_removes_the_committed_value() {
+        let committed = root_with_publishers(Some(r#"[{"kind":"key"}]"#), '1');
+        let fetched = root_with_publishers(None, '2');
+        let merged = merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Package)
+            .expect("the moved tag is a change");
+        assert_eq!(publishers_of(&merged), Some(serde_json::json!([{"kind": "key"}])));
     }
 
     /// A root document pinning one row per `(tag, leaf, ephemeral)`; `leaf` picks the dispatch

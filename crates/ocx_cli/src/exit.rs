@@ -114,6 +114,7 @@ ocx_exit::families!(
     ::ocx_package_manager::error::PackageErrorKind,
     ::ocx_package_manager::error::DependencyError,
     ::ocx_package_manager::record::RecordsError,
+    ::ocx_package_manager::tasks::signer_rounds::RoundsError,
     // ocx_store
     ::ocx_store::file_structure::error::Error,
     ::ocx_store::file_structure::ToolchainPathError,

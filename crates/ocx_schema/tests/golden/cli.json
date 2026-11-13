@@ -8452,7 +8452,7 @@
               "package",
               "sbom"
             ],
-            "version": 1,
+            "version": 2,
             "summary": "List or extract the SBOM attestations a published package carries",
             "hidden": false,
             "external_subcommands": false,
@@ -8521,7 +8521,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Write the SBOM document to PATH (\"-\" for stdout). Several candidates exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest"
+                "help": "Write the SBOM document to PATH (\"-\" for stdout). Several candidates of one type resolve to the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest"
               },
               {
                 "id": "summary",

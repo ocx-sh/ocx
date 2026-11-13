@@ -449,6 +449,13 @@
             "null"
           ],
           "default": null
+        },
+        "claims": {
+          "description": "Fulcio certificate claims that must all match, keyed by claim name or raw OID.\n\nEvery listed claim must match, and values compare as exact strings. A key is a known claim name\n(`build_signer_uri`, `source_repository_identifier`, `source_repository_owner_identifier`,\n`build_trigger`, `build_signer_digest`) or a raw OID under `1.3.6.1.4.1.57264.1.`; an unknown\nname matches nobody.\n\nAlone or beside `identity` / `identity_regexp`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },

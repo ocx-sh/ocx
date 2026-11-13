@@ -467,23 +467,22 @@ impl Context {
         let operator_policies = config.trust_policies().to_vec();
         // Read once: auto-verify and the recorded config must see the same value.
         let no_verify_env = bool_or_received(&ocx_env::OCX_NO_VERIFY, env_slot.policy.no_verify)?;
-        let auto_verify = if operator_policies.is_empty() {
-            None
-        } else {
+        // Always constructed: an index-declared publisher covers a package no policy names.
+        let auto_verify = {
             let client = registry_client_cell
                 .get_or_init(|| client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build())
                 .clone();
-            build_auto_verify(
+            ocx_package_manager::AutoVerify::new(build_auto_verify(
                 operator_policies,
+                config.clone(),
                 config.trust.as_ref().and_then(|t| t.sigstore.clone()),
                 &client,
                 options.offline,
                 file_structure.state.clone(),
                 no_verify_env,
-            )?
-            .map(ocx_package_manager::AutoVerify::new)
+            )?)
         };
-        let manager = manager.with_auto_verify(auto_verify);
+        let manager = manager.with_auto_verify(Some(auto_verify));
 
         // Pins child spawns to this binary via `OCX_BINARY_PIN`; on failure the child's
         // `${OCX_BINARY_PIN:-ocx}` degrades to a `$PATH` lookup.
@@ -1061,30 +1060,29 @@ fn client_builder(
         .extra_roots(extra_roots.clone())
 }
 
-/// The policy-gated auto-verify input, or `None` with no operator `[[trust.policy]]`.
+/// The auto-verify input, built on every context whether or not an operator `[[trust.policy]]` exists.
 ///
 /// Returns `AutoVerifyInput` rather than `AutoVerify` so tests can read the resolved
 /// endpoint. Only operator `config.toml` policies gate it; the project pool stays empty.
 fn build_auto_verify(
     operator_policies: Vec<ocx_trust::TrustPolicy>,
+    config: ocx_config::Config,
     sigstore_trust: Option<ocx_trust::SigstoreTrust>,
     registry_client: &ocx_oci::Client,
     offline: bool,
     state: StateStore,
     user_opted_out: bool,
-) -> anyhow::Result<Option<ocx_package_manager::AutoVerifyInput>> {
-    if operator_policies.is_empty() {
-        return Ok(None);
-    }
+) -> anyhow::Result<ocx_package_manager::AutoVerifyInput> {
     // Auto-verify keys its trust-root cache by this URL, so a bad URL fails the run: falling
     // back to the default would cache a self-hosted root under the public-good key.
     let rekor = resolve_endpoint(None, sigstore_trust.as_ref(), SigstoreEndpoint::Rekor);
     let rekor_url = ocx_oci::endpoint::validate_sigstore_url(&rekor, "[trust.sigstore].rekor_url")?;
-    Ok(Some(ocx_package_manager::AutoVerifyInput {
+    Ok(ocx_package_manager::AutoVerifyInput {
         operator_policies,
         // ponytail: project `ocx.toml` policies are not read on OCI-tier surfaces yet; wire them
         // here when that follow-up lands.
         project_policies: Vec::new(),
+        config,
         registry_client: registry_client.clone(),
         rekor_url,
         offline,
@@ -1099,7 +1097,7 @@ fn build_auto_verify(
         sigstore_trust,
         home_trusted_root: ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path(),
         user_opted_out,
-    }))
+    })
 }
 
 /// Condition 2 of [`is_published_namespace`] without its warning, so [`index_namespaces`]
@@ -1727,15 +1725,32 @@ mod tests {
     /// Call `build_auto_verify` with `sigstore` as the only varying input.
     fn auto_verify_input(
         sigstore: Option<ocx_trust::SigstoreTrust>,
-    ) -> anyhow::Result<Option<ocx_package_manager::AutoVerifyInput>> {
+    ) -> anyhow::Result<ocx_package_manager::AutoVerifyInput> {
         build_auto_verify(
             one_policy(),
+            ocx_config::Config::default(),
             sigstore,
             &ocx_oci::ClientBuilder::new().build(),
             false,
             StateStore::new("/state"),
             false,
         )
+    }
+
+    /// with no operator policy the input is still built, so an index-declared publisher can cover the package.
+    #[test]
+    fn auto_verify_is_built_with_no_operator_policy() {
+        let input = build_auto_verify(
+            Vec::new(),
+            ocx_config::Config::default(),
+            None,
+            &ocx_oci::ClientBuilder::new().build(),
+            false,
+            StateStore::new("/state"),
+            false,
+        )
+        .expect("no policy is not an error");
+        assert!(input.operator_policies.is_empty());
     }
 
     /// Install and pull carry no `--rekor-url`, so `[trust.sigstore].rekor_url`
@@ -1753,12 +1768,8 @@ mod tests {
             rekor_url: Some("https://rekor.corp.example".to_string()),
             ..Default::default()
         };
-        let from_config = auto_verify_input(Some(configured))
-            .expect("a valid config URL must not fail the run")
-            .expect("a policy is configured, so auto-verify is on");
-        let from_builtin = auto_verify_input(None)
-            .expect("the builtin default is valid")
-            .expect("a policy is configured, so auto-verify is on");
+        let from_config = auto_verify_input(Some(configured)).expect("a valid config URL must not fail the run");
+        let from_builtin = auto_verify_input(None).expect("the builtin default is valid");
 
         assert_eq!(
             from_config.rekor_url.host_str(),
@@ -2238,6 +2249,7 @@ mod tests {
             ocx_config::RegistryConfig {
                 index: Some("https://index.ocx.sh".to_string()),
                 index_is_compiled_default: true,
+                signatures: None,
                 ..Default::default()
             },
         );
