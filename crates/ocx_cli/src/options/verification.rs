@@ -8,9 +8,10 @@ use ocx_sign::verify::VerificationMode;
 pub struct Verification {
     /// Require a verified signature; refuse unsigned attachments.
     ///
-    /// The default when identity flags are given, or when a [trust.policy]
-    /// covers the package. Without either, there is nothing to verify
-    /// against and this is a usage error.
+    /// The default when identity flags are given, when the index lists
+    /// publishers for the package, or when a [trust.policy] covers it.
+    /// With none of these, there is nothing to verify against and this is
+    /// a usage error.
     #[clap(long = "verify", overrides_with = "no_verify")]
     verify: bool,
 

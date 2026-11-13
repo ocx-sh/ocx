@@ -53,7 +53,7 @@ Plain output is an aligned `Key`, `Type`, `Value` table. When binaries, entry po
 
 `--format json` emits `items` plus `binaries`, `entrypoints` and `integrations` arrays; `--shell[=NAME]` emits the only eval-safe form. A package's dependencies contribute their variables in topological order, dependencies before dependents.
 
-Packages missing from the object store are installed, with their transitive dependencies, and a package a `[[trust.policy]]` covers is signature-verified before its environment is composed.
+Packages missing from the object store are installed, with their transitive dependencies, and a package with index-listed publishers or a covering `[[trust.policy]]` is signature-verified before its environment is composed.
 
 `--candidate`, `--current` and `--link` resolve through an install symlink instead and never auto-install. `--self` selects the publisher's own view (private and public entries) instead of the consumer view (public and interface); `integrations` is always empty under `--self`.
 
@@ -79,7 +79,7 @@ ocx package env [OPTIONS] <PACKAGE>...
 
 Runs installed packages.
 
-Identifiers are OCI references (for example `kitware/cmake:3.28`), resolved through the index and installed when missing. A package a `[[trust.policy]]` covers is signature-verified before it runs.
+Identifiers are OCI references (for example `kitware/cmake:3.28`), resolved through the index and installed when missing. A package with index-listed publishers or a covering `[[trust.policy]]` is signature-verified before it runs.
 
 Dependencies' environments apply in topological order before the package's own, and entries layer in the order the identifiers appear. For a project driven by `ocx.toml`, use `ocx exec`.
 
@@ -153,7 +153,7 @@ Install packages from a local or remote index (no `ocx.toml` touched).
 
 Downloads the packages and their transitive dependencies into the object store and creates a candidate symlink for each requested package; dependencies get no install symlinks. This is the OCI-tier install and never touches `ocx.toml`; use `ocx add` for a project.
 
-A package that a `[[trust.policy]]` covers is verified before any layer downloads (see `--verify`).
+A package with index-listed publishers or a covering `[[trust.policy]]` is verified before any layer downloads (see `--verify`).
 
 Installing a foreign platform fills the object store but leaves the host's candidate and `current` symlinks alone. A platformless lookup therefore never resolves to a package the host cannot run.
 
@@ -285,7 +285,7 @@ The payload layer's own media type is the only claim about the document, so it i
 
 Each invocation runs in one of two modes. `--verify` lists only documents whose signature passed every check `verify --attestation` runs; an unsigned attach is refused rather than listed (exit 77 when it is all the package carries).
 
-It is the default whenever `--certificate-identity` or `--certificate-oidc-issuer` is given or a `[[trust.policy]]` covers the package. `--no-verify` runs no cryptography at all and reports every document as `verified: false` with no signer identity.
+It is the default whenever `--certificate-identity` or `--certificate-oidc-issuer` is given, the index lists publishers for the package, or a `[[trust.policy]]` covers it. `--no-verify` runs no cryptography at all and reports every document as `verified: false` with no signer identity.
 
 It is the default when no identity source resolves, and it is what lets `sbom` work with no Sigstore setup.
 
@@ -316,7 +316,7 @@ ocx package sbom [OPTIONS] <IDENTIFIER>
 | `--key` | `REF` | Sign or verify with a key pair instead of keyless Sigstore |
 | `--no-cache` |  | Bypass the referrers-capability cache for this invocation |
 | `--no-verify` |  | List documents without verifying anything; `--output` still writes the document, with one stderr warning naming the referrer digest |
-| `--output`, `-o` | `PATH` | Write the SBOM document to PATH ("-" for stdout). Several candidates exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest |
+| `--output`, `-o` | `PATH` | Write the SBOM document to PATH ("-" for stdout). Several candidates of one type resolve to the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest |
 | `--platform`, `-p` | `PLATFORM` | Narrow into one platform of an image index |
 | `--rekor-url` | `URL` | Rekor transparency-log endpoint |
 | `--signature-format` | `FORMAT` | Signature wire format to accept: bundle or simplesigning |
@@ -365,9 +365,9 @@ Verify a published package's Sigstore signature (keyless, via OCI Referrers).
 
 Fetches the Sigstore bundle v0.3 referrer for the target. Then it checks the Fulcio certificate chain against a trust root, the Rekor Signed Entry Timestamp, and the signature over the subject manifest digest.
 
-It also checks the certificate identity and OIDC issuer against the identity you supply as flags or have pinned in a `[[trust.policy]]` entry. All checks must pass for exit 0.
+It also checks the certificate identity and OIDC issuer against the identity you supply as flags, the index lists as the package's publishers, or you have pinned in a `[[trust.policy]]` entry. All checks must pass for exit 0.
 
-`--certificate-identity` and `--certificate-oidc-issuer` are optional only when a `[[trust.policy]]` scope covers the target; keyless verification needs an identity from one source or the other.
+`--certificate-identity` and `--certificate-oidc-issuer` are optional only when the index lists publishers for the target or a `[[trust.policy]]` scope covers it; keyless verification needs an identity from one of these sources.
 
 `--offline` (or `OCX_OFFLINE`) scopes to the Sigstore trust services, the Rekor-key fetch and TUF, not the registry. Verify still fetches the target and its referrer from the registry in every mode.
 
@@ -391,11 +391,9 @@ The report has the same fields in either mode. Use `ocx package sbom` when the p
 
 Name the signer in one of two ways. Pass both `--certificate-identity` and `--certificate-oidc-issuer`, an exact-match pair that overrides any configured policy.
 
-Or pass neither and let `[[trust.policy]]` decide. Verify then checks the operator-tier (`config.toml`) policies against the target's canonical `registry/repository`.
+Or pass neither and let the publishers the index lists for the package, or `[[trust.policy]]`, decide. Policies are matched against the target's canonical `registry/repository`: the operator-tier (`config.toml`) ones first, the project `ocx.toml` ones only when none match.
 
-It falls back to the project `ocx.toml` policies only when none match.
-
-Reading `[[trust.policy]]` from `ocx.toml` is the one exception to OCI-tier commands never consulting it, because trust policy is a security posture rather than toolchain binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), and so is neither flag with no covering policy (`no_identity_provided`).
+Reading `[[trust.policy]]` from `ocx.toml` is the one exception to OCI-tier commands never consulting it, because trust policy is a security posture rather than toolchain binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), and so is neither flag with no listed publishers and no covering policy (`no_identity_provided`).
 
 Trust material carrying only CA anchors cannot verify anything, since the Fulcio certificate's SCT is checked against the CT log key. Verify refuses it with exit 78 (`trust root carries no CT log key`).
 

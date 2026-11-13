@@ -135,7 +135,7 @@ Layout: `{root}/packages/{registry_slug}/{algorithm}/{2hex}/{30hex}/`
 
 **Repository NOT in path.** Only registry + digest set location → cross-repo dedup.
 
-Each package dir contain: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`, `refs/origins/`.
+Each package dir contain: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`, `refs/origins/`, `refs/verified/`.
 
 Key store methods: `path(pinned_id)`, `content(pinned_id)`, `metadata(pinned_id)`, `manifest(pinned_id)`, `resolve(pinned_id)`, `install_status(pinned_id)`, `digest_file(pinned_id)`, `metadata_for_content(content_path)`, `refs_symlinks_dir_for_content(content_path)`, `refs_deps_dir_for_content(content_path)`, `refs_layers_dir_for_content(content_path)`, `refs_blobs_dir_for_content(content_path)`, `resolve_for_content(content_path)`, `list_all() → Vec<PackageDir>`.
 
@@ -342,6 +342,8 @@ Layer forward-ref: created by `pull` directly (not via `ReferenceManager`). Syml
 Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` target `blobs/.../data`. GC recover blob entry dir via `.parent()` on target.
 
 Origin marker: `packages/.../refs/origins/{name_for_path(origin)}` — a **regular file** (not a symlink), content = the canonical `<registry>/<repository-path>` origin string, written by `record_origin()` on a genuine fetch only. Records provenance (which repository this host resolved this digest under — logical, not transport), not liveness — deliberately outside the GC reachability graph below, so `refs/origins/` is never walked for roots or edges. Read side: `PackageDir::recorded_origins()`. Consumed by `project::consent::verified_sources` (the shell-activation namespace-grant predicate).
+
+Verified marker: `packages/.../refs/verified/{name_for_path(origin)}` — same shape as the origin marker, written by `record_verified()` only after a publisher round ran and passed for that logical repository (never for an undeclared, `--no-verify` or digest-without-committed-root install). Read side: `is_verified()`, one marker, never a listing; the origin gate on `find` (`origin_gate_open`) reads it for a package its index declares publishers for. Outside the GC graph like `refs/origins/`.
 
 `broken_refs()` check only `refs/symlinks/` — not `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 

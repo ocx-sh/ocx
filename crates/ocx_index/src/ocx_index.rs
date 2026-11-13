@@ -26,6 +26,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use super::error::Result;
+use super::index_impl::DeclaredPublishers;
 use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
 use super::{IndexOperation, error, index_impl};
 use ocx_oci::client::ReadAddressing;
@@ -1202,6 +1203,22 @@ impl index_impl::IndexImpl for OcxIndex {
         // Replaces the memo, so the dispatch reads that follow agree with the root just committed.
         self.memoize_root(identifier.repository(), fetched.clone()).await;
         Ok(fetched.map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())))
+    }
+
+    /// The `publishers` of the root this process already fetched; the memo only, so never a request.
+    async fn declared_publishers(&self, identifier: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        if !self.serves_registry(identifier.registry()) {
+            return Ok(DeclaredPublishers::Undeclared);
+        }
+        Ok(self
+            .cache
+            .read()
+            .await
+            .roots
+            .get(identifier.repository())
+            .and_then(Option::as_ref)
+            .and_then(|cached| cached.parsed.publishers.clone())
+            .map_or(DeclaredPublishers::Undeclared, DeclaredPublishers::Declared))
     }
 
     async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
@@ -3505,6 +3522,37 @@ mod tests {
     /// C-006 edge case (a2) — a **foreign-registry** identifier memoizes
     /// nothing.
     ///
+    /// `declared_publishers` reads only the memo: a fetched root carrying `publishers` answers `Declared`,
+    /// a foreign registry answers `Undeclared` even though the memo holds that repository.
+    ///
+    /// *Red-reachability:* dropping the `serves_registry` guard turns the foreign answer into `Declared`;
+    /// dropping the memo read turns the served answer into `Undeclared`.
+    #[tokio::test]
+    async fn declared_publishers_reads_the_memoized_root_for_the_served_registry_only() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let root = br#"{"repository":"oci://ghcr.io/ocx-contrib/cmake","publishers":[{"kind":"key","key_pem":"a"}],"tags":{}}"#;
+        transport.insert(&root_url(), root);
+        let source = make_source(transport, false);
+        let served = ocx_oci::PackageRef::new_registry(REPO, NAMESPACE);
+
+        assert_eq!(
+            source.declared_publishers(&served).await.unwrap(),
+            DeclaredPublishers::Undeclared,
+            "an empty memo is never a request"
+        );
+        source.fetch_root_document(&served).await.unwrap();
+        assert_eq!(
+            source.declared_publishers(&served).await.unwrap(),
+            DeclaredPublishers::Declared(serde_json::json!([{"kind": "key", "key_pem": "a"}]))
+        );
+        let foreign = ocx_oci::PackageRef::new_registry(REPO, "other.io");
+        assert_eq!(
+            source.declared_publishers(&foreign).await.unwrap(),
+            DeclaredPublishers::Undeclared
+        );
+    }
+
     /// The memo key is the bare repository with no registry component, so a
     /// tail-position insert would poison `ns/pkg` with `None` for the served
     /// registry, `jurisdiction` would settle `Outside`, and the package would

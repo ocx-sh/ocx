@@ -270,6 +270,7 @@ Input data is malformed or fails verification.
 | `predicate_too_large` | The predicate or statement exceeds its size limit |
 | `predicate_type_mismatch` | The signed predicate type is not the requested one |
 | `project_env_path_separator_in_value` | An ocx.toml path value contains the platform path separator |
+| `publishers_invalid` | The index lists publishers that are malformed |
 | `pull_request_unmergeable` | The open announce pull request conflicts with the index |
 | `rekor_inclusion_proof_absent` | The bundle carries no transparency log inclusion proof |
 | `rekor_set_absent_tsa_present` | The bundle has a timestamp authority stamp but no transparency log timestamp, which this build cannot verify |
@@ -445,6 +446,7 @@ The operation was refused for lack of permission.
 | `issuer_mismatch` | The certificate OIDC issuer does not match the required issuer |
 | `oidc_pre_check_failed` | The OIDC token failed a client-side check before reaching the certificate authority |
 | `permission_denied` | The operating system refused access to a file or directory |
+| `publisher_mismatch` | No publisher listed by the index signed the package |
 | `unsigned_rejected_by_policy` | An unsigned document was refused because a signature is required |
 
 ## `78` ConfigError {#exit-78}
@@ -625,6 +627,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 | `project_resolution_blocked` | A local policy refused resolving a binding |
 | `prune_no_index` | No index is configured to check the tags against |
 | `prune_refused_durable` | The index still lists a tag prune would delete, and the tag is durable |
+| `publishers_required` | The registry requires index-declared publishers and the package has none |
 
 ## `82` Unsupported {#exit-82}
 
@@ -635,6 +638,7 @@ The operation as requested is not supported or not enabled by this registry, for
 | Slug | Meaning |
 | --- | --- |
 | `forge_capability_unavailable` | The forge or project lacks a capability the transport needs |
+| `publishers_unrecognized` | The index lists publishers only a newer ocx understands |
 | `referrers_unsupported` | The registry supports neither the OCI Referrers API nor a referrers fallback tag |
 | `registry_delete_unsupported` | The registry does not delete tags |
 | `unsupported_key_backend` | A key reference names a recognised key backend this build does not implement |

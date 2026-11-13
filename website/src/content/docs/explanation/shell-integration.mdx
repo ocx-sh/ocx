@@ -178,7 +178,7 @@ What the grant still cannot tell you is whether the *expected* identity publishe
 The real control for that residual already exists and answers the right question: an operator-tier [`[[trust.policy]]`][config-trust-policy] plus [`ocx package verify`][cmd-package-verify]. Consent decides whether to run a project's toolchain at all; a Sigstore signature decides whether the expected identity published what you are about to run. They are deliberately separate mechanisms — folding signature verification into the consent stamp would produce one system doing both jobs worse.
 
 :::caution[This mitigation is opt-in, not default]
-With no `[[trust.policy]]` configured, automatic verification is a no-op. Someone who cloned a repository and wrote no operator config gets no signature check on the hook's path. Turning it on means writing an operator-tier `[[trust.policy]]` yourself; see [Signing][in-depth-signing] for the full model. A project's own `ocx.toml` cannot enable this on your behalf, by the same logic that keeps `[shell.consent]` out of it.
+With no publisher list in the index root and no `[[trust.policy]]` configured, automatic verification is a no-op. Someone who cloned a repository and wrote no operator config gets no signature check on the hook's path unless the index root lists publishers. Otherwise, turning it on means writing an operator-tier `[[trust.policy]]` yourself; see [Signing][in-depth-signing] for the full model. A project's own `ocx.toml` cannot enable this on your behalf, by the same logic that keeps `[shell.consent]` out of it.
 :::
 
 [mise-security]: https://mise.jdx.dev/

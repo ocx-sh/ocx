@@ -23,7 +23,7 @@ signers = [
 ]
 ```
 
-Declare it in a [`config.toml` tier](./configure-ocx.mdx#configuration-files) (system, user or `$OCX_HOME`) or in the project's `ocx.toml`. Then `ocx package verify` resolves the identity for any package under `ghcr.io/acme/`. You pass no identity flags. Install and pull verify only from a `config.toml` tier. An `ocx.toml` policy gates `ocx package verify` alone, as [Verify installs](./verify-installs.mdx#supply-chain-auto-verify) explains. The trust-root requirement from [Verify a package](./verify-installs.mdx#supply-chain-verification) still applies:
+Declare it in a [`config.toml` tier](./configure-ocx.mdx#configuration-files) (system, user or `$OCX_HOME`) or in the project's `ocx.toml`. Then `ocx package verify` resolves the identity for any package under `ghcr.io/acme/`. You pass no identity flags. Install and pull verify only from a `config.toml` tier, or when the package's index root [lists publishers][index-publishers]. An `ocx.toml` policy gates `ocx package verify` alone, as [Verify installs](./verify-installs.mdx#supply-chain-auto-verify) explains. The trust-root requirement from [Verify a package](./verify-installs.mdx#supply-chain-verification) still applies:
 
 ```shell
 ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
@@ -122,6 +122,18 @@ signers = [
 ]
 ```
 
+A keyless signer can match Fulcio certificate claims instead of, or beside, the identity. The `claims` table names each claim, and every listed claim must match:
+
+```toml
+[[trust.policy]]
+scope   = "ghcr.io/acme/*"
+signers = [
+  { kind = "keyless", oidc_issuer = "https://token.actions.githubusercontent.com",
+                      claims = { build_signer_uri = "https://github.com/acme/release/.github/workflows/publish.yml@refs/heads/main",
+                                 source_repository_identifier = "123456789" } },
+]
+```
+
 Mixing `keyless` and `key` entries in one policy is legal. It is how a fleet migrates between signing models without touching scope. A relative key reference resolves against the directory of the `config.toml` that declared it. This is plain path resolution, the same one `[trust.sigstore] trusted_root` uses, not a containment check. The failure codes follow what failed, as `ocx package sign --key` does for the same file:
 
 | Condition | Exit |
@@ -156,6 +168,69 @@ A table scope combines the same per-pattern rules. A target matches when it matc
 
 An unknown key beside `include` or `exclude` is dropped as usual. Write `scope = ""`, or omit it, when you mean a catch-all. Scopes have no regex form in either spelling. `identity_regexp` is the only regex surface, because an over-broad pattern here silently widens trust rather than failing loudly.
 
+## Declare publishers in the index {#supply-chain-publishers}
+
+A package's root document can list who signs its releases, in a `publishers` array. The list lives in the index, so it reaches a client with the root and needs no operator configuration. Before a pull, OCX reads the committed root and checks the release signature against the list: the signature must match at least one entry. A package that lists no publishers is verified only if an operator [`[[trust.policy]]`][config-trust] covers it. Under `signatures = "required"`, such a package is refused instead.
+
+Each entry names a `kind`:
+
+```json
+{
+  "publishers": [
+    {
+      "kind": "keyless",
+      "oidc_issuer": "https://token.actions.githubusercontent.com",
+      "claims": {
+        "build_signer_uri": "https://github.com/acme/release/.github/workflows/publish.yml@refs/heads/main",
+        "source_repository_identifier": "123456789"
+      }
+    },
+    { "kind": "key", "key_pem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n" }
+  ]
+}
+```
+
+A `keyless` entry requires `oidc_issuer` and at least one of `identity`, `identity_regexp` (not both) or a non-empty `claims` object. A `key` entry carries the public key inline as `key_pem`. A remote document never names a local file, so a `key` field is invalid.
+
+Each element of the array is classified on its own:
+
+| Entry | Outcome |
+|---|---|
+| Not an object, no string `kind`, or the list is not a non-empty array | Invalid |
+| `kind` other than `keyless` or `key`, or a field outside the kind's set | Unrecognised: the entry is skipped, since a newer OCX may understand it |
+| `keyless` without `oidc_issuer`, with both `identity` and `identity_regexp`, with no identity rule, a non-string value, or an `identity_regexp` that does not compile | Invalid |
+| `key` with a `key` field, without `key_pem`, or a `key_pem` that does not parse | Invalid |
+| `key_pem` of a key type OCX does not support | Unrecognised |
+| Everything else | Usable |
+
+Usable entries are alternatives. If none is usable, OCX refuses the install: `publishers_unrecognized` (exit 82) when any entry was unrecognised, `publishers_invalid` (exit 65) when all were invalid.
+
+### Claims {#supply-chain-publishers-claims}
+
+The signing certificate carries the workflow context as Fulcio extensions. `claims` matches them by name, or by dotted OID inside `1.3.6.1.4.1.57264.1.`. Every listed claim must match, and a claim the certificate does not carry never matches. A dotted key outside that arc is invalid, and an unknown name is unrecognised, so the entry matches nobody under this OCX version.
+
+Common claim names are `build_signer_uri`, `source_repository_identifier` and `build_signer_digest`.
+
+Pair `build_signer_uri` with `source_repository_identifier`. The first names the workflow file and ref that signed. The second is the numeric repository ID, which survives a repository rename or transfer where the `owner/name` form does not. For a reusable workflow, `build_signer_uri` names the called workflow, so `build_signer_digest` pins the commit of that workflow.
+
+### Registry policy {#supply-chain-publishers-signatures}
+
+The `signatures` setting under [`[registries.<name>]`][config-registries] decides what happens around the list:
+
+| Value | Behavior |
+|---|---|
+| `if_declared` (default) | Verify when the root lists publishers; otherwise fall through to operator policy. |
+| `required` | Refuse a package whose root lists no publishers (`publishers_required`, exit 81). |
+| `off` | Ignore `publishers` for this registry. |
+
+An unknown value behaves as `required` and logs one warning.
+
+An operator `[[trust.policy]]` signer takes the same `claims` table, under the same rules.
+
+When no listed publisher signed the release, the install fails with `publisher_mismatch` (exit 77). Install a release a listed publisher signed, run [`ocx index update <package>`][cmd-index-update] to refresh the root, or pass `--no-verify`.
+
+The other refusals have their own remedies. `publishers_required` is cleared by loosening `signatures` or passing `--no-verify`. `publishers_unrecognized` is cleared by upgrading OCX or setting `signatures = "off"`. A `publishers_invalid` refusal is a defect in the index entry for its maintainer.
+
 :::tip[Learn more]
 [Signing In Depth][in-depth-signing] covers trust root mechanics, how a referrer is published, Sigstore bundle storage, slice boundaries and offline semantics. [Identity matching][in-depth-signing-identity] covers most-specific-wins resolution, regex identities and operator-versus-project tier precedence.
 The [`package sign`][cmd-package-sign] and [`package verify`][cmd-package-verify] references list flags, exit codes and CI examples.
@@ -166,6 +241,9 @@ The [`package sign`][cmd-package-sign] and [`package verify`][cmd-package-verify
 [cmd-package-sign]: ../reference/command-line/package-publishing.md#package-sign
 [cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify
 [config-trust]: ../reference/configuration.md#keys-trust
+[config-registries]: ../reference/configuration.md#keys-registries
+[cmd-index-update]: ../reference/command-line/index-commands.md#index-update
+[index-publishers]: #supply-chain-publishers
 [config-trust-scope]: ../reference/configuration.md#keys-trust-policy-scope
 [config-trust-builder]: ../reference/configuration.md#keys-trust-policy-builder
 [config-trust-signers]: ../reference/configuration.md#keys-trust-policy-signers

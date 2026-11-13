@@ -27,6 +27,7 @@ pub use wire_writer::{serialize_catalog, serialize_config, serialize_root};
 mod chained_index;
 mod file_transport;
 mod index_impl;
+pub use index_impl::DeclaredPublishers;
 mod local_index;
 mod oci_index;
 mod ocx_index;
@@ -63,6 +64,10 @@ pub fn current_date() -> String {
 /// Test seam: lets tests outside this crate build an `Index` from a mock `IndexImpl`.
 #[cfg(any(test, feature = "__testing"))]
 pub use index_impl::IndexImpl;
+
+/// Test seam: the return type of [`IndexImpl::source_kind`], so a mock source can be `Published`.
+#[cfg(any(test, feature = "__testing"))]
+pub use local_index::SourceKind;
 
 /// Whether a chain source answers for a name, and what its silence means
 /// (`adr_index_indirection.md#decision-h`); asked before any fetch, so it is never confused with a fetch's `Ok(None)`.
@@ -295,6 +300,24 @@ impl Index {
             Some(physical) => Ok(physical),
             None => self.unrouted(identifier),
         }
+    }
+
+    /// The effective `publishers` list of `logical`: committed ∩ fetched, adopt on absent→present, keep on
+    /// fetched-absent. Never issues a request.
+    ///
+    /// # Errors
+    ///
+    /// An unreadable or unparsable committed root fails closed. Two non-empty lists with nothing in common come
+    /// back as [`DeclaredPublishers::Diverged`], distinct from a declared `[]`.
+    pub async fn declared_publishers(&self, logical: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        self.inner.declared_publishers(logical).await
+    }
+
+    /// The `publishers` of the root committed locally, ignoring any root a source fetched in this process.
+    ///
+    /// Never issues a request; an unreadable committed root fails closed like [`Self::declared_publishers`].
+    pub async fn committed_publishers(&self, logical: &ocx_oci::PackageRef) -> Result<DeclaredPublishers> {
+        self.inner.committed_publishers(logical).await
     }
 
     /// [`Self::route`] plus the dial-site SSRF floor, for a caller that dials the registry

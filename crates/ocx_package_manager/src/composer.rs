@@ -1157,14 +1157,21 @@ impl PackageManager {
     /// # Errors
     ///
     /// [`PackageErrorKind::NotFound`] when it is not materialized, else whatever the resolve surfaced.
-    async fn local_root(
+    pub(crate) async fn local_root(
         &self,
         identifier: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
         // A digest skips the index: an absent cached leaf manifest must not turn an installed tool into a miss.
         match ocx_oci::PinnedPackageRef::try_from(identifier.clone()) {
-            Ok(pinned) => self.find_plain(&pinned).await?.ok_or(PackageErrorKind::NotFound),
+            Ok(pinned) => {
+                let info = self.find_plain(&pinned).await?.ok_or(PackageErrorKind::NotFound)?;
+                // `find_plain` skips the origin gate: content installed unverified must not be served under a declared name.
+                if !self.origin_gate_open(pinned.as_identifier(), &info, true).await? {
+                    return Err(PackageErrorKind::NotFound);
+                }
+                Ok(info)
+            }
             Err(_) => self.find(identifier, platform.clone()).await,
         }
     }

@@ -2054,6 +2054,26 @@
           "exit_code": 75
         },
         {
+          "value": "publisher_mismatch",
+          "description": "No publisher listed by the index signed the package",
+          "exit_code": 77
+        },
+        {
+          "value": "publishers_invalid",
+          "description": "The index lists publishers that are malformed",
+          "exit_code": 65
+        },
+        {
+          "value": "publishers_required",
+          "description": "The registry requires index-declared publishers and the package has none",
+          "exit_code": 81
+        },
+        {
+          "value": "publishers_unrecognized",
+          "description": "The index lists publishers only a newer ocx understands",
+          "exit_code": 82
+        },
+        {
           "value": "pull_request_unmergeable",
           "description": "The open announce pull request conflicts with the index",
           "exit_code": 65

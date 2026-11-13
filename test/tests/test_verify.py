@@ -1256,15 +1256,16 @@ def _verify_flags(ocx: OcxRunner, *flags: str) -> subprocess.CompletedProcess[st
 
     Deliberately not ``_verify``: that helper always passes the certificate
     pair, which is exactly what ``--key`` conflicts with. Every case below is
-    refused before the first registry request, so the identifier need not
-    resolve to anything and no package is published for it.
+    refused before the first registry request or at the identity gate, so no
+    package is published for the identifier; the registry is the live one
+    because the identity gate runs after the identifier is resolved.
     """
     return subprocess.run(
         [
             str(ocx.binary), "--format", "json", "package", "verify",
             "--platform", current_platform(),
             *flags,
-            "localhost:5000/never-published:1.0.0",
+            f"{ocx.registry}/never-published:1.0.0",
         ],
         capture_output=True, text=True, env=ocx.env, check=False,
     )

@@ -52,6 +52,7 @@ ocx_sign = [
     "tests/test_attest.py",
     "tests/test_verify.py",
     "tests/test_auto_verify.py",
+    "tests/test_publisher_trust*.py",
     "tests/test_offline_verify.py",
     "tests/test_cosign_*.py",
     "tests/test_sbom.py",

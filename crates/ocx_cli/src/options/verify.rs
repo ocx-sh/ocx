@@ -33,16 +33,14 @@ pub struct SignatureVerify {
     /// Verify the package's Sigstore signature before installing (default).
     #[arg(long_help = "\
         Verify the package's Sigstore signature before installing (default).\n\n\
-        When a `[[trust.policy]]` covers the package, its keyless Sigstore signature is verified \
-        before the package is installed; a failure aborts the install fail-closed. Overrides an \
-        `OCX_NO_VERIFY` opt-out for this invocation.\n\n\
+        When the package's index entry lists `publishers`, or a `[[trust.policy]]` covers it, its \
+        Sigstore signature is verified before the package is installed; both apply, and a failure \
+        aborts the install fail-closed. Overrides an `OCX_NO_VERIFY` opt-out for this invocation.\n\n\
         The check runs after the manifest digest resolves and before any layer downloads or state \
-        is written. Only the operator-tier policy is consulted, never a project `ocx.toml`. A \
-        package outside every policy is not verified, and a covered package's dependencies are \
-        verified only when a policy also covers them. A failed check exits 65 (tampered bundle), \
-        77 (identity or issuer mismatch), 78 (trust-root or policy problem) or 79 (no signature \
-        found). Under `--offline` the check reuses local trust material and fails closed with 81 \
-        (`PolicyBlocked`) when there is none.")]
+        is written. A package the index lists no publishers for and no `[[trust.policy]]` covers is \
+        not verified. A failed check exits 65 (tampered bundle), 77 (identity or issuer mismatch), \
+        78 (trust-root or policy problem) or 79 (no signature found). Under `--offline` the check \
+        reuses local trust material and fails closed with 81 (`PolicyBlocked`) when there is none.")]
     #[clap(long = "verify", overrides_with = "no_verify")]
     verify: bool,
 

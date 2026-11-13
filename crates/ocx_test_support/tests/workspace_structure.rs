@@ -2680,6 +2680,13 @@ const UNARMED_AT_THE_BOUNDARY: &[(&str, &str, &str)] = &[
     // arming it would add a second, closer classification for a value that
     // already has one — which moves an exit code, and DEC-23 forbids that.
     (
+        "ocx_trust/src/claims.rs",
+        "ClaimKeyError",
+        "`resolve_claim_key` is crate-private; its two callers wrap the error as the `source` of the \
+         armed trust-policy error (`ClaimKeyInvalid`) or as a publishers-invalid message, so the value \
+         that reaches the CLI is never this type",
+    ),
+    (
         "ocx_oci/src/manifest.rs",
         "InvalidImageIndex",
         "WP-24: `manifest::validate_image_index` raises it; every caller either `?`s it into \

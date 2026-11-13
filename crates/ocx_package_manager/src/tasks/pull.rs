@@ -249,22 +249,34 @@ async fn setup_impl(
 
     // Before any layer download, so a fail-closed abort leaves no partial install state.
     // Leader-only: waiters share the verified digest and receive a failure via `handle.fail`.
-    if let Err(kind) = mgr.maybe_auto_verify(pinned.as_identifier()).await {
-        let shared = handle.fail(kind);
-        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
-    }
+    let publisher_verified = match mgr.maybe_auto_verify_requested(pinned.as_identifier(), package).await {
+        Ok(verified) => verified,
+        Err(kind) => {
+            let shared = handle.fail(kind);
+            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+        }
+    };
 
     // Fail the handle explicitly: a dropped one tells waiters only "abandoned".
-    match setup_owned(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
-        Ok(info) => {
-            handle.complete(info.clone());
-            Ok(info)
-        }
+    let installed = match setup_owned(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
+        Ok(info) => info,
         Err(e) => {
             let shared = handle.fail(e);
-            Err(map_singleflight_error(singleflight::Error::Failed(shared)))
+            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
         }
+    };
+
+    // Written last, on the placed content: a crash before it leaves content `find` re-verifies, never a marker
+    // for content that was not verified. Content already in the store gets it too, which no fetch ever writes.
+    if publisher_verified
+        && dest_override.is_none()
+        && let Err(error) = file_structure::record_verified(installed.dir(), pinned.as_identifier()).await
+    {
+        let shared = handle.fail(PackageErrorKind::Internal(error.into()));
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
     }
+    handle.complete(installed.clone());
+    Ok(installed)
 }
 
 /// Downloads, sets up dependencies and places the package; call only while owning the singleflight handle.

@@ -288,7 +288,7 @@ OCX always compares `oidc_issuer` byte-for-byte and never dials it, so it does n
 
 OCX wraps `identity_regexp` as `\A(?:…)\z` before compiling it, so it must match the **entire** SAN. You never write the anchors yourself. A pattern that looks like a substring match is a full match.
 
-Once a policy covers a package, it also makes verification automatic on `install` and `pull`. See [Verify by default][guide-auto-verify].
+Once a policy covers a package, or its index root lists publishers, OCX also makes verification automatic on `install` and `pull`. See [Verify by default][guide-auto-verify].
 
 ## `identity_regexp` is an authorization boundary {#authorization}
 

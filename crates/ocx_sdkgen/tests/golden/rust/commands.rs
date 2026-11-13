@@ -1443,9 +1443,9 @@ impl PackageReceiptArgs {
 pub struct PackageSbomArgs {
     /// Narrow into one platform of an image index
     pub platform: Option<String>,
-    /// Write the SBOM document to PATH ("-" for stdout). Several candidates exit 65
-    /// (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names
-    /// the referrer digest
+    /// Write the SBOM document to PATH ("-" for stdout). Several candidates of one type resolve to
+    /// the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under
+    /// `--no-verify` a stderr warning names the referrer digest
     pub output: Option<PathBuf>,
     /// Parse each SBOM and report component counts (CycloneDX 1.5-1.7 only)
     pub summary: bool,

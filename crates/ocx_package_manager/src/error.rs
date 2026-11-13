@@ -117,6 +117,10 @@ pub enum Error {
     #[error(transparent)]
     #[exit(delegate = 0)]
     Verify(#[from] Box<ocx_sign::verify::VerifyError>),
+    /// A signer-rounds refusal: publisher mismatch, unrecognised, invalid or required publishers.
+    #[error(transparent)]
+    #[exit(delegate = 0)]
+    Rounds(#[from] crate::tasks::signer_rounds::RoundsError),
     /// A digest string could not be parsed.
     #[error(transparent)]
     #[exit(delegate = 0)]

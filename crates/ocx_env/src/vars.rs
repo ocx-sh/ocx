@@ -275,9 +275,9 @@ crate::env_vars! {
     /// Skips the policy-gated auto-verify on `install`, `pull` and every command that auto-installs
     /// on demand (`exec`, `env`, `package exec`, `package env`, patch discovery). Only `install`
     /// and `pull` carry the `--verify` / `--no-verify` flag, which outranks this variable. A
-    /// skipped policy-covered package prints one `warning:` line per invocation.
+    /// skipped package that publishers or a policy cover prints one `warning:` line per invocation.
     ///
-    /// With no `[[trust.policy]]` covering a package, verification does not run regardless.
+    /// With no publishers listed in the index and no `[[trust.policy]]` covering a package, verification does not run regardless.
     pub OCX_NO_VERIFY: Bool, Public, on_invalid = Error, propagation = UserInput;
 
     // ── Shell activation ──

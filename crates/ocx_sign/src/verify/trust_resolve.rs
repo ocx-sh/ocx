@@ -34,6 +34,27 @@ pub async fn resolve_trust_root(
     rekor_cache_key: &str,
     offline: bool,
 ) -> Result<TrustRoot, VerifyErrorKind> {
+    match resolve_local_trust_root(explicit_override, sigstore, home_trusted_root, state, rekor_cache_key).await? {
+        Some(root) => enforce_offline_rekor_key(root, offline),
+        None if offline => Err(VerifyErrorKind::OfflineNoPinnedRekorKey),
+        None => TrustRoot::load_embedded(&state.tuf_cache_dir()).await,
+    }
+}
+
+/// The trust root a first-rung-wins pass finds with no network: the override, `[trust.sigstore]`, the home file or the
+/// fresh cache. `None` when no rung holds one, which is not an error: a key-signed candidate needs none.
+///
+/// # Errors
+///
+/// An unreadable operator-named file (exit 74), a `trusted_root` / `trusted_root_json` ambiguity or a JSON parse
+/// failure. Never a Rekor-key refusal: whether the root can check a log entry is the caller's question.
+pub async fn resolve_local_trust_root(
+    explicit_override: Option<&Path>,
+    sigstore: Option<&SigstoreTrust>,
+    home_trusted_root: Option<&Path>,
+    state: &SigningStatePaths,
+    rekor_cache_key: &str,
+) -> Result<Option<TrustRoot>, VerifyErrorKind> {
     // Exit 74, not 78: every read here is an operator-typed path, matching `--key file:<missing>`.
     let read_err = |error: BoundedReadError| {
         VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable {
@@ -44,8 +65,7 @@ pub async fn resolve_trust_root(
     if let Some(path) = explicit_override {
         let json_path = trusted_root_json_path(path).await;
         let bytes = read_trusted_root(&json_path).await.map_err(read_err)?;
-        let root = TrustRoot::load_trusted_root_json(&bytes)?;
-        return enforce_offline_rekor_key(root, offline);
+        return TrustRoot::load_trusted_root_json(&bytes).map(Some);
     }
 
     if let Some(sigstore) = sigstore {
@@ -55,23 +75,18 @@ pub async fn resolve_trust_root(
             ));
         }
         if let Some(json) = sigstore.trusted_root_json.as_deref() {
-            let root = TrustRoot::load_trusted_root_json(json.as_bytes())?;
-            return enforce_offline_rekor_key(root, offline);
+            return TrustRoot::load_trusted_root_json(json.as_bytes()).map(Some);
         }
         if let Some(path) = sigstore.trusted_root.as_deref() {
             let json_path = trusted_root_json_path(path).await;
             let bytes = read_trusted_root(&json_path).await.map_err(read_err)?;
-            let root = TrustRoot::load_trusted_root_json(&bytes)?;
-            return enforce_offline_rekor_key(root, offline);
+            return TrustRoot::load_trusted_root_json(&bytes).map(Some);
         }
     }
 
     if let Some(path) = home_trusted_root {
         match read_trusted_root(path).await {
-            Ok(bytes) => {
-                let root = TrustRoot::load_trusted_root_json(&bytes)?;
-                return enforce_offline_rekor_key(root, offline);
-            }
+            Ok(bytes) => return TrustRoot::load_trusted_root_json(&bytes).map(Some),
             // Only `NotFound` falls through; any other error here silently downgrades a present trust root to
             // cache/TUF.
             Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -80,13 +95,9 @@ pub async fn resolve_trust_root(
     }
 
     if let Ok(Some(cached)) = TrustRootCache::from_cache(rekor_cache_key, state).await {
-        return enforce_offline_rekor_key(cached.into_trust_root(), offline);
+        return Ok(Some(cached.into_trust_root()));
     }
-
-    if offline {
-        return Err(VerifyErrorKind::OfflineNoPinnedRekorKey);
-    }
-    TrustRoot::load_embedded(&state.tuf_cache_dir()).await
+    Ok(None)
 }
 
 /// Refuse, offline only, a trust root without a pinned Rekor key: nothing else can check the SET.
@@ -158,6 +169,31 @@ mod tests {
             1,
             "the cached anchor must survive the resolve"
         );
+    }
+
+    /// the local pass reports "no root here" as `None`, never as a refusal and never by reaching for TUF, so a
+    /// key candidate offline with nothing cached is not failed by the trust-root ladder.
+    #[tokio::test]
+    async fn the_local_pass_finds_nothing_without_a_network_or_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = SigningStatePaths::new(tmp.path().join("state"));
+        let found = resolve_local_trust_root(None, None, None, &state, "rekor.example").await;
+        assert!(matches!(found, Ok(None)), "got {found:?}");
+    }
+
+    /// The local pass accepts a cached root that has no pinned Rekor key (the strict ladder refuses it offline), and
+    /// stays the same cache rung the full ladder reads.
+    #[tokio::test]
+    async fn the_local_pass_returns_a_cached_root_without_judging_its_rekor_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = SigningStatePaths::new(tmp.path().join("state"));
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+        let local = resolve_local_trust_root(None, None, None, &state, "rekor.example")
+            .await
+            .expect("the cache rung reads")
+            .expect("a cached root is local");
+        assert_eq!(local.der_certs().len(), 1);
+        assert!(local.rekor_public_key_pem().is_none());
     }
 
     /// Both spellings of the same decision is a configuration error, not a

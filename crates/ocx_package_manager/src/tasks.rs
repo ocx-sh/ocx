@@ -33,7 +33,9 @@ pub(crate) mod resolve;
 pub(crate) mod resolve_subject;
 pub(crate) mod sbom;
 pub(crate) mod select;
+// `pub`: the CLI's chain walk registers `RoundsError`, and `ocx_cli` calls `signer_rounds`.
 pub(crate) mod sign;
+pub mod signer_rounds;
 pub(crate) mod toolchain_drift;
 pub(crate) mod toolchain_names;
 pub(crate) mod uninstall;

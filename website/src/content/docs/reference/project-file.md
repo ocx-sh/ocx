@@ -317,6 +317,20 @@ catch-all.
 - Default: `[]`
 - See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
 
+## `trust.policy.signers.claims.<name>` {#project-trust-policy-signers-claims}
+
+Fulcio certificate claims that must all match, keyed by claim name or raw OID.
+
+Every listed claim must match, and values compare as exact strings. A key is a known claim name
+(`build_signer_uri`, `source_repository_identifier`, `source_repository_owner_identifier`,
+`build_trigger`, `build_signer_digest`) or a raw OID under `1.3.6.1.4.1.57264.1.`; an unknown
+name matches nobody.
+
+Alone or beside `identity` / `identity_regexp`.
+
+- Type: `string`
+- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+
 ## `trust.policy.signers.identity` {#project-trust-policy-signers-identity}
 
 Exact expected certificate SAN (byte-equal).

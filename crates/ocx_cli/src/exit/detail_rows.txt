@@ -384,6 +384,10 @@ prune_package_not_bare	UsageError	The package argument carries a tag or digest
 prune_refused_durable	PolicyBlocked	The index still lists a tag prune would delete, and the tag is durable
 prune_refused_pending	TempFail	The index still lists a tag prune would delete, pending an announce
 prune_tag_still_present	TempFail	A deleted tag is still present in the registry
+publisher_mismatch	PermissionDenied	No publisher listed by the index signed the package
+publishers_invalid	DataError	The index lists publishers that are malformed
+publishers_required	PolicyBlocked	The registry requires index-declared publishers and the package has none
+publishers_unrecognized	Unsupported	The index lists publishers only a newer ocx understands
 pull_request_unmergeable	DataError	The open announce pull request conflicts with the index
 push_option_refused	Failure	The forge refused a git push option
 record_exemption_refused	IoError	The execution-record exemption was refused

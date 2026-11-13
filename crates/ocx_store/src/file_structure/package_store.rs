@@ -77,6 +77,11 @@ impl PackageDir {
         self.dir.join("refs").join("origins")
     }
 
+    /// Publisher-verified markers written by [`record_verified`]: regular files, outside the GC graph.
+    pub fn refs_verified_dir(&self) -> PathBuf {
+        self.dir.join("refs").join("verified")
+    }
+
     /// Sorted `<registry>/<repo>` origins recorded for this digest; blocking.
     ///
     /// Empty means nothing recorded, which an authorization check must treat as a refusal, never as unconstrained.
@@ -269,14 +274,44 @@ fn origin_marker_name(origin: &str) -> String {
 ///
 /// Creating the directory or writing the marker fails.
 pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -> Result<()> {
+    write_marker(&pkg.refs_origins_dir(), &origin_of(identifier)).await
+}
+
+/// Records that the publisher round passed for `identifier`'s logical repository on this digest; idempotent.
+///
+/// Distinct from [`record_origin`], which any successful pull writes: only this marker lets a package its index
+/// declares publishers for be handed out without a pull. Write it only after a publisher round ran and passed,
+/// never for an undeclared, opted-out or digest-only install.
+///
+/// # Errors
+///
+/// Creating the directory or writing the marker fails.
+pub async fn record_verified(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -> Result<()> {
+    write_marker(&pkg.refs_verified_dir(), &origin_of(identifier)).await
+}
+
+/// Whether [`record_verified`] ran for `identifier`'s logical repository on this digest; reads the one marker, never lists.
+///
+/// A marker whose content does not hash to its own name reads as absent.
+pub async fn is_verified(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -> bool {
     let origin = origin_of(identifier);
-    let dir = pkg.refs_origins_dir();
-    tokio::fs::create_dir_all(&dir)
+    let marker = pkg.refs_verified_dir().join(origin_marker_name(&origin));
+    match tokio::fs::read_to_string(&marker).await {
+        Ok(content) => content.trim() == origin,
+        Err(e) => {
+            log::debug!("No verified marker at '{}': {e}", marker.display());
+            false
+        }
+    }
+}
+
+async fn write_marker(dir: &Path, origin: &str) -> Result<()> {
+    tokio::fs::create_dir_all(dir)
         .await
-        .map_err(|e| ocx_util::error::FileError::new(dir.clone(), e))?;
+        .map_err(|e| ocx_util::error::FileError::new(dir, e))?;
 
     // Attests a local pull, not registry vouching: a cached digest mints a marker with no wire contact (ocx-sh/ocx#348).
-    let marker = dir.join(origin_marker_name(&origin));
+    let marker = dir.join(origin_marker_name(origin));
     if tokio::fs::try_exists(&marker)
         .await
         .map_err(|e| ocx_util::error::FileError::new(marker.clone(), e))?
@@ -404,6 +439,40 @@ mod tests {
         assert!(
             pkg.recorded_origins().is_empty(),
             "a marker rewritten to name another repository must not be honoured"
+        );
+    }
+
+    /// The verified marker is its own record: an origin marker never reads as verified, and the reverse.
+    #[tokio::test]
+    async fn a_verified_marker_is_separate_from_the_origin_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PackageStore::new(dir.path());
+        let id = pinned("example.com", "acme/cmake");
+        let other = pinned("example.com", "acme/ninja");
+        let pkg = store.package_dir(&id);
+
+        record_origin(&pkg, id.as_identifier()).await.unwrap();
+        assert!(
+            !is_verified(&pkg, id.as_identifier()).await,
+            "an origin is not a verification"
+        );
+
+        record_verified(&pkg, id.as_identifier()).await.unwrap();
+        record_verified(&pkg, id.as_identifier()).await.unwrap();
+        assert!(is_verified(&pkg, id.as_identifier()).await, "positive control");
+        assert!(
+            !is_verified(&pkg, other.as_identifier()).await,
+            "verification is per logical repository, not per digest"
+        );
+        assert_eq!(pkg.recorded_origins(), vec!["example.com/acme/cmake".to_string()]);
+
+        let marker = pkg
+            .refs_verified_dir()
+            .join(origin_marker_name("example.com/acme/cmake"));
+        std::fs::write(&marker, "example.com/acme/other").unwrap();
+        assert!(
+            !is_verified(&pkg, id.as_identifier()).await,
+            "a clobbered marker is discarded"
         );
     }
 

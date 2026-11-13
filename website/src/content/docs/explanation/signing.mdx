@@ -136,7 +136,7 @@ The certificate [Fulcio][fulcio] issues encodes the signer's identity in two fie
 - **Subject Alternative Name (SAN)** is the signer's OIDC-derived identity. For GitHub Actions this is the workflow run URL, such as `https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main`. For human sign flows it is an email address.
 - **Fulcio OIDC issuer extension** is the "Issuer (V2)" OID `1.3.6.1.4.1.57264.1.8`. It contains the OIDC issuer URL, such as `https://token.actions.githubusercontent.com`. OCX does not read the v1 `.1.1` encoding.
 
-At verify time, the accepted SAN and issuer come from one of two sources. Passed as `--certificate-identity` / `--certificate-oidc-issuer` flags, both checks are exact-match. Resolved instead from a [`[[trust.policy]]`][config-trust] entry whose scope covers the target, the SAN check also accepts an anchored regex form (`identity_regexp`). The issuer check stays exact-match either way.
+At verify time, the accepted SAN and issuer come from one of three sources. Passed as `--certificate-identity` / `--certificate-oidc-issuer` flags, both checks are exact-match. Resolved instead from a [`[[trust.policy]]`][config-trust] entry whose scope covers the target, the SAN check also accepts an anchored regex form (`identity_regexp`). The issuer check stays exact-match either way. The third source is the [`publishers`][index-publishers] list in the package's index root, which acts like a covering policy.
 
 The policy schema and scope matching are in [Pin the signer identity][guide-trust-policy]. How competing policies resolve is below.
 
@@ -218,7 +218,7 @@ The lock is per scope, not fleet-wide. A lower tier is still free to pin any sco
 
 ### No matching policy \{#identity-matching-no-match\}
 
-`--certificate-identity` and `--certificate-oidc-issuer` on `ocx package verify` are optional exactly when a `[[trust.policy]]` scope matches the target. Passing both always overrides any policy, as an exact-match pair, unchanged from flag-only verification. Passing neither with no matching scope, or passing only one of the two, is a usage error.
+`--certificate-identity` and `--certificate-oidc-issuer` on `ocx package verify` are optional exactly when the index root lists [`publishers`][index-publishers] or a `[[trust.policy]]` scope matches the target. Passing both always overrides both, as an exact-match pair, unchanged from flag-only verification. Passing neither with no listed publishers and no matching scope, or passing only one of the two, is a usage error.
 
 ## Choosing a Sigstore Deployment \{#deployments\}
 
@@ -272,9 +272,9 @@ The acceptance suite runs against a real Sigstore deployment, not a fake. That d
   So [`ocx package sbom --no-verify`][cmd-package-sbom] lists it `verified: false`, and `--verify` refuses it (`unsigned_rejected_by_policy`, exit 77). This is a property of the shape, not of the reader, because a signed SBOM is an attestation. See [Attached SBOMs][in-depth-cosign-parity-sbom].
 
 :::tip[Automatic verification at install time]
-Everything above describes the standalone `ocx package verify` command. Once a [`[[trust.policy]]`][config-trust] covers a package, [`install`][cmd-package-install], [`pull`][cmd-package-pull] and every command that auto-installs on demand run the same check automatically. See [Verify by default][guide-auto-verify].
+Everything above describes the standalone `ocx package verify` command. [`install`][cmd-package-install], [`pull`][cmd-package-pull] and every command that auto-installs on demand run the same check automatically whenever the package's index root lists [`publishers`][index-publishers] or a [`[[trust.policy]]`][config-trust] covers it. See [Verify by default][guide-auto-verify].
 
-That gate has its own scope limitations, distinct from the cryptographic ones above. A covered root's transitive dependencies are verified only if a policy also covers each dependency's own `registry/repository` scope. The automatic check reads the operator `config.toml` tier only, so a project `ocx.toml` policy never gates it.
+That gate has its own scope limitations, distinct from the cryptographic ones above. A covered root's transitive dependencies are verified only if a publisher list or a policy also covers each dependency's own `registry/repository` scope. The operator policy is read from the `config.toml` tier only, so a project `ocx.toml` policy never gates it.
 :::
 
 ## Deferred to Future Work \{#deferred-future-work\}
@@ -327,6 +327,7 @@ That gate has its own scope limitations, distinct from the cryptographic ones ab
 
 
 [config-trust]: ../reference/configuration.md#keys-trust
+[index-publishers]: ../guides/pin-signer-identity.mdx#supply-chain-publishers
 
 
 [gh-107]: https://github.com/ocx-sh/ocx/issues/107

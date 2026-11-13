@@ -169,8 +169,39 @@
             "null"
           ],
           "default": false
+        },
+        "signatures": {
+          "description": "Whether packages of this registry must carry publisher identities declared in the index.\n\nOne of `if_declared` (verify when the package declares publishers), `required` (refuse a package without\nthem) or `off` (skip the check). Defaults to `if_declared`. An unknown value is treated as `required`,\nwith one warning per run.\n\nA lock-first install in a fresh home makes no index request, so it installs without the publisher check.\nSet `required` to check those installs too: a package whose committed root declares no publishers is\nthen refused (exit 81, `publishers_required`), and the error names `ocx index update`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignatureRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
+    },
+    "SignatureRequirement": {
+      "description": "The `signatures` setting of a `[registries.\"<registry>\"]` entry.",
+      "anyOf": [
+        {
+          "description": "Verify against the index-declared publishers when the package declares any (the default).",
+          "type": "string",
+          "const": "if_declared"
+        },
+        {
+          "description": "Refuse a package whose index declares no publishers.",
+          "type": "string",
+          "const": "required"
+        },
+        {
+          "description": "Skip the publisher check.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
     },
     "MirrorConfig": {
       "description": "Normalized `[mirrors.\"<host>\"]` entry: one independent optional endpoint\nper traffic role.",
@@ -509,6 +540,13 @@
             "null"
           ],
           "default": null
+        },
+        "claims": {
+          "description": "Fulcio certificate claims that must all match, keyed by claim name or raw OID.\n\nEvery listed claim must match, and values compare as exact strings. A key is a known claim name\n(`build_signer_uri`, `source_repository_identifier`, `source_repository_owner_identifier`,\n`build_trigger`, `build_signer_digest`) or a raw OID under `1.3.6.1.4.1.57264.1.`; an unknown\nname matches nobody.\n\nAlone or beside `identity` / `identity_regexp`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },

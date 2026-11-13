@@ -57,6 +57,9 @@ from src.helpers import PROJECT_ROOT
 # Scope
 # ---------------------------------------------------------------------------
 
+_EXCLUDED_FILE = "CHANGELOG.md"
+"""Generated release history (git-cliff): its lines legitimately name old spellings."""
+
 _EXCLUDED_PATHS: tuple[str, ...] = (".claude/artifacts", ".agents", ".serena")
 """Repo-relative subtrees pruned. Three, and each earns its place.
 
@@ -173,6 +176,7 @@ ENV_DECLARATIONS: frozenset[Path] = frozenset(
         PROJECT_ROOT / "crates" / "ocx_env" / "src" / "retired.rs",
         PROJECT_ROOT / "crates" / "ocx_env" / "src" / "vars.rs",
         PROJECT_ROOT / "crates" / "ocx_schema" / "tests" / "golden" / "cli.json",
+        PROJECT_ROOT / "crates" / "ocx_schema" / "contract" / "baseline" / "cli.json",
         PROJECT_ROOT / "crates" / "ocx_schema" / "contract" / "conformance" / "spawn" / "cases.json",
         PROJECT_ROOT / "crates" / "ocx_sdkgen" / "tests" / "golden" / "rust" / "env.rs",
         PROJECT_ROOT / "website" / "src" / "content" / "docs" / "reference" / "environment.md",
@@ -459,7 +463,8 @@ def _scan_files() -> list[Path]:
     return [
         PROJECT_ROOT / name
         for name in names
-        if not any(name.startswith(f"{excluded}/") for excluded in _EXCLUDED_PATHS)
+        if name != _EXCLUDED_FILE
+        and not any(name.startswith(f"{excluded}/") for excluded in _EXCLUDED_PATHS)
     ]
 
 

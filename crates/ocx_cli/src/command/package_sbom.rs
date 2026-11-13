@@ -15,13 +15,13 @@ use std::process::ExitCode;
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
 
-use ocx_package_manager::SbomOptions;
+use ocx_package_manager::{Round, SbomOptions};
 use ocx_sign::attest::predicate::PredicateType;
 use ocx_sign::sbom;
 use ocx_sign::verify::{
-    AttestationMatch, RefusedCandidate, TrustRoot, UnverifiedSbom, VerificationMode, VerifyError, VerifyErrorKind,
+    AttestationMatch, RefusedCandidate, Transparency, TrustRoot, UnverifiedSbom, VerificationMode, VerifyError,
+    VerifyErrorKind,
 };
-use ocx_trust::CompiledPolicy;
 
 use crate::api::data::sanitize_for_terminal;
 use crate::api::data::sbom::{ListingVerification, RefusedEntry, SbomEntry, SbomListingReport, SbomSummaryOut};
@@ -42,15 +42,15 @@ pub struct PackageSbom {
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     platform: Option<ocx_oci::Platform>,
 
-    /// Write the SBOM document to PATH ("-" for stdout). Several candidates exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest
+    /// Write the SBOM document to PATH ("-" for stdout). Several candidates of one type resolve to the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under `--no-verify` a stderr warning names the referrer digest
     ///
     /// The bytes are exactly what was attached, never a re-serialization.
-    /// Under --no-verify nothing was checked, so the document is written
-    /// with a warning on stderr naming the referrer digest. More than one
-    /// candidate of the requested type is a refusal (`multiple_attestations`)
-    /// naming every candidate, not a choice: narrow with --type.
-    /// Writing raw predicate bytes to a terminal is refused - redirect to a
-    /// file or a pipe.
+    /// Under --no-verify nothing was checked, so a stderr warning names the
+    /// referrer digest. Several verified candidates of one type resolve to
+    /// the newest when every one carries a transparency-log time; mixed
+    /// types, a candidate without one or a tie on the newest is refused
+    /// (`multiple_attestations`): narrow with --type. Writing to a terminal
+    /// is refused - redirect to a file or a pipe.
     #[clap(long = "output", short = 'o', value_name = "PATH", conflicts_with = "summary")]
     output: Option<PathBuf>,
 
@@ -64,14 +64,17 @@ pub struct PackageSbom {
     summary: bool,
 
     /// Restrict to one predicate type (for example cyclonedx or spdx).
+    ///
+    /// Use it to settle a `multiple_attestations` refusal caused by mixed
+    /// predicate types.
     #[clap(long = "type", value_name = "TYPE")]
     predicate_type: Option<PredicateType>,
 
     /// Expected certificate SAN (exact match).
     ///
-    /// Optional when a `[trust.policy]` whose scope covers the target supplies
-    /// the identity; when given, this flag and `--certificate-oidc-issuer`
-    /// override any policy. The two flags are used together; supplying one
+    /// Without this flag the identity comes from the publishers the index
+    /// lists for the package or a matching `[trust.policy]`. Given with
+    /// `--certificate-oidc-issuer`, the two replace both. Supplying one
     /// without the other is an error. Not usable with `--key`: a key signature
     /// carries no certificate, so there is no SAN to match.
     #[clap(
@@ -84,9 +87,10 @@ pub struct PackageSbom {
 
     /// Expected certificate OIDC issuer (exact match).
     ///
-    /// Optional when a matching `[trust.policy]` supplies the issuer; used
-    /// together with `--certificate-identity` to override any policy. Not
-    /// usable with `--key`, which names a public key rather than an issuer.
+    /// Without this flag the issuer comes from the index's listed publishers
+    /// or a matching `[trust.policy]`; given with `--certificate-identity`,
+    /// the pair replaces both. Not usable with `--key`, which names a public
+    /// key rather than an issuer.
     #[clap(
         long = "certificate-oidc-issuer",
         value_name = "URL",
@@ -174,26 +178,26 @@ impl PackageSbom {
 
         let client = context.verify_client();
         let offline = context.is_offline();
-        let (verification, policies) = self.mode(&context, &identifier, key.as_ref()).await?;
+        let (verification, rounds) = self.mode(&context, &identifier, key.as_ref(), &rekor_url).await?;
 
         // `TrustRoot::default()` has no anchors, so leaked into a signed pass it fails closed (`NoCtLogKey`).
-        let trust_root = match verification {
-            VerificationMode::Permissive => TrustRoot::default(),
+        let (trust_root, transparency) = match verification {
+            VerificationMode::Permissive => (TrustRoot::default(), Transparency::Verify),
             VerificationMode::Demand => {
-                let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
-                package_sign_common::resolve_trust_root(
+                Box::pin(package_sign_common::trust_for_rounds(
                     &context,
                     &identifier,
-                    &rekor_cache_key,
+                    &rounds,
+                    &ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url),
                     offline,
                     self.trusted_root.as_deref(),
-                )
+                ))
                 .await?
             }
         };
 
         let options = SbomOptions {
-            policies: &policies,
+            policies: &[],
             client,
             trust_root: &trust_root,
             rekor_url: &rekor_url,
@@ -203,12 +207,13 @@ impl PackageSbom {
             predicate_type: self.predicate_type.clone(),
             verification,
             signature_format,
+            transparency,
         };
         // Re-rooted on the bare `VerifyError` (`PackageError` has no `#[source]`), or every failure exits 1
         // (`each_verify_kind_keeps_its_own_exit_code_through_the_wrapper`).
         let report = context
             .manager()
-            .sbom_one(&identifier, self.platform.as_ref(), options)
+            .sbom_rounds(&identifier, self.platform.as_ref(), &rounds, options)
             .await
             .map_err(package_sign_common::verify_error_into_anyhow)?;
 
@@ -240,13 +245,14 @@ impl PackageSbom {
     }
 
     /// Resolves the verification mode and the policies to verify against; `--no-verify` resolves
-    /// nothing, or every consumer without a trust policy is refused (exit 64).
+    /// nothing, or a run that resolves no signer identity at all is refused (exit 64).
     async fn mode(
         &self,
         context: &crate::app::Context,
         identifier: &ocx_oci::PackageRef,
         key: Option<&ocx_trust::key_ref::KeyRef>,
-    ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
+        rekor_url: &ocx_oci::endpoint::Url,
+    ) -> anyhow::Result<(VerificationMode, Vec<Round>)> {
         let requested = self.verification.requested();
         if requested == Some(VerificationMode::Permissive) {
             if key.is_some() {
@@ -255,9 +261,16 @@ impl PackageSbom {
                 )
                 .into());
             }
-            return Ok((VerificationMode::Permissive, Vec::new()));
+            return Ok((VerificationMode::Permissive, vec![Round::flags(Vec::new())]));
         }
-        let policies = package_sign_common::resolve_policies_lenient(
+        package_sign_common::validate_explicit_trust_root(
+            context,
+            identifier,
+            &ocx_sign::verify::trust_cache::cache_key_for_rekor(rekor_url),
+            self.trusted_root.as_deref(),
+        )
+        .await?;
+        let rounds = package_sign_common::resolve_rounds(
             context,
             identifier,
             self.certificate_identity.as_deref(),
@@ -265,9 +278,9 @@ impl PackageSbom {
             key,
         )
         .await?;
-        match resolve_mode(requested, policies.is_empty()) {
-            Some(VerificationMode::Demand) => Ok((VerificationMode::Demand, policies)),
-            Some(VerificationMode::Permissive) => Ok((VerificationMode::Permissive, Vec::new())),
+        match resolve_mode(requested, rounds.iter().all(|round| round.policies.is_empty())) {
+            Some(VerificationMode::Demand) => Ok((VerificationMode::Demand, rounds)),
+            Some(VerificationMode::Permissive) => Ok((VerificationMode::Permissive, vec![Round::flags(Vec::new())])),
             None => Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into()),
         }
     }
@@ -444,6 +457,13 @@ fn single_document<'a>(
         [only] => return Ok(Selected::Verified(only)),
         [] => {}
         many => {
+            // newest-wins only within one predicate type; a mixed set is the user's to narrow with `--type`.
+            let one_type = many
+                .iter()
+                .all(|c| c.attestation.predicate_type == many[0].attestation.predicate_type);
+            if let Some(newest) = one_type.then(|| newest_logged(many)).flatten() {
+                return Ok(Selected::Verified(newest));
+            }
             return Err(ambiguous(
                 identifier,
                 many.iter()
@@ -469,6 +489,21 @@ fn single_document<'a>(
                 .collect(),
         ))?),
     }
+}
+
+/// The strictly newest document when every candidate carries a verified log time.
+///
+/// `None` when any candidate is unlogged or two share the newest time: ordering is then unproven.
+fn newest_logged(candidates: &[AttestationMatch]) -> Option<&AttestationMatch> {
+    let newest = candidates
+        .iter()
+        .map(|candidate| candidate.verify.signed_at)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()?;
+    let mut at_newest = candidates.iter().filter(|c| c.verify.signed_at == Some(newest));
+    let first = at_newest.next()?;
+    at_newest.next().is_none().then_some(first)
 }
 
 /// The truncation refusal among a scan's refused candidates, if it carries one.
@@ -1076,6 +1111,57 @@ mod tests {
 
     const CYCLONEDX: &str = r#"{"bomFormat":"CycloneDX","specVersion":"1.6","components":[{"name":"zlib"}]}"#;
     const SPDX: &str = r#"{"spdxVersion":"SPDX-2.3"}"#;
+
+    fn signed_at(mut candidate: AttestationMatch, at: Option<u64>) -> AttestationMatch {
+        candidate.verify.signed_at = at;
+        candidate
+    }
+
+    /// several eligible documents, all logged, one strictly newest: that one is selected.
+    #[test]
+    fn c017_the_strictly_newest_logged_attestation_wins() {
+        let matches = [
+            signed_at(attestation_match("b", "https://cyclonedx.org/bom"), Some(1_755_597_600)),
+            signed_at(attestation_match("c", "https://cyclonedx.org/bom"), Some(1_755_597_900)),
+        ];
+        let selected = single_document(&identifier(), &matches, &[], Vec::new())
+            .expect("the newest of two logged documents is selected");
+        assert!(matches!(selected, Selected::Verified(chosen) if std::ptr::eq(chosen, &matches[1])));
+    }
+
+    /// newest-wins picks within one predicate type; a mixed set stays ambiguous however the times fall.
+    #[test]
+    fn c017_a_mixed_predicate_type_set_refuses_even_when_one_is_newest() {
+        let matches = [
+            signed_at(attestation_match("b", "https://cyclonedx.org/bom"), Some(1_755_597_600)),
+            signed_at(attestation_match("c", "https://spdx.dev/Document"), Some(1_755_597_900)),
+        ];
+        let error = single_document(&identifier(), &matches, &[], Vec::new()).expect_err("mixed predicate types");
+        assert_eq!(envelope(&error)["error"]["detail"], "multiple_attestations");
+    }
+
+    /// one unlogged candidate (`signed_at = None`) makes the set ambiguous.
+    #[test]
+    fn c017_an_unlogged_candidate_refuses_as_ambiguous() {
+        let matches = [
+            signed_at(attestation_match("b", "https://cyclonedx.org/bom"), Some(1_755_597_600)),
+            signed_at(attestation_match("c", "https://cyclonedx.org/bom"), None),
+        ];
+        let error = single_document(&identifier(), &matches, &[], Vec::new()).expect_err("an unlogged candidate");
+        assert_eq!(envelope(&error)["error"]["detail"], "multiple_attestations");
+    }
+
+    /// two different documents sharing the newest time refuse as ambiguous.
+    #[test]
+    fn c017_a_tie_on_the_newest_time_refuses_as_ambiguous() {
+        let matches = [
+            signed_at(attestation_match("b", "https://cyclonedx.org/bom"), Some(1_755_597_900)),
+            signed_at(attestation_match("c", "https://cyclonedx.org/bom"), Some(1_755_597_900)),
+            signed_at(attestation_match("d", "https://cyclonedx.org/bom"), Some(1_755_597_600)),
+        ];
+        let error = single_document(&identifier(), &matches, &[], Vec::new()).expect_err("a tie on the newest");
+        assert_eq!(envelope(&error)["error"]["detail"], "multiple_attestations");
+    }
 
     /// Two real matches, so the refusal is asserted on the path a user
     /// reaches. The empty slice this once drove is structurally unreachable —

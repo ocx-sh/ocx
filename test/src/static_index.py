@@ -98,6 +98,8 @@ def write_package(
     yanked: bool = False,
     ephemeral: bool = False,
     extra_tags: Sequence[str] = (),
+    publishers: object = None,
+    publishers_present: bool = False,
 ) -> PackageEntry:
     """Writes a root document + its OCI image index under `repository`.
 
@@ -133,6 +135,10 @@ def write_package(
         root["tags"][extra] = extra_entry
         tag_digests[extra] = f"sha256:{extra_hex}"
         extra_bodies[extra_hex] = extra_body
+    # `publishers` goes in verbatim, `None` included, only when given or `publishers_present`
+    # is set; the default writes no key, so a fixture under `ocx.sh` never starts verifying.
+    if publishers is not None or publishers_present:
+        root["publishers"] = publishers
     if status is not None:
         root["status"] = status
     if deprecated_message is not None:

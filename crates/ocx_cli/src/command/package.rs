@@ -169,8 +169,8 @@ pub enum Package {
         arrays; `--shell[=NAME]` emits the only eval-safe form. A package's dependencies contribute their variables in topological order, \
         dependencies before dependents.\n\n\
         Packages missing from the object store are installed, with their transitive dependencies, \
-        and a package a `[[trust.policy]]` covers is signature-verified before its environment is \
-        composed.\n\n\
+        and a package with index-listed publishers or a covering `[[trust.policy]]` is \
+        signature-verified before its environment is composed.\n\n\
         `--candidate`, `--current` and `--link` resolve through an install symlink instead and \
         never auto-install. `--self` selects the publisher's own view (private and public \
         entries) instead of the consumer view (public and interface); `integrations` is always \
@@ -206,7 +206,7 @@ pub enum Package {
         creates a candidate symlink for each requested package; dependencies get no install \
         symlinks. This is the OCI-tier install and never touches `ocx.toml`; use `ocx add` for a \
         project.\n\n\
-        A package that a `[[trust.policy]]` covers is verified before any layer downloads (see \
+        A package with index-listed publishers or a covering `[[trust.policy]]` is verified before any layer downloads (see \
         `--verify`).\n\n\
         Installing a foreign platform fills the object store but leaves the host's candidate and \
         `current` symlinks alone. A platformless lookup therefore never resolves to a package the host \
@@ -285,7 +285,7 @@ pub enum Package {
         passed every check `verify --attestation` runs; an unsigned attach is refused rather than \
         listed (exit 77 when it is all the package carries).\n\n\
         It is the default whenever `--certificate-identity` or `--certificate-oidc-issuer` is \
-        given or a `[[trust.policy]]` covers the package. `--no-verify` runs no cryptography at \
+        given, the index lists publishers for the package, or a `[[trust.policy]]` covers it. `--no-verify` runs no cryptography at \
         all and reports every document as `verified: false` with no signer identity. It is the \
         default when no identity source resolves, and it is what lets `sbom` work with no Sigstore \
         setup.\n\n\
@@ -386,11 +386,11 @@ pub enum Package {
         Fetches the Sigstore bundle v0.3 referrer for the target. Then it checks the Fulcio \
         certificate chain against a trust root, the Rekor Signed Entry Timestamp, and the signature \
         over the subject manifest digest. It also checks the certificate identity and OIDC issuer against \
-        the identity you supply as flags or have pinned in a `[[trust.policy]]` entry. All checks \
+        the identity you supply as flags, the index lists as the package's publishers, or you have pinned in a `[[trust.policy]]` entry. All checks \
         must pass for exit 0.\n\n\
-        `--certificate-identity` and `--certificate-oidc-issuer` are optional only when a \
-        `[[trust.policy]]` scope covers the target; keyless verification needs an identity from \
-        one source or the other.\n\n\
+        `--certificate-identity` and `--certificate-oidc-issuer` are optional only when the \
+        index lists publishers for the target or a `[[trust.policy]]` scope covers it; keyless \
+        verification needs an identity from one of these sources.\n\n\
         `--offline` (or `OCX_OFFLINE`) scopes to the Sigstore trust services, the Rekor-key fetch \
         and TUF, not the registry. Verify still fetches the target and its referrer from the \
         registry in every mode. Offline verification needs a pinned Rekor key from \
@@ -414,13 +414,13 @@ pub enum Package {
         content is what you need back.\n\n\
         Name the signer in one of two ways. Pass both `--certificate-identity` and \
         `--certificate-oidc-issuer`, an exact-match pair that overrides any configured policy. Or \
-        pass neither and let `[[trust.policy]]` decide. Verify then checks the operator-tier \
-        (`config.toml`) policies against the target's canonical `registry/repository`. It falls \
-        back to the project `ocx.toml` policies only when none match.\n\n\
+        pass neither and let the publishers the index lists for the package, or `[[trust.policy]]`, \
+        decide. Policies are matched against the target's canonical `registry/repository`: the \
+        operator-tier (`config.toml`) ones first, the project `ocx.toml` ones only when none match.\n\n\
         Reading `[[trust.policy]]` from `ocx.toml` is the one exception to OCI-tier commands \
         never consulting it, because trust policy is a security posture rather than toolchain \
         binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), \
-        and so is neither flag with no covering policy (`no_identity_provided`).\n\n\
+        and so is neither flag with no listed publishers and no covering policy (`no_identity_provided`).\n\n\
         Trust material carrying only CA anchors cannot verify anything, since the Fulcio \
         certificate's SCT is checked against the CT log key. Verify refuses it with exit 78 \
         (`trust root carries no CT log key`). `--sigstore-trusted-root` accepts only a Sigstore \
@@ -436,7 +436,7 @@ pub enum Package {
     #[command(long_about = "\
         Runs installed packages.\n\n\
         Identifiers are OCI references (for example `kitware/cmake:3.28`), resolved through the \
-        index and installed when missing. A package a `[[trust.policy]]` covers is \
+        index and installed when missing. A package with index-listed publishers or a covering `[[trust.policy]]` is \
         signature-verified before it runs.\n\n\
         Dependencies' environments apply in topological order before the package's own, and \
         entries layer in the order the identifiers appear. For a project driven by `ocx.toml`, \

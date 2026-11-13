@@ -51,6 +51,8 @@ rust_test(
         "//test:tests/fixtures/golden/simplesigning_key_payload.json",
         "//test:tests/fixtures/golden/simplesigning_keyless_manifest.json",
         "//test:tests/fixtures/golden/simplesigning_keyless_payload.json",
+        "//test:tests/fixtures/public_leaf/github_actions_leaf.json",
+        "//test:tests/fixtures/public_leaf/github_actions_leaf.pem",
         "//test:tests/fixtures/simplesigning/foreign_claim_type_payload.json",
         "//test:tests/fixtures/simplesigning/foreign_subject_payload.json",
         "//test:tests/fixtures/simplesigning/publisher_formatted_manifest.json",
