@@ -9,7 +9,7 @@ lettered here so every test below can cite one::
     (a) `push --sign` writes one signature per platform manifest,
         then `verify` per platform
     (b) `push --sign --fulcio-url --rekor-url` against the local stack
-    (c) `sign --tags-file` over an index, then `verify` on the tag
+    (c) `sign --tags-file` over an index, then `verify` on the index digest
     (d) `sign -p <platform> <tag>` narrowing
     (e) the documented error on a bare manifest
     (f) `--key env://NAME` + `OCX_KEY_PASSWORD`, over the same three
@@ -510,13 +510,13 @@ def test_push_sign_against_local_fulcio_and_rekor_signs_and_verifies(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# c — sign --tags-file over an index, then verify on the tag
+# c — sign --tags-file over an index, then verify on the index digest
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("signature_format", SIGNATURE_FORMATS)
 @pytest.mark.parametrize("mode", SIGN_MODES)
-def test_sign_tags_file_over_an_index_then_verify_on_the_tag(
+def test_sign_tags_file_over_an_index_then_verify_on_the_index_digest(
     ocx: OcxRunner,
     published_two_versions: tuple[PackageInfo, PackageInfo],
     tmp_path: Path,
@@ -526,13 +526,13 @@ def test_sign_tags_file_over_an_index_then_verify_on_the_tag(
     signature_format: str,
 ) -> None:
     """OCX-C-3 (c), (f), (g): a `--tags-file` sweep signs the index each listed
-    tag resolves to, and `verify` on the tag afterwards accepts it.
+    tag resolves to, and `verify` on that index's digest afterwards accepts it.
 
     The other half of ADR D2's division of labour: (a) asserts push leaves the
-    index unsigned, and this asserts the sweep is what signs it. Verifying *on
-    the tag*, with no `--platform`, is the operator-visible point — that is the
-    reference cosign resolves for a multi-platform image, and it works only
-    because the subject is the index rather than a child.
+    index unsigned, and this asserts the sweep is what signs it. The digest
+    identifier is the exact object, so the index stays addressable; a bare tag
+    without `--platform` narrows into the host platform manifest, which the
+    sweep never signed.
 
     Two versions rather than two cascade aliases of one: aliases share an index
     digest, so a sweep that signed only the first would still produce the right
@@ -586,7 +586,7 @@ def test_sign_tags_file_over_an_index_then_verify_on_the_tag(
         verify = ocx.run(
             "package", "verify",
             *verify_flags(mode, sigstore_stack, signature_format),
-            f"{first.repo}:{tag}",
+            f"{first.repo}@{index_digest}",
             check=False,
         )
         assert verify.returncode == 0, (

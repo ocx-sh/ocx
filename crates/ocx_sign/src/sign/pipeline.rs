@@ -22,7 +22,7 @@ use crate::sign::state::SigningStatePaths;
 use crate::simplesigning::SimpleSigningClaim;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport};
-use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
+use ocx_oci::media_type::{SUBJECT_MANIFEST_TYPES, manifest_media_type};
 use ocx_oci::referrer::ReferrerManifest;
 use ocx_oci::referrer::manifest::{bundle_annotations, bundle_created, bundle_now};
 use ocx_oci::referrer::media_types::{
@@ -30,7 +30,7 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::resolve_target::{ResolveTargetError, ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
-use ocx_oci::{Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
+use ocx_oci::{Descriptor, Digest, PackageRef, Platform, native};
 
 /// A caller-supplied subject resolution, shared by the sign and attest pipelines.
 ///
@@ -252,7 +252,7 @@ impl SignPipeline {
         // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
-            .pull_manifest_raw(&subject_ref, SIGNABLE_MANIFEST_TYPES)
+            .pull_manifest_raw(&subject_ref, SUBJECT_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
         // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields a signature strict verifiers reject.
@@ -262,6 +262,12 @@ impl SignPipeline {
                 actual: served_digest,
             }));
         }
+
+        let subject_media_type = manifest_media_type(&subject_bytes).ok_or_else(|| {
+            map_client_error(ClientError::InvalidManifest(
+                "subject manifest is not a JSON object with a signable media type".to_string(),
+            ))
+        })?;
 
         // Probe the PUSH host: a mirror's referrers support says nothing about the upstream's.
         let referrers_support =
@@ -274,7 +280,7 @@ impl SignPipeline {
 
         // Best-effort per leg: hiding a landed leg behind the other's failure leaves the operator re-signing it.
         let subject_descriptor = Descriptor {
-            media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
+            media_type: subject_media_type,
             digest: subject_digest.to_string(),
             size: subject_bytes.len() as i64,
             ..Descriptor::default()
@@ -487,7 +493,7 @@ mod platform_narrowing_tests {
     //! own suite, so each row below drives the seam end to end.
 
     use super::*;
-    use ocx_oci::{INDEX_SCHEMA_VERSION, ImageIndex, ImageIndexEntry, ImageManifest};
+    use ocx_oci::{INDEX_SCHEMA_VERSION, ImageIndex, ImageIndexEntry, ImageManifest, OCI_IMAGE_MEDIA_TYPE};
 
     fn digest(byte: u8) -> Digest {
         Digest::Sha256(format!("{byte:064x}"))
@@ -684,6 +690,7 @@ mod platform_narrowing_tests {
 mod tests {
     use super::*;
 
+    use ocx_oci::OCI_IMAGE_MEDIA_TYPE;
     use ocx_oci::native;
     use ocx_oci::referrer::capability::ReferrersApiCapability;
     use ocx_oci::testing::RecordingTransport;
@@ -967,6 +974,56 @@ mod tests {
         )
         .await;
         (result, transport.calls(), temp, signer)
+    }
+
+    /// An image index, which a registry enforcing `Accept` serves only when the request names the index type.
+    const INDEX_SUBJECT: &[u8] =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+
+    #[tokio::test]
+    async fn signing_an_image_index_subject_works_where_accept_is_enforced_and_names_the_index_type() {
+        let transport = recording_transport()
+            .enforcing_accept()
+            .serving_subject_manifest(INDEX_SUBJECT);
+        let (result, _calls, _temp, _signer) =
+            drive_sign(ocx_oci::client::MirrorMap::default(), transport.clone()).await;
+        if let Err(error) = result {
+            panic!("an index subject must sign where Accept is enforced: {error}");
+        }
+        assert_eq!(
+            transport.pushed_referrer()["subject"]["mediaType"],
+            ocx_oci::OCI_IMAGE_INDEX_MEDIA_TYPE,
+            "the signed subject descriptor must carry the fetched manifest's media type",
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_refuses_a_subject_that_is_not_json_before_anything_is_pushed() {
+        let transport = recording_transport().serving_subject_manifest(b"not a manifest");
+        let (result, _calls, _temp, _signer) =
+            drive_sign(ocx_oci::client::MirrorMap::default(), transport.clone()).await;
+        let error = result.err().expect("an unreadable subject must be refused");
+        assert!(
+            matches!(&error.kind, SignErrorKind::Internal(inner)
+                if matches!(inner.downcast_ref::<ClientError>(), Some(ClientError::InvalidManifest(_)))),
+            "{:?}",
+            error.kind
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_refuses_a_subject_declaring_a_media_type_outside_the_signable_list() {
+        let transport = recording_transport()
+            .serving_subject_manifest(br#"{"schemaVersion":2,"mediaType":"application/vnd.example.other+json"}"#);
+        let (result, _calls, _temp, _signer) =
+            drive_sign(ocx_oci::client::MirrorMap::default(), transport.clone()).await;
+        let error = result.err().expect("an unsignable declared type must be refused");
+        assert!(
+            matches!(&error.kind, SignErrorKind::Internal(inner)
+                if matches!(inner.downcast_ref::<ClientError>(), Some(ClientError::InvalidManifest(_)))),
+            "{:?}",
+            error.kind
+        );
     }
 
     // ── WP5b: the cosign simplesigning sidecar ──

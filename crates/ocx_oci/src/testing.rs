@@ -88,6 +88,9 @@ pub struct RecordingTransport {
     /// shape, where the tag-schema fallback is the only way a referrer becomes
     /// discoverable.
     referrers_unsupported: bool,
+    /// Answer a manifest read with `ManifestNotFound` when the stored manifest's media type is not in the request's
+    /// `Accept` list, the way ghcr.io does.
+    enforce_accept: bool,
     /// Bytes every blob stream yields.
     blob_stream: Option<Vec<u8>>,
     /// When set, the FIRST manifest PUT to a `.sig` tag is answered `Ok` and
@@ -161,6 +164,13 @@ impl RecordingTransport {
     #[must_use]
     pub fn serving_referrers(mut self, descriptors: Vec<Descriptor>) -> Self {
         self.referrers = descriptors;
+        self
+    }
+
+    /// 404 a manifest read whose media type the request's `Accept` list omits.
+    #[must_use]
+    pub fn enforcing_accept(mut self) -> Self {
+        self.enforce_accept = true;
         self
     }
 
@@ -241,6 +251,26 @@ impl RecordingTransport {
             .expect("a RecordingTransport serving manifests needs `serving_subject_digest`")
     }
 
+    fn manifest_answer(&self, image: &Reference) -> Answer<(Vec<u8>, String)> {
+        // The fallback index is tag-addressed, so its read must be served from
+        // the store this transport writes into; anything else is a manifest the
+        // fixture describes.
+        if let Some(bytes) = self.stored(&image.whole()) {
+            let digest = Algorithm::Sha256.hash(&bytes).to_string();
+            return Ok((bytes, digest));
+        }
+        let claimed = self.claimed_subject_digest();
+        if image.digest() == Some(claimed.as_str())
+            && let Some(bytes) = self.subject_manifest.clone()
+        {
+            return Ok((bytes, claimed));
+        }
+        if self.sidecar_tags_absent && image.tag().is_some_and(|tag| tag.starts_with("sha256-")) {
+            return Err(ClientError::ManifestNotFound(image.whole()));
+        }
+        Ok((self.default_manifest.clone().unwrap_or_else(|| b"{}".to_vec()), claimed))
+    }
+
     fn refuse_write(&self, method: &str) {
         assert!(
             !self.refuse_pushes,
@@ -268,25 +298,16 @@ impl OciTransport for RecordingTransport {
         unimplemented!("a RecordingTransport resolves digests through the index")
     }
 
-    async fn pull_manifest_raw(&self, image: &Reference, _: &[&str]) -> Answer<(Vec<u8>, String)> {
+    async fn pull_manifest_raw(&self, image: &Reference, accept: &[&str]) -> Answer<(Vec<u8>, String)> {
         self.record("pull_manifest_raw", image);
-        // The fallback index is tag-addressed, so its read must be served from
-        // the store this transport writes into; anything else is a manifest the
-        // fixture describes.
-        if let Some(bytes) = self.stored(&image.whole()) {
-            let digest = Algorithm::Sha256.hash(&bytes).to_string();
-            return Ok((bytes, digest));
-        }
-        let claimed = self.claimed_subject_digest();
-        if image.digest() == Some(claimed.as_str())
-            && let Some(bytes) = self.subject_manifest.clone()
-        {
-            return Ok((bytes, claimed));
-        }
-        if self.sidecar_tags_absent && image.tag().is_some_and(|tag| tag.starts_with("sha256-")) {
+        let (bytes, digest) = self.manifest_answer(image)?;
+        // An unreadable body counts as an image manifest: the double stands in for a registry that stored it as one.
+        let served_type = crate::media_type::manifest_media_type(&bytes)
+            .unwrap_or_else(|| crate::media_type::MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string());
+        if self.enforce_accept && !accept.contains(&served_type.as_str()) {
             return Err(ClientError::ManifestNotFound(image.whole()));
         }
-        Ok((self.default_manifest.clone().unwrap_or_else(|| b"{}".to_vec()), claimed))
+        Ok((bytes, digest))
     }
 
     async fn pull_blob(&self, _: &Reference, _: &Digest) -> Answer<Vec<u8>> {
