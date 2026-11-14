@@ -653,11 +653,13 @@ fn planned_entries(
 }
 
 /// Turns a report into the index writes that would resolve it; an alias that
-/// would end up empty is left out.
+/// would end up empty is left out. A `Some` `owned` (see [`announce_scope`]) bounds the plan to those
+/// aliases, so what a build-tag request writes and what it announces come from one set.
 pub fn plan_repairs(
     report: &CascadeReport,
     observation: &TagGraphObservation,
     expected: &ExpectedGraph,
+    owned: Option<&BTreeSet<AliasTag>>,
 ) -> Vec<PlannedWrite> {
     let mut writes = Vec::new();
 
@@ -667,6 +669,9 @@ pub fn plan_repairs(
     }
 
     for (alias, state) in &report.aliases {
+        if owned.is_some_and(|owned| !owned.contains(alias)) {
+            continue;
+        }
         let reasons = by_alias.remove(alias).unwrap_or_default();
         if !needs_write(state, &reasons) {
             continue;
@@ -764,6 +769,39 @@ pub fn scope_filter(
     }
 
     Ok(scope)
+}
+
+/// The aliases a repair of `requests` may announce although it wrote nothing: those whose expected
+/// content folds from a requested leaf, so a retry lists the rolling tags the build tag owns and never
+/// an ancestor it does not write (a prerelease's stable parents, an alias a newer release took over).
+/// `None` when no request is a build tag (an alias or whole-graph request): the written aliases are
+/// unbounded. `Some` bounds them to the set, which is empty when the build tag's leaf owns no alias, so
+/// a superseded build's repair announces none.
+pub fn announce_scope(
+    versions: &BTreeSet<Version>,
+    expected: &ExpectedGraph,
+    requests: &[Option<AliasTag>],
+) -> Option<BTreeSet<AliasTag>> {
+    let names_build =
+        |request: &Option<AliasTag>| matches!(request, Some(AliasTag::Version(version)) if version.has_build());
+    if !requests.iter().any(names_build) {
+        return None;
+    }
+    let leaves = leaves(versions);
+    let wanted: Vec<&Version> = requests
+        .iter()
+        .filter_map(|request| match request {
+            Some(AliasTag::Version(version)) => leaves.iter().find(|leaf| ***leaf == *version).copied(),
+            _ => None,
+        })
+        .collect();
+    Some(
+        expected
+            .iter()
+            .filter(|(_, slots)| slots.values().any(|slot| wanted.contains(&&slot.source)))
+            .map(|(alias, _)| alias.clone())
+            .collect(),
+    )
 }
 
 /// Whether `alias` sits under `ancestor` in the version trie.

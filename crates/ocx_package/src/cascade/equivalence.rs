@@ -672,7 +672,7 @@ async fn h9_a_swallowed_blocker_fetch_leaves_drift_that_check_finds_and_repair_c
         findings(&report)
     );
 
-    let writes = plan_repairs(&report, &observation, &expected);
+    let writes = plan_repairs(&report, &observation, &expected, None);
     let served: BTreeSet<String> = observation
         .tags
         .values()
@@ -700,7 +700,7 @@ async fn h9_a_swallowed_blocker_fetch_leaves_drift_that_check_finds_and_repair_c
         findings(&after)
     );
     assert!(
-        plan_repairs(&after, &repaired, &fold_expected(&repaired)).is_empty(),
+        plan_repairs(&after, &repaired, &fold_expected(&repaired), None).is_empty(),
         "and the repaired graph must be a fixed point"
     );
     assert_eq!(
