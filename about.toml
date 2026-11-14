@@ -24,17 +24,18 @@ accepted = [
   "bzip2-1.0.6",
 ]
 
-# The eight triples cargo-dist builds. Without this cargo-about unions every
-# target Cargo knows about and reproduces notices for crates OCX never
-# compiles (wasm, redox, illumos). With it, the notice is the exact union of
-# what the eight shipped binaries contain — one file, valid for all of them.
+# The eight triples the release ships; Bazel builds the two Windows ones as
+# gnullvm. Without this cargo-about unions every target Cargo knows about and
+# reproduces notices for crates OCX never compiles (wasm, redox, illumos).
+# With it, the notice is the exact union of what the eight shipped binaries
+# contain — one file, valid for all of them.
 targets = [
   "aarch64-apple-darwin",
-  "aarch64-pc-windows-msvc",
+  "aarch64-pc-windows-gnullvm",
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
   "x86_64-apple-darwin",
-  "x86_64-pc-windows-msvc",
+  "x86_64-pc-windows-gnullvm",
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
 ]

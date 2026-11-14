@@ -22,8 +22,8 @@
 #   - target/xwin/ holds cargo build artefacts (separate from host target/)
 #
 # Container runs as the invoking host UID/GID so the worktree never grows
-# root-owned files; image pin matches deploy-dev.yml so local runs and CI
-# resolve to the same cargo-xwin + MSVC SDK manifest snapshot. `rustup
+# root-owned files; image is pinned by digest so every local run
+# resolves to the same cargo-xwin + MSVC SDK manifest snapshot. `rustup
 # target add` runs inside the container to honour rust-toolchain.toml,
 # which pins gnullvm targets only — MSVC targets must be added on demand
 # (mirrors verify-deep.yml:74-77).

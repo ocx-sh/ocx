@@ -13,8 +13,10 @@ binary must never ship. Two checks keep it out:
 
 `--scan` reads every named file's bytes for the three string markers the
 placeholder table plants (`placeholder-g00000000`, `ci.invalid`,
-`placeholder/placeholder`). It runs on every target's binary, including the
-ones the runner cannot execute. Each hit prints the file, the marker and its
+`placeholder/placeholder`) and for the name of any `__OCX_TESTING_*` variable:
+the registry declares those only under `__testing`, so a name in the binary
+means test seams are compiled in. It runs on every target's binary, including
+the ones the runner cannot execute. Each hit prints the file, the marker and its
 byte offset. The all-zero SHA is deliberately NOT a marker: dependency code
 already carries 40-zero runs (gix's null object id), so it would red every
 real release. `--min-files` is the reader floor: reading fewer files than
@@ -37,8 +39,8 @@ and show every red on synthetic fixtures; their greens exercise the parser only
 (ADR AM-2): the green on a real release build — the one proof that dependency
 bytes stay clear of the markers — is `task release:provenance:proof`, a step of
 `task release:gate`. `scan-binaries.yml` runs `--scan` and `--exec` over the binaries
-that `release.yml` and `deploy-dev.yml` are about to publish, and `--link` over the
-cargo-dist Linux archives; no deep or pull-request job scans, because the
+that `release.yml` is about to publish in any mode, and `--link` over the
+Linux archives; no deep or pull-request job scans, because the
 Bazel-built `ocx` carries the placeholders by design.
 
 Exit codes: 0 clean, 1 finding, 2 usage (bad arguments, unreadable file, no readelf).
@@ -56,6 +58,7 @@ import sys
 from pathlib import Path
 
 MARKERS: tuple[bytes, ...] = (b"placeholder-g00000000", b"ci.invalid", b"placeholder/placeholder")
+SEAM_MARKER = re.compile(rb"__OCX_TESTING_")
 RUN_URL = re.compile(r"^https://github\.com/ocx-sh/ocx/actions/runs/\d+$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 EPOCH_PREFIX = "1970-01-01T00:00:00"
@@ -66,8 +69,18 @@ EXEC_TIMEOUT_SECONDS = 60
 GLIBC_FLOOR = (2, 34)
 # A new NEEDED soname is a new runtime dependency on every host: v0.6.5 links these three, and its
 # aarch64 build also lists its loader. The x86_64 loader is allowed for when a toolchain lists it too.
+# librt, libpthread and libdl are glibc's own, listed by the Bazel build's 2.28 sysroot (stubs since 2.34).
 NEEDED_ALLOWED = frozenset(
-    {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+    {
+        "libc.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "ld-linux-x86-64.so.2",
+        "ld-linux-aarch64.so.1",
+        "librt.so.1",
+        "libpthread.so.0",
+        "libdl.so.2",
+    }
 )
 READELF = "readelf"
 NEEDED_LINE = re.compile(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]")
@@ -94,6 +107,9 @@ def scan(paths: list[Path]) -> list[str]:
             while offset != -1:
                 findings.append(f"{path}: marker '{marker.decode()}' at byte offset {offset}")
                 offset = data.find(marker, offset + 1)
+        findings.extend(
+            f"{path}: marker '__OCX_TESTING_' at byte offset {m.start()}" for m in SEAM_MARKER.finditer(data)
+        )
     return findings
 
 
@@ -333,9 +349,11 @@ def _edited(old: str, new: str) -> str:
 _NEEDED_LIBC = " 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]\n"
 
 
-def _with_needed(soname: str) -> str:
-    """`_GOOD_READELF` plus one more NEEDED library."""
-    return _edited(_NEEDED_LIBC, _NEEDED_LIBC + _NEEDED_LIBC.replace("libc.so.6", soname))
+def _with_needed(*sonames: str) -> str:
+    """`_GOOD_READELF` plus more NEEDED libraries."""
+    return _edited(
+        _NEEDED_LIBC, _NEEDED_LIBC + "".join(_NEEDED_LIBC.replace("libc.so.6", soname) for soname in sonames)
+    )
 
 
 # (name, readelf output, substring the finding must carry), as `_REPORT_REDS`.
@@ -345,7 +363,6 @@ _LINK_REDS: list[tuple[str, str, str]] = [
     ("three-part version above the floor", _edited("GLIBC_2.14  Flags", "GLIBC_2.34.1  Flags"), "GLIBC_2.34.1"),
     ("glibc-internal version", _edited("GLIBC_2.14  Flags", "GLIBC_PRIVATE  Flags"), "GLIBC_PRIVATE"),
     ("unexpected NEEDED", _with_needed("libssl.so.3"), "libssl.so.3"),
-    ("libpthread NEEDED", _with_needed("libpthread.so.0"), "libpthread.so.0"),
     ("dynamic musl NEEDED", _with_needed("libc.musl-x86_64.so.1"), "libc.musl"),
     ("another arch's loader", _with_needed("ld-linux-armhf.so.3"), "ld-linux-armhf.so.3"),
     ("empty output", "", "no dynamic-section verdict"),
@@ -362,6 +379,7 @@ _LINK_REDS: list[tuple[str, str, str]] = [
 _LINK_GREENS: list[tuple[str, str]] = [
     ("v0.6.5 x86_64 gnu", _GOOD_READELF),
     ("aarch64 gnu with its loader", _with_needed("ld-linux-aarch64.so.1")),
+    ("Bazel sysroot's split glibc libs", _with_needed("librt.so.1", "libpthread.so.0", "libdl.so.2")),
     ("static-pie musl", "\nDynamic section at offset 0x19683e0 contains 20 entries:\n  Tag        Type  Name/Value\n"),
     ("fully static musl", "\nThere is no dynamic section in this file.\n"),
 ]

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+# The release build's provenance (`task cross:build:release`): the real values
+# `build.rs` bakes under cargo, in place of `_TESTING_PROVENANCE` in
+# `//crates/ocx_cli`. Selected by a define rather than a platform, so every
+# triple takes one switch.
+
+load(":provenance.bzl", "release_provenance")
+
+# `--define=ocx_provenance=release`: `//crates/ocx_cli:ocx_cli` reads
+# `:provenance`, and every crate drops its `__testing` feature (`features.bzl`). Without it the select resolves to the
+# attributes the target has always had, so no test or host build changes key.
+config_setting(
+    name = "stamped",
+    define_values = {"ocx_provenance": "release"},
+    # A rule's `crate_features` select resolves in the rule's own package (every crate, through
+    # `features.bzl`); the `rustc_env` / `rustc_env_files` ones from a rules_rust package
+    # (measured: //:__pkg__ is refused here).
+    visibility = [
+        "//crates:__subpackages__",
+        "@rules_rust//rust:__subpackages__",
+    ],
+)
+
+# `manual`: it reads the workspace status, so a `bazel build //...` must not
+# pull it in; only the select above reaches it.
+release_provenance(
+    name = "provenance",
+    tags = ["manual"],
+    visibility = ["//crates/ocx_cli:__pkg__"],
+)

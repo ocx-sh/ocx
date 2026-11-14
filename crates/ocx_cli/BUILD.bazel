@@ -4,6 +4,8 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc_test", "rust_library", "rust_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel/release:features.bzl", "testing_features")
+load("//bazel/release:version.bzl", "OCX_VERSION")
 load("//crates/ocx_test_support:isolated.bzl", "crate_tree", "isolated_cases")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -34,7 +36,8 @@ filegroup(
 # so without these every `option_env!` in `app/build_info.rs` reads `None` and
 # the release provenance scan (`task release:provenance:proof`) finds no marker
 # in the binary under test. On the library, not the binary: the reads live
-# here. Sound because this graph is test-only — releases stay on cargo-dist.
+# here. Only `--define=ocx_provenance=release` (`task cross:build:release`)
+# swaps them for `//bazel/release:provenance`, and drops `__testing` below.
 #
 # The toolchain-derived rows `build.rs` gets from vergen are spelled out:
 # `VERGEN_RUSTC_SEMVER` is `MODULE.bazel`'s pin, `VERGEN_CARGO_DEBUG` is
@@ -43,7 +46,6 @@ filegroup(
 # no triple, so `build` drops out of `ocx version` and
 # `test_version_json_reports_placeholder_provenance` reds by name.
 _TESTING_PROVENANCE = {
-    "CARGO_MANIFEST_DIR": "crates/ocx_cli",
     "GITHUB_REF": "refs/heads/placeholder",
     "GITHUB_REPOSITORY": "placeholder/placeholder",
     "GITHUB_RUN_ID": "0",
@@ -57,11 +59,15 @@ _TESTING_PROVENANCE = {
     "VERGEN_GIT_DIRTY": "true",
     "VERGEN_GIT_SHA": "0000000000000000000000000000000000000000",
     "VERGEN_RUSTC_SEMVER": "1.95.0",
+    "__OCX_BUILD_BRANCH": "placeholder",
     "__OCX_BUILD_CHANNEL": "test",
 }
 
 # `@rules_rust//rust/platform` selector -> the triple the binary reports. It has
-# no gnullvm selector; its msvc one matches the same os and cpu constraints.
+# no gnullvm selector; its msvc one matches the same os and cpu constraints, and
+# it ignores musl (a musl build reads `-gnu` here). Only the placeholder build
+# reads this: the stamped build's env file names the toolchain's exact triple
+# and rules_rust applies it after `rustc_env`.
 _TARGET_TRIPLES = {
     "aarch64-apple-darwin": "aarch64-apple-darwin",
     "aarch64-pc-windows-msvc": "aarch64-pc-windows-gnullvm",
@@ -82,14 +88,21 @@ rust_library(
     ),
     # `app::seam`, as cargo's `--features ocx/__testing` compiles it into the
     # acceptance binary; the tier crates' libraries enable their own.
-    crate_features = ["__testing"],
+    crate_features = testing_features(),
     crate_name = "ocx",
     edition = "2024",
-    rustc_env = select({
-        "@rules_rust//rust/platform:" + selector: _TESTING_PROVENANCE | {"VERGEN_CARGO_TARGET_TRIPLE": triple}
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"} | select({
+        "//bazel/release:stamped": {},
+        "//conditions:default": _TESTING_PROVENANCE,
+    }) | select({
+        "@rules_rust//rust/platform:" + selector: {"VERGEN_CARGO_TARGET_TRIPLE": triple}
         for selector, triple in _TARGET_TRIPLES.items()
-    } | {"//conditions:default": _TESTING_PROVENANCE}),
-    version = "0.6.2",
+    } | {"//conditions:default": {}}),
+    rustc_env_files = select({
+        "//bazel/release:stamped": ["//bazel/release:provenance"],
+        "//conditions:default": [],
+    }),
+    version = OCX_VERSION,
     deps = all_crate_deps(normal = True),
 )
 
@@ -113,7 +126,7 @@ rust_binary(
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
     stamp = 0,
-    version = "0.6.2",
+    version = OCX_VERSION,
     visibility = [
         "//crates:__subpackages__",
         "//test:__pkg__",
@@ -243,7 +256,7 @@ rust_test(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -287,7 +300,7 @@ rust_test(
         "CARGO_BIN_EXE_ocx": "$(rootpath :ocx)",
         "CARGO_MANIFEST_DIR": "crates/ocx_cli",
     },
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -316,7 +329,7 @@ rust_test(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -330,7 +343,8 @@ rust_doc_test(
     crate = ":ocx_cli",
     # rust_doc_test does not inherit the library's features: without these the
     # `__testing`-gated items' doctests silently drop out (C-031 name diff).
-    crate_features = ["__testing"],
+    # The library's select, spelled twice: `build:drift` compares the two lists.
+    crate_features = testing_features(),
 )
 
 crate_tree()

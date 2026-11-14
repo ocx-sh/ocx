@@ -139,12 +139,18 @@ impl Printable for VerboseVersionData {
                 .as_deref()
                 .map(|ts| theme.aside(format!(" - {ts}")))
                 .unwrap_or_default();
+            let branch = commit
+                .branch
+                .as_deref()
+                .map(|name| theme.aside(format!(" on {name}")))
+                .unwrap_or_default();
             println!(
-                "{}   {} {}{}",
+                "{}   {} {}{}{}",
                 theme.label("commit:"),
                 theme.digest(&commit.short),
                 theme.aside(format!("({dirty_text})")),
                 timestamp,
+                branch,
             );
         }
 

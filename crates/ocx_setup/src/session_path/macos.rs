@@ -84,7 +84,8 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
 
 /// The `/bin/sh -c` merge script the agent runs at every load.
 ///
-/// Shape, with each directory appearing exactly once, single-quoted:
+/// Shape (the first two lines are the unit-test seam; a shipped build has just `launchctl() { /bin/launchctl "$@"; }`),
+/// with each directory appearing exactly once, single-quoted:
 ///
 /// ```sh
 /// __OCX_TESTING_LAUNCHCTL=${__OCX_TESTING_LAUNCHCTL:-/bin/launchctl}
@@ -126,11 +127,8 @@ pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError>
         format!("\"{prefix}${{out:+:$out}}\"")
     };
 
-    // A test seam: a plausible name like `LAUNCHCTL` would be one `launchctl setenv` from redirecting
-    // the binary this login agent runs, so it keeps the `__OCX_TESTING_` prefix.
     Ok(format!(
-        "__OCX_TESTING_LAUNCHCTL=${{__OCX_TESTING_LAUNCHCTL:-{LAUNCHCTL_BINARY}}}\n\
-         launchctl() {{ \"$__OCX_TESTING_LAUNCHCTL\" \"$@\"; }}\n\
+        "{LAUNCHCTL_PRELUDE}\
          {assignments}\
          cur=$(launchctl getenv PATH)\n\
          [ -n \"$cur\" ] || cur={SYSTEM_DEFAULT_PATH}\n\
@@ -141,6 +139,16 @@ pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError>
 
 /// The `launchctl` the agent runs, and the default of the script's seam.
 pub const LAUNCHCTL_BINARY: &str = "/bin/launchctl";
+
+/// A test seam: a plausible name like `LAUNCHCTL` would be one `launchctl setenv` from redirecting
+/// the binary this login agent runs, so it keeps the `__OCX_TESTING_` prefix. Compiled for unit
+/// tests only: the name must not be a string in the shipped binary.
+#[cfg(test)]
+const LAUNCHCTL_PRELUDE: &str = "__OCX_TESTING_LAUNCHCTL=${__OCX_TESTING_LAUNCHCTL:-/bin/launchctl}\n\
+     launchctl() { \"$__OCX_TESTING_LAUNCHCTL\" \"$@\"; }\n";
+
+#[cfg(not(test))]
+const LAUNCHCTL_PRELUDE: &str = "launchctl() { /bin/launchctl \"$@\"; }\n";
 
 /// Composed onto when `launchctl getenv PATH` is unset, or GUI apps get a PATH without `sh` or `ls`.
 pub const SYSTEM_DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -1005,7 +1013,7 @@ mod tests {
     /// TODO string.
     fn shipped_code(source: &str) -> String {
         source
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap_or(source)
             .lines()

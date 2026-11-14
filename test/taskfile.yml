@@ -151,7 +151,7 @@ tasks:
       # `test_self_update.py::test_self_update_installs_newer_version`
       # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The seams
       # are loopback-only-asserted at runtime and compile-gated; release
-      # builds come from cargo-dist and never include them.
+      # builds come from the stamped Bazel build and never include them.
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/ocx_cli:ocx //crates/ocx_shim:ocx_shim //crates/ocx_schema:ocx_schema_bin
       - mkdir -p "{{.BIN_DIR}}" "{{.SCHEMA_BIN_DIR}}"
       # Each output's path from `cquery --output=files`, never a spelled

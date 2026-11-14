@@ -184,6 +184,7 @@ def test_version_json_reports_placeholder_provenance(ocx: OcxRunner) -> None:
         "sha": zero_sha,
         "short": zero_sha[:8],
         "describe": "placeholder-g00000000",
+        "branch": "placeholder",
         "dirty": True,
         "timestamp": epoch,
     }

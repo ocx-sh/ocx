@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_proc_macro")
+load("//bazel/release:version.bzl", "OCX_VERSION")
 load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -17,7 +18,7 @@ rust_proc_macro(
     compile_data = ["GRAMMAR.md"],
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_exit_derive"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(normal = True),
 )
 

@@ -569,7 +569,7 @@ mod tests {
     /// assertion green before a single line of the implementation existed.
     fn shipped_code(source: &str) -> String {
         source
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap_or(source)
             .lines()

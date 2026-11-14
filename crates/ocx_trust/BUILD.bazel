@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+load("//bazel/release:version.bzl", "OCX_VERSION")
 load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -18,7 +19,7 @@ rust_library(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_trust"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(normal = True),
 )
 

@@ -205,6 +205,41 @@ def set_module_version(module_bazel_text: str, version: str) -> str:
     return new
 
 
+#: `bazel/release/version.bzl`'s constant: Bazel's `CARGO_PKG_VERSION` for every crate.
+OCX_VERSION_ASSIGN = re.compile(r'(?P<head>^OCX_VERSION\s*=\s*")(?P<v>[^"]*)"', re.MULTILINE)
+OCX_VERSION_MSG = (
+    "bazel/release/version.bzl OCX_VERSION={bzl!r} differs from the workspace version {cargo!r} in "
+    "Cargo.toml — every crate's CARGO_PKG_VERSION (the execution records) would carry it; "
+    "`task release:bump-files` sets both"
+)
+
+
+def version_bzl_drift(version_bzl_text: str | None, cargo_toml_text: str | None) -> list[Finding]:
+    """Same two reader floors and compare as `module_version_drift`."""
+    bzl = OCX_VERSION_ASSIGN.search(version_bzl_text) if version_bzl_text is not None else None
+    cargo = None
+    if cargo_toml_text is not None:
+        try:
+            cargo = tomllib.loads(cargo_toml_text)["workspace"]["package"]["version"]
+        except (tomllib.TOMLDecodeError, KeyError):
+            cargo = None
+    findings: list[Finding] = []
+    if bzl is None:
+        findings.append(Finding("version-bzl", MODULE_VERSION_READ_MSG.format(what="version.bzl", reason="no OCX_VERSION = ...")))
+    if cargo is None:
+        findings.append(Finding("version-bzl", MODULE_VERSION_READ_MSG.format(what="Cargo.toml [workspace.package]", reason="not readable")))
+    if bzl is not None and cargo is not None and bzl.group("v") != cargo:
+        findings.append(Finding("version-bzl", OCX_VERSION_MSG.format(bzl=bzl.group("v"), cargo=cargo)))
+    return findings
+
+
+def set_version_bzl(version_bzl_text: str, version: str) -> str:
+    new, n = OCX_VERSION_ASSIGN.subn(lambda m: f'{m.group("head")}{version}"', version_bzl_text, count=1)
+    if n != 1:
+        raise SystemExit("version.bzl has no OCX_VERSION = ... to set")
+    return new
+
+
 # ---------------------------------------------------------------------------
 # C-003 — the binary reading WP-14 owns. The comparator itself is imported.
 # ---------------------------------------------------------------------------
@@ -254,12 +289,14 @@ def run_check(
     rust_toolchain_path: Path,
     module_bazel_path: Path,
     cargo_toml_path: Path,
+    version_bzl_path: Path,
 ) -> list[Finding]:
     return (
         check_pin(bazelversion_path=bazelversion_path, bazel_bin=bazel_bin)
         + check_toolchain(rust_toolchain_path=rust_toolchain_path, module_bazel_path=module_bazel_path)
         + module_pin_drift(read_bazelversion(module_bazel_path))
         + module_version_drift(read_bazelversion(module_bazel_path), read_bazelversion(cargo_toml_path))
+        + version_bzl_drift(read_bazelversion(version_bzl_path), read_bazelversion(cargo_toml_path))
     )
 
 
@@ -526,6 +563,23 @@ def prove_module_version(scratch: Path) -> int:
     return 5
 
 
+def prove_version_bzl(scratch: Path) -> int:
+    """The Bazel crate version constant: red when stale, green when equal, setter fixes it."""
+    cargo = '[workspace.package]\nversion = "0.6.6"\n'
+    stale = 'OCX_VERSION = "0.6.2"\n'
+    drift = version_bzl_drift(stale, cargo)
+    expect(codes(drift) == ["version-bzl"], f"stale OCX_VERSION must red, got {codes(drift)}")
+    print(f"version-bzl RED  : {drift[0].message}")
+    fixed = set_version_bzl(stale, "0.6.6")
+    expect(fixed == 'OCX_VERSION = "0.6.6"\n', "the setter must rewrite the constant")
+    expect(version_bzl_drift(fixed, cargo) == [], "after the setter the check must be silent")
+    print("version-bzl GREEN: OCX_VERSION equal to Cargo.toml is silent")
+    for text in (None, "X = 1"):
+        expect(codes(version_bzl_drift(text, cargo)) == ["version-bzl"], "absent OCX_VERSION must red")
+    expect(codes(version_bzl_drift(fixed, None)) == ["version-bzl"], "absent Cargo.toml must red")
+    return 5
+
+
 def prove_entry_point(scratch: Path) -> int:
     """The shipped `--check` path (`run_check` + `report`), not just the two
     comparators in isolation — a green run and a red run through the same
@@ -540,6 +594,8 @@ def prove_entry_point(scratch: Path) -> int:
     rust_toolchain.write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
     cargo_toml = scratch / "Cargo.toml"
     cargo_toml.write_text('[workspace.package]\nversion = "1.2.3"\n', encoding="utf-8")
+    version_bzl = scratch / "version.bzl"
+    version_bzl.write_text('OCX_VERSION = "1.2.3"\n', encoding="utf-8")
     module_bazel.write_text(
         'module(name = "ocx", version = "1.2.3")\nbazel_dep(name = "rules_rs", version = "0.1.3")\nbazel_dep(name = "llvm", version = "0.8.25")\n'
         'toolchains.toolchain(\n    version = "1.95.0",\n)\n',
@@ -551,6 +607,7 @@ def prove_entry_point(scratch: Path) -> int:
         rust_toolchain_path=rust_toolchain,
         module_bazel_path=module_bazel,
         cargo_toml_path=cargo_toml,
+        version_bzl_path=version_bzl,
     )
     expect(report(clean) == 0, "run_check + report must exit 0 when every pair agrees")
     print("entry point GREEN: run_check() -> report() exits 0 when pin and toolchain both agree")
@@ -564,6 +621,7 @@ def prove_entry_point(scratch: Path) -> int:
         rust_toolchain_path=rust_toolchain,
         module_bazel_path=module_bazel,
         cargo_toml_path=cargo_toml,
+        version_bzl_path=version_bzl,
     )
     expect(codes(dirty) == ["pin-drift"], f"got {codes(dirty)}")
     expect(report(dirty) == 1, "run_check + report must exit 1 on pin drift")
@@ -578,7 +636,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--set-module-version", metavar="X.Y.Z",
-        help="rewrite MODULE.bazel's module(version=...) and exit (used by `task release:bump-files`)",
+        help="rewrite MODULE.bazel's module(version=...) and bazel/release/version.bzl's OCX_VERSION, then exit (used by `task release:bump-files`)",
     )
     parser.add_argument(
         "--check", action="store_true",
@@ -594,10 +652,15 @@ def main() -> int:
     parser.add_argument("--rust-toolchain", type=Path, default=REPO_ROOT / "rust-toolchain.toml")
     parser.add_argument("--module-bazel", type=Path, default=REPO_ROOT / "MODULE.bazel")
     parser.add_argument("--cargo-toml", type=Path, default=REPO_ROOT / "Cargo.toml")
+    parser.add_argument("--version-bzl", type=Path, default=REPO_ROOT / "bazel" / "release" / "version.bzl")
     args = parser.parse_args()
     if args.set_module_version:
         args.module_bazel.write_text(
             set_module_version(args.module_bazel.read_text(encoding="utf-8"), args.set_module_version),
+            encoding="utf-8",
+        )
+        args.version_bzl.write_text(
+            set_version_bzl(args.version_bzl.read_text(encoding="utf-8"), args.set_module_version),
             encoding="utf-8",
         )
         return 0
@@ -610,6 +673,7 @@ def main() -> int:
         rust_toolchain_path=args.rust_toolchain,
         module_bazel_path=args.module_bazel,
         cargo_toml_path=args.cargo_toml,
+        version_bzl_path=args.version_bzl,
     )
     return report(findings)
 
