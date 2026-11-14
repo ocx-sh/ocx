@@ -903,14 +903,6 @@ def test_sign_rejects_ftp_scheme_url(ocx: OcxRunner) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ADR S1-I (idempotent re-sign) not yet implemented: sign/pipeline.rs "
-    "unconditionally pushes a new bundle+referrer, so a re-sign leaves two. "
-    "Deferred (not a review-fix-pass regression); tracked as production follow-up. "
-    "ANY-of verify tolerates the duplicate, so this is a publisher-hygiene gap, "
-    "not a verification hole. Remove this marker when S1-I dedup lands.",
-)
 def test_sign_then_sign_again_is_idempotent(
     ocx: OcxRunner,
     published_package: PackageInfo,
@@ -1666,10 +1658,9 @@ def test_sign_tags_signs_one_referrer_per_index_not_per_tag(
     the cap and the artifact stopped verifying — a latent failure that only
     appears on a *second* run, which is why this test sweeps twice.
 
-    The second sweep is a per-run delta assertion, not an idempotence one:
-    `sign` deliberately appends rather than replacing (a second identity's
-    signature must be able to join the first), so a re-run adds its own
-    referrer. What must not happen is a re-run adding one *per tag*.
+    The second sweep adds nothing: the same identity already signed that
+    subject, so re-signing is skipped. A re-run must never add one referrer
+    *per tag*, and never one at all for an identity already on the subject.
     """
     pkg = published_package
     aliases = [pkg.tag, "1.0", "1"]
@@ -1712,12 +1703,9 @@ def test_sign_tags_signs_one_referrer_per_index_not_per_tag(
 
     sweep()
     after_second = _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest)
-    assert len(after_second) == 2, (
-        f"a second sweep over the unchanged index must add one referrer, not one "
-        f"per tag; got {len(after_second) - len(after_first)} new: {after_second}"
-    )
-    assert set(after_first) < set(after_second), (
-        "the first run's signature must survive the second — sign appends"
+    assert set(after_second) == set(after_first), (
+        f"a second sweep by the same identity must add no referrer; "
+        f"got {len(after_second) - len(after_first)} new: {after_second}"
     )
 
 

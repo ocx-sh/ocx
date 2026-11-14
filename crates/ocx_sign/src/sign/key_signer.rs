@@ -37,6 +37,17 @@ impl KeySigner {
 
 #[async_trait]
 impl Signer for KeySigner {
+    async fn identity(
+        &self,
+        _token: Option<&OidcToken>,
+        _fulcio_url: &Url,
+    ) -> Result<Option<super::signer::SignerIdentity>, SignErrorKind> {
+        Ok(Some(super::signer::SignerIdentity::Key {
+            public_key_hint: self.backend.hint(),
+            key_backend: self.backend.kind(),
+        }))
+    }
+
     async fn sign_blob(
         &self,
         payload: &[u8],
