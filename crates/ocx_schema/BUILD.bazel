@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_doc_test", "rust_library", "rust_test")
+load("//bazel/release:version.bzl", "OCX_VERSION")
 load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -18,7 +19,7 @@ rust_library(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(normal = True),
 )
 
@@ -59,7 +60,7 @@ rust_binary(
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
     stamp = 0,
-    version = "0.6.2",
+    version = OCX_VERSION,
     visibility = [
         "//crates:__subpackages__",
         "//test:__pkg__",
@@ -167,7 +168,7 @@ rust_test(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -205,7 +206,7 @@ rust_test(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -243,7 +244,7 @@ rust_test(
     ) + ["//website:docs_content"],
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -288,7 +289,7 @@ rust_test(
         "CARGO_BIN_EXE_ocx_schema": "$(rootpath :ocx_schema_bin)",
         "CARGO_MANIFEST_DIR": "crates/ocx_schema",
     },
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,

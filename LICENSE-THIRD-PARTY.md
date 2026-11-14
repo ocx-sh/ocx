@@ -713,9 +713,9 @@ Applies to:
 - windows-targets
 - windows-threading
 - windows
-- windows_aarch64_msvc
+- windows_aarch64_gnullvm
 - windows_x86_64_gnu
-- windows_x86_64_msvc
+- windows_x86_64_gnullvm
 
 ````text
                                  Apache License

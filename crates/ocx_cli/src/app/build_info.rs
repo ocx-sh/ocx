@@ -19,7 +19,7 @@ const SHORT_SHA_LEN: usize = 8;
 /// {
 ///   "channel": "dev",
 ///   "commit": { "sha": "…", "short": "…", "describe": "…",
-///               "dirty": false, "timestamp": "…" },
+///               "dirty": false, "timestamp": "…", "branch": "…" },
 ///   "build":  { "timestamp": "…", "profile": "release",
 ///               "target":    "…", "rustc":   "…" },
 ///   "ci":     { "provider":   "github-actions",
@@ -57,6 +57,9 @@ pub struct CommitInfo {
     /// ISO-8601 commit timestamp (author date).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// The branch the binary was built from, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Build environment metadata (timestamp, profile, target, rustc).
@@ -115,7 +118,13 @@ fn commit_info() -> Option<CommitInfo> {
         describe: describe.to_owned(),
         dirty,
         timestamp: option_env!("VERGEN_GIT_COMMIT_TIMESTAMP").map(str::to_owned),
+        branch: branch_from(option_env!("__OCX_BUILD_BRANCH")),
     })
+}
+
+/// An empty value is unknown, the same as unset: a build that cannot name its branch says nothing.
+fn branch_from(value: Option<&str>) -> Option<String> {
+    value.filter(|name| !name.is_empty()).map(str::to_owned)
 }
 
 fn build_info() -> Option<BuildInfo> {
@@ -161,7 +170,7 @@ mod tests {
     /// - `ci` — present when the test binary is compiled inside CI itself
     ///   (GitHub Actions exports `GITHUB_*`); absent locally.
     /// - `channel` — present only when `__OCX_BUILD_CHANNEL` is set at
-    ///   compile time (cargo-dist release jobs).
+    ///   compile time (stamped release builds).
     ///
     /// Assert structural invariants on each populated block instead of
     /// presence, so the test passes in every build environment.
@@ -179,6 +188,32 @@ mod tests {
         if let Some(channel) = info.channel {
             assert!(!channel.is_empty(), "channel must be non-empty when present");
         }
+    }
+
+    /// `commit.branch` is whatever `__OCX_BUILD_BRANCH` baked, alongside the commit it names:
+    /// the `__testing` placeholder in a test build, the real branch in a stamped one.
+    #[test]
+    fn commit_branch_follows_the_baked_env() {
+        let expected = option_env!("VERGEN_GIT_SHA").and(branch_from(option_env!("__OCX_BUILD_BRANCH")));
+        assert_eq!(Provenance::current().commit.and_then(|commit| commit.branch), expected);
+    }
+
+    /// An unset or empty `__OCX_BUILD_BRANCH` leaves `commit.branch` out of the JSON.
+    #[test]
+    fn unknown_branch_is_absent_from_the_report() {
+        assert_eq!(branch_from(None), None);
+        assert_eq!(branch_from(Some("")), None);
+        let commit = CommitInfo {
+            sha: "0".repeat(40),
+            short: "0".repeat(8),
+            describe: "x".into(),
+            dirty: false,
+            timestamp: None,
+            branch: branch_from(None),
+        };
+        let value = serde_json::to_value(&commit).unwrap();
+        assert!(value.get("branch").is_none(), "absent branch must not serialise");
+        assert_eq!(branch_from(Some("hex/x")).as_deref(), Some("hex/x"));
     }
 
     /// JSON output skips empty blocks rather than emitting `null` —

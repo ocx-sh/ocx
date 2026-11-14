@@ -31,6 +31,7 @@ const TESTING_PLACEHOLDERS: &[(&str, &str)] = &[
     ("GITHUB_WORKFLOW", "placeholder"),
     ("GITHUB_REF", "refs/heads/placeholder"),
     ("GITHUB_SHA", "0000000000000000000000000000000000000000"),
+    ("__OCX_BUILD_BRANCH", "placeholder"),
     ("__OCX_BUILD_CHANNEL", "test"),
 ];
 
@@ -70,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set by dev-deploy CI so the binary reports the tag it was published as.
     pass_through_env("__OCX_BUILD_VERSION");
     pass_through_env("__OCX_BUILD_CHANNEL");
+    pass_through_env("__OCX_BUILD_BRANCH");
 
     // GitHub Actions context for `ci.run_url`.
     for var in [

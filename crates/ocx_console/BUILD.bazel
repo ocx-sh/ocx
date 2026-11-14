@@ -3,6 +3,8 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+load("//bazel/release:features.bzl", "testing_features")
+load("//bazel/release:version.bzl", "OCX_VERSION")
 load("//crates/ocx_test_support:isolated.bzl", "crate_tree")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -16,12 +18,10 @@ rust_library(
         allow_empty = True,
         exclude = ["src/**/*.rs"],
     ),
-    crate_features = [
-        "__testing",
-    ],
+    crate_features = testing_features(),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_console"},
-    version = "0.6.2",
+    version = OCX_VERSION,
     deps = all_crate_deps(normal = True),
 )
 
@@ -50,9 +50,7 @@ rust_doc_test(
     crate = ":ocx_console",
     # rust_doc_test does not inherit the library's features: without these the
     # `__testing`-gated items' doctests silently drop out (C-031 name diff).
-    crate_features = [
-        "__testing",
-    ],
+    crate_features = testing_features(),
 )
 
 crate_tree()

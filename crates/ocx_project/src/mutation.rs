@@ -292,7 +292,7 @@ async fn maybe_inject_fault(fault: Option<&str>, stage: CommitStage) -> Result<(
         CommitStage::BeforeLockRename | CommitStage::AfterLockWrite => Err(ProjectError::new(
             PathBuf::new(),
             ProjectErrorKind::Io(std::io::Error::other(format!(
-                "__OCX_TESTING_FAULT={fault} (test-only hook)"
+                "injected fault {fault} (test-only hook)"
             ))),
         )
         .into()),

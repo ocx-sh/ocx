@@ -53,6 +53,35 @@ tasks:
           cp -L --remove-destination "$src" "target/cross/$t/$bin"
           echo "$PWD/target/cross/$t/$bin"
 
+  # The shipped build: real provenance in place of the `__testing` placeholders
+  # (`//bazel/release`). `--define=ocx_provenance=release` is the one switch, so
+  # `build` above keeps its cache keys; the status command reads git from this
+  # checkout and `__OCX_BUILD_*` / `GITHUB_*` from this environment. No `CACHE_RC`:
+  # the provenance action is `no-remote-cache` and nothing here may upload.
+  build:release:
+    desc: 'Cross-build ocx with real provenance for TARGET=<triple> CHANNEL=<release|candidate|dev> VERSION=<semver> into target/cross-release/<triple>/'
+    requires:
+      vars: [TARGET, CHANNEL, VERSION]
+    # Read as "$VAR", never templated into the script: a CLI value is shell text otherwise.
+    env:
+      TARGET: '{{.TARGET}}'
+      TARGETS: '{{.TARGETS}}'
+      __OCX_BUILD_CHANNEL: '{{.CHANNEL}}'
+      __OCX_BUILD_VERSION: '{{.VERSION}}'
+    cmds:
+      - cmd: |
+          set -euo pipefail
+          printf '%s\n' "$TARGETS" | grep -qx -- "$TARGET" || { echo "unsupported TARGET '$TARGET'; see: task cross:targets" >&2; exit 1; }
+          case "$__OCX_BUILD_CHANNEL" in release|candidate|dev) ;; *) echo "CHANNEL must be release, candidate or dev, got '$__OCX_BUILD_CHANNEL'" >&2; exit 1;; esac
+          printf '%s\n' "$__OCX_BUILD_VERSION" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?' || { echo "VERSION must be a semver, got '$__OCX_BUILD_VERSION'" >&2; exit 1; }
+          bin=ocx; case "$TARGET" in *-windows-*) bin=ocx.exe;; esac
+          set -- -c opt "--platforms=@rules_rs//rs/platforms:$TARGET" --define=ocx_provenance=release --remote_cache= --noremote_accept_cached --noremote_upload_local_results --disk_cache= '--workspace_status_command=python3 bazel/release/workspace_status.py'
+          ocx exec bazel -- bazel build "$@" //crates/ocx_cli:ocx
+          src=$(ocx exec bazel -- bazel cquery "$@" --output=files //crates/ocx_cli:ocx 2>/dev/null | tail -n1)
+          mkdir -p "target/cross-release/$TARGET"
+          cp -L --remove-destination "$src" "target/cross-release/$TARGET/$bin"
+          echo "$PWD/target/cross-release/$TARGET/$bin"
+
   # Unit tests are built here, on Linux, and only executed on the foreign runner:
   # `test:bundle` packs every `rust_test` with its runfiles, `test:run` needs
   # nothing but Python. Doctests are build actions and stay Linux-only.

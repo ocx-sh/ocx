@@ -297,8 +297,8 @@ tasks:
       redirect the canonical `ocx.sh/ocx/cli` identifier to a localhost test
       registry — see `crates/ocx_cli/BUILD.bazel`). The seams are
       loopback-only-asserted at runtime — safe in all non-release binaries.
-      User-facing release artifacts come from cargo-dist (release.yml), which
-      never builds this graph and therefore physically lacks the seams.
+      User-facing release artifacts come from the stamped build of release.yml
+      (`task cross:build:release`), which drops `__testing` and therefore physically lacks the seams.
     # `SKIP_BUILD` pinned off: it defaults to true on CI, where this task is
     # the step that produces the binary rather than one that may reuse it.
     # No `sources:`/`status:` — Bazel decides what to rebuild.
@@ -642,7 +642,7 @@ tasks:
       Runs `cargo xwin build --release` for x86_64-pc-windows-msvc and
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
       Not the CI cross-build: cross.yml runs Bazel's gnullvm one
-      (`task cross:build`), and the release ships the cargo-dist MSVC zips.
+      (`task cross:build`), and the release ships the gnullvm binary under the MSVC archive names.
       Produces target/xwin/<triple>/release/ocx.exe. Shares caches
       with check:windows under .cache/xwin/.
     cmds:

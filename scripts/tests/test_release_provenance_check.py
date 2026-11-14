@@ -4,8 +4,11 @@ docstring for what each proof covers)."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,12 +20,14 @@ from release_provenance_check import (
     _LINK_GREENS,
     _LINK_REDS,
     _REPORT_REDS,
+    EPOCH_PREFIX,
     EXIT_CLEAN,
     EXIT_FINDING,
     EXIT_USAGE,
     GLIBC_FLOOR,
     MARKERS,
     NEEDED_ALLOWED,
+    SHA,
     _broken,
     evaluate_readelf,
     evaluate_report,
@@ -41,6 +46,28 @@ def test_scan_finds_each_marker_at_its_offset(tmp_path: Path, marker: bytes) -> 
     assert f"offset {offset}" in findings[0]
     assert str(fixture) in findings[0]
     assert check_mod.main(["--scan", str(fixture)]) == EXIT_FINDING
+
+
+@pytest.mark.parametrize(
+    "name", ["__OCX_TESTING_FORGE_BASE_URL", "__OCX_TESTING_FAULT", "__OCX_TESTING_GITHUB_API_URL"]
+)
+def test_scan_flags_a_declared_testing_variable(tmp_path: Path, name: str) -> None:
+    # The registry declares these only under `__testing`: their names in a binary mean its seams are compiled in.
+    fixture = tmp_path / "red-seam"
+    fixture.write_bytes(b"\x7fELF" + b"\0" * 32 + name.encode() + b"\0" * 8)
+    findings = scan([fixture])
+    assert len(findings) == 1
+    assert "__OCX_TESTING_" in findings[0]
+    assert "offset 36" in findings[0]
+    assert check_mod.main(["--scan", str(fixture)]) == EXIT_FINDING
+
+
+def test_scan_flags_the_fault_variable_followed_by_a_value(tmp_path: Path) -> None:
+    # No exemption: the name followed by `=` is a seam string too, so a release binary must not carry it.
+    planted = tmp_path / "red-hook-text"
+    planted.write_bytes(b"\x7fELF" + b"\0" * 32 + b"__OCX_TESTING_FAULT=after_lock_write" + b"\0" * 8)
+    assert len(scan([planted])) == 1
+    assert check_mod.main(["--scan", str(planted)]) == EXIT_FINDING
 
 
 def test_scan_reports_every_occurrence_not_only_the_first(tmp_path: Path) -> None:
@@ -127,9 +154,7 @@ def _write_fake_binary(path: Path, body: str) -> None:
         ("placeholder", _broken(("channel",), "test"), EXIT_FINDING),
     ],
 )
-def test_exec_end_to_end_over_a_fake_binary(
-    tmp_path: Path, name: str, report: object, expected: int
-) -> None:
+def test_exec_end_to_end_over_a_fake_binary(tmp_path: Path, name: str, report: object, expected: int) -> None:
     fake = tmp_path / f"fake-ocx-{name}"
     _write_fake_binary(
         fake,
@@ -145,7 +170,8 @@ def test_exec_reds_on_a_failing_binary(tmp_path: Path) -> None:
     # A release-shaped report on stdout, so only the exit status can red it.
     broken = tmp_path / "fake-ocx-fails"
     _write_fake_binary(
-        broken, f"import sys\nprint({json.dumps(json.dumps(_GOOD_REPORT))})\nsys.exit(3)\n"
+        broken,
+        f"import sys\nprint({json.dumps(json.dumps(_GOOD_REPORT))})\nsys.exit(3)\n",
     )
     assert check_mod.main(["--exec", str(broken)]) == EXIT_FINDING
 
@@ -172,11 +198,23 @@ def test_evaluate_readelf_greens(name: str, text: str) -> None:
 def test_link_constants_match_the_release_bytes() -> None:
     # v0.6.5: the highest GLIBC_ either gnu binary needs, and the sonames they link, loaders included.
     assert GLIBC_FLOOR == (2, 34)
-    assert NEEDED_ALLOWED == {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+    assert NEEDED_ALLOWED == {
+        "libc.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "ld-linux-x86-64.so.2",
+        "ld-linux-aarch64.so.1",
+        "librt.so.1",
+        "libpthread.so.0",
+        "libdl.so.2",
+    }
 
 
 def _write_fake_readelf(path: Path, output: str, status: int = 0) -> None:
-    path.write_text(f"#!{sys.executable}\nimport sys\nprint({output!r})\nsys.exit({status})\n", encoding="utf-8")
+    path.write_text(
+        f"#!{sys.executable}\nimport sys\nprint({output!r})\nsys.exit({status})\n",
+        encoding="utf-8",
+    )
     path.chmod(0o755)
 
 
@@ -190,10 +228,18 @@ def elf_file(tmp_path: Path) -> Path:
 @pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
 @pytest.mark.parametrize(
     "name,output,expected",
-    [("good", _GOOD_READELF, EXIT_CLEAN), ("glibc 2.99", _LINK_REDS[0][1], EXIT_FINDING)],
+    [
+        ("good", _GOOD_READELF, EXIT_CLEAN),
+        ("glibc 2.99", _LINK_REDS[0][1], EXIT_FINDING),
+    ],
 )
 def test_link_end_to_end_over_a_fake_readelf(
-    tmp_path: Path, elf_file: Path, monkeypatch: pytest.MonkeyPatch, name: str, output: str, expected: int
+    tmp_path: Path,
+    elf_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    output: str,
+    expected: int,
 ) -> None:
     fake = tmp_path / "fake-readelf"
     _write_fake_readelf(fake, output)
@@ -232,3 +278,213 @@ def test_link_reader_floor_reds_under_min_files(
 
 def test_link_over_a_missing_file_is_usage_error(tmp_path: Path) -> None:
     assert check_mod.main(["--link", str(tmp_path / "absent")]) == EXIT_USAGE
+
+
+# ---------------------------------------------------------------------------
+# The stamped / unstamped pair (`task cross:build:release` against `task cross:build`)
+# ---------------------------------------------------------------------------
+
+_STATUS_SCRIPT = Path(__file__).resolve().parents[2] / "bazel" / "release" / "workspace_status.py"
+_SPEC = importlib.util.spec_from_file_location("workspace_status", _STATUS_SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+workspace_status = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(workspace_status)
+
+_CI_ENV = {
+    "GITHUB_SERVER_URL": "https://github.com",
+    "GITHUB_REPOSITORY": "ocx-sh/ocx",
+    "GITHUB_RUN_ID": "35032267742",
+}
+_STATUS_LINE = re.compile(r"STABLE_OCX_(\S+) (.*)")
+
+
+@pytest.fixture
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A one-commit git checkout on branch `feature/x`, with no CI variable in the environment."""
+    root = tmp_path / "checkout"
+    root.mkdir()
+    # Every variable the status script reads, so a CI runner's GITHUB_WORKFLOW / GITHUB_SHA cannot leak in.
+    for name in ("GITHUB_REF_NAME", *workspace_status.PASS_THROUGH):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "feature/x")
+    (root / "tracked").write_text("one\n", encoding="utf-8")
+    git("add", "tracked")
+    git("commit", "-q", "-m", "one")
+    monkeypatch.chdir(root)
+    return root
+
+
+def _status(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], **env: str) -> dict[str, str]:
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert workspace_status.main() == 0
+    pairs = (_STATUS_LINE.fullmatch(line) for line in capsys.readouterr().out.splitlines())
+    return {m[1]: m[2] for m in pairs if m}
+
+
+def test_status_reports_the_checkout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status = _status(monkeypatch, capsys)
+    assert SHA.fullmatch(status["VERGEN_GIT_SHA"])
+    assert status["VERGEN_GIT_DIRTY"] == "false"
+    assert status["__OCX_BUILD_BRANCH"] == "feature/x"
+    assert not status["VERGEN_BUILD_TIMESTAMP"].startswith(EPOCH_PREFIX)
+    assert status["VERGEN_GIT_COMMIT_TIMESTAMP"].endswith("Z")
+    # Nothing the environment did not set is invented.
+    assert not any(key.startswith("GITHUB_") for key in status)
+
+
+def test_status_dirty_follows_tracked_files_only(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (repo / "untracked").write_text("x\n", encoding="utf-8")
+    assert _status(monkeypatch, capsys)["VERGEN_GIT_DIRTY"] == "false"
+    (repo / "tracked").write_text("two\n", encoding="utf-8")
+    assert _status(monkeypatch, capsys)["VERGEN_GIT_DIRTY"] == "true"
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({"GITHUB_REF": "refs/heads/main", "GITHUB_REF_NAME": "main"}, "main"),
+        (
+            {"GITHUB_REF": "refs/heads/release/1.x", "GITHUB_REF_NAME": "release/1.x"},
+            "release/1.x",
+        ),
+        # A tag ref names no branch: the checkout's own HEAD answers.
+        ({"GITHUB_REF": "refs/tags/v1.2.3", "GITHUB_REF_NAME": "v1.2.3"}, "feature/x"),
+        (
+            {"GITHUB_REF": "refs/pull/7/merge", "GITHUB_REF_NAME": "7/merge"},
+            "feature/x",
+        ),
+        ({}, "feature/x"),
+    ],
+)
+def test_status_branch_rule(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    env: dict[str, str],
+    expected: str,
+) -> None:
+    assert _status(monkeypatch, capsys, **env)["__OCX_BUILD_BRANCH"] == expected
+
+
+def test_status_omits_the_branch_on_a_detached_head(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    subprocess.run(["git", "checkout", "-q", "--detach"], cwd=repo, check=True, capture_output=True)
+    assert "__OCX_BUILD_BRANCH" not in _status(monkeypatch, capsys)
+
+
+def test_status_passes_ci_channel_and_version_through(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status = _status(
+        monkeypatch,
+        capsys,
+        __OCX_BUILD_CHANNEL="dev",
+        __OCX_BUILD_VERSION="0.6.7-dev+1",
+        **_CI_ENV,
+    )
+    assert status["__OCX_BUILD_CHANNEL"] == "dev"
+    assert status["__OCX_BUILD_VERSION"] == "0.6.7-dev+1"
+    assert status["GITHUB_RUN_ID"] == _CI_ENV["GITHUB_RUN_ID"]
+
+
+def test_status_refuses_a_multiline_value(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("GITHUB_WORKFLOW", "a\nVERGEN_GIT_SHA=" + "f" * 40)
+    assert workspace_status.main() == 0
+    captured = capsys.readouterr()
+    assert "GITHUB_WORKFLOW" not in captured.out
+    assert "skipping GITHUB_WORKFLOW" in captured.err
+
+
+def _report_from_status(status: dict[str, str]) -> dict:
+    """The version report `build_info.rs` renders from those baked values."""
+    report: dict = {
+        "version": status["__OCX_BUILD_VERSION"],
+        "channel": status["__OCX_BUILD_CHANNEL"],
+        "commit": {
+            "sha": status["VERGEN_GIT_SHA"],
+            "dirty": status["VERGEN_GIT_DIRTY"] == "true",
+            "timestamp": status["VERGEN_GIT_COMMIT_TIMESTAMP"],
+            "branch": status["__OCX_BUILD_BRANCH"],
+        },
+        "build": {"timestamp": status["VERGEN_BUILD_TIMESTAMP"]},
+    }
+    if "GITHUB_RUN_ID" in status:
+        run_url = f"{status['GITHUB_SERVER_URL']}/{status['GITHUB_REPOSITORY']}/actions/runs/{status['GITHUB_RUN_ID']}"
+        report["ci"] = {"run_url": run_url}
+    return report
+
+
+_PLACEHOLDER_REPORT = {
+    "version": "0.6.2",
+    "channel": "test",
+    "commit": {"sha": "0" * 40, "dirty": True, "branch": "placeholder"},
+    "build": {"timestamp": "1970-01-01T00:00:00.000000000Z"},
+    "ci": {"run_url": "https://ci.invalid/placeholder/placeholder/actions/runs/0"},
+}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
+def test_unstamped_build_is_red_and_stamped_build_is_green(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    unstamped = tmp_path / "unstamped-ocx"
+    _write_fake_binary(unstamped, f"print({json.dumps(json.dumps(_PLACEHOLDER_REPORT))})\n")
+    # The shebang fake carries the markers as a comment, as the real binary carries them as data.
+    unstamped.write_bytes(unstamped.read_bytes() + b"# " + b" ".join(MARKERS) + b"\n")
+
+    status = _status(
+        monkeypatch,
+        capsys,
+        __OCX_BUILD_CHANNEL="dev",
+        __OCX_BUILD_VERSION="0.6.7-dev+1",
+        **_CI_ENV,
+    )
+    stamped = tmp_path / "stamped-ocx"
+    _write_fake_binary(stamped, f"print({json.dumps(json.dumps(_report_from_status(status)))})\n")
+
+    assert check_mod.main(["--scan", str(unstamped)]) == EXIT_FINDING
+    assert check_mod.main(["--exec", str(unstamped)]) == EXIT_FINDING
+    assert check_mod.main(["--scan", str(stamped)]) == EXIT_CLEAN
+    assert check_mod.main(["--exec", str(stamped)]) == EXIT_CLEAN
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a shebang fake cannot execute outside posix")
+def test_stamped_build_without_a_ci_run_is_still_red_under_exec(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A local `cross:build:release` carries real git state but no run URL: `--scan` clean, `--exec` red.
+    status = _status(
+        monkeypatch,
+        capsys,
+        __OCX_BUILD_CHANNEL="dev",
+        __OCX_BUILD_VERSION="0.6.7-dev+1",
+    )
+    local = tmp_path / "local-ocx"
+    _write_fake_binary(local, f"print({json.dumps(json.dumps(_report_from_status(status)))})\n")
+    assert check_mod.main(["--scan", str(local)]) == EXIT_CLEAN
+    assert check_mod.main(["--exec", str(local)]) == EXIT_FINDING
