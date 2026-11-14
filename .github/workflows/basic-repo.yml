@@ -89,6 +89,11 @@ jobs:
           version: '0.6.2'
           # Default-off: a restored object store is runner-executable content.
           cache: false
+      # The self-tests run under xdist and several shell out to `cargo`; on a runner without the pinned
+      # toolchain each worker would trigger rustup's auto-install at once and collide on a component.
+      - name: Install the pinned Rust toolchain
+        if: steps.changed.outputs.changed == 'true'
+        run: rustup toolchain install
       - name: Run the script self-tests
         if: steps.changed.outputs.changed == 'true'
         run: task scripts:self-test

@@ -1,0 +1,17 @@
+{
+  "ocx-x86_64-unknown-linux-gnu.tar.gz": [
+    "ocx-x86_64-unknown-linux-gnu/",
+    "ocx-x86_64-unknown-linux-gnu/CHANGELOG.md",
+    "ocx-x86_64-unknown-linux-gnu/LICENSE",
+    "ocx-x86_64-unknown-linux-gnu/LICENSE-THIRD-PARTY.md",
+    "ocx-x86_64-unknown-linux-gnu/README.md",
+    "ocx-x86_64-unknown-linux-gnu/ocx"
+  ],
+  "ocx-x86_64-pc-windows-msvc.zip": [
+    "CHANGELOG.md",
+    "LICENSE",
+    "LICENSE-THIRD-PARTY.md",
+    "README.md",
+    "ocx.exe"
+  ]
+}
