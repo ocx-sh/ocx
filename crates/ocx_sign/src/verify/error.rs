@@ -41,6 +41,19 @@ pub enum VerifyErrorKind {
     )]
     NoSignaturesFound,
 
+    /// The verified subject is an image index carrying no signature of its own. Exit 79, same slug.
+    ///
+    /// Signing targets platform manifests, so an index digest answers this until `--platform` narrows it.
+    #[error(
+        "no signatures found for this image index; platform manifests are signed individually, pass --platform to verify one"
+    )]
+    #[exit(
+        NotFound,
+        slug = "no_signatures_found",
+        summary = "The target has no signature referrers"
+    )]
+    NoSignaturesOnIndex,
+
     /// The identifier did not resolve to a manifest for the requested platform.
     ///
     /// Exit 79 (`NotFound`), with its own slug: "unsigned" and "not here" must never read alike.

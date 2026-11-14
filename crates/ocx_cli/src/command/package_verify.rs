@@ -28,10 +28,12 @@ pub struct PackageVerify {
     ///
     /// A tag that names an image index resolves to the platform manifest
     /// for this host, as `install` does. A tag that names a single manifest
-    /// is used as is. A reference pinned by digest is the exact object it
-    /// names, so pin the index digest to act on the index itself. Given
-    /// against a reference that resolves to a single manifest, there is
-    /// nothing to narrow and the command fails.
+    /// is used as is. A reference pinned by digest acts on exactly that
+    /// object: an index digest needs `--platform` to reach a platform
+    /// manifest, and `package push --sign` signs platform manifests, so the
+    /// index itself carries no signature. Given against a reference that
+    /// resolves to a single manifest, there is nothing to narrow and the
+    /// command fails.
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     platform: Option<ocx_oci::Platform>,
 
