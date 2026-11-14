@@ -221,11 +221,77 @@ pub struct CascadePushOutcome {
     pub layer_counts: ocx_oci::LayerCounts,
 }
 
-/// Pushes a package to its primary tag, then merges the platform entry into
-/// each cascade tag, most-specific first so a partial failure leaves no gap.
+/// A platform manifest on the registry by digest alone: no tag reaches it yet, so a
+/// signature written against [`digest`](Self::digest) lands before anything can resolve it.
+#[derive(Debug, Clone)]
+pub struct StagedManifest {
+    pub digest: ocx_oci::Digest,
+    size: i64,
+    layer_counts: ocx_oci::LayerCounts,
+}
+
+impl StagedManifest {
+    pub fn layer_counts(&self) -> ocx_oci::LayerCounts {
+        self.layer_counts
+    }
+}
+
+/// Pushes `package_info`'s layers and manifest without writing any tag.
 ///
-/// `keep_tag` adds the digest-named keep tag (`adr_index_indirection.md`
-/// Decision E); `default` also aliases a variant onto the un-prefixed track.
+/// # Errors
+///
+/// Push authentication, a layer or manifest upload, or a manifest size beyond `i64::MAX`.
+pub async fn stage_manifest(
+    client: &ocx_oci::Client,
+    target: &ocx_oci::OciIdentifier,
+    package_info: &crate::info::Info,
+    layers: &[ocx_oci::layer_ref::LayerRef],
+) -> Result<StagedManifest> {
+    let (_, data, sha256, layer_counts) = client
+        .push_multi_layer_manifest(target, layers, package_info.manifest_builder()?)
+        .await?;
+    let size = i64::try_from(data.len()).map_err(|_| {
+        ocx_oci::client::error::ClientError::InvalidManifest(format!("manifest size {} exceeds i64::MAX", data.len()))
+    })?;
+    let digest = ocx_oci::Digest::try_from(sha256).map_err(ocx_oci::client::error::ClientError::internal)?;
+    Ok(StagedManifest {
+        digest,
+        size,
+        layer_counts,
+    })
+}
+
+/// Merges `platform` into the index of `target`'s tag, then of each of `extra_tags`.
+/// Returns the primary index digest and data.
+pub(crate) async fn merge_staged(
+    client: &ocx_oci::Client,
+    target: &ocx_oci::OciIdentifier,
+    platform: &ocx_oci::Platform,
+    staged: &StagedManifest,
+    extra_tags: &[String],
+    annotations: &BTreeMap<String, String>,
+) -> Result<(ocx_oci::Digest, ocx_oci::ImageIndex)> {
+    let sha256 = staged.digest.to_string();
+    let primary = client
+        .merge_platform_into_index(
+            target,
+            target.tag_or_latest().to_string(),
+            platform,
+            &sha256,
+            staged.size,
+            annotations,
+        )
+        .await?;
+    for tag in extra_tags {
+        log::debug!("Cascading to {tag}");
+        client
+            .merge_platform_into_index(target, tag.clone(), platform, &sha256, staged.size, annotations)
+            .await?;
+    }
+    Ok(primary)
+}
+
+/// [`stage_manifest`] then [`publish_with_cascade`], for a push with nothing to do between them.
 #[expect(
     clippy::too_many_arguments,
     reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
@@ -241,28 +307,53 @@ pub async fn push_with_cascade(
     default: bool,
     annotations: &BTreeMap<String, String>,
 ) -> Result<CascadePushOutcome> {
-    let (cascade_tags, _) =
-        resolve_cascade_tags(client, target, version, &other_versions, &package_info.platform).await?;
+    let staged = stage_manifest(client, target, &package_info, layers).await?;
+    publish_with_cascade(
+        client,
+        target,
+        &package_info.platform,
+        &staged,
+        other_versions,
+        version,
+        keep_tag,
+        default,
+        annotations,
+    )
+    .await
+}
 
-    let (manifest_digest, index, layer_counts) = client
-        .push_manifest_and_merge_tags(
-            target,
-            &package_info.platform,
-            layers,
-            &cascade_tags,
-            annotations,
-            package_info.manifest_builder()?,
-        )
-        .await?;
+/// Merges a staged platform manifest into its primary tag, then into each cascade tag,
+/// most-specific first so a partial failure leaves no gap.
+///
+/// `keep_tag` adds the digest-named keep tag (`adr_index_indirection.md`
+/// Decision E); `default` also aliases a variant onto the un-prefixed track.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
+)]
+pub async fn publish_with_cascade(
+    client: &ocx_oci::Client,
+    target: &ocx_oci::OciIdentifier,
+    platform: &ocx_oci::Platform,
+    staged: &StagedManifest,
+    other_versions: BTreeSet<Version>,
+    version: &Version,
+    keep_tag: bool,
+    default: bool,
+    annotations: &BTreeMap<String, String>,
+) -> Result<CascadePushOutcome> {
+    let (cascade_tags, _) = resolve_cascade_tags(client, target, version, &other_versions, platform).await?;
+
+    let (manifest_digest, index) = merge_staged(client, target, platform, staged, &cascade_tags, annotations).await?;
 
     let merged = ocx_oci::Manifest::ImageIndex(index);
     // Outside the `keep_tag` branch: a signing input, needed under `--no-keep-tag` too.
-    let platform_digest = ocx_oci::manifest::platform_manifest_digest(&merged, &package_info.platform);
+    let platform_digest = ocx_oci::manifest::platform_manifest_digest(&merged, platform);
 
     let aliases = write_default_variant_aliases(
         client,
         target,
-        &package_info.platform,
+        platform,
         &merged,
         version,
         default,
@@ -272,7 +363,7 @@ pub async fn push_with_cascade(
     .await?;
 
     let keep_tag_written = if keep_tag {
-        client.push_keep_tag(target, &merged, &package_info.platform).await?
+        client.push_keep_tag(target, &merged, platform).await?
     } else {
         None
     };
@@ -283,7 +374,7 @@ pub async fn push_with_cascade(
         keep_tag: keep_tag_written,
         platform_digest,
         aliases,
-        layer_counts,
+        layer_counts: staged.layer_counts,
     })
 }
 

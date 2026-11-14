@@ -212,6 +212,6 @@ mod tests {
         assert!(roots >= 54, "read {roots} roots");
         assert_eq!(versions.reports.len(), roots);
         assert_eq!(versions.errors, 1);
-        assert_eq!(versions.commands.get("package push"), Some(&1));
+        assert_eq!(versions.commands.get("package push"), Some(&2));
     }
 }

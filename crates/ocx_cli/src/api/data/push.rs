@@ -90,9 +90,9 @@ pub struct PushReport {
     pub signatures: Vec<SignedPlatformReport>,
     /// Absent unless `--sbom` was passed.
     ///
-    /// Reported separately from `status`, which reports the push alone: a push
-    /// that lands and an attestation that then fails is a real state — the
-    /// manifest is immutable and OCI offers no un-push.
+    /// Reported separately from `status`, which reports the push alone. A failed
+    /// attestation emits the error document instead of this report, so a printed
+    /// report carries `succeeded` today; `failed` stays so the schema covers it.
     // Never fold this into `status`: `ocx-mirror pipeline push` keys its go/no-go off it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attestation: Option<AttestationOutcome>,
@@ -160,7 +160,8 @@ impl SignedPlatformReport {
 pub enum AttestationStatus {
     /// The attestation was published on the pushed manifest.
     Succeeded,
-    /// The push landed and was NOT rolled back; the attestation did not.
+    /// The attestation was not published. The pushed manifest stays in the
+    /// registry; no tag was written after it.
     Failed,
 }
 

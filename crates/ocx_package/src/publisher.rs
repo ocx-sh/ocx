@@ -74,6 +74,24 @@ impl PushOutcome {
     }
 }
 
+/// Platform manifests on the registry by digest, no tag written; see [`Publisher::stage`].
+#[derive(Debug)]
+pub struct StagedPush {
+    // The target with its build-metadata segment, so every platform lands on one tag.
+    identifier: ocx_oci::OciIdentifier,
+    platforms: Vec<(ocx_oci::Platform, crate::cascade::StagedManifest)>,
+}
+
+impl StagedPush {
+    /// The platform manifest digest each platform staged on, in push order.
+    pub fn platform_digests(&self) -> Vec<(ocx_oci::Platform, ocx_oci::Digest)> {
+        self.platforms
+            .iter()
+            .map(|(platform, manifest)| (platform.clone(), manifest.digest.clone()))
+            .collect()
+    }
+}
+
 impl Publisher {
     pub fn new(client: ocx_oci::Client) -> Self {
         Self { client }
@@ -100,21 +118,43 @@ impl Publisher {
         layers: &[LayerRef],
         annotations: &BTreeMap<String, String>,
     ) -> Result<(ocx_oci::Digest, ocx_oci::Manifest, ocx_oci::LayerCounts)> {
-        let (index_digest, index, layer_counts) = self
-            .client
-            .push_manifest_and_merge_tags(
-                target,
-                &info.platform,
-                layers,
-                &[],
-                annotations,
-                info.manifest_builder()?,
-            )
-            .await?;
-        Ok((index_digest, ocx_oci::Manifest::ImageIndex(index), layer_counts))
+        let staged = crate::cascade::stage_manifest(&self.client, target, info, layers).await?;
+        let (index_digest, index) =
+            crate::cascade::merge_staged(&self.client, target, &info.platform, &staged, &[], annotations).await?;
+        Ok((
+            index_digest,
+            ocx_oci::Manifest::ImageIndex(index),
+            staged.layer_counts(),
+        ))
     }
 
-    /// Pushes a package, one [`Info`] per target platform.
+    /// Pushes every platform's layers and manifest by digest and writes no tag, so a caller can
+    /// sign what [`StagedPush::platform_digests`] names before [`publish`](Self::publish) or
+    /// [`publish_cascade`](Self::publish_cascade) makes any of it reachable.
+    ///
+    /// With `build_meta`, `target`'s tag must be an `X.Y.Z` [`Version`] without build metadata.
+    pub async fn stage(
+        &self,
+        target: &ocx_oci::OciIdentifier,
+        infos: Vec<Info>,
+        layers: &[LayerRef],
+        build_meta: Option<&str>,
+    ) -> Result<StagedPush> {
+        let identifier = apply_build_meta(target, build_meta)?;
+        if infos.is_empty() {
+            return Err(crate::error::Error::EmptyPushSet);
+        }
+        let mut platforms = Vec::with_capacity(infos.len());
+        for info in infos {
+            log::info!("staging package {} (platform {})", identifier, info.platform);
+            let staged = crate::cascade::stage_manifest(&self.client, &identifier, &info, layers).await?;
+            platforms.push((info.platform, staged));
+        }
+        Ok(StagedPush { identifier, platforms })
+    }
+
+    /// Pushes a package, one [`Info`] per target platform: [`stage`](Self::stage) then
+    /// [`publish`](Self::publish).
     ///
     /// With `build_meta`, `target`'s tag must be an `X.Y.Z` [`Version`] without build metadata.
     /// `keep_tag` tags each platform manifest `__ocx.keep.<algorithm>-<hex>`
@@ -133,33 +173,42 @@ impl Publisher {
         default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
-        let identifier = apply_build_meta(target, build_meta)?;
+        let staged = self.stage(target, infos, layers, build_meta).await?;
+        self.publish(&staged, keep_tag, default, annotations).await
+    }
+
+    /// Writes the primary tag, keep tags and `--default` aliases for every staged platform.
+    pub async fn publish(
+        &self,
+        staged: &StagedPush,
+        keep_tag: bool,
+        default: bool,
+        annotations: &BTreeMap<String, String>,
+    ) -> Result<PushOutcome> {
+        let identifier = &staged.identifier;
         let mut manifest_digest: Option<ocx_oci::Digest> = None;
         let mut keep_tags: Vec<String> = Vec::new();
         let mut platform_digests: Vec<(ocx_oci::Platform, ocx_oci::Digest)> = Vec::new();
         let mut aliases_written: Vec<String> = Vec::new();
         let mut layer_counts = ocx_oci::LayerCounts::default();
         // Sequential: the index merge is a read-modify-write, so concurrent platforms would race.
-        for info in infos {
-            log::info!(
-                "pushing package with identifier {} (platform {})",
-                identifier,
-                info.platform
-            );
-            let platform = info.platform.clone();
-            let (digest, manifest, counts) = self.push_package(&identifier, &info, layers, annotations).await?;
-            layer_counts += counts;
+        for (platform, manifest) in &staged.platforms {
+            log::info!("publishing package {} (platform {})", identifier, platform);
+            let (digest, index) =
+                crate::cascade::merge_staged(&self.client, identifier, platform, manifest, &[], annotations).await?;
+            let merged = ocx_oci::Manifest::ImageIndex(index);
+            layer_counts += manifest.layer_counts();
             // Outside the keep-tag branch: `platform_digests` is needed under `--no-keep-tag` too.
-            if let Some(platform_digest) = ocx_oci::manifest::platform_manifest_digest(&manifest, &platform) {
+            if let Some(platform_digest) = ocx_oci::manifest::platform_manifest_digest(&merged, platform) {
                 platform_digests.push((platform.clone(), platform_digest));
             }
             // A non-version tag carries no variant, so `--default` is a no-op, not a refusal.
             if let Some(version) = Version::parse(identifier.tag_or_latest()) {
                 let aliases = crate::cascade::write_default_variant_aliases(
                     &self.client,
-                    &identifier,
-                    &platform,
-                    &manifest,
+                    identifier,
+                    platform,
+                    &merged,
                     &version,
                     default,
                     None,
@@ -173,7 +222,7 @@ impl Publisher {
                 }
             }
             if keep_tag
-                && let Some(tag) = self.client.push_keep_tag(&identifier, &manifest, &platform).await?
+                && let Some(tag) = self.client.push_keep_tag(identifier, &merged, platform).await?
                 && !keep_tags.contains(&tag)
             {
                 keep_tags.push(tag);
@@ -209,27 +258,48 @@ impl Publisher {
         default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
+        // Before any upload: a tag that is no version cascades nowhere.
         let identifier = apply_build_meta(target, build_meta)?;
-        let version = Version::parse(identifier.tag_or_latest())
-            .ok_or_else(|| crate::error::Error::VersionInvalid(identifier.tag_or_latest().to_string()))?;
+        Self::cascade_version(&identifier)?;
+        let staged = self.stage(target, infos, layers, build_meta).await?;
+        self.publish_cascade(&staged, existing_versions, keep_tag, default, annotations)
+            .await
+    }
+
+    /// The version a cascade push of `identifier` moves from.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageError::VersionInvalid`] when the tag is not a version.
+    pub fn cascade_version(identifier: &ocx_oci::OciIdentifier) -> Result<Version> {
+        Version::parse(identifier.tag_or_latest())
+            .ok_or_else(|| crate::error::Error::VersionInvalid(identifier.tag_or_latest().to_string()))
+    }
+
+    /// [`publish`](Self::publish) plus the rolling tags `existing_versions` leaves open.
+    pub async fn publish_cascade(
+        &self,
+        staged: &StagedPush,
+        existing_versions: BTreeSet<Version>,
+        keep_tag: bool,
+        default: bool,
+        annotations: &BTreeMap<String, String>,
+    ) -> Result<PushOutcome> {
+        let identifier = &staged.identifier;
+        let version = Self::cascade_version(identifier)?;
         let mut manifest_digest: Option<ocx_oci::Digest> = None;
         let mut cascade_tags: Vec<String> = Vec::new();
         let mut keep_tags: Vec<String> = Vec::new();
         let mut platform_digests: Vec<(ocx_oci::Platform, ocx_oci::Digest)> = Vec::new();
         let mut aliases_written: Vec<String> = Vec::new();
         let mut layer_counts = ocx_oci::LayerCounts::default();
-        for info in infos {
-            log::info!(
-                "pushing package with identifier {} (cascade, platform {})",
-                identifier,
-                info.platform
-            );
-            let platform = info.platform.clone();
-            let outcome = crate::cascade::push_with_cascade(
+        for (platform, manifest) in &staged.platforms {
+            log::info!("publishing package {} (cascade, platform {})", identifier, platform);
+            let outcome = crate::cascade::publish_with_cascade(
                 &self.client,
-                &identifier,
-                info,
-                layers,
+                identifier,
+                platform,
+                manifest,
                 existing_versions.clone(),
                 &version,
                 keep_tag,
@@ -255,7 +325,7 @@ impl Publisher {
                 keep_tags.push(tag);
             }
             if let Some(platform_digest) = outcome.platform_digest {
-                platform_digests.push((platform, platform_digest));
+                platform_digests.push((platform.clone(), platform_digest));
             }
         }
         Ok(PushOutcome {
@@ -718,6 +788,45 @@ mod tests {
             "platforms sharing one manifest digest share one keep tag: {:?}",
             outcome.keep_tags
         );
+    }
+
+    /// A staged push has written no tag, so a signature can land first; `publish_cascade` then
+    /// writes the primary, rolling and keep tags.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stage_writes_no_tag_until_publish_cascade() {
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(
+            data.clone(),
+        ))));
+
+        let staged = publisher
+            .stage(&test_target("1.0.0"), vec![test_info()], &[], None)
+            .await
+            .expect("stage succeeds");
+        let digests = staged.platform_digests();
+        assert_eq!(digests.len(), 1, "one platform staged: {digests:?}");
+        let tagged = |data: &StubTransportData| {
+            data.read()
+                .manifests
+                .keys()
+                .filter(|key| key.contains(":1") || key.contains(":latest") || key.contains(":__ocx.keep."))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(tagged(&data).is_empty(), "stage wrote tags: {:?}", tagged(&data));
+
+        let outcome = publisher
+            .publish_cascade(&staged, BTreeSet::new(), true, false, &BTreeMap::new())
+            .await
+            .expect("publish succeeds");
+        assert_eq!(
+            outcome.platform_digests, digests,
+            "publish reports the digests stage returned"
+        );
+        assert!(!tagged(&data).is_empty(), "publish wrote no tag");
     }
 
     #[tokio::test(flavor = "multi_thread")]

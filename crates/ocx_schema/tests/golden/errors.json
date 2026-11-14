@@ -1629,6 +1629,11 @@
           "exit_code": 79
         },
         {
+          "value": "no_verify_refused",
+          "description": "--no-verify was refused because the system config requires signatures",
+          "exit_code": 81
+        },
+        {
           "value": "non_utf8_wire_name",
           "description": "A local index path is not valid UTF-8",
           "exit_code": 65
@@ -2024,6 +2029,11 @@
           "exit_code": 64
         },
         {
+          "value": "prune_index_stale",
+          "description": "The index row for a tag names a different build than the registry serves",
+          "exit_code": 75
+        },
+        {
           "value": "prune_no_index",
           "description": "No index is configured to check the tags against",
           "exit_code": 81
@@ -2047,6 +2057,11 @@
           "value": "prune_refused_pending",
           "description": "The index still lists a tag prune would delete, pending an announce",
           "exit_code": 75
+        },
+        {
+          "value": "prune_shared_version",
+          "description": "A version selected for deletion is shared with another tag",
+          "exit_code": 81
         },
         {
           "value": "prune_tag_still_present",
@@ -2140,7 +2155,7 @@
         },
         {
           "value": "registry_delete_unsupported",
-          "description": "The registry does not delete tags",
+          "description": "The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github",
           "exit_code": 82
         },
         {
