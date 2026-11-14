@@ -38,7 +38,7 @@
 
 | Component | Choice |
 |-----------|--------|
-| Static/Frontend | Bunny (behind owner nginx: ocx.sh, dev.ocx.sh) |
+| Static/Frontend | Bunny (behind owner nginx: ocx.sh) |
 | Edge/CDN | Bunny |
 | Secrets | GitHub Secrets |
 
