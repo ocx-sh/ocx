@@ -153,7 +153,7 @@
           ]
         },
         "trusted_hosts": {
-          "description": "SSRF escape hatch for this namespace's physical registry hosts. Each\nentry is an exact hostname or a CIDR block whose resolved addresses skip\nthe default-on private/loopback/link-local/metadata refusal.",
+          "description": "SSRF escape hatch for this namespace's physical registry hosts. Each\nentry is an exact hostname or a CIDR block whose resolved addresses skip\nthe default-on private/loopback/link-local/metadata refusal.\n\nA hostname entry also lets `ocx package prune --forge github` delete through the GitHub\nEnterprise packages API of a `containers.<host>` registry that this namespace's index names.\nOnly an exact hostname vouches for that; a CIDR block does not.",
           "type": [
             "array",
             "null"
