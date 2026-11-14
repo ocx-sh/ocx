@@ -44,9 +44,9 @@ pub enum ListingVerification {
 
 /// Whether every examined candidate was listed.
 ///
-/// A refusal beside a listing is a partial failure the caller is told about and
-/// the run still exits 0, even when every document refused under `--summary`.
-/// Only a zero-match scan exits non-zero (79), and it prints no listing.
+/// A refusal beside a usable entry is a partial failure the caller is told about
+/// and the run exits 0. When every candidate was refused the report is printed
+/// and the run exits 79, the same code a scan with no match exits with.
 #[derive(Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum ListingStatus {

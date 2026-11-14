@@ -4453,7 +4453,7 @@
       "description": "The counts and the status a script branches on."
     },
     "ListingStatus": {
-      "description": "Whether every examined candidate was listed.\n\nA refusal beside a listing is a partial failure the caller is told about and\nthe run still exits 0, even when every document refused under `--summary`.\nOnly a zero-match scan exits non-zero (79), and it prints no listing.",
+      "description": "Whether every examined candidate was listed.\n\nA refusal beside a usable entry is a partial failure the caller is told about\nand the run exits 0. When every candidate was refused the report is printed\nand the run exits 79, the same code a scan with no match exits with.",
       "type": "string",
       "x-ocx-enum": [
         {
