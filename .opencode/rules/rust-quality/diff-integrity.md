@@ -32,19 +32,19 @@ labelled with the tag the table below explains.
 
 ```bash
 D="origin/main..."
-git diff "$D" -- '*.rs' | rg -nE '^\+.*#!?\[allow\('                    # allow
-git diff "$D" -- '*.rs' | rg -nE '^-.*assert'                           # assert
-git diff "$D" -- '*.rs' | rg -nE '^\+.*#\[ignore\]'                     # ignore
-git diff "$D" -- '*.rs' | rg -nE -e '^\+.*todo!' -e '^\+.*unimplemented!' # stub
-git diff "$D" | rg -nE '^\+.*unsafe '                                   # unsafe
-git diff "$D" | rg -nE '^\+.*\.unwrap\(\)'                              # unwrap
+git diff "$D" -- '*.rs' | grep -n -E -e '^\+.*#!?\[allow\('                  # allow
+git diff "$D" -- '*.rs' | grep -n -E -e '^-.*assert'                         # assert
+git diff "$D" -- '*.rs' | grep -n -E -e '^\+.*#\[ignore\]'                   # ignore
+git diff "$D" -- '*.rs' | grep -n -E -e '^\+.*todo!' -e '^\+.*unimplemented!' # stub
+git diff "$D" | grep -n -E -e '^\+.*unsafe '                                 # unsafe
+git diff "$D" | grep -n -E -e '^\+.*\.unwrap\(\)'                            # unwrap
 git diff --name-only "$D" -- '*Taskfile*' '*Justfile*' .github/workflows \
   deny.toml clippy.toml 'rust-toolchain*'                               # gate
 git diff --name-only "$D" -- '*.snap'                                   # snapshot
 git diff --stat "$D" -- Cargo.lock                                      # lockfile
 ```
 
-Each `rg` above reads a `git diff` on stdin deliberately — that is the one
+Each `grep` above reads a `git diff` on stdin deliberately — that is the one
 case where omitting a path operand is correct. Anywhere else it silently
 searches stdin, finds nothing, and reports a clean tree.
 

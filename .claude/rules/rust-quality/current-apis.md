@@ -71,13 +71,19 @@ provider in the graph.
 | EVO-6 | After changing the signature of a function returning `impl Trait`, re-derive what it captures; add `+ use<…>` where the set must be pinned. | `cargo build` on all dependents; `git grep -n -e '-> impl ' -- '*.rs'` for the affected signatures. RPITIT `use<…>` needs Rust ≥ 1.87 | SHOULD (MUST if the crate is published) |
 | EVO-7 | Suppress with `#[expect(lint, reason = "…")]`, never bare `#[allow]`. Convert an `#[allow]` whenever you touch its line. | `git grep -c '#\[allow(' -- '*.rs'` must trend down; a new `#[allow]` in a diff needs a justification in review | SHOULD |
 | EVO-8 | `LazyLock`/`OnceLock` for lazy globals; `once_cell`/`lazy_static` only for API std lacks, with a comment saying which. Never treat `LazyLock` poisoning as recoverable. | `cargo tree -e normal -i once_cell`, `-i lazy_static` — no match is clean; every direct edge justified or removed | SHOULD |
-| EVO-9 | Before calling into a high-churn crate (`rand`, `thiserror`, `reqwest`, `rustls`, `clap`), read the pinned version from `Cargo.lock` and check the API against *that version's* docs. Never generate symbol names from memory. | `grep -A1 '^name = "rand"' Cargo.lock`, then `docs.rs/<crate>/<version>`; stale-name sweep `git grep -n -e 'thread_rng()' -e '\.gen()' -e '\.gen_range(' -e 'rand::distributions' -e 'rand::rngs::OsRng' -- '*.rs'` | MUST |
+| EVO-9 | Before calling into a high-churn crate (`rand`, `thiserror`, `reqwest`, `rustls`, `clap`), read the pinned version from `Cargo.lock` and check the API against *that version's* docs. Never generate symbol names from memory. | see block EVO-9, then `docs.rs/<crate>/<version>`; stale-name sweep `git grep -n -e 'thread_rng()' -e '\.gen()' -e '\.gen_range(' -e 'rand::distributions' -e 'rand::rngs::OsRng' -- '*.rs'` | MUST |
 | EVO-10 | Exactly one rustls crypto provider is reachable. Do not "simplify" a TLS feature pin or add a second TLS-using dependency without re-checking — `install_default()` succeeds at most once per process, so a conflict is a *runtime* failure on the first handshake. | `cargo tree -e features -i rustls`, `-i ring`, `-i aws-lc-rs` — confirm one backend is *enabled* (lock edges include optional deps and prove nothing); plus one test doing a real handshake | MUST |
-| EVO-11 | A dependency change touching the TLS or crypto backend is validated by the real release target matrix, not a host `cargo check`. | Run the full `dist-workspace.toml` target list in CI on the bumping PR; a host-only green check is not evidence | MUST |
+| EVO-11 | A dependency change touching the TLS or crypto backend is validated by the real release target matrix, not a host `cargo check`. | Run the project's full release target matrix in CI on the bumping PR; a host-only green check is not evidence | MUST |
 | EVO-12 | Ban `async-std`, `structopt`, `error-chain` and `failure` in `deny.toml`'s `[[bans.deny]]` — a transitive upgrade could reintroduce one silently. | `cargo deny check bans` in CI; `cargo tree -i <crate>` to locate the path | SHOULD |
 | EVO-13 | Wrap every `env::set_var`/`remove_var` in `unsafe` **and** serialize it — one owning test, a mutex-guarded helper, or `#[serial]`. The keyword alone silences the compiler and leaves the data race. | `git grep -n -e 'env::set_var' -e 'env::remove_var' -- '*.rs'` — every hit inside a documented single-owner or serialization convention | MUST |
 | EVO-14 | Any crate invoking `#[derive(thiserror::Error)]` lists `thiserror` as its own direct dependency; unraw field names in `#[error("…")]`. | `git grep -l 'derive(.*Error' -- '*.rs'` and `git grep -l '^thiserror' -- '*Cargo.toml'` — the two crate sets must match | MUST |
 | EVO-15 | Declare `rust-version` matching the pinned `rust-toolchain.toml` channel — with `resolver = "3"` the MSRV-aware resolver does nothing without it, and a routine `cargo update` can pull a crate needing a newer compiler than the pin. | `git grep -n '^rust-version' -- '*Cargo.toml'` equals the `rust-toolchain.toml` channel | SHOULD |
+
+```sh
+CHECKS=.claude/rules/rust-quality/checks
+# EVO-9
+PAT='^name = "rand"' A=1 awk -f "$CHECKS/context.awk" -- Cargo.lock
+```
 
 When the pinned docs are unreachable, do not fall back to memory. Read the
 vendored source in `~/.cargo/registry`, or state the uncertainty and stop —
