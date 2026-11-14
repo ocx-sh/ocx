@@ -102,6 +102,8 @@ pub enum PruneReason {
     Durable,
     /// The registry has it but the index does not list it.
     NotInIndex,
+    /// The version carrying it also carries a tag outside the selection.
+    SharedVersion,
 }
 
 impl std::fmt::Display for PruneAction {
@@ -124,6 +126,7 @@ impl std::fmt::Display for PruneReason {
             Self::Rolling => "rolling",
             Self::Durable => "durable",
             Self::NotInIndex => "not_in_index",
+            Self::SharedVersion => "shared_version",
         })
     }
 }
@@ -719,6 +722,11 @@ async fn run(
             row.action = PruneAction::Deleted;
         } else if report.absent.contains(&row.tag) {
             row.action = PruneAction::Absent;
+        } else if let Err(PruneError::SharedVersion { tag, .. }) = &result
+            && *tag == row.tag
+        {
+            row.action = PruneAction::Refused;
+            row.reason = Some(PruneReason::SharedVersion);
         } else if result.is_err() {
             row.action = PruneAction::NotAttempted;
         }

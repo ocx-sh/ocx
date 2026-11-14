@@ -3697,6 +3697,10 @@
         {
           "value": "not_in_index",
           "description": "The registry has it but the index does not list it."
+        },
+        {
+          "value": "shared_version",
+          "description": "The version carrying it also carries a tag outside the selection."
         }
       ]
     },

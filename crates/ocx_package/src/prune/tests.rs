@@ -1575,3 +1575,45 @@ async fn the_deleter_is_told_the_digest_each_indexed_tag_row_names_and_none_for_
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].indexed, vec![("listed".to_owned(), root_content("listed"))]);
 }
+
+/// Refuses the second planned tag as sharing a version with a tag outside the selection.
+struct SharesVersion;
+
+#[async_trait]
+impl TagDeleter for SharesVersion {
+    async fn delete(&self, plan: &DeletePlan, _report: &mut DeleteReport) -> Result<(), PruneError> {
+        Err(PruneError::SharedVersion {
+            repository: plan.repository.to_string(),
+            tag: plan.tags[1].clone(),
+            other_tag: "outside".to_owned(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_tag_refused_for_sharing_a_version_is_reported_refused_with_its_reason() {
+    let registry = Registry::new();
+    let target = target(&[("first", true), ("second", true)]);
+
+    let run = prune_with(
+        &registry.client,
+        &SharesVersion,
+        &target,
+        &explicit(&["first", "second"]),
+    )
+    .await;
+
+    assert!(
+        matches!(run.error, Some(PruneError::SharedVersion { .. })),
+        "got {:?}",
+        run.error
+    );
+    assert_eq!(
+        rows(&run),
+        vec![
+            ("first", PruneAction::NotAttempted, None),
+            ("second", PruneAction::Refused, Some(PruneReason::SharedVersion)),
+        ]
+    );
+    assert_eq!(PruneReason::SharedVersion.to_string(), "shared_version");
+}
