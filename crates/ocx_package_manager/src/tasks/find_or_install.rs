@@ -36,7 +36,7 @@ impl PackageManager {
                 info,
                 arrival: Arrival::Cached,
             }),
-            Err(PackageErrorKind::NotFound) => {
+            Err(PackageErrorKind::NotFound | PackageErrorKind::NotInstalled(_)) => {
                 if self.is_offline() {
                     log::info!(
                         "Package '{}' not found in package store; attempting offline re-assembly from cache.",

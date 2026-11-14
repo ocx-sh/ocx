@@ -113,7 +113,7 @@ async fn locate(
 ) -> Result<Located, PackageErrorKind> {
     let package_root = match manager.find(package, platform.clone()).await {
         Ok(info) => Some(info.dir().root().to_path_buf()),
-        Err(PackageErrorKind::NotFound) => None,
+        Err(PackageErrorKind::NotFound | PackageErrorKind::NotInstalled(_)) => None,
         Err(kind) => return Err(kind),
     };
 

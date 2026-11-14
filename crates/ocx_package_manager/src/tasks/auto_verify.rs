@@ -1688,7 +1688,7 @@ mod tests {
                 },
             );
             let miss = find_golden(&manager, &pin).await.expect_err("nothing is installed");
-            assert!(matches!(miss, PackageErrorKind::NotFound), "got {miss:?}");
+            assert!(matches!(miss, PackageErrorKind::NotInstalled(_)), "got {miss:?}");
 
             // Non-vacuity: the resolve did commit a pointer; it just declares nothing.
             let store = ocx_index::IndexStore::machine_local(manager.file_structure());

@@ -105,7 +105,7 @@ impl PackageManager {
                     arrival: Arrival::Cached,
                 });
             }
-            Err(PackageErrorKind::NotFound) => {}
+            Err(PackageErrorKind::NotFound | PackageErrorKind::NotInstalled(_)) => {}
             Err(kind) => return Err(Error::FindFailed(vec![PackageError::new(identifier, kind)])),
         }
 

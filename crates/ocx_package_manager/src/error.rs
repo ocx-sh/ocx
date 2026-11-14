@@ -288,6 +288,13 @@ pub struct OfflineManifestMissing {
     pub digest: ocx_oci::Digest,
 }
 
+/// Payload for [`PackageErrorKind::NotInstalled`]: a reference that resolves, whose package is not in the object store.
+#[derive(Debug)]
+pub struct NotInstalled {
+    pub identifier: ocx_oci::PackageRef,
+    pub digest: ocx_oci::Digest,
+}
+
 /// Payload for the shim refusals naming a package and one of its claimed names.
 ///
 /// `package` may be a dependency deep in the closure, not [`PackageError::identifier`].
@@ -304,6 +311,10 @@ pub enum PackageErrorKind {
     #[error("package not found")]
     #[exit(NotFound, slug = "package_not_found", summary = "The package does not exist")]
     NotFound,
+    /// The reference resolves, but its package is not in the object store.
+    #[error("resolves to {} but is not installed; run `ocx install {}`", _0.digest, _0.identifier)]
+    #[exit(NotFound, slug = "package_not_found", summary = "The package does not exist")]
+    NotInstalled(Box<NotInstalled>),
     /// Offline mode: the tag pointer is cached locally but the manifest blob is not.
     #[error(
         "manifest {} is not in the local cache; run `ocx install {}` online to populate it",
@@ -548,6 +559,19 @@ pub enum DependencyError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn not_installed_names_the_digest_and_the_install_command() {
+        let identifier = ocx_oci::PackageRef::new_registry("cmake", "example.com");
+        let kind = PackageErrorKind::NotInstalled(Box::new(NotInstalled {
+            identifier,
+            digest: ocx_oci::Digest::Sha256("a".repeat(64)),
+        }));
+        let text = kind.to_string();
+        assert!(text.contains(&"a".repeat(64)), "{text}");
+        assert!(text.contains("is not installed"), "{text}");
+        assert!(text.contains("`ocx install example.com/cmake"), "{text}");
+    }
+
     use super::*;
     use ocx_oci::client::error::ClientError;
 
