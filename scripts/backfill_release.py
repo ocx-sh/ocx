@@ -3,7 +3,7 @@
 # Copyright 2026 The OCX Authors
 """Sign and attest versions that were published before `release.yml` did.
 
-    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--also-trusted SAN]... [--dry-run] [TAG...]
+    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--also-trusted SAN]... [--limit N] [--dry-run] [TAG...]
 
 For every git tag `vX.Y.Z` (the arguments, else every version tag of the checkout) and every
 platform of the package tag `X.Y.Z`: a signature by IDENTITY is added when `ocx package verify`
@@ -13,7 +13,8 @@ a second run changes nothing. A signature or attestation by any `--also-trusted`
 workflow's, say) counts as done too, so it is not added a second time. A tag is never moved: both add referrers to the digest the tag
 already names. The tag is resolved to each platform's manifest digest once, and every check and
 write then names `REF@DIGEST`, so a tag that moves mid-run cannot send a signature to a manifest
-that was never checked. `--dry-run` reports what would change and writes nothing.
+that was never checked. `--limit N` stops after N tags that needed a signature or an attestation and
+reports how many tags were left; a rerun converges because the work done is skipped. `--dry-run` reports what would change and writes nothing.
 
 The SBOM of a version is generated from the source at its git tag by `generate_sbom`, the one
 function a repository with another build overrides; it returns the path of the CycloneDX JSON.
@@ -65,6 +66,13 @@ def run_ocx(argv: list[str]) -> tuple[int, str, str]:
     return done.returncode, done.stdout, done.stderr
 
 
+# Statuses that mean a signature or an attestation was needed (written, planned, or failed on its SBOM);
+# "skipped" and "no package" are the only ones that cost nothing, and FAILED is counted because the
+# network work was spent.
+SIGNATURE_WORK = {"signed", "would sign", "FAILED"}
+SBOM_WORK = {"attested", "would attest", "FAILED"}
+
+
 @dataclass(frozen=True)
 class Row:
     tag: str
@@ -72,6 +80,10 @@ class Row:
     signature: str
     sbom: str
     digest: str = "-"
+
+    @property
+    def did_work(self) -> bool:
+        return self.signature in SIGNATURE_WORK or self.sbom in SBOM_WORK
 
 
 def version_tags(root: Path) -> list[str]:
@@ -283,6 +295,13 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
     parser.add_argument(
         "--issuer", required=True, help="the OIDC issuer of that identity"
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop after N tags that needed a signature or an attestation; unlimited when unset",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "tags",
@@ -290,6 +309,9 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         help="git tags (vX.Y.Z); every version tag of the checkout when none",
     )
     args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        print("backfill_release: --limit must be at least 1", file=sys.stderr)
+        return 64
     bad = [t for t in args.tags if not TAG.match(t)]
     if bad:
         print(f"backfill_release: not a version tag: {bad}", file=sys.stderr)
@@ -301,8 +323,16 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         return 64
     rows: list[Row] = []
     failed = False
+    worked = 0
     with tempfile.TemporaryDirectory() as scratch:
-        for tag in tags:
+        for done, tag in enumerate(tags):
+            if args.limit is not None and worked >= args.limit:
+                print(
+                    f"backfill_release: --limit {args.limit} reached, {len(tags) - done} tags remain; dispatch again",
+                    file=sys.stderr,
+                )
+                break
+            before = len(rows)
             try:
                 rows += backfill_tag(
                     run,
@@ -320,6 +350,8 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
                 print(f"backfill_release: {tag}: {error}", file=sys.stderr)
                 rows.append(Row(tag, "-", "FAILED", "FAILED"))
                 failed = True
+            if any(r.did_work for r in rows[before:]):
+                worked += 1
     failed = failed or any("FAILED" in (r.signature, r.sbom) for r in rows)
     # A version named on the command line that has no package fails the run; discovery meets git tags that never had one.
     failed = failed or (bool(args.tags) and any(r.signature == "no package" for r in rows))
