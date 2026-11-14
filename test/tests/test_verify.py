@@ -1213,16 +1213,12 @@ def test_verify_without_platform_runs_against_what_resolved(
 ) -> None:
     """C-010. ``package verify`` with no ``--platform`` is not a usage error.
 
-    ``--platform`` used to be ``required = true``; a cosign-signed
-    multi-platform tag carries its signature on the *index*, which is what the
-    reference resolves to when nothing narrows it, so demanding the flag made
-    that signature unreachable.
-
     Written out longhand rather than through ``_verify``, which always passes
     the flag. The envelope is the discriminator, not the exit code: clap writes
     a usage refusal to stderr and leaves stdout empty, so a parseable envelope
     naming a *pipeline* verdict proves the grammar accepted the invocation and
-    the run reached the registry.
+    the run reached the registry. The package is unsigned, so the verdict is
+    ``no_signatures_found`` on the host platform's manifest.
     """
     result = subprocess.run(
         [
@@ -2017,3 +2013,89 @@ def test_verify_does_not_credit_a_signature_parked_on_the_index_to_the_platform_
         identity=identity, issuer=issuer, platform="linux/amd64",
     )
     _refusal(result, 79, "no_signatures_found", "a signature parked on the enclosing index")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Omitted `--platform` resolves to the host platform
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _push_host_index_over(registry: str, repo: str, child: str, child_size: int, tag: str) -> tuple[str, int]:
+    """Tag a one-child image index over ``child``, labelled with the host platform."""
+    operating_system, architecture = current_platform().split("/")
+    index = {
+        "schemaVersion": 2,
+        "mediaType": IMAGE_INDEX_MEDIA_TYPE,
+        "manifests": [{
+            "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+            "digest": child,
+            "size": child_size,
+            "platform": {"os": operating_system, "architecture": architecture},
+        }],
+    }
+    digest, _ = push_manifest(registry, repo, index, reference=tag)
+    return digest, len(json.dumps(index).encode())
+
+
+def test_verify_tag_without_platform_verifies_the_host_platform_manifest(
+    ocx: OcxRunner, unique_repo: str
+) -> None:
+    """A tag naming an unsigned index with a signed per-platform child verifies.
+
+    Without ``--platform`` the index used to be the subject, which carries no
+    signature when the publisher signs per platform (exit 79). The host
+    platform's manifest is the subject now, as for ``install``.
+    """
+    subject, size = cosign_artifacts.push_subject(ocx.registry, unique_repo)
+    index_digest, _ = _push_host_index_over(ocx.registry, unique_repo, subject, size, "v1")
+    referrer = cosign_artifacts.push_bundle_referrer(
+        ocx.registry, unique_repo, "keyless",
+        {"mediaType": IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject, "size": size},
+    )
+    identity, issuer = cosign_artifacts.golden_certificate_identity("keyless")
+
+    result = _verify_golden(ocx, f"{ocx.registry}/{unique_repo}:v1", identity=identity, issuer=issuer)
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
+    data = json.loads(result.stdout)
+    assert data["subject_digest"] == subject, (
+        f"the verdict must name the host platform manifest, not the index {index_digest}"
+    )
+    assert data["referrer_digest"] == referrer.digest
+
+
+def test_verify_index_digest_without_platform_is_the_index_itself(
+    ocx: OcxRunner, unique_repo: str
+) -> None:
+    """A digest identifier is the exact object: the unsigned index is not narrowed.
+
+    Same registry state as the cell above; only the identifier differs. If the
+    digest were narrowed into the signed child this would exit 0.
+    """
+    subject, size = cosign_artifacts.push_subject(ocx.registry, unique_repo)
+    index_digest, _ = _push_host_index_over(ocx.registry, unique_repo, subject, size, "v1")
+    cosign_artifacts.push_bundle_referrer(
+        ocx.registry, unique_repo, "keyless",
+        {"mediaType": IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject, "size": size},
+    )
+    identity, issuer = cosign_artifacts.golden_certificate_identity("keyless")
+
+    result = _verify_golden(
+        ocx, f"{ocx.registry}/{unique_repo}@{index_digest}", identity=identity, issuer=issuer,
+    )
+    _refusal(result, 79, "no_signatures_found", "an index addressed by digest is the subject itself")
+
+
+def test_verify_single_manifest_tag_without_platform_is_the_manifest(
+    ocx: OcxRunner, unique_repo: str
+) -> None:
+    """A tag naming one manifest is the subject; there is nothing to narrow, so nothing fails."""
+    subject, size = cosign_artifacts.push_subject(ocx.registry, unique_repo, reference="v1")
+    cosign_artifacts.push_bundle_referrer(
+        ocx.registry, unique_repo, "keyless",
+        {"mediaType": IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject, "size": size},
+    )
+    identity, issuer = cosign_artifacts.golden_certificate_identity("keyless")
+
+    result = _verify_golden(ocx, f"{ocx.registry}/{unique_repo}:v1", identity=identity, issuer=issuer)
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr.strip()}"
+    assert json.loads(result.stdout)["subject_digest"] == subject

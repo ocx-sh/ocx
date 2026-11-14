@@ -58,6 +58,20 @@ pub(crate) fn sign_resolver<'a>(
     })
 }
 
+/// The host platform to narrow an unqualified tag into, when that tag resolves to an index.
+///
+/// A single manifest, a digest-named identifier and an explicit platform all stay as given: the digest
+/// names the exact object (an index stays addressable that way), and a bare manifest has nothing to narrow.
+fn host_platform_for(
+    resolved: Option<&(Digest, Manifest)>,
+    identifier: &PackageRef,
+    platform: Option<&ocx_oci::Platform>,
+) -> Option<ocx_oci::Platform> {
+    let is_index = matches!(resolved, Some((_, Manifest::ImageIndex(_))));
+    (platform.is_none() && identifier.digest().is_none() && is_index)
+        .then(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any))
+}
+
 /// The resolution the verify pipeline takes.
 ///
 /// One fetch yields digest, index-ness and members; fetching children separately would leave an index
@@ -69,7 +83,8 @@ pub(crate) fn verify_resolver<'a>(index: &'a Index) -> Box<VerifySubjectResolver
                 .fetch_manifest(identifier, IndexOperation::Resolve)
                 .await
                 .map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
-            let (target, index_members) = verify_target_from_resolution(fetched.as_ref(), platform)?;
+            let host = host_platform_for(fetched.as_ref(), identifier, platform);
+            let (target, index_members) = verify_target_from_resolution(fetched.as_ref(), platform.or(host.as_ref()))?;
             let subject = identifier.clone_with_digest(target.subject_digest.clone());
             let physical = physical_of(index, &subject)
                 .await
@@ -224,6 +239,27 @@ mod tests {
         assert!(
             matches!(&error, SignErrorKind::TargetNotFound { platform } if platform == "any"),
             "expected TargetNotFound from the index, got {error:?}"
+        );
+    }
+
+    /// Only an unqualified tag that resolves to an index narrows to the host; each other input stays as given.
+    #[test]
+    fn the_host_platform_applies_to_an_unqualified_tag_over_an_index_only() {
+        let index = (digest(0xaa), image_index_manifest());
+        let tag = identifier();
+
+        assert!(host_platform_for(Some(&index), &tag, None).is_some());
+        assert!(
+            host_platform_for(Some(&index), &tag, Some(&platform("linux/arm64"))).is_none(),
+            "an explicit platform is never replaced"
+        );
+        assert!(
+            host_platform_for(Some(&index), &tag.clone_with_digest(digest(0xaa)), None).is_none(),
+            "a digest names the exact object, so the index stays addressable"
+        );
+        assert!(
+            host_platform_for(None, &tag, None).is_none(),
+            "nothing resolved means nothing to narrow"
         );
     }
 }

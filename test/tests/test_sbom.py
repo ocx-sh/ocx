@@ -275,9 +275,8 @@ def test_sbom_without_platform_runs_against_what_resolved(
 ) -> None:
     """C-010. ``package sbom`` with no ``--platform`` is not a usage error.
 
-    Same relaxation as ``package verify``: absent the flag the command acts on
-    whatever the reference resolved to, which for a multi-platform tag is the
-    index — where cosign attaches an index-level attestation.
+    Same default as ``package verify``: absent the flag the command acts on
+    the host platform's manifest when the tag names an index.
 
     ``sbom_args`` always passes ``--platform``, so the flags are spelled out
     here without it. A clap refusal exits 64 with an empty stdout, so a
@@ -1016,17 +1015,17 @@ def test_sbom_shadows_the_index_cyclonedx_but_never_the_index_spdx(
         )
 
 
-def test_sbom_without_platform_shadows_nothing(
+def test_sbom_of_an_index_digest_shadows_nothing(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
 ) -> None:
     """C-011 rule 3, and the discriminating control for the test above.
 
-    Same registry shape, one flag removed: with no ``--platform`` nothing is
-    narrowed, one subject is read, and no document can supersede another. A
-    shadowing pass that ignored what was narrowed would mark the index-level
-    CycloneDX here too.
+    Same registry shape, but the identifier names the index by digest: that is
+    the exact object, nothing is narrowed, one subject is read, and no document
+    can supersede another. A shadowing pass that ignored what was narrowed would
+    mark the index-level CycloneDX here too.
     """
     index_bytes, index_digest = reg.fetch_manifest_raw(
         ocx.registry, published_package.repo, published_package.tag,
@@ -1048,18 +1047,61 @@ def test_sbom_without_platform_shadows_nothing(
         "package", "sbom",
         "--rekor-url", sigstore_stack.rekor_url,
         "--sigstore-trusted-root", str(sigstore_stack.trust_root),
-        published_package.short,
+        f"{ocx.registry}/{published_package.repo}@{index_digest}",
         check=False,
     )
     assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
     entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["attestations"]}
     assert set(entries) == {index_cyclonedx}, (
-        "with no --platform the index is the subject itself, so only its own "
+        "a digest identifier is the exact object, so only the index's own "
         f"documents are read; got {sorted(entries)}"
     )
     assert entries[index_cyclonedx]["shadowed"] is False, (
         "nothing was narrowed, so nothing is superseded"
     )
+
+
+def test_sbom_tag_without_platform_reads_the_host_platform_manifest(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """C-006. A tag naming an index and no ``--platform`` lists as the host platform does.
+
+    The platform-level CycloneDX is read and supersedes the index-level one,
+    exactly as with ``--platform <host>``; before, only the index's own
+    document was listed.
+    """
+    index_bytes, index_digest = reg.fetch_manifest_raw(
+        ocx.registry, published_package.repo, published_package.tag,
+    )
+    platform_digest, platform_size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    platform_cyclonedx = push_sbom_referrer(
+        ocx.registry, published_package.repo, platform_digest, platform_size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+    index_cyclonedx = push_sbom_referrer(
+        ocx.registry, published_package.repo, index_digest, len(index_bytes),
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_INDEX_LEVEL,
+        subject_media_type=reg.IMAGE_INDEX_MEDIA_TYPE,
+    )
+
+    listed = ocx.run(
+        "package", "sbom",
+        "--rekor-url", sigstore_stack.rekor_url,
+        "--sigstore-trusted-root", str(sigstore_stack.trust_root),
+        published_package.short,
+        check=False,
+    )
+    assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
+    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["attestations"]}
+    assert set(entries) == {platform_cyclonedx, index_cyclonedx}, (
+        f"the host platform manifest and its enclosing index are both read; got {sorted(entries)}"
+    )
+    assert entries[platform_cyclonedx]["subject_digest"] == platform_digest
+    assert entries[index_cyclonedx]["shadowed"] is True
 
 
 def test_sbom_demand_mode_lists_the_verified_document_and_refuses_the_unsigned_sibling(

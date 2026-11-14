@@ -57,7 +57,8 @@ pub struct VerifyReport {
 
 impl PackageManager {
     /// Verify `package` against `opts.trust_root`, requiring the signing certificate to satisfy one of
-    /// `opts.policies`; a `Some` platform requires an index, `None` acts on whatever resolved.
+    /// `opts.policies`; a `Some` platform requires an index; `None` narrows an index named by tag into the host platform's
+    /// manifest and acts on a single manifest or a digest-named object as resolved.
     ///
     /// # Errors
     /// A [`PackageError`] tagged with `package`, classified via [`ocx_sign::verify::VerifyErrorKind`].
