@@ -78,6 +78,7 @@ export default defineConfig({
           page('Manage config centrally', '/guides/manage-config-centrally/'),
           page('Verify installs', '/guides/verify-installs/'),
           page('Pin a signer identity', '/guides/pin-signer-identity/'),
+          page('Declare publishers', '/guides/declare-publishers/'),
           page('Self-hosted Sigstore', '/guides/self-hosted-sigstore/'),
           page('Serve an index', '/guides/serve-an-index/'),
           page('Update ocx', '/guides/update-ocx/'),

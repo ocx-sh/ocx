@@ -156,7 +156,7 @@ Index objects share one object store with the `desc` blobs (README text and logo
 
 <!-- internal -->
 [indices]: ./indices.md
-[verify-publishers]: ../guides/pin-signer-identity.mdx#supply-chain-publishers
+[verify-publishers]: ../guides/declare-publishers.mdx#supply-chain-publishers
 [indices-format]: ./indices.md#format
 [indices-bundled]: ./indices.md#bundled
 [local-index]: ./local-index.md
