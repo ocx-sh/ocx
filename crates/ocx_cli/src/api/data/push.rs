@@ -160,22 +160,15 @@ impl SignedPlatformReport {
 pub enum AttestationStatus {
     /// The attestation was published on the pushed manifest.
     Succeeded,
-    /// The attestation was not published. The pushed manifest stays in the
-    /// registry; no tag was written after it.
-    Failed,
 }
 
-/// What `--sbom` did after the push landed.
-///
-/// A failure carries the error slug the JSON error document would have used,
-/// not a bespoke string, so a script branches on the same vocabulary
-/// either way.
+/// What `--sbom` did after the push landed. A failed attestation emits the
+/// error document instead of this report.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AttestationOutcome {
     /// Whether the attestation was published.
     pub status: AttestationStatus,
-    /// Digest of the published OCI referrer manifest. Absent on failure, and
-    /// under `--signature-format simplesigning`, which publishes the
+    /// Digest of the published OCI referrer manifest. Absent under `--signature-format simplesigning`, which publishes the
     /// `sha256-<hex>.att` sidecar alone and no referrer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub referrer_digest: Option<ocx_oci::Digest>,
@@ -184,24 +177,14 @@ pub struct AttestationOutcome {
     /// `ocx package attest` report, so one vocabulary names both addresses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sidecar_digest: Option<ocx_oci::Digest>,
-    /// The resolved `predicateType` URI written into the Statement. Present
-    /// exactly when `status` is `succeeded`.
+    /// The resolved `predicateType` URI written into the Statement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate_type: Option<String>,
     /// Whether the referrer carries a signature. `false` means the SBOM was
     /// attached raw because the run had no signing identity available — the
-    /// push still succeeded, and nothing vouches for the document. Present
-    /// exactly when `status` is `succeeded`.
+    /// push still succeeded, and nothing vouches for the document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signed: Option<bool>,
-    /// The error document's `error.detail` slug, falling back to its
-    /// `error.kind` category. Present exactly when `status` is `failed`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Human-readable cause, sanitized for the terminal (CWE-150). Present
-    /// exactly when `status` is `failed`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 impl AttestationOutcome {
@@ -218,21 +201,6 @@ impl AttestationOutcome {
             sidecar_digest,
             predicate_type: Some(predicate_type),
             signed: Some(signed),
-            kind: None,
-            message: None,
-        }
-    }
-
-    /// An attestation that failed after the push landed.
-    pub fn failed(kind: String, message: String) -> Self {
-        Self {
-            status: AttestationStatus::Failed,
-            referrer_digest: None,
-            sidecar_digest: None,
-            predicate_type: None,
-            signed: None,
-            kind: Some(kind),
-            message: Some(crate::api::data::sanitize_for_terminal(&message)),
         }
     }
 }
@@ -283,7 +251,7 @@ impl PushReport {
 }
 
 impl Printable for PushReport {
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
     const ROOT: &'static str = "PushReport";
 
     /// One-row table; keep tags are a count, since each is 82 columns, and `status` is always `pushed`.
@@ -643,22 +611,6 @@ mod attestation_tests {
         let json = serde_json::to_value(report().with_annotations(written)).expect("serialize");
 
         assert_eq!(json["annotations_written"]["org.opencontainers.image.version"], "1.2.3");
-    }
-
-    /// `status` still reports the push alone: a landed push with a failed
-    /// attestation is a real state, and folding the two into one verdict would
-    /// tell a mirror pipeline the push did not happen.
-    #[test]
-    fn a_failed_attestation_does_not_change_the_push_status() {
-        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::failed(
-            "offline_attest_refused".into(),
-            "offline attestation is not supported".into(),
-        )))
-        .expect("serialize");
-
-        assert_eq!(json["status"], "pushed", "the push landed and is not undoable");
-        assert_eq!(json["attestation"]["status"], "failed");
-        assert_eq!(json["attestation"]["kind"], "offline_attest_refused");
     }
 
     #[test]

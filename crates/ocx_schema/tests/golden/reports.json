@@ -4290,7 +4290,7 @@
           "description": "Whether the attestation was published."
         },
         "referrer_digest": {
-          "description": "Digest of the published OCI referrer manifest. Absent on failure, and\nunder `--signature-format simplesigning`, which publishes the\n`sha256-<hex>.att` sidecar alone and no referrer.",
+          "description": "Digest of the published OCI referrer manifest. Absent under `--signature-format simplesigning`, which publishes the\n`sha256-<hex>.att` sidecar alone and no referrer.",
           "$ref": "#/$defs/Digest"
         },
         "sidecar_digest": {
@@ -4299,25 +4299,17 @@
         },
         "predicate_type": {
           "type": "string",
-          "description": "The resolved `predicateType` URI written into the Statement. Present\nexactly when `status` is `succeeded`."
+          "description": "The resolved `predicateType` URI written into the Statement."
         },
         "signed": {
           "type": "boolean",
-          "description": "Whether the referrer carries a signature. `false` means the SBOM was\nattached raw because the run had no signing identity available — the\npush still succeeded, and nothing vouches for the document. Present\nexactly when `status` is `succeeded`."
-        },
-        "kind": {
-          "type": "string",
-          "description": "The error document's `error.detail` slug, falling back to its\n`error.kind` category. Present exactly when `status` is `failed`."
-        },
-        "message": {
-          "type": "string",
-          "description": "Human-readable cause, sanitized for the terminal (CWE-150). Present\nexactly when `status` is `failed`."
+          "description": "Whether the referrer carries a signature. `false` means the SBOM was\nattached raw because the run had no signing identity available — the\npush still succeeded, and nothing vouches for the document."
         }
       },
       "required": [
         "status"
       ],
-      "description": "What `--sbom` did after the push landed.\n\nA failure carries the error slug the JSON error document would have used,\nnot a bespoke string, so a script branches on the same vocabulary\neither way."
+      "description": "What `--sbom` did after the push landed. A failed attestation emits the\nerror document instead of this report."
     },
     "AttestationStatus": {
       "description": "Whether the `--sbom` attestation was published.",
@@ -4326,10 +4318,6 @@
         {
           "value": "succeeded",
           "description": "The attestation was published on the pushed manifest."
-        },
-        {
-          "value": "failed",
-          "description": "The attestation was not published. The pushed manifest stays in the\nregistry; no tag was written after it."
         }
       ]
     },
@@ -8976,7 +8964,7 @@
         "schema_version": {
           "description": "The version of this root's shape; a breaking change increments it.",
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "identifier": {
           "$ref": "#/$defs/PackageRef",
