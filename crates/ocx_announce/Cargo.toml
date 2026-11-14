@@ -61,10 +61,16 @@ which.workspace = true
 ocx_test_support = { path = "../ocx_test_support" }
 # `cfg(test)` writes the environment through `ocx_env::overrides`.
 ocx_env = { workspace = true, features = ["__testing"] }
+# `ocx_index::current_timestamp` honours the pinned announce clock only with this feature, so a bare `-p ocx_announce` run would read the wall clock.
+ocx_index = { workspace = true, features = ["__testing"] }
+# The stub transport the forge-deleter tests read manifests through.
+ocx_oci = { workspace = true, features = ["__testing"] }
 # `announce/pipeline.rs`'s tests stand a local HTTP peer up to drive the
 # observe path. Test-only: the production transport is `reqwest`, never a
 # hand-built hyper service.
 hyper-util.workspace = true
+# `tokio::time::pause` for the confirmation-poll tests, which a bare `-p ocx_announce` build lacks.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

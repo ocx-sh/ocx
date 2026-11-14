@@ -9,7 +9,7 @@ use crate::{Digest, OciIdentifier, PinnedOciIdentifier, native};
 #[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum ClientError {
     /// Authentication with the registry failed.
-    #[error("registry authentication failed: {0}")]
+    #[error("registry authentication failed")]
     #[exit(
         AuthError,
         slug = "registry_auth_failed",
@@ -248,7 +248,7 @@ pub enum ClientError {
     #[exit(
         Unsupported,
         slug = "registry_delete_unsupported",
-        summary = "The registry does not delete tags"
+        summary = "The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github"
     )]
     DeleteUnsupported { registry: String, status: u16 },
 

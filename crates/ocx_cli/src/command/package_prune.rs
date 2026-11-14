@@ -7,10 +7,21 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use ocx_announce::forge::ForgeKind;
+use ocx_announce::forge::ForgeToken;
+use ocx_announce::forge::github_packages::{GithubPackagesDeleter, api_base_for_registry, forge_for_registry};
+use ocx_announce::forge::http::build_forge_http_client;
 use ocx_package::prune;
 use ocx_package::version::Version;
 
+use crate::error::UsageError;
 use crate::options;
+
+/// Per-request ceiling for the packages API.
+const FORGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const GITLAB_REFUSAL: &str =
+    "GitLab's registry does not accept OCX packages, see https://github.com/ocx-sh/ocx/issues/480";
 
 /// Delete tags from a package's registry repository, guarded by the index.
 #[derive(Parser)]
@@ -28,13 +39,23 @@ use crate::options;
     `=date` is not enough, since two builds on one day share a tag.\n\n\
     For a namespace with an index, prune reads the package's root from the configured index \
     URL, never a mirror, to find the registry repository. Before any delete it refuses the \
-    whole run in two cases. One is a selected tag listed without the ephemeral marker (exit 81). The other is a selected tag in the \
-    registry but not yet in the index (exit 75).\n\n\
+    whole run when a selected tag is listed without the ephemeral marker (exit 81), or is in \
+    the registry but not yet in the index (exit 75).\n\n\
     `--force` deletes such tags anyway and is required for a namespace with no index. A tag \
     already gone from the registry is reported as absent.\n\n\
-    Prune deletes registry tags only: never a digest, a platform manifest, a keep tag or a \
-    referrer, and it never writes the index. A keep tag pins the manifest past the tag's \
+    On the registry API prune deletes registry tags only: never a digest, a platform manifest, \
+    a keep tag or a referrer, and it never writes the index. A keep tag pins the manifest past the tag's \
     deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.\n\n\
+    A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API \
+    with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` \
+    registry needs `--forge github` and the repository named on that host directly; when the \
+    index supplies the host, any host but `ghcr.io` is refused with exit 64. It deletes the version holding the tag, the platform \
+    manifests only that version lists, and the referrer tags of those manifests. A version that \
+    also carries a tag outside the selection exits 81. An index row naming another build than \
+    the registry serves, a kept version whose manifest is not served, and a package listing \
+    that changed since planning each refuse the run before any delete with exit 75. A version \
+    entry the API returns without an id or name exits 69. `--dry-run` lists the same set and \
+    deletes nothing. `--forge gitlab` is not supported.\n\n\
     Pass `--tags-file PATH` to append each gone tag the index lists, then publish the removal \
     with `ocx package announce --tags-file PATH`.\n\n\
     Builds are deleted oldest first and the rolling tag last. After each delete prune confirms \
@@ -61,7 +82,8 @@ use crate::options;
     package. Exits 80 when the credential cannot delete. Exits 81 for a durable tag, a \
     namespace with no index, or `--offline`. Exits 82 when the registry does not delete tags. \
     A dry run exits 81 or 75 exactly as the real run would, while 80 and 82 surface only on a \
-    real delete.\n\n\
+    real delete. On a GitHub package a dry run also reads the packages API, so it can exit 80 \
+    there.\n\n\
     Details: <https://ocx.sh/docs/reference/command-line/package-consuming/#package-prune>"
 )]
 // Exactly one selection mode: both is a conflict, neither a missing argument, each exit 64.
@@ -101,6 +123,14 @@ pub struct PackagePrune {
     #[arg(long = "tags-file", value_name = "PATH")]
     tags_file: Option<PathBuf>,
 
+    /// Delete through this forge's package API, for a registry that has no tag DELETE (`github`).
+    ///
+    /// Inferred for `ghcr.io` only; a GitHub Enterprise `containers.<host>` registry needs it named, with the
+    /// repository given on that host directly, since a host the index supplies must be `ghcr.io`.
+    /// `gitlab` is refused: GitLab's registry does not accept OCX packages.
+    #[arg(long, value_name = "FORGE")]
+    forge: Option<ForgeKind>,
+
     /// Run the safeguard and report; delete nothing, write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -116,6 +146,7 @@ pub struct PackagePrune {
 
 impl PackagePrune {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        self.refuse_gitlab()?;
         // Before any index or registry read: `--offline` refuses a prune outright.
         let remote_client = context.remote_client()?;
         let package = self.package.as_target(context.default_registry())?;
@@ -139,7 +170,19 @@ impl PackagePrune {
             force: self.force,
             dry_run: self.dry_run,
         };
-        let run = prune::prune(client, &target, &request).await;
+        // A tags file that cannot be written would lose the record of what the delete removed.
+        if let (Some(path), false) = (&self.tags_file, self.dry_run) {
+            crate::conventions::check_tags_file_writable(path).await?;
+        }
+        let run = match self.forge_for(&target.repository) {
+            Some(ForgeKind::GitHub) => {
+                Self::refuse_unvouched_forge_host(target.index.is_some(), target.repository.registry())?;
+                let deleter =
+                    Self::github_deleter(&context, client, &target.repository, &self.selection_label()).await?;
+                prune::prune_with(client, &deleter, &target, &request).await
+            }
+            _ => prune::prune(client, &target, &request).await,
+        };
 
         context.api().report(&run.outcome)?;
         let written = match (&self.tags_file, run.outcome.tags_file_entries()) {
@@ -164,6 +207,82 @@ impl PackagePrune {
         }
     }
 
+    /// The forge to delete through: the one named, else the one the registry host implies.
+    fn forge_for(&self, repository: &ocx_oci::OciIdentifier) -> Option<ForgeKind> {
+        self.forge.or_else(|| forge_for_registry(repository.registry()))
+    }
+
+    /// An index-supplied registry host is deleted through the GitHub API only when it is `ghcr.io`: the
+    /// operator vouched for no other host, and the credential for it would go to the API that host names.
+    /// A host the operator typed themselves (no index) may be a `containers.<host>` enterprise registry.
+    fn refuse_unvouched_forge_host(indexed: bool, registry: &str) -> anyhow::Result<()> {
+        if indexed && forge_for_registry(registry).is_none() {
+            return Err(UsageError::new(format!(
+                "the index names the registry {registry}, and an index-supplied host is deleted through the GitHub packages API only on ghcr.io; name the registry repository on that host directly instead"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// A GitHub Packages deleter for `repository`, authenticated with the credential ocx already resolves
+    /// for its registry host; requests go only to the API base derived from that host.
+    async fn github_deleter<'a>(
+        context: &crate::app::Context,
+        client: &'a ocx_oci::Client,
+        repository: &ocx_oci::OciIdentifier,
+        label: &str,
+    ) -> anyhow::Result<GithubPackagesDeleter<'a>> {
+        let registry = repository.registry();
+        let api_base = match testing_api_base() {
+            Some(url) => url,
+            None => api_base_for_registry(registry).ok_or_else(|| {
+                UsageError::new(format!(
+                    "no GitHub API is known for the registry {registry}, use a ghcr.io package, or name a GitHub Enterprise containers.<host> registry with --forge github"
+                ))
+            })?,
+        };
+        let (owner, package) = repository
+            .repository()
+            .split_once('/')
+            .ok_or_else(|| UsageError::new("a GitHub package is named owner/package"))?;
+        // Refused before any request: an empty bearer header would only earn the forge's 401 and a confusing hint.
+        let token = secret_of(ocx_oci::auth::Auth::new().get_or_fallback(registry).await).ok_or_else(|| {
+            prune::PruneError::DeleteDenied {
+                repository: repository.to_string(),
+                tag: label.to_owned(),
+                source: ocx_oci::client::error::ClientError::Authentication(Box::new(std::io::Error::other(format!(
+                    "no credential is configured for {registry}, which the GitHub packages API needs; run `ocx login {registry}`"
+                )))),
+            }
+        })?;
+        let http = build_forge_http_client(FORGE_TIMEOUT, context.extra_roots_merged())?;
+        Ok(GithubPackagesDeleter::new(
+            client,
+            http,
+            api_base,
+            owner.to_owned(),
+            package.to_owned(),
+            ForgeToken::new(token),
+        ))
+    }
+
+    /// Names the selection in an error that has no single tag to point at.
+    fn selection_label(&self) -> String {
+        self.tags
+            .first()
+            .cloned()
+            .or_else(|| self.prerelease.as_ref().map(ToString::to_string))
+            .unwrap_or_default()
+    }
+
+    fn refuse_gitlab(&self) -> anyhow::Result<()> {
+        if self.forge == Some(ForgeKind::GitLab) {
+            return Err(UsageError::new(GITLAB_REFUSAL).into());
+        }
+        Ok(())
+    }
+
     fn selection(&self) -> prune::PruneSelection {
         match &self.prerelease {
             Some(prerelease) => prune::PruneSelection::Prerelease {
@@ -175,6 +294,28 @@ impl PackagePrune {
             },
         }
     }
+}
+
+/// The secret of a resolved credential, or `None` for anonymous access or an empty secret.
+fn secret_of(auth: ocx_oci::native::Auth) -> Option<String> {
+    match auth {
+        ocx_oci::native::Auth::Basic(_, secret) | ocx_oci::native::Auth::Bearer(secret) => {
+            Some(secret).filter(|secret| !secret.is_empty())
+        }
+        ocx_oci::native::Auth::Anonymous => None,
+    }
+}
+
+#[cfg(any(test, feature = "__testing"))]
+fn testing_api_base() -> Option<String> {
+    ocx_env::__OCX_TESTING_GITHUB_API_URL
+        .get_raw()
+        .and_then(|url| url.into_string().ok())
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn testing_api_base() -> Option<String> {
+    None
 }
 
 #[cfg(test)]
@@ -248,6 +389,103 @@ mod tests {
                 .get_one::<std::path::PathBuf>("tags_file")
                 .map(|path| path.as_path()),
             Some(std::path::Path::new("removed.txt"))
+        );
+    }
+
+    #[test]
+    fn forge_gitlab_parses_and_is_refused_with_one_line() {
+        let matches = parse(&[PACKAGE, "0.5.0", "--forge", "gitlab"]).expect("the flag parses");
+        assert_eq!(
+            matches.get_one::<super::ForgeKind>("forge"),
+            Some(&super::ForgeKind::GitLab)
+        );
+        let prune = super::PackagePrune {
+            prerelease: None,
+            keep_builds: None,
+            force: false,
+            tags_file: None,
+            forge: Some(super::ForgeKind::GitLab),
+            dry_run: false,
+            package: PACKAGE.parse().expect("identifier"),
+            tags: vec![],
+        };
+        let error = prune.refuse_gitlab().expect_err("gitlab is refused");
+        assert_eq!(error.to_string(), super::GITLAB_REFUSAL);
+    }
+
+    fn prune_with_forge(forge: Option<super::ForgeKind>) -> super::PackagePrune {
+        super::PackagePrune {
+            prerelease: None,
+            keep_builds: None,
+            force: false,
+            tags_file: None,
+            forge,
+            dry_run: false,
+            package: PACKAGE.parse().expect("identifier"),
+            tags: vec!["0.5.0".to_owned()],
+        }
+    }
+
+    fn location(registry: &str) -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::from_parts("org/pkg", registry)
+    }
+
+    #[test]
+    fn the_forge_is_inferred_from_ghcr_only() {
+        let prune = prune_with_forge(None);
+        assert_eq!(prune.forge_for(&location("ghcr.io")), Some(super::ForgeKind::GitHub));
+    }
+
+    #[test]
+    fn a_github_enterprise_host_needs_the_forge_named() {
+        let host = location("containers.example.com");
+        assert_eq!(prune_with_forge(None).forge_for(&host), None);
+        assert_eq!(
+            prune_with_forge(Some(super::ForgeKind::GitHub)).forge_for(&host),
+            Some(super::ForgeKind::GitHub)
+        );
+    }
+
+    #[test]
+    fn no_forge_is_inferred_for_any_other_host() {
+        let prune = prune_with_forge(None);
+        for host in ["localhost:5000", "registry.example", "docker.io"] {
+            assert_eq!(prune.forge_for(&location(host)), None, "{host}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_forge_wins_over_the_host() {
+        let prune = prune_with_forge(Some(super::ForgeKind::GitHub));
+        assert_eq!(
+            prune.forge_for(&location("localhost:5000")),
+            Some(super::ForgeKind::GitHub)
+        );
+    }
+
+    #[test]
+    fn a_shared_version_refusal_carries_its_slug_and_the_policy_exit_code() {
+        let error = ocx_package::prune::PruneError::SharedVersion {
+            repository: "ghcr.io/acme/tool".to_owned(),
+            tag: "0.5.0".to_owned(),
+            other_tag: "1.0.0".to_owned(),
+        };
+        assert_eq!(
+            crate::exit::detail_slug(ocx_exit::ClassifyErrorKind::kind_detail(&error)),
+            "prune_shared_version"
+        );
+        assert_eq!(crate::exit::classify_error(&error), ocx_exit::ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn only_a_non_empty_secret_is_a_credential() {
+        use ocx_oci::native::Auth;
+        assert_eq!(super::secret_of(Auth::Anonymous), None);
+        assert_eq!(super::secret_of(Auth::Bearer(String::new())), None);
+        assert_eq!(super::secret_of(Auth::Bearer("t".into())).as_deref(), Some("t"));
+        assert_eq!(
+            super::secret_of(Auth::Basic("u".into(), "p".into())).as_deref(),
+            Some("p")
         );
     }
 
@@ -347,10 +585,19 @@ mod tests {
             "--tags-file",
             "--force",
             "80 and 82 surface only on a real delete",
+            "GitHub packages API",
+            "--forge github",
             "https://ocx.sh/docs/reference/command-line/package-consuming/#package-prune",
         ] {
             assert!(help.contains(needle), "long help must mention {needle}:\n{help}");
         }
         assert!(help.is_ascii(), "help text must stay ASCII");
+    }
+
+    #[test]
+    fn index_supplied_host_other_than_ghcr_is_refused() {
+        assert!(super::PackagePrune::refuse_unvouched_forge_host(true, "containers.evil.example").is_err());
+        assert!(super::PackagePrune::refuse_unvouched_forge_host(true, "ghcr.io").is_ok());
+        assert!(super::PackagePrune::refuse_unvouched_forge_host(false, "containers.ghe.example").is_ok());
     }
 }

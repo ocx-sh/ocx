@@ -305,6 +305,32 @@ pub fn merge_tags_file(existing: &[String], tags: &[String]) -> String {
     merged.iter().map(|tag| format!("{tag}\n")).collect()
 }
 
+/// Refuses, before anything is deleted, a tags-file that `append_tags_file` could not write:
+/// a missing or non-directory parent, or a path that is not a readable file.
+pub async fn check_tags_file_writable(path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    let parent_is_dir = tokio::fs::metadata(parent).await.map(|meta| meta.is_dir());
+    let error = match parent_is_dir {
+        Ok(true) => None,
+        Ok(false) => Some(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "parent is not a directory",
+        )),
+        Err(error) => Some(error),
+    };
+    if let Some(error) = error {
+        return Err(ocx_util::error::FileError::new(path, error))
+            .with_context(|| format!("tags file {} cannot be written", path.display()));
+    }
+    crate::options::tags::read_tags_file_if_present(path).await?;
+    Ok(())
+}
+
 /// Appends `tags` onto the tags-file at `path` (created if absent), deduping against what is
 /// already there. Written even when there is nothing to add, so an unconditional
 /// `announce --tags-file` finds a file.
@@ -448,9 +474,9 @@ pub fn report_purge(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_tags_file, emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file,
-        not_eval_safe_advisory, parse_tags_file, resolve_ci_arg, resolve_receipt_path, resolve_shell_arg,
-        resolved_lazy_mode,
+        append_tags_file, check_tags_file_writable, emit_line, export_ci, infer_metadata_file, infer_receipt_file,
+        merge_tags_file, not_eval_safe_advisory, parse_tags_file, resolve_ci_arg, resolve_receipt_path,
+        resolve_shell_arg, resolved_lazy_mode,
     };
     use crate::error::UsageError;
     use ocx_oci::layer_ref::LayerRef;
@@ -695,6 +721,19 @@ mod tests {
     }
 
     // ── announce tag-file wire format (design register C2) ──────────────────
+
+    #[tokio::test]
+    async fn check_tags_file_writable_refuses_a_missing_parent_and_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nope").join("x.txt");
+        let error = check_tags_file_writable(&missing).await.expect_err("missing parent");
+        assert_eq!(crate::exit::classify_error(error.as_ref()), ocx_exit::ExitCode::IoError);
+        let error = check_tags_file_writable(dir.path()).await.expect_err("a directory");
+        assert_eq!(crate::exit::classify_error(error.as_ref()), ocx_exit::ExitCode::IoError);
+        check_tags_file_writable(&dir.path().join("ok.txt"))
+            .await
+            .expect("fresh file");
+    }
 
     #[tokio::test]
     async fn append_tags_file_creates_merges_and_dedupes() {

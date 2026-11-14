@@ -509,6 +509,8 @@ crate::env_vars! {
     pub __OCX_TESTING_CONFIG_EDIT_HOLD_MS: Integer, Testing, propagation = UserInput;
     /// Base URL replacing the forge API host.
     pub __OCX_TESTING_FORGE_BASE_URL: String, Testing, propagation = UserInput;
+    /// Base URL replacing the GitHub REST API host for the packages deleter.
+    pub __OCX_TESTING_GITHUB_API_URL: String, Testing, propagation = UserInput;
     /// Milliseconds the forge waits to confirm a write.
     pub __OCX_TESTING_FORGE_CONFIRM_MS: Integer, Testing, propagation = UserInput;
     /// Milliseconds before a credential helper times out.

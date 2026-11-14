@@ -158,12 +158,14 @@ Retry exit 75. Never retry exit 69 or 82.
 
 ### GitLab CI {#snapshot-tracks-ci-gitlab}
 
+The container registry on gitlab.com did not accept an OCX package in a measured copy, so this recipe runs the pipeline on GitLab CI, keeps the index on GitLab, and pushes the packages to [GHCR][ghcr]. Any registry that takes OCX packages works the same way. See [issue 480][issue-480] for the GitLab registry.
+
 ```yaml
 variables:
   PKG: ocx.acme.example/acme/tool
-  REG: registry.gitlab.example.com/acme/tool
+  REG: ghcr.io/acme/tool
   FORGE: --index-repo gitlab.example.com/platform/ocx-index --forge gitlab
-  OCX_AUTH_registry_gitlab_example_com_TYPE: basic
+  OCX_AUTH_ghcr_io_TYPE: basic
 
 .retry: &retry
   retry: { max: 2, exit_codes: [75] }
@@ -286,19 +288,19 @@ The workflow-level `concurrency` group serializes each pull request's runs. The 
 
 ## Registry support {#snapshot-tracks-registries}
 
-Prune needs a registry that deletes tags. Tag deletion is optional in the [OCI distribution spec][oci-delete-tags]. A registry that refuses it fails the first delete with exit 82, `error.kind` `unsupported` and `error.detail` `registry_delete_unsupported`. Nothing was deleted.
-
-Measured against running registries:
+Prune needs a way to delete tags. Tag deletion is optional in the [OCI distribution spec][oci-delete-tags]. A registry that refuses it fails the first delete with exit 82, `error.kind` `unsupported` and `error.detail` `registry_delete_unsupported`. Nothing was deleted.
 
 | Registry | Tag delete | Prune |
 |---|---|---|
-| [zot][zot] v2.1.18 | Answers 202 and removes the tag | Works |
-| [`registry:2`][distribution] with delete disabled | Answers 405 `UNSUPPORTED` | Exit 82 |
-| [`registry:2`][distribution] with delete enabled | Answers 400 `DIGEST_INVALID` and the tag stays | Exit 82 |
+| [zot][zot] v2.1.18 | Answers 202 and removes the tag. Measured against a running registry | Works |
+| [`registry:2`][distribution] with delete disabled | Answers 405 `UNSUPPORTED`. Measured | Exit 82 |
+| [`registry:2`][distribution] with delete enabled | Answers 400 `DIGEST_INVALID` and the tag stays. Measured | Exit 82 |
+| [GHCR][ghcr] | The registry API deletes no tag. Prune deletes through the GitHub packages API with `--forge github`, which it infers for `ghcr.io` | Works with `--forge github`, using the credential ocx resolves for `ghcr.io`. Measured in two live runs. [In the first][ghcr-prune-run], a version shared with a stable tag made prune exit 81 with nothing deleted. [In the second][ghcr-prune-clean-run], prune deleted the four candidate tags with no hand step, the reported digests equalled the registry's, and the stable and unrelated tags stayed |
+| [gitlab.com][gitlab-registry] | The registry refuses `ocx package copy` with `400 MANIFEST_INVALID` (`unknown media type: application/vnd.sh.ocx.package.v1`), exit 69, and no tag appears. Measured; a self-managed GitLab registry is not measured | Not reachable on gitlab.com |
 
-[GHCR][ghcr], [Docker Hub][docker-hub] and [Amazon ECR][ecr] do not offer tag deletion through the registry API, so prune exits 82 against them. This comes from their documentation, and no run against them is recorded here.
+[Docker Hub][docker-hub] and [Amazon ECR][ecr] do not offer tag deletion through the registry API, so prune exits 82 against them. This comes from their documentation, and no run against them is recorded here.
 
-Exit 82 is never transient, so do not retry it. Use a registry that deletes tags, or delete through the registry's own tooling and skip prune.
+Exit 82 is never transient, so do not retry it. Use a registry or a forge that deletes tags, or delete through the registry's own tooling and skip prune.
 
 ## Limits {#snapshot-tracks-limits}
 
@@ -329,10 +331,14 @@ Exit 82 is never transient, so do not retry it. Use a registry that deletes tags
 [oci-delete-tags]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#deleting-tags
 [zot]: https://zotregistry.dev/
 [distribution]: https://distribution.github.io/distribution/
+[ghcr-prune-run]: https://github.com/ocx-sh/e2e-package/actions/runs/43510835871
+[ghcr-prune-clean-run]: https://github.com/ocx-sh/e2e-package/actions/runs/43532031981
 [ghcr]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 [docker-hub]: https://hub.docker.com/
 [ecr]: https://aws.amazon.com/ecr/
 [gitlab-ci]: https://docs.gitlab.com/ci/
+[gitlab-registry]: https://docs.gitlab.com/user/packages/container_registry/
+[issue-480]: https://github.com/ocx-sh/ocx/issues/480
 [gitlab-resource-group]: https://docs.gitlab.com/ci/resource_groups/
 [gitlab-environments]: https://docs.gitlab.com/ci/environments/
 [github-actions]: https://github.com/features/actions
