@@ -61,7 +61,10 @@ const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_regis
     content-addressed README and logo) is rebuilt and `desc_status` reads `updated`. A \
     description the index records but the registry no longer serves stops the run.\n\n\
     A package with no committed entry exits 79: the first-time claim is `ocx package claim`.\n\n\
-    The following are dropped from the set and reported in `reserved_tags_dropped`. They are a tag that is not a version, the OCX-internal `__ocx` namespace (which carries the keep tag), and the legacy `sha256.<hex>` keep tag. `--tags-from-registry` filters them silently. A `--tags` set that \
+    `--tags-from-registry` keeps the version tags and `latest` the registry holds and silently \
+    ignores every other tag. An explicit `--tags` or `--tags-file` list is taken as given, except \
+    that reserved tags are dropped and reported in `reserved_tags_dropped`: the OCX-internal \
+    `__ocx` namespace (which carries the keep tag) and the legacy `sha256.<hex>` keep tag. A `--tags` set that \
     resolves to nothing but reserved tags exits 64.\n\n\
     A `--tags-file` that lists no tag, or only reserved ones, exits 0 before any registry or \
     forge work unless `--yank` or `--unyank` was given. A pipeline can therefore feed it the empty file \
@@ -119,8 +122,8 @@ pub struct PackageAnnounce {
     #[clap(long = "tags-file", value_name = "PATH", conflicts_with_all = ["refresh", "tags_from_registry"])]
     tags_file: Option<PathBuf>,
 
-    /// Add every tag the registry holds; remove ephemeral rows whose tag is
-    /// gone, and report durable ones.
+    /// Add every version tag (and `latest`) the registry holds; remove
+    /// ephemeral rows whose tag is gone, and report durable ones.
     ///
     /// Use it to announce versions that were published before the package was
     /// in the index, or that an earlier announce missed. A yanked tag stays
@@ -777,8 +780,8 @@ mod tests {
             "Add, update or remove the tags listed in this file: a listed tag the registry no \
              longer has is removed from the index. Rows the file does not list are left as \
              they are.",
-            "Add every tag the registry holds; remove ephemeral rows whose tag is gone, and \
-             report durable ones.",
+            "Add every version tag (and `latest`) the registry holds; remove ephemeral rows whose \
+             tag is gone, and report durable ones.",
             "Re-observe every committed tag; remove ephemeral rows whose tag is gone, and \
              report durable ones.",
             "Mark the tags this run adds as removable without review.",

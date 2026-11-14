@@ -3619,7 +3619,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Add every tag the registry holds; remove ephemeral rows whose tag is gone, and report durable ones"
+                "help": "Add every version tag (and `latest`) the registry holds; remove ephemeral rows whose tag is gone, and report durable ones"
               },
               {
                 "id": "refresh",
