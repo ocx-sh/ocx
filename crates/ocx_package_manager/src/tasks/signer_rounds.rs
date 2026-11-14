@@ -18,7 +18,7 @@ pub enum RoundsError {
     ///
     /// `reason` is interpolated rather than a `#[source]`: this variant classifies itself, so no walker
     /// descends and its only consumer is the text.
-    #[error("{}", mismatch_message(.package, .root, .reason.as_deref()))]
+    #[error("{}", mismatch_message(.package, .root, .reason.as_deref(), *.keyless_skipped))]
     #[exit(
         PermissionDenied,
         slug = "publisher_mismatch",
@@ -32,6 +32,8 @@ pub enum RoundsError {
         /// The verification failure the publisher round remapped; `None` when the committed and fetched
         /// publisher lists share no entry, so no signature was checked.
         reason: Option<Box<VerifyErrorKind>>,
+        /// Keyless publishers were dropped from the round because the Sigstore trust root could not be resolved.
+        keyless_skipped: bool,
     },
     /// `--no-verify` or `OCX_NO_VERIFY` was given where the system config requires signatures.
     #[error(
@@ -107,8 +109,8 @@ pub enum RoundsError {
     },
 }
 
-fn mismatch_message(package: &str, root: &str, reason: Option<&VerifyErrorKind>) -> String {
-    match reason {
+fn mismatch_message(package: &str, root: &str, reason: Option<&VerifyErrorKind>, keyless_skipped: bool) -> String {
+    let mut message = match reason {
         Some(reason) => format!(
             "no publisher listed by the index signed {package} ({reason}); install a release a listed publisher \
              signed or refresh the root with `ocx index update {root}`"
@@ -117,7 +119,11 @@ fn mismatch_message(package: &str, root: &str, reason: Option<&VerifyErrorKind>)
             "the locally committed and the fetched publisher lists share no entry for {package}; refresh the root \
              with `ocx index update {root}`"
         ),
+    };
+    if keyless_skipped {
+        message.push_str("; keyless publishers were skipped because the Sigstore trust root could not be resolved");
     }
+    message
 }
 
 /// The repository `ocx index update` refreshes for `package`; the default registry is left implicit.
@@ -136,6 +142,7 @@ impl RoundsError {
             package: package.to_string(),
             root: index_update_target(package),
             reason: Some(Box::new(reason)),
+            keyless_skipped: false,
         }
     }
 
@@ -145,6 +152,7 @@ impl RoundsError {
             package: package.to_string(),
             root: index_update_target(package),
             reason: None,
+            keyless_skipped: false,
         }
     }
 }
@@ -242,6 +250,24 @@ pub(super) fn publisher_round_error(
             kind @ VerifyErrorKind::SignatureInvalid if has_key_publisher => mismatch(kind),
             _ => PackageErrorKind::Internal(crate::Error::Verify(verify_error)),
         },
+        other => other,
+    }
+}
+
+/// Marks a [`RoundsError::PublisherMismatch`] as raised after keyless publishers were dropped; any other error is unchanged.
+pub(super) fn note_keyless_skipped(kind: PackageErrorKind) -> PackageErrorKind {
+    match kind {
+        PackageErrorKind::Internal(crate::Error::Rounds(RoundsError::PublisherMismatch {
+            package,
+            root,
+            reason,
+            ..
+        })) => PackageErrorKind::Internal(crate::Error::Rounds(RoundsError::PublisherMismatch {
+            package,
+            root,
+            reason,
+            keyless_skipped: true,
+        })),
         other => other,
     }
 }
@@ -401,6 +427,29 @@ mod tests {
         let other = PackageRef::new_registry("cmake", "example.com").clone_with_tag("3.28");
         let message = RoundsError::publisher_mismatch(&other, VerifyErrorKind::IdentityMismatch).to_string();
         assert!(message.contains("`ocx index update example.com/cmake`"), "{message}");
+    }
+
+    /// The trust-root hint appears only when keyless publishers were dropped.
+    #[test]
+    fn c013_publisher_mismatch_message_names_skipped_keyless_publishers() {
+        let package = PackageRef::new_registry("cmake", ocx_oci::DEFAULT_REGISTRY).clone_with_tag("3.28");
+        let plain = RoundsError::publisher_mismatch(&package, VerifyErrorKind::IdentityMismatch);
+        assert!(
+            !plain.to_string().contains("keyless publishers were skipped"),
+            "{plain}"
+        );
+
+        let PackageErrorKind::Internal(crate::Error::Rounds(hinted)) =
+            note_keyless_skipped(PackageErrorKind::Internal(crate::Error::Rounds(plain)))
+        else {
+            panic!("a mismatch stays a rounds error");
+        };
+        assert!(
+            hinted
+                .to_string()
+                .ends_with("keyless publishers were skipped because the Sigstore trust root could not be resolved"),
+            "{hinted}"
+        );
     }
 
     /// No publisher round, no operator policy and no refusal is `Uncovered`.
