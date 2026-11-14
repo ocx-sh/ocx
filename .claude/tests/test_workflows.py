@@ -4181,7 +4181,7 @@ def test_the_publish_gate_sweep_reds_each_way_an_unready_build_could_publish(old
 def _entry_findings(documents: list[tuple[str, dict]]) -> list[str]:
     by_name = dict(documents)
     findings = []
-    for name, inputs in (("release.yml", {"mode", "version", "prune_after_days"}), ("backfill.yml", {"tags", "dry_run"})):
+    for name, inputs in (("release.yml", {"mode", "version", "prune_after_days"}), ("backfill.yml", {"tags", "dry_run", "limit"})):
         document = by_name[name]
         triggers = document.get("on") or document.get(True)
         if set(triggers) != {"workflow_dispatch"}:

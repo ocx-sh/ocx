@@ -10,6 +10,7 @@ name: Backfill
 # `release-backfill` environment, whose required reviewer is the human gate on a dispatch.
 #
 # `tags` is a newline- or space-separated list of version tags (`v0.6.6`); empty backfills every version tag.
+# `limit` caps a dispatch at that many versions needing work; repeat the dispatch until none remain.
 # `dry_run` prints what would be signed and writes nothing. The SBOM of a version is built from the source at
 # its git tag by `generate_sbom` in `scripts/backfill_release.py`, the one function another repository overrides.
 #
@@ -28,6 +29,11 @@ on:
         required: false
         type: boolean
         default: true
+      limit:
+        description: Stop after this many versions that needed a signature or an attestation; empty is unlimited. Dispatch again to continue.
+        required: false
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -49,6 +55,8 @@ jobs:
     name: Backfill signatures and SBOMs
     runs-on: ubuntu-latest
     environment: release-backfill
+    # A full-history run is serial and network-bound; under the 360-minute ceiling, `limit` and a rerun finish it.
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -81,6 +89,7 @@ jobs:
         env:
           TAGS: ${{ inputs.tags }}
           DRY_RUN: ${{ inputs.dry_run }}
+          LIMIT: ${{ inputs.limit }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -88,6 +97,7 @@ jobs:
           mapfile -t tags < <(printf '%s\n' "$TAGS" | tr -s ' \t\r' '\n' | sed '/^$/d')
           flags=()
           [[ "$DRY_RUN" == true ]] && flags+=(--dry-run)
+          [[ -n "$LIMIT" ]] && flags+=(--limit "$LIMIT")
           python3 scripts/backfill_release.py \
             --package "$PACKAGE" \
             --identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
