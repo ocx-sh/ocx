@@ -25,8 +25,11 @@ platform digest is the one auto-verify resolves.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from src.helpers import rglob_no_links
 from src.runner import OcxRunner, PackageInfo, current_platform
@@ -497,3 +500,56 @@ def test_policy_covered_identity_mismatch_with_attestations_aborts(
         f"with exit 77, got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
     _assert_no_partial_state(ocx, pkg)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# A system-locked `signatures = "required"` cannot be opted out of
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _require_signatures(ocx: OcxRunner, tmp_path: Path, *, locked: bool) -> Path:
+    """`signatures = "required"` for the test registry, in the system tier (locked) or `$OCX_HOME` (not)."""
+    toml = f'[registries."{ocx.registry}"]\nsignatures = "required"\n'
+    if not locked:
+        (ocx.ocx_home / "config.toml").write_text(toml)
+        return ocx.ocx_home / "config.toml"
+    system = tmp_path / "system-config.toml"
+    system.write_text(toml)
+    ocx.env["__OCX_TESTING_SYSTEM_CONFIG"] = str(system)
+    return system
+
+
+@pytest.mark.requires_testing_build
+@pytest.mark.parametrize("via", ["flag", "env"])
+def test_no_verify_is_refused_under_a_system_locked_required(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path, via: str,
+) -> None:
+    """`--no-verify` / `OCX_NO_VERIFY` under a system-locked `required` exits 81 `no_verify_refused`, names the
+    system config file and installs nothing. The unlocked twin below is the control that the refusal is the lock's."""
+    pkg = published_package
+    system = _require_signatures(ocx, tmp_path, locked=True)
+
+    flags = ("--no-verify",) if via == "flag" else ()
+    extra_env = {"OCX_NO_VERIFY": "1"} if via == "env" else None
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "package", "install", "-p", current_platform(), *flags, pkg.short],
+        capture_output=True, text=True, env={**ocx.env, **(extra_env or {})}, check=False,
+    )
+    assert result.returncode == 81, f"got {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    error = json.loads(result.stdout)["error"]
+    assert error["detail"] == "no_verify_refused"
+    assert str(system) in error["message"], error["message"]
+    _assert_no_partial_state(ocx, pkg)
+
+
+@pytest.mark.requires_testing_build
+def test_no_verify_is_honoured_under_an_unlocked_required(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path,
+) -> None:
+    """The same `required` set in `$OCX_HOME` is not an operator lock: the opt-out warns once and installs."""
+    pkg = published_package
+    _require_signatures(ocx, tmp_path, locked=False)
+
+    result = _run(ocx, "install", pkg.short, flags=("--no-verify",))
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.lower().count("verification skipped") == 1, result.stderr

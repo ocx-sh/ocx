@@ -237,6 +237,13 @@ impl Config {
     /// The `signatures` setting for `registry`: default `IfDeclared`, an unknown value reads as `Required`.
     #[must_use]
     pub fn signature_requirement(&self, registry: &str) -> SignatureRequirement {
+        self.signature_policy(registry).0
+    }
+
+    /// [`Self::signature_requirement`] plus whether the winning value is system-locked, which is what makes an
+    /// opt-out of it refusable.
+    #[must_use]
+    pub fn signature_policy(&self, registry: &str) -> (SignatureRequirement, bool) {
         static WARNED: std::sync::Once = std::sync::Once::new();
         let rank = |requirement: &SignatureRequirement| match requirement {
             SignatureRequirement::Off => 0,
@@ -275,7 +282,7 @@ impl Config {
         if let Some((name, value)) = unknown {
             WARNED.call_once(|| log::warn!("{}", unknown_signatures_warning(name, value)));
         }
-        winner.unwrap_or(SignatureRequirement::IfDeclared)
+        (winner.unwrap_or(SignatureRequirement::IfDeclared), locked)
     }
 
     /// Merge higher-precedence `other` into `self`: set scalars win, tables merge key-by-key.
@@ -3443,6 +3450,31 @@ mod toolchain_root_tests {
         merged.merge(system);
         merged.merge(signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"off\"\n"));
         assert_eq!(merged.signature_requirement("ocx.sh"), SignatureRequirement::Required);
+    }
+
+    /// The lock flag is true only for a system-tier winner; a lower tier or the default is never locked.
+    #[test]
+    fn d13_signature_policy_reports_the_system_lock() {
+        let toml = "[registries.\"ocx.sh\"]\nsignatures = \"required\"\n";
+        let mut system = signatures_config(toml);
+        for entry in system.registries.iter_mut().flatten() {
+            entry.1.lock_as_system();
+        }
+        let mut merged = Config::default();
+        merged.merge(system);
+        merged.merge(signatures_config("[registries.\"ocx.sh\"]\nsignatures = \"off\"\n"));
+        assert_eq!(
+            merged.signature_policy("ocx.sh"),
+            (SignatureRequirement::Required, true)
+        );
+        assert_eq!(
+            signatures_config(toml).signature_policy("ocx.sh"),
+            (SignatureRequirement::Required, false)
+        );
+        assert_eq!(
+            signatures_config("").signature_policy("ocx.sh"),
+            (SignatureRequirement::IfDeclared, false)
+        );
     }
 
     /// The warning names the unknown value, which deserialization must keep.

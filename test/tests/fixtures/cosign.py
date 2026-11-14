@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 
@@ -277,6 +278,14 @@ def resolved_cosign_digest() -> str:
     raise RuntimeError("`ocx env` lists no `cosign` binary; is `[tools] cosign` still declared?")
 
 
+#: `ocx exec`'s exit when a named binding ships no leaf for this host (`no_host_leaf`).
+NO_HOST_LEAF_EXIT = 78
+
+
+class CosignUnavailable(RuntimeError):
+    """`ocx.lock` pins no cosign for this host (cosign publishes no windows/arm64 build)."""
+
+
 @cache
 def cosign_binary() -> Path:
     """The pinned cosign executable, resolved out of this project's toolchain.
@@ -301,11 +310,19 @@ def cosign_binary() -> Path:
             "`.claude/artifacts/analysis_cosign_interop_probes.md` and the stderr constants in "
             "`cosign_matrix.py` before moving the pin."
         )
-    entries = [
-        Path(entry["value"])
-        for entry in _ocx_json("--project", str(_PROJECT), "env")["items"]
-        if entry["kind"] == "path"
-    ]
+    # `exec cosign` composes only that binding: a whole-group `env` also composes siblings with no
+    # leaf for this host (pnpm has no darwin/amd64), which exits 78 on the macOS x64 leg. The
+    # composed directories are prepended, so the first `PATH` entry holding cosign is the pinned one.
+    composed = subprocess.run(
+        [_ocx(), "--project", str(_PROJECT), "exec", "cosign", "--", sys.executable, "-c",
+         "import os; print(os.environ['PATH'])"],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
+    )
+    if composed.returncode == NO_HOST_LEAF_EXIT:
+        raise CosignUnavailable(composed.stderr.strip())
+    if composed.returncode != 0:
+        raise RuntimeError(f"`ocx exec cosign` failed (rc={composed.returncode}):\n{composed.stderr}")
+    entries = [Path(entry) for entry in composed.stdout.strip().split(os.pathsep) if entry]
     name = "cosign.exe" if os.name == "nt" else "cosign"
     for directory in entries:
         candidate = directory / name
