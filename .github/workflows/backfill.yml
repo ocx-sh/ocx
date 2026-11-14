@@ -1,0 +1,93 @@
+name: Backfill
+
+# Signs and attests versions that were published before `release.yml` did. For every version tag and every
+# platform of its package index, a signature by THIS workflow's identity is added unless `ocx package verify`
+# already finds one, and a CycloneDX attestation likewise: each judged on its own, so a second run adds
+# nothing. A tag is never moved; both are referrers of the digest the tag already names.
+#
+# The job is the second signing identity of the package (`<repo>/.github/workflows/backfill.yml@refs/heads/main`),
+# defined here and never in a called workflow, for the reason `release.yml` gives. It runs in the
+# `release-backfill` environment, whose required reviewer is the human gate on a dispatch.
+#
+# `tags` is a newline- or space-separated list of version tags (`v0.6.6`); empty backfills every version tag.
+# `dry_run` prints what would be signed and writes nothing. The SBOM of a version is built from the source at
+# its git tag by `generate_sbom` in `scripts/backfill_release.py`, the one function another repository overrides.
+#
+# Repository values live in the one `env:` block, so a copy of this file differs only there.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: Version tags to backfill, one per line (v0.6.6). Empty backfills every version tag.
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: Report what would be signed and attested; write nothing.
+        required: false
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  REPOSITORY_ID: "1171751668"
+  PACKAGE: ghcr.io/ocx-sh/ocx/cli
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+  # The published ocx that drives the backfill; it needs `package sign`, `attest` and `verify` (0.6.0 and later).
+  OCX_VERSION: '0.6.6'
+
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill signatures and SBOMs
+    runs-on: ubuntu-latest
+    environment: release-backfill
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Guard the ref and the repository
+        env:
+          REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::backfill runs only from refs/heads/main (this run is $GITHUB_REF)"
+            exit 1
+          fi
+          if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
+            echo "::error::this workflow signs only for the repository it was written for (id $REPOSITORY_ID)"
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: ${{ env.OCX_VERSION }}
+          cache: false
+      - name: Backfill every platform of every requested version
+        env:
+          TAGS: ${{ inputs.tags }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags < <(printf '%s\n' "$TAGS" | tr -s ' \t\r' '\n' | sed '/^$/d')
+          flags=()
+          [[ "$DRY_RUN" == true ]] && flags+=(--dry-run)
+          python3 scripts/backfill_release.py \
+            --package "$PACKAGE" \
+            --identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --issuer "$OIDC_ISSUER" \
+            "${flags[@]}" "${tags[@]}"
