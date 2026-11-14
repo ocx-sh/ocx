@@ -638,8 +638,8 @@ pub struct PackageAnnounceArgs {
     /// Add, update or remove the tags listed in this file: a listed tag the registry no longer has
     /// is removed from the index. Rows the file does not list are left as they are
     pub tags_file: Option<PathBuf>,
-    /// Add every tag the registry holds; remove ephemeral rows whose tag is gone, and report
-    /// durable ones
+    /// Add every version tag (and `latest`) the registry holds; remove ephemeral rows whose tag is
+    /// gone, and report durable ones
     pub tags_from_registry: bool,
     /// Re-observe every committed tag; remove ephemeral rows whose tag is gone, and report durable
     /// ones

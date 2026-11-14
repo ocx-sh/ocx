@@ -21,7 +21,7 @@ pub enum TagSelection {
     /// `--refresh`: every committed tag, without scanning the registry or
     /// touching yank markers.
     Refresh,
-    /// `--tags-from-registry`: every tag the physical repository holds, plus
+    /// `--tags-from-registry`: every version tag and `latest` the physical repository holds, plus
     /// every committed tag, the latter asked by GET before it counts as gone.
     FromRegistry,
 }

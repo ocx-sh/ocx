@@ -185,11 +185,11 @@ fn union_onto_committed(committed: &[String], additions: &[String]) -> Vec<Strin
     union
 }
 
-/// List the physical repository's tags, silently dropping reserved ones.
+/// List the physical repository's tags, keeping version tags and `latest` only.
 ///
 /// `physical` must come from [`guarded_physical`]: this is the run's first
-/// registry request. Reserved tags are not reported, or every published
-/// version's keep tag floods `reserved_dropped`.
+/// registry request. Other tags (`main`, reserved ones) are dropped silently,
+/// or every published version's keep tag floods `reserved_dropped`.
 ///
 /// # Errors
 ///
@@ -203,7 +203,10 @@ pub async fn list_registry_tags(publisher: &Publisher, physical: &Physical) -> R
             repository: physical.display.clone(),
             source: Box::new(source),
         })?;
-    Ok(tags.into_iter().filter(|tag| !Tag::is_reserved_str(tag)).collect())
+    Ok(tags
+        .into_iter()
+        .filter(|tag| matches!(Tag::from(tag.clone()), Tag::Version(_) | Tag::Latest))
+        .collect())
 }
 
 fn dedup_in_order(tags: &[String]) -> Vec<String> {
@@ -2728,6 +2731,8 @@ mod tests {
             "1.0.0".to_string(),
             keep_tag(),
             "__ocx.desc".to_string(),
+            "main".to_string(),
+            "unsigned".to_string(),
             "latest".to_string(),
         ]];
         let publisher = stub_publisher(&data);
