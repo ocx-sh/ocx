@@ -137,6 +137,19 @@ The gate runs before any file is touched, so a refused release leaves the tree a
 
 After the dispatch, CI takes over: readiness gate → stamped build → provenance scan → sign and publish to the registry → tag and GitHub Release → announce → docker and sdkgen publish.
 
+### Recovery: publish green, a later job red
+
+Once `publish` is green, the floating tags, signatures and attestations exist. What can still be missing: the git tag, the GitHub release, the index row.
+
+- **Rerun, do not redispatch.** Use "Re-run failed jobs" on the same run. `plan` outputs and the build tag are reused, so no new build tag, signature or attestation referrer appears.
+- **Artifacts expire.** `release-dist` and `published-tags` are kept 7 days; later, `github-release` and `announce` cannot fetch their input.
+- **`github-release`** creates the tag at the run's SHA, and `gh release create` fails when the release exists. Run `gh release view vX.Y.Z` before rerunning.
+- **`announce` and `prune`** wait for the `ocx.sh` environment reviewer again. `announce` refuses an empty `published-tags.txt` or a missing token. `prune` runs in release mode only.
+- **`post-docker` and `post-sdkgen`** start only after `github-release` is green; rerunning it unblocks them.
+- **Fresh dispatch is the last resort** (artifacts expired, or the run cannot be rerun). `plan` refuses a non-main ref, the wrong repository, a malformed version and an existing `refs/tags/vX.Y.Z`; it does not refuse a published-but-untagged version. A fresh dispatch builds a new `X.Y.Z_<timestamp>` build tag, adds one more signature and attestation referrer per platform, and re-cascades the floating tags.
+
+Afterwards check: git tag, GitHub release, index row, and both post jobs.
+
 ### Version Between Releases
 
 Between releases, `Cargo.toml` retains version from last `release:prepare` run. The task computes the correct next version from commit history via `git-cliff --bumped-version` at release time (or takes `VERSION=`). No automated post-release version bump — `release:prepare` = single versioning mechanism.
