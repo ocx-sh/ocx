@@ -28,7 +28,8 @@ use crate::options;
     that cannot be fixed without publishing new content. Exits 64 when a package names a digest \
     or a tag that is not a version, or when `--tags-file` is given more than one package.\n\n\
     `repair` writes by default, since `check` is already the read-only preview; `--dry-run` \
-    computes and reports the same plan. Identifier forms and scope are those of `check`.\n\n\
+    computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag \
+    writes only the aliases that build owns: a pre-release build never moves a stable alias.\n\n\
     For each broken alias it rebuilds the whole platform index entry from the same fold \
     `check` diffs against. It preserves every observed entry the fold does not supersede. That includes annotations already on the index, non-platform entries such as attestations, and \
     orphaned alias tags whose child manifests still exist. A missing referenced manifest is \
@@ -42,9 +43,10 @@ use crate::options;
     flight. An index-staleness finding is never something `repair` writes. Reaching the public \
     index with the fix is a second hop through `ocx package announce`. Refreshing one \
     machine's local copy is `ocx index update`'s job.\n\n\
-    `--tags-file` records exactly the tags whose write landed (not `raced`, `refused` or \
-    `failed` ones), unioned with every tag an index-staleness finding names, so one file \
-    covers both hops. It is written on every run, empty included, so a workflow can feed it to \
+    `--tags-file` records the tags whose write landed (not `raced`, `refused` or \
+    `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for an alias or whole-graph request), unioned with \
+    every tag an index-staleness finding names, so one file covers both hops and a retry after a \
+    failed announce still lists the tags the first run moved. It is written on every run, empty included, so a workflow can feed it to \
     `announce` unconditionally. A preview contributes no landed tag, and its plan is in the \
     JSON report as each entry's `planned`.\n\n\
     A follow-up `announce` updates or creates the listed aliases; a repair never produces a \
@@ -87,15 +89,15 @@ impl PackageCascadeRepair {
 
         let (reports, graphs): (Vec<_>, Vec<_>) = audits
             .into_iter()
-            .map(|audit| (audit.report, (audit.observation, audit.expected)))
+            .map(|audit| (audit.report, (audit.observation, audit.expected, audit.announce_scope)))
             .unzip();
         let mut report =
             crate::api::data::package_cascade_repair::PackageCascadeRepair::from_reports(reports, self.dry_run);
         report.index_layer_skipped = skipped;
         report.tags_file = self.tags_file.clone();
 
-        for (entry, (observation, expected)) in report.items.iter_mut().zip(graphs) {
-            let planned = graph::plan_repairs(&entry.report, &observation, &expected);
+        for (entry, (observation, expected, announce_scope)) in report.items.iter_mut().zip(graphs) {
+            let planned = graph::plan_repairs(&entry.report, &observation, &expected, announce_scope.as_ref());
 
             let attempted = self.writes_to_attempt(&planned);
             entry.outcomes = if attempted.is_empty() {
@@ -108,7 +110,7 @@ impl PackageCascadeRepair {
                 let _spinner = context.progress().spinner(format!("Repairing {package}"));
                 apply::apply(context.remote_client()?, &observation.identifier, attempted).await?
             };
-            entry.tags = announce_tags(&entry.report, &entry.outcomes);
+            entry.tags = announce_tags(&entry.report, &entry.outcomes, announce_scope.as_ref());
             entry.planned = planned;
         }
 
@@ -131,14 +133,40 @@ impl PackageCascadeRepair {
     }
 }
 
-/// The alias tags a run hands to `ocx package announce`: writes that landed plus every tag an
-/// index finding names. Never a raced, failed, refused or unattempted write, since announce
-/// commits whatever the registry serves and would publish a digest this run never wrote.
-fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome]) -> Vec<String> {
+/// The alias tags a run hands to `ocx package announce`: writes that landed, every tag an index
+/// finding names, and every in-scope alias that already carries exactly the expected content (a
+/// retry whose first run moved the aliases but never announced them). Never a raced, failed,
+/// refused or unattempted write, since announce commits whatever the registry serves and would
+/// publish a digest this run never wrote. A `Some` `scope` bounds the written and current-alias halves to
+/// the aliases the requested build tag owns, so a candidate's announce never creates a floating tag and a
+/// superseded build (empty set) announces none; `None` (alias or whole-graph request) leaves written
+/// aliases unbounded.
+fn announce_tags(
+    report: &graph::CascadeReport,
+    outcomes: &[apply::RepairOutcome],
+    scope: Option<&BTreeSet<graph::AliasTag>>,
+) -> Vec<String> {
     outcomes
         .iter()
-        .filter(|outcome| matches!(outcome.outcome, apply::WriteOutcome::Written { .. }))
+        .filter(|outcome| {
+            matches!(outcome.outcome, apply::WriteOutcome::Written { .. })
+                && scope.is_none_or(|scope| scope.contains(&outcome.tag))
+        })
         .map(|outcome| outcome.tag.to_string())
+        .chain(
+            report
+                .aliases
+                .iter()
+                .filter(|(tag, state)| {
+                    scope.is_some_and(|scope| scope.contains(*tag))
+                        && **state == graph::AliasState::Present
+                        && report
+                            .rows
+                            .iter()
+                            .all(|row| &row.tag != *tag || row.status == graph::SlotStatus::Ok)
+                })
+                .map(|(tag, _)| tag.to_string()),
+        )
         .chain(report.index_findings.iter().map(|finding| match finding {
             graph::IndexFinding::Stale { tag, .. } | graph::IndexFinding::NotCommitted { tag } => tag.to_string(),
         }))
@@ -328,7 +356,7 @@ mod tests {
         ];
 
         assert_eq!(
-            announce_tags(&report(), &outcomes),
+            announce_tags(&report(), &outcomes, None),
             ["3.28"],
             "announcing a failed or raced alias would commit a digest this run never wrote"
         );
@@ -345,9 +373,122 @@ mod tests {
         });
 
         assert_eq!(
-            announce_tags(&stale, &[]),
+            announce_tags(&stale, &[], None),
             ["latest"],
             "an alias the index never committed is the one drift a repair cannot close itself"
+        );
+    }
+
+    #[test]
+    fn an_alias_already_correct_is_announced_though_nothing_was_written() {
+        // A retry after a publish whose announce failed: the first run moved the aliases, this one finds
+        // them current and writes nothing, so announcing only what landed would leave them out of the index.
+        let mut current = report();
+        current.aliases.insert(
+            AliasTag::Version(Version::parse("3.28").expect("fixture version parses")),
+            graph::AliasState::Present,
+        );
+        current
+            .aliases
+            .insert(AliasTag::Root { variant: None }, graph::AliasState::Present);
+        current.aliases.insert(
+            AliasTag::Version(Version::parse("3").expect("fixture version parses")),
+            graph::AliasState::Absent,
+        );
+
+        assert_eq!(
+            announce_tags(&current, &[], Some(&scope(&["3.28", "latest"]))),
+            ["3.28", "latest"],
+            "a current alias belongs in the file, an absent one does not"
+        );
+    }
+
+    fn present(report: &mut CascadeReport, tags: &[&str]) {
+        for tag in tags {
+            let alias = match *tag {
+                "latest" => AliasTag::Root { variant: None },
+                tag => AliasTag::Version(Version::parse(tag).expect("fixture version parses")),
+            };
+            report.aliases.insert(alias, graph::AliasState::Present);
+        }
+    }
+
+    fn scope(tags: &[&str]) -> BTreeSet<AliasTag> {
+        let mut holder = report();
+        present(&mut holder, tags);
+        holder.aliases.into_keys().collect()
+    }
+
+    #[test]
+    fn a_prerelease_build_tag_announces_only_its_own_prerelease() {
+        // Check scope climbs through the stable ancestors; a candidate's announce must not.
+        let mut current = report();
+        present(&mut current, &["1.1.0-beta", "1.0", "1", "latest"]);
+
+        assert_eq!(
+            announce_tags(&current, &[], Some(&scope(&["1.1.0-beta"]))),
+            ["1.1.0-beta"],
+            "a candidate that announced `latest` would create a floating tag row"
+        );
+    }
+
+    #[test]
+    fn a_candidate_request_never_announces_a_drifted_alias_its_repair_rewrote() {
+        let latest = apply::RepairOutcome {
+            tag: AliasTag::Root { variant: None },
+            outcome: apply::WriteOutcome::Written {
+                digest: digest(),
+                verified: true,
+                dropped: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            announce_tags(
+                &report(),
+                &[landed("1.1.0-beta"), latest],
+                Some(&scope(&["1.1.0-beta"]))
+            ),
+            ["1.1.0-beta"],
+            "a rewritten `latest` outside the candidate's scope would create a floating tag row"
+        );
+    }
+
+    #[test]
+    fn a_superseded_build_tag_whose_leaf_owns_no_alias_announces_no_rewritten_alias() {
+        let latest = apply::RepairOutcome {
+            tag: AliasTag::Root { variant: None },
+            outcome: apply::WriteOutcome::Written {
+                digest: digest(),
+                verified: true,
+                dropped: Vec::new(),
+            },
+        };
+        let owns_nothing = BTreeSet::new();
+
+        assert!(announce_tags(&report(), &[latest], Some(&owns_nothing)).is_empty());
+    }
+
+    #[test]
+    fn a_dev_build_tag_announces_only_its_own_dev_alias() {
+        let mut current = report();
+        present(&mut current, &["0.1.0-dev", "0.1", "0", "latest"]);
+
+        assert_eq!(
+            announce_tags(&current, &[], Some(&scope(&["0.1.0-dev"]))),
+            ["0.1.0-dev"]
+        );
+    }
+
+    #[test]
+    fn a_release_build_tag_never_announces_an_alias_a_newer_release_owns() {
+        // Scope `1.0.1_b1` while `1.1.0` holds `1` and `latest`: unbounded, the file named both.
+        let mut current = report();
+        present(&mut current, &["1.0.1", "1.0", "1", "latest"]);
+
+        assert_eq!(
+            announce_tags(&current, &[], Some(&scope(&["1.0.1", "1.0"]))),
+            ["1.0", "1.0.1"]
         );
     }
 }

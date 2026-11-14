@@ -109,6 +109,33 @@ def test_j2_repair_re_points_a_broken_alias_without_publishing_new_content(
     assert healed_digest == original_digest, "repair reconstructed exactly the pre-break content"
 
 
+def test_j2c_a_prerelease_build_request_leaves_a_stale_stable_alias_untouched(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A candidate or dev run repairs only what its build tag owns. `latest` is
+    deliberately drifted (a platform stripped); a repair of the pre-release
+    build writes its parent pre-release alias and leaves `latest` byte-identical.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64")
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64")
+    body, _ = fetch_manifest_raw(ocx.registry, unique_repo, "latest")
+    document = json.loads(body)
+    document["manifests"] = [e for e in document["manifests"] if e["platform"]["architecture"] != "arm64"]
+    put_manifest(ocx.registry, unique_repo, "latest", json.dumps(document).encode(), document["mediaType"])
+    _, drifted_digest = fetch_manifest_raw(ocx.registry, unique_repo, "latest")
+
+    make_package(ocx, unique_repo, "1.1.0-beta_b1", tmp_path / "beta", platform="linux/amd64", cascade=False)
+
+    repaired = _repair(ocx, f"{unique_repo}:1.1.0-beta_b1")
+    assert repaired.returncode == 0
+    item = _entries(repaired)[0]
+    assert [write["tag"] for write in item["planned"]] == ["1.1.0-beta"]
+    assert [o["tag"] for o in item["outcomes"]] == ["1.1.0-beta"]
+
+    _, after_digest = fetch_manifest_raw(ocx.registry, unique_repo, "latest")
+    assert after_digest == drifted_digest, "a pre-release build's repair must not move a stable alias"
+
+
 def test_j2b_dry_run_repair_leaves_the_registry_byte_identical(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

@@ -332,7 +332,7 @@ fn plan_of(observation: &TagGraphObservation) -> Vec<PlannedWrite> {
 fn plan_scoped(observation: &TagGraphObservation, scope: &BTreeSet<AliasTag>) -> Vec<PlannedWrite> {
     let expected = fold_expected(observation);
     let report = diff(observation, &expected, scope);
-    let writes = plan_repairs(&report, observation, &expected);
+    let writes = plan_repairs(&report, observation, &expected, None);
 
     assert_eq!(
         unserved(&writes, &served_digests(observation)),
@@ -1870,7 +1870,7 @@ fn e14_an_alias_that_would_end_up_empty_is_refused() {
             },
         ]
     );
-    assert!(plan_repairs(&report, &observation, &expected).is_empty());
+    assert!(plan_repairs(&report, &observation, &expected, None).is_empty());
 }
 
 #[test]
@@ -1959,4 +1959,114 @@ fn c27b_a_duplicate_platform_entry_is_reported_beside_the_staleness_it_hides() {
         planned(&write),
         [("latest".to_string(), vec!["linux/amd64=sha256:lin".to_string()])]
     );
+}
+
+// ── announce scope ──────────────────────────────────────────────
+
+fn leaf_request(tag: &str) -> Vec<Option<AliasTag>> {
+    vec![Some(AliasTag::Version(
+        Version::parse(tag).expect("fixture version parses"),
+    ))]
+}
+
+fn announce_names(observation: &TagGraphObservation, request: &[Option<AliasTag>]) -> Vec<String> {
+    let scope = announce_scope(&observation.versions(), &fold_expected(observation), request);
+    {
+        scope
+            .iter()
+            .flatten()
+            .map(|alias| match alias {
+                AliasTag::Version(version) => version.to_string(),
+                AliasTag::Root { .. } => "latest".to_string(),
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn a_prerelease_build_tag_owns_only_its_parent_prerelease() {
+    let observation = Graph::new()
+        .index("1.0.0_b1", vec![entry("linux/amd64", "release")])
+        .index("1.1.0-beta_b1", vec![entry("linux/amd64", "beta")])
+        .build();
+    assert_eq!(
+        announce_names(&observation, &leaf_request("1.1.0-beta_b1")),
+        vec!["1.1.0-beta".to_string()]
+    );
+}
+
+#[test]
+fn a_release_build_tag_owns_no_alias_a_newer_release_took() {
+    let observation = Graph::new()
+        .index("1.0.1_b1", vec![entry("linux/amd64", "old")])
+        .index("1.1.0_b1", vec![entry("linux/amd64", "new")])
+        .build();
+    assert_eq!(
+        announce_names(&observation, &leaf_request("1.0.1_b1")),
+        vec!["1.0.1".to_string(), "1.0".to_string()]
+    );
+}
+
+#[test]
+fn a_request_that_is_not_a_leaf_owns_no_alias() {
+    let observation = Graph::new()
+        .index("1.0.1_b1", vec![entry("linux/amd64", "old")])
+        .build();
+    assert!(announce_names(&observation, &leaf_request("1.0")).is_empty());
+    assert!(announce_names(&observation, &[None]).is_empty());
+}
+
+#[test]
+fn an_alias_or_whole_graph_request_is_unbounded_and_a_build_tag_request_is_bounded() {
+    let observation = Graph::new()
+        .index("1.0.1_b1", vec![entry("linux/amd64", "old")])
+        .index("1.1.0_b1", vec![entry("linux/amd64", "new")])
+        .build();
+    let versions = observation.versions();
+    let expected = fold_expected(&observation);
+    assert_eq!(announce_scope(&versions, &expected, &[None]), None);
+    assert_eq!(announce_scope(&versions, &expected, &leaf_request("1.0")), None);
+    assert_eq!(
+        announce_scope(&versions, &expected, &leaf_request("9.9.9_b1")),
+        Some(BTreeSet::new()),
+        "a build tag whose leaf owns no alias is bounded to the empty set"
+    );
+}
+
+/// Plans the repair of `request` the way the command does: the scope filter, then the plan bounded by `announce_scope`.
+fn planned_tags_for(observation: &TagGraphObservation, request: &[Option<AliasTag>]) -> Vec<String> {
+    let versions = observation.versions();
+    let expected = fold_expected(observation);
+    let scope = scope_filter(&versions, request).expect("request names a published tag");
+    let report = diff(observation, &expected, &scope);
+    let owned = announce_scope(&versions, &expected, request);
+    plan_repairs(&report, observation, &expected, owned.as_ref())
+        .iter()
+        .map(|write| write.tag.to_string())
+        .collect()
+}
+
+#[test]
+fn a_prerelease_build_request_plans_no_write_to_a_stale_stable_alias() {
+    // `1.0.0` carries a rolled-back digest, `1.0`, `1` and `latest` are missing: all drift a stable run owns.
+    let observation = Graph::new()
+        .index("1.0.0_b1", vec![entry("linux/amd64", "release")])
+        .index("1.0.0", vec![entry("linux/amd64", "rolled-back")])
+        .index("1.1.0-beta_b1", vec![entry("linux/amd64", "beta")])
+        .build();
+    assert_eq!(
+        planned_tags_for(&observation, &leaf_request("1.1.0-beta_b1")),
+        vec!["1.1.0-beta".to_string()]
+    );
+}
+
+#[test]
+fn a_stable_build_request_still_plans_its_whole_owned_chain() {
+    let observation = Graph::new()
+        .index("1.0.0_b1", vec![entry("linux/amd64", "release")])
+        .build();
+    let tags = planned_tags_for(&observation, &leaf_request("1.0.0_b1"));
+    for owned in ["1.0.0", "1.0", "1", "latest"] {
+        assert!(tags.contains(&owned.to_string()), "{owned} missing from {tags:?}");
+    }
 }
