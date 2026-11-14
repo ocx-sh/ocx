@@ -206,7 +206,10 @@ impl PackageManager {
             Ok(Some(tags)) => tags,
             Ok(None) => return Ok(UpdateCheckResult::Skipped(SkippedReason::NotFound)),
             Err(err) => {
-                log::debug!("update check: registry probe failed: {err}");
+                log::debug!(
+                    "update check: registry probe failed: {chain}",
+                    chain = ocx_util::error::render_chain(&err)
+                );
                 // Skipped, not propagated: the auto-check must never fail a user command.
                 return Ok(UpdateCheckResult::Skipped(SkippedReason::RegistryProbeFailed(
                     err.to_string(),

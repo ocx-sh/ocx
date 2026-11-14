@@ -1102,7 +1102,10 @@ impl PackageManager {
                                 },
                             ));
                         }
-                        log::warn!("skipping optional companion '{companion_id}' for '{admitted_id}': {error}");
+                        log::warn!(
+                            "skipping optional companion '{companion_id}' for '{admitted_id}': {chain}",
+                            chain = ocx_util::error::render_chain(&error)
+                        );
                         companion_projection_cache.insert(companion_id.clone(), CompanionOutcome::Missing);
                     }
                 }
