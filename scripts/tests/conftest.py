@@ -1,9 +1,9 @@
 """The gate scripts' proofs, as pytest.
 
-Each gate script under `scripts/` is stdlib-only and importable; its tests live
-here as `test_<script>.py` and call the script's own proof functions. pytest is
-the only entry point: discovery replaces the hand-kept list, `-n auto` the
-sequential run, and `test_every_gate_script_has_tests` the completeness check.
+Each stdlib-only gate script under `scripts/` has its tests here as
+`test_<script>.py`, calling the script's own proof functions. Run `task scripts:self-test`
+(a bare `uv run pytest` has no pytest): discovery replaces the hand-kept list and
+`test_every_gate_script_has_tests` is the completeness check.
 
 The session is budgeted in CPU seconds: a clean run whose controller plus xdist
 workers spend more than `OCX_TOOLING_BUDGET_SECONDS` turns red. Wall time only
