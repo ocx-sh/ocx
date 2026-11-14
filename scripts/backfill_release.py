@@ -3,13 +3,14 @@
 # Copyright 2026 The OCX Authors
 """Sign and attest versions that were published before `release.yml` did.
 
-    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--dry-run] [TAG...]
+    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--also-trusted SAN]... [--dry-run] [TAG...]
 
 For every git tag `vX.Y.Z` (the arguments, else every version tag of the checkout) and every
 platform of the package tag `X.Y.Z`: a signature by IDENTITY is added when `ocx package verify`
 finds none, and a CycloneDX attestation by IDENTITY when `verify --attestation --type cyclonedx`
 finds none. Each is judged on its own, so a platform that only lacks its SBOM gets only that, and
-a second run changes nothing. A tag is never moved: both add referrers to the digest the tag
+a second run changes nothing. A signature or attestation by any `--also-trusted` identity (the release
+workflow's, say) counts as done too, so it is not added a second time. A tag is never moved: both add referrers to the digest the tag
 already names. The tag is resolved to each platform's manifest digest once, and every check and
 write then names `REF@DIGEST`, so a tag that moves mid-run cannot send a signature to a manifest
 that was never checked. `--dry-run` reports what would change and writes nothing.
@@ -104,24 +105,29 @@ def platforms_of(run: Run, ref: str) -> dict[str, str]:
     return dict(sorted(found.items()))
 
 
-def has(run: Run, subject: str, identity: str, issuer: str, attestation: bool) -> bool:
-    """Whether IDENTITY has signed (or attested) `subject`, a digest-pinned platform manifest."""
-    argv = [
-        "package",
-        "verify",
-        "--certificate-identity",
-        identity,
-        "--certificate-oidc-issuer",
-        issuer,
-    ]
-    if attestation:
-        argv += ["--attestation", "--type", "cyclonedx"]
-    code, _, err = run([*argv, subject])
-    if code == 0:
-        return True
-    if code in ABSENT:
-        return False
-    raise BackfillError(f"verifying {subject} exited {code}: {err.strip()[:200]}")
+def has(
+    run: Run, subject: str, identities: list[str], issuer: str, attestation: bool
+) -> bool:
+    """Whether any of IDENTITIES has signed (or attested) `subject`, a digest-pinned platform manifest."""
+    for identity in identities:
+        argv = [
+            "package",
+            "verify",
+            "--certificate-identity",
+            identity,
+            "--certificate-oidc-issuer",
+            issuer,
+        ]
+        if attestation:
+            argv += ["--attestation", "--type", "cyclonedx"]
+        code, _, err = run([*argv, subject])
+        if code == 0:
+            return True
+        if code not in ABSENT:
+            raise BackfillError(
+                f"verifying {subject} exited {code}: {err.strip()[:200]}"
+            )
+    return False
 
 
 def triple_of(platform: str) -> str:
@@ -188,17 +194,19 @@ def backfill_tag(
     issuer: str,
     dry_run: bool,
     sbom: Callable[[str, str], Path],
+    also_trusted: tuple[str, ...] = (),
 ) -> list[Row]:
     version = tag.removeprefix("v")
     ref = f"{package}:{version}"
     digests = platforms_of(run, ref)
     if not digests:
         return [Row(tag, "-", "no package", "no package")]
+    identities = [identity, *also_trusted]
     rows = []
     for platform, digest in digests.items():
         # The digest, never the tag: `-p` has nothing to narrow on a single manifest.
         subject = f"{ref}@{digest}"
-        if has(run, subject, identity, issuer, attestation=False):
+        if has(run, subject, identities, issuer, attestation=False):
             signature = "skipped"
         elif dry_run:
             signature = "would sign"
@@ -209,7 +217,7 @@ def backfill_tag(
                     f"signing {subject} ({platform}) exited {code}: {err.strip()[:200]}"
                 )
             signature = "signed"
-        if has(run, subject, identity, issuer, attestation=True):
+        if has(run, subject, identities, issuer, attestation=True):
             attested = "skipped"
         elif dry_run:
             attested = "would attest"
@@ -266,6 +274,13 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         "--identity", required=True, help="the certificate identity this run signs as"
     )
     parser.add_argument(
+        "--also-trusted",
+        action="append",
+        default=[],
+        metavar="SAN",
+        help="another certificate identity whose signature or attestation counts as done (repeatable)",
+    )
+    parser.add_argument(
         "--issuer", required=True, help="the OIDC issuer of that identity"
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -299,6 +314,7 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
                     lambda version, platform: generate_sbom(
                         root, version, triple_of(platform), Path(scratch)
                     ),
+                    tuple(args.also_trusted),
                 )
             except (BackfillError, subprocess.CalledProcessError) as error:
                 print(f"backfill_release: {tag}: {error}", file=sys.stderr)
