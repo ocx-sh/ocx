@@ -3485,7 +3485,7 @@ def test_release_readiness_publishes_nothing() -> None:
 
 # The `[[tool]]` rows of ocx.lock are the leaves a platform can install; a target maps onto
 # the lock's `os/arch` platform keys (`linux/amd64+libc.glibc` is a leaf of `linux/amd64`).
-_LOCK_OS = {"apple-darwin": "darwin", "unknown-linux-gnu": "linux", "pc-windows-msvc": "windows"}
+_LOCK_OS = {"apple-darwin": "darwin", "unknown-linux-gnu": "linux", "pc-windows-gnullvm": "windows"}
 _LOCK_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
 
 
@@ -4030,10 +4030,6 @@ def _cross_targets() -> list[str]:
     return yaml.safe_load(CROSS_TASKFILE.read_text(encoding="utf-8"))["vars"]["TARGETS"].split()
 
 
-def _asset_triple(target: str) -> str:
-    return target.replace("-pc-windows-gnullvm", "-pc-windows-msvc")
-
-
 _PLATFORM_OF = {"linux": "linux", "apple-darwin": "darwin", "windows": "windows"}
 
 
@@ -4055,12 +4051,20 @@ def _v066_archive_triples() -> set[str]:
     return triples
 
 
-def _asset_target() -> dict[str, str]:
-    """`ASSET_TARGET` of `scripts/release_assets.py`: the build triple of each archive it writes."""
+def _asset_targets() -> set[str]:
+    """`TARGETS` of `scripts/release_assets.py`: the triple of each archive it writes, which is also its build triple."""
     for node in ast.parse(RELEASE_ASSETS.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "ASSET_TARGET":
-            return ast.literal_eval(node.value)
-    raise AssertionError("release_assets.py defines no ASSET_TARGET")
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "TARGETS":
+            return set(ast.literal_eval(node.value))
+    raise AssertionError("release_assets.py defines no TARGETS")
+
+
+def _as_v066(triple: str) -> str:
+    return triple.replace("-pc-windows-gnullvm", "-pc-windows-msvc")
+
+
+def _as_gnullvm(triple: str) -> str:
+    return triple.replace("-pc-windows-msvc", "-pc-windows-gnullvm")
 
 
 def _asset_findings(documents: list[tuple[str, dict]], v066: set[str] | None = None) -> list[str]:
@@ -4071,12 +4075,12 @@ def _asset_findings(documents: list[tuple[str, dict]], v066: set[str] | None = N
     findings = []
     # The archives the build writes are v0.6.6's, and what the workflow publishes is those minus the
     # glibc Linux ones, which are built and release-tested but never published.
-    produced = set(_asset_target().values())
-    if produced != v066:
-        findings.append(f"release_assets.py writes {sorted(produced)}, v0.6.6 shipped {sorted(v066)}")
-    if {_asset_target().get(t) for t in _cross_targets()} != v066:
+    produced = _asset_targets()
+    if {_as_v066(t) for t in produced} != v066:
+        findings.append(f"release_assets.py writes {sorted(produced)}, v0.6.6 shipped {sorted(v066)} (modulo the Windows name)")
+    if set(_cross_targets()) != produced:
         findings.append(f"the cross targets {sorted(_cross_targets())} do not map onto the v0.6.6 archives {sorted(v066)}")
-    shipped = {t for t in v066 if not t.endswith("-unknown-linux-gnu")}
+    shipped = {_as_gnullvm(t) for t in v066 if not t.endswith("-unknown-linux-gnu")}
     if {asset for asset, _ in rows} != shipped:
         findings.append(f"PLATFORMS assets {sorted(a for a, _ in rows)} differ from the v0.6.6 archives that ship {sorted(shipped)}")
     findings += [f"{asset} is published as {platform}, not {_oci_platform(asset)}" for asset, platform in rows if platform != _oci_platform(asset)]
@@ -4097,10 +4101,10 @@ def test_the_published_platforms_are_the_cross_built_ones_readiness_tests_and_th
 @pytest.mark.parametrize(
     ("name", "old", "new"),
     [
-        pytest.param("release.yml", "    aarch64-pc-windows-msvc windows/arm64\n", "", id="a-platform-dropped"),
+        pytest.param("release.yml", "    aarch64-pc-windows-gnullvm windows/arm64\n", "", id="a-platform-dropped"),
         pytest.param("release.yml", "x86_64-apple-darwin darwin/amd64", "x86_64-apple-darwin darwin/arm64", id="a-platform-mislabelled"),
         pytest.param("release.yml", '[[ "$file" == *.cdx.json ]] || assets+=("$file")', 'assets+=("$file")', id="predicates-published"),
-        pytest.param("release-readiness.yml", "target: aarch64-pc-windows-msvc", "target: aarch64-apple-darwin", id="a-platform-untested"),
+        pytest.param("release-readiness.yml", "target: aarch64-pc-windows-gnullvm", "target: aarch64-apple-darwin", id="a-platform-untested"),
     ],
 )
 def test_the_asset_sweep_reds_a_dropped_platform_a_mislabel_published_predicates_and_an_untested_platform(name: str, old: str, new: str) -> None:

@@ -42,7 +42,7 @@ from pathlib import Path
 ABSENT = {77, 79}
 TAG = re.compile(r"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z]+)?$")
 
-# OCI platform -> the Rust triple the version shipped for it; Windows archives are named `msvc`.
+# OCI platform -> the Rust triple an already published version shipped for it; those Windows archives are named `msvc`.
 TRIPLE = {
     "linux/amd64": "x86_64-unknown-linux-musl",
     "linux/arm64": "aarch64-unknown-linux-musl",

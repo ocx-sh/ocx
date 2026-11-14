@@ -63,14 +63,14 @@ env:
   PACKAGE_LOGICAL: ocx.sh/ocx/cli
   INDEX_REPO: ocx-sh/index
   INDEX_PACKAGE: ocx/cli
-  # Whitespace-separated rows of `<asset triple> <OCI platform>`; Windows keeps its `pc-windows-msvc` asset names.
+  # Whitespace-separated rows of `<asset triple> <OCI platform>`.
   PLATFORMS: |
     x86_64-unknown-linux-musl linux/amd64
     aarch64-unknown-linux-musl linux/arm64
     x86_64-apple-darwin darwin/amd64
     aarch64-apple-darwin darwin/arm64
-    x86_64-pc-windows-msvc windows/amd64
-    aarch64-pc-windows-msvc windows/arm64
+    x86_64-pc-windows-gnullvm windows/amd64
+    aarch64-pc-windows-gnullvm windows/arm64
   OIDC_ISSUER: https://token.actions.githubusercontent.com
   # The identity a release or a candidate is verified against, pinned here rather than derived from the run: a
   # run from any other ref cannot pass its own self-verify. A dev build runs from any branch and verifies
