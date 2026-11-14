@@ -16,9 +16,8 @@ on: # zizmor: ignore[dangerous-triggers] workflow_run reports other runs and che
       - "verify-deep"
       - "License Compliance"
       - "Deploy Docs"
-      - "Deploy Dev"
       - "Build Windows Shims"
-      - "OCI Publish"
+      - "Backfill"
       - "Release"
       - "Verify Version"
     types: [completed]
@@ -117,7 +116,7 @@ jobs:
         if: >-
           github.event_name == 'deployment_status' &&
           github.event.deployment_status.state == 'success' &&
-          (github.event.deployment.environment == 'ocx.sh' || github.event.deployment.environment == 'dev.ocx.sh') &&
+          github.event.deployment.environment == 'ocx.sh' &&
           env.DISCORD_WEBHOOK != ''
         uses: sarisia/actions-status-discord@eb045afee445dc055c18d3d90bd0f244fd062708 # v1.16.0
         with:

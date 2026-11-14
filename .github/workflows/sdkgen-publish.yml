@@ -1,6 +1,6 @@
 name: Publish ocx-sdkgen
 
-# cargo-dist post-announce job (`dist-workspace.toml` `post-announce-jobs`).
+# Called by `release.yml`'s `post-sdkgen` job after the GitHub release exists.
 # Packages the `ocx-sdkgen` binary as the OCX package `ocx.sh/ocx/sdkgen`,
 # pushes it to its GHCR home beside `ocx/cli`, and signs it keyless under this
 # workflow's identity. SDK repositories pin it by digest with the
@@ -24,8 +24,8 @@ name: Publish ocx-sdkgen
 on:
   workflow_call:
     inputs:
-      plan:
-        # Forwarded by cargo-dist; not consumed here, but the contract requires it.
+      version_tag:
+        description: Package tag of this release (`<X.Y.Z>_<UTC>`), frozen once by `release.yml`'s `plan` job.
         required: true
         type: string
 
@@ -34,29 +34,12 @@ permissions:
 
 env:
   # Logical name `ocx.sh/ocx/sdkgen`; the physical home is the owner namespace
-  # on GHCR, as for `ocx/cli` (post-release-oci-publish.yml).
+  # on GHCR, as for `ocx/cli` (release.yml's PACKAGE_RELEASE).
   SDKGEN_REPOSITORY: ghcr.io/ocx-sh/ocx/sdkgen
 
 jobs:
-  compute-tag:
-    # Same rule as post-release-oci-publish.yml: no registry publish for a
-    # pre-release tag.
-    if: ${{ github.repository == 'ocx-sh/ocx' && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    outputs:
-      version_tag: ${{ steps.tag.outputs.version_tag }}
-    steps:
-      - id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Frozen once so every platform push below lands on one tag.
-          ts="$(date -u +%Y%m%d%H%M%S)"
-          echo "version_tag=${GITHUB_REF_NAME#v}_${ts}" >> "$GITHUB_OUTPUT"
-
   build:
     name: Build (${{ matrix.target }})
-    needs: [compute-tag]
     if: ${{ github.repository == 'ocx-sh/ocx' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -121,7 +104,7 @@ jobs:
 
   publish:
     name: Push packages
-    needs: [compute-tag, build]
+    needs: [build]
     if: ${{ github.repository == 'ocx-sh/ocx' }}
     runs-on: ubuntu-latest
     environment: ocx.sh
@@ -143,30 +126,14 @@ jobs:
         with:
           pattern: sdkgen-*
           path: sdkgen/
-      - name: Download cargo-dist archives
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: artifacts-build-*
-          path: distrib/
-          merge-multiple: true
       - name: Install OCX from the release build
-        # The ocx this release just built drives the push, as in oci-publish.yml.
-        shell: bash
-        run: |
-          set -euo pipefail
-          stage="$(mktemp -d)"
-          tar -xzf distrib/ocx-x86_64-unknown-linux-musl.tar.gz -C "$stage"
-          found="$(find "$stage" -name ocx -type f | head -1)"
-          if [[ -z "$found" ]]; then
-            echo "::error::no ocx in distrib/ocx-x86_64-unknown-linux-musl.tar.gz"
-            exit 1
-          fi
-          install -m 0755 "$found" /usr/local/bin/ocx
+        # The ocx this release just built drives the push.
+        uses: ./.github/actions/release-ocx
       - name: Package and push
         id: push
         shell: bash
         env:
-          VERSION_TAG: ${{ needs.compute-tag.outputs.version_tag }}
+          VERSION_TAG: ${{ inputs.version_tag }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -221,21 +188,20 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - name: Download cargo-dist archives
+      - name: Download the release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: artifacts-build-*
-          path: distrib/
-          merge-multiple: true
+          name: release-dist
+          path: dist/
       - name: Install OCX from the release build
         shell: bash
         run: |
           set -euo pipefail
           stage="$(mktemp -d)"
-          tar -xzf distrib/ocx-x86_64-unknown-linux-musl.tar.gz -C "$stage"
+          tar -xzf dist/ocx-x86_64-unknown-linux-musl.tar.gz -C "$stage"
           found="$(find "$stage" -name ocx -type f | head -1)"
           if [[ -z "$found" ]]; then
-            echo "::error::no ocx in distrib/ocx-x86_64-unknown-linux-musl.tar.gz"
+            echo "::error::no ocx in dist/ocx-x86_64-unknown-linux-musl.tar.gz"
             exit 1
           fi
           install -m 0755 "$found" /usr/local/bin/ocx

@@ -8,6 +8,11 @@ name: Cross
 #
 # Reusable only: the artifacts it uploads belong to the caller's run, which is how the callers' native
 # legs find them.
+#
+# `stamp: true` is the release path (`release.yml`, `release-readiness.yml`): each leg builds the shipped,
+# provenance-stamped `ocx` (`task cross:build:release`) and uploads only that, as `ocx-release-<triple>`. It
+# builds no unit bundle and no acceptance binaries, and the callers pass no cache secret, so no credential
+# reaches a build whose bytes are published.
 
 on:
   workflow_call:
@@ -15,6 +20,20 @@ on:
       targets:
         description: >-
           Whitespace-separated triples to build, each one of `task cross:targets`. Empty builds all of them.
+        type: string
+        default: ''
+      stamp:
+        description: >-
+          Build the shipped, provenance-stamped binary (`task cross:build:release`) instead of the
+          test-provenance one, and upload it as `ocx-release-<triple>`. Needs `channel` and `version`.
+        type: boolean
+        default: false
+      channel:
+        description: With `stamp`, the build channel the binary reports (`release`, `candidate` or `dev`).
+        type: string
+        default: ''
+      version:
+        description: With `stamp`, the semver the binary reports.
         type: string
         default: ''
     secrets:
@@ -72,11 +91,12 @@ jobs:
           version: '0.6.2'
           cache: false
       # Reads and writes the shared cache; with no secret (a fork PR, or a caller that passed none) the
-      # action writes no rc and Bazel runs uncached.
+      # action writes no rc and Bazel runs uncached. A stamped build is the release bytes: it is handed no
+      # credential even when a caller passes one.
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
-          write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+          write-auth: ${{ !inputs.stamp && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
       # NO release-provenance `--scan` here. The old cross-compile job ran it
       # over a real `--release` cargo build; this job has no such build, and
       # the Bazel-built `ocx` deliberately carries the `__testing` placeholder
@@ -84,25 +104,32 @@ jobs:
       # scan of these bytes would red by design. A second, release-profile
       # compile just to scan it is the cost this restructure removes. The scan
       # still runs over the real release bytes in `scan-binaries.yml`
-      # (called by `release.yml` and `deploy-dev.yml`) before anything ships.
+      # (called by `release.yml` and `release-readiness.yml`) before anything ships.
       # A leg with a bundle builds the binary, the unit tests and the acceptance binaries in one Bazel
       # invocation (`cross:build:bundle`): the binary's crate chain and the tests' overlap there, where
       # separate steps ran them one after the other. The files land where the separate tasks put them.
       - name: Cross-build ocx, unit tests and acceptance binaries
-        if: matrix.bundle
+        if: ${{ !inputs.stamp && matrix.bundle }}
         env:
           TARGET: ${{ matrix.target }}
         run: task cross:build:bundle TARGET="$TARGET"
       - name: Cross-build ocx
-        if: ${{ !matrix.bundle }}
+        if: ${{ !inputs.stamp && !matrix.bundle }}
         env:
           TARGET: ${{ matrix.target }}
         run: task cross:build TARGET="$TARGET"
       - name: Stage acceptance binaries
-        if: ${{ matrix.test-bin && !matrix.bundle }}
+        if: ${{ !inputs.stamp && matrix.test-bin && !matrix.bundle }}
         env:
           TARGET: ${{ matrix.target }}
         run: task cross:test:bin TARGET="$TARGET"
+      - name: Cross-build the stamped ocx
+        if: ${{ inputs.stamp }}
+        env:
+          TARGET: ${{ matrix.target }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+        run: task cross:build:release TARGET="$TARGET" CHANNEL="$CHANNEL" VERSION="$VERSION"
       - name: Remove the Bazel cache credential
         if: always()
         uses: ./.github/actions/bazel-cache-rc
@@ -110,6 +137,7 @@ jobs:
           cleanup: 'true'
       # `ocx*` is `ocx` or `ocx.exe`; `test-bin/` and the bundle do not match.
       - name: Upload ocx
+        if: ${{ !inputs.stamp }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ocx-${{ matrix.target }}
@@ -118,8 +146,18 @@ jobs:
           compression-level: 0
           retention-days: 1
           overwrite: true
+      - name: Upload the stamped ocx
+        if: ${{ inputs.stamp }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ocx-release-${{ matrix.target }}
+          path: target/cross-release/${{ matrix.target }}/ocx*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
       - name: Upload unit-test bundle
-        if: matrix.bundle
+        if: ${{ !inputs.stamp && matrix.bundle }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unit-tests-${{ matrix.target }}
@@ -129,7 +167,7 @@ jobs:
           retention-days: 1
           overwrite: true
       - name: Upload acceptance binaries
-        if: matrix.test-bin
+        if: ${{ !inputs.stamp && matrix.test-bin }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-bin-${{ matrix.target }}
