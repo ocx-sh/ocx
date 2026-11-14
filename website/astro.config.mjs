@@ -8,6 +8,7 @@ import ocxTheme from '@ocx-sh/theme/starlight';
 import { defineConfig } from 'astro/config';
 
 import { recentReleases } from './plugins/changelog.mjs';
+import { ocxPreloadFont } from './plugins/preload-font.mjs';
 import { ocxRedirects } from './plugins/redirects.mjs';
 
 const BASE = '/docs/';
@@ -190,5 +191,6 @@ export default defineConfig({
       ],
     }),
     ocxRedirects({ dir: redirectsDir, base: BASE }),
+    ocxPreloadFont({ pages: ['changelog'], base: BASE }),
   ],
 });
