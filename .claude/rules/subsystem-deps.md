@@ -22,8 +22,8 @@ Rust dep, license, audit config for OCX.
 `cargo-deny`, `hawkeye` and `cargo-about` run in CI via `.github/workflows/verify-licenses.yml` (part of `task verify`); `renovate` runs as a hosted GitHub App on a weekly schedule (not a CI step).
 
 `LICENSE-THIRD-PARTY.md` is **committed**. It ships in every release archive
-(cargo-dist auto-includes `LICENSE*` — no `include` entry needed) and is copied
-into the OCX package by `oci-publish.yml`. Any dependency-graph change makes it
+(`scripts/release_assets.py` copies it in) and is copied
+into the OCX package by `scripts/publish_ocx_package.sh`. Any dependency-graph change makes it
 stale and reds `license:notice:check`; fix with `task rust:license:notice`.
 `about.toml`'s `accepted` list must stay a superset of the licenses cargo-deny
 allows, or generation fails on a crate cargo-deny already waved through.

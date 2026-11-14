@@ -913,7 +913,7 @@ Every divergence the implementation recorded, and whether it touches this record
 | 36 | The reconciler's file set gains a stamp constructor and a second hunk in the renderer | Plan-level |
 | 37 | The reconciler's summary arm for the two unconditional session directories folded to `-`, so a fresh shell's first prompt printed `ocx: -PATH` on the prompt ocx started setting it; flipped to `+` | A user-visible defect from C-059, fixed |
 | 38 | `owned_home` handed a repo-committed symlink deletion authority over the whole filesystem | **A-11** |
-| 39 | The generated LaunchAgent carries a `__OCX_TESTING_LAUNCHCTL` seam instead of naming `/bin/launchctl` absolutely | Testability seam; D5 unchanged |
+| 39 | The generated LaunchAgent carries a `__OCX_TESTING_LAUNCHCTL` seam instead of naming `/bin/launchctl` absolutely — in unit-test builds only; a shipped build names `/bin/launchctl`, so the release provenance scan finds no seam name in the binary | Testability seam; D5 unchanged |
 | 40 | The `environment.d` refusal set is derived from systemd's `parse_env_file`, not the man page's prose, and adds `\\` and a leading space | Widens D5's Linux encoding refusals |
 
 ## Addendum — 2026-09-07 (layout: the closed depth-1 tree)

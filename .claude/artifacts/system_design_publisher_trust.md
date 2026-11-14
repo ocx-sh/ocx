@@ -292,8 +292,8 @@ Counterparts in the same commit: `ocx_exit` detail rows (`detail_rows.txt`), the
 
 - **Input:** `--no-verify` or `OCX_NO_VERIFY` (flag wins), and a `Covered` or `Refused` decision.
 - **Output:** no verification, no refusal, and exactly one `log::warn!` per batch with the existing text: `signature verification skipped for policy-covered package(s) via --no-verify / OCX_NO_VERIFY`.
-- **Edge:** `Uncovered` plus opt-out → no warning (today).
-- **Test:** existing `test_auto_verify.py:170` stays green; new acceptance case with a publisher-only package.
+- **Edge:** `Uncovered` plus opt-out → no warning (today). A `required` verification setting locked by the system config tier refuses the opt-out instead (D-13 of `plan_signing_dogfood.md`): `--no-verify` or `OCX_NO_VERIFY` exits 81, `error.detail` `no_verify_refused`, the message names the system config file. The refusal is checked on the find fast path and on the rounds path. An unlocked `required` keeps the opt-out.
+- **Test:** existing `test_auto_verify.py:170` stays green; new acceptance case with a publisher-only package; a system-locked `required` plus `OCX_NO_VERIFY=1` exits 81.
 
 ### C-016 — `ocx package verify` and `ocx package sbom`
 

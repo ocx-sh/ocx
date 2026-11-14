@@ -40,4 +40,4 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 
 - GitHub Actions (`.github/workflows/`), OIDC auth, Trivy security scans.
 - Static frontend on Bunny storage (`deploy-docs.yml`; owner nginx fronts ocx.sh/dev.ocx.sh), secrets via GitHub Secrets.
-- Release tooling: `cargo-dist` (`dist-workspace.toml`), `git-cliff` (`cliff.toml`).
+- Release tooling: stamped Bazel builds dispatched through `release.yml`, `git-cliff` (`cliff.toml`).

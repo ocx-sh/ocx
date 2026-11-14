@@ -517,27 +517,6 @@ class TestHookSubprocessDecoding:
 
 
 # ---------------------------------------------------------------------------
-# TestPreToolUseValidatorGenerated
-# ---------------------------------------------------------------------------
-
-
-class TestPreToolUseValidatorGenerated:
-    def test_generated_file_detected(self) -> None:
-        """is_generated returns guidance for known generated files."""
-        result = pre_tool_use_validator.is_generated(".github/workflows/release.yml")
-        assert result is not None
-        assert "cargo-dist" in result
-
-    def test_non_generated_file_returns_none(self) -> None:
-        """is_generated returns None for non-generated files."""
-        assert pre_tool_use_validator.is_generated(".github/workflows/verify-basic.yml") is None
-
-    def test_regular_source_file_not_generated(self) -> None:
-        """is_generated returns None for regular source files."""
-        assert pre_tool_use_validator.is_generated("src/main.rs") is None
-
-
-# ---------------------------------------------------------------------------
 # TestPostToolUseTracker
 # ---------------------------------------------------------------------------
 
