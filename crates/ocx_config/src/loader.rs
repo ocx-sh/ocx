@@ -115,7 +115,8 @@ impl ConfigLoader {
 
         // Under `OCX_NO_CONFIG` the recorded extra-CA tier is `System` exactly when the filter keeps
         // the pair, so it needs no reset.
-        let (mut discovered_config, discovered_extra_ca_tier) = Self::load_and_merge_recording(&discovered).await?;
+        let (mut discovered_config, discovered_extra_ca_tier) =
+            Self::load_and_merge_recording(&discovered, ConfigSource::Discovered).await?;
         if no_config {
             Self::retain_system_locked_sections(&mut discovered_config);
         }
@@ -123,7 +124,8 @@ impl ConfigLoader {
         let mut base = Self::builtin_defaults();
         base.merge(discovered_config);
         // The explicit overlay merges on top of the managed fold, never under it.
-        let (overlay, overlay_extra_ca_tier) = Self::load_and_merge_recording(&explicit_paths).await?;
+        let (overlay, overlay_extra_ca_tier) =
+            Self::load_and_merge_recording(&explicit_paths, ConfigSource::Config).await?;
         // The overlay folds from an empty accumulator, so the lock is checked here, against `base`.
         let overlay_extra_ca_tier = overlay_extra_ca_tier
             .filter(|_| !Self::system_lock_drops_extra_ca(&base, &overlay, crate::ConfigTier::Explicit));
@@ -685,7 +687,7 @@ impl ConfigLoader {
     /// Returns an error if any file is missing, unreadable, exceeds
     /// [`MAX_CONFIG_SIZE`], or contains invalid TOML.
     pub async fn load_and_merge<P: AsRef<Path>>(paths: &[P]) -> Result<Config> {
-        Ok(Self::load_and_merge_recording(paths).await?.0)
+        Ok(Self::load_and_merge_recording(paths, ConfigSource::Config).await?.0)
     }
 
     /// Whether `contribution` sets either extra-CA key, the pair [`Config::merge`] replaces whole.
@@ -712,7 +714,10 @@ impl ConfigLoader {
     ///
     /// # Errors
     /// Same as [`Self::load_and_merge`].
-    async fn load_and_merge_recording<P: AsRef<Path>>(paths: &[P]) -> Result<(Config, Option<crate::ConfigTier>)> {
+    async fn load_and_merge_recording<P: AsRef<Path>>(
+        paths: &[P],
+        tier: ConfigSource,
+    ) -> Result<(Config, Option<crate::ConfigTier>)> {
         let mut config = Config::default();
         let mut extra_ca_certs_tier = None;
         for path in paths {
@@ -723,7 +728,7 @@ impl ConfigLoader {
             {
                 return Err(Error::Io {
                     path: path.to_path_buf(),
-                    tier: ConfigSource::Config,
+                    tier,
                     source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "config path is not a regular file"),
                 });
             }
@@ -732,26 +737,26 @@ impl ConfigLoader {
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                     return Err(Error::FileNotFound {
                         path: path.to_path_buf(),
-                        tier: ConfigSource::Config,
+                        tier,
                     });
                 }
                 Err(source) => {
                     return Err(Error::Io {
                         path: path.to_path_buf(),
-                        tier: ConfigSource::Config,
+                        tier,
                         source,
                     });
                 }
             };
             let metadata = file.metadata().await.map_err(|source| Error::Io {
                 path: path.to_path_buf(),
-                tier: ConfigSource::Config,
+                tier,
                 source,
             })?;
             if !metadata.file_type().is_file() {
                 return Err(Error::Io {
                     path: path.to_path_buf(),
-                    tier: ConfigSource::Config,
+                    tier,
                     source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "config path is not a regular file"),
                 });
             }
@@ -767,7 +772,7 @@ impl ConfigLoader {
             let mut taken = file.take(MAX_CONFIG_SIZE + 1);
             taken.read_to_string(&mut contents).await.map_err(|source| Error::Io {
                 path: path.to_path_buf(),
-                tier: ConfigSource::Config,
+                tier,
                 source,
             })?;
             if contents.len() as u64 > MAX_CONFIG_SIZE {
@@ -2014,6 +2019,39 @@ mod tests {
             matches!(error, Error::SystemConfig { path: named, .. } if named == path),
             "expected a fatal system-config error naming {}, got: {error:?}",
             path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_discovered_file_error_is_tagged_discovered_and_an_explicit_one_config() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let discovered =
+            ConfigLoader::load_and_merge_recording(std::slice::from_ref(&missing), ConfigSource::Discovered)
+                .await
+                .expect_err("missing file");
+        assert!(
+            matches!(
+                discovered,
+                Error::FileNotFound {
+                    tier: ConfigSource::Discovered,
+                    ..
+                }
+            ),
+            "{discovered:?}"
+        );
+        let explicit = ConfigLoader::load_and_merge(std::slice::from_ref(&missing))
+            .await
+            .expect_err("missing file");
+        assert!(
+            matches!(
+                explicit,
+                Error::FileNotFound {
+                    tier: ConfigSource::Config,
+                    ..
+                }
+            ),
+            "{explicit:?}"
         );
     }
 
