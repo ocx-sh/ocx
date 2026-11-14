@@ -11,8 +11,8 @@ v0.6.6 shipped under cargo-dist, so installers and scripts keep resolving: one a
 triple with its `.sha256`, `sha256.sum`, `dist-manifest.json` and `ocx.cdx.xml`, plus one
 `ocx-<asset-target>.cdx.json` per triple (the per-platform attestation predicate).
 
-Bazel builds Windows as `*-pc-windows-gnullvm`; the archives keep the `*-pc-windows-msvc`
-names (`ASSET_TARGET` is the only place that alias lives).
+Archives, checksums and manifest entries are named for the triple the binary was built for, so
+Windows is `*-pc-windows-gnullvm`; v0.6.6 and earlier shipped it as `*-pc-windows-msvc`.
 
 Exit codes: 0 written, 1 a binary is missing or the SBOM tool failed.
 """
@@ -32,17 +32,17 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
-# Build triple (Bazel) -> asset triple (archive names, manifest).
-ASSET_TARGET: dict[str, str] = {
-    "x86_64-unknown-linux-gnu": "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl": "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-gnu": "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl": "aarch64-unknown-linux-musl",
-    "x86_64-apple-darwin": "x86_64-apple-darwin",
-    "aarch64-apple-darwin": "aarch64-apple-darwin",
-    "x86_64-pc-windows-gnullvm": "x86_64-pc-windows-msvc",
-    "aarch64-pc-windows-gnullvm": "aarch64-pc-windows-msvc",
-}
+# The shipped triples: Bazel build triple, archive name and manifest triple are one string.
+TARGETS: tuple[str, ...] = (
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-gnullvm",
+    "aarch64-pc-windows-gnullvm",
+)
 
 # Files copied from the repository root into every archive, as cargo-dist did.
 EXTRA_FILES = ("CHANGELOG.md", "LICENSE", "LICENSE-THIRD-PARTY.md", "README.md")
@@ -113,9 +113,9 @@ def build(
 ) -> list[str]:
     """Write the asset set into `dist`; return its file names, sorted."""
     missing = [
-        str(bin_root / t / ("ocx.exe" if _is_windows(a) else "ocx"))
-        for t, a in ASSET_TARGET.items()
-        if not (bin_root / t / ("ocx.exe" if _is_windows(a) else "ocx")).is_file()
+        str(bin_root / t / ("ocx.exe" if _is_windows(t) else "ocx"))
+        for t in TARGETS
+        if not (bin_root / t / ("ocx.exe" if _is_windows(t) else "ocx")).is_file()
     ]
     if missing:
         raise FileNotFoundError(f"missing binaries: {missing}")
@@ -123,9 +123,9 @@ def build(
 
     artifacts: dict[str, dict[str, object]] = {}
     sums: list[str] = []
-    for build_target, asset in ASSET_TARGET.items():
+    for asset in TARGETS:
         exe = "ocx.exe" if _is_windows(asset) else "ocx"
-        files = {exe: bin_root / build_target / exe} | {
+        files = {exe: bin_root / asset / exe} | {
             n: root / n for n in EXTRA_FILES
         }
         archive = dist / (
@@ -167,7 +167,7 @@ def build(
             "target_triples": [asset],
         }
         shutil.move(
-            sbom(root, "json", build_target, f"ocx-{asset}"),
+            sbom(root, "json", asset, f"ocx-{asset}"),
             dist / f"ocx-{asset}.cdx.json",
         )
 

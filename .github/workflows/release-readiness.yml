@@ -16,9 +16,8 @@ name: Release Readiness
 #   shell-activation-deep (macOS and Windows activation) runs beside the acceptance legs.
 #
 # Nothing here publishes: no release, no tag, no registry push. Artifacts live one day in this run.
-# Linux x64 is tested on the glibc archive, the one a glibc host installs. The Windows archives keep their
-# `pc-windows-msvc` names; the `ocx.exe` inside is the `pc-windows-gnullvm` cross-build, so the Windows
-# legs run the bytes that ship.
+# Linux x64 is tested on the glibc archive, the one a glibc host installs. The Windows archives are the
+# `pc-windows-gnullvm` cross-builds, so the Windows legs run the bytes that ship.
 #
 # Inputs: `bypass` skips every test job and the verdict goes green; it needs a `reason`, which lands in
 # the run-name (so the gate script and `gh run list` name it) and in the step summary. Use it for an
@@ -126,14 +125,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Archive names: the Windows `ocx.exe` inside the `pc-windows-msvc` archives is the gnullvm build.
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
-          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
+          - { target: x86_64-pc-windows-gnullvm, os: windows-latest }
+          - { target: aarch64-pc-windows-gnullvm, os: windows-11-arm }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -195,8 +193,8 @@ jobs:
           - { name: Linux arm64, target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, limits: test/limits/linux-release, no-docker: false, toolchain-group: '' }
           - { name: macOS arm64, target: aarch64-apple-darwin, os: macos-latest, limits: test/limits/macos-release, no-docker: true, toolchain-group: '' }
           - { name: macOS x64, target: x86_64-apple-darwin, os: macos-15-intel, limits: test/limits/macos-release, no-docker: true, toolchain-group: 'test' }
-          - { name: Windows x64, target: x86_64-pc-windows-msvc, os: windows-latest, limits: test/limits/windows-release, no-docker: true, toolchain-group: '' }
-          - { name: Windows arm64, target: aarch64-pc-windows-msvc, os: windows-11-arm, limits: test/limits/windows-release, no-docker: true, toolchain-group: 'test' }
+          - { name: Windows x64, target: x86_64-pc-windows-gnullvm, os: windows-latest, limits: test/limits/windows-release, no-docker: true, toolchain-group: '' }
+          - { name: Windows arm64, target: aarch64-pc-windows-gnullvm, os: windows-11-arm, limits: test/limits/windows-release, no-docker: true, toolchain-group: 'test' }
     uses: ./.github/workflows/acceptance.yml
     with:
       os: ${{ matrix.os }}
