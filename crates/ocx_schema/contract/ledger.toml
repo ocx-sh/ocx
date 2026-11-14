@@ -112,3 +112,17 @@ subjects = ["PushReport"]
 rule = "doc"
 pointer = "/$defs/PushReportRoot/properties/attestation"
 reason = "a failed attestation emits the error document instead of this report"
+
+[[break]]
+document = "reports"
+subjects = ["SbomListingReport"]
+rule = "doc"
+pointer = "/$defs/ListingStatus"
+reason = "the description now states that a listing with refusals and no usable entry exits 79"
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "semantic"
+pointer = "/root/commands/14/commands/17/args/2"
+reason = "a listing whose candidates were all refused now prints the report and exits 79 instead of exiting 0"

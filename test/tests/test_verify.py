@@ -1155,7 +1155,7 @@ def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard
     tmp_path: Path,
 ) -> None:
     """S-019: `--summary` over a predicate the CycloneDX reader cannot parse
-    exits 0 with that one entry moved to ``refused`` -- never a hard failure.
+    moves that one entry to ``refused``; with no usable entry left the run exits 79.
 
     WP-R5 correction: this test previously asserted exit 65 with a top-level
     ``error`` envelope, a contract `--summary` no longer has -- per-candidate
@@ -1179,8 +1179,8 @@ def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard
         [str(ocx.binary), "--format", "json", *_sbom_args(sigstore_stack, pkg), "--summary"],
         capture_output=True, text=True, env=ocx.env, check=False,
     )
-    assert result.returncode == 0, (
-        f"an unreadable document refuses its own entry, not the run, got "
+    assert result.returncode == 79, (
+        f"every candidate refused and none usable fails the run (exit 79), got "
         f"{result.returncode}\nstdout: {result.stdout.strip()}\n"
         f"stderr: {result.stderr.strip()}"
     )

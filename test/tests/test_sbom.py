@@ -630,8 +630,8 @@ def test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works(
         "package", "sbom", *sbom_args(sigstore_stack), "--summary",
         published_package.short, check=False,
     )
-    assert summarized.returncode == 0, (
-        f"an unreadable document refuses its own entry, not the run, got "
+    assert summarized.returncode == 79, (
+        f"every candidate refused is a not-found run with its report printed, got "
         f"{summarized.returncode}\nstdout: {summarized.stdout}"
     )
     data = json.loads(summarized.stdout)

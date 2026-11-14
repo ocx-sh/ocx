@@ -37,10 +37,12 @@ pub struct PackageSbom {
     ///
     /// A tag that names an image index resolves to the platform manifest
     /// for this host, as `install` does. A tag that names a single manifest
-    /// is used as is. A reference pinned by digest is the exact object it
-    /// names, so pin the index digest to act on the index itself. Given
-    /// against a reference that resolves to a single manifest, there is
-    /// nothing to narrow and the command fails.
+    /// is used as is. A reference pinned by digest acts on exactly that
+    /// object: an index digest needs `--platform` to reach a platform
+    /// manifest, and `package push --sign` signs platform manifests, so the
+    /// index itself carries no SBOM. Given against a reference that resolves
+    /// to a single manifest, there is nothing to narrow and the command
+    /// fails.
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     platform: Option<ocx_oci::Platform>,
 
@@ -61,7 +63,8 @@ pub struct PackageSbom {
     /// A predicate outside that range refuses that entry - it moves to the
     /// refused list, naming the type it could not read - never an empty
     /// summary, and never the rest of the listing. The listing still works
-    /// without this flag.
+    /// without this flag. When every candidate is refused the report is still
+    /// printed and the command exits 79; one usable entry keeps it at 0.
     #[clap(long = "summary", conflicts_with = "output")]
     summary: bool,
 
@@ -241,6 +244,9 @@ impl PackageSbom {
                     &report.shadowed,
                 );
                 context.api().report(&listing)?;
+                if let Some(error) = no_usable_entry(&identifier, &listing) {
+                    return Err(error);
+                }
             }
         }
         Ok(ExitCode::SUCCESS)
@@ -508,6 +514,21 @@ fn newest_logged(candidates: &[AttestationMatch]) -> Option<&AttestationMatch> {
     at_newest.next().is_none().then_some(first)
 }
 
+/// The listing was printed; it still fails when every candidate was refused, so a script never reads an
+/// all-refused run as a package that carries an SBOM. One usable entry keeps the run at exit 0.
+fn no_usable_entry(identifier: &ocx_oci::PackageRef, report: &SbomListingReport) -> Option<anyhow::Error> {
+    if !report.attestations.is_empty() || report.refused.is_empty() {
+        return None;
+    }
+    Some(
+        anyhow::Error::new(VerifyError::new(
+            identifier.clone(),
+            VerifyErrorKind::AttestationNotFound,
+        ))
+        .context(format!("{} candidate(s) refused, none usable", report.refused.len())),
+    )
+}
+
 /// The truncation refusal among a scan's refused candidates, if it carries one.
 ///
 /// Lists every kind the scan budget stops on; a new budget stop missing here lets a truncated scan
@@ -680,6 +701,54 @@ mod tests {
             VerifyErrorKind::IdentityMismatch.to_string(),
             "the prose stays beside the slug, not replaced by it",
         );
+    }
+
+    fn refused_candidate(digest: &str) -> RefusedCandidate {
+        RefusedCandidate {
+            referrer_digest: digest.to_string(),
+            reason: VerifyErrorKind::BundleParseFailed,
+        }
+    }
+
+    #[test]
+    fn a_listing_with_refusals_and_no_usable_entry_fails_with_not_found() {
+        let report = command(&[]).listing(
+            VerificationMode::Demand,
+            Vec::new(),
+            Vec::new(),
+            vec![refused_candidate("sha256:aa")],
+            &BTreeSet::new(),
+        );
+
+        let error = no_usable_entry(&identifier(), &report).expect("every candidate refused is a failure");
+
+        assert_eq!(exit_code(&error), 79);
+    }
+
+    #[test]
+    fn a_listing_with_refusals_and_one_usable_entry_succeeds() {
+        let report = command(&[]).listing(
+            VerificationMode::Demand,
+            vec![attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)],
+            Vec::new(),
+            vec![refused_candidate("sha256:aa")],
+            &BTreeSet::new(),
+        );
+
+        assert!(no_usable_entry(&identifier(), &report).is_none());
+    }
+
+    #[test]
+    fn a_listing_with_no_candidates_at_all_is_unchanged() {
+        let report = command(&[]).listing(
+            VerificationMode::Demand,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &BTreeSet::new(),
+        );
+
+        assert!(no_usable_entry(&identifier(), &report).is_none());
     }
 
     // ── `--output` across the two trust classes ─────────────────────────────
