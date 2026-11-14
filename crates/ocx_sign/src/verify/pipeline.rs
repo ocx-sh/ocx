@@ -761,12 +761,25 @@ impl VerifyPipeline {
         } else {
             ScanArity::FirstMatch
         };
-        let found = Self::scan_with_index_fallback(client, &ctx, &target, arity, &mut budget).await?;
+        let found = Self::scan_with_index_fallback(client, &ctx, &target, arity, &mut budget)
+            .await
+            .map_err(|kind| Self::name_index_subject(&target, kind))?;
         let results: Vec<VerifyResult> = found.matches.into_iter().map(|(verify, _)| verify).collect();
         if results.is_empty() {
-            return Err(VerifyErrorKind::NoSignaturesFound);
+            return Err(Self::name_index_subject(&target, VerifyErrorKind::NoSignaturesFound));
         }
         Ok(results)
+    }
+
+    /// Reword an empty result when the subject is the image index itself, whose members are what get signed.
+    ///
+    /// A platform-narrowed target carries `enclosing_index`; only an un-narrowed index lists members without one.
+    fn name_index_subject(target: &ScanTarget, kind: VerifyErrorKind) -> VerifyErrorKind {
+        let subject_is_index = target.enclosing_index.is_none() && !target.index_members.is_empty();
+        match kind {
+            VerifyErrorKind::NoSignaturesFound if subject_is_index => VerifyErrorKind::NoSignaturesOnIndex,
+            other => other,
+        }
     }
 
     /// Scan the pinned subject, then the enclosing index (where cosign signs) when the membership proof holds.
@@ -8462,6 +8475,46 @@ mod tests {
             },
         )
         .await
+    }
+
+    /// An unsigned image index, verified without `--platform`, says it is an index and points at `--platform`.
+    #[tokio::test]
+    async fn an_unsigned_index_subject_says_to_pass_platform() {
+        let index_digest = Digest::Sha256("2".repeat(64));
+        let child = membership_child_digest();
+
+        let error = drive_run(
+            ocx_oci::client::test_transport::StubTransportData::new(),
+            Some((index_digest, image_index_of(&[("linux/amd64", &child)]))),
+            None,
+        )
+        .await
+        .expect_err("an unsigned index has nothing to verify");
+
+        assert!(matches!(error, VerifyErrorKind::NoSignaturesOnIndex), "{error:?}");
+        let text = error.to_string();
+        assert!(
+            text.contains("image index") && text.contains("--platform"),
+            "message must name the index and `--platform`: {text}"
+        );
+    }
+
+    /// Narrowed into a platform manifest, the subject is no longer the index: the plain message stays.
+    #[tokio::test]
+    async fn an_unsigned_platform_manifest_keeps_the_plain_message() {
+        let index_digest = Digest::Sha256("2".repeat(64));
+        let child = membership_child_digest();
+        let requested: Platform = "linux/amd64".parse().expect("test platform parses");
+
+        let error = drive_run(
+            ocx_oci::client::test_transport::StubTransportData::new(),
+            Some((index_digest, image_index_of(&[("linux/amd64", &child)]))),
+            Some(&requested),
+        )
+        .await
+        .expect_err("an unsigned platform manifest has nothing to verify");
+
+        assert!(matches!(error, VerifyErrorKind::NoSignaturesFound), "{error:?}");
     }
 
     /// The sidecar seeded on `subject`, in the repository `verify_id()` names —
