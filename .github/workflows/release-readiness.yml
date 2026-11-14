@@ -1,29 +1,31 @@
 name: Release Readiness
 
-# The GO/NO-GO gate for a release: the full acceptance suite, on the bytes cargo-dist would publish.
-# Dispatch it on the exact commit about to be tagged (the `release/vX` branch holding the
+# The GO/NO-GO gate for a release: the full acceptance suite, on the bytes `release.yml` would publish.
+# Dispatch it on the exact commit about to be released (the `release/vX` branch holding the
 # `release: vX` commit):
 #
 #   gh workflow run release-readiness.yml --ref release/vX
 #
-# `task release:tag` then refuses unless this workflow succeeded for that SHA, and `readiness-gate.yml`
-# asks again on the tagged commit before `host` can publish (scripts/release_readiness_gate.py).
+# `release.yml` then refuses a release or a candidate unless this workflow succeeded for that SHA
+# (`readiness-gate.yml`, scripts/release_readiness_gate.py).
 #
-#   plan -> build (dist build per target, as release.yml) -> scan (scan-binaries.yml, as release.yml)
+#   plan (the Cargo.toml version) -> cross (cross.yml, stamped: the 8 binaries release.yml builds)
+#        -> assets (the release archives) -> scan (scan-binaries.yml, as release.yml)
 #        -> stage (extract `ocx`, add ocx-shim and ocx_schema, natively) -> acceptance (acceptance.yml
 #           per platform, 4 shards and a merge against test/limits/<os>-release) -> verdict
 #   shell-activation-deep (macOS and Windows activation) runs beside the acceptance legs.
 #
 # Nothing here publishes: no release, no tag, no registry push. Artifacts live one day in this run.
-# Linux x64 is tested on the glibc archive, the one a glibc host installs. aarch64-pc-windows-msvc is
-# built natively on its own runner here, where release.yml cross-compiles it with cargo-xwin.
+# Linux x64 is tested on the glibc archive, the one a glibc host installs. The Windows archives keep their
+# `pc-windows-msvc` names; the `ocx.exe` inside is the `pc-windows-gnullvm` cross-build, so the Windows
+# legs run the bytes that ship.
 #
 # Inputs: `bypass` skips every test job and the verdict goes green; it needs a `reason`, which lands in
 # the run-name (so the gate script and `gh run list` name it) and in the step summary. Use it for an
 # outage of this workflow, never for a red result.
 #
-# Nesting: acceptance.yml, scan-binaries.yml and shell-activation-deep.yml are called one level
-# down; none of them calls a further workflow.
+# Nesting: cross.yml, acceptance.yml, scan-binaries.yml and shell-activation-deep.yml are called one
+# level down; none of them calls a further workflow.
 
 run-name: "readiness ${{ github.sha }}${{ inputs.bypass && format(' BYPASS: {0}', inputs.reason) || '' }}"
 
@@ -47,100 +49,65 @@ concurrency:
 
 jobs:
   plan:
-    name: Dist plan
+    name: Release version
     if: ${{ !inputs.bypass }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          submodules: recursive
-      # The same installer and version as release.yml and verify-release-ci.yml; test_workflows.py holds all three.
-      - name: Install dist
-        shell: bash
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
-      - name: Plan
-        run: dist plan
+      - name: Read the Cargo.toml version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Dist build (${{ matrix.target }})
+  # The eight stamped binaries `release.yml` builds, from the same task. No cache secret: the build that
+  # produces release bytes holds no credential.
+  cross:
+    name: Cross-build (stamped)
     if: ${{ !inputs.bypass }}
     needs: plan
-    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    env:
-      GH_TOKEN: ${{ github.token }}
-      TARGET: ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Equal to `targets` in dist-workspace.toml; test_workflows.py holds it there.
-        include:
-          - { target: aarch64-apple-darwin, runner: macos-15 }
-          - { target: x86_64-apple-darwin, runner: macos-15-intel }
-          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
-          - { target: aarch64-unknown-linux-musl, runner: ubuntu-22.04-arm, musl: true }
-          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04 }
-          - { target: x86_64-unknown-linux-musl, runner: ubuntu-22.04, musl: true }
-          - { target: x86_64-pc-windows-msvc, runner: windows-2022 }
-          - { target: aarch64-pc-windows-msvc, runner: windows-11-arm }
+    uses: ./.github/workflows/cross.yml
+    with:
+      stamp: true
+      channel: release
+      version: ${{ needs.plan.outputs.version }}
+
+  assets:
+    name: Release archives
+    if: ${{ !inputs.bypass }}
+    needs: [plan, cross]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Enable Windows long paths
-        if: runner.os == 'Windows'
-        run: git config --global core.longpaths true
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
           submodules: recursive
-      - name: Install musl tools
-        if: matrix.musl
-        run: |
-          sudo apt-get update
-          sudo apt-get install musl-tools
-      - name: Install dist and cargo-auditable
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/rust-secure-code/cargo-auditable/releases/latest/download/cargo-auditable-installer.sh | sh
-      - name: Install dist and cargo-auditable (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          irm https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.ps1 | iex
-          irm https://github.com/rust-secure-code/cargo-auditable/releases/latest/download/cargo-auditable-installer.ps1 | iex
-      - name: Build the release archive
-        id: dist
-        shell: bash
-        run: |
-          set -euo pipefail
-          dist build --artifacts=local --target="$TARGET" --print=linkage --output-format=json > dist-manifest.json
-          {
-            echo "paths<<EOF"
-            dist print-upload-files-from-manifest --manifest dist-manifest.json
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-      # Same name as release.yml's: scan-binaries.yml reads `artifacts-build-local-*`.
-      - name: Upload the archive
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          name: artifacts-build-local-${{ matrix.target }}
-          path: ${{ steps.dist.outputs.paths }}
-          overwrite: true
-          if-no-files-found: error
-          retention-days: 1
+          version: '0.6.2'
+          cache: false
+      - name: Assemble the release assets
+        uses: ./.github/actions/release-assets
+        with:
+          version: ${{ needs.plan.outputs.version }}
 
   scan:
     name: Scan for test provenance
-    needs: build
+    needs: assets
     permissions:
       contents: read
     uses: ./.github/workflows/scan-binaries.yml
@@ -150,7 +117,7 @@ jobs:
   stage:
     name: Stage test/bin (${{ matrix.target }})
     if: ${{ !inputs.bypass }}
-    needs: build
+    needs: assets
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -159,6 +126,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Archive names: the Windows `ocx.exe` inside the `pc-windows-msvc` archives is the gnullvm build.
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
@@ -172,10 +140,10 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Download the release archive
+      - name: Download the release archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: artifacts-build-local-${{ matrix.target }}
+          name: release-dist
           path: archive
       - name: Extract (tar.gz)
         if: runner.os != 'Windows'
@@ -252,7 +220,7 @@ jobs:
 
   verdict:
     name: Verdict
-    needs: [plan, build, scan, stage, acceptance, shell-activation-deep]
+    needs: [plan, cross, assets, scan, stage, acceptance, shell-activation-deep]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}
@@ -264,7 +232,8 @@ jobs:
           ACTOR: ${{ github.actor }}
           SHA: ${{ github.sha }}
           PLAN: ${{ needs.plan.result }}
-          BUILD: ${{ needs.build.result }}
+          CROSS: ${{ needs.cross.result }}
+          ASSETS: ${{ needs.assets.result }}
           SCAN: ${{ needs.scan.result }}
           STAGE: ${{ needs.stage.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
@@ -298,8 +267,9 @@ jobs:
             echo "| $1 | \`$2\` |" >> "$summary"
             [[ "$2" == "success" ]] || failed+=("$1=$2")
           }
-          row "dist plan" "$PLAN"
-          row "dist build, 8 targets" "$BUILD"
+          row "release version" "$PLAN"
+          row "stamped cross-build, 8 targets" "$CROSS"
+          row "release archives" "$ASSETS"
           row "provenance scan" "$SCAN"
           row "stage test/bin, 6 platforms" "$STAGE"
           row "acceptance on the release bytes, 6 platforms" "$ACCEPTANCE"

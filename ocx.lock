@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:91ccc7041493e487858c6710bd356c7b38fec1235e3392ecbb07c4cde22df046"
-generated_by = "ocx 0.6.5"
-generated_at = "2026-11-07T19:05:49Z"
+declaration_hash = "sha256:11f56886e137c1e6d89956df2c2ff43d3d5c65360e292e2bae59d944a284ed26"
+generated_by = "ocx 0.6.6"
+generated_at = "2026-11-13T16:55:07Z"
 
 [[tool]]
 name = "actionlint"
@@ -275,6 +275,18 @@ repository = "ocx.sh/astral-sh/uv"
 "linux/arm64+libc.glibc" = "sha256:6032218a742e03a5d2b91690e716bf44d2fa369259cc0564ae27bb166a1347d9"
 "windows/amd64" = "sha256:75ee3facb7f4a5ed382d6cc0736ec622190b3f8891abf1432a7d7fd6d4361eaf"
 "windows/arm64" = "sha256:b143f13fb9bdb58eaeaaa71ca2c6d3ed4b6190b6aebd0100a914606c2378cb16"
+
+[[tool]]
+name = "cargo-cyclonedx"
+group = "release"
+repository = "ocx.sh/cyclonedx/cargo-cyclonedx"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ad009ae95d2bf3034a2b5f8add3436a375927a60683f6f9a074b38b3ec06e30e"
+"darwin/arm64" = "sha256:eca90d097192cac953bf5cde3b378b0c377aa7c7008f7fa9290c975f850da9c0"
+"linux/amd64" = "sha256:a64eb97856beda4551c4c66fdf569d46970d7949e768bdbc8e2cf2156046baa4"
+"linux/arm64+libc.glibc" = "sha256:56022a684a164ca94319a7b68ab26ee6dcecf5548ea8fe039cf8ce7d9dc3619c"
+"windows/amd64" = "sha256:377e262a27f9318e0eff340ec4ada6dc65727c20387c6ecdcfd16edd199e0b17"
 
 [[tool]]
 name = "git-cliff"

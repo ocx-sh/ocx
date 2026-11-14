@@ -1,0 +1,51 @@
+name: Release assets
+description: >-
+  Lay out the stamped cross-builds of this run (`ocx-release-<triple>`, from `cross.yml` with `stamp: true`)
+  as `target/cross-release/<triple>/`, assemble the release asset set with `scripts/release_assets.py`, and
+  upload it as the `release-dist` artifact. The caller has checked out the repository with its submodules
+  and run `ocx-sh/setup-ocx`.
+
+inputs:
+  version:
+    description: The semver the stamped binaries report; written into `dist-manifest.json`.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download the stamped binaries
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: ocx-release-*
+        path: ${{ runner.temp }}/release-bins
+    - name: Lay out target/cross-release
+      shell: bash
+      env:
+        BINS: ${{ runner.temp }}/release-bins
+      run: |
+        set -euo pipefail
+        for dir in "$BINS"/ocx-release-*; do
+          triple="${dir##*/ocx-release-}"
+          mkdir -p "target/cross-release/$triple"
+          cp -p "$dir"/ocx* "target/cross-release/$triple/"
+        done
+        find target/cross-release -type f | sort
+    # `cargo cyclonedx` reads `cargo metadata`, and `rust-toolchain.toml` pins the channel it runs under.
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      run: rustup toolchain install --no-self-update
+    - name: Assemble the release assets
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: ocx exec -g release -- python3 scripts/release_assets.py build --dist dist --version "$VERSION" --sha "$GITHUB_SHA"
+    # 7 days, not 1: a rerun or an approval-gated job after expiry finds no assets to download.
+    - name: Upload the release assets
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: release-dist
+        path: dist/
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 7
+        overwrite: true

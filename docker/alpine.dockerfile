@@ -1,5 +1,5 @@
 # Official ocx image — Alpine variant (static musl binary).
-# The binary is extracted from the cargo-dist release archive by
+# The binary is extracted from the GitHub release archive by
 # .github/workflows/docker-publish.yml — never compiled here.
 FROM alpine:3@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 ARG TARGETARCH

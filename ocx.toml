@@ -35,4 +35,5 @@ ocx-previous = "ocx.sh/ocx/cli:0.6.5_20261007132152"
 cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
 
 [group.release.tools]
+cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
 git-cliff = "ocx.sh/git-cliff/git-cliff:2.14.1"

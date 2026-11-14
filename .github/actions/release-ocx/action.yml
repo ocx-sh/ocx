@@ -1,0 +1,33 @@
+name: Release ocx
+description: >-
+  Download the `release-dist` artifact of this run into `dist-dir` and put the `ocx` it carries
+  (the x86_64 musl archive, the binary this release built) at `/usr/local/bin/ocx`. The caller has checked out the
+  repository. Jobs that publish, announce or prune drive the registry with the ocx under release,
+  never with a toolchain one.
+
+inputs:
+  dist-dir:
+    description: Where the release assets are downloaded to.
+    required: false
+    default: dist
+
+runs:
+  using: composite
+  steps:
+    - name: Download the release assets
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: release-dist
+        path: ${{ inputs.dist-dir }}
+    - name: Install the release ocx
+      shell: bash
+      env:
+        DIST: ${{ inputs.dist-dir }}
+      run: |
+        set -euo pipefail
+        archive="$DIST/ocx-x86_64-unknown-linux-musl.tar.gz"
+        [[ -f "$archive" ]] || { echo "::error::no $archive in the release assets"; exit 1; }
+        stage="$(mktemp -d)"
+        tar -xzf "$archive" -C "$stage" --strip-components=1 ocx-x86_64-unknown-linux-musl/ocx
+        sudo install -m 0755 "$stage/ocx" /usr/local/bin/ocx
+        ocx version

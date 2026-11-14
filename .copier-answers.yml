@@ -26,5 +26,4 @@ site:
     path: ''
 submodules: true
 theme_bundle: false
-zizmor_ignore:
-- .github/workflows/release.yml
+zizmor_ignore: []

@@ -3,16 +3,16 @@ name: Readiness Gate
 # Refuses a release whose exact commit has no successful `release-readiness.yml` run
 # (scripts/release_readiness_gate.py; a bypass run counts and names its reason in the log).
 #
-# Called by release.yml: `local-artifacts-jobs` in dist-workspace.toml renders it as
-# `custom-readiness-gate`, which `host` needs, so a red gate means nothing is released. It runs on
-# the tagged commit (`github.sha` of the tag push). Dispatch it by hand with a `sha` to see the
-# gate red or green for any commit without cutting a tag; it publishes nothing.
+# Called by release.yml's `readiness` job for a release or a candidate: `publish` needs it, so a red
+# gate means nothing is pushed or tagged. It checks the dispatched commit (`github.sha`). Dispatch it
+# by hand with a `sha` to see the gate red or green for any commit without cutting a release; it
+# publishes nothing.
 
 on:
   workflow_call:
     inputs:
-      plan:
-        description: The cargo-dist plan manifest. cargo-dist passes it to every custom job; unused here.
+      sha:
+        description: Full 40-hex commit to check. Defaults to the caller's commit.
         required: false
         type: string
         default: ""

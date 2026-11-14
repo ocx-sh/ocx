@@ -154,7 +154,7 @@ PowerShell needs the script compiled to a scriptblock so `-Version` binds to its
 & ([scriptblock]::Create((Invoke-RestMethod 'https://setup.ocx.sh/pwsh'))) -Version 0.5.0
 ```
 
-**Track prereleases.** To follow prereleases instead of stable, use the `next` channel on any per-shell prefix, such as `https://setup.ocx.sh/sh/next` or `https://setup.ocx.sh/pwsh/next`.
+**Install a prerelease.** The installer without a pin installs the newest stable release and never a prerelease. To install a prerelease, pin its exact version, such as `OCX_INSTALL_VERSION=0.7.0-rc1`.
 
 **Behind a corporate CA.** The `OCX_INSTALL_CA_BUNDLE` env knob points the installer at a corporate root for its own downloads. Export [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] beside it. Then [`ocx self setup`][cmd-self-setup] persists the certificate text as [`extra_ca_certs_pem`][config-extra-ca-certs] in `config.toml`, so every later command trusts it too:
 
@@ -402,9 +402,33 @@ Both directions read the value unexpanded, so a foreign `%…%` reference alread
 
 Reversing the session PATH does not remove ocx. The managed shell-profile block, the `$OCX_HOME/env.*` shims and `$OCX_HOME` itself stay in place. The [uninstall recipe][uninstalling] covers them. Neither recipe touches a project's own rendered toolchain. Delete `.ocx/toolchain/`, or the [`toolchain_dir`][config-toolchain_dir] root if one is configured, in every project where you have run [`ocx pull`][cmd-pull].
 
+## Verify the package signature \{#verify-signature\}
+
+The release workflow signs every platform of `ocx.sh/ocx/cli` with a keyless [Sigstore][sigstore] signature and attaches a CycloneDX SBOM. A downloaded archive carries a checksum, and the signed package ties the bytes to the workflow that built them.
+
+[`ocx package verify`][cmd-package-verify] checks the signature against the identity of that workflow. Without `-p`, the command resolves the host platform as `ocx install` does:
+
+```text
+ocx package verify ocx.sh/ocx/cli:<version> \
+  --certificate-identity https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The identity above is the release workflow. A version released before signing began carries its signature from the backfill workflow, so verify it with `--certificate-identity https://github.com/ocx-sh/ocx/.github/workflows/backfill.yml@refs/heads/main` instead.
+
+Replace `<version>` with a release tag. [`ocx package sbom`][cmd-package-sbom] lists the attached SBOM and takes the same two flags to verify its signature:
+
+```text
+ocx package sbom ocx.sh/ocx/cli:<version> \
+  --certificate-identity https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Pin the identity once instead of passing it on every call, as [Pin a signer identity][pin-signer-identity] describes.
+
 ## Dev builds \{#dev-builds\}
 
-Binaries published from the `deploy-dev` workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. These are pre-release snapshots, not stable releases.
+Binaries published to the dev channel by the release workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. These are pre-release snapshots, not stable releases.
 
 To identify whether your installed binary is a dev build, run:
 
@@ -432,6 +456,7 @@ The `channel` field reads `"dev"` for dev builds and is absent for stable releas
 [nushell]: https://www.nushell.sh/
 [fish]: https://fishshell.com/
 [elvish]: https://elv.sh/
+[sigstore]: https://www.sigstore.dev/
 
 
 [dl-linux-x64]: https://github.com/ocx-sh/ocx/releases/latest/download/ocx-x86_64-unknown-linux-gnu.tar.gz
@@ -456,6 +481,9 @@ The `channel` field reads `"dev"` for dev builds and is absent for stable releas
 [cmd-self-setup]: ../reference/command-line/self.md#self-setup
 [cmd-self-setup-session-path]: #session-path
 [cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-package-verify]: ../reference/command-line/package-consuming.md#package-verify
+[cmd-package-sbom]: ../reference/command-line/package-consuming.md#package-sbom
+[pin-signer-identity]: ../guides/pin-signer-identity.mdx
 
 
 [systemd-environment-d]: https://www.freedesktop.org/software/systemd/man/latest/environment.d.html
