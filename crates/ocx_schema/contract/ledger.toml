@@ -60,9 +60,51 @@ reason = "registry_delete_unsupported names where tag deletion goes on ghcr.io: 
 [[break]]
 document = "reports"
 subjects = ["PushReport"]
-rule = "doc"
+rule = "B05"
 pointer = "/$defs/AttestationStatus/x-ocx-enum/1"
-reason = "a failed attestation emits the error document, so the failed status no longer describes a landed push"
+reason = "a failed attestation emits the error document, so the failed status was unreachable and is removed"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "B02"
+pointer = "/$defs/AttestationOutcome/properties/kind"
+reason = "the field described a failed attestation, which emits the error document instead"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "B02"
+pointer = "/$defs/AttestationOutcome/properties/message"
+reason = "the field described a failed attestation, which emits the error document instead"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/AttestationOutcome"
+reason = "the description no longer covers a failed attestation"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/AttestationOutcome/properties/predicate_type"
+reason = "the field is present on every attestation, not only a succeeded one"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/AttestationOutcome/properties/referrer_digest"
+reason = "the field is no longer absent on failure, only under simplesigning"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/AttestationOutcome/properties/signed"
+reason = "the field is present on every attestation, not only a succeeded one"
 
 [[break]]
 document = "reports"

@@ -134,7 +134,7 @@ pub const REPORTS: &[(&str, u32)] = &[
     ("PatchWhyReport", 1),
     ("Paths", 1),
     ("PullDryRun", 1),
-    ("PushReport", 1),
+    ("PushReport", 2),
     ("RegenerateReport", 1),
     ("Removed", 1),
     ("SbomListingReport", 2),

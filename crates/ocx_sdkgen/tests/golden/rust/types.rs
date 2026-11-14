@@ -370,37 +370,28 @@ impl Unknowns for AssertionRecord {
     }
 }
 
-/// What `--sbom` did after the push landed.
+/// What `--sbom` did after the push landed. A failed attestation emits the error document instead
+/// of this report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AttestationOutcome {
     /// Whether the attestation was published.
     pub status: AttestationStatus,
-    /// Digest of the published OCI referrer manifest. Absent on failure, and under
-    /// `--signature-format simplesigning`, which publishes the `sha256-<hex>.att` sidecar alone and
-    /// no referrer.
+    /// Digest of the published OCI referrer manifest. Absent under `--signature-format
+    /// simplesigning`, which publishes the `sha256-<hex>.att` sidecar alone and no referrer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer_digest: Option<Digest>,
     /// Digest of the `sha256-<hex>.att` sidecar manifest, when `--signature-format` asked for one.
     /// Spelled as in the `ocx package attest` report, so one vocabulary names both addresses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_digest: Option<Digest>,
-    /// The resolved `predicateType` URI written into the Statement. Present exactly when `status`
-    /// is `succeeded`.
+    /// The resolved `predicateType` URI written into the Statement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate_type: Option<String>,
     /// Whether the referrer carries a signature. `false` means the SBOM was attached raw because
     /// the run had no signing identity available — the push still succeeded, and nothing vouches
-    /// for the document. Present exactly when `status` is `succeeded`.
+    /// for the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed: Option<bool>,
-    /// The error document's `error.detail` slug, falling back to its `error.kind` category. Present
-    /// exactly when `status` is `failed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    /// Human-readable cause, sanitized for the terminal (CWE-150). Present exactly when `status` is
-    /// `failed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 impl Unknowns for AttestationOutcome {
@@ -410,8 +401,6 @@ impl Unknowns for AttestationOutcome {
         field(pointer, out, "sidecar_digest", &self.sidecar_digest);
         field(pointer, out, "predicate_type", &self.predicate_type);
         field(pointer, out, "signed", &self.signed);
-        field(pointer, out, "kind", &self.kind);
-        field(pointer, out, "message", &self.message);
     }
 }
 
@@ -532,9 +521,6 @@ impl Unknowns for AttestationReportSweptTag {
 pub enum AttestationStatus {
     /// The attestation was published on the pushed manifest.
     Succeeded,
-    /// The attestation was not published. The pushed manifest stays in the registry; no tag was
-    /// written after it.
-    Failed,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -544,7 +530,6 @@ impl AttestationStatus {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
             Self::Unknown(value) => value,
         }
     }
@@ -553,7 +538,6 @@ impl AttestationStatus {
     pub fn from_value(value: String) -> Self {
         match value.as_str() {
             "succeeded" => Self::Succeeded,
-            "failed" => Self::Failed,
             _ => Self::Unknown(value),
         }
     }
