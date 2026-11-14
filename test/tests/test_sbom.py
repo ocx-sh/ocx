@@ -607,7 +607,9 @@ def test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works(
 
     ``--summary`` augments a listing that works without it, so a document no
     reader understands costs the operator that document and nothing else: the
-    entry moves to ``refused`` with its own slug and the process still exits 0.
+    entry moves to ``refused`` with its own slug and the report is still
+    printed. Here it is the only candidate, so nothing is usable and the run
+    exits 79 (``attestation_not_found``); beside a readable entry it would exit 0.
     Aborting the whole listing would hand one malformed SBOM the power to hide
     every readable one beside it — the per-candidate independence the verify
     pipeline already guarantees, undone one layer up (PKG-22).

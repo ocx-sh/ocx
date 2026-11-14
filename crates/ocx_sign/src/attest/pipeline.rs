@@ -14,7 +14,9 @@ use super::predicate::{self, PredicateType};
 use super::statement;
 use crate::sign::bundle::BUNDLE_V03_MEDIA_TYPE;
 use crate::sign::pipeline::{LegDigests, SubjectResolver};
-use crate::sign::referrers::{attach_referrer, map_client_error, referrers_capability};
+use crate::sign::referrers::{
+    IdentityProbe, attach_referrer, find_bundle_referrer, map_client_error, referrers_capability,
+};
 use crate::sign::simplesigning_write::{self, SidecarLayer};
 use crate::sign::state::SigningStatePaths;
 use crate::sign::{SignError, SignErrorKind, SignatureFormat, Signer, TokenProvider};
@@ -231,13 +233,82 @@ impl AttestPipeline {
                 )?;
                 let statement_bytes =
                     serde_json::to_vec(&statement).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+
+                // Per shape, and only for these exact statement bytes: a changed document is a new attestation (#701).
+                let mut probe = IdentityProbe::new(ctx.signer, token.as_ref(), ctx.fulcio_url);
+                let existing_referrer = match ctx.format.writes_bundle() {
+                    true => {
+                        find_bundle_referrer(
+                            transport,
+                            &write_image,
+                            &subject_digest,
+                            &predicate_type,
+                            Some(&statement_bytes),
+                            &mut probe,
+                        )
+                        .await?
+                    }
+                    false => None,
+                };
+                let existing_sidecar = match ctx.format.writes_simplesigning() {
+                    true => {
+                        simplesigning_write::find_signed_layer(
+                            transport,
+                            &write_image,
+                            &subject_digest,
+                            crate::verify::SidecarKind::Attestation,
+                            None,
+                            Some(&statement_bytes),
+                            &mut probe,
+                        )
+                        .await?
+                    }
+                    false => None,
+                };
+                let missing_referrer = ctx.format.writes_bundle() && existing_referrer.is_none();
+                let missing_sidecar = ctx.format.writes_simplesigning() && existing_sidecar.is_none();
+                if !missing_referrer && !missing_sidecar {
+                    let found = existing_referrer.as_ref().or(existing_sidecar.as_ref());
+                    let identity = found.map(|existing| &existing.identity);
+                    let (certificate_identity, certificate_oidc_issuer, key_backend, public_key_hint) = match identity {
+                        Some(crate::sign::SignerIdentity::Keyless {
+                            certificate_identity,
+                            certificate_oidc_issuer,
+                        }) => (
+                            Some(certificate_identity.clone()),
+                            Some(certificate_oidc_issuer.clone()),
+                            ocx_trust::key_ref::KeyBackendKind::Keyless,
+                            None,
+                        ),
+                        Some(crate::sign::SignerIdentity::Key {
+                            public_key_hint,
+                            key_backend,
+                        }) => (None, None, *key_backend, Some(public_key_hint.clone())),
+                        None => return Err(SignErrorKind::Internal("no attestation shape was selected".into())),
+                    };
+                    let transparency_log_index = found.and_then(|existing| existing.transparency_log_index);
+                    return Ok(AttestResult {
+                        subject_digest,
+                        predicate_type,
+                        referrer: existing_referrer.map(|existing| existing.digests),
+                        sidecar: existing_sidecar.map(|existing| existing.digests),
+                        signed: true,
+                        certificate_identity,
+                        certificate_oidc_issuer,
+                        key_backend: Some(key_backend),
+                        public_key_hint,
+                        transparency_log_index,
+                    });
+                }
+
                 let bundle = ctx
                     .signer
                     .sign_dsse(&statement_bytes, token.as_ref(), ctx.fulcio_url, ctx.rekor_url)
                     .await?;
 
                 // One signature for every shape, or the publications can disagree about which identity attested.
-                let referrer = match ctx.format.writes_bundle() {
+                let referrer = match missing_referrer {
+                    false => existing_referrer.map(|existing| existing.digests),
                     true => {
                         // The annotation set is a one-way door: it is hashed into the referrer's registry address.
                         let annotations =
@@ -263,10 +334,10 @@ impl AttestPipeline {
                             manifest_digest: referrer_digest,
                         })
                     }
-                    false => None,
                 };
 
-                let sidecar = match ctx.format.writes_simplesigning() {
+                let sidecar = match missing_sidecar {
+                    false => existing_sidecar.map(|existing| existing.digests),
                     true => {
                         // The bare DSSE envelope, not the bundle: cosign's `.att` layer predates bundles.
                         let payload_digest = Algorithm::Sha256.hash(&bundle.envelope_json);
@@ -282,7 +353,6 @@ impl AttestPipeline {
                             manifest_digest,
                         })
                     }
-                    false => None,
                 };
 
                 Ok(AttestResult {
@@ -499,6 +569,10 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingSigner {
         signed: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// What `identity` answers; `None` is a signer that cannot tell.
+        identity: Option<crate::sign::SignerIdentity>,
+        /// Return the golden keyless bundle carrying the signed statement, as a real signer would.
+        golden_carrying: bool,
     }
 
     impl RecordingSigner {
@@ -520,6 +594,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Signer for RecordingSigner {
+        async fn identity(
+            &self,
+            _: Option<&OidcToken>,
+            _: &Url,
+        ) -> Result<Option<crate::sign::SignerIdentity>, SignErrorKind> {
+            Ok(self.identity.clone())
+        }
+
         async fn sign_blob(
             &self,
             _: &[u8],
@@ -541,7 +623,10 @@ mod tests {
                 .lock()
                 .expect("recorder lock")
                 .push(statement_bytes.to_vec());
-            let bytes = br#"{"mediaType":"test-dsse-bundle"}"#.to_vec();
+            let bytes = match self.golden_carrying {
+                true => golden_bundle_carrying(statement_bytes),
+                false => br#"{"mediaType":"test-dsse-bundle"}"#.to_vec(),
+            };
             let digest = Algorithm::Sha256.hash(&bytes);
             // A recognisable stand-in for the DSSE envelope the real signers
             // return: the `.att` sidecar layer is these bytes verbatim, so a
@@ -638,6 +723,31 @@ mod tests {
         token_fails: bool,
         format: SignatureFormat,
     ) -> Run {
+        drive_attest_signed_by(
+            transport,
+            RecordingSigner::default(),
+            mode,
+            predicate_type,
+            predicate,
+            offline,
+            token_fails,
+            format,
+        )
+        .await
+    }
+
+    /// `drive_attest_with` with the signer injected.
+    #[allow(clippy::too_many_arguments)]
+    async fn drive_attest_signed_by(
+        transport: RecordingTransport,
+        signer: RecordingSigner,
+        mode: AttestMode,
+        predicate_type: PredicateType,
+        predicate: &str,
+        offline: bool,
+        token_fails: bool,
+        format: SignatureFormat,
+    ) -> Run {
         let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         // A public IP literal, not a name: the pipeline resolves the physical
         // host before dialing it (dial-site SSRF guard), and a DNS name here
@@ -656,7 +766,6 @@ mod tests {
         // bare image manifest, and under the narrowing rule a platform against
         // a bare manifest is `TargetNotAnIndex`. Attesting whatever resolved is
         // what this fixture is about.
-        let signer = RecordingSigner::default();
         let token_provider = CountingTokenProvider {
             fails: token_fails,
             ..CountingTokenProvider::default()
@@ -1108,6 +1217,127 @@ mod tests {
     /// The referrers fallback tag for `subject_digest()`.
     fn fallback_tag_reference() -> String {
         format!("8.8.8.8/acme/tool:sha256-{}", subject_digest().hex())
+    }
+
+    // ── Attesting again under the same identity is idempotent ──
+
+    const GOLDEN_KEYLESS_BUNDLE: &str = include_str!("../../../../test/tests/fixtures/golden/keyless_bundle.json");
+
+    fn golden_identity() -> crate::sign::SignerIdentity {
+        crate::sign::SignerIdentity::Keyless {
+            certificate_identity: "ocx-test@example.com".to_string(),
+            certificate_oidc_issuer: "http://dex:5556/dex".to_string(),
+        }
+    }
+
+    /// The golden keyless bundle with its DSSE payload swapped for `statement`.
+    fn golden_bundle_carrying(statement: &[u8]) -> Vec<u8> {
+        use base64::Engine as _;
+        let mut bundle: serde_json::Value = serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("golden bundle is JSON");
+        bundle["dsseEnvelope"]["payload"] = base64::engine::general_purpose::STANDARD.encode(statement).into();
+        serde_json::to_vec(&bundle).expect("bundle serializes")
+    }
+
+    fn attester_as(identity: crate::sign::SignerIdentity) -> RecordingSigner {
+        RecordingSigner {
+            identity: Some(identity),
+            golden_carrying: true,
+            ..RecordingSigner::default()
+        }
+    }
+
+    /// Attest [`PREDICATE`] as CycloneDX under the golden identity, then attest `second_predicate`
+    /// as `second_type` with `second` against a registry holding what the first run pushed.
+    async fn attest_twice(second: RecordingSigner, second_type: PredicateType, second_predicate: &str) -> (Run, Run) {
+        let first = drive_attest_signed_by(
+            recording_transport(),
+            attester_as(golden_identity()),
+            AttestMode::Signed,
+            PredicateType::CycloneDx,
+            PREDICATE,
+            false,
+            false,
+            SignatureFormat::Bundle,
+        )
+        .await;
+        let [pushed] = first
+            .transport
+            .referrer_manifests()
+            .try_into()
+            .expect("one referrer pushed");
+        let listed = Descriptor {
+            media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+            digest: Algorithm::Sha256.hash(&pushed).to_string(),
+            size: pushed.len() as i64,
+            artifact_type: Some(SIGSTORE_BUNDLE_V03.to_string()),
+            ..Descriptor::default()
+        };
+        let transport = recording_transport()
+            .serving_subject_manifest(b"{}")
+            .serving_referrers(vec![listed])
+            .serving_manifest(&pushed)
+            .serving_blob(&golden_bundle_carrying(&first.signer.signed_bytes()));
+        let second = drive_attest_signed_by(
+            transport,
+            second,
+            AttestMode::Signed,
+            second_type,
+            second_predicate,
+            false,
+            false,
+            SignatureFormat::Bundle,
+        )
+        .await;
+        (first, second)
+    }
+
+    #[tokio::test]
+    async fn attesting_again_under_the_same_identity_writes_no_second_referrer() {
+        let (first, second) = attest_twice(attester_as(golden_identity()), PredicateType::CycloneDx, PREDICATE).await;
+        let first = first.result.expect("the first attest completes");
+        assert!(
+            second.transport.referrer_manifests().is_empty(),
+            "a second attestation referrer was pushed under the same identity"
+        );
+        assert!(
+            second.signer.signed.lock().expect("recorder lock").is_empty(),
+            "nothing may be signed for a skipped attestation"
+        );
+        let second = second.result.expect("the second attest completes");
+        let (first_leg, second_leg) = (
+            first.referrer.expect("first referrer"),
+            second.referrer.expect("second referrer"),
+        );
+        assert_eq!(second_leg.manifest_digest, first_leg.manifest_digest);
+        assert_eq!(second_leg.payload_digest, first_leg.payload_digest);
+        assert_eq!(second.certificate_identity.as_deref(), Some("ocx-test@example.com"));
+    }
+
+    /// A corrected SBOM re-attested by the same signer is a new document, so `ocx package sbom` can pick it.
+    #[tokio::test]
+    async fn attesting_a_changed_document_under_the_same_identity_writes_a_second_referrer() {
+        let changed = r#"{"bomFormat":"CycloneDX","specVersion":"1.6","version":2}"#;
+        let (_, second) = attest_twice(attester_as(golden_identity()), PredicateType::CycloneDx, changed).await;
+        second.result.expect("the second attest completes");
+        assert_eq!(second.transport.referrer_manifests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attesting_again_under_a_different_identity_still_writes_a_referrer() {
+        let other = crate::sign::SignerIdentity::Keyless {
+            certificate_identity: "someone-else@example.com".to_string(),
+            certificate_oidc_issuer: "http://dex:5556/dex".to_string(),
+        };
+        let (_, second) = attest_twice(attester_as(other), PredicateType::CycloneDx, PREDICATE).await;
+        second.result.expect("the second attest completes");
+        assert_eq!(second.transport.referrer_manifests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attesting_another_predicate_type_under_the_same_identity_still_writes_a_referrer() {
+        let (_, second) = attest_twice(attester_as(golden_identity()), PredicateType::Spdx, PREDICATE).await;
+        second.result.expect("the second attest completes");
+        assert_eq!(second.transport.referrer_manifests().len(), 1);
     }
 
     /// **The attest half of C-009.** `attest/pipeline.rs` carried its own

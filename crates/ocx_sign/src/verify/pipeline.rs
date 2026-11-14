@@ -49,10 +49,10 @@ use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{Bundle, bundle, verific
 use sigstore_protobuf_specs::dev::sigstore::rekor::v1::InclusionProof as ProtoInclusionProof;
 
 /// Maximum accepted size of a referrer manifest, in bytes (a real one is a few hundred).
-pub(super) const MAX_REFERRER_MANIFEST_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_REFERRER_MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// Maximum number of signature referrers examined during an ANY-of verify.
-pub(super) const MAX_SIGNATURE_CANDIDATES: usize = 8;
+pub(crate) const MAX_SIGNATURE_CANDIDATES: usize = 8;
 
 /// Cross-candidate byte budget over referrer-manifest descriptor sizes.
 const MAX_TOTAL_REFERRER_BYTES: u64 = 4 * 1024 * 1024;

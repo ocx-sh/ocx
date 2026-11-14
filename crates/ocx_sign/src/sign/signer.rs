@@ -38,9 +38,46 @@ pub struct SignedBlob {
     pub public_key_hint: Option<String>,
 }
 
+/// Who a signature is attributed to: the certificate SAN and issuer, or the signing key's hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignerIdentity {
+    Keyless {
+        certificate_identity: String,
+        certificate_oidc_issuer: String,
+    },
+    Key {
+        public_key_hint: String,
+        key_backend: ocx_trust::key_ref::KeyBackendKind,
+    },
+}
+
+impl SignerIdentity {
+    /// Whether a signature claiming these fields is attributed to this identity; the claim is unverified.
+    pub(crate) fn matches(&self, identity: Option<&str>, issuer: Option<&str>, hint: Option<&str>) -> bool {
+        match self {
+            Self::Keyless {
+                certificate_identity,
+                certificate_oidc_issuer,
+            } => identity == Some(certificate_identity.as_str()) && issuer == Some(certificate_oidc_issuer.as_str()),
+            Self::Key { public_key_hint, .. } => hint == Some(public_key_hint.as_str()),
+        }
+    }
+}
+
 /// Produces a Sigstore bundle over an in-toto Statement.
 #[async_trait]
 pub trait Signer: Send + Sync {
+    /// The identity the next signature will carry, learned without writing a transparency-log entry.
+    ///
+    /// `None` means "cannot tell", and the caller then signs as if nothing were published.
+    async fn identity(
+        &self,
+        _token: Option<&OidcToken>,
+        _fulcio_url: &Url,
+    ) -> Result<Option<SignerIdentity>, SignErrorKind> {
+        Ok(None)
+    }
+
     /// Sign an in-toto Statement as a DSSE envelope over `sha256(PAE(type, statement_bytes))`.
     ///
     /// Must refuse over `MAX_STATEMENT_PAYLOAD_BYTES` before any network: a Rekor entry is permanent.
@@ -99,6 +136,31 @@ impl Default for KeylessSigner {
 
 #[async_trait]
 impl Signer for KeylessSigner {
+    /// Spends one Fulcio certificate and no Rekor entry: Fulcio's SAN depends on the issuer
+    /// (a GitHub Actions SAN is the workflow ref, not `sub`), so predicting it from the token would miss.
+    async fn identity(
+        &self,
+        token: Option<&OidcToken>,
+        fulcio_url: &Url,
+    ) -> Result<Option<SignerIdentity>, SignErrorKind> {
+        let token = token.ok_or(SignErrorKind::OidcTokenRejected)?;
+        let leaf_pem = issue_ephemeral_certificate(token, fulcio_url)
+            .await?
+            .certificate
+            .leaf_pem;
+        let Ok(leaf) = <x509_cert::Certificate as x509_cert::der::DecodePem>::from_pem(leaf_pem.as_bytes()) else {
+            return Ok(None);
+        };
+        Ok(crate::verify::identity::subject_identity(&leaf)
+            .zip(crate::verify::identity::oidc_issuer(&leaf))
+            .map(
+                |(certificate_identity, certificate_oidc_issuer)| SignerIdentity::Keyless {
+                    certificate_identity,
+                    certificate_oidc_issuer,
+                },
+            ))
+    }
+
     async fn sign_blob(
         &self,
         payload: &[u8],

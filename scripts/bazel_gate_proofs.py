@@ -248,10 +248,10 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
-ACCEPTANCE_MODULE_TARGETS = 197
+ACCEPTANCE_MODULE_TARGETS = 198
 """One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
-'kind(sh_test, //test:all)'` answers 197 and `ls test/tests/test_*.py` answers
-197 (195 before `test_push_sign_order.py` and `test_self_candidate_switch.py`; 193 before `test_publisher_trust.py` and `test_publisher_trust_previous.py`; 192 before `test_pinned_project_vanished.py`; 187 before the five `test_hardening_*.py` modules; 179 before `test_shell_open.py`; 178 before `test_credential_helper_reentry.py`; 177 before `test_upgrade.py`; 176 before `test_toolchain_drift_notice.py`; 175 before `test_update_config.py`; 174 before `test_install_link.py`; 173 until `test_env_contract.py` was added; 172 until `test_error_document.py` was added; 181 until eight source-only sweep modules moved to the lint tier,
+'kind(sh_test, //test:all)'` answers 198 and `ls test/tests/test_*.py` answers
+198 (197 before `test_sign_idempotent.py`; 195 before `test_push_sign_order.py` and `test_self_candidate_switch.py`; 193 before `test_publisher_trust.py` and `test_publisher_trust_previous.py`; 192 before `test_pinned_project_vanished.py`; 187 before the five `test_hardening_*.py` modules; 179 before `test_shell_open.py`; 178 before `test_credential_helper_reentry.py`; 177 before `test_upgrade.py`; 176 before `test_toolchain_drift_notice.py`; 175 before `test_update_config.py`; 174 before `test_install_link.py`; 173 until `test_env_contract.py` was added; 172 until `test_error_document.py` was added; 181 until eight source-only sweep modules moved to the lint tier,
 plan_test_speed_tiers.md C-009; 173 until `test_schema_generation.py` was
 ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020; 172 until
 `test_pull_progress.py`, whose only assertions were on log message text, was
@@ -268,7 +268,7 @@ per-module groups that left `:suite_inputs` (`:bench_inputs`,
 `:vendored_specs`). No `sh_test`, but `kind(rule, ...)` counts them, so the
 floor has to."""
 
-ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 206
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 207
 
 GRAPH_TAIL_TARGETS = 8
 """What `//...` holds that no earlier stage's universe names: `//:all` (4 —
@@ -1682,16 +1682,16 @@ def prove_counts() -> int:
         f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 186",
     )
     expect(
-        ACCEPTANCE_MODULE_TARGETS == 197,
-        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 197",
+        ACCEPTANCE_MODULE_TARGETS == 198,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 198",
     )
     expect(
-        ACCEPTANCE_RULE_TARGETS == 206,
-        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 206",
+        ACCEPTANCE_RULE_TARGETS == 207,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 207",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 400,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 400",
+        STAGE_FLOORS["stage-4"].minimum == 401,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 401",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
