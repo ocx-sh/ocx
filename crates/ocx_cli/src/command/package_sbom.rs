@@ -33,12 +33,14 @@ use crate::options;
 #[derive(Parser, Clone)]
 #[clap(mut_arg("signature_format", options::signature_format::read_side))]
 pub struct PackageSbom {
-    /// Narrow into one platform of an image index.
+    /// Platform of an image index to act on; defaults to the host platform.
     ///
-    /// Omit it to act on whatever the reference resolves to: an index is then
-    /// the subject itself, which is where cosign puts a multi-platform tag's
-    /// signature. Given against a reference that resolves to a single manifest,
-    /// there is nothing to narrow and the command fails.
+    /// A tag that names an image index resolves to the platform manifest
+    /// for this host, as `install` does. A tag that names a single manifest
+    /// is used as is. A reference pinned by digest is the exact object it
+    /// names, so pin the index digest to act on the index itself. Given
+    /// against a reference that resolves to a single manifest, there is
+    /// nothing to narrow and the command fails.
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     platform: Option<ocx_oci::Platform>,
 
