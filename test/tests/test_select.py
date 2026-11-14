@@ -118,6 +118,18 @@ def test_select_partial_failure_exits_nonzero(
     assert result.returncode != 0, f"expected nonzero exit, stderr: {result.stderr}"
 
 
+def test_select_published_but_not_installed_names_ocx_install(ocx: OcxRunner, tmp_path: Path):
+    """A version the registry has but the object store lacks says so and names ``ocx install``."""
+    repo = f"t_{uuid4().hex[:8]}_select_not_installed"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path)
+
+    result = ocx.run("package", "select", pkg.short, format=None, check=False)
+
+    assert result.returncode != 0, f"expected nonzero exit, stderr: {result.stderr}"
+    assert "not installed" in result.stderr, result.stderr
+    assert "run `ocx install " in result.stderr and pkg.short in result.stderr, result.stderr
+
+
 def test_select_multiple_wire_failures_aggregate_all(ocx: OcxRunner, tmp_path: Path):
     """Wire-up failures for MULTIPLE resolved packages aggregate — both surface.
 

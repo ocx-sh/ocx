@@ -56,7 +56,10 @@ impl PackageManager {
 
         let info = self.find_plain(&identifier).await?.ok_or_else(|| {
             log::debug!("Package not found locally for '{}'.", identifier);
-            PackageErrorKind::NotFound
+            PackageErrorKind::NotInstalled(Box::new(crate::error::NotInstalled {
+                identifier: package.clone(),
+                digest: identifier.digest(),
+            }))
         })?;
         if !self
             .origin_gate_open(identifier.as_identifier(), &info, package.digest().is_some())
