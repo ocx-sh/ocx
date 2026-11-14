@@ -5,7 +5,9 @@
 # red on every shape it forbids and green on every shape it allows. pytest's
 # discovery is the list: `scripts/tests/test_completeness.py` reds a gate script
 # without a test module, so a proof nobody runs cannot be added by forgetting a
-# line here. `verify` is part of `.verify:lint`, and `scripts/scoped_gate.py`
+# line here. Run them with `task scripts:self-test` or
+# `uv run --project test pytest scripts/tests`; a bare `uv run pytest` has no pytest.
+# `verify` is part of `.verify:lint`, and `scripts/scoped_gate.py`
 # routes `scripts/**` to it.
 
 version: '3'
