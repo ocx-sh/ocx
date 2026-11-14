@@ -27,7 +27,8 @@ use ocx_trust::{CompiledPolicy, TrustPolicy};
 
 use super::super::PackageManager;
 use super::signer_rounds::{
-    RoundsDecision, SignerRounds, SignerRoundsInput, publisher_round_error, signer_rounds, signer_rounds_for_pinned,
+    RoundsDecision, RoundsError, SignerRounds, SignerRoundsInput, publisher_round_error, signer_rounds,
+    signer_rounds_for_pinned,
 };
 use super::verify::VerifyOptions;
 use ocx_sign::verify::VerifyContentMode;
@@ -156,6 +157,20 @@ impl AutoVerify {
         .copied()
     }
 
+    /// Refuse the opt-out where the system config locks `signatures` to `required` for `registry`: an operator
+    /// decision no flag or environment variable may lift.
+    fn refuse_locked_opt_out(&self, registry: &str) -> Result<(), RoundsError> {
+        if self.user_opted_out
+            && self.config.signature_policy(registry) == (ocx_config::SignatureRequirement::Required, true)
+        {
+            return Err(RoundsError::NoVerifyRefused {
+                registry: registry.to_owned(),
+                config_path: ocx_config::loader::ConfigLoader::system_path().display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Override the `OCX_NO_VERIFY`-derived opt-out with a `--verify` / `--no-verify` flag, which wins.
     #[must_use]
     pub fn with_user_opted_out(mut self, opted_out: bool) -> Self {
@@ -184,6 +199,9 @@ impl PackageManager {
         let Some(auto_verify) = self.auto_verify() else {
             return Ok(true);
         };
+        auto_verify
+            .refuse_locked_opt_out(logical.registry())
+            .map_err(|refusal| PackageErrorKind::Internal(refusal.into()))?;
         if auto_verify.user_opted_out
             || auto_verify.config.signature_requirement(logical.registry()) == ocx_config::SignatureRequirement::Off
         {
@@ -261,6 +279,9 @@ impl PackageManager {
         resolved: &ocx_oci::PackageRef,
         committed_only: bool,
     ) -> Result<bool, PackageErrorKind> {
+        auto_verify
+            .refuse_locked_opt_out(resolved.registry())
+            .map_err(|refusal| PackageErrorKind::Internal(refusal.into()))?;
         let input = SignerRoundsInput {
             logical: resolved,
             index: self.index(),
@@ -274,13 +295,17 @@ impl PackageManager {
             signer_rounds(input).await
         } {
             Ok(decision) => decision,
-            // Only an unparseable committed root yields to the opt-out; any other error, a malformed operator policy included, still refuses.
+            // Only an unreadable or unparseable committed root yields to the opt-out; any other error, a malformed operator policy included, still refuses.
             Err(
-                error @ crate::Error::FileStructure(ocx_store::file_structure::error::Error::MalformedRootDocument {
+                error @ (crate::Error::InternalFile(..)
+                | crate::Error::FileStructure(ocx_store::file_structure::error::Error::MalformedRootDocument {
                     ..
-                }),
+                })),
             ) if auto_verify.user_opted_out => {
-                log::debug!("committed index root unreadable for '{resolved}', skipping verification: {error}");
+                log::debug!(
+                    "committed index root unreadable for '{resolved}', skipping verification: {chain}",
+                    chain = ocx_util::error::render_chain(&error)
+                );
                 self.warn_skipped_once(auto_verify);
                 return Ok(false);
             }
@@ -358,7 +383,10 @@ impl PackageManager {
                 Err(error) if has_key => {
                     // A keyless candidate on a root that cannot check it aborts the scan, so it is dropped from
                     // the rounds instead; a round left with no key to try keeps the resolution error.
-                    log::debug!("full trust root unavailable, verifying key candidates only: {error}");
+                    log::debug!(
+                        "full trust root unavailable, verifying key candidates only: {chain}",
+                        chain = ocx_util::error::render_chain(&error)
+                    );
                     if !keep_key_backends(rounds) {
                         return Err(error);
                     }
@@ -783,6 +811,8 @@ mod tests {
         declared: Option<serde_json::Value>,
         operator_policies: Vec<TrustPolicy>,
         signatures: Option<&'static str>,
+        /// The `signatures` entry came from the system config tier.
+        signatures_locked: bool,
         user_opted_out: bool,
         offline: bool,
         /// `OCX_SIGSTORE_TRUSTED_ROOT`; `None` leaves no local trust root at all.
@@ -797,6 +827,7 @@ mod tests {
                 declared,
                 operator_policies: Vec::new(),
                 signatures: None,
+                signatures_locked: false,
                 user_opted_out: false,
                 offline: true,
                 trusted_root: None,
@@ -829,8 +860,19 @@ mod tests {
             ChainMode::Default,
         );
         let config = match scenario.signatures {
-            Some(value) => toml::from_str(&format!("[registries.\"{REGISTRY}\"]\nsignatures = \"{value}\"\n"))
-                .expect("config parses"),
+            Some(value) => {
+                let mut config: Config =
+                    toml::from_str(&format!("[registries.\"{REGISTRY}\"]\nsignatures = \"{value}\"\n"))
+                        .expect("config parses");
+                if scenario.signatures_locked {
+                    config
+                        .registries
+                        .iter_mut()
+                        .flatten()
+                        .for_each(|entry| entry.1.lock_as_system());
+                }
+                config
+            }
             None => Config::default(),
         };
         let auto_verify = AutoVerify::new(AutoVerifyInput {
@@ -1197,6 +1239,104 @@ mod tests {
         manager.maybe_auto_verify(&target).await.expect("opted out");
         manager.maybe_auto_verify(&target).await.expect("opted out");
         assert!(av.warned.load(Ordering::Relaxed), "the warning latch fired");
+    }
+
+    /// A system-locked `required` refuses `--no-verify` with `NoVerifyRefused` on the rounds path, and the
+    /// unlocked twin keeps the opt-out (one warning, installs).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn d13_a_locked_required_refuses_the_opt_out_on_the_rounds_path() {
+        let (subject, target) = golden_subject();
+        let root = TempDir::new().unwrap();
+        let scenario = |signatures_locked| GoldenScenario {
+            signatures: Some("required"),
+            signatures_locked,
+            user_opted_out: true,
+            ..GoldenScenario::new(None)
+        };
+
+        let manager = golden_manager(root.path(), golden_transport_data(&subject), scenario(true));
+        let error = manager
+            .maybe_auto_verify(&target)
+            .await
+            .expect_err("a locked `required` refuses the opt-out");
+        match rounds_refusal(error) {
+            RoundsError::NoVerifyRefused { registry, config_path } => {
+                assert_eq!(registry, REGISTRY);
+                assert!(!config_path.is_empty());
+            }
+            other => panic!("expected NoVerifyRefused, got {other:?}"),
+        }
+
+        let manager = golden_manager(root.path(), golden_transport_data(&subject), scenario(false));
+        manager
+            .maybe_auto_verify(&target)
+            .await
+            .expect("unlocked opt-out installs");
+        assert!(manager.auto_verify().expect("attached").warned.load(Ordering::Relaxed));
+    }
+
+    /// The find fast path refuses too: a locked `required` must not hand out store content on `--no-verify`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn d13_a_locked_required_refuses_the_opt_out_on_the_fast_path() {
+        let (_, target) = golden_subject();
+        let scenario = |signatures_locked| GoldenScenario {
+            signatures: Some("required"),
+            signatures_locked,
+            user_opted_out: true,
+            ..declared_scenario()
+        };
+
+        let root = TempDir::new().unwrap();
+        let manager = golden_manager(root.path(), StubTransportData::new(), scenario(true));
+        install_golden_content(&manager, &target);
+        let error = find_golden(&manager, &golden_tag()).await.expect_err("locked refuses");
+        assert!(matches!(rounds_refusal(error), RoundsError::NoVerifyRefused { .. }));
+
+        let root = TempDir::new().unwrap();
+        let manager = golden_manager(root.path(), StubTransportData::new(), scenario(false));
+        install_golden_content(&manager, &target);
+        find_golden(&manager, &golden_tag())
+            .await
+            .expect("unlocked opt-out keeps the fast path");
+    }
+
+    /// A committed root that cannot be read (a directory stands in for the file: the read fails with an I/O
+    /// error other than NotFound, and unlike `chmod 000` that holds for root) or does not parse yields to an
+    /// unlocked opt-out, and still errors without one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn d13_b_an_unreadable_or_malformed_committed_root_yields_to_the_opt_out_only() {
+        let (_, target) = golden_subject();
+        for unreadable in [true, false] {
+            for user_opted_out in [true, false] {
+                let root = TempDir::new().unwrap();
+                let manager = golden_manager(
+                    root.path(),
+                    StubTransportData::new(),
+                    GoldenScenario {
+                        user_opted_out,
+                        ..GoldenScenario::new(None)
+                    },
+                );
+                let path =
+                    ocx_index::IndexStore::machine_local(manager.file_structure()).root_document_path(REGISTRY, REPO);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if unreadable {
+                    std::fs::create_dir(&path).unwrap();
+                } else {
+                    std::fs::write(&path, b"{ not json").unwrap();
+                }
+                let outcome = manager.maybe_auto_verify_requested(&target, &target).await;
+                if user_opted_out {
+                    assert!(
+                        !outcome.expect("the opt-out proceeds past the unreadable root"),
+                        "no publisher round ran"
+                    );
+                    assert!(manager.auto_verify().expect("attached").warned.load(Ordering::Relaxed));
+                } else {
+                    outcome.expect_err("without the opt-out the root error stands");
+                }
+            }
+        }
     }
 
     /// An uncovered package under the opt-out stays silent (today's behaviour).
