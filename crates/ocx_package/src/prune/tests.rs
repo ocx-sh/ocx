@@ -1540,3 +1540,38 @@ fn an_unreadable_root_says_retry_only_when_a_rerun_may_succeed() {
     );
     assert!(!message(403).contains("retry"), "{}", message(403));
 }
+
+// ── the plan handed to a deleter ─────────────────────────────────────────────
+
+/// Records the plan it is given and deletes nothing.
+struct PlanRecorder(Mutex<Vec<DeletePlan>>);
+
+#[async_trait]
+impl TagDeleter for PlanRecorder {
+    async fn delete(&self, plan: &DeletePlan, _report: &mut DeleteReport) -> Result<(), PruneError> {
+        self.0.lock().expect("plan lock").push(plan.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_deleter_is_told_the_digest_each_indexed_tag_row_names_and_none_for_an_unlisted_tag() {
+    let registry = Registry::new();
+    // `listed` has an ephemeral row; `unlisted` has none, so only `--force` reaches the deleter with it.
+    registry.probes(vec![present("unlisted")]);
+    let target = target(&[("listed", true)]);
+    let recorder = PlanRecorder(Mutex::new(Vec::new()));
+
+    let run = prune_with(
+        &registry.client,
+        &recorder,
+        &target,
+        &forced(explicit(&["listed", "unlisted"])),
+    )
+    .await;
+
+    assert!(run.error.is_none(), "got {:?}", run.error);
+    let plans = recorder.0.lock().expect("plan lock");
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].indexed, vec![("listed".to_owned(), root_content("listed"))]);
+}

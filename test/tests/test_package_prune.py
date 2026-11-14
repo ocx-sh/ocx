@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -23,7 +24,7 @@ from fake_forge import FakeForge
 
 from src import static_index
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest
+from src.registry import fetch_manifest_digest, fetch_manifest_raw, put_manifest
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("package_prune*")
@@ -357,17 +358,17 @@ def test_rerunning_a_finished_prune_reports_absent_and_repeats_the_tags_file(
     )
 
 
-def test_a_tags_file_that_cannot_be_written_exits_74_after_the_deletes(
+def test_a_tags_file_that_cannot_be_written_exits_74_before_any_delete(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
 ) -> None:
+    # Deleting first would lose the record the announce needs: a rerun reports the tag absent.
     _publish(ocx, unique_repo, [BUILD_1], tmp_path)
     package = _indexed(ocx, index_server, unique_repo, {BUILD_1: True})
 
     result = _prune(ocx, "--tags-file", str(tmp_path / "no-such-directory" / "removed.txt"), package, BUILD_1)
 
     assert result.returncode == 74, result.stderr
-    assert _tags(ocx.registry, unique_repo) == [], "the write failure comes after the deletes, never instead of them"
-    assert _actions(_report(result)) == [(BUILD_1, "deleted", None)]
+    assert _tags(ocx.registry, unique_repo) == [BUILD_1], "an unwritable tags file is refused before any delete"
 
 
 # ---------------------------------------------------------------------------
@@ -701,3 +702,212 @@ def test_a_rerun_teardown_selects_nothing_and_a_refresh_then_removes_the_rows(
 
     assert sorted(refreshed["removed"]) == sorted([MR_BUILD_1, MR_BUILD_2, MR_ROLLING])
     assert _written_tags(out_dir, package) == {tag: seeded[tag] for tag in RELEASE_TAGS}
+
+
+# ---------------------------------------------------------------------------
+# GitHub Packages: deletion through the packages API
+# ---------------------------------------------------------------------------
+
+DURABLE = "1.0.0"
+
+
+def _forge_package(ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tags: list[str], tmp_path: Path) -> str:
+    """Publishes `tags` to `<unique_repo>/app` and registers it with the fake forge as that owner's package.
+
+    The test registry is a localhost zot, which infers no forge, so the runs below pass `--forge github`.
+    Returns the repository.
+    """
+    repository = f"{unique_repo}/app"
+    _publish(ocx, repository, tags, tmp_path)
+    fake_forge.seed_package(unique_repo, "app", registry=ocx.registry, repository=repository)
+    return repository
+
+
+def _forge_prune(
+    ocx: OcxRunner,
+    fake_forge: FakeForge,
+    repository: str,
+    *tags: str,
+    options: tuple[str, ...] = (),
+    credential: bool = True,
+):
+    """Runs a forge prune. The test registry is anonymous, so a throwaway token stands in for the credential."""
+    overrides = {"__OCX_TESTING_GITHUB_API_URL": fake_forge.base_url}
+    if credential:
+        overrides[f"OCX_AUTH_{re.sub(r'[^a-zA-Z0-9]', '_', ocx.registry)}_TOKEN"] = "test-forge-token"
+    return ocx.run(
+        "package",
+        "prune",
+        "--forge",
+        "github",
+        "--force",
+        *options,
+        f"{ocx.registry}/{repository}",
+        *tags,
+        format="json",
+        check=False,
+        env_overrides=overrides,
+    )
+
+
+def _deletes(fake_forge: FakeForge) -> int:
+    return sum(1 for method, _ in fake_forge.requests if method == "DELETE")
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_deletes_the_version_and_its_platform_manifests(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1, BUILD_2], tmp_path)
+    before = fake_forge.package_version_digests(unique_repo, "app")
+    kept_digest = fetch_manifest_digest(ocx.registry, repository, BUILD_2)
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1)
+
+    assert result.returncode == 0, result.stderr
+    assert _tags(ocx.registry, repository) == [BUILD_2], "exactly the named tag left the registry"
+    assert _actions(_report(result)) == [(BUILD_1, "deleted", None)]
+    after = fake_forge.package_version_digests(unique_repo, "app")
+    assert kept_digest in after, "the other tag's version survives"
+    assert len(before) - len(after) == _deletes(fake_forge) >= 2, (
+        "the tagged index and the platform manifest only it lists were both deleted, nothing else"
+    )
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_dry_run_lists_and_deletes_nothing(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1, BUILD_2], tmp_path)
+    before = _tags(ocx.registry, repository)
+    versions = fake_forge.package_version_digests(unique_repo, "app")
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1, options=("--dry-run",))
+
+    assert result.returncode == 0, result.stderr
+    assert _actions(_report(result)) == [(BUILD_1, "would_delete", None)]
+    assert _tags(ocx.registry, repository) == before, "a dry run leaves the tag list equal"
+    assert fake_forge.package_version_digests(unique_repo, "app") == versions
+    assert _deletes(fake_forge) == 0
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_refuses_a_version_that_also_carries_a_durable_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1], tmp_path)
+    body, _ = fetch_manifest_raw(ocx.registry, repository, BUILD_1)
+    put_manifest(ocx.registry, repository, DURABLE, body, "application/vnd.oci.image.index.v1+json")
+    before = _tags(ocx.registry, repository)
+    assert before == sorted([BUILD_1, DURABLE])
+
+    for options in ((), ("--dry-run",)):
+        result = _forge_prune(ocx, fake_forge, repository, BUILD_1, options=options)
+
+        assert result.returncode == 81, result.stderr
+        assert f"also carries {DURABLE}" in result.stderr, "the refusal names the other tag"
+        assert _actions(_report(result)) == [(BUILD_1, "not_attempted", None)]
+        assert _tags(ocx.registry, repository) == before, "the durable tag's version was not deleted"
+    assert _deletes(fake_forge) == 0
+
+
+@pytest.mark.requires_testing_build
+@pytest.mark.parametrize("status", [401, 403])
+def test_forge_prune_without_delete_rights_exits_80(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge, status: int
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1], tmp_path)
+    fake_forge.packages_delete_status = status
+    before = _tags(ocx.registry, repository)
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1)
+
+    assert result.returncode == 80, result.stderr
+    assert _tags(ocx.registry, repository) == before
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_without_a_credential_exits_80_before_any_forge_request(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1], tmp_path)
+    before = _tags(ocx.registry, repository)
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1, credential=False)
+
+    assert result.returncode == 80, result.stderr
+    assert fake_forge.requests == [], "no request reached the forge"
+    assert _tags(ocx.registry, repository) == before
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_of_a_package_the_forge_does_not_know_exits_80(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = f"{unique_repo}/app"
+    _publish(ocx, repository, [BUILD_1], tmp_path)
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1)
+
+    assert result.returncode == 80, result.stderr
+    assert "lacks package read access" in result.stderr, "the refusal says the package may be hidden"
+    assert _deletes(fake_forge) == 0
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_against_a_spent_rate_limit_exits_75(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, fake_forge: FakeForge
+) -> None:
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1], tmp_path)
+    fake_forge.packages_delete_status = 429
+    before = _tags(ocx.registry, repository)
+
+    result = _forge_prune(ocx, fake_forge, repository, BUILD_1)
+
+    assert result.returncode == 75, result.stderr
+    assert _tags(ocx.registry, repository) == before
+
+
+def test_forge_gitlab_is_refused_with_a_usage_error(ocx: OcxRunner, unique_repo: str) -> None:
+    result = ocx.run(
+        "package", "prune", "--forge", "gitlab", "--force", f"{ocx.registry}/{unique_repo}", BUILD_1,
+        format="json", check=False,
+    )
+
+    assert result.returncode == 64, result.stderr
+    assert "480" in result.stderr, "the refusal names the tracking issue"
+
+
+@pytest.mark.requires_testing_build
+def test_forge_prune_of_a_host_only_the_index_names_exits_64_before_any_forge_request(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    fake_forge: FakeForge,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The index points the repository at the local registry, a host the operator never vouched for."""
+    _publish(ocx, unique_repo, [BUILD_1], tmp_path)
+    package = _indexed(ocx, index_server, unique_repo, {BUILD_1: True})
+    before = _tags(ocx.registry, unique_repo)
+
+    result = ocx.run(
+        "package",
+        "prune",
+        "--forge",
+        "github",
+        package,
+        BUILD_1,
+        format="json",
+        check=False,
+        env_overrides={
+            "__OCX_TESTING_GITHUB_API_URL": fake_forge.base_url,
+            f"OCX_AUTH_{re.sub(r'[^a-zA-Z0-9]', '_', ocx.registry)}_TOKEN": "test-forge-token",
+        },
+    )
+
+    assert result.returncode == 64, result.stderr
+    assert "index-supplied host" in result.stderr, "the refusal says why"
+    assert _deletes(fake_forge) == 0
+    assert fake_forge.requests == [], "no request reached the forge"
+    assert _tags(ocx.registry, unique_repo) == before

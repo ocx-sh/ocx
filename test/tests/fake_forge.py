@@ -31,7 +31,9 @@ import http.server
 import json
 import re
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 from collections.abc import Sequence
 from email.message import Message as EmailMessage
 from typing import Any, NamedTuple
@@ -107,6 +109,14 @@ _MERGE_UPSTREAM_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGM
 # `GET /users?username=<login>` (`fake_gitlab.py`), which is the bare `/users`
 # path with a query, so the two never collide.
 _USER_BY_LOGIN_RE = re.compile(rf"^/users/(?P<login>{_SEGMENT})$")
+# GitHub Packages, the surface `ocx package prune` deletes through. The package
+# segment keeps its percent-encoding: a nested package `org/app` arrives as `org%2Fapp`.
+_PACKAGE_VERSIONS_RE = re.compile(
+    rf"^/(?P<kind>orgs|users)/(?P<owner>{_SEGMENT})/packages/container/(?P<package>{_SEGMENT})/versions$"
+)
+_PACKAGE_VERSION_RE = re.compile(
+    rf"^/(?P<kind>orgs|users)/(?P<owner>{_SEGMENT})/packages/container/(?P<package>{_SEGMENT})/versions/(?P<id>[0-9]+)$"
+)
 
 
 class ForgeUser(NamedTuple):
@@ -211,6 +221,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except NotImplementedError as stub:
             self._reply_stub(stub)
 
+    def do_DELETE(self) -> None:
+        try:
+            self._route_delete()
+        except NotImplementedError as stub:
+            self._reply_stub(stub)
+
     def do_PATCH(self) -> None:
         try:
             self._route_patch()
@@ -245,6 +261,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         match = _USER_BY_LOGIN_RE.fullmatch(path)
         if match:
             self.server.handle_get_user_by_login(self, match.group("login"))
+            return
+
+        match = _PACKAGE_VERSIONS_RE.fullmatch(path)
+        if match:
+            self.server.handle_get_package_versions(
+                self, match.group("kind"), match.group("owner"), match.group("package"), query
+            )
             return
 
         match = _REPO_RE.fullmatch(path)
@@ -342,6 +365,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"message": "not found"})
 
+    def _route_delete(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        self.server.record("DELETE", path, self.path, self.headers)
+
+        match = _PACKAGE_VERSION_RE.fullmatch(path)
+        if match:
+            self.server.handle_delete_package_version(
+                self, match.group("kind"), match.group("owner"), match.group("package"), int(match.group("id"))
+            )
+            return
+
+        self._reply_json(404, {"message": "not found"})
+
     def _route_patch(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         self.server.record("PATCH", path, headers=self.headers)
@@ -412,6 +448,16 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         # endpoint at all (`UsersApiUnavailable`, C-009/C-027). `None` (default)
         # keeps every existing consumer's identity read working.
         self.users_api_status: int | None = None
+        # GitHub Packages: `(owner, package)` lowercased -> `(registry host:port, repository)`
+        # of the registry that holds the package's manifests. The version list is read
+        # live off that registry, so a delete the fake performs is visible to the
+        # confirmation probe `ocx package prune` makes afterwards. Seed through `seed_package`.
+        self.packages: dict[tuple[str, str], tuple[str, str]] = {}
+        # Owner login (lowercased) -> "Organization" | "User", the `type` of `GET /users/<owner>`.
+        self.owner_types: dict[str, str] = {}
+        # When set, every package version DELETE answers this status and deletes nothing —
+        # a token without delete rights (401/403).
+        self.packages_delete_status: int | None = None
 
         # Repo metadata: "owner/repo" -> {"full_name", "owner", "parent"}.
         self.repos: dict[str, dict[str, Any]] = {}
@@ -1018,10 +1064,135 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
                 "login": user.login,
                 "username": user.login,
                 "id": user.id,
-                "type": "Bot" if user.bot else "User",
+                "type": self.owner_types.get(user.login.lower()) or ("Bot" if user.bot else "User"),
                 "bot": user.bot,
             },
         )
+
+    def seed_package(
+        self,
+        owner: str,
+        package: str,
+        *,
+        registry: str,
+        repository: str,
+        owner_type: str = "Organization",
+        owner_id: int = 4242,
+    ) -> None:
+        """Register `owner/package` as a GitHub Packages container whose versions are
+        the manifests `registry`/`repository` holds, and `owner` as an account of
+        `owner_type` ("Organization" or "User")."""
+        self.seed_user(owner, owner_id)
+        with self.lock:
+            self.owner_types[owner.lower()] = owner_type
+            self.packages[(owner.lower(), package)] = (registry, repository)
+
+    def package_version_digests(self, owner: str, package: str) -> list[str]:
+        """Test-assertion helper: the digest of every version the package lists right now."""
+        with self.lock:
+            registry = self.packages[(owner.lower(), package)]
+        return [version["name"] for version in self._package_versions(*registry)]
+
+    def _registry_get(self, registry: str, repository: str, reference: str, method: str = "GET") -> tuple[int, dict[str, str], bytes]:
+        request = urllib.request.Request(
+            f"http://{registry}/v2/{repository}/manifests/{reference}",
+            method=method,
+            headers={
+                "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), error.read()
+
+    def _package_versions(self, registry: str, repository: str) -> list[dict[str, Any]]:
+        """Every manifest the registry holds for `repository` as a GitHub package version:
+        tagged manifests with their tags, plus the untagged platform manifests an image
+        index lists. Ordered by id, so paging is stable."""
+        status, _, body = self._registry_tags(registry, repository)
+        tags = json.loads(body).get("tags") or [] if status == 200 else []
+        tags_by_digest: dict[str, list[str]] = {}
+        children: set[str] = set()
+        for tag in tags:
+            status, headers, manifest = self._registry_get(registry, repository, tag)
+            if status != 200:
+                continue
+            digest = headers.get("Docker-Content-Digest") or "sha256:" + hashlib.sha256(manifest).hexdigest()
+            tags_by_digest.setdefault(digest, []).append(tag)
+            document = json.loads(manifest)
+            for entry in document.get("manifests") or []:
+                children.add(entry["digest"])
+        for child in children:
+            if child not in tags_by_digest and self._registry_get(registry, repository, child, "HEAD")[0] == 200:
+                tags_by_digest[child] = []
+        versions = [
+            {
+                "id": int(digest.split(":", 1)[1][:12], 16),
+                "name": digest,
+                "metadata": {"package_type": "container", "container": {"tags": sorted(tags)}},
+            }
+            for digest, tags in tags_by_digest.items()
+        ]
+        return sorted(versions, key=lambda version: version["id"])
+
+    def _registry_tags(self, registry: str, repository: str) -> tuple[int, dict[str, str], bytes]:
+        try:
+            with urllib.request.urlopen(f"http://{registry}/v2/{repository}/tags/list", timeout=10) as response:
+                return response.status, dict(response.headers), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), error.read()
+
+    def _package_for(self, kind: str, owner: str, package: str) -> tuple[str, str] | None:
+        """The registry behind `owner/package`, or None when this owner is not a `kind` account or holds no such package."""
+        with self.lock:
+            owner_type = self.owner_types.get(urllib.parse.unquote(owner).lower())
+            if (kind == "orgs") != (owner_type == "Organization"):
+                return None
+            return self.packages.get((urllib.parse.unquote(owner).lower(), urllib.parse.unquote(package)))
+
+    def handle_get_package_versions(
+        self, handler: _Handler, kind: str, owner: str, package: str, query: dict[str, list[str]]
+    ) -> None:
+        registry = self._package_for(kind, owner, package)
+        if registry is None:
+            handler._reply_json(404, {"message": "not found"})
+            return
+        per_page = int(query.get("per_page", ["30"])[0])
+        page = int(query.get("page", ["1"])[0])
+        versions = self._package_versions(*registry)
+        handler._reply_json(200, versions[(page - 1) * per_page : page * per_page])
+
+    def handle_delete_package_version(
+        self, handler: _Handler, kind: str, owner: str, package: str, version_id: int
+    ) -> None:
+        """`DELETE .../versions/<id>`: removes that version's manifest from the backing registry by digest.
+
+        The deletion is real, so the confirmation probe `ocx package prune` makes
+        afterwards sees the registry's own answer rather than the fake's."""
+        if self.packages_delete_status is not None:
+            handler._reply_json(self.packages_delete_status, {"message": "forbidden"})
+            return
+        registry = self._package_for(kind, owner, package)
+        if registry is None:
+            handler._reply_json(404, {"message": "not found"})
+            return
+        digest = next((v["name"] for v in self._package_versions(*registry) if v["id"] == version_id), None)
+        if digest is None:
+            handler._reply_json(404, {"message": "package version not found"})
+            return
+        request = urllib.request.Request(
+            f"http://{registry[0]}/v2/{registry[1]}/manifests/{digest}", method="DELETE"
+        )
+        try:
+            urllib.request.urlopen(request, timeout=10).close()
+        except urllib.error.HTTPError as error:
+            handler._reply_json(502, {"message": f"registry refused the delete: {error.code}"})
+            return
+        handler.send_response(204)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
 
     def handle_get_repo(self, handler: _Handler, owner: str, repo: str) -> None:
         full = f"{owner}/{repo}"

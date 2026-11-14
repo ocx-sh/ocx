@@ -183,7 +183,7 @@ Exits 0 when every attempted write succeeded. Exits 65 when a finding remains, i
 
 Exits 64 when a package names a digest or a tag that is not a version, or when `--tags-file` is given more than one package.
 
-`repair` writes by default, since `check` is already the read-only preview; `--dry-run` computes and reports the same plan. Identifier forms and scope are those of `check`.
+`repair` writes by default, since `check` is already the read-only preview; `--dry-run` computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag writes only the aliases that build owns: a pre-release build never moves a stable alias.
 
 For each broken alias it rebuilds the whole platform index entry from the same fold `check` diffs against. It preserves every observed entry the fold does not supersede.
 
@@ -199,7 +199,7 @@ There is no conditional-request guard, so avoid repairing a repository with a pu
 
 Reaching the public index with the fix is a second hop through `ocx package announce`. Refreshing one machine's local copy is `ocx index update`'s job.
 
-`--tags-file` records exactly the tags whose write landed (not `raced`, `refused` or `failed` ones), unioned with every tag an index-staleness finding names, so one file covers both hops. It is written on every run, empty included, so a workflow can feed it to `announce` unconditionally.
+`--tags-file` records the tags whose write landed (not `raced`, `refused` or `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for an alias or whole-graph request), unioned with every tag an index-staleness finding names, so one file covers both hops and a retry after a failed announce still lists the tags the first run moved. It is written on every run, empty included, so a workflow can feed it to `announce` unconditionally.
 
 A preview contributes no landed tag, and its plan is in the JSON report as each entry's `planned`.
 
@@ -472,7 +472,7 @@ Title, description and keywords for catalog display come from `ocx package descr
 
 Both keys are omitted when empty.
 
-`signatures` has one row per platform `--sign` signed, and `attestation` records the `--sbom` outcome (`status`, `predicate_type` and `signed`, or `kind` and `message` on failure). `aliases_written` lists the tags `--default` aliased onto the bare track.
+`signatures` has one row per platform `--sign` signed, and `attestation` records the published `--sbom` attestation (`status`, `predicate_type` and `signed`); a failed attestation emits the error document instead. `aliases_written` lists the tags `--default` aliased onto the bare track.
 
 ```text
 ocx package push [OPTIONS] [LAYERS]...
@@ -495,8 +495,8 @@ ocx package push [OPTIONS] [LAYERS]...
 | `--platform`, `-p` | `PLATFORM` | Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content) |
 | `--rekor-upload` |  | Record the signature in the Rekor transparency log |
 | `--rekor-url` | `URL` | Rekor transparency-log endpoint |
-| `--sbom` | `PATH` | After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not undo the push, is recorded in the report and sets the exit code |
-| `--sign` |  | Sign each platform manifest this push writes, inline. A failure does not undo the push, is recorded in the report and sets the exit code |
+| `--sbom` | `PATH` | Attest this CycloneDX SBOM against the pushed manifest, before any tag is written |
+| `--sign` |  | Sign each platform manifest this push writes, inline, before any tag is written |
 | `--signature-format` | `bundle\|simplesigning\|both` | Signature wire format: bundle (default), simplesigning, or both. A sidecar appends a layer, never replacing one; `attest` with no signing identity refuses it (exit 64) |
 | `--tags-file` | `PATH` | After a successful push, append the pushed tag and any cascade tags to this file, one per line (creating it if absent), so `ocx package announce --tags-file` can pick them up |
 

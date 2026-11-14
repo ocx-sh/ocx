@@ -314,6 +314,35 @@ pub enum PruneError {
         source: ClientError,
     },
 
+    /// A version the delete set needs also carries a tag outside the selection.
+    #[error("refusing to delete {tag} from {repository}: the same version also carries {other_tag}")]
+    #[exit(
+        PolicyBlocked,
+        slug = "prune_shared_version",
+        summary = "A version selected for deletion is shared with another tag"
+    )]
+    SharedVersion {
+        repository: String,
+        tag: String,
+        other_tag: String,
+    },
+
+    /// A forge deleter found a different build under a tag than the index row for it names.
+    #[error(
+        "refusing to delete {tag} from {repository}: the index lists it as {indexed} but the registry serves {served}; nothing was deleted; resync the index and retry"
+    )]
+    #[exit(
+        TempFail,
+        slug = "prune_index_stale",
+        summary = "The index row for a tag names a different build than the registry serves"
+    )]
+    IndexStale {
+        repository: String,
+        tag: String,
+        indexed: String,
+        served: String,
+    },
+
     /// A deleted tag was still served after every confirmation GET.
     #[error("{tag} is still present in {repository} after its delete; retry")]
     #[exit(
@@ -488,11 +517,22 @@ pub async fn locate(package: &OciIdentifier, index: Option<&OcxIndex>) -> Result
     })
 }
 
-/// Selects, runs the safeguard over the whole selection, then deletes: builds oldest first, the
-/// rolling tag last, each confirmed gone by a canonical GET.
+/// Selects, runs the safeguard over the whole selection, then deletes through the registry API:
+/// builds oldest first, the rolling tag last, each confirmed gone by a canonical GET.
 ///
 /// `client` must be pinned to `target.repository`'s host; every call it makes is canonical.
 pub async fn prune(client: &ocx_oci::Client, target: &PruneTarget, request: &PruneRequest) -> PruneRun {
+    prune_with(client, &RegistryTagDeleter { client }, target, request).await
+}
+
+/// [`prune`] with the deletion step swapped for `deleter`; selection and the safeguard still read
+/// through `client`.
+pub async fn prune_with(
+    client: &ocx_oci::Client,
+    deleter: &dyn TagDeleter,
+    target: &PruneTarget,
+    request: &PruneRequest,
+) -> PruneRun {
     let mut outcome = PruneOutcome {
         package: target.package.clone(),
         repository: target.repository.clone(),
@@ -506,8 +546,72 @@ pub async fn prune(client: &ocx_oci::Client, target: &PruneTarget, request: &Pru
         tags: Vec::new(),
         selected: false,
     };
-    let error = run(client, target, request, &mut outcome).await.err();
+    let error = run(client, deleter, target, request, &mut outcome).await.err();
     PruneRun { outcome, error }
+}
+
+/// What a [`TagDeleter`] is asked to remove from one repository.
+#[derive(Debug, Clone)]
+pub struct DeletePlan {
+    /// The repository the tags live in.
+    pub repository: OciIdentifier,
+    /// Tags to delete, in the order given.
+    pub tags: Vec<String>,
+    /// The digest the index row of a tag names, for each tag that has a row. A deleter that removes
+    /// a build rather than a tag refuses when the registry serves another one.
+    pub indexed: Vec<(String, Digest)>,
+    /// Report what would be deleted and delete nothing.
+    pub dry_run: bool,
+}
+
+/// What a [`TagDeleter`] did, grown tag by tag so a failure partway keeps what was already done.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteReport {
+    /// Tags this call deleted and confirmed gone.
+    pub deleted: Vec<String>,
+    /// Tags the registry already had no record of, confirmed gone.
+    pub absent: Vec<String>,
+    /// Tags a dry run would delete.
+    pub would_delete: Vec<String>,
+}
+
+/// The seam between prune and how a registry removes tags.
+///
+/// The registry-API deleter removes a tag directly; a forge deleter removes the package version that
+/// carries it, and refuses with [`PruneError::SharedVersion`] when that version carries another tag.
+/// Every deleter confirms a tag gone (see [`confirm_gone`]) before it reports it.
+#[async_trait::async_trait]
+pub trait TagDeleter: Send + Sync {
+    /// Deletes `plan.tags` from `plan.repository`, recording progress in `report`.
+    ///
+    /// # Errors
+    ///
+    /// [`PruneError::DeleteDenied`] when the credential lacks delete rights, [`PruneError::SharedVersion`]
+    /// when a version in the delete set carries a tag outside it. `report` keeps the tags finished
+    /// before the failure.
+    async fn delete(&self, plan: &DeletePlan, report: &mut DeleteReport) -> Result<(), PruneError>;
+}
+
+/// Deletes tags through the OCI distribution API.
+pub struct RegistryTagDeleter<'a> {
+    pub client: &'a ocx_oci::Client,
+}
+
+#[async_trait::async_trait]
+impl TagDeleter for RegistryTagDeleter<'_> {
+    async fn delete(&self, plan: &DeletePlan, report: &mut DeleteReport) -> Result<(), PruneError> {
+        for tag in &plan.tags {
+            if plan.dry_run {
+                report.would_delete.push(tag.clone());
+                continue;
+            }
+            match delete_and_confirm(self.client, &plan.repository, tag).await? {
+                PruneAction::Deleted => report.deleted.push(tag.clone()),
+                _ => report.absent.push(tag.clone()),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A selected tag's verdict before any DELETE.
@@ -521,6 +625,7 @@ enum Verdict {
 
 async fn run(
     client: &ocx_oci::Client,
+    deleter: &dyn TagDeleter,
     target: &PruneTarget,
     request: &PruneRequest,
     outcome: &mut PruneOutcome,
@@ -581,18 +686,44 @@ async fn run(
             not_in_index,
         });
     }
-    if request.dry_run {
-        return Ok(());
-    }
-
-    for (position, verdict) in verdicts.into_iter().enumerate() {
-        if verdict != Verdict::Delete {
-            continue;
-        }
+    let positions: Vec<usize> = verdicts
+        .iter()
+        .enumerate()
+        .filter_map(|(position, verdict)| (*verdict == Verdict::Delete).then_some(position))
+        .collect();
+    let plan = DeletePlan {
+        repository: target.repository.clone(),
+        tags: positions
+            .iter()
+            .map(|&position| outcome.tags[position].tag.clone())
+            .collect(),
+        indexed: positions
+            .iter()
+            .filter_map(|&position| {
+                let row = &outcome.tags[position];
+                row.in_root
+                    .then(|| row.digest.clone().map(|digest| (row.tag.clone(), digest)))?
+            })
+            .collect(),
+        dry_run: request.dry_run,
+    };
+    let mut report = DeleteReport::default();
+    let result = if plan.tags.is_empty() {
+        Ok(())
+    } else {
+        deleter.delete(&plan, &mut report).await
+    };
+    for position in positions {
         let row = &mut outcome.tags[position];
-        row.action = delete_and_confirm(client, &target.repository, &row.tag).await?;
+        if report.deleted.contains(&row.tag) {
+            row.action = PruneAction::Deleted;
+        } else if report.absent.contains(&row.tag) {
+            row.action = PruneAction::Absent;
+        } else if result.is_err() {
+            row.action = PruneAction::NotAttempted;
+        }
     }
-    Ok(())
+    result
 }
 
 /// The selected tags in processing order, each with its keep reason when `--keep-builds` spares it.
@@ -706,15 +837,27 @@ async fn delete_and_confirm(
         Err(error) => return Err(PruneError::Registry(error)),
     };
     // Checked after `AlreadyAbsent` too: a registry hiding a repository from this credential answers 404.
+    confirm_gone(client, repository, tag).await?;
+    Ok(match deleted {
+        DeleteOutcome::Deleted => PruneAction::Deleted,
+        DeleteOutcome::AlreadyAbsent => PruneAction::Absent,
+    })
+}
+
+/// GETs `tag` until the registry answers that it is gone, for registries whose tag index is
+/// eventually consistent.
+///
+/// # Errors
+///
+/// [`PruneError::StillPresent`] after [`CONFIRM_TRIES`] answers that it is there.
+pub async fn confirm_gone(client: &ocx_oci::Client, repository: &OciIdentifier, tag: &str) -> Result<(), PruneError> {
+    let reference = repository.clone_with_tag(tag);
     for attempt in 0..CONFIRM_TRIES {
         if attempt > 0 {
             tokio::time::sleep(CONFIRM_INTERVAL).await;
         }
         if let ManifestPresence::Absent(_) = client.probe_manifest_canonical(&reference).await? {
-            return Ok(match deleted {
-                DeleteOutcome::Deleted => PruneAction::Deleted,
-                DeleteOutcome::AlreadyAbsent => PruneAction::Absent,
-            });
+            return Ok(());
         }
     }
     Err(PruneError::StillPresent {

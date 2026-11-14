@@ -422,6 +422,7 @@ A transient failure; the same command may succeed on retry.
 | `observe_raced` | A tag appeared between the two reads of one announce |
 | `oidc_token_unavailable` | The CI provider's OIDC token endpoint is unreachable or overloaded |
 | `project_locked` | Another process holds the lock on ocx.toml |
+| `prune_index_stale` | The index row for a tag names a different build than the registry serves |
 | `prune_refused_pending` | The index still lists a tag prune would delete, pending an announce |
 | `prune_tag_still_present` | A deleted tag is still present in the registry |
 | `registry_transient` | A registry operation failed in a way a retry may clear |
@@ -619,6 +620,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 | `credential_helper_not_installed` | The credential helper is not installed, and an ocx started by a credential helper never downloads |
 | `frozen_refused` | The verb discovers new digests, which frozen mode forbids |
 | `index_resolution_blocked` | A local policy refused resolving through the index |
+| `no_verify_refused` | --no-verify was refused because the system config requires signatures |
 | `offline_attest_refused` | Attaching was refused because offline mode is on |
 | `offline_manifest_missing` | Offline mode and the manifest is not stored locally |
 | `offline_mode` | A network operation was attempted in offline mode |
@@ -627,6 +629,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 | `project_resolution_blocked` | A local policy refused resolving a binding |
 | `prune_no_index` | No index is configured to check the tags against |
 | `prune_refused_durable` | The index still lists a tag prune would delete, and the tag is durable |
+| `prune_shared_version` | A version selected for deletion is shared with another tag |
 | `publishers_required` | The registry requires index-declared publishers and the package has none |
 
 ## `82` Unsupported {#exit-82}
@@ -640,5 +643,5 @@ The operation as requested is not supported or not enabled by this registry, for
 | `forge_capability_unavailable` | The forge or project lacks a capability the transport needs |
 | `publishers_unrecognized` | The index lists publishers only a newer ocx understands |
 | `referrers_unsupported` | The registry supports neither the OCI Referrers API nor a referrers fallback tag |
-| `registry_delete_unsupported` | The registry does not delete tags |
+| `registry_delete_unsupported` | The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github |
 | `unsupported_key_backend` | A key reference names a recognised key backend this build does not implement |

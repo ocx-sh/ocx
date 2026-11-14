@@ -512,6 +512,22 @@ impl Client {
             .await
     }
 
+    /// [`fetch_manifest`](Self::fetch_manifest) accepting every manifest format, Docker lists included, for
+    /// a caller that must see what a version references whatever format it was pushed in.
+    pub async fn fetch_manifest_any_format(&self, identifier: &OciIdentifier) -> Result<(Digest, crate::Manifest)> {
+        let ref_ = self.read_reference(identifier, ReadAddressing::Canonical);
+        self.transport()
+            .ensure_auth(&ref_, crate::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
+        let (data, digest) = self
+            .transport()
+            .pull_manifest_raw(&ref_, crate::media_type::ANY_MANIFEST_TYPES)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
+        Ok((digest.try_into()?, parse_registry_manifest(&data)?))
+    }
+
     /// [`fetch_manifest`](Self::fetch_manifest) against a caller-chosen host; `Mirrored`
     /// only for a manifest no write is decided from.
     pub async fn fetch_manifest_addressed(
@@ -6451,6 +6467,7 @@ mod tests {
             "ocx_package/src/cascade/apply.rs",
             "ocx_package/src/cascade/equivalence.rs",
             "ocx_package/src/prune/tests.rs",
+            "ocx_announce/src/forge/github_packages.rs", // test-only stub manifest key
         ];
 
         // One walk for both gates, floored on what it READ. They were two
