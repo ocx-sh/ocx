@@ -130,6 +130,26 @@ def test_each_half_is_judged_on_its_own() -> None:
     assert (rows[0].signature, rows[0].sbom) == ("skipped", "attested")
 
 
+def test_a_platform_the_release_identity_signed_is_skipped_and_never_signed_again() -> None:
+    release = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"
+    ref = f"{PACKAGE}:0.6.6"
+    fake = FakeOcx({ref: ["linux/amd64"]}, {(ref, "linux/amd64"): {"sig", "sbom"}})
+    real = fake.__call__
+
+    def only_release(argv: list[str]) -> tuple[int, str, str]:
+        if "verify" in argv and IDENTITY in argv:
+            fake.calls.append(argv)
+            return 79, "", "no signatures found"
+        return real(argv)
+
+    rows = bf.backfill_tag(
+        only_release, PACKAGE, "v0.6.6", IDENTITY, ISSUER, False,
+        lambda version, platform: Path("sbom.json"), (release,),
+    )
+    assert fake.writes() == []
+    assert [(r.signature, r.sbom) for r in rows] == [("skipped", "skipped")]
+
+
 def test_a_dry_run_reports_and_writes_nothing() -> None:
     fake = FakeOcx({f"{PACKAGE}:0.6.6": ["linux/amd64"]})
     rows = tag_rows(fake, dry_run=True)

@@ -37,6 +37,8 @@ env:
   OIDC_ISSUER: https://token.actions.githubusercontent.com
   # The published ocx that drives the backfill; it needs `package sign`, `attest` and `verify` (0.6.0 and later).
   OCX_VERSION: '0.6.6'
+  # Same literal as `RELEASE_IDENTITY` in release.yml: what that workflow already signed is not signed again.
+  RELEASE_IDENTITY: ${{ github.server_url }}/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main
 
 concurrency:
   group: backfill
@@ -89,5 +91,6 @@ jobs:
           python3 scripts/backfill_release.py \
             --package "$PACKAGE" \
             --identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --also-trusted "$RELEASE_IDENTITY" \
             --issuer "$OIDC_ISSUER" \
             "${flags[@]}" "${tags[@]}"
