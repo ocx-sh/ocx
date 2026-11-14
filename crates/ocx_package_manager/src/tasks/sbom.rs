@@ -402,11 +402,8 @@ mod tests {
         );
     }
 
-    /// Two documents of one predicateType on the **same**
-    /// subject shadow neither. Multiple SBOMs per package is normal — different
-    /// formats, lifecycle phases, rescans — and there is no disambiguation
-    /// convention beyond `org.opencontainers.image.created`, so the existing
-    /// `MultipleAttestations` behaviour stands.
+    /// Two documents of one predicateType on the **same** subject shadow neither: the listing reports both,
+    /// and `ocx package sbom -o` picks the newest by transparency-log time, so this layer must not pre-select.
     #[test]
     fn two_documents_of_one_type_on_one_subject_shadow_neither() {
         let platform = report_from(scan_over(
