@@ -577,11 +577,6 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
     }
 }
 
-/// A failed `push --sbom` attestation, slugged as the JSON error envelope would slug it.
-pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::AttestationOutcome {
-    crate::api::data::push::AttestationOutcome::failed(error_slug("package attest", err), format!("{err:#}"))
-}
-
 /// The slug the JSON error envelope would give `err`: `error.detail`, else `error.kind`.
 ///
 /// Lifted from the rendered envelope, never re-derived, or a report and the envelope spell one
@@ -1139,40 +1134,6 @@ mod tests {
             assert!(seen.insert(exit), "exit code {exit} appeared twice");
         }
         assert_eq!(seen.len(), 4, "four kinds must not collapse onto fewer codes");
-    }
-
-    /// `failed_outcome` reports the same slug the error envelope would have,
-    /// so `push --sbom` and `attest` speak one vocabulary.
-    #[test]
-    fn failed_outcome_carries_the_envelope_slug() {
-        let err = attest_error_into_anyhow(wrapped(SignErrorKind::OfflineAttestRefused));
-        let outcome = failed_outcome(&err);
-        let json = serde_json::to_value(&outcome).expect("serialize outcome");
-        assert_eq!(json["status"], "failed");
-        assert_eq!(json["kind"], "offline_attest_refused");
-        assert!(
-            json["message"].as_str().expect("message").contains("offline"),
-            "message should name the refusal, got {}",
-            json["message"]
-        );
-    }
-
-    /// Registry-sourced text in a failure message is neutralized before it can
-    /// reach a terminal (CWE-150).
-    #[test]
-    fn failed_outcome_sanitizes_the_message() {
-        let hostile = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("parse");
-        let err = anyhow::Error::from(SignError::new(
-            hostile,
-            SignErrorKind::TargetNotFound {
-                platform: "linux/\u{1b}[31mamd64\u{202e}".into(),
-            },
-        ));
-        let outcome = failed_outcome(&err);
-        let json = serde_json::to_value(&outcome).expect("serialize outcome");
-        let message = json["message"].as_str().expect("message");
-        assert!(!message.contains('\u{1b}'), "escape survived: {message:?}");
-        assert!(!message.contains('\u{202e}'), "bidi override survived: {message:?}");
     }
 
     // ── `--predicate` read ───────────────────────────────────────────────────

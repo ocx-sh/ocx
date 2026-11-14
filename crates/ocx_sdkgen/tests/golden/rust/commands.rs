@@ -1283,6 +1283,8 @@ pub struct PackagePruneArgs {
     /// past selection, empty included and even when the run then fails partway, never on a dry run.
     /// A forced delete of a tag the index does not list writes nothing
     pub tags_file: Option<PathBuf>,
+    /// Delete through this forge's package API, for a registry that has no tag DELETE (`github`)
+    pub forge: Option<String>,
     /// Run the safeguard and report; delete nothing, write nothing
     pub dry_run: bool,
     /// Package whose tags to delete, e.g. `ocx.acme.example/acme/tool`
@@ -1303,6 +1305,7 @@ impl PackagePruneArgs {
         );
         argv.switch("force", self.force);
         argv.flag("tags-file", &self.tags_file, Presence::Optional, &[]);
+        argv.flag("forge", &self.forge, Presence::Optional, &["github", "gitlab"]);
         argv.switch("dry-run", self.dry_run);
         argv.positional("package", [&self.package], Presence::Required, Hyphen::Refuse);
         argv.positional("tags", &self.tags, Presence::Optional, Hyphen::Refuse);
@@ -1354,11 +1357,9 @@ pub struct PackagePushArgs {
     /// After a successful push, append the pushed tag and any cascade tags to this file, one per
     /// line (creating it if absent), so `ocx package announce --tags-file` can pick them up
     pub tags_file: Option<PathBuf>,
-    /// After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not
-    /// undo the push, is recorded in the report and sets the exit code
+    /// Attest this CycloneDX SBOM against the pushed manifest, before any tag is written
     pub sbom: Option<PathBuf>,
-    /// Sign each platform manifest this push writes, inline. A failure does not undo the push, is
-    /// recorded in the report and sets the exit code
+    /// Sign each platform manifest this push writes, inline, before any tag is written
     pub sign: bool,
     /// Fulcio CA endpoint (the keyless certificate issuer)
     pub fulcio_url: Option<String>,
@@ -1441,7 +1442,7 @@ impl PackageReceiptArgs {
 /// The arguments of `ocx package sbom`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageSbomArgs {
-    /// Narrow into one platform of an image index
+    /// Platform of an image index to act on; defaults to the host platform
     pub platform: Option<String>,
     /// Write the SBOM document to PATH ("-" for stdout). Several candidates of one type resolve to
     /// the newest; otherwise exit 65 (`multiple_attestations`), a terminal exits 64; under
@@ -1686,7 +1687,7 @@ impl PackageUninstallArgs {
 /// The arguments of `ocx package verify`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageVerifyArgs {
-    /// Narrow into one platform of an image index
+    /// Platform of an image index to act on; defaults to the host platform
     pub platform: Option<String>,
     /// Expected certificate SAN (exact match)
     pub certificate_identity: Option<String>,

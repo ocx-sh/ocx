@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import urllib.request
 from pathlib import Path
 
 from src import registry as reg
@@ -640,30 +641,26 @@ def test_offline_push_with_sbom_refuses_with_the_attest_slug_not_offline_mode(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# S-010 — a failed attestation does not roll back a push that already landed
+# S-010 — a failed attestation writes no tag and emits no push report
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_push_with_sbom_keeps_the_push_when_the_attestation_fails(
+def test_push_with_sbom_writes_no_tag_when_the_attestation_fails(
     ocx: OcxRunner,
     unique_repo: str,
     identity_token: Path,
     tmp_path: Path,
 ) -> None:
-    """S-010: push lands, attestation fails, the report is still owed and emitted.
+    """S-010: the attestation fails, so the push exits red with the error document and writes no tag.
 
-    A push is not undoable, so the failure mode worth guarding is a tool that
-    treats a late attestation error as a reason to report nothing: the operator
-    would then have a published package and no record of it. The report must
-    reach stdout, carry ``status: pushed`` and the failed attestation outcome,
-    and only then may the attestation failure own the exit code.
-
-    The attestation is made to fail hermetically by routing outbound HTTPS to a
-    closed local port. ``push --sbom`` has no endpoint flags and this test
-    writes no ``[trust.sigstore]`` config, so it addresses builtin public
-    Fulcio — through the dead proxy. The success half of S-010 is the
-    config-driven test below, the one lever that points push at the local
-    stack.
+    ``push`` stages the platform manifests by digest, attests them, and only
+    then writes the tags: a failed attestation must leave no tag pointing at
+    unattested content (issue 402). The attestation is made to fail
+    hermetically by routing outbound HTTPS to a closed local port.
+    ``push --sbom`` has no endpoint flags and this test writes no
+    ``[trust.sigstore]`` config, so it addresses builtin public Fulcio —
+    through the dead proxy. The success half of S-010 is the config-driven
+    test below, the one lever that points push at the local stack.
     """
     import socket
 
@@ -674,6 +671,12 @@ def test_push_with_sbom_keeps_the_push_when_the_attestation_fails(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
+    def registry_tags() -> set[str]:
+        url = f"http://{ocx.registry}/v2/{pkg.repo}/tags/list"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            return set(json.load(response).get("tags") or [])
+
+    before = registry_tags()
     result = ocx.run(
         *push_argv(pkg, tmp_path, sbom),
         check=False,
@@ -685,21 +688,11 @@ def test_push_with_sbom_keeps_the_push_when_the_attestation_fails(
     )
 
     assert result.returncode != 0, "a failed attestation must decide a non-zero exit"
-
-    report = json.loads(result.stdout)
-    assert report["status"] == "pushed", (
-        f"the push must not be rolled back by a later attestation failure, got "
-        f"{report.get('status')!r}"
-    )
-    assert report["attestation"]["status"] == "failed"
-    assert report["attestation"]["message"], "a failed outcome must say why"
-
-    # The push really landed: the manifest is resolvable in the registry, not
-    # merely claimed by a report that could have been assembled optimistically.
-    digest = reg.fetch_platform_manifest_digest(
-        ocx.registry, pkg.repo, pkg.tag, platform=current_platform(),
-    )
-    assert FULL_SHA256_DIGEST_RE.match(digest)
+    document = json.loads(result.stdout)
+    assert "status" not in document, f"a failed attestation must emit no push report, got {document!r}"
+    assert document["error"]["detail"] == "fulcio_unavailable"
+    after = registry_tags()
+    assert after == before, f"tags written by a push whose attestation failed: {sorted(after - before)}"
 
 
 def test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config(

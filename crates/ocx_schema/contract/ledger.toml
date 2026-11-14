@@ -28,3 +28,45 @@ subjects = ["package sbom"]
 rule = "semantic"
 pointer = "/root/commands/14/commands/17/args/1"
 reason = "several SBOM candidates of one type now resolve to the newest instead of exiting 65 (multiple_attestations)"
+
+[[break]]
+document = "cli"
+subjects = ["package verify"]
+rule = "semantic"
+pointer = "/root/commands/14/commands/22/args/0"
+reason = "an omitted --platform now selects the host platform of an image index instead of acting on no platform"
+
+[[break]]
+document = "cli"
+subjects = ["package sbom"]
+rule = "semantic"
+pointer = "/root/commands/14/commands/17/args/0"
+reason = "an omitted --platform now selects the host platform of an image index instead of acting on no platform"
+
+[[break]]
+document = "cli"
+subjects = ["package push"]
+rule = "semantic"
+pointer = "/root/commands/14/commands/15/args/10"
+reason = "a failed --sign or --sbom now writes no tag, emits no report and returns the error document instead of a report with a failed signature"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/378"
+reason = "registry_delete_unsupported names where tag deletion goes on ghcr.io: ocx package prune --forge github"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/AttestationStatus/x-ocx-enum/1"
+reason = "a failed attestation emits the error document, so the failed status no longer describes a landed push"
+
+[[break]]
+document = "reports"
+subjects = ["PushReport"]
+rule = "doc"
+pointer = "/$defs/PushReportRoot/properties/attestation"
+reason = "a failed attestation emits the error document instead of this report"

@@ -302,6 +302,10 @@
         "timestamp": {
           "type": "string",
           "description": "ISO-8601 commit timestamp (author date)."
+        },
+        "branch": {
+          "type": "string",
+          "description": "The branch the binary was built from, when known."
         }
       },
       "required": [
@@ -4068,7 +4072,7 @@
           "description": "One row per platform manifest `--sign` signed inline, in push order.\n\nEmpty (and omitted) without `--sign`. JSON only; a signing failure also\nreaches a plain caller on stderr. The image index is never listed:\nplatform manifest digests are final once pushed, but the index digest is\nrewritten on every platform merge, so `ocx package sign --tags-file`\nsigns it later."
         },
         "attestation": {
-          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone: a push\nthat lands and an attestation that then fails is a real state — the\nmanifest is immutable and OCI offers no un-push.",
+          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone. A failed\nattestation emits the error document instead of this report, so a printed\nreport carries `succeeded` today; `failed` stays so the schema covers it.",
           "$ref": "#/$defs/AttestationOutcome"
         }
       },
@@ -4321,7 +4325,7 @@
         },
         {
           "value": "failed",
-          "description": "The push landed and was NOT rolled back; the attestation did not."
+          "description": "The attestation was not published. The pushed manifest stays in the\nregistry; no tag was written after it."
         }
       ]
     },
@@ -9029,7 +9033,7 @@
           "description": "One row per platform manifest `--sign` signed inline, in push order.\n\nEmpty (and omitted) without `--sign`. JSON only; a signing failure also\nreaches a plain caller on stderr. The image index is never listed:\nplatform manifest digests are final once pushed, but the index digest is\nrewritten on every platform merge, so `ocx package sign --tags-file`\nsigns it later."
         },
         "attestation": {
-          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone: a push\nthat lands and an attestation that then fails is a real state — the\nmanifest is immutable and OCI offers no un-push.",
+          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone. A failed\nattestation emits the error document instead of this report, so a printed\nreport carries `succeeded` today; `failed` stays so the schema covers it.",
           "$ref": "#/$defs/AttestationOutcome"
         }
       },

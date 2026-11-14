@@ -295,6 +295,7 @@ no_project	UsageError	No ocx.toml exists in the working directory or any parent
 no_project_in	UsageError	The explicitly selected project directory holds no ocx.toml
 no_signatures_found	NotFound	The target has no signature referrers
 no_usable_bundle	NotFound	Referrers exist but none is a recognised Sigstore bundle
+no_verify_refused	PolicyBlocked	--no-verify was refused because the system config requires signatures
 non_utf8_wire_name	DataError	A local index path is not valid UTF-8
 noncanonical_platform_key	DataError	ocx.lock records a platform key not in canonical form
 not_a_manifest	DataError	The registry did not answer with a manifest
@@ -378,11 +379,13 @@ project_toml_invalid	ConfigError	ocx.toml or ocx.lock is not valid TOML of the e
 project_toml_serialize	ConfigError	A project file could not be serialized
 provenance_version_unsupported	UsageError	The provenance predicate type is older than SLSA v1.0
 prune_digest_tag	UsageError	A digest was given where prune takes a tag
+prune_index_stale	TempFail	The index row for a tag names a different build than the registry serves
 prune_no_index	PolicyBlocked	No index is configured to check the tags against
 prune_not_a_prerelease	UsageError	The --prerelease value is not a pre-release without a build
 prune_package_not_bare	UsageError	The package argument carries a tag or digest
 prune_refused_durable	PolicyBlocked	The index still lists a tag prune would delete, and the tag is durable
 prune_refused_pending	TempFail	The index still lists a tag prune would delete, pending an announce
+prune_shared_version	PolicyBlocked	A version selected for deletion is shared with another tag
 prune_tag_still_present	TempFail	A deleted tag is still present in the registry
 publisher_mismatch	PermissionDenied	No publisher listed by the index signed the package
 publishers_invalid	DataError	The index lists publishers that are malformed
@@ -403,7 +406,7 @@ referrers_unsupported	Unsupported	The registry supports neither the OCI Referrer
 referrers_unsupported	Unsupported	The registry supports neither the OCI Referrers API nor a referrers fallback tag
 registry_auth_failed	AuthError	The registry rejected the request's authentication
 registry_auth_failed	AuthError	The registry rejected the request's authentication
-registry_delete_unsupported	Unsupported	The registry does not delete tags
+registry_delete_unsupported	Unsupported	The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github
 registry_transient	TempFail	A registry operation failed in a way a retry may clear
 registry_unavailable	Unavailable	A registry operation failed in a way a retry does not clear
 registry_unreachable	Unavailable	The registry could not be reached

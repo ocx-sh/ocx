@@ -147,28 +147,28 @@ pub struct PackagePush {
     #[clap(long = "tags-file", value_name = "PATH")]
     tags_file: Option<std::path::PathBuf>,
 
-    /// After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not undo the push, is recorded in the report and sets the exit code
+    /// Attest this CycloneDX SBOM against the pushed manifest, before any tag is written
     #[arg(long_help = "\
-        After the push, attest this CycloneDX SBOM against the pushed manifest.\n\n\
+        Attest this CycloneDX SBOM against the pushed manifest.\n\n\
         Sugar for `ocx package attest --type cyclonedx` on the digest this push just wrote. The \
         file is read before the push, so a bad path costs no upload; the OIDC token comes from \
         OCX_IDENTITY_TOKEN or from ambient CI detection, as `ocx package attest` resolves it.\n\n\
-        A push that lands followed by an attestation that fails is not rolled back: a pushed \
-        manifest is immutable and OCI offers no un-push. The push report is still emitted, with the \
-        attestation outcome recorded, and the attestation failure decides the exit code.")]
+        Every tag is written after the attestation, so a push whose attestation fails writes no tag, \
+        emits no report and exits with the attestation failure; the manifest it pushed stays in the \
+        registry, reachable by digest only.")]
     #[clap(long = "sbom", value_name = "PATH")]
     sbom: Option<std::path::PathBuf>,
 
-    /// Sign each platform manifest this push writes, inline. A failure does not undo the push, is recorded in the report and sets the exit code
+    /// Sign each platform manifest this push writes, inline, before any tag is written
     #[arg(long_help = "\
         Sign each platform manifest this push writes, inline.\n\n\
         Opt-in: a push without it signs nothing. The signature covers the platform manifest, whose \
         digest is final the moment it is pushed -- never the image index, whose digest is rewritten \
         every time another platform merges into it. Sign the index afterwards with `ocx package \
         sign --tags-file`, using the file `--tags-file` wrote.\n\n\
-        Keyless by default; `--key` selects a key pair. A push that lands and then fails to sign is \
-        not rolled back: the push report is still emitted, with the per-platform signing outcome \
-        recorded, and the failure decides the exit code.")]
+        Keyless by default; `--key` selects a key pair. Every tag is written after the signature, so \
+        a push that fails to sign writes no tag, emits no report and exits with the signing failure; \
+        the unsigned manifest it pushed stays in the registry, reachable by digest only.")]
     #[clap(long = "sign")]
     sign: bool,
 
@@ -263,6 +263,19 @@ pub struct PackagePush {
         repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst ocx package push app:1.0.0 \
         ./layer.tar.gz:from=base-images/layer")]
     layers: Vec<LayerRef>,
+}
+
+/// The one platform manifest `--sbom` attests. A push stages exactly one platform, so any other count
+/// is refused rather than attesting an arbitrary manifest. The count is not user input, so a miss
+/// is a broken internal invariant (exit 1), not a usage error.
+fn sole_staged_digest(staged: &[(ocx_oci::Platform, ocx_oci::Digest)]) -> anyhow::Result<&ocx_oci::Digest> {
+    match staged {
+        [(_, digest)] => Ok(digest),
+        _ => Err(anyhow::anyhow!(
+            "--sbom attests exactly one platform manifest, but this push staged {}",
+            staged.len()
+        )),
+    }
 }
 
 impl PackagePush {
@@ -390,6 +403,46 @@ impl PackagePush {
         };
         let annotations = merge_annotations(generated, &self.annotation);
 
+        // Manifests by digest first, tags last: at every instant a tag is visible, each platform manifest
+        // it reaches already carries its signature and attestation, and a failed signing writes no tag.
+        let staged = publisher
+            .stage(&target, infos, &self.layers, build_meta.as_deref())
+            .await?;
+        let staged_digests = staged.platform_digests();
+
+        let mut signature_rows = None;
+        if let Some(options) = &signing
+            && self.sign
+        {
+            let signed = context
+                .manager()
+                .sign_platforms(&identifier, &staged_digests, options)
+                .await;
+            let mut rows = Vec::with_capacity(signed.len());
+            for (platform, outcome) in signed {
+                let result = outcome.map_err(package_sign_common::attest_error_into_anyhow)?.result;
+                // A `both` platform that lost one leg is a failed signing: its manifest stays tagless.
+                if result.first_failure().is_some() {
+                    let kind = result.legs.into_iter().find_map(|leg| leg.outcome.err());
+                    return Err(ocx_sign::sign::SignError::new(
+                        identifier.clone(),
+                        kind.expect("`first_failure` found a failed leg"),
+                    )
+                    .into());
+                }
+                let signature = package_sign_common::signature_report(&identifier, Some(&platform), result);
+                rows.push(SignedPlatformReport::completed(platform, signature));
+            }
+            signature_rows = Some(rows);
+        }
+
+        let mut attestation = None;
+        if let Some(predicate) = sbom_predicate {
+            let options = signing.expect("--sbom resolves the signing options above");
+            let digest = sole_staged_digest(&staged_digests)?;
+            attestation = Some(Self::attest_sbom(&context, &identifier, digest, options, predicate).await?);
+        }
+
         let outcome = if self.cascade || self.deprecated_c {
             let existing_tags = publisher
                 .list_tags(target.clone())
@@ -398,29 +451,10 @@ impl PackagePush {
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher
-                .push_cascade(
-                    &target,
-                    infos,
-                    &self.layers,
-                    existing_versions,
-                    build_meta.as_deref(),
-                    keep_tag,
-                    self.default,
-                    &annotations,
-                )
+                .publish_cascade(&staged, existing_versions, keep_tag, self.default, &annotations)
                 .await?
         } else {
-            publisher
-                .push(
-                    &target,
-                    infos,
-                    &self.layers,
-                    build_meta.as_deref(),
-                    keep_tag,
-                    self.default,
-                    &annotations,
-                )
-                .await?
+            publisher.publish(&staged, keep_tag, self.default, &annotations).await?
         };
 
         // No `__ocx.keep.*` tags: announce drops them, so the file would name tags never announced.
@@ -429,71 +463,15 @@ impl PackagePush {
         pushed_tags.extend(outcome.aliases_written.iter().cloned());
         refresh_pushed_pins(&context, &publisher, &identifier, &pushed_tags).await;
 
-        // Platform manifests, never the index, whose digest a later platform merge rewrites.
-        let platform_digests = outcome.platform_digests.clone();
         // `--build-timestamp` rewrites the tag at publish time, so the report names the tag written, not the input.
         let pushed = identifier.clone_with_tag(&outcome.primary_tag);
         let mut report =
             crate::api::data::push::PushReport::from_outcome(pushed, outcome).with_annotations(annotations);
-        // Post-push failures are never rolled back: each becomes a report row plus a log line.
-        let mut failures: Vec<ocx_exit::ExitCode> = Vec::new();
-
-        if let Some(options) = &signing
-            && self.sign
-        {
-            let signed = context
-                .manager()
-                .sign_platforms(&identifier, &platform_digests, options)
-                .await;
-            let mut rows = Vec::with_capacity(signed.len());
-            for (platform, outcome) in signed {
-                rows.push(match outcome {
-                    Ok(signed) => {
-                        // A `both` platform that lost one leg fails but still reports the leg that landed.
-                        let result = signed.result;
-                        let leg = result.first_failure().map(|kind| {
-                            (
-                                package_sign_common::leg_exit_code(kind),
-                                package_sign_common::leg_slug(kind),
-                                kind.to_string(),
-                            )
-                        });
-                        let signature = package_sign_common::signature_report(&identifier, Some(&platform), result);
-                        match leg {
-                            Some((code, slug, message)) => {
-                                failures.push(code);
-                                SignedPlatformReport::failed(platform, Some(signature), slug, message)
-                            }
-                            None => SignedPlatformReport::completed(platform, signature),
-                        }
-                    }
-                    Err(error) => {
-                        let error = package_sign_common::attest_error_into_anyhow(error);
-                        failures.push(crate::exit::classify_library_error(error.as_ref()));
-                        log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{error:#}")));
-                        SignedPlatformReport::failed(
-                            platform,
-                            None,
-                            package_sign_common::error_slug("package push", &error),
-                            format!("{error:#}"),
-                        )
-                    }
-                });
-            }
+        if let Some(rows) = signature_rows {
             report = report.with_signatures(rows);
         }
-
-        // Folded into the report, never raised: the push already landed and its report is owed.
-        if let Some(predicate) = sbom_predicate {
-            let options = signing.expect("--sbom resolves the signing options above");
-            match Self::attest_sbom(&context, &identifier, &platform, options, predicate).await {
-                Ok(outcome) => report = report.with_attestation(outcome),
-                Err(err) => {
-                    report = report.with_attestation(package_sign_common::failed_outcome(&err));
-                    failures.push(crate::exit::classify_library_error(err.as_ref()));
-                    log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{err:#}")));
-                }
-            }
+        if let Some(attestation) = attestation {
+            report = report.with_attestation(attestation);
         }
         context.api().report(&report)?;
 
@@ -508,8 +486,7 @@ impl PackagePush {
             return Err(error);
         }
 
-        // Returned, not raised: stdout already holds the report, so an error envelope would be suppressed.
-        Ok(ExitCode::from(package_sign_common::sweep_exit_code(&failures)))
+        Ok(ExitCode::SUCCESS)
     }
 
     /// Resolves the one option set both `--sign` and `--sbom` sign under.
@@ -553,8 +530,8 @@ impl PackagePush {
         })
     }
 
-    /// Attests `predicate` as a CycloneDX SBOM against the manifest this push wrote for `platform`,
-    /// resolved through `identifier`, never a keep tag (`--no-keep-tag` may have suppressed it).
+    /// Attests `predicate` as a CycloneDX SBOM against the platform manifest `digest`, staged but not
+    /// yet tagged, so addressed by digest alone.
     ///
     /// # Errors
     ///
@@ -562,17 +539,19 @@ impl PackagePush {
     async fn attest_sbom(
         context: &crate::app::Context,
         identifier: &ocx_oci::PackageRef,
-        platform: &ocx_oci::Platform,
+        digest: &ocx_oci::Digest,
         options: ocx_package_manager::SignOptions,
         predicate: Vec<u8>,
     ) -> anyhow::Result<crate::api::data::push::AttestationOutcome> {
         use ocx_sign::attest::predicate::PredicateType;
 
+        // Tag dropped: the tag does not resolve yet, and a later platform merge rewrites its index.
+        let pinned = identifier.clone_with_digest(digest.clone()).without_tag();
         let result = context
             .manager()
             .attest_one(
-                identifier,
-                Some(platform),
+                &pinned,
+                None,
                 ocx_package_manager::AttestOptions {
                     key: options.key,
                     rekor_upload: options.rekor_upload,
@@ -651,45 +630,28 @@ async fn refresh_pushed_pins(
 }
 
 #[cfg(test)]
-mod stderr_neutralization_tests {
-    //! `push` is the one command that logs a failure *and* keeps going: the
-    //! push already landed, so an inline-signing or attestation failure is
-    //! reported rather than returned, and `main.rs`'s boundary log — the only
-    //! other place a cause chain reaches the terminal — never sees these
-    //! chains at all. That makes each of these sites a terminal boundary in
-    //! its own right (CWE-150): a registry-served error body quotes names read
-    //! off wire documents, and `tracing-subscriber` passes `\n`, `\r`, NUL and
-    //! the whole `Cf` bidi set straight through.
+mod sbom_target_tests {
+    use super::sole_staged_digest;
 
-    /// Every `log::error!` in this module's production half neutralizes what
-    /// it interpolates.
-    ///
-    /// Written per call site rather than as a count budget: comparing totals
-    /// (`log::error!` count == `sanitize_for_terminal` count) is satisfied by
-    /// one raw call plus one unrelated sanitized call elsewhere in the file,
-    /// which is exactly the shape that shipped. The non-zero assertion is the
-    /// other half — a needle that silently stops matching still reports green.
+    fn staged(count: usize) -> Vec<(ocx_oci::Platform, ocx_oci::Digest)> {
+        let digest =
+            ocx_oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .expect("fixture digest parses");
+        (0..count).map(|_| (ocx_oci::Platform::any(), digest.clone())).collect()
+    }
+
     #[test]
-    fn every_stderr_log_neutralizes_its_cause_chain() {
-        let production = include_str!("package_push.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the module has a non-test half");
-        let sites: Vec<&str> = production
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .filter(|line| line.contains("log::error!"))
-            .collect();
-        assert!(
-            !sites.is_empty(),
-            "the needle stopped matching — this guard would now pass on any code at all"
-        );
-        for site in sites {
-            assert!(
-                site.contains("sanitize_for_terminal"),
-                "an unsanitized cause chain reaches the terminal here: {}",
-                site.trim()
-            );
+    fn exactly_one_staged_platform_is_attested() {
+        let one = staged(1);
+        assert_eq!(sole_staged_digest(&one).expect("one platform"), &one[0].1);
+    }
+
+    #[test]
+    fn zero_or_several_staged_platforms_are_a_generic_failure() {
+        for count in [0, 2] {
+            let error = sole_staged_digest(&staged(count)).expect_err("not exactly one");
+            assert!(error.to_string().contains("--sbom"), "{error}");
+            assert_eq!(crate::exit::classify_error(error.as_ref()), ocx_exit::ExitCode::Failure);
         }
     }
 }

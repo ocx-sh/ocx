@@ -7530,6 +7530,41 @@
                 "help": "Append each gone tag the index lists, one per line, for `ocx package announce --tags-file`. Creates the file if absent and keeps the tags already in it. Written on every run that gets past selection, empty included and even when the run then fails partway, never on a dry run. A forced delete of a tag the index does not list writes nothing"
               },
               {
+                "id": "forge",
+                "long": "forge",
+                "value": {
+                  "type": "choice",
+                  "choices": [
+                    {
+                      "value": "github",
+                      "hidden": false
+                    },
+                    {
+                      "value": "gitlab",
+                      "hidden": false
+                    }
+                  ]
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Delete through this forge's package API, for a registry that has no tag DELETE (`github`)"
+              },
+              {
                 "id": "dry_run",
                 "long": "dry-run",
                 "value": {
@@ -7766,7 +7801,7 @@
               "package",
               "push"
             ],
-            "version": 1,
+            "version": 2,
             "summary": "Publish a package's layers and metadata to a registry",
             "hidden": false,
             "external_subcommands": false,
@@ -8069,7 +8104,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "After the push, attest this CycloneDX SBOM against the pushed manifest. A failure does not undo the push, is recorded in the report and sets the exit code"
+                "help": "Attest this CycloneDX SBOM against the pushed manifest, before any tag is written"
               },
               {
                 "id": "sign",
@@ -8096,7 +8131,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Sign each platform manifest this push writes, inline. A failure does not undo the push, is recorded in the report and sets the exit code"
+                "help": "Sign each platform manifest this push writes, inline, before any tag is written"
               },
               {
                 "id": "fulcio_url",
@@ -8493,7 +8528,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Narrow into one platform of an image index"
+                "help": "Platform of an image index to act on; defaults to the host platform"
               },
               {
                 "id": "output",
@@ -9811,7 +9846,7 @@
               "package",
               "verify"
             ],
-            "version": 1,
+            "version": 2,
             "summary": "Verify a published package's Sigstore signature (keyless, via OCI Referrers)",
             "hidden": false,
             "external_subcommands": false,
@@ -9846,7 +9881,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Narrow into one platform of an image index"
+                "help": "Platform of an image index to act on; defaults to the host platform"
               },
               {
                 "id": "certificate_identity",

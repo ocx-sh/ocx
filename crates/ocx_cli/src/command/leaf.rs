@@ -315,7 +315,7 @@ impl Leaf {
             ),
             Self::PackagePull => (1, const { &[OutputMode::report::<data::paths::Paths>()] }),
             Self::PackagePush => (
-                1,
+                2,
                 const {
                     &[
                         OutputMode::report::<data::push::PushReport>(),
@@ -361,7 +361,7 @@ impl Leaf {
             ),
             Self::PackageUninstall => (1, const { &[OutputMode::report::<data::removed::Removed>()] }),
             Self::PackageVerify => (
-                1,
+                2,
                 const { &[OutputMode::report::<data::verification::VerificationReport>()] },
             ),
             Self::PackageWhich => (1, const { &[OutputMode::report::<data::paths::LocatedPaths>()] }),

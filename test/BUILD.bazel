@@ -306,6 +306,7 @@ acceptance_suite(
         "tests/test_lazy_loading.py": ["tests/test_patches.py"],
         "tests/test_project_env.py": ["//crates/ocx_schema:ocx_schema_bin"],
         "tests/test_purge.py": ["tests/test_assembly.py"],
+        "tests/test_push_sign_order.py": ["tests/test_push.py"],
         "tests/test_scenarios_smoke.py": [":scenario_scripts"],
         "tests/test_schema.py": ["//website:src/public/schemas/metadata/v1.json"],
         "tests/test_state_providers.py": _PROJECT_TOOLCHAIN + [":recording_sources"],

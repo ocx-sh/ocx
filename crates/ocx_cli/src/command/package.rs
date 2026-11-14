@@ -254,8 +254,8 @@ pub enum Package {
         platform keyed by platform, never the index digest. It also reports `annotations_written`, \
         the annotations that landed on the index. Both keys are omitted when empty.\n\n\
         `signatures` has one row per platform `--sign` signed, and `attestation` records the \
-        `--sbom` outcome (`status`, `predicate_type` and `signed`, or `kind` and `message` on \
-        failure). `aliases_written` lists the tags `--default` aliased onto the bare track.")]
+        published `--sbom` attestation (`status`, `predicate_type` and `signed`); a failed \
+        attestation emits the error document instead. `aliases_written` lists the tags `--default` aliased onto the bare track.")]
     Push(super::package_push::PackagePush),
     /// Print the build receipt `ocx package create` wrote beside a bundle
     #[command(long_about = "\

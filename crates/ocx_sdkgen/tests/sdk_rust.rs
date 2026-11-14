@@ -420,7 +420,7 @@ mod fake_child {
         for _ in 0..2 {
             let refused = ocx.package_push(&push_args()).expect_err("the version differs");
             assert!(
-                matches!(&refused, Error::ContractMismatch { subject, expected: 1, found: 2 } if subject.contains("package push")),
+                matches!(&refused, Error::ContractMismatch { subject, expected, found } if subject.contains("package push") && *found == *expected + 1),
                 "{refused:?}"
             );
         }
