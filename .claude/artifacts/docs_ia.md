@@ -880,6 +880,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | user-guide.mdx | guides/manage-config-centrally.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/verify-installs.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/pin-signer-identity.mdx | how-to | everyday | everyday | settings |
+| (split from guides/pin-signer-identity.mdx) | guides/declare-publishers.mdx | how-to | everyday | everyday | settings |
 | in-depth/self-hosted-sigstore.md | guides/self-hosted-sigstore.md | how-to | everyday | explanation | settings |
 | in-depth/indices.md | guides/serve-an-index.md | how-to | everyday | explanation | settings |
 | user-guide.mdx | guides/update-ocx.mdx | how-to | everyday | everyday | settings |
