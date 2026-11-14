@@ -5,7 +5,7 @@ lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:c0dc166ac07493f7f0fa4eec633276e411024e8290cec940cffc270798882f8f"
 generated_by = "grim 0.14.3"
-generated_at = "2026-10-25T08:44:02Z"
+generated_at = "2026-11-14T10:40:51Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -219,7 +219,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "rust-quality"
-pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:44ad99505fd8e655f18e1cfaf7aecd6ab1ea99038e4ce815c6ef6006b49e9d2f"
+pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:083595eda2b89b416560ceecabf692807a0833481846b5056bac6c746b05c834"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
 
@@ -266,7 +266,7 @@ id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
 name = "code-docs-essentials"
 repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:300035d09cfadca25ce5f4c54df877ba86d19f4fdc8be59f2a3979316465e945"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:183da12123e068eb066bd211bd837e4a8fcd5f2de1f1db222b3c34e0b740039a"
 
 [[bundle.member]]
 kind = "skill"
@@ -282,7 +282,7 @@ id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 name = "docs-essentials"
 repo = "ghcr.io/ocx-sh/lore/docs-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:d8b090ccb9c7871b4fb03b7f1671a9464bf8d0a07e6d1ee8733a25ac79ae9c38"
+pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:21469c134d44ace8bc6f0d2468aadb972394c29aaf0deb0d52b33636832abb6d"
 
 [[bundle.member]]
 kind = "skill"
@@ -380,7 +380,7 @@ id = "ghcr.io/michael-herwig/arcana/nox-review:latest"
 name = "python-essentials"
 repo = "ghcr.io/ocx-sh/lore/python-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:d24b327100ec8d56b6ffb3c79d95ecbbddd3d630f64c9fae8a07f2074f332f98"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:a5d599b8a5e890a58bc1fa76b22239321adf63f54a825673a03f6f9e43084603"
 
 [[bundle.member]]
 kind = "skill"
@@ -406,7 +406,7 @@ id = "ghcr.io/ocx-sh/lore/python-quality:latest"
 name = "rust-essentials"
 repo = "ghcr.io/ocx-sh/lore/rust-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:59e4de7d30af4ab105ab3c4e1652fd2fcee00d6ab942e0090139b3aa134922f5"
+pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:cf23f23d5d652853ddce8d219dc7c9b6949ad0d5b87765dae652f91b52511a5f"
 
 [[bundle.member]]
 kind = "skill"
@@ -478,7 +478,7 @@ id = "ghcr.io/ocx-sh/lore/shell-quality:latest"
 name = "typescript-essentials"
 repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:af27f2ad8b40ca2fa3276e143b1866fd899b719487484a7c2a857f48475ad7b7"
+pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:e0446fdfa48ee779e3d3a31c74efdcebf1f557f91c7f1939d548fdf3d0e6c9b4"
 
 [[bundle.member]]
 kind = "skill"

@@ -28,12 +28,10 @@ own. The two structural defects look opposite and need opposite fixes:
 
 ```bash
 # Free-function clusters: which modules thread the same params?
-rg -o --no-filename '^\s*(pub(\(crate\))?\s+)?(async\s+)?fn\s+\w+\(([^,)]+,\s*[^,)]+)' --type rust --glob '!external/**' . \
-  | sed -E 's/.*fn \w+\(//' | sort | uniq -c | sort -rn | head
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -o -E -e '^[[:space:]]*(pub(\(crate\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[[:alnum:]_]+\(([^,)]+,[[:space:]]*[^,)]+)' -- | sed -E 's/.*fn [[:alnum:]_]+\(//' | sort | uniq -c | sort -rn | head
 
 # Impl sprawl: which type absorbed everything?
-rg -o --no-filename '^impl(<[^>]*>)?\s+[A-Za-z_]\w*' --type rust --glob '!external/**' . \
-  | rg -v ' for ' | sort | uniq -c | sort -rn | head
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -o -E -e '^impl(<[^>]*>)?[[:space:]]+[A-Za-z_][[:alnum:]_]*' -- | sed -E 's/^[^:]*://' | grep -v -F -e ' for ' | sort | uniq -c | sort -rn | head
 ```
 
 A type with dozens of `impl` blocks across dozens of files needs
@@ -158,7 +156,7 @@ you are moving, plus rows elsewhere naming that module; a pair appearing
 both ways is the cycle.
 
 ```bash
-rg -o 'use crate::[a-z_]+' --type rust --glob '!external/**' . | sort -u
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -o -E -e 'use crate::[a-z_]+' -- | sort -u
 ```
 
 1. Create the crate; add it to `[workspace.members]` and

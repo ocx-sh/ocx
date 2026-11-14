@@ -52,27 +52,56 @@ chain. `#[error(transparent)]` is the correct spelling for a pass-through.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| ERR-01 | Subsystem modules return a concrete `thiserror` enum. `anyhow::Error` appears only in `main.rs`, `app::run`, and the command handlers directly beneath them — `anyhow` in a reusable module destroys downstream `match`-ability and exit-code classification. | `rg -l --type rust anyhow -g '!external/**' -g '!main.rs' -g '!app.rs' -g '!**/command/**' .` — every hit is a candidate downgrade | MUST |
-| ERR-02 | Every public error enum carries `#[non_exhaustive]` — adding a variant to an exhaustive public enum is a semver break. | `rg -B2 --type rust --glob '!external/**' 'pub enum \w*Error' .` — the attribute precedes each | MUST |
-| ERR-03 | Every variant wrapping another error carries `#[source]` (or `#[from]`, which implies it). Never `#[error("{0}")]` on a wrapped error without it — `source()` then returns `None`, and both `{err:#}` rendering and downcast classification silently lose the inner error. | `rg -A2 --type rust --glob '!external/**' '#\[error\("\{0\}"\)\]' .` — each hit has `#[source]`/`#[from]` on the field, or is `#[error(transparent)]` | MUST |
-| ERR-04 | Never `map_err` a source into a `String`-carrying variant, and never store `error.to_string()` in a field — stringifying erases the source chain and all downcast ability. | `rg --type rust --glob '!external/**' 'map_err.*to_string\(\)' .` empty | MUST |
+| ERR-01 | Subsystem modules return a concrete `thiserror` enum. `anyhow::Error` appears only in `main.rs`, `app::run`, and the command handlers directly beneath them — `anyhow` in a reusable module destroys downstream `match`-ability and exit-code classification. | see block ERR-01 — every hit is a candidate downgrade | MUST |
+| ERR-02 | Every public error enum carries `#[non_exhaustive]` — adding a variant to an exhaustive public enum is a semver break. | see block ERR-02 — the attribute precedes each | MUST |
+| ERR-03 | Every variant wrapping another error carries `#[source]` (or `#[from]`, which implies it). Never `#[error("{0}")]` on a wrapped error without it — `source()` then returns `None`, and both `{err:#}` rendering and downcast classification silently lose the inner error. | see block ERR-03 — each hit has `#[source]`/`#[from]` on the field, or is `#[error(transparent)]` | MUST |
+| ERR-04 | Never `map_err` a source into a `String`-carrying variant, and never store `error.to_string()` in a field — stringifying erases the source chain and all downcast ability. | see block ERR-04 → empty | MUST |
 | ERR-07 | Use `#[from]` only when the variant needs nothing beyond the source. The moment a path, URL, digest or identifier matters, write an explicit named-field variant and `map_err` it in — a `#[from]` field can hold only the source, so taking it drops the call-site context. | Review each `#[from] io::Error`-shaped variant: can the message name *which* file or URL? If not it is under-specified | MUST |
 | ERR-08 | Keep `Err` payloads small; box anything past 128 bytes. `Result<T, E>` is sized to its largest variant in every frame it crosses, including the `Ok` path. | `cargo clippy --workspace --all-targets -- -D clippy::result_large_err` | SHOULD |
-| ERR-25 | Do not add `eyre`, `color-eyre`, `miette`, `ariadne`, `snafu` or `error-stack`. Span diagnostics pay only when there is user-authored source text to point into; a `Diagnostic` derive with no `#[label]` is a heavier `thiserror`. | `rg -e miette -e eyre -e snafu -e error-stack -e ariadne -g 'Cargo.toml' -g '!external/**' .` empty | SHOULD |
+| ERR-25 | Do not add `eyre`, `color-eyre`, `miette`, `ariadne`, `snafu` or `error-stack`. Span diagnostics pay only when there is user-authored source text to point into; a `Diagnostic` derive with no `#[label]` is a heavier `thiserror`. | see block ERR-25 → empty | SHOULD |
+
+```sh
+CHECKS=.claude/rules/rust-quality/checks
+# ERR-01
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' ':(exclude,glob)**/main.rs' ':(exclude,glob)**/app.rs' ':(exclude,glob)**/command/**' | xargs -0 -r grep -l -E -e 'anyhow' --
+# ERR-02
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | PAT='pub enum [[:alnum:]_]*Error' B=2 xargs -0 -r awk -f "$CHECKS/context.awk" --
+# ERR-03
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | PAT='#\[error\("\{0\}"\)\]' A=2 xargs -0 -r awk -f "$CHECKS/context.awk" --
+# ERR-04
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'map_err.*to_string\(\)' --
+# ERR-25
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/Cargo.toml' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'miette' -e 'eyre' -e 'snafu' -e 'error-stack' -e 'ariadne' --
+```
 
 ## Messages and Reporting
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| ERR-05 | `#[error("…")]` text and `anyhow` context strings are lowercase, unpunctuated, and never open with `error:`/`failed:`. Acronyms keep canonical case (`JSON`, `I/O`, `TLS`, `SHA-256`). The string must compose when nested inside a `{err:#}` chain. | `rg --type rust --glob '!external/**' -e '#\[error\("[A-Z][a-z]' -e '#\[error\(".*[.!]"\)' .` empty — the trailing `[a-z]` mechanizes the acronym allowlist, since `JSON`/`TLS`/`I/O` never continue lowercase; `rg -i --type rust --glob '!external/**' -e '\.context\(.*"error' -e '\.context\(.*"failed' .` empty | MUST |
+| ERR-05 | `#[error("…")]` text and `anyhow` context strings are lowercase, unpunctuated, and never open with `error:`/`failed:`. Acronyms keep canonical case (`JSON`, `I/O`, `TLS`, `SHA-256`). The string must compose when nested inside a `{err:#}` chain. | see block ERR-05 → empty — the trailing `[a-z]` mechanizes the acronym allowlist, since `JSON`/`TLS`/`I/O` never continue lowercase; see block ERR-05 (2) → empty | MUST |
 | ERR-06 | A variant's `Display` says only what `source()` does not. Never interpolate the source's text *and* return it from `source()` — a reporter walking the chain then prints the same sentence twice. | `#[error("…: {source}")]` or `#[error("…: {0}")]` on a variant that also has `#[source]` is the violation; drop the interpolation | MUST |
-| ERR-16 | Sanitize the rendered chain for terminal control, `\r`, NUL and bidi (`Cf`) characters at the single stderr boundary, before printing. Chains quote package names, tags and paths read off the wire (CWE-150). | `rg -n --type rust --glob '!external/**' -e 'eprintln!' -e 'writeln!\(io::stderr' .` — each routes through the sanitizer, pinned by a same-file structural test | MUST |
-| ERR-17 | Credentials are `secrecy::SecretString`, never `String`. Any URL or path from auth-bearing config is scrubbed of userinfo and query string before interpolation — redaction by construction beats remembering it at each `{:?}`. | `rg -n --type rust --glob '!external/**' -e 'token: (Option<)?String' -e 'password: (Option<)?String' -e 'secret: (Option<)?String' -e 'api_key: (Option<)?String' -e 'bearer: (Option<)?String' .` — a secret-named binding held as a bare `String` is a candidate leak; the bare words match every doc comment, so anchor on the type and restrict to added lines on a diff | MUST |
+| ERR-16 | Sanitize the rendered chain for terminal control, `\r`, NUL and bidi (`Cf`) characters at the single stderr boundary, before printing. Chains quote package names, tags and paths read off the wire (CWE-150). | see block ERR-16 — each routes through the sanitizer, pinned by a same-file structural test | MUST |
+| ERR-17 | Credentials are `secrecy::SecretString`, never `String`. Any URL or path from auth-bearing config is scrubbed of userinfo and query string before interpolation — redaction by construction beats remembering it at each `{:?}`. | see block ERR-17 — a secret-named binding held as a bare `String` is a candidate leak; the bare words match every doc comment, so anchor on the type and restrict to added lines on a diff | MUST |
 | ERR-18 | A function that returns `Result` does not also log the error it returns. Log once, where propagation stops. | Any `tracing::error!`/`warn!` immediately preceding a `return Err`/`?` on the same value | MUST |
-| ERR-19 | No silent swallowing. `let _ = result`, `.ok()`, and `unwrap_or_default()` on a `Result` each need a comment naming why the error is discardable — otherwise it is indistinguishable from a forgotten error path. The comment makes the discard visible and proves nothing about it: presence is not ownership (`code-docs` GRD-07). | `rg -n --type rust --glob '!external/**' -e 'let _ = ' -e '\.ok\(\);' -e 'unwrap_or_default\(\)' .` — a hit with no adjacent rationale is a finding; restrict to added lines on a diff | MUST |
-| ERR-20 | Print with the alternate format `{err:#}`, never `{err}` — the plain form shows only the top message and throws the chain away. | `rg -n -e '\{err\}' -e '\{e\}' -g 'main.rs' -g '**/cli/**' -g '!external/**' .` empty | SHOULD |
+| ERR-19 | No silent swallowing. `let _ = result`, `.ok()`, and `unwrap_or_default()` on a `Result` each need a comment naming why the error is discardable — otherwise it is indistinguishable from a forgotten error path. The comment makes the discard visible and proves nothing about it: presence is not ownership (`code-docs` GRD-07). | see block ERR-19 — a hit with no adjacent rationale is a finding; restrict to added lines on a diff | MUST |
+| ERR-20 | Print with the alternate format `{err:#}`, never `{err}` — the plain form shows only the top message and throws the chain away. | see block ERR-20 → empty | SHOULD |
 | ERR-21 | A batch over N targets collects `Vec<(Target, Error)>` and reports "K of N failed" with per-item detail; it does not `?` out at the first failure. | A bare `?` in a loop body over packages/targets is the violation | SHOULD |
 | ERR-22 | Public fallible functions carry a `# Errors` doc section; public functions that can panic carry `# Panics`. | `cargo clippy --workspace -- -W clippy::missing_errors_doc -W clippy::missing_panics_doc` | SHOULD |
+
+```sh
+# ERR-05
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e '#\[error\("[A-Z][a-z]' -e '#\[error\(".*[.!]"\)' --
+# ERR-05 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -i -E -e '\.context\(.*"error' -e '\.context\(.*"failed' --
+# ERR-16
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'eprintln!' -e 'writeln!\(io::stderr' --
+# ERR-17
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'token: (Option<)?String' -e 'password: (Option<)?String' -e 'secret: (Option<)?String' -e 'api_key: (Option<)?String' -e 'bearer: (Option<)?String' --
+# ERR-19
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'let _ = ' -e '\.ok\(\);' -e 'unwrap_or_default\(\)' --
+# ERR-20
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/main.rs' ':(glob)**/cli/**' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e '\{err\}' -e '\{e\}' --
+```
 
 ## Panics and Exit Codes
 
@@ -83,15 +112,37 @@ numeric exit-code table is pinned in the sibling rule
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| ERR-09 | `[lints.clippy]` sets `unwrap_used`, `expect_used` and `panic` to at least `warn` for non-test code, with `allow-unwrap-in-tests`/`allow-expect-in-tests` in `clippy.toml`. All three are restriction-group and allow-by-default — a clean clippy run proves nothing without them. | `rg -A8 '\[lints\.clippy\]' --glob '**/Cargo.toml' --glob '!external/**' .` shows all three — the glob covers a workspace root and its member manifests alike, then `cargo clippy --workspace --all-targets -- -D warnings` | MUST |
-| ERR-10 | An `expect` message states the invariant that guarantees success, never the failure. `expect("hardcoded IP address is valid")`, not `expect("parse failed")`. Prefer `expect` over `unwrap` in production code. | `rg -ni --type rust --glob '!external/**' -e '\.expect\("failed' -e '\.expect\("could not' -e '\.expect\("error' .` empty — those openings name the failure, not the invariant | MUST |
-| ERR-11 | `main` returns `std::process::ExitCode`. `std::process::exit` never appears in library code, and in `main` only as the terminal statement — it skips every destructor on every live stack, dropping lockfile release, temp-dir cleanup and buffered writes. | `rg -n --type rust --glob '!external/**' 'process::exit' .` — every hit is the last statement of a `main` | MUST |
-| ERR-12 | One `#[repr(u8)] #[non_exhaustive] ExitCode` enum per workspace, sysexits-aligned, with `From<ExitCode> for std::process::ExitCode`. A separate binary with its own taxonomy needs an ADR. | `rg -n --type rust --glob '!external/**' 'ExitCode::from\([0-9]' .` empty; `rg -n --type rust --glob '!external/**' 'enum ExitCode' .` returns exactly one | MUST |
-| ERR-13 | Derive the exit code from the error's **structure** — an exhaustive `match`, or a `ClassifyExitCode`-style trait walked over the chain. Never from `Display` text. Either mechanism is fine; string matching is not. Wording changes, taxonomy must not. | `rg -e 'to_string\(\).*contains' -e 'Display.*match' -g '**/cli/**' .` at the classification site empty | MUST |
+| ERR-09 | `[lints.clippy]` sets `unwrap_used`, `expect_used` and `panic` to at least `warn` for non-test code, with `allow-unwrap-in-tests`/`allow-expect-in-tests` in `clippy.toml`. All three are restriction-group and allow-by-default — a clean clippy run proves nothing without them. | see block ERR-09, which shows all three — the glob covers a workspace root and its member manifests alike, then `cargo clippy --workspace --all-targets -- -D warnings` | MUST |
+| ERR-10 | An `expect` message states the invariant that guarantees success, never the failure. `expect("hardcoded IP address is valid")`, not `expect("parse failed")`. Prefer `expect` over `unwrap` in production code. | see block ERR-10 → empty — those openings name the failure, not the invariant | MUST |
+| ERR-11 | `main` returns `std::process::ExitCode`. `std::process::exit` never appears in library code, and in `main` only as the terminal statement — it skips every destructor on every live stack, dropping lockfile release, temp-dir cleanup and buffered writes. | see block ERR-11 — every hit is the last statement of a `main` | MUST |
+| ERR-12 | One `#[repr(u8)] #[non_exhaustive] ExitCode` enum per workspace, sysexits-aligned, with `From<ExitCode> for std::process::ExitCode`. A separate binary with its own taxonomy needs an ADR. | see block ERR-12 → empty; see block ERR-12 (2), which returns exactly one | MUST |
+| ERR-13 | Derive the exit code from the error's **structure** — an exhaustive `match`, or a `ClassifyExitCode`-style trait walked over the chain. Never from `Display` text. Either mechanism is fine; string matching is not. Wording changes, taxonomy must not. | see block ERR-13 at the classification site empty | MUST |
 | ERR-14 | Classification matches are exhaustive — no `_ => Failure` wildcard, or a new variant ships silently mis-classified. Intended fall-throughs are listed explicitly and locked by a test. | `_ =>` arms in `classify*` fns; each existing fall-through has a pinning test | SHOULD |
-| ERR-15 | Never assign 101, or any code ≥ 128, to a modeled error path — 101 is Rust's panic signal and 128+N is signal-derived. Forwarding a *child's* `128 + signum` status is the sole exception. | `rg -n --type rust --glob '!external/**' -e 'ExitCode::from\(101' -e 'process::exit\(101' -e '= 101' .` empty outside panic-hook code | MUST |
-| ERR-23 | `catch_unwind` appears only at an FFI boundary or a documented supervised-worker boundary. Never around `main`, never as control flow — unwinding across FFI is UB, and a panic laundered into error text hides a broken invariant from CI and from anything watching exit 101. | `rg -n --type rust --glob '!external/**' 'catch_unwind' .` — each hit adjoins an `extern "C"` boundary or a worker-supervision comment | MUST |
-| ERR-24 | A poisoned `Mutex` is propagated (`.expect("<invariant>")`) or explicitly recovered via `into_inner()`/`clear_poison()`. Never downgrade a poison to a default — poisoning means a thread already panicked mid-mutation. | `rg -n --type rust --glob '!external/**' -e '\.lock\(\)\.unwrap_or' -e '\.lock\(\)\.ok\(\)' -e '\.lock\(\)\.map_or' -e 'let Ok\(.*\.lock\(\)' .` — each hit is a violation unless it recovers via `into_inner()`; a bare `.lock()` grep is 90% compliant noise | SHOULD |
+| ERR-15 | Never assign 101, or any code ≥ 128, to a modeled error path — 101 is Rust's panic signal and 128+N is signal-derived. Forwarding a *child's* `128 + signum` status is the sole exception. | see block ERR-15 → empty outside panic-hook code | MUST |
+| ERR-23 | `catch_unwind` appears only at an FFI boundary or a documented supervised-worker boundary. Never around `main`, never as control flow — unwinding across FFI is UB, and a panic laundered into error text hides a broken invariant from CI and from anything watching exit 101. | see block ERR-23 — each hit adjoins an `extern "C"` boundary or a worker-supervision comment | MUST |
+| ERR-24 | A poisoned `Mutex` is propagated (`.expect("<invariant>")`) or explicitly recovered via `into_inner()`/`clear_poison()`. Never downgrade a poison to a default — poisoning means a thread already panicked mid-mutation. | see block ERR-24 — each hit is a violation unless it recovers via `into_inner()`; a bare `.lock()` grep is 90% compliant noise | SHOULD |
+
+```sh
+CHECKS=.claude/rules/rust-quality/checks
+# ERR-09
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/Cargo.toml' ':(exclude,glob)external/**' | PAT='\[lints\.clippy\]' A=8 xargs -0 -r awk -f "$CHECKS/context.awk" --
+# ERR-10
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -i -E -e '\.expect\("failed' -e '\.expect\("could not' -e '\.expect\("error' --
+# ERR-11
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'process::exit' --
+# ERR-12
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'ExitCode::from\([0-9]' --
+# ERR-12 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'enum ExitCode' --
+# ERR-13
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/cli/**' | xargs -0 -r grep -H -n -E -e 'to_string\(\).*contains' -e 'Display.*match' --
+# ERR-15
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'ExitCode::from\(101' -e 'process::exit\(101' -e '= 101' --
+# ERR-23
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e 'catch_unwind' --
+# ERR-24
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.rs' ':(exclude,glob)external/**' | xargs -0 -r grep -H -n -E -e '\.lock\(\)\.unwrap_or' -e '\.lock\(\)\.ok\(\)' -e '\.lock\(\)\.map_or' -e 'let Ok\(.*\.lock\(\)' --
+```
 
 ## What Agents Get Wrong Here
 

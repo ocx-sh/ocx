@@ -74,6 +74,13 @@ next section, where each rule carries its rationale and verification.
 Read the file for the work you are about to do, not for the topic it is
 filed under. One level deep; these files do not point at each other.
 
+A verification cell that reads `see block ID` points at the fenced `sh`
+block under the same table. Run it from the repository root: file lists come
+from `git ls-files`, so `external/` stays out, and the commands need neither
+ripgrep nor GNU-only grep options. Empty output passes unless the row says
+otherwise. A block that calls an awk script sets `CHECKS` to
+`.claude/rules/rust-quality/checks`.
+
 | Doing… | Read |
 |---|---|
 | Adding a type, trait, or module; moving code between them; touching crate boundaries | [rust-quality/architecture.md](rust-quality/architecture.md) |
