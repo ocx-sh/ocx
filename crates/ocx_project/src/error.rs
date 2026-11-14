@@ -14,9 +14,9 @@ use ocx_oci::package_ref::error::IdentifierError;
 pub enum Error {
     /// A project-tier operation failed on a specific file.
     // Boxed: inline, `ProjectError` pushes this enum past clippy's `result_large_err` limit on Windows.
-    #[error("{0}")]
+    #[error(transparent)]
     #[exit(delegate = 0.kind)]
-    Project(#[source] Box<ProjectError>),
+    Project(Box<ProjectError>),
     /// An OCI client failure during lock resolution. Carried, not flattened:
     /// its transient/terminal split is what separates exit 69 from 74.
     #[error(transparent)]
@@ -105,7 +105,8 @@ impl std::fmt::Display for ProjectError {
 
 impl std::error::Error for ProjectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.kind)
+        // `Display` already prints the kind, so linking it here would render it twice in a chain walk.
+        self.kind.source()
     }
 }
 
