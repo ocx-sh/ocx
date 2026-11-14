@@ -28,6 +28,10 @@ pub struct RegistryConfig {
     /// SSRF escape hatch for this namespace's physical registry hosts. Each
     /// entry is an exact hostname or a CIDR block whose resolved addresses skip
     /// the default-on private/loopback/link-local/metadata refusal.
+    ///
+    /// A hostname entry also lets `ocx package prune --forge github` delete through the GitHub
+    /// Enterprise packages API of a `containers.<host>` registry that this namespace's index names.
+    /// Only an exact hostname vouches for that; a CIDR block does not.
     // An index root's `repository` pointer is remote-controlled, so the refusal runs before any fetch.
     pub trusted_hosts: Option<Vec<String>>,
 

@@ -879,17 +879,19 @@ def test_forge_gitlab_is_refused_with_a_usage_error(ocx: OcxRunner, unique_repo:
 
 
 @pytest.mark.requires_testing_build
-def test_forge_prune_of_a_host_only_the_index_names_exits_64_before_any_forge_request(
+def test_forge_prune_of_an_index_named_host_listed_in_trusted_hosts_deletes_through_the_forge(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
     fake_forge: FakeForge,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """The index points the repository at the local registry, a host the operator never vouched for."""
-    _publish(ocx, unique_repo, [BUILD_1], tmp_path)
-    package = _indexed(ocx, index_server, unique_repo, {BUILD_1: True})
-    before = _tags(ocx.registry, unique_repo)
+    """The fixture lists the local registry in `trusted_hosts`; an unlisted host is refused in the unit tests.
+
+    On loopback the SSRF exemption and the vouch are the same entry, so the refusal cannot be reached here.
+    """
+    repository = _forge_package(ocx, fake_forge, unique_repo, [BUILD_1], tmp_path)
+    package = _indexed(ocx, index_server, repository, {BUILD_1: True})
 
     result = ocx.run(
         "package",
@@ -906,8 +908,7 @@ def test_forge_prune_of_a_host_only_the_index_names_exits_64_before_any_forge_re
         },
     )
 
-    assert result.returncode == 64, result.stderr
-    assert "index-supplied host" in result.stderr, "the refusal says why"
-    assert _deletes(fake_forge) == 0
-    assert fake_forge.requests == [], "no request reached the forge"
-    assert _tags(ocx.registry, unique_repo) == before
+    assert result.returncode == 0, result.stderr
+    assert _actions(_report(result)) == [(BUILD_1, "deleted", None)]
+    assert _deletes(fake_forge) >= 1
+    assert _tags(ocx.registry, repository) == []
