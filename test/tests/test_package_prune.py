@@ -806,7 +806,7 @@ def test_forge_prune_refuses_a_version_that_also_carries_a_durable_tag(
 
         assert result.returncode == 81, result.stderr
         assert f"also carries {DURABLE}" in result.stderr, "the refusal names the other tag"
-        assert _actions(_report(result)) == [(BUILD_1, "not_attempted", None)]
+        assert _actions(_report(result)) == [(BUILD_1, "refused", "shared_version")]
         assert _tags(ocx.registry, repository) == before, "the durable tag's version was not deleted"
     assert _deletes(fake_forge) == 0
 

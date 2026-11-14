@@ -7981,6 +7981,8 @@ pub enum PruneReason {
     Durable,
     /// The registry has it but the index does not list it.
     NotInIndex,
+    /// The version carrying it also carries a tag outside the selection.
+    SharedVersion,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -7993,6 +7995,7 @@ impl PruneReason {
             Self::Rolling => "rolling",
             Self::Durable => "durable",
             Self::NotInIndex => "not_in_index",
+            Self::SharedVersion => "shared_version",
             Self::Unknown(value) => value,
         }
     }
@@ -8004,6 +8007,7 @@ impl PruneReason {
             "rolling" => Self::Rolling,
             "durable" => Self::Durable,
             "not_in_index" => Self::NotInIndex,
+            "shared_version" => Self::SharedVersion,
             _ => Self::Unknown(value),
         }
     }
