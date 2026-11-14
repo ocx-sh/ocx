@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:11f56886e137c1e6d89956df2c2ff43d3d5c65360e292e2bae59d944a284ed26"
-generated_by = "ocx 0.6.6"
-generated_at = "2026-11-13T16:55:07Z"
+declaration_hash = "sha256:dfa4ee82a3824310b58b52fb03d7683f1397d6a1eca05018a2c25843c16e9a6d"
+generated_by = "ocx 0.6.5"
+generated_at = "2026-11-14T10:35:23Z"
 
 [[tool]]
 name = "actionlint"
@@ -307,12 +307,12 @@ group = "test"
 repository = "ocx.sh/ocx/cli"
 
 [tool.platforms]
-"darwin/amd64" = "sha256:42e9fc9007aa1e70bde87005ae89edbce418b0a24b48efd4c9f9215774a11c56"
-"darwin/arm64" = "sha256:d9a5d3f92806762f11139bb3be69e154b4487a472d55f23e346274d44c704847"
-"linux/amd64" = "sha256:853a43059f4205e84dc2f9bb62210cbd93159268e1d8fe3a54837332e4936250"
-"linux/arm64" = "sha256:d8e1a580de62e284623da0182e3021ce8458276b2c10331f8e3ba061c458af54"
-"windows/amd64" = "sha256:f771f61a7d596a99dd518a95df56d86aa7bdbda5bd6d4992ae072101c61c368d"
-"windows/arm64" = "sha256:68a8425d23d519707723fda1c0ad6467302e4e453d5fdb42e190adb1aeb978aa"
+"darwin/amd64" = "sha256:ed31cc21b565ebf3605ee6670eb2f6989a83e0207c5ecb321885ceed1ef38a29"
+"darwin/arm64" = "sha256:66e68581b559fe0b2f8dbc2c50008b75d14a2249d1e9546ffe8cefa96f209b15"
+"linux/amd64" = "sha256:206ff08e346a69b41e5ceb08143d6742d0818166f55fe483ffdec682a05f5025"
+"linux/arm64" = "sha256:cd7b151b1c7ef8f3d3cac4995273f79c8ba365f39cf60733dec961fd55e4b18c"
+"windows/amd64" = "sha256:6365531e757749f8a23cc3bc5c998d9a50721aca546dfd363bb7be1bc78dff0d"
+"windows/arm64" = "sha256:8fc6efe56134eaad06107f5ced14d05ff8793ff67778fac3f6736b9feb75ff9c"
 
 [[tool]]
 name = "zot"
