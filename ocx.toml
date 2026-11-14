@@ -27,7 +27,7 @@ actionlint = "ocx.sh/actionlint/actionlint:1.7.12"
 
 [group.test.tools]
 zot = "ocx.sh/project-zot/zot:2.1.21"
-ocx-previous = "ocx.sh/ocx/cli:0.6.5_20261007132152"
+ocx-previous = "ocx.sh/ocx/cli:0.6.6_20261112175442"
 
 [group.build.tools]
 
