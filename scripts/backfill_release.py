@@ -3,16 +3,18 @@
 # Copyright 2026 The OCX Authors
 """Sign and attest versions that were published before `release.yml` did.
 
-    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--dry-run] [TAG...]
+    scripts/backfill_release.py --package REF --identity SAN --issuer URL [--also-trusted SAN]... [--limit N] [--dry-run] [TAG...]
 
 For every git tag `vX.Y.Z` (the arguments, else every version tag of the checkout) and every
 platform of the package tag `X.Y.Z`: a signature by IDENTITY is added when `ocx package verify`
 finds none, and a CycloneDX attestation by IDENTITY when `verify --attestation --type cyclonedx`
 finds none. Each is judged on its own, so a platform that only lacks its SBOM gets only that, and
-a second run changes nothing. A tag is never moved: both add referrers to the digest the tag
+a second run changes nothing. A signature or attestation by any `--also-trusted` identity (the release
+workflow's, say) counts as done too, so it is not added a second time. A tag is never moved: both add referrers to the digest the tag
 already names. The tag is resolved to each platform's manifest digest once, and every check and
 write then names `REF@DIGEST`, so a tag that moves mid-run cannot send a signature to a manifest
-that was never checked. `--dry-run` reports what would change and writes nothing.
+that was never checked. `--limit N` stops after N tags that needed a signature or an attestation and
+reports how many tags were left; a rerun converges because the work done is skipped. `--dry-run` reports what would change and writes nothing.
 
 The SBOM of a version is generated from the source at its git tag by `generate_sbom`, the one
 function a repository with another build overrides; it returns the path of the CycloneDX JSON.
@@ -40,7 +42,7 @@ from pathlib import Path
 ABSENT = {77, 79}
 TAG = re.compile(r"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z]+)?$")
 
-# OCI platform -> the Rust triple the version shipped for it; Windows archives are named `msvc`.
+# OCI platform -> the Rust triple an already published version shipped for it; those Windows archives are named `msvc`.
 TRIPLE = {
     "linux/amd64": "x86_64-unknown-linux-musl",
     "linux/arm64": "aarch64-unknown-linux-musl",
@@ -64,6 +66,13 @@ def run_ocx(argv: list[str]) -> tuple[int, str, str]:
     return done.returncode, done.stdout, done.stderr
 
 
+# Statuses that mean a signature or an attestation was needed (written, planned, or failed on its SBOM);
+# "skipped" and "no package" are the only ones that cost nothing, and FAILED is counted because the
+# network work was spent.
+SIGNATURE_WORK = {"signed", "would sign", "FAILED"}
+SBOM_WORK = {"attested", "would attest", "FAILED"}
+
+
 @dataclass(frozen=True)
 class Row:
     tag: str
@@ -71,6 +80,10 @@ class Row:
     signature: str
     sbom: str
     digest: str = "-"
+
+    @property
+    def did_work(self) -> bool:
+        return self.signature in SIGNATURE_WORK or self.sbom in SBOM_WORK
 
 
 def version_tags(root: Path) -> list[str]:
@@ -104,24 +117,29 @@ def platforms_of(run: Run, ref: str) -> dict[str, str]:
     return dict(sorted(found.items()))
 
 
-def has(run: Run, subject: str, identity: str, issuer: str, attestation: bool) -> bool:
-    """Whether IDENTITY has signed (or attested) `subject`, a digest-pinned platform manifest."""
-    argv = [
-        "package",
-        "verify",
-        "--certificate-identity",
-        identity,
-        "--certificate-oidc-issuer",
-        issuer,
-    ]
-    if attestation:
-        argv += ["--attestation", "--type", "cyclonedx"]
-    code, _, err = run([*argv, subject])
-    if code == 0:
-        return True
-    if code in ABSENT:
-        return False
-    raise BackfillError(f"verifying {subject} exited {code}: {err.strip()[:200]}")
+def has(
+    run: Run, subject: str, identities: list[str], issuer: str, attestation: bool
+) -> bool:
+    """Whether any of IDENTITIES has signed (or attested) `subject`, a digest-pinned platform manifest."""
+    for identity in identities:
+        argv = [
+            "package",
+            "verify",
+            "--certificate-identity",
+            identity,
+            "--certificate-oidc-issuer",
+            issuer,
+        ]
+        if attestation:
+            argv += ["--attestation", "--type", "cyclonedx"]
+        code, _, err = run([*argv, subject])
+        if code == 0:
+            return True
+        if code not in ABSENT:
+            raise BackfillError(
+                f"verifying {subject} exited {code}: {err.strip()[:200]}"
+            )
+    return False
 
 
 def triple_of(platform: str) -> str:
@@ -188,17 +206,19 @@ def backfill_tag(
     issuer: str,
     dry_run: bool,
     sbom: Callable[[str, str], Path],
+    also_trusted: tuple[str, ...] = (),
 ) -> list[Row]:
     version = tag.removeprefix("v")
     ref = f"{package}:{version}"
     digests = platforms_of(run, ref)
     if not digests:
         return [Row(tag, "-", "no package", "no package")]
+    identities = [identity, *also_trusted]
     rows = []
     for platform, digest in digests.items():
         # The digest, never the tag: `-p` has nothing to narrow on a single manifest.
         subject = f"{ref}@{digest}"
-        if has(run, subject, identity, issuer, attestation=False):
+        if has(run, subject, identities, issuer, attestation=False):
             signature = "skipped"
         elif dry_run:
             signature = "would sign"
@@ -209,7 +229,7 @@ def backfill_tag(
                     f"signing {subject} ({platform}) exited {code}: {err.strip()[:200]}"
                 )
             signature = "signed"
-        if has(run, subject, identity, issuer, attestation=True):
+        if has(run, subject, identities, issuer, attestation=True):
             attested = "skipped"
         elif dry_run:
             attested = "would attest"
@@ -266,7 +286,21 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         "--identity", required=True, help="the certificate identity this run signs as"
     )
     parser.add_argument(
+        "--also-trusted",
+        action="append",
+        default=[],
+        metavar="SAN",
+        help="another certificate identity whose signature or attestation counts as done (repeatable)",
+    )
+    parser.add_argument(
         "--issuer", required=True, help="the OIDC issuer of that identity"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="stop after N tags that needed a signature or an attestation; unlimited when unset",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -275,6 +309,9 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         help="git tags (vX.Y.Z); every version tag of the checkout when none",
     )
     args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        print("backfill_release: --limit must be at least 1", file=sys.stderr)
+        return 64
     bad = [t for t in args.tags if not TAG.match(t)]
     if bad:
         print(f"backfill_release: not a version tag: {bad}", file=sys.stderr)
@@ -286,8 +323,16 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
         return 64
     rows: list[Row] = []
     failed = False
+    worked = 0
     with tempfile.TemporaryDirectory() as scratch:
-        for tag in tags:
+        for done, tag in enumerate(tags):
+            if args.limit is not None and worked >= args.limit:
+                print(
+                    f"backfill_release: --limit {args.limit} reached, {len(tags) - done} tags remain; dispatch again",
+                    file=sys.stderr,
+                )
+                break
+            before = len(rows)
             try:
                 rows += backfill_tag(
                     run,
@@ -299,11 +344,14 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
                     lambda version, platform: generate_sbom(
                         root, version, triple_of(platform), Path(scratch)
                     ),
+                    tuple(args.also_trusted),
                 )
             except (BackfillError, subprocess.CalledProcessError) as error:
                 print(f"backfill_release: {tag}: {error}", file=sys.stderr)
                 rows.append(Row(tag, "-", "FAILED", "FAILED"))
                 failed = True
+            if any(r.did_work for r in rows[before:]):
+                worked += 1
     failed = failed or any("FAILED" in (r.signature, r.sbom) for r in rows)
     # A version named on the command line that has no package fails the run; discovery meets git tags that never had one.
     failed = failed or (bool(args.tags) and any(r.signature == "no package" for r in rows))

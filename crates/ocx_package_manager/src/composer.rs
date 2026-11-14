@@ -1276,7 +1276,9 @@ impl PackageManager {
 // Includes policy blocks: `--no-pull` with `--offline`/`--frozen` reports a missing tag that way, not as `NotFound`.
 fn unavailable_locally(kind: &PackageErrorKind) -> bool {
     match kind {
-        PackageErrorKind::NotFound | PackageErrorKind::OfflineManifestMissing(_) => true,
+        PackageErrorKind::NotFound
+        | PackageErrorKind::NotInstalled(_)
+        | PackageErrorKind::OfflineManifestMissing(_) => true,
         PackageErrorKind::Internal(crate::Error::OfflineMode) => true,
         PackageErrorKind::Internal(crate::Error::OciIndex(error)) => {
             matches!(error, ocx_index::error::Error::PolicyResolutionBlocked { .. })

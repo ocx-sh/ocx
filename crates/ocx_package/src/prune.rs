@@ -102,6 +102,8 @@ pub enum PruneReason {
     Durable,
     /// The registry has it but the index does not list it.
     NotInIndex,
+    /// The version carrying it also carries a tag outside the selection.
+    SharedVersion,
 }
 
 impl std::fmt::Display for PruneAction {
@@ -124,6 +126,7 @@ impl std::fmt::Display for PruneReason {
             Self::Rolling => "rolling",
             Self::Durable => "durable",
             Self::NotInIndex => "not_in_index",
+            Self::SharedVersion => "shared_version",
         })
     }
 }
@@ -194,6 +197,19 @@ impl PruneOutcome {
                 .collect(),
         )
     }
+}
+
+/// Names each version left behind, never the cause: the cause is this error's source and prints after it.
+fn leftover_message(repository: &str, leftover: &[(String, String)]) -> String {
+    let versions: Vec<String> = leftover
+        .iter()
+        .map(|(id, digest)| format!("version {id} ({digest})"))
+        .collect();
+    format!(
+        "the prune of {repository} stopped with {} planned versions not deleted: {}",
+        leftover.len(),
+        versions.join(", ")
+    )
 }
 
 /// A run's report and, when it failed, why.
@@ -351,6 +367,16 @@ pub enum PruneError {
         summary = "A deleted tag is still present in the registry"
     )]
     StillPresent { repository: String, tag: String },
+
+    /// A deleter stopped part-way; `leftover` is every planned version it did not delete, as `(id, digest)`.
+    #[error("{}", leftover_message(.repository, .leftover))]
+    #[exit(delegate = source)]
+    Incomplete {
+        repository: String,
+        leftover: Vec<(String, String)>,
+        #[source]
+        source: Box<PruneError>,
+    },
 
     /// Any other registry failure, including a registry that cannot delete tags.
     #[error(transparent)]
@@ -719,6 +745,11 @@ async fn run(
             row.action = PruneAction::Deleted;
         } else if report.absent.contains(&row.tag) {
             row.action = PruneAction::Absent;
+        } else if let Err(PruneError::SharedVersion { tag, .. }) = &result
+            && *tag == row.tag
+        {
+            row.action = PruneAction::Refused;
+            row.reason = Some(PruneReason::SharedVersion);
         } else if result.is_err() {
             row.action = PruneAction::NotAttempted;
         }

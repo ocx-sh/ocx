@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn roots_start_at_one_and_the_six_formerly_wrapped_at_two() {
+    fn roots_start_at_one_except_those_with_a_recorded_break_at_two() {
         let at_two: Vec<&str> = ocx::api::report_versions()
             .into_iter()
             .filter(|(_, version)| *version != 1)
@@ -503,6 +503,7 @@ mod tests {
             at_two,
             [
                 "AttestationReport",
+                "PushReport",
                 "SbomListingReport",
                 "SignatureReport",
                 "SweepReport<AttestationReport>",

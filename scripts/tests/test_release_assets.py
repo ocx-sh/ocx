@@ -14,7 +14,12 @@ import release_assets as ra
 from cdx_stub import run_cyclonedx
 
 FIXTURES = Path(__file__).parent / "fixtures" / "v0.6.6"
-CDX_JSON = {f"ocx-{a}.cdx.json" for a in ra.ASSET_TARGET.values()}
+CDX_JSON = {f"ocx-{t}.cdx.json" for t in ra.TARGETS}
+
+
+def as_v066(text: str) -> str:
+    """v0.6.6 shipped the Windows archives as `msvc`; every comparison with its fixture goes through here."""
+    return text.replace("pc-windows-gnullvm", "pc-windows-msvc")
 
 
 @pytest.fixture
@@ -25,8 +30,8 @@ def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root.mkdir()
     for name in ra.EXTRA_FILES:
         (root / name).write_text(name, encoding="utf-8")
-    for triple, asset in ra.ASSET_TARGET.items():
-        exe = bins / triple / ("ocx.exe" if "windows" in asset else "ocx")
+    for triple in ra.TARGETS:
+        exe = bins / triple / ("ocx.exe" if "windows" in triple else "ocx")
         exe.parent.mkdir(parents=True)
         exe.write_bytes(b"binary " + triple.encode())
     dist = tmp_path / "dist"
@@ -38,22 +43,23 @@ def v066_names() -> set[str]:
     return set((FIXTURES / "assets.txt").read_text(encoding="utf-8").split())
 
 
-def test_asset_names_equal_v066_plus_the_per_platform_sbom(built: Path) -> None:
-    produced = {p.name for p in built.iterdir()}
+def test_asset_names_equal_v066_modulo_the_windows_name_plus_the_per_platform_sbom(built: Path) -> None:
+    produced = {as_v066(p.name) for p in built.iterdir()}
     expected = v066_names()
     assert len(expected) == 19, "the v0.6.6 fixture stopped being read"
-    assert produced - CDX_JSON == expected, (
-        f"missing {expected - produced}, extra {produced - CDX_JSON - expected}"
+    cdx = {as_v066(n) for n in CDX_JSON}
+    assert produced - cdx == expected, (
+        f"missing {expected - produced}, extra {produced - cdx - expected}"
     )
-    assert CDX_JSON <= produced
+    assert cdx <= produced
 
 
-def test_the_windows_alias_lives_in_one_map() -> None:
-    windows = {t: a for t, a in ra.ASSET_TARGET.items() if "windows" in a}
-    assert windows == {
-        "x86_64-pc-windows-gnullvm": "x86_64-pc-windows-msvc",
-        "aarch64-pc-windows-gnullvm": "aarch64-pc-windows-msvc",
+def test_windows_archives_are_named_for_the_gnullvm_target_they_contain() -> None:
+    assert {t for t in ra.TARGETS if "windows" in t} == {
+        "x86_64-pc-windows-gnullvm",
+        "aarch64-pc-windows-gnullvm",
     }
+    assert not any("msvc" in t for t in ra.TARGETS)
 
 
 def test_the_unix_archive_layout_matches_v066(built: Path) -> None:
@@ -66,24 +72,24 @@ def test_the_unix_archive_layout_matches_v066(built: Path) -> None:
         assert tar.getmember("ocx-x86_64-unknown-linux-gnu/ocx").mode == 0o755
 
 
-def test_the_windows_archive_layout_matches_v066(built: Path) -> None:
+def test_the_windows_archive_layout_matches_v066_modulo_the_windows_name(built: Path) -> None:
     listing = json.loads(
         (FIXTURES / "archive-listing.json").read_text(encoding="utf-8")
     )
-    name = "ocx-x86_64-pc-windows-msvc.zip"
+    name = "ocx-x86_64-pc-windows-gnullvm.zip"
     with zipfile.ZipFile(built / name) as zf:
-        assert sorted(zf.namelist()) == sorted(listing[name])
+        assert sorted(zf.namelist()) == sorted(listing[as_v066(name)])
 
 
 def test_checksums_follow_the_v066_format(built: Path) -> None:
     fixture = (FIXTURES / "sha256.sum").read_text(encoding="utf-8")
     ours = (built / "sha256.sum").read_text(encoding="utf-8")
-    assert [line.split("*")[1] for line in ours.splitlines() if line] == [
+    assert [as_v066(line.split("*")[1]) for line in ours.splitlines() if line] == [
         line.split("*")[1] for line in fixture.splitlines() if line
     ]
     assert ours.endswith("\n\n") and fixture.endswith("\n\n")
-    per = (built / "ocx-x86_64-pc-windows-msvc.zip.sha256").read_text(encoding="utf-8")
-    assert per.endswith(" *ocx-x86_64-pc-windows-msvc.zip\n\n")
+    per = (built / "ocx-x86_64-pc-windows-gnullvm.zip.sha256").read_text(encoding="utf-8")
+    assert per.endswith(" *ocx-x86_64-pc-windows-gnullvm.zip\n\n")
 
 
 def test_the_manifest_carries_the_v066_artifact_fields(built: Path) -> None:
@@ -94,7 +100,7 @@ def test_the_manifest_carries_the_v066_artifact_fields(built: Path) -> None:
     read the `.sha256` files and `sha256.sum` only.
     """
     fixture = json.loads((FIXTURES / "dist-manifest.json").read_text(encoding="utf-8"))
-    ours = json.loads((built / "dist-manifest.json").read_text(encoding="utf-8"))
+    ours = json.loads(as_v066((built / "dist-manifest.json").read_text(encoding="utf-8")))
     assert set(ours["artifacts"]) == set(fixture["artifacts"])
     for name, art in fixture["artifacts"].items():
         assert set(ours["artifacts"][name]) == set(art), name

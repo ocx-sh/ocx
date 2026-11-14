@@ -29,7 +29,7 @@ Jobs, in order: `plan` (guards, channel, version, tag, target package), `readine
 
 - **Stamped Bazel builds.** The release binaries are Bazel cross builds through `task cross:build:release` (`--define=ocx_provenance=release`, `bazel/release/`): provenance is stamped, every crate drops `__testing`, and `release_provenance_check.py --scan` fails on any `__OCX_TESTING_` string. Stamped builds use no remote cache and no cache credential (`release.yml`, `release-readiness.yml`); `cross.yml` passes write-auth only when not stamped.
 - **Sign before tag.** `publish` pushes every platform with `--sign` and an SBOM, applies the cascade once after every platform is pushed and verified, and self-verifies each platform against an identity pinned in `release.yml` (`RELEASE_IDENTITY`, the literal `…/release.yml@refs/heads/main`) for a release or a candidate, and against its own `${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}` for a dev build. `github-release` needs `publish`, so no tag exists before a signature does.
-- **Windows names.** Bazel builds `*-pc-windows-gnullvm`. The archives keep the `*-pc-windows-msvc` names, the binary inside reports its real triple, and `ASSET_TARGET` in `scripts/release_assets.py` is the only place the alias lives.
+- **Windows names.** Bazel builds `*-pc-windows-gnullvm`. The archives carry the same name (`TARGETS` in `scripts/release_assets.py`); releases up to v0.6.6 shipped `*-pc-windows-msvc` archives.
 - **No cargo-dist installers.** OCX uses the custom bootstrap at [setup.ocx.sh](https://setup.ocx.sh): it downloads a release archive, runs `ocx self setup`, and hands off to OCX package management.
 - **`backfill.yml`** (dispatch, `refs/heads/main`, environment `release-backfill`) signs and attests the platforms of already published versions that lack either, and never moves a tag. Inputs: `tags` (empty = every version tag), `dry_run`.
 - **Structural tests.** `.claude/tests/test_workflows.py` pins who may hold `id-token: write` together with a signing step, the main-and-repository guards, the dev-package guard, `--force` on prune only against the dev package, and `github-release` needing `publish`.
@@ -136,6 +136,19 @@ task release:tag
 The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify hook that runs the suite and a gate without its readiness or provenance step each turn it red.
 
 After the dispatch, CI takes over: readiness gate → stamped build → provenance scan → sign and publish to the registry → tag and GitHub Release → announce → docker and sdkgen publish.
+
+### Recovery: publish green, a later job red
+
+Once `publish` is green, the floating tags, signatures and attestations exist. What can still be missing: the git tag, the GitHub release, the index row.
+
+- **Rerun, do not redispatch.** Use "Re-run failed jobs" on the same run. `plan` outputs and the build tag are reused, so no new build tag, signature or attestation referrer appears.
+- **Artifacts expire.** `release-dist` and `published-tags` are kept 7 days; later, `github-release` and `announce` cannot fetch their input.
+- **`github-release`** creates the tag at the run's SHA, and `gh release create` fails when the release exists. Run `gh release view vX.Y.Z` before rerunning.
+- **`announce` and `prune`** wait for the `ocx.sh` environment reviewer again. `announce` refuses an empty `published-tags.txt` or a missing token. `prune` runs in release mode only.
+- **`post-docker` and `post-sdkgen`** start only after `github-release` is green; rerunning it unblocks them.
+- **Fresh dispatch is the last resort** (artifacts expired, or the run cannot be rerun). `plan` refuses a non-main ref, the wrong repository, a malformed version and an existing `refs/tags/vX.Y.Z`; it does not refuse a published-but-untagged version. A fresh dispatch builds a new `X.Y.Z_<timestamp>` build tag, adds one more signature and attestation referrer per platform, and re-cascades the floating tags.
+
+Afterwards check: git tag, GitHub release, index row, and both post jobs.
 
 ### Version Between Releases
 

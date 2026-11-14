@@ -30,5 +30,5 @@ pub use key_signer::KeySigner;
 pub use oidc::{DispatchingTokenProvider, OidcToken, TokenProvider};
 pub use pipeline::{SignContext, SignPipeline, SignResult};
 pub use referrers::map_client_error;
-pub use signer::{KeylessSigner, SignedBlob, Signer};
+pub use signer::{KeylessSigner, SignedBlob, Signer, SignerIdentity};
 pub use state::SigningStatePaths;

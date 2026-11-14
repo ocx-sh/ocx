@@ -11,12 +11,14 @@ use url::Url;
 
 use super::error::{SignError, SignErrorKind};
 use super::oidc::TokenProvider;
-use super::signer::Signer;
+use super::signer::{Signer, SignerIdentity};
 use crate::attest::COSIGN_SIGN_PREDICATE_TYPE;
 use crate::attest::statement;
 use crate::sign::bundle::BUNDLE_V03_MEDIA_TYPE;
 use crate::sign::format::SignatureFormat;
-use crate::sign::referrers::{attach_referrer, map_client_error, referrers_capability};
+use crate::sign::referrers::{
+    ExistingSignature, IdentityProbe, attach_referrer, find_bundle_referrer, map_client_error, referrers_capability,
+};
 use crate::sign::simplesigning_write;
 use crate::sign::state::SigningStatePaths;
 use crate::simplesigning::SimpleSigningClaim;
@@ -120,6 +122,39 @@ struct SignedIdentity {
     key_backend: ocx_trust::key_ref::KeyBackendKind,
     public_key_hint: Option<String>,
     transparency_log_index: Option<u64>,
+}
+
+impl SignedIdentity {
+    /// The report facts for a leg skipped because `existing` already carries this identity.
+    fn existing(existing: &ExistingSignature) -> Self {
+        let (certificate_identity, certificate_oidc_issuer, key_backend, public_key_hint) = match &existing.identity {
+            SignerIdentity::Keyless {
+                certificate_identity,
+                certificate_oidc_issuer,
+            } => (
+                certificate_identity.clone(),
+                certificate_oidc_issuer.clone(),
+                ocx_trust::key_ref::KeyBackendKind::Keyless,
+                None,
+            ),
+            SignerIdentity::Key {
+                public_key_hint,
+                key_backend,
+            } => (
+                String::new(),
+                String::new(),
+                *key_backend,
+                Some(public_key_hint.clone()),
+            ),
+        };
+        Self {
+            certificate_identity,
+            certificate_oidc_issuer,
+            key_backend,
+            public_key_hint,
+            transparency_log_index: existing.transparency_log_index,
+        }
+    }
 }
 
 impl Default for SignedIdentity {
@@ -287,6 +322,7 @@ impl SignPipeline {
         };
         let mut legs = Vec::new();
         let mut identity = None;
+        let mut probe = IdentityProbe::new(ctx.signer, token.as_ref(), ctx.fulcio_url);
 
         if ctx.format.writes_bundle() {
             let outcome = Self::write_bundle_leg(
@@ -298,6 +334,7 @@ impl SignPipeline {
                 subject_descriptor.clone(),
                 token.as_ref(),
                 referrers_support,
+                &mut probe,
             )
             .await;
             if let Ok((digests, signed)) = &outcome {
@@ -318,6 +355,7 @@ impl SignPipeline {
                 &physical,
                 &subject_digest,
                 token.as_ref(),
+                &mut probe,
             )
             .await;
             if let Ok((_, signed)) = &outcome {
@@ -360,7 +398,22 @@ impl SignPipeline {
         subject_descriptor: Descriptor,
         token: Option<&crate::sign::OidcToken>,
         referrers_support: ocx_oci::referrer::capability::ReferrersSupport,
+        probe: &mut IdentityProbe<'_>,
     ) -> Result<(LegDigests, SignedIdentity), SignErrorKind> {
+        // Before signing: a re-dispatched release must not stack one more referrer per run (#701).
+        if let Some(existing) = find_bundle_referrer(
+            transport,
+            write_image,
+            subject_digest,
+            COSIGN_SIGN_PREDICATE_TYPE,
+            None,
+            probe,
+        )
+        .await?
+        {
+            let signed = SignedIdentity::existing(&existing);
+            return Ok((existing.digests, signed));
+        }
         // cosign v3 wraps the digest in a DSSE Statement (empty predicate), not a `messageSignature`.
         let statement = statement::build_image_signature(physical.repository(), subject_digest);
         let statement_bytes = serde_json::to_vec(&statement).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
@@ -441,6 +494,7 @@ impl SignPipeline {
         physical: &ocx_oci::OciIdentifier,
         subject_digest: &Digest,
         token: Option<&crate::sign::OidcToken>,
+        probe: &mut IdentityProbe<'_>,
     ) -> Result<(LegDigests, SignedIdentity), SignErrorKind> {
         let docker_reference = format!("{}/{}", physical.registry(), physical.repository());
         let claim = SimpleSigningClaim::new(docker_reference, subject_digest);
@@ -448,12 +502,26 @@ impl SignPipeline {
         let payload = claim
             .to_signing_bytes()
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        let payload_digest = ocx_oci::Algorithm::Sha256.hash(&payload);
+        if let Some(existing) = simplesigning_write::find_signed_layer(
+            transport,
+            write_image,
+            subject_digest,
+            crate::verify::SidecarKind::Signature,
+            Some(&payload_digest),
+            None,
+            probe,
+        )
+        .await?
+        {
+            let signed = SignedIdentity::existing(&existing);
+            return Ok((existing.digests, signed));
+        }
 
         let signed = ctx
             .signer
             .sign_blob(&payload, token, ctx.fulcio_url, ctx.rekor_url)
             .await?;
-        let payload_digest = ocx_oci::Algorithm::Sha256.hash(&payload);
         let layer = simplesigning_write::SidecarLayer::signature(payload, &signed);
         let manifest_digest = simplesigning_write::append_layer(transport, write_image, subject_digest, &layer).await?;
 
@@ -832,10 +900,22 @@ mod tests {
     struct FixedSigner {
         statement: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
         blob_payload: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+        /// What `identity` answers; `None` is a signer that cannot tell.
+        identity: Option<SignerIdentity>,
+        /// The bundle `sign_dsse` returns instead of the opaque stand-in.
+        bundle: Option<Vec<u8>>,
     }
 
     #[async_trait::async_trait]
     impl Signer for FixedSigner {
+        async fn identity(
+            &self,
+            _: Option<&super::super::oidc::OidcToken>,
+            _: &Url,
+        ) -> Result<Option<SignerIdentity>, SignErrorKind> {
+            Ok(self.identity.clone())
+        }
+
         async fn sign_blob(
             &self,
             payload: &[u8],
@@ -867,7 +947,10 @@ mod tests {
             // Records what it was handed, so a test can assert the pipeline
             // signed an in-toto Statement rather than a bare digest.
             *self.statement.lock().expect("statement lock") = Some(statement_bytes.to_vec());
-            let bytes = br#"{"mediaType":"test-bundle"}"#.to_vec();
+            let bytes = self
+                .bundle
+                .clone()
+                .unwrap_or_else(|| br#"{"mediaType":"test-bundle"}"#.to_vec());
             let digest = ocx_oci::Algorithm::Sha256.hash(&bytes);
             Ok(crate::sign::bundle::SignedBundle {
                 key_backend: ocx_trust::key_ref::KeyBackendKind::Keyless,
@@ -931,6 +1014,22 @@ mod tests {
         tempfile::TempDir,
         FixedSigner,
     ) {
+        drive_sign_with(physical, mirrors, transport, format, FixedSigner::default()).await
+    }
+
+    /// `drive_sign_at` with the signer injected.
+    async fn drive_sign_with(
+        physical: &str,
+        mirrors: ocx_oci::client::MirrorMap,
+        transport: RecordingTransport,
+        format: SignatureFormat,
+        signer: FixedSigner,
+    ) -> (
+        Result<SignResult, SignError>,
+        Vec<String>,
+        tempfile::TempDir,
+        FixedSigner,
+    ) {
         let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let physical = PackageRef::parse(physical).expect("physical identifier");
 
@@ -948,7 +1047,6 @@ mod tests {
         // bare image manifest, and under the narrowing rule a platform against
         // a bare manifest is `TargetNotAnIndex`. Signing whatever resolved is
         // what this fixture is about.
-        let signer = FixedSigner::default();
         let token_provider = FixedTokenProvider;
         // Declared last so they drop first: `SignContext<'a>` is invariant in
         // `'a` (the resolver takes `&'a PackageRef`), so `'a` is pinned to the
@@ -1023,6 +1121,120 @@ mod tests {
                 if matches!(inner.downcast_ref::<ClientError>(), Some(ClientError::InvalidManifest(_)))),
             "{:?}",
             error.kind
+        );
+    }
+
+    // ── Re-signing under the same identity is idempotent ──
+
+    const GOLDEN_KEYLESS_BUNDLE: &str = include_str!("../../../../test/tests/fixtures/golden/keyless_bundle.json");
+
+    /// The SAN and issuer of the golden keyless leaf.
+    fn golden_identity() -> SignerIdentity {
+        SignerIdentity::Keyless {
+            certificate_identity: "ocx-test@example.com".to_string(),
+            certificate_oidc_issuer: "http://dex:5556/dex".to_string(),
+        }
+    }
+
+    fn signer_as(identity: SignerIdentity) -> FixedSigner {
+        FixedSigner {
+            identity: Some(identity),
+            bundle: Some(GOLDEN_KEYLESS_BUNDLE.as_bytes().to_vec()),
+            ..FixedSigner::default()
+        }
+    }
+
+    /// Sign once under the golden identity, then again against a registry holding what the first run pushed.
+    async fn sign_twice(second: FixedSigner) -> (SignResult, SignResult, RecordingTransport, FixedSigner) {
+        let physical = "8.8.8.8/acme/tool:1.0";
+        let first_transport = recording_transport();
+        let (first, _, _first_temp, _) = drive_sign_with(
+            physical,
+            ocx_oci::client::MirrorMap::default(),
+            first_transport.clone(),
+            SignatureFormat::Bundle,
+            signer_as(golden_identity()),
+        )
+        .await;
+        let first = first.expect("the first sign completes");
+        let [pushed] = first_transport
+            .referrer_manifests()
+            .try_into()
+            .expect("one referrer pushed");
+        let listed = Descriptor {
+            media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
+            digest: ocx_oci::Algorithm::Sha256.hash(&pushed).to_string(),
+            size: pushed.len() as i64,
+            artifact_type: Some(SIGSTORE_BUNDLE_V03.to_string()),
+            ..Descriptor::default()
+        };
+
+        let second_transport = recording_transport()
+            .serving_subject_manifest(b"{}")
+            .serving_referrers(vec![listed])
+            .serving_manifest(&pushed)
+            .serving_blob(GOLDEN_KEYLESS_BUNDLE.as_bytes());
+        let (second_result, _, _second_temp, second_signer) = drive_sign_with(
+            physical,
+            ocx_oci::client::MirrorMap::default(),
+            second_transport.clone(),
+            SignatureFormat::Bundle,
+            second,
+        )
+        .await;
+        (
+            first,
+            second_result.expect("the second sign completes"),
+            second_transport,
+            second_signer,
+        )
+    }
+
+    fn bundle_leg(result: &SignResult) -> &LegDigests {
+        result.legs[0].outcome.as_ref().expect("the bundle leg succeeded")
+    }
+
+    #[tokio::test]
+    async fn signing_again_under_the_same_identity_writes_no_second_referrer() {
+        let (first, second, transport, signer) = sign_twice(signer_as(golden_identity())).await;
+        assert!(
+            transport.referrer_manifests().is_empty(),
+            "a second referrer was pushed under the same identity"
+        );
+        assert!(
+            signer.statement.lock().expect("statement lock").is_none(),
+            "nothing may be signed, or a Rekor entry is spent for a skipped leg"
+        );
+        assert_eq!(bundle_leg(&second).manifest_digest, bundle_leg(&first).manifest_digest);
+        assert_eq!(bundle_leg(&second).payload_digest, bundle_leg(&first).payload_digest);
+        assert_eq!(second.certificate_identity, "ocx-test@example.com");
+    }
+
+    #[tokio::test]
+    async fn signing_again_under_a_different_identity_still_writes_a_referrer() {
+        let other = SignerIdentity::Keyless {
+            certificate_identity: "someone-else@example.com".to_string(),
+            certificate_oidc_issuer: "http://dex:5556/dex".to_string(),
+        };
+        let (_, _, transport, _) = sign_twice(signer_as(other)).await;
+        assert_eq!(
+            transport.referrer_manifests().len(),
+            1,
+            "another identity must still sign"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signer_that_cannot_tell_its_identity_still_writes_a_referrer() {
+        let unknown = FixedSigner {
+            identity: None,
+            ..signer_as(golden_identity())
+        };
+        let (_, _, transport, _) = sign_twice(unknown).await;
+        assert_eq!(
+            transport.referrer_manifests().len(),
+            1,
+            "fail-open: an unknown identity signs"
         );
     }
 

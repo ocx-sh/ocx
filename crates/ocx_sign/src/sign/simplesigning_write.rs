@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::error::SignErrorKind;
-use super::referrers::map_client_error;
+use super::pipeline::LegDigests;
+use super::referrers::{ExistingSignature, IdentityProbe, map_client_error};
 use super::rekor::RekorEntry;
 use super::signer::SignedBlob;
 use crate::verify::SidecarKind;
@@ -192,6 +193,81 @@ pub(crate) async fn append_layer(
         )
         .into(),
     ))))
+}
+
+/// The `kind` sidecar layer `probe`'s identity already published for `subject`, if any.
+///
+/// `.sig`: the layer must hold `payload_digest`'s claim. `.att`: the envelope's payload must be `statement`, byte for byte.
+/// Only certificate-annotated layers can match, so a key-mode sidecar is always rewritten (fail-open).
+///
+/// # Errors
+///
+/// An unreadable sidecar, as [`append_layer`] would raise, and the probe's.
+pub(crate) async fn find_signed_layer(
+    transport: &dyn OciTransport,
+    image: &native::Reference,
+    subject: &Digest,
+    kind: SidecarKind,
+    payload_digest: Option<&Digest>,
+    statement: Option<&[u8]>,
+    probe: &mut IdentityProbe<'_>,
+) -> Result<Option<ExistingSignature>, SignErrorKind> {
+    let target = ocx_oci::client::sibling_tag_reference(image, crate::verify::sidecar_tag(subject, kind));
+    let Some((manifest, manifest_digest)) = read_sidecar(transport, &target).await? else {
+        return Ok(None);
+    };
+    let candidates: Vec<(Digest, &str)> = manifest
+        .layers
+        .iter()
+        .filter_map(|layer| {
+            let certificate = layer.annotations.as_ref()?.get(ANNOTATION_COSIGN_CERTIFICATE)?;
+            let digest = Digest::try_from(layer.digest.as_str()).ok()?;
+            payload_digest
+                .is_none_or(|wanted| wanted == &digest)
+                .then_some((digest, certificate.as_str()))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let Some(identity) = probe.get().await? else {
+        return Ok(None);
+    };
+    for (digest, certificate) in candidates {
+        let leaf = <x509_cert::Certificate as x509_cert::der::DecodePem>::from_pem(certificate.as_bytes()).ok();
+        let claimed_identity = leaf.as_ref().and_then(crate::verify::identity::subject_identity);
+        let claimed_issuer = leaf.as_ref().and_then(crate::verify::identity::oidc_issuer);
+        if !identity.matches(claimed_identity.as_deref(), claimed_issuer.as_deref(), None) {
+            continue;
+        }
+        if let Some(wanted) = statement
+            && !envelope_carries(transport, image, &digest, wanted).await
+        {
+            continue;
+        }
+        return Ok(Some(ExistingSignature {
+            digests: LegDigests {
+                payload_digest: digest,
+                manifest_digest,
+            },
+            identity,
+            transparency_log_index: None,
+        }));
+    }
+    Ok(None)
+}
+
+/// Whether the `.att` envelope at `digest` carries exactly `statement` as its payload.
+async fn envelope_carries(
+    transport: &dyn OciTransport,
+    image: &native::Reference,
+    digest: &Digest,
+    statement: &[u8],
+) -> bool {
+    let Some(bytes) = super::referrers::pull_capped(transport, image, digest).await else {
+        return false;
+    };
+    crate::attest::dsse::DsseEnvelope::parse(&bytes).is_ok_and(|envelope| envelope.payload == statement)
 }
 
 /// Whether `held` is the layer `layer` carries, not merely a layer at the same address.

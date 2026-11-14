@@ -48,8 +48,9 @@ const GITLAB_REFUSAL: &str =
     deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.\n\n\
     A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API \
     with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` \
-    registry needs `--forge github` and the repository named on that host directly; when the \
-    index supplies the host, any host but `ghcr.io` is refused with exit 64. It deletes the version holding the tag, the platform \
+    registry needs `--forge github`. When the index supplies the host, that host must be `ghcr.io` \
+    or listed exactly in `trusted_hosts` of the package's namespace in `config.toml`, else the run \
+    is refused with exit 64. It deletes the version holding the tag, the platform \
     manifests only that version lists, and the referrer tags of those manifests. A version that \
     also carries a tag outside the selection exits 81. An index row naming another build than \
     the registry serves, a kept version whose manifest is not served, and a package listing \
@@ -69,7 +70,7 @@ const GITLAB_REFUSAL: &str =
     The read of the root commits nothing to the local index.\n\n\
     Under `--format json` each tag row carries an `action`: `deleted`, `absent`, `would_delete`, \
     `kept`, `refused` or `not_attempted`. A kept row's `reason` is `newest` or `rolling`. A refused \
-    row's `reason` is `durable` or `not_in_index`.\n\n\
+    row's `reason` is `durable`, `not_in_index` or `shared_version`.\n\n\
     Rows are in processing order, builds oldest first and the rolling tag last. A run that failed \
     after entering the safeguard still prints this document alone on stdout, and the exit code \
     is the status. A routing failure prints the envelope alone, since the repository is not yet \
@@ -125,8 +126,8 @@ pub struct PackagePrune {
 
     /// Delete through this forge's package API, for a registry that has no tag DELETE (`github`).
     ///
-    /// Inferred for `ghcr.io` only; a GitHub Enterprise `containers.<host>` registry needs it named, with the
-    /// repository given on that host directly, since a host the index supplies must be `ghcr.io`.
+    /// Inferred for `ghcr.io` only; a GitHub Enterprise `containers.<host>` registry needs it named. A host
+    /// the index supplies must be `ghcr.io` or listed in `trusted_hosts` of the package's namespace.
     /// `gitlab` is refused: GitLab's registry does not accept OCX packages.
     #[arg(long, value_name = "FORGE")]
     forge: Option<ForgeKind>,
@@ -176,7 +177,12 @@ impl PackagePrune {
         }
         let run = match self.forge_for(&target.repository) {
             Some(ForgeKind::GitHub) => {
-                Self::refuse_unvouched_forge_host(target.index.is_some(), target.repository.registry())?;
+                Self::refuse_unvouched_forge_host(
+                    target.index.is_some(),
+                    target.repository.registry(),
+                    &namespace,
+                    |ns| context.trusted_hosts_for(ns),
+                )?;
                 let deleter =
                     Self::github_deleter(&context, client, &target.repository, &self.selection_label()).await?;
                 prune::prune_with(client, &deleter, &target, &request).await
@@ -212,17 +218,23 @@ impl PackagePrune {
         self.forge.or_else(|| forge_for_registry(repository.registry()))
     }
 
-    /// An index-supplied registry host is deleted through the GitHub API only when it is `ghcr.io`: the
-    /// operator vouched for no other host, and the credential for it would go to the API that host names.
-    /// A host the operator typed themselves (no index) may be a `containers.<host>` enterprise registry.
-    fn refuse_unvouched_forge_host(indexed: bool, registry: &str) -> anyhow::Result<()> {
-        if indexed && forge_for_registry(registry).is_none() {
-            return Err(UsageError::new(format!(
-                "the index names the registry {registry}, and an index-supplied host is deleted through the GitHub packages API only on ghcr.io; name the registry repository on that host directly instead"
-            ))
-            .into());
+    /// An index-supplied registry host is deleted through the GitHub API only when it is `ghcr.io` or the
+    /// operator listed it in `trusted_hosts` of the package's own namespace: the credential goes to the API
+    /// that host names. A host the operator typed themselves (no index) may be any `containers.<host>`.
+    fn refuse_unvouched_forge_host(
+        indexed: bool,
+        registry: &str,
+        namespace: &str,
+        trusted_hosts_for: impl Fn(&str) -> Vec<String>,
+    ) -> anyhow::Result<()> {
+        if !indexed || forge_for_registry(registry).is_some() || vouched(registry, &trusted_hosts_for(namespace)) {
+            return Ok(());
         }
-        Ok(())
+        let (host, _) = ocx_oci::ssrf::split_host_port(registry);
+        Err(UsageError::new(format!(
+            "the index names the registry {registry}, and an index-supplied host is deleted through the GitHub packages API only on ghcr.io or when listed in [registries.\"{namespace}\"].trusted_hosts; add \"{host}\" there, or name the registry repository on that host directly"
+        ))
+        .into())
     }
 
     /// A GitHub Packages deleter for `repository`, authenticated with the credential ocx already resolves
@@ -294,6 +306,20 @@ impl PackagePrune {
             },
         }
     }
+}
+
+/// Whether a `trusted_hosts` entry names `registry`'s host, or its whole `host:port`, exactly.
+///
+/// Case and one trailing dot are ignored, as DNS ignores them; never a suffix, wildcard or CIDR match,
+/// since this vouch decides where the registry credential is sent.
+fn vouched(registry: &str, trusted: &[String]) -> bool {
+    let normal = |name: &str| name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+    let (host, _) = ocx_oci::ssrf::split_host_port(registry);
+    let (host, authority) = (normal(host), normal(registry));
+    trusted
+        .iter()
+        .map(|entry| normal(entry))
+        .any(|entry| entry == host || entry == authority)
 }
 
 /// The secret of a resolved credential, or `None` for anonymous access or an empty secret.
@@ -587,6 +613,7 @@ mod tests {
             "80 and 82 surface only on a real delete",
             "GitHub packages API",
             "--forge github",
+            "trusted_hosts",
             "https://ocx.sh/docs/reference/command-line/package-consuming/#package-prune",
         ] {
             assert!(help.contains(needle), "long help must mention {needle}:\n{help}");
@@ -594,10 +621,70 @@ mod tests {
         assert!(help.is_ascii(), "help text must stay ASCII");
     }
 
+    /// `trusted_hosts` per namespace: `acme.example` vouches for `containers.ghe.example`, `other.example`
+    /// for `containers.evil.example`.
+    fn trusted(namespace: &str) -> Vec<String> {
+        match namespace {
+            "acme.example" => vec!["containers.ghe.example".to_owned()],
+            "other.example" => vec!["containers.evil.example".to_owned()],
+            _ => Vec::new(),
+        }
+    }
+
+    fn refuse(indexed: bool, registry: &str, namespace: &str) -> anyhow::Result<()> {
+        super::PackagePrune::refuse_unvouched_forge_host(indexed, registry, namespace, trusted)
+    }
+
+    fn usage_error(result: anyhow::Result<()>) -> String {
+        let error = result.expect_err("refused");
+        assert_eq!(
+            crate::exit::classify_error(error.as_ref()),
+            ocx_exit::ExitCode::UsageError
+        );
+        error.to_string()
+    }
+
     #[test]
     fn index_supplied_host_other_than_ghcr_is_refused() {
-        assert!(super::PackagePrune::refuse_unvouched_forge_host(true, "containers.evil.example").is_err());
-        assert!(super::PackagePrune::refuse_unvouched_forge_host(true, "ghcr.io").is_ok());
-        assert!(super::PackagePrune::refuse_unvouched_forge_host(false, "containers.ghe.example").is_ok());
+        let message = usage_error(refuse(true, "containers.evil.example", "acme.example"));
+        assert!(
+            message.contains(r#"[registries."acme.example"].trusted_hosts"#),
+            "the refusal names the key to set: {message}"
+        );
+        assert!(refuse(true, "ghcr.io", "acme.example").is_ok());
+        assert!(refuse(true, "GHCR.io", "unlisted.example").is_ok());
+        assert!(refuse(false, "containers.ghe.example", "unlisted.example").is_ok());
+    }
+
+    #[test]
+    fn an_index_supplied_host_listed_in_trusted_hosts_of_its_namespace_is_accepted() {
+        assert!(refuse(true, "containers.ghe.example", "acme.example").is_ok());
+        assert!(refuse(true, "Containers.GHE.example.", "acme.example").is_ok());
+        assert!(refuse(true, "containers.ghe.example:8443", "acme.example").is_ok());
+    }
+
+    #[test]
+    fn a_host_listed_under_another_namespace_does_not_vouch() {
+        usage_error(refuse(true, "containers.evil.example", "acme.example"));
+        usage_error(refuse(true, "containers.ghe.example", "other.example"));
+    }
+
+    #[test]
+    fn only_an_exact_host_vouches_never_a_suffix_or_prefix() {
+        for registry in [
+            "evil.containers.ghe.example",
+            "containers.ghe.example.evil",
+            "containers.ghe.exampl",
+            "ghe.example",
+        ] {
+            usage_error(refuse(true, registry, "acme.example"));
+        }
+        assert!(!super::vouched("containers.ghe.example", &["*.ghe.example".to_owned()]));
+        assert!(!super::vouched("containers.ghe.example", &["ghe.example".to_owned()]));
+        assert!(!super::vouched("10.0.0.5", &["10.0.0.0/8".to_owned()]));
+        assert!(!super::vouched(
+            "containers.ghe.example:8443",
+            &["containers.ghe.example:9443".to_owned()]
+        ));
     }
 }

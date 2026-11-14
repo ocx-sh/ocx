@@ -27,8 +27,8 @@ use ocx_trust::{CompiledPolicy, TrustPolicy};
 
 use super::super::PackageManager;
 use super::signer_rounds::{
-    RoundsDecision, RoundsError, SignerRounds, SignerRoundsInput, publisher_round_error, signer_rounds,
-    signer_rounds_for_pinned,
+    RoundsDecision, RoundsError, SignerRounds, SignerRoundsInput, note_keyless_skipped, publisher_round_error,
+    signer_rounds, signer_rounds_for_pinned,
 };
 use super::verify::VerifyOptions;
 use ocx_sign::verify::VerifyContentMode;
@@ -332,7 +332,7 @@ impl PackageManager {
             RoundsDecision::Uncovered => return Ok(false),
         };
 
-        let (trust_root, transparency) = self.round_trust(auto_verify, resolved, &mut rounds).await?;
+        let (trust_root, transparency, keyless_skipped) = self.round_trust(auto_verify, resolved, &mut rounds).await?;
 
         // Publisher round first: its refusal names the publishers, which is the more useful message when both fail.
         if let Some(publishers) = &rounds.publishers {
@@ -344,7 +344,14 @@ impl PackageManager {
                 transparency,
             )
             .await
-            .map_err(|kind| publisher_round_error(resolved, std::slice::from_ref(publishers), kind))?;
+            .map_err(|kind| {
+                let kind = publisher_round_error(resolved, std::slice::from_ref(publishers), kind);
+                if keyless_skipped {
+                    note_keyless_skipped(kind)
+                } else {
+                    kind
+                }
+            })?;
         }
         if !rounds.operator.is_empty() {
             self.verify_round(auto_verify, resolved, &rounds.operator, trust_root, transparency)
@@ -366,7 +373,7 @@ impl PackageManager {
         auto_verify: &'a AutoVerify,
         resolved: &ocx_oci::PackageRef,
         rounds: &mut SignerRounds,
-    ) -> Result<(&'a TrustRoot, Transparency), PackageErrorKind> {
+    ) -> Result<(&'a TrustRoot, Transparency, bool), PackageErrorKind> {
         let backends = || {
             rounds
                 .publishers
@@ -377,9 +384,10 @@ impl PackageManager {
         let has_keyless = backends().any(|backend| matches!(backend, ocx_trust::PolicyBackend::Keyless(_)));
         let has_key = backends().any(|backend| matches!(backend, ocx_trust::PolicyBackend::Key(_)));
 
+        let mut keyless_skipped = false;
         if has_keyless {
             match self.auto_verify_trust_root(auto_verify, resolved).await {
-                Ok(root) => return Ok((root, Transparency::Verify)),
+                Ok(root) => return Ok((root, Transparency::Verify, false)),
                 Err(error) if has_key => {
                     // A keyless candidate on a root that cannot check it aborts the scan, so it is dropped from
                     // the rounds instead; a round left with no key to try keeps the resolution error.
@@ -390,6 +398,7 @@ impl PackageManager {
                     if !keep_key_backends(rounds) {
                         return Err(error);
                     }
+                    keyless_skipped = true;
                 }
                 Err(error) => return Err(error),
             }
@@ -412,7 +421,7 @@ impl PackageManager {
             })
             .await
             .map_err(|kind| verify_kind(resolved, kind))?;
-        Ok((local, Transparency::VerifyIfRootAvailable))
+        Ok((local, Transparency::VerifyIfRootAvailable, keyless_skipped))
     }
 
     /// The batch's trust root, resolved on first use and memoized on success only, so a failure retries
@@ -1688,7 +1697,7 @@ mod tests {
                 },
             );
             let miss = find_golden(&manager, &pin).await.expect_err("nothing is installed");
-            assert!(matches!(miss, PackageErrorKind::NotFound), "got {miss:?}");
+            assert!(matches!(miss, PackageErrorKind::NotInstalled(_)), "got {miss:?}");
 
             // Non-vacuity: the resolve did commit a pointer; it just declares nothing.
             let store = ocx_index::IndexStore::machine_local(manager.file_structure());
@@ -1849,5 +1858,22 @@ mod tests {
         ]))))
         .await
         .expect("the key candidate passes while the keyless one fails alone");
+    }
+
+    /// A mismatch raised after the keyless publishers were dropped says so; one raised with the full root does not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn c012_a_mismatch_after_keyless_publishers_were_skipped_carries_the_trust_root_hint() {
+        const UNRELATED_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQY+VFWJLFWJpQKBrAqQeDfT1OIou\n\
+            YbF3RXwIEbTtElkojhk7HU3uksfEwpgDXqsMtlzxmAXOfXjQUS9nGp8RwA==\n\
+            -----END PUBLIC KEY-----\n";
+        let error = verify_golden_with(GoldenScenario::new(Some(serde_json::json!([
+            golden_keyless_publisher(GOLDEN_IDENTITY),
+            {"kind": "key", "key_pem": UNRELATED_KEY_PEM}
+        ]))))
+        .await
+        .expect_err("the only candidate left is a key that did not sign");
+        let message = rounds_refusal(error).to_string();
+        assert!(message.contains("keyless publishers were skipped"), "{message}");
     }
 }

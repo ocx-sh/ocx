@@ -39,5 +39,5 @@ Single source of truth: `.claude/rules/product-tech-strategy.md`. Latest stable 
 ## Infra / CI
 
 - GitHub Actions (`.github/workflows/`), OIDC auth, Trivy security scans.
-- Static frontend on Bunny storage (`deploy-docs.yml`; owner nginx fronts ocx.sh/dev.ocx.sh), secrets via GitHub Secrets.
+- Static frontend on Bunny storage (`deploy-docs.yml`; owner nginx fronts ocx.sh), secrets via GitHub Secrets.
 - Release tooling: stamped Bazel builds dispatched through `release.yml`, `git-cliff` (`cliff.toml`).

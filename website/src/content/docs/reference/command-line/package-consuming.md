@@ -189,13 +189,15 @@ For a namespace with an index, prune reads the package's root from the configure
 
 On the registry API prune deletes registry tags only: never a digest, a platform manifest, a keep tag or a referrer, and it never writes the index. A keep tag pins the manifest past the tag's deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.
 
-A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` registry needs `--forge github` and the repository named on that host directly; when the index supplies the host, any host but `ghcr.io` is refused with exit 64.
+A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` registry needs `--forge github`.
 
-It deletes the version holding the tag, the platform manifests only that version lists, and the referrer tags of those manifests. A version that also carries a tag outside the selection exits 81.
+When the index supplies the host, that host must be `ghcr.io` or listed exactly in `trusted_hosts` of the package's namespace in `config.toml`, else the run is refused with exit 64. It deletes the version holding the tag, the platform manifests only that version lists, and the referrer tags of those manifests.
 
-An index row naming another build than the registry serves, a kept version whose manifest is not served, and a package listing that changed since planning each refuse the run before any delete with exit 75. A version entry the API returns without an id or name exits 69.
+A version that also carries a tag outside the selection exits 81. An index row naming another build than the registry serves, a kept version whose manifest is not served, and a package listing that changed since planning each refuse the run before any delete with exit 75.
 
-`--dry-run` lists the same set and deletes nothing. `--forge gitlab` is not supported.
+A version entry the API returns without an id or name exits 69. `--dry-run` lists the same set and deletes nothing.
+
+`--forge gitlab` is not supported.
 
 Pass `--tags-file PATH` to append each gone tag the index lists, then publish the removal with `ocx package announce --tags-file PATH`.
 
@@ -211,7 +213,7 @@ The read of the root commits nothing to the local index.
 
 Under `--format json` each tag row carries an `action`: `deleted`, `absent`, `would_delete`, `kept`, `refused` or `not_attempted`. A kept row's `reason` is `newest` or `rolling`.
 
-A refused row's `reason` is `durable` or `not_in_index`.
+A refused row's `reason` is `durable`, `not_in_index` or `shared_version`.
 
 Rows are in processing order, builds oldest first and the rolling tag last. A run that failed after entering the safeguard still prints this document alone on stdout, and the exit code is the status.
 

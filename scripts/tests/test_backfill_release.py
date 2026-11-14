@@ -130,6 +130,26 @@ def test_each_half_is_judged_on_its_own() -> None:
     assert (rows[0].signature, rows[0].sbom) == ("skipped", "attested")
 
 
+def test_a_platform_the_release_identity_signed_is_skipped_and_never_signed_again() -> None:
+    release = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"
+    ref = f"{PACKAGE}:0.6.6"
+    fake = FakeOcx({ref: ["linux/amd64"]}, {(ref, "linux/amd64"): {"sig", "sbom"}})
+    real = fake.__call__
+
+    def only_release(argv: list[str]) -> tuple[int, str, str]:
+        if "verify" in argv and IDENTITY in argv:
+            fake.calls.append(argv)
+            return 79, "", "no signatures found"
+        return real(argv)
+
+    rows = bf.backfill_tag(
+        only_release, PACKAGE, "v0.6.6", IDENTITY, ISSUER, False,
+        lambda version, platform: Path("sbom.json"), (release,),
+    )
+    assert fake.writes() == []
+    assert [(r.signature, r.sbom) for r in rows] == [("skipped", "skipped")]
+
+
 def test_a_dry_run_reports_and_writes_nothing() -> None:
     fake = FakeOcx({f"{PACKAGE}:0.6.6": ["linux/amd64"]})
     rows = tag_rows(fake, dry_run=True)
@@ -249,3 +269,45 @@ def test_generate_sbom_runs_the_current_toolchain_against_the_old_checkout(
     assert manifest == str(tmp_path / "source-v0.6.6/crates/ocx_cli/Cargo.toml")
     assert out == tmp_path / "source-v0.6.6/crates/ocx_cli/ocx-x86_64-unknown-linux-gnu.cdx.json"
     assert out.is_file(), "the returned path is the file the tool wrote"
+
+
+def test_limit_stops_after_n_tags_that_needed_work_and_counts_the_rest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    held = {(f"{PACKAGE}:0.6.5", "linux/amd64"): {"sig", "sbom"}}
+    fake = FakeOcx(
+        {f"{PACKAGE}:{v}": ["linux/amd64"] for v in ("0.6.4", "0.6.5", "0.6.6", "0.6.7")},
+        held,
+    )
+    code = bf.main(
+        ["--package", PACKAGE, "--identity", IDENTITY, "--issuer", ISSUER, "--limit", "1", "--dry-run",
+         "v0.6.5", "v0.6.4", "v0.6.6", "v0.6.7"],
+        run=fake,
+    )
+    out = capsys.readouterr()
+    tags = [line.split("|")[1].strip() for line in out.out.splitlines() if line.startswith("| v")]
+    assert code == 0
+    assert tags == ["v0.6.5", "v0.6.4"], "a tag with nothing to do does not use the budget"
+    assert "2 tags remain" in out.err
+
+
+def test_a_tag_that_never_had_a_package_does_not_spend_the_limit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(bf, "version_tags", lambda root: ["v0.6.3", "v0.6.4", "v0.6.5"])
+    fake = FakeOcx({f"{PACKAGE}:{v}": ["linux/amd64"] for v in ("0.6.4", "0.6.5")})
+    code = bf.main(
+        ["--package", PACKAGE, "--identity", IDENTITY, "--issuer", ISSUER, "--limit", "1", "--dry-run"],
+        run=fake,
+    )
+    out = capsys.readouterr()
+    tags = [line.split("|")[1].strip() for line in out.out.splitlines() if line.startswith("| v")]
+    assert code == 0
+    assert tags == ["v0.6.3", "v0.6.4"], "the no-package tag is skipped and the next tag with work is processed"
+    assert "1 tags remain" in out.err
+
+
+@pytest.mark.parametrize("limit", ["0", "-1"])
+def test_a_limit_below_one_is_a_bad_argument(limit: str) -> None:
+    argv = ["--package", PACKAGE, "--identity", IDENTITY, "--issuer", ISSUER, "--limit", limit, "v0.6.6"]
+    assert bf.main(argv, run=FakeOcx({})) == 64

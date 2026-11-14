@@ -8,6 +8,7 @@ import ocxTheme from '@ocx-sh/theme/starlight';
 import { defineConfig } from 'astro/config';
 
 import { recentReleases } from './plugins/changelog.mjs';
+import { ocxPreloadFont } from './plugins/preload-font.mjs';
 import { ocxRedirects } from './plugins/redirects.mjs';
 
 const BASE = '/docs/';
@@ -78,6 +79,7 @@ export default defineConfig({
           page('Manage config centrally', '/guides/manage-config-centrally/'),
           page('Verify installs', '/guides/verify-installs/'),
           page('Pin a signer identity', '/guides/pin-signer-identity/'),
+          page('Declare publishers', '/guides/declare-publishers/'),
           page('Self-hosted Sigstore', '/guides/self-hosted-sigstore/'),
           page('Serve an index', '/guides/serve-an-index/'),
           page('Update ocx', '/guides/update-ocx/'),
@@ -189,5 +191,6 @@ export default defineConfig({
       ],
     }),
     ocxRedirects({ dir: redirectsDir, base: BASE }),
+    ocxPreloadFont({ pages: ['changelog'], base: BASE }),
   ],
 });

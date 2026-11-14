@@ -12,6 +12,7 @@
 //! (exit 75). The API has no conditional delete, so a candidate prune must not overlap a release push of
 //! identical bytes.
 
+use futures::StreamExt as _;
 use ocx_oci::{Digest, OciIdentifier};
 use ocx_package::prune::{DeletePlan, DeleteReport, PruneError, TagDeleter, confirm_gone};
 
@@ -62,6 +63,8 @@ struct Version {
 const PAGE_SIZE: usize = 100;
 /// Listing pages read before the run gives up, bounding a listing the server never ends.
 const MAX_PAGES: usize = 500;
+/// Manifests of kept versions read at once while computing the delete set.
+const MANIFEST_READ_CONCURRENCY: usize = 8;
 
 impl GithubPackagesDeleter<'_> {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -249,10 +252,14 @@ impl TagDeleter for GithubPackagesDeleter<'_> {
                 .iter()
                 .find(|(_, id)| *id == version.id)
                 .map_or_else(|| found.last().map_or(first_tag, |(tag, _)| *tag), |(tag, _)| *tag);
-            self.delete_version(collection, version, repository, label).await?;
+            if let Err(error) = self.delete_version(collection, version, repository, label).await {
+                return Err(incomplete(repository, &set[position..], error));
+            }
             if position < roots.len() {
                 for (tag, _) in found.iter().filter(|(_, id)| *id == version.id) {
-                    confirm_gone(self.client, repository, tag).await?;
+                    if let Err(error) = confirm_gone(self.client, repository, tag).await {
+                        return Err(incomplete(repository, &set[position + 1..], error));
+                    }
                     report.deleted.push((*tag).clone());
                 }
             }
@@ -298,15 +305,21 @@ impl GithubPackagesDeleter<'_> {
         let by_digest = |digest: &str| versions.iter().find(|version| version.digest == digest);
         let is_root = |version: &Version| roots.iter().any(|root| root.id == version.id);
 
-        let mut protected: Vec<(String, String)> = Vec::new();
-        for version in versions
+        let kept = versions
             .iter()
-            .filter(|version| !is_root(version) && !version.tags.is_empty())
-        {
+            .filter(|version| !is_root(version) && !version.tags.is_empty());
+        // `buffered`, not `buffer_unordered`: the first failing version in listing order is the one reported.
+        // Futures built up front: a closure inside the stream fails `async_trait`'s higher-ranked `Send` check.
+        let reads: Vec<_> = kept
+            .map(|version| async move { (version, self.children(repository, &version.digest).await) })
+            .collect();
+        let mut reads = futures::stream::iter(reads).buffered(MANIFEST_READ_CONCURRENCY);
+        let mut protected: Vec<(String, String)> = Vec::new();
+        while let Some((version, children)) = reads.next().await {
             let other_tag = version.tags.first().cloned().unwrap_or_default();
             // An unserved manifest protects nothing, so a version kept on the registry's word alone is
             // read as unknown, never as empty: the run stops before any DELETE.
-            let children = self.children(repository, &version.digest).await?.ok_or_else(|| {
+            let children = children?.ok_or_else(|| {
                 transient(&format!(
                     "the manifest of kept version {} ({}) is not served; retry",
                     version.id, version.digest
@@ -410,6 +423,21 @@ fn refuse_stale_rows(
         }
     }
     Ok(())
+}
+
+/// `cause` stopped the run with `leftover` still on the registry.
+fn incomplete(repository: &OciIdentifier, leftover: &[&Version], cause: PruneError) -> PruneError {
+    if leftover.is_empty() {
+        return cause;
+    }
+    PruneError::Incomplete {
+        repository: repository.to_string(),
+        leftover: leftover
+            .iter()
+            .map(|version| (version.id.to_string(), version.digest.clone()))
+            .collect(),
+        source: Box::new(cause),
+    }
 }
 
 /// Adds `version` unless the set holds it; whether it was added.
@@ -961,10 +989,21 @@ mod tests {
             .await
             .expect_err("the second delete is denied");
 
-        let PruneError::DeleteDenied { tag, .. } = &error else {
+        let PruneError::Incomplete { leftover, source, .. } = &error else {
             panic!("{error:?}");
         };
+        assert_eq!(
+            leftover,
+            &[("8".to_owned(), b_digest.clone())],
+            "version 7 was already deleted"
+        );
+        let PruneError::DeleteDenied { tag, .. } = source.as_ref() else {
+            panic!("{source:?}");
+        };
         assert_eq!(tag, "second", "the first tag was already deleted");
+        let message = error.to_string();
+        assert!(message.contains(&format!("version 8 ({b_digest})")), "{message}");
+        assert!(!message.contains(&a_digest), "{message}");
         let mut chain = Vec::new();
         let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(&error);
         while let Some(c) = cause {
@@ -1079,7 +1118,23 @@ mod tests {
             .await
             .expect_err("the platform version delete fails");
 
-        assert!(matches!(error, PruneError::Registry(_)), "{error:?}");
+        let PruneError::Incomplete { leftover, source, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert!(matches!(source.as_ref(), PruneError::Registry(_)), "{source:?}");
+        let ids: Vec<&str> = leftover.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["2", "5", "6"], "version 1 was deleted, the rest were not");
+        let message = error.to_string();
+        for (id, digest) in leftover {
+            let listed = graph
+                .versions
+                .iter()
+                .find(|v| v["id"].as_u64() == id.parse().ok())
+                .expect("listed");
+            assert_eq!(listed["name"].as_str(), Some(digest.as_str()));
+            assert!(message.contains(&format!("version {id} ({digest})")), "{message}");
+        }
+        assert!(!message.contains("version 1 "), "{message}");
         assert_eq!(report.deleted, ["old"], "the root was deleted before the failure");
     }
 
@@ -1205,6 +1260,39 @@ mod tests {
 
         assert!(is_transient(&error), "{error:?}");
         assert!(fake.deletes().is_empty(), "{:?}", fake.requests());
+    }
+
+    #[tokio::test]
+    async fn the_manifests_of_kept_versions_are_read_at_most_eight_at_a_time() {
+        const KEPT: u64 = 9;
+        const DELAY: Duration = Duration::from_millis(300);
+        let (root_bytes, root_digest) = index(&[]);
+        let data = StubTransportData::new();
+        serve(&data, &root_digest, root_bytes);
+        let mut versions = vec![version(1, &root_digest, &["old"])];
+        for id in 0..KEPT {
+            let (bytes, kept) = index(&[&digest(&format!("child-{id}"))]);
+            serve(&data, &kept, bytes);
+            let key = repository()
+                .clone_with_digest(Digest::try_from(kept.as_str()).expect("a digest"))
+                .canonical_reference()
+                .to_string();
+            data.write().manifest_delays.insert(key, DELAY);
+            versions.push(version(10 + id, &kept, &[&format!("1.0.{id}")]));
+        }
+        let client = stub_client(&data);
+        let fake = Fake::start(route("Organization", versions)).await;
+
+        let started = std::time::Instant::now();
+        deleter(&client, &fake.base)
+            .delete(&plan(&["old"], true), &mut DeleteReport::default())
+            .await
+            .expect("dry run");
+        let elapsed = started.elapsed();
+
+        // One at a time takes KEPT delays; eight at a time takes two; unbounded takes one.
+        assert!(elapsed < DELAY * KEPT as u32, "read one after another: {elapsed:?}");
+        assert!(elapsed >= DELAY * 2, "more than eight in flight: {elapsed:?}");
     }
 
     #[tokio::test]

@@ -37,6 +37,8 @@ A project declares its tools in `ocx.toml`, as the [project toolchain guide][pro
 
 [`ocx lock --check`][cmd-lock] exits non-zero when `ocx.toml` and `ocx.lock` have drifted, which makes it a CI gate.
 
+An install from `ocx.lock` in a fresh home makes no index request. With no committed index root to read, the package counts as undeclared and installs without the [publisher check][verify-installs]. Setting [`signatures = "required"`][config-registries] refuses that install (exit `81`, `publishers_required`) until [`ocx index update`][cmd-index-update] has committed a root that lists the package's publishers.
+
 ## Freeze version discovery \{#lock-frozen\}
 
 Set [`OCX_FROZEN`][env-frozen] to a truthy value to freeze tag-to-digest resolution to the local index. It is the same as the global [`--frozen`][arg-frozen] flag, and the flag takes precedence. A tag already in the local index resolves from cache. A digest-pinned identifier (`repo@sha256:…`, or a tag pinned by `ocx.lock`) still fetches its content over the network.
@@ -107,3 +109,5 @@ To verify that a subset would not change, without writing, use [`ocx update --ch
 [in-depth-indices-local]: ../explanation/local-index.md#local
 [in-depth-indices-bundled]: ../explanation/indices.md#bundled
 [project-toolchain]: ./project-toolchain.mdx
+[verify-installs]: ./verify-installs.mdx
+[config-registries]: ../reference/configuration.md#keys-registries

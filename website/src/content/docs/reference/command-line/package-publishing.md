@@ -45,9 +45,9 @@ A description the index records but the registry no longer serves stops the run.
 
 A package with no committed entry exits 79: the first-time claim is `ocx package claim`.
 
-The following are dropped from the set and reported in `reserved_tags_dropped`. They are a tag that is not a version, the OCX-internal `__ocx` namespace (which carries the keep tag), and the legacy `sha256.<hex>` keep tag.
+`--tags-from-registry` keeps the version tags and `latest` the registry holds and silently ignores every other tag. An explicit `--tags` or `--tags-file` list is taken as given, except that reserved tags are dropped and reported in `reserved_tags_dropped`: the OCX-internal `__ocx` namespace (which carries the keep tag) and the legacy `sha256.<hex>` keep tag.
 
-`--tags-from-registry` filters them silently. A `--tags` set that resolves to nothing but reserved tags exits 64.
+A `--tags` set that resolves to nothing but reserved tags exits 64.
 
 A `--tags-file` that lists no tag, or only reserved ones, exits 0 before any registry or forge work unless `--yank` or `--unyank` was given. A pipeline can therefore feed it the empty file `ocx package prune` writes.
 
@@ -71,7 +71,7 @@ ocx package announce [OPTIONS] <PACKAGE>
 | `--refresh` |  | Re-observe every committed tag; remove ephemeral rows whose tag is gone, and report durable ones |
 | `--tags` | `TAGS` | Replace the curated tag set with this comma-separated list. A currently-committed tag that is not named here is dropped. So is a reserved tag named here: an `__ocx` tag (the keep tag included) or a legacy `sha256.<hex>` one is not a version, so the run still succeeds and reports the drops |
 | `--tags-file` | `PATH` | Add, update or remove the tags listed in this file: a listed tag the registry no longer has is removed from the index. Rows the file does not list are left as they are |
-| `--tags-from-registry` |  | Add every tag the registry holds; remove ephemeral rows whose tag is gone, and report durable ones |
+| `--tags-from-registry` |  | Add every version tag (and `latest`) the registry holds; remove ephemeral rows whose tag is gone, and report durable ones |
 | `--transport` | `api\|git` | How the request is written |
 | `--unyank` | `TAG` | Clear the yanked marker from a tag. Repeat for multiple tags |
 | `--yank` | `TAG` | Mark a tag as yanked. Repeat for multiple tags. Requires `--yank-reason`; only applies to a tag already in the curated set |

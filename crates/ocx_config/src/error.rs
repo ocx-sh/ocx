@@ -6,9 +6,10 @@ use std::path::PathBuf;
 /// Which config tier produced an error; picks the remediation hint (`--config` vs `--project`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigSource {
-    /// Config-tier source: `--config`, `OCX_CONFIG`, or a discovered
-    /// tier-config path (system / user / `$OCX_HOME`).
+    /// Config-tier source named explicitly: `--config` or `OCX_CONFIG`.
     Config,
+    /// A config file ocx found itself (system / user / `$OCX_HOME`), not one the operator named.
+    Discovered,
     /// Project-tier source: `--project` or `OCX_PROJECT`.
     Project,
 }
@@ -16,7 +17,7 @@ pub enum ConfigSource {
 impl ConfigSource {
     fn label(self) -> &'static str {
         match self {
-            Self::Config => "config",
+            Self::Config | Self::Discovered => "config",
             Self::Project => "project",
         }
     }
@@ -24,6 +25,7 @@ impl ConfigSource {
     fn hint(self) -> &'static str {
         match self {
             Self::Config => "check --config or OCX_CONFIG",
+            Self::Discovered => "edit or remove this file",
             Self::Project => "check --project or OCX_PROJECT",
         }
     }
@@ -167,5 +169,27 @@ mod tests {
             count, 1,
             "TOML source should appear exactly once, got {count}: {rendered}"
         );
+    }
+
+    #[test]
+    fn explicit_config_error_hints_at_the_config_flag() {
+        let err = Error::FileNotFound {
+            path: PathBuf::from("/given.toml"),
+            tier: ConfigSource::Config,
+        };
+        assert!(err.to_string().contains("check --config or OCX_CONFIG"), "{err}");
+    }
+
+    #[test]
+    fn discovered_config_error_never_hints_at_the_config_flag() {
+        let err = Error::Io {
+            path: PathBuf::from("/etc/ocx/config.toml"),
+            tier: ConfigSource::Discovered,
+            source: std::io::Error::other("denied"),
+        };
+        let text = err.to_string();
+        assert!(text.contains("/etc/ocx/config.toml"), "{text}");
+        assert!(text.contains("edit or remove this file"), "{text}");
+        assert!(!text.contains("--config"), "{text}");
     }
 }
