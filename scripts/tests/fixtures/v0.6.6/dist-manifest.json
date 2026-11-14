@@ -1,0 +1,410 @@
+{
+  "announcement_is_prerelease": false,
+  "announcement_tag": "v0.6.6",
+  "artifacts": {
+    "ocx-aarch64-apple-darwin.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-aarch64-apple-darwin-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-aarch64-apple-darwin.tar.gz.sha256",
+      "checksums": {
+        "sha256": "8eca498ee22f6683b2d341439f4793c3d739062e594d64fc67143d18557dcff6"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-aarch64-apple-darwin.tar.gz",
+      "target_triples": [
+        "aarch64-apple-darwin"
+      ]
+    },
+    "ocx-aarch64-apple-darwin.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-aarch64-apple-darwin.tar.gz.sha256",
+      "target_triples": [
+        "aarch64-apple-darwin"
+      ]
+    },
+    "ocx-aarch64-pc-windows-msvc.zip": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-aarch64-pc-windows-msvc-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx.exe"
+        }
+      ],
+      "checksum": "ocx-aarch64-pc-windows-msvc.zip.sha256",
+      "checksums": {
+        "sha256": "1a048b08065ee366866ff2ae07d99f0de55e46595e35a8ae9705033c8a832afe"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-aarch64-pc-windows-msvc.zip",
+      "target_triples": [
+        "aarch64-pc-windows-msvc"
+      ]
+    },
+    "ocx-aarch64-pc-windows-msvc.zip.sha256": {
+      "kind": "checksum",
+      "name": "ocx-aarch64-pc-windows-msvc.zip.sha256",
+      "target_triples": [
+        "aarch64-pc-windows-msvc"
+      ]
+    },
+    "ocx-aarch64-unknown-linux-gnu.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-aarch64-unknown-linux-gnu-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-aarch64-unknown-linux-gnu.tar.gz.sha256",
+      "checksums": {
+        "sha256": "3c3d69da8fb22a0c74921c781cebff88db201fbe7ac9145ad423c4521476c447"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-aarch64-unknown-linux-gnu.tar.gz",
+      "target_triples": [
+        "aarch64-unknown-linux-gnu"
+      ]
+    },
+    "ocx-aarch64-unknown-linux-gnu.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-aarch64-unknown-linux-gnu.tar.gz.sha256",
+      "target_triples": [
+        "aarch64-unknown-linux-gnu"
+      ]
+    },
+    "ocx-aarch64-unknown-linux-musl.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-aarch64-unknown-linux-musl-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-aarch64-unknown-linux-musl.tar.gz.sha256",
+      "checksums": {
+        "sha256": "1fff47d126da3873b49e00062510bd92c003a70eec9deef9d711c7370fa51a0d"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-aarch64-unknown-linux-musl.tar.gz",
+      "target_triples": [
+        "aarch64-unknown-linux-musl"
+      ]
+    },
+    "ocx-aarch64-unknown-linux-musl.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-aarch64-unknown-linux-musl.tar.gz.sha256",
+      "target_triples": [
+        "aarch64-unknown-linux-musl"
+      ]
+    },
+    "ocx-x86_64-apple-darwin.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-x86_64-apple-darwin-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-x86_64-apple-darwin.tar.gz.sha256",
+      "checksums": {
+        "sha256": "2d6fe7b1a7a2cc4420c3a1b4cd5b171c8d368e761104e0c3b6c164ce123552f7"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-x86_64-apple-darwin.tar.gz",
+      "target_triples": [
+        "x86_64-apple-darwin"
+      ]
+    },
+    "ocx-x86_64-apple-darwin.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-x86_64-apple-darwin.tar.gz.sha256",
+      "target_triples": [
+        "x86_64-apple-darwin"
+      ]
+    },
+    "ocx-x86_64-pc-windows-msvc.zip": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-x86_64-pc-windows-msvc-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx.exe"
+        }
+      ],
+      "checksum": "ocx-x86_64-pc-windows-msvc.zip.sha256",
+      "checksums": {
+        "sha256": "19c1f861bd47fde185d16e07b8192a4cab2d0c1f97f2728327e7b20b8829c7c4"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-x86_64-pc-windows-msvc.zip",
+      "target_triples": [
+        "x86_64-pc-windows-msvc"
+      ]
+    },
+    "ocx-x86_64-pc-windows-msvc.zip.sha256": {
+      "kind": "checksum",
+      "name": "ocx-x86_64-pc-windows-msvc.zip.sha256",
+      "target_triples": [
+        "x86_64-pc-windows-msvc"
+      ]
+    },
+    "ocx-x86_64-unknown-linux-gnu.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-x86_64-unknown-linux-gnu-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-x86_64-unknown-linux-gnu.tar.gz.sha256",
+      "checksums": {
+        "sha256": "4425c847d2859d8c46502d3bc31561f6b1b3482ca3558286266afc27243f0e87"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-x86_64-unknown-linux-gnu.tar.gz",
+      "target_triples": [
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    "ocx-x86_64-unknown-linux-gnu.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-x86_64-unknown-linux-gnu.tar.gz.sha256",
+      "target_triples": [
+        "x86_64-unknown-linux-gnu"
+      ]
+    },
+    "ocx-x86_64-unknown-linux-musl.tar.gz": {
+      "assets": [
+        {
+          "kind": "changelog",
+          "name": "CHANGELOG.md",
+          "path": "CHANGELOG.md"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE",
+          "path": "LICENSE"
+        },
+        {
+          "kind": "license",
+          "name": "LICENSE-THIRD-PARTY.md",
+          "path": "LICENSE-THIRD-PARTY.md"
+        },
+        {
+          "kind": "readme",
+          "name": "README.md",
+          "path": "README.md"
+        },
+        {
+          "id": "ocx-x86_64-unknown-linux-musl-exe-ocx",
+          "kind": "executable",
+          "name": "ocx",
+          "path": "ocx"
+        }
+      ],
+      "checksum": "ocx-x86_64-unknown-linux-musl.tar.gz.sha256",
+      "checksums": {
+        "sha256": "e5bc1b5b023588237564139e3220d4eff95187be7ca26673fe24bd35c3d4d182"
+      },
+      "kind": "executable-zip",
+      "name": "ocx-x86_64-unknown-linux-musl.tar.gz",
+      "target_triples": [
+        "x86_64-unknown-linux-musl"
+      ]
+    },
+    "ocx-x86_64-unknown-linux-musl.tar.gz.sha256": {
+      "kind": "checksum",
+      "name": "ocx-x86_64-unknown-linux-musl.tar.gz.sha256",
+      "target_triples": [
+        "x86_64-unknown-linux-musl"
+      ]
+    },
+    "ocx.cdx.xml": {
+      "kind": "sbom",
+      "name": "ocx.cdx.xml"
+    },
+    "sha256.sum": {
+      "kind": "unified-checksum",
+      "name": "sha256.sum"
+    }
+  },
+  "releases": [
+    {
+      "app_name": "ocx",
+      "app_version": "0.6.6",
+      "artifacts": [
+        "ocx.cdx.xml",
+        "sha256.sum",
+        "ocx-aarch64-apple-darwin.tar.gz",
+        "ocx-aarch64-apple-darwin.tar.gz.sha256",
+        "ocx-aarch64-pc-windows-msvc.zip",
+        "ocx-aarch64-pc-windows-msvc.zip.sha256",
+        "ocx-aarch64-unknown-linux-gnu.tar.gz",
+        "ocx-aarch64-unknown-linux-gnu.tar.gz.sha256",
+        "ocx-aarch64-unknown-linux-musl.tar.gz",
+        "ocx-aarch64-unknown-linux-musl.tar.gz.sha256",
+        "ocx-x86_64-apple-darwin.tar.gz",
+        "ocx-x86_64-apple-darwin.tar.gz.sha256",
+        "ocx-x86_64-pc-windows-msvc.zip",
+        "ocx-x86_64-pc-windows-msvc.zip.sha256",
+        "ocx-x86_64-unknown-linux-gnu.tar.gz",
+        "ocx-x86_64-unknown-linux-gnu.tar.gz.sha256",
+        "ocx-x86_64-unknown-linux-musl.tar.gz",
+        "ocx-x86_64-unknown-linux-musl.tar.gz.sha256"
+      ],
+      "display": true,
+      "display_name": "ocx"
+    }
+  ]
+}
