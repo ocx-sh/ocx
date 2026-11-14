@@ -54,6 +54,8 @@ pub struct StubTransportInner {
     /// `(method, registry, repository)` each manifest/blob read was handed, from the `pull_*` methods that
     /// call `record_target`.
     pub read_targets: Vec<(&'static str, String, String)>,
+    /// The `Accept` media types of every `pull_manifest_raw` call, in call order.
+    pub accepted_media_types: Vec<Vec<String>>,
     /// When true, `push_manifest_raw` stores pushed data back into `manifests`
     /// so subsequent reads see the updated content.
     pub capture_pushes: bool,
@@ -275,9 +277,13 @@ impl OciTransport for StubTransport {
     async fn pull_manifest_raw(
         &self,
         image: &crate::native::Reference,
-        _accepted_media_types: &[&str],
+        accepted_media_types: &[&str],
     ) -> Result<(Vec<u8>, String)> {
         self.record("pull_manifest_raw");
+        self.data
+            .write()
+            .accepted_media_types
+            .push(accepted_media_types.iter().map(ToString::to_string).collect());
         self.record_target("pull_manifest_raw", image);
         let key = image.to_string();
         // Lock released before the sleep, or concurrent callers serialise here.

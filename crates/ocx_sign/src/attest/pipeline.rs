@@ -20,7 +20,7 @@ use crate::sign::state::SigningStatePaths;
 use crate::sign::{SignError, SignErrorKind, SignatureFormat, Signer, TokenProvider};
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport};
-use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
+use ocx_oci::media_type::{SUBJECT_MANIFEST_TYPES, manifest_media_type};
 use ocx_oci::referrer::ReferrerManifest;
 use ocx_oci::referrer::capability::ReferrersSupport;
 use ocx_oci::referrer::manifest::{bundle_annotations, bundle_created, bundle_now};
@@ -29,7 +29,7 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::resolve_target::{ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
-use ocx_oci::{Algorithm, Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
+use ocx_oci::{Algorithm, Descriptor, Digest, PackageRef, Platform, native};
 
 /// Whether the attach publishes a signed bundle or the raw document.
 ///
@@ -184,7 +184,7 @@ impl AttestPipeline {
         // Digest-only: a `repo:tag@digest` reference keys a different registry path and 404s.
         let subject_ref = read_image.clone_with_digest(subject_digest.to_string());
         let (subject_bytes, served_digest) = transport
-            .pull_manifest_raw(&subject_ref, SIGNABLE_MANIFEST_TYPES)
+            .pull_manifest_raw(&subject_ref, SUBJECT_MANIFEST_TYPES)
             .await
             .map_err(map_client_error)?;
         // Bind the mirror-served bytes to the resolved digest, or a wrong `size` yields an attestation strict verifiers reject.
@@ -195,12 +195,18 @@ impl AttestPipeline {
             }));
         }
 
+        let subject_media_type = manifest_media_type(&subject_bytes).ok_or_else(|| {
+            map_client_error(ClientError::InvalidManifest(
+                "subject manifest is not a JSON object with a signable media type".to_string(),
+            ))
+        })?;
+
         // Probe the PUSH host: a mirror's referrers support says nothing about the upstream's.
         let referrers_support =
             referrers_capability(transport, &write_image, &subject_digest, &ctx.state, ctx.no_cache).await?;
 
         let subject_descriptor = Descriptor {
-            media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
+            media_type: subject_media_type,
             digest: subject_digest.to_string(),
             size: subject_bytes.len() as i64,
             ..Descriptor::default()
@@ -692,6 +698,72 @@ mod tests {
             acquisitions,
             _state: state_dir,
         }
+    }
+
+    /// An image index, which a registry enforcing `Accept` serves only when the request names the index type.
+    const INDEX_SUBJECT: &[u8] =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+
+    #[tokio::test]
+    async fn attesting_an_image_index_subject_works_where_accept_is_enforced_and_names_the_index_type() {
+        let transport = recording_transport()
+            .enforcing_accept()
+            .serving_subject_manifest(INDEX_SUBJECT);
+        let run = drive_attest_with(
+            transport,
+            AttestMode::Signed,
+            PredicateType::CycloneDx,
+            PREDICATE,
+            false,
+            false,
+            SignatureFormat::Bundle,
+        )
+        .await;
+        if let Err(error) = &run.result {
+            panic!("an index subject must attest where Accept is enforced: {error}");
+        }
+        assert_eq!(
+            run.transport.pushed_referrer()["subject"]["mediaType"],
+            ocx_oci::OCI_IMAGE_INDEX_MEDIA_TYPE,
+            "the attested subject descriptor must carry the fetched manifest's media type",
+        );
+    }
+
+    async fn attest_subject(bytes: &[u8]) -> Run {
+        drive_attest_with(
+            recording_transport().serving_subject_manifest(bytes),
+            AttestMode::Signed,
+            PredicateType::CycloneDx,
+            PREDICATE,
+            false,
+            false,
+            SignatureFormat::Bundle,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn attesting_refuses_a_subject_that_is_not_json() {
+        let run = attest_subject(b"not a manifest").await;
+        let error = run.result.expect_err("an unreadable subject must be refused");
+        assert!(
+            matches!(&error.kind, SignErrorKind::Internal(inner)
+                if matches!(inner.downcast_ref::<ClientError>(), Some(ClientError::InvalidManifest(_)))),
+            "{:?}",
+            error.kind
+        );
+    }
+
+    #[tokio::test]
+    async fn attesting_refuses_a_subject_declaring_a_media_type_outside_the_signable_list() {
+        let run = attest_subject(br#"{"schemaVersion":2,"mediaType":"application/vnd.example.other+json"}"#).await;
+        let error = run.result.expect_err("an unsignable declared type must be refused");
+        assert!(
+            matches!(&error.kind, SignErrorKind::Internal(inner)
+                if matches!(inner.downcast_ref::<ClientError>(), Some(ClientError::InvalidManifest(_)))),
+            "{:?}",
+            error.kind
+        );
     }
 
     /// A minimal SBOM-shaped predicate; the pipeline never reads inside it.

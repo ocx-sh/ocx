@@ -35,7 +35,7 @@ use crate::sign::bundle::{MAX_BUNDLE_SIZE_BYTES, parse_bundle};
 use crate::sign::state::SigningStatePaths;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{Client, OciTransport, ReferrersListing, sibling_tag_reference};
-use ocx_oci::media_type::SIGNABLE_MANIFEST_TYPES;
+use ocx_oci::media_type::{SIGNABLE_MANIFEST_TYPES, SUBJECT_MANIFEST_TYPES};
 use ocx_oci::referrer::media_types::{
     ANNOTATION_BUNDLE_CONTENT, ANNOTATION_BUNDLE_PREDICATE_TYPE, BUNDLE_CONTENT_DSSE, COSIGN_SBOM_ARTIFACT_TYPE,
     COSIGN_SIG_ARTIFACT_TYPE, SIGSTORE_BUNDLE_V03,
@@ -2194,7 +2194,7 @@ async fn pull_subject_manifest_verified(
     // Digest-addressed, not whatever the tag points at now.
     let pinned = image.clone_with_digest(subject_digest.to_string());
     let (bytes, _) = transport
-        .pull_manifest_raw(&pinned, SIGNABLE_MANIFEST_TYPES)
+        .pull_manifest_raw(&pinned, SUBJECT_MANIFEST_TYPES)
         .await
         .map_err(map_client_error)?;
     // No size cap: the body is already allocated, so a cap would refuse only a genuine oversized manifest.
@@ -2980,6 +2980,24 @@ mod tests {
                 Err(VerifyErrorKind::SubjectDigestMismatch)
             ),
             "a body that does not hash to the resolved digest must be refused",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_subject_fetch_reads_an_image_index_where_accept_is_enforced() {
+        let index = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+        let digest = ocx_oci::Algorithm::Sha256.hash(index);
+        let transport = RecordingTransport::default()
+            .serving_subject_digest(digest.to_string())
+            .serving_subject_manifest(index)
+            .enforcing_accept();
+        let image: native::Reference = "8.8.8.8/acme/tool:1.0".parse().expect("reference");
+
+        let fetched = pull_subject_manifest_verified(&transport, &image, &digest).await;
+        assert!(
+            matches!(&fetched, Ok(bytes) if bytes == index),
+            "an index subject must be fetched and re-hashed where Accept is enforced: {:?}",
+            fetched.as_ref().err().map(ToString::to_string),
         );
     }
 
