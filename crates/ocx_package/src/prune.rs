@@ -199,6 +199,19 @@ impl PruneOutcome {
     }
 }
 
+/// Names each version left behind, never the cause: the cause is this error's source and prints after it.
+fn leftover_message(repository: &str, leftover: &[(String, String)]) -> String {
+    let versions: Vec<String> = leftover
+        .iter()
+        .map(|(id, digest)| format!("version {id} ({digest})"))
+        .collect();
+    format!(
+        "the prune of {repository} stopped with {} planned versions not deleted: {}",
+        leftover.len(),
+        versions.join(", ")
+    )
+}
+
 /// A run's report and, when it failed, why.
 #[derive(Debug)]
 pub struct PruneRun {
@@ -354,6 +367,16 @@ pub enum PruneError {
         summary = "A deleted tag is still present in the registry"
     )]
     StillPresent { repository: String, tag: String },
+
+    /// A deleter stopped part-way; `leftover` is every planned version it did not delete, as `(id, digest)`.
+    #[error("{}", leftover_message(.repository, .leftover))]
+    #[exit(delegate = source)]
+    Incomplete {
+        repository: String,
+        leftover: Vec<(String, String)>,
+        #[source]
+        source: Box<PruneError>,
+    },
 
     /// Any other registry failure, including a registry that cannot delete tags.
     #[error(transparent)]

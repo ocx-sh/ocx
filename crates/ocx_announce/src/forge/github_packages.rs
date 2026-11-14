@@ -252,10 +252,14 @@ impl TagDeleter for GithubPackagesDeleter<'_> {
                 .iter()
                 .find(|(_, id)| *id == version.id)
                 .map_or_else(|| found.last().map_or(first_tag, |(tag, _)| *tag), |(tag, _)| *tag);
-            self.delete_version(collection, version, repository, label).await?;
+            if let Err(error) = self.delete_version(collection, version, repository, label).await {
+                return Err(incomplete(repository, &set[position..], error));
+            }
             if position < roots.len() {
                 for (tag, _) in found.iter().filter(|(_, id)| *id == version.id) {
-                    confirm_gone(self.client, repository, tag).await?;
+                    if let Err(error) = confirm_gone(self.client, repository, tag).await {
+                        return Err(incomplete(repository, &set[position + 1..], error));
+                    }
                     report.deleted.push((*tag).clone());
                 }
             }
@@ -419,6 +423,21 @@ fn refuse_stale_rows(
         }
     }
     Ok(())
+}
+
+/// `cause` stopped the run with `leftover` still on the registry.
+fn incomplete(repository: &OciIdentifier, leftover: &[&Version], cause: PruneError) -> PruneError {
+    if leftover.is_empty() {
+        return cause;
+    }
+    PruneError::Incomplete {
+        repository: repository.to_string(),
+        leftover: leftover
+            .iter()
+            .map(|version| (version.id.to_string(), version.digest.clone()))
+            .collect(),
+        source: Box::new(cause),
+    }
 }
 
 /// Adds `version` unless the set holds it; whether it was added.
@@ -970,10 +989,21 @@ mod tests {
             .await
             .expect_err("the second delete is denied");
 
-        let PruneError::DeleteDenied { tag, .. } = &error else {
+        let PruneError::Incomplete { leftover, source, .. } = &error else {
             panic!("{error:?}");
         };
+        assert_eq!(
+            leftover,
+            &[("8".to_owned(), b_digest.clone())],
+            "version 7 was already deleted"
+        );
+        let PruneError::DeleteDenied { tag, .. } = source.as_ref() else {
+            panic!("{source:?}");
+        };
         assert_eq!(tag, "second", "the first tag was already deleted");
+        let message = error.to_string();
+        assert!(message.contains(&format!("version 8 ({b_digest})")), "{message}");
+        assert!(!message.contains(&a_digest), "{message}");
         let mut chain = Vec::new();
         let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(&error);
         while let Some(c) = cause {
@@ -1088,7 +1118,23 @@ mod tests {
             .await
             .expect_err("the platform version delete fails");
 
-        assert!(matches!(error, PruneError::Registry(_)), "{error:?}");
+        let PruneError::Incomplete { leftover, source, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert!(matches!(source.as_ref(), PruneError::Registry(_)), "{source:?}");
+        let ids: Vec<&str> = leftover.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["2", "5", "6"], "version 1 was deleted, the rest were not");
+        let message = error.to_string();
+        for (id, digest) in leftover {
+            let listed = graph
+                .versions
+                .iter()
+                .find(|v| v["id"].as_u64() == id.parse().ok())
+                .expect("listed");
+            assert_eq!(listed["name"].as_str(), Some(digest.as_str()));
+            assert!(message.contains(&format!("version {id} ({digest})")), "{message}");
+        }
+        assert!(!message.contains("version 1 "), "{message}");
         assert_eq!(report.deleted, ["old"], "the root was deleted before the failure");
     }
 
