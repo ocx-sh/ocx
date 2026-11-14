@@ -2,22 +2,24 @@
   "artifact": "worker-researcher",
   "cost_min": 0,
   "entries": [
-    "20260925T004301Z-f0131ae9.json"
+    "20260925T004301Z-f0131ae9.json",
+    "20261113T004529Z-5ed536d8.json"
   ],
   "first_seen": "2026-09-25T00:43:01Z",
   "fixed": null,
-  "folded_at": "2026-09-28T21:50:08Z",
-  "folds": 1,
+  "folded_at": "2026-11-13T22:42:02Z",
+  "folds": 2,
   "id": "worker-researcher-no-write-tool",
   "kind": "defect",
-  "last_seen": "2026-09-25T00:43:01Z",
-  "occurrences": 1,
+  "last_seen": "2026-11-13T00:45:29Z",
+  "occurrences": 2,
   "scope": "project",
   "severity": "low",
   "status": "deferred",
   "title": "worker-researcher cannot persist research artifacts (no Write tool)",
   "v": 1,
   "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-plan@sha256:e594ea45774a01d1cf0e7e09822ebde72bab7000dcbdc5ec53652e2a2b839684",
     "unknown"
   ]
 }

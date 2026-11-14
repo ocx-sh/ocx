@@ -1022,7 +1022,7 @@ class TestReleaseImplementation:
 
     def test_workflow_filenames_match_disk(self) -> None:
         """Bug captured: body references 'publish-to-registry.yml' but actual
-        file is 'post-release-oci-publish.yml'."""
+        file is 'release.yml'."""
         rule = CLAUDE_DIR / "rules" / "workflow-release.md"
         text = rule.read_text(encoding="utf-8")
         workflows_dir = ROOT / ".github" / "workflows"

@@ -126,7 +126,7 @@ Mirrors subsystem table in `AGENTS.md`. Catalog = single source of truth — `AG
 | Source files (`**/*.rs`, `**/*.py`, `**/*.ts`, `**/*.go`, … — the rule's `paths:` list) | [code-docs.md](./rules/code-docs.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
-| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
+| `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | `crates/**`, `test/**`, `website/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock` | [workflow-bugfix.md](./rules/workflow-bugfix.md), [workflow-refactor.md](./rules/workflow-refactor.md) — source-work-surface scope per `adr_ai_config_path_scope_correction.md`; co-firing with subsystem rules is intended |
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
@@ -139,7 +139,7 @@ Globals (always loaded or imported into `AGENTS.md`): [quality-core.md](./rules/
 Scoped workflow rules (loaded by path match, consumed by skills on demand):
 [quality-security.md](./rules/quality-security.md) (`.github/workflows/**`, `.github/actions/**`),
 [workflow-github.md](./rules/workflow-github.md) (`.github/ISSUE_TEMPLATE/**`),
-[workflow-git.md](./rules/workflow-git.md) (`CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml`).
+[workflow-git.md](./rules/workflow-git.md) (`CHANGELOG.md`, `cliff.toml`).
 
 ## Declared Path-Scope Overlaps
 
@@ -153,7 +153,7 @@ Exempt from overlap detection (intended broad coupling):
 | Declared group | Shared scope |
 |---|---|
 | `quality-security.md` + `subsystem-ci.md` | `.github/workflows/**`, `.github/actions/**` |
-| `workflow-git.md` + `workflow-release.md` + `docs-quality.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
+| `workflow-git.md` + `workflow-release.md` + `docs-quality.md` | `CHANGELOG.md`, `cliff.toml` |
 | `docs-style.md` + `subsystem-website.md` + `product-context.md` + `docs-quality.md` | `website/**` |
 | `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
 | `subsystem-cli-api.md` + `subsystem-cli-commands.md` + `subsystem-interface-contract.md` | `crates/ocx_cli/src/command/**` |

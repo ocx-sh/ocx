@@ -2,7 +2,6 @@
 paths:
   - "CHANGELOG.md"
   - "cliff.toml"
-  - "dist-workspace.toml"
 ---
 
 # Git & Commit Workflow
