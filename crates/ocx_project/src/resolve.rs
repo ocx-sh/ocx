@@ -1841,8 +1841,7 @@ mod tests {
             let mut found = false;
             let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
             while let Some(c) = cause {
-                if let Some(ProjectErrorKind::PolicyBlocked { policy: got, .. }) = c.downcast_ref::<ProjectErrorKind>()
-                {
+                if let Some(ProjectErrorKind::PolicyBlocked { policy: got, .. }) = project_kind(c) {
                     assert_eq!(
                         *got, policy,
                         "policy label must be carried through to the project error"
@@ -2138,7 +2137,7 @@ delta = "{r}/delta:1"
         let mut found = false;
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
         while let Some(c) = cause {
-            if let Some(ProjectErrorKind::LockOutOfSync { drift }) = c.downcast_ref::<ProjectErrorKind>()
+            if let Some(ProjectErrorKind::LockOutOfSync { drift }) = project_kind(c)
                 && let LockDrift::DeclarationHash {
                     previous_hash,
                     current_hash,
@@ -2486,10 +2485,7 @@ gamma = "{r}/gamma:1"
     fn chain_contains_lock_out_of_sync(err: &super::super::Error) -> bool {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(err);
         while let Some(c) = cause {
-            if matches!(
-                c.downcast_ref::<ProjectErrorKind>(),
-                Some(ProjectErrorKind::LockOutOfSync { .. })
-            ) {
+            if matches!(project_kind(c), Some(ProjectErrorKind::LockOutOfSync { .. })) {
                 return true;
             }
             cause = c.source();
@@ -2526,7 +2522,7 @@ gamma = "{r}/gamma:1"
         let mut found = false;
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&err);
         while let Some(c) = cause {
-            if let Some(ProjectErrorKind::ToolNotInConfig { name }) = c.downcast_ref::<ProjectErrorKind>() {
+            if let Some(ProjectErrorKind::ToolNotInConfig { name }) = project_kind(c) {
                 assert_eq!(name, "nonexistent", "the undeclared tool is named in the error");
                 found = true;
                 break;
@@ -2732,6 +2728,34 @@ gamma = "{r}/gamma:1"
     }
 
     // ── resolve_one: candidate fan-out edge cases ───────────────────────────
+
+    /// The kind of a project-tier error, whether `c` is the kind itself or the `Error::Project` carrying it.
+    fn project_kind<'a>(c: &'a (dyn std::error::Error + 'static)) -> Option<&'a ProjectErrorKind> {
+        match c.downcast_ref::<crate::Error>() {
+            Some(crate::Error::Project(project_error)) => Some(&project_error.kind),
+            _ => c.downcast_ref::<ProjectErrorKind>(),
+        }
+    }
+
+    /// A missing tag is stated once in the rendered chain.
+    #[tokio::test]
+    async fn resolve_lock_missing_tag_renders_once() {
+        let config = single_tool_config();
+        let mock = ManifestMock::new(test_digest(), None);
+        let index = Index::from_impl(mock);
+        let err = resolve_lock(&config, &index, &[], fast_options())
+            .await
+            .expect_err("a missing tag must surface as an error");
+        // The raw walk `{err:#}` does; `render_chain` hides a repeat that ends the output.
+        let mut rendered = err.to_string();
+        let mut cause = std::error::Error::source(&err);
+        while let Some(link) = cause {
+            rendered.push_str(&format!(": {link}"));
+            cause = link.source();
+        }
+        let count = rendered.matches("not found").count();
+        assert_eq!(count, 1, "tag-not-found must appear once, got {count}: {rendered}");
+    }
 
     /// Plan Testing Strategy (`resolve_one`): an unpinned-tag `Resolve` miss
     /// (the manifest is not found) maps to a `NotFound`-classified error —
