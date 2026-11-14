@@ -440,7 +440,10 @@ fn tolerate_discovery_error(
     if install_discovery_error_is_fatal(patches, &error) {
         return Err(error);
     }
-    log::warn!("patch discovery for '{base}' failed (patch tier not required): {error}; continuing without companions");
+    log::warn!(
+        "patch discovery for '{base}' failed (patch tier not required): {chain}; continuing without companions",
+        chain = ocx_util::error::render_chain(&error)
+    );
     Ok(())
 }
 
@@ -550,7 +553,10 @@ async fn sync_descriptors(
                 synced.pending.extend(pending);
             }
             // ponytail: each pass naming it retries; memoize the failure if an outage makes sync slow.
-            Err(error) => log::debug!("patch sync: '{id}' failed once, left to each base: {error}"),
+            Err(error) => log::debug!(
+                "patch sync: '{id}' failed once, left to each base: {chain}",
+                chain = ocx_util::error::render_chain(&error)
+            ),
         }
     }
     synced
@@ -645,7 +651,10 @@ async fn revalidate_descriptors(
             }
             Err(error) if patches.required => fatal.push((position, error)),
             Err(error) => {
-                log::warn!("patch discovery: could not re-check '{id}': {error}; using the cached state");
+                log::warn!(
+                    "patch discovery: could not re-check '{id}': {chain}; using the cached state",
+                    chain = ocx_util::error::render_chain(&error)
+                );
                 let recorded = recorded_descriptor_offline(manager, id).await;
                 revalidated.descriptors.insert(id.clone(), recorded);
             }

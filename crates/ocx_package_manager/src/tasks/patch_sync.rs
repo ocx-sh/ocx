@@ -401,7 +401,10 @@ impl PackageManager {
                     fatal.get_or_insert(err);
                 }
                 Err(err) if pass.scope == PatchDescriptorScope::GlobalOnly => {
-                    log::warn!("patch sync: global descriptor check failed: {err}; continuing");
+                    log::warn!(
+                        "patch sync: global descriptor check failed: {chain}; continuing",
+                        chain = ocx_util::error::render_chain(&err)
+                    );
                 }
                 Err(err) => {
                     log::warn!(

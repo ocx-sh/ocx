@@ -177,7 +177,10 @@ async fn walk_uninstalled_closure(
         return Ok(());
     }
     if let Err(error) = walk_closure(mgr, &resolved, platform).await {
-        log::debug!("Credential prefetch for '{package}' stopped early: {error}");
+        log::debug!(
+            "Credential prefetch for '{package}' stopped early: {chain}",
+            chain = ocx_util::error::render_chain(&error)
+        );
     }
     Ok(())
 }

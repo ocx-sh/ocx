@@ -124,7 +124,11 @@ impl PackageManager {
         match ocx_config::managed_config::probe_managed_config_digest(client, &resolved.source).await {
             Ok(digest) => digest,
             Err(error) => {
-                log::debug!("managed-config digest probe for '{}' failed: {error}", resolved.source);
+                log::debug!(
+                    "managed-config digest probe for '{}' failed: {chain}",
+                    resolved.source,
+                    chain = ocx_util::error::render_chain(&error)
+                );
                 None
             }
         }
@@ -172,7 +176,10 @@ impl PackageManager {
                     return ManagedConfigRefreshOutcome::Unreachable;
                 }
                 Err(error) => {
-                    log::debug!("managed-config refresh probe failed: {error}");
+                    log::debug!(
+                        "managed-config refresh probe failed: {chain}",
+                        chain = ocx_util::error::render_chain(&error)
+                    );
                     ocx_store::file_structure::StateStore::touch(marker).await;
                     return ManagedConfigRefreshOutcome::Unreachable;
                 }
@@ -207,7 +214,10 @@ impl PackageManager {
                         return ManagedConfigRefreshOutcome::Unreachable;
                     }
                     Err(error) => {
-                        log::debug!("managed-config apply-on-drift fetch failed: {error}");
+                        log::debug!(
+                            "managed-config apply-on-drift fetch failed: {chain}",
+                            chain = ocx_util::error::render_chain(&error)
+                        );
                         return ManagedConfigRefreshOutcome::Unreachable;
                     }
                 };
@@ -258,7 +268,10 @@ async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str)
     let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
     match manager.clone().with_patches(Some(resolved)).sync_patches(&[host]).await {
         Ok(_report) => log::debug!("managed-config patch sync: completed"),
-        Err(error) => log::warn!("managed-config patch sync failed (non-fatal): {error}"),
+        Err(error) => log::warn!(
+            "managed-config patch sync failed (non-fatal): {chain}",
+            chain = ocx_util::error::render_chain(&error)
+        ),
     }
 }
 
