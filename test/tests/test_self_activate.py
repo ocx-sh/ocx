@@ -1139,3 +1139,28 @@ def test_activate_prepends_the_global_toolchain_bin_in_every_mode(
     assert expected in result.stdout, (
         f"activate = {mode!r} must prepend {expected!r} to PATH; got:\n{result.stdout}"
     )
+
+
+@requires_pty
+def test_activate_records_state_that_shell_state_reads_with_a_relative_config(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A relative `OCX_CONFIG` must not leave the per-prompt hook unable to read its own state."""
+    config = tmp_path / "rel.toml"
+    config.write_text("")
+    relative = os.path.relpath(config, os.getcwd())
+    assert not os.path.isabs(relative)
+
+    result = _run_activate_interactive(ocx, "--shell=bash", extra_env={"OCX_CONFIG": relative})
+    assert result.returncode == 0, result.stdout
+    match = re.search(r"__OCX_ENV_STATE='([^']*)'", result.stdout)
+    assert match, f"activate emitted no env state:\n{result.stdout}"
+
+    report = ocx.run(
+        "shell",
+        "state",
+        check=False,
+        env_overrides={"__OCX_ENV_STATE": match.group(1), "OCX_NO_PROJECT": "1"},
+    )
+    assert report.returncode == 0, report.stderr
+    assert json.loads(report.stdout)["env_state"]["status"] == "readable"
