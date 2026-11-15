@@ -6,7 +6,7 @@
     python3 scripts/release_readiness_gate.py --sha <40-hex commit>
 
 Asks GitHub (through `gh`) for a successful `release-readiness.yml` run whose head is exactly `--sha`
-(`task release:tag` on HEAD and `readiness-gate.yml` before `host` both call it); a run on an
+(`readiness-gate.yml`, called by `release.yml`, calls it); a run on an
 ancestor or sibling commit is no evidence. Every non-zero exit refuses the release: 1 no green run,
 2 `--sha` is not a full 40-hex commit, 69 `gh` missing or unauthenticated, 74 any other `gh` failure
 or unexpected JSON. Exit 0 prints the run URL and run-name, so a `BYPASS` run is named in the log.

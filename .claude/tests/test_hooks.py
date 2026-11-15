@@ -282,8 +282,8 @@ class TestReleasePrepareGuard:
     `release:validate` and `release:verify` when the repository defines them.
     The predicates are shown red and green by `scripts/tests/test_commit_gate.py`;
     what this catches is the *call sites* drifting: a hook ocx stopped defining
-    (the template then skips it without a word), a gate that no longer asks for
-    the readiness run or runs the provenance proof, a verify hook that runs the suite again.
+    (the template then skips it without a word), a gate without the provenance
+    proof or with a pre-bump readiness run, a verify hook that runs the suite again.
     """
 
     HOOKS = ("gate", "bump-files", "validate", "verify")
@@ -336,10 +336,17 @@ class TestReleasePrepareGuard:
         taken = [line for line in self._dry_prepare() if line.startswith("task: [release:run] task verify")]
         assert not taken, taken
 
-    def test_release_gate_asks_for_the_readiness_run_first(self) -> None:
+    def test_release_prepare_asks_for_no_readiness_run(self) -> None:
+        """The one readiness run is on the release commit, demanded by `release.yml`; a pre-bump call is redundant."""
         cmds = _task_cmds(RELEASE_TASKFILE, "gate")
-        assert "release_readiness_gate.py" in cmds[0] and '--sha "$(git rev-parse HEAD)"' in cmds[0], cmds
         assert not any("commit_gate.py" in cmd or "NOCACHE" in cmd for cmd in cmds), cmds
+        # `--dry release:prepare` only names `task release:gate`; render the gate body too.
+        gate = subprocess.run(
+            ["task", "--dry", "release:gate"], cwd=REPO_ROOT, capture_output=True, encoding="utf-8", check=False
+        )
+        assert gate.returncode == 0, gate.stderr
+        rendered = "\n".join(self._dry_prepare()) + gate.stdout + gate.stderr
+        assert "release_readiness_gate" not in rendered, rendered
 
     def test_release_gate_runs_the_provenance_proof(self) -> None:
         """C-006 / S-019: the real-bytes proof (release build green, `__testing` build red)

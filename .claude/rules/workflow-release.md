@@ -109,7 +109,7 @@ Release ceremony = human-driven process with tooling support, in four steps. No 
 # 1. Prepare. Never tags or pushes.
 task release:prepare BUMP=auto   # or BUMP=patch|minor|major, or VERSION=x.y.z
 # Human reviews the changes
-# 2. Commit, land the release commit on main, dispatch readiness on that exact commit.
+# 2. Commit, land the release commit on main, dispatch readiness on that exact commit (the one readiness run).
 git add -A && git commit -m "release: vX.Y.Z"
 gh workflow run release-readiness.yml --ref <ref holding the release commit>
 # 3. Print the dispatch command, then run it yourself.
@@ -118,7 +118,7 @@ task release:tag
 # 4. release.yml takes over: readiness gate, build, scan, sign, publish, tag, GitHub Release, announce.
 ```
 
-1. **`task release:prepare`** — the conventions template's task; gate, bump, changelog, validate, verify (below). The bump commit does not exist while it runs, so it cannot ask for readiness on it.
+1. **`task release:prepare`** — the conventions template's task; gate, bump, changelog, validate, verify (below). It asks for no readiness run: the bump commit does not exist while it runs, and the one readiness run is on the landed release commit (step 2), which `release.yml` demands again on that exact SHA (step 4).
 2. **Commit, land, dispatch.** `release-readiness.yml` runs the full gate on the bytes `release.yml` would publish: the stamped Bazel cross builds of all eight targets (`cross.yml`), `scan-binaries.yml`, then `acceptance.yml` on six platforms (linux and Windows x64/arm64, macOS x64/arm64) with `OCX_TEST_RELEASE_BINARY=1` against `test/limits/<os>-release`, plus `shell-activation-deep.yml`. It publishes nothing. The run-name is `readiness <sha>`. A dispatch with `bypass=true` and a `reason` skips every test job, goes green, and renames the run `readiness <sha> BYPASS: <reason>`; use it for an outage of the gate itself, never for a red result.
 3. **`task release:tag`** (`taskfiles/release.taskfile.yml`) — reads the version from `Cargo.toml` and prints `gh workflow run release.yml -f mode=release -f version=<version>`. It never runs it, tags nothing and pushes nothing. `release.yml` refuses to run off `refs/heads/main`, outside the ocx-sh/ocx repository, or when tag `v<version>` already exists. Use `mode=candidate -f version=X.Y.Z-rcN` for a release candidate and `mode=dev` for a dev build (`ghcr.io/ocx-sh/dev/cli` only).
 4. **`readiness-gate.yml`** — the `readiness` job of `release.yml` (release and candidate modes) calls it on `github.sha`; `publish` needs it and reads its result, so a red gate publishes nothing. `gh workflow run readiness-gate.yml --ref <ref> -f sha=<sha>` shows the gate red or green for any commit without cutting a release.
@@ -127,13 +127,13 @@ task release:tag
 
 | Step | Owner | What it does |
 |---|---|---|
-| `release:gate` | ocx | Refuses without a green Release Readiness run for HEAD (`scripts/release_readiness_gate.py --sha HEAD`), then runs `provenance:proof`: the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
+| `release:gate` | ocx | Runs `provenance:proof` (no readiness check; that is `release.yml`'s job on the release commit): the release provenance scan on real bytes, green on a `__testing`-free build and red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV). Defining it replaces the template's own check of the latest verify-deep run. |
 | `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, then `scripts/bazel_pin_check.py --set-module-version` on `MODULE.bazel`'s `module(version=)` (`bazel:pin:check` fails when the two differ), from the version the template computed with `git-cliff --bumped-version`. |
 | git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
 | `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
-| `release:verify` | ocx | An echo and nothing else: the template falls back to a full `task verify` when the hook is undefined, and readiness on the release commit (`release:gate`) is the test gate. |
+| `release:verify` | ocx | An echo and nothing else: the template falls back to a full `task verify` when the hook is undefined, and readiness on the release commit (`release.yml`'s `readiness` job) is the test gate. |
 
-The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify hook that runs the suite and a gate without its readiness or provenance step each turn it red.
+The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify hook that runs the suite and a gate without its provenance step or with a pre-bump readiness call each turn it red.
 
 After the dispatch, CI takes over: readiness gate → stamped build → provenance scan → sign and publish to the registry → tag and GitHub Release → announce → docker and sdkgen publish.
 
