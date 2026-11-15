@@ -45,6 +45,10 @@ certify whatever ocx does, which is the failure mode the corpus exists to preven
   never hand-edit. Asserted by `index_wire_conformance.rs`'s
   `codepoint_escapes_match_the_cpython_truth_table` and
   `cpython_structural_vectors_round_trip_byte_exact`.
+- `publishers/*` — **not** vendored: roots that declare `publishers`, a field
+  `ocx-sh/indexbot` does not model yet, so its corpus has no vector for it.
+  Typed-parse only (`a_root_declaring_publishers_parses_into_the_typed_index_root`).
+  Once upstream carries the field, the vendored vector replaces this directory.
 - `dispatch/sha256/<hex>.json` — real OCI image indices, one per file, each named
   by the sha256 of its own bytes (the CAS convention of `p/<ns>/<pkg>/o/<algo>/`,
   D1). `dispatch/expected_platforms.json` records, per vector, the exact

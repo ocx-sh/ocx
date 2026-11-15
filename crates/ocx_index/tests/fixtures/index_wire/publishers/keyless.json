@@ -1,0 +1,27 @@
+{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/ocx-contrib/widget",
+  "owners": [
+    {
+      "login": "alice",
+      "id": 1
+    }
+  ],
+  "status": "active",
+  "deprecated_message": null,
+  "created": "2026-07-24",
+  "desc": null,
+  "publishers": [
+    {
+      "kind": "keyless",
+      "identity": "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/main",
+      "oidc_issuer": "https://token.actions.githubusercontent.com"
+    }
+  ],
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "observed": "2026-07-24T00:00:00Z"
+    }
+  }
+}
