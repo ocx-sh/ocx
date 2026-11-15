@@ -649,16 +649,22 @@ def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
 
 def _scans_a_directory(env: list[dict]) -> bool:
     """Whether `ocx package create` scans a directory for `env`: an interface-visible `PATH` entry
-    whose whole value is `${installPath}/<dir>` or its `${self.installPath}` alias, as `scan_scope` in
-    `ocx_package`'s `bin_scan.rs` reads it."""
+    whose whole value is `${installPath}` (the content root), `${installPath}/<dir>`, or the
+    `${self.installPath}` alias of either, as `scan_scope` in `ocx_package`'s `bin_scan.rs` reads it."""
     roots = ("${installPath}/", "${self.installPath}/")
+    bare = ("${installPath}", "${self.installPath}")
     return any(
         entry.get("type") == "path"
         and entry.get("key") == "PATH"
         and entry.get("visibility", "private") in ("public", "interface")
-        and (value := str(entry.get("value", ""))).startswith(roots)
-        and "${" not in (rest := value.partition("}/")[2])
-        and ".." not in rest.split("/")
+        and (
+            (value := str(entry.get("value", ""))) in bare
+            or (
+                value.startswith(roots)
+                and "${" not in (rest := value.partition("}/")[2])
+                and ".." not in rest.split("/")
+            )
+        )
         for entry in env
     )
 

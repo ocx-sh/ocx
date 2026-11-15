@@ -432,6 +432,16 @@ mod tests {
         serde_json::from_str(&json).expect("fixture metadata parses")
     }
 
+    /// Builds `AuthoringMetadata` whose one interface-visible `PATH` var is `value` verbatim,
+    /// for shapes `interface_path_metadata` cannot spell (the bare `${installPath}`).
+    fn interface_path_value_metadata(value: &str) -> AuthoringMetadata {
+        let json = format!(
+            r#"{{"type":"bundle","version":1,
+                "env":[{{"key":"PATH","type":"path","value":"{value}","required":false,"visibility":"interface"}}]}}"#
+        );
+        serde_json::from_str(&json).expect("fixture metadata parses")
+    }
+
     #[cfg(unix)]
     fn write_exec_file(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -476,6 +486,49 @@ mod tests {
             names(&found),
             vec!["cmake"],
             "only the executable regular file must be claimed; non-exec file and subdirectory excluded"
+        );
+    }
+
+    // ── Bare `${installPath}` names the content root ────────────────────
+
+    /// A bare `${installPath}` (and its `${self.installPath}` alias) scans the content
+    /// root's immediate entries: a root-level executable is claimed, one under `bin/` is not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_scans_the_content_root_for_a_bare_install_path_and_does_not_recurse() {
+        let dir = tempfile::tempdir().unwrap();
+        write_exec_file(&dir.path().join("tool"));
+        write_nonexec_file(&dir.path().join("README"));
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_file(&bin.join("nested"));
+
+        for value in ["${installPath}", "${self.installPath}"] {
+            let metadata = interface_path_value_metadata(value);
+            let found = scan_interface_binaries(dir.path(), &metadata, &linux_platform())
+                .await
+                .expect("scan succeeds");
+            assert_eq!(
+                names(&found),
+                vec!["tool"],
+                "{value}: only the root-level executable is claimed; `bin/` is not descended into"
+            );
+        }
+    }
+
+    /// The bare token puts the root in scope, so a host that cannot scan refuses `Auto`
+    /// exactly as it does for `${installPath}/bin`.
+    #[tokio::test]
+    async fn resolve_binaries_auto_fails_closed_for_a_bare_install_path_when_the_host_cannot_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = interface_path_value_metadata("${installPath}");
+
+        let err = resolve_binaries_on_host(dir.path(), metadata, &linux_platform(), ScanMode::Auto, false)
+            .await
+            .expect_err("a bare ${installPath} is a non-empty scope, so Auto must refuse");
+        assert!(
+            matches!(err, BinScanError::UnsupportedHostScan { .. }),
+            "unexpected: {err}"
         );
     }
 

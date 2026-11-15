@@ -99,8 +99,7 @@ fn path_value_substitutes_cleanly(value: &str) -> bool {
     if segments.next().is_some() {
         return false;
     }
-    // The bare token separately: `classify_install_path_rooted_dir` only accepts `${installPath}/<rel>`.
-    only == INSTALL_PATH_TOKEN || classify_install_path_rooted_dir(only).is_some()
+    classify_install_path_rooted_dir(only).is_some()
 }
 
 #[cfg(test)]
@@ -421,11 +420,10 @@ mod tests {
     /// Closed 2026-08-10 and previously unguarded: a value that is
     /// *exactly* `${installPath}` fires nothing.
     ///
-    /// The clean-shape predicate cannot be
-    /// `metadata::template::classify_install_path_rooted_dir` alone — that helper
-    /// strips the literal `"${installPath}/"` prefix and so returns `None` here,
-    /// which would classify the most trivially substitutable shape there is as a
-    /// *concatenation*. Deleting the bare-token arm beside it reds only this test.
+    /// The clean-shape predicate is
+    /// `metadata::template::classify_install_path_rooted_dir`, which answers the
+    /// bare token with the content root; were it `None` here, the most trivially
+    /// substitutable shape there is would read as a *concatenation*.
     #[test]
     fn bare_install_path_under_a_path_modifier_is_not_flagged() {
         let package = pinned("cmake");

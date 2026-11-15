@@ -73,6 +73,7 @@ See [Declaring executables][authoring-binaries] for why the claim is unverified 
 A name is eligible only if it is reachable through a `${installPath}`- or `${self.installPath}`-rooted [`path`](./env.md#env-path) variable named `PATH` with [interface visibility](./env.md#env-entry-visibility).
 
 - Private, `libexec`-style directories are never candidates.
+- A bare `${installPath}` (or `${self.installPath}`) `PATH` entry names the content root itself; its immediate entries are scanned, subdirectories are not descended into.
 - Only the `PATH` variable is scanned (`Path` also counts for a Windows target). `LD_LIBRARY_PATH` and every other path variable never contribute a name.
 - Shared libraries in a scanned directory are never claimed: ELF shared objects and Mach-O files that are not executables are skipped even when their exec bit is set. Scripts and unrecognized files are claimed.
 - The claim is own-package only and never transitive: a package never lists a dependency's executables. What is reachable through a dependency chain is reported by [`ocx env`][cmd-env-root] and [`ocx package env`][cmd-package-env] in their `binaries` array, attributed per admitted package.
