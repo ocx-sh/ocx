@@ -154,7 +154,8 @@ pub async fn scan_interface_binaries(
 1. Collect every `Var` in `metadata`'s `env` where `modifier` is `Path` **and**
    `key` is `PATH` (ASCII case-insensitive on a Windows target; #619) **and**
    `visibility.has_interface()` **and** the value template is exactly
-   `${installPath}/<rel>` (no combination with `${deps.*}`, no extra literal
+   `${installPath}/<rel>`, or the bare `${installPath}` (the content root, empty
+   `<rel>`; no combination with `${deps.*}`, no extra literal
    segments). Vars not matching this exact shape are excluded from scan scope
    — best-effort, not an error (a combined-path var is rare and the publisher
    can always hand-author `binaries` for it).

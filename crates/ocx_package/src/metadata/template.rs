@@ -33,20 +33,26 @@ use ocx_util::fs::path::RelativePath;
 pub const MAX_RESOLVED_VALUE_BYTES: usize = 64 * 1024;
 
 /// Returns `rel` for a raw `${installPath}/<rel>` template with no modifier, else `None`,
-/// including for a scan error or an escaping `rel`.
+/// including for a scan error or an escaping `rel`. The bare `${installPath}` (or its
+/// `${self.installPath}` alias) is the content root itself and yields the empty `rel`,
+/// like `${installPath}/`; with a modifier it is `None`.
 ///
 /// It never checks the var's `modifier` or `visibility`; the caller must
 /// (`adr_declared_binaries_metadata.md` §2).
 #[must_use]
 pub fn classify_install_path_rooted_dir(value: &str) -> Option<RelativePath> {
     let segments = scanner::scan(value).ok()?;
-    let [Segment::Token(token), Segment::Literal { text: rest, .. }] = segments.as_slice() else {
-        return None;
-    };
-    if token.shape != TokenShape::InstallPath || token.modifier.is_some() {
-        return None;
+    match segments.as_slice() {
+        [Segment::Token(token)] if token.shape == TokenShape::InstallPath && token.modifier.is_none() => {
+            Some(RelativePath::default())
+        }
+        [Segment::Token(token), Segment::Literal { text: rest, .. }]
+            if token.shape == TokenShape::InstallPath && token.modifier.is_none() =>
+        {
+            RelativePath::parse(rest.strip_prefix('/')?).ok()
+        }
+        _ => None,
     }
-    RelativePath::parse(rest.strip_prefix('/')?).ok()
 }
 
 /// Resolves interpolation tokens in template strings; pure, since every input is a parameter.
@@ -583,11 +589,21 @@ mod tests {
 
     // ── classify_install_path_rooted_dir ──────────────────────────────────────
 
-    /// A bare `${installPath}` with no trailing slash is not the
-    /// `${installPath}/<rel>` shape — no `<rel>` to classify.
+    /// A bare `${installPath}` is the content root itself, the same answer as
+    /// `${installPath}/`; the `${self.installPath}` alias shares the token shape.
     #[test]
-    fn classify_install_path_rooted_dir_bare_token_returns_none() {
-        assert_eq!(classify_install_path_rooted_dir("${installPath}"), None);
+    fn classify_install_path_rooted_dir_bare_token_yields_empty_rel() {
+        let rel = classify_install_path_rooted_dir("${installPath}").expect("the bare token is the root");
+        assert_eq!(rel.as_path(), Path::new(""));
+        let alias = classify_install_path_rooted_dir("${self.installPath}").expect("the bare alias is the root");
+        assert_eq!(alias.as_path(), Path::new(""));
+    }
+
+    /// A modifier on the lone token is not the raw shape, as with `<rel>` present.
+    #[test]
+    fn classify_install_path_rooted_dir_bare_token_with_a_modifier_returns_none() {
+        assert_eq!(classify_install_path_rooted_dir("${installPath:native}"), None);
+        assert_eq!(classify_install_path_rooted_dir("${self.installPath:posix}"), None);
     }
 
     /// `${installPath}/` (trailing slash, nothing after) yields an empty,

@@ -174,7 +174,6 @@ fn path_list_segments(value: &str) -> Vec<&str> {
 fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
     use crate::metadata::template::classify_install_path_rooted_dir;
     use crate::metadata::template::scanner::{Segment, TokenShape, scan};
-    use ocx_util::fs::path::RelativePath;
 
     // Recorded, never dropped, or its directory goes uninspected and the lint stays green.
     let Ok(scanned) = scan(segment) else {
@@ -186,14 +185,6 @@ fn classify_path_segment(segment: &str, scope: &mut ScanScope) {
         .iter()
         .any(|piece| matches!(piece, Segment::Token(token) if token.shape == TokenShape::InstallPath));
     if !names_install_path {
-        return;
-    }
-
-    // The content root itself: scanned, never refused or dropped.
-    if let [Segment::Token(token)] = scanned.as_slice()
-        && token.modifier.is_none()
-    {
-        scope.directories.push(RelativePath::default());
         return;
     }
 
