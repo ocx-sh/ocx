@@ -58,7 +58,7 @@ than fixed.
      release arm unreachable and refuse `task release:prepare`'s own commit.
   4. Every commit needs a fresh mark, full or scoped, whatever its subject or
      branch — `task verify:mark` writes one. A `release:` commit is gated on the
-     remote Release Readiness run (`task release:gate`), not on a local full
+     remote Release Readiness run (`release.yml`'s readiness job), not on a local full
      verify.
   5. The mark must be fresh (5-minute TTL), written at the current HEAD, of at
      least the required scope, and written BY THIS WORKING TREE. A mark
