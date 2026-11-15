@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-11-15
+
+### Added
+
+- Verify packages against publishers declared in the index *(trust)* **BREAKING**
+- --no-verify is refused when the system config locks signatures to required *(install)* **BREAKING**
+- Prune deletes GitHub Packages tags for ghcr.io with --forge github *(package)*
+- Package verify and sbom default to the host platform *(cli)* **BREAKING**
+- Package prune accepts an index-named GitHub Enterprise host listed in trusted_hosts *(cli)*
+
+### Changed
+
+- Package prune reads the manifests of kept versions concurrently *(announce)*
+
+### Documentation
+
+- The lock guide says when a lock install skips the publisher check *(guides)*
+- Declaring publishers in the index has its own guide *(guides)*
+- The changelog page derives its font preload at build time *(website)*
+
+### Fixed
+
+- Sign, attest and verify an image index on registries that honour Accept, such as ghcr.io *(sign)*
+- Cascade repair for a build tag writes and announces only the aliases that build owns *(package)*
+- Log lines carry the full error cause chain, including the registry authentication cause *(cli)*
+- A failed package push --sign or --sbom writes no tag and returns the error document *(cli)* **BREAKING**
+- Announce --tags-from-registry indexes version tags only *(cli)*
+- An unreadable discovered config file is named in the hint instead of --config *(config)*
+- Ocx lock states a missing tag once instead of three times *(cli)*
+- Selecting a version that is not installed says so and names ocx install *(cli)*
+- Package verify says to pass --platform when an image index carries no signature *(cli)*
+- A publisher mismatch says when keyless publishers were skipped for a missing trust root *(cli)*
+- Signing or attesting again under the same identity adds no second referrer *(sign)*
+- Package prune reports shared_version as the reason for a refused tag *(cli)*
+- A package prune that fails part-way names every version it did not delete *(cli)*
+- The push report no longer lists a failed attestation status *(cli)* **BREAKING**
+- Package sbom fails when every candidate is refused *(cli)* **BREAKING**
+- The per-prompt hook keeps working on Windows and with a relative OCX_CONFIG *(shell)*
+- The system config on Windows is %ProgramFiles%\ocx\config.toml *(config)* **BREAKING**
+- The index conformance fixtures match indexbot again and the publishers vector is ocx-authored *(test)*
+- Bin_scan scans the content root for a bare ${installPath} PATH entry *(package)*
+
 ## [0.6.6] - 2026-11-12
 
 ### Added
@@ -78,6 +120,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A lock written by a newer ocx tells you to upgrade ocx, and ocx 0.6.5 and older cannot read a version 4 lock *(lock)*
 - The release bump also sets the Bazel module version, and a stale one fails bazel:pin:check *(release)*
 - Ocx exec --clean keeps SystemRoot on Windows, without which a child process cannot start there *(exec)*
+
+### Release
+
+- V0.6.6
 
 ## [0.6.5] - 2026-10-07
 
@@ -1349,6 +1395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.7]: https://github.com/ocx-sh/ocx/compare/v0.6.6..v0.6.7
 [0.6.6]: https://github.com/ocx-sh/ocx/compare/v0.6.5..v0.6.6
 [0.6.5]: https://github.com/ocx-sh/ocx/compare/v0.6.4..v0.6.5
 [0.6.4]: https://github.com/ocx-sh/ocx/compare/v0.6.3..v0.6.4

@@ -131,7 +131,7 @@ task release:tag
 | `release:bump-files` | ocx | `cargo set-version` on the workspace manifests, then `scripts/bazel_pin_check.py --set-module-version` on `MODULE.bazel`'s `module(version=)` (`bazel:pin:check` fails when the two differ), from the version the template computed with `git-cliff --bumped-version`. |
 | git-cliff | template | Regenerates `CHANGELOG.md` from the commit subjects. |
 | `release:validate` | ocx | `changelog:validate`: no raw HTML tag and no website doc path in the rendered changelog. |
-| `release:verify` | ocx | An echo and nothing else: the template falls back to a full `task verify` when the hook is undefined, and readiness on the release commit (`release.yml`'s `readiness` job) is the test gate. |
+| `release:verify` | ocx | Echoes and nothing else: the template falls back to a full `task verify` when the hook is undefined, and readiness on the release commit (`release.yml`'s `readiness` job) is the test gate. It prints the next steps for the version in `Cargo.toml` — commit, push, the readiness dispatch, the `release.yml` dispatch — ahead of the template's closing line, whose "tag and push yourself" does not apply here. |
 
 The gate runs before any file is touched, so a refused release leaves the tree as it was. `.claude/tests/test_hooks.py::TestReleasePrepareGuard` holds the order and each hook's body against the rendered `task --dry release:prepare`; a renamed hook, a verify hook that runs the suite and a gate without its provenance step or with a pre-bump readiness call each turn it red.
 

@@ -354,9 +354,13 @@ class TestReleasePrepareGuard:
         assert "task: provenance:proof" in _task_cmds(RELEASE_TASKFILE, "gate")
 
     def test_release_verify_runs_no_local_suite(self) -> None:
-        """Readiness on the release commit is the gate; the hook only keeps the template off its `verify` fallback."""
+        """Readiness on the release commit is the gate; the hook only prints, the next steps included."""
         cmds = _task_cmds(RELEASE_TASKFILE, "verify")
-        assert len(cmds) == 1 and cmds[0].startswith("echo "), cmds
+        assert len(cmds) == 1, cmds
+        lines = [line.strip() for line in cmds[0].splitlines() if line.strip()]
+        assert all(line.startswith(("echo ", "version=$(python3 -c ")) for line in lines), lines
+        for step in ("git commit", "git push --no-verify origin main", "release-readiness.yml", "release.yml -f mode=release"):
+            assert any(step in line for line in lines), step
 
     def test_release_bump_files_sets_the_version_the_template_passes(self) -> None:
         cmds = _task_cmds(RELEASE_TASKFILE, "bump-files")
