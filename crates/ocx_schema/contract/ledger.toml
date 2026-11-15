@@ -126,3 +126,10 @@ subjects = ["package sbom"]
 rule = "semantic"
 pointer = "/root/commands/14/commands/17/args/2"
 reason = "a listing whose candidates were all refused now prints the report and exits 79 instead of exiting 0"
+
+[[break]]
+document = "reports"
+subjects = ["PackageCascadeRepair"]
+rule = "doc"
+pointer = "/$defs/PlannedWrite"
+reason = "PlannedWrite now says an alias one build owns is a copy of that build's own index, not rebuilt from observed content"

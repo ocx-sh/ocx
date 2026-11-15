@@ -144,6 +144,17 @@ pub enum AliasState {
         /// The bare manifest the tag resolves to.
         digest: Digest,
     },
+    /// An image index whose slots are all right, but which is not the bytes of the one build it is
+    /// made of: the same entries in another order, or with other index-level fields. Repair points
+    /// it at that build's own index.
+    Diverged {
+        /// The index the alias holds now.
+        digest: Digest,
+        /// The build whose entries make up the whole alias.
+        source: PackageVersion,
+        /// The digest of that build's own index.
+        source_digest: Digest,
+    },
     /// A variant this SDK was not generated for: the whole object, as sent.
     Unknown(Value),
 }
@@ -165,6 +176,18 @@ impl Serialize for AliasState {
                 let mut object = serializer.serialize_map(None)?;
                 object.serialize_entry("type", "not_an_index")?;
                 object.serialize_entry("digest", field_0)?;
+                object.end()
+            }
+            Self::Diverged {
+                digest: field_0,
+                source: field_1,
+                source_digest: field_2,
+            } => {
+                let mut object = serializer.serialize_map(None)?;
+                object.serialize_entry("type", "diverged")?;
+                object.serialize_entry("digest", field_0)?;
+                object.serialize_entry("source", field_1)?;
+                object.serialize_entry("source_digest", field_2)?;
                 object.end()
             }
             Self::Unknown(value) => value.serialize(serializer),
@@ -189,6 +212,20 @@ impl<'de> Deserialize<'de> for AliasState {
                 let fields = payload::<Fields, D::Error>("not_an_index", value)?;
                 Ok(Self::NotAnIndex { digest: fields.digest })
             }
+            "diverged" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    digest: Digest,
+                    source: PackageVersion,
+                    source_digest: Digest,
+                }
+                let fields = payload::<Fields, D::Error>("diverged", value)?;
+                Ok(Self::Diverged {
+                    digest: fields.digest,
+                    source: fields.source,
+                    source_digest: fields.source_digest,
+                })
+            }
             _ => Ok(Self::Unknown(value)),
         }
     }
@@ -201,6 +238,15 @@ impl Unknowns for AliasState {
             Self::Absent => {}
             Self::NotAnIndex { digest: field_0 } => {
                 field(pointer, out, "digest", field_0);
+            }
+            Self::Diverged {
+                digest: field_0,
+                source: field_1,
+                source_digest: field_2,
+            } => {
+                field(pointer, out, "digest", field_0);
+                field(pointer, out, "source", field_1);
+                field(pointer, out, "source_digest", field_2);
             }
             Self::Unknown(_) => out.push(pointer.clone()),
         }
@@ -7533,6 +7579,11 @@ pub struct PlannedWrite {
     /// Every child manifest digest `index` references, deduped. Apply preflights each one so a
     /// missing child refuses the alias instead of publishing a dangling pointer.
     pub referenced_digests: Vec<String>,
+    /// The digest of the build index `index` is a verbatim copy of, when one build owns the whole
+    /// alias. Apply then writes that index's stored bytes, so the alias digest equals this one
+    /// whatever serialiser produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<Digest>,
     /// The rows that justify the write — what the user is being told changed.
     pub reasons: Vec<SlotRow>,
 }
@@ -7543,6 +7594,7 @@ impl Unknowns for PlannedWrite {
         field(pointer, out, "index", &self.index);
         field(pointer, out, "observed_digest", &self.observed_digest);
         field(pointer, out, "referenced_digests", &self.referenced_digests);
+        field(pointer, out, "copy_of", &self.copy_of);
         field(pointer, out, "reasons", &self.reasons);
     }
 }

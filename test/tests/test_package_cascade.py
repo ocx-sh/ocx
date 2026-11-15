@@ -594,3 +594,58 @@ def test_j15_a_logical_name_the_index_does_not_hold_is_not_in_index(ocx: OcxRunn
                 assert expected in refused.stderr, (
                     f"{run.__name__}: the refusal must name the authoritative index:\n{refused.stderr}"
                 )
+
+
+def test_j16_repair_points_every_alias_a_build_owns_at_the_build_tags_own_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A build pushed without `--cascade`, platforms out of alphabetical order and
+    with index annotations, owns every rolling tag. `repair` writes each of them as
+    the build tag's own index, so all share its digest; a second repair writes
+    nothing and `check` is clean.
+    """
+    build = "1.0.0_20260101000000"
+    source = ["--annotation", "org.opencontainers.image.source=https://example.com/acme/pkg"]
+    make_package(
+        ocx, unique_repo, build, tmp_path / "arm64", cascade=False, platform="linux/arm64", extra_push_args=source
+    )
+    make_package(
+        ocx, unique_repo, build, tmp_path / "amd64", cascade=False, platform="linux/amd64", extra_push_args=source
+    )
+    build_digest = fetch_manifest_digest(ocx.registry, unique_repo, build)
+
+    repaired = _repair(ocx, f"{unique_repo}:{build}")
+    assert repaired.returncode == 0
+    written = {o["tag"] for o in _entries(repaired)[0]["outcomes"] if o["outcome"]["type"] == "written"}
+    assert written == {"1.0.0", "1.0", "1", "latest"}
+
+    for alias in sorted(written):
+        assert fetch_manifest_digest(ocx.registry, unique_repo, alias) == build_digest, (
+            f"'{alias}' must be the build tag's own index"
+        )
+
+    again = _repair(ocx, f"{unique_repo}:{build}")
+    assert again.returncode == 0
+    assert _entries(again)[0]["planned"] == []
+    assert _entries(again)[0]["outcomes"] == []
+    assert _check(ocx, unique_repo).returncode == 0
+
+
+def test_j17_successive_cascaded_versions_check_clean(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """`push --cascade` keeps each alias on the index of the build that owns it: a
+    later version pushed with its platforms in the other order and a changed
+    annotation value checks clean, and `latest` is that version's own index.
+    """
+
+    def revision(value: str) -> list[str]:
+        return ["--annotation", f"org.opencontainers.image.revision={value}"]
+
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "a1", platform="linux/amd64", extra_push_args=revision("r1"))
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "b1", platform="linux/arm64", extra_push_args=revision("r1"))
+    make_package(ocx, unique_repo, "1.1.0", tmp_path / "b2", platform="linux/arm64", extra_push_args=revision("r2"))
+    make_package(ocx, unique_repo, "1.1.0", tmp_path / "a2", platform="linux/amd64", extra_push_args=revision("r2"))
+
+    assert _check(ocx, unique_repo).returncode == 0
+    newest = fetch_manifest_digest(ocx.registry, unique_repo, "1.1.0")
+    for alias in ("1.1", "1", "latest"):
+        assert fetch_manifest_digest(ocx.registry, unique_repo, alias) == newest, f"'{alias}' drifted from 1.1.0"

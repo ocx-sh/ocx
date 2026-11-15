@@ -90,6 +90,8 @@ fn image_index(entries: Vec<ocx_oci::ImageIndexEntry>) -> ocx_oci::ImageIndex {
 
 /// The digest a seeded tag resolves to — a function of the tag name, so a
 /// fixture can state what an index root committed without threading values.
+/// [`Graph::build`] gives byte-identical bodies the first such tag's digest,
+/// as a registry's content addressing does.
 fn tag_digest(tag: &str) -> ocx_oci::Digest {
     ocx_oci::Digest::Sha256(format!("tag-{tag}"))
 }
@@ -106,6 +108,8 @@ fn identifier() -> ocx_oci::PackageRef {
 struct Graph {
     seeds: Vec<(String, Option<ocx_oci::ImageIndex>)>,
     root: Option<Vec<(String, ocx_oci::Digest)>>,
+    /// Tags whose root commit is whatever digest the registry serves for them.
+    agreeing: Vec<String>,
 }
 
 impl Graph {
@@ -144,9 +148,10 @@ impl Graph {
 
     /// A live index root committing every listed tag at the digest it actually
     /// resolves to — an index in agreement with the registry.
-    fn root_agreeing(self, tags: &[&str]) -> Self {
-        let commits: Vec<(&str, ocx_oci::Digest)> = tags.iter().map(|tag| (*tag, tag_digest(tag))).collect();
-        self.root(&commits)
+    fn root_agreeing(mut self, tags: &[&str]) -> Self {
+        self.agreeing = tags.iter().map(ToString::to_string).collect();
+        self.root.get_or_insert_with(Vec::new);
+        self
     }
 
     fn build(self) -> TagGraphObservation {
@@ -155,6 +160,7 @@ impl Graph {
 
         let mut tags = BTreeMap::new();
         let mut ignored_tags = Vec::new();
+        let mut first_with_body: BTreeMap<String, String> = BTreeMap::new();
         for (tag, body) in &self.seeds {
             let Some(alias) = AliasTag::parse(tag, &variants) else {
                 ignored_tags.push(tag.clone());
@@ -164,25 +170,44 @@ impl Graph {
                 Some(index) => ocx_oci::Manifest::ImageIndex(index.clone()),
                 None => ocx_oci::Manifest::Image(ocx_oci::ImageManifest::default()),
             };
+            let digest_name = match body {
+                Some(index) => first_with_body
+                    .entry(serde_json::to_string(index).expect("an index serializes"))
+                    .or_insert_with(|| tag.clone())
+                    .clone(),
+                None => tag.clone(),
+            };
             tags.insert(
                 alias,
                 ObservedTag {
-                    digest: tag_digest(tag),
+                    digest: tag_digest(&digest_name),
                     size: SIZE,
                     manifest,
                 },
             );
         }
 
+        let agreed: Vec<(String, ocx_oci::Digest)> = self
+            .agreeing
+            .iter()
+            .filter_map(|tag| {
+                let alias = AliasTag::parse(tag, &variants)?;
+                Some((tag.clone(), tags.get(&alias)?.digest.clone()))
+            })
+            .collect();
+        let root = self.root.map(|mut commits| {
+            commits.extend(agreed);
+            commits
+        });
+
         TagGraphObservation {
             identifier: ocx_oci::OciIdentifier::passthrough(&identifier()),
-            logical: self
-                .root
+            logical: root
                 .as_ref()
                 .map(|_| ocx_oci::PackageRef::new_registry("test/pkg", "ocx.sh")),
             tags,
             ignored_tags,
-            index_root: self.root.map(|commits| IndexRoot {
+            index_root: root.map(|commits| IndexRoot {
                 repository: "oci://example.com/test/pkg".to_string(),
                 tags: commits
                     .into_iter()
@@ -1340,11 +1365,8 @@ fn c22_an_index_committing_a_different_digest_is_stale() {
         .index("1.0", content())
         .index("1", content())
         .index("latest", content())
-        .root(&[
-            ("latest", ocx_oci::Digest::Sha256("older".to_string())),
-            ("1.0", tag_digest("1.0")),
-            ("1", tag_digest("1")),
-        ])
+        .root(&[("latest", ocx_oci::Digest::Sha256("older".to_string()))])
+        .root_agreeing(&["1.0", "1"])
         .build();
 
     let report = check(&observation);
@@ -1353,7 +1375,7 @@ fn c22_an_index_committing_a_different_digest_is_stale() {
         [IndexFinding::Stale {
             tag: AliasTag::Root { variant: None },
             committed: ocx_oci::Digest::Sha256("older".to_string()),
-            live: tag_digest("latest"),
+            live: observation.tags[&AliasTag::Root { variant: None }].digest.clone(),
         }]
     );
 }
@@ -1574,15 +1596,15 @@ fn e2_one_missing_platform_rewrites_the_whole_alias() {
             (
                 "1.0".to_string(),
                 vec![
-                    "darwin/arm64=sha256:mac".to_string(),
-                    "linux/amd64=sha256:lin".to_string()
+                    "linux/amd64=sha256:lin".to_string(),
+                    "darwin/arm64=sha256:mac".to_string()
                 ]
             ),
             (
                 "1".to_string(),
                 vec![
-                    "darwin/arm64=sha256:mac".to_string(),
-                    "linux/amd64=sha256:lin".to_string()
+                    "linux/amd64=sha256:lin".to_string(),
+                    "darwin/arm64=sha256:mac".to_string()
                 ]
             ),
         ]
@@ -1684,13 +1706,14 @@ fn e4_attestations_are_preserved_verbatim_after_the_platform_entries() {
 }
 
 #[test]
-fn e5_index_level_annotations_survive_the_rewrite() {
+fn e5_index_level_annotations_survive_the_rewrite_of_a_mixed_alias() {
     let annotations = BTreeMap::from([("org.opencontainers.image.source".to_string(), "https://x".to_string())]);
     let mut broken = image_index(vec![entry("linux/amd64", "lin")]);
     broken.annotations = Some(annotations.clone());
 
     let observation = Graph::new()
         .index("1.0.0", vec![entry("linux/amd64", "lin"), entry("darwin/arm64", "mac")])
+        .index("1.0.1", vec![entry("linux/amd64", "newer")])
         .raw("latest", broken)
         .build();
 
@@ -1721,13 +1744,14 @@ fn e6_an_absent_alias_is_created_from_content_that_already_exists() {
 }
 
 #[test]
-fn e7_a_foreign_artifact_type_is_preserved() {
+fn e7_a_foreign_artifact_type_is_preserved_on_a_mixed_alias() {
     let mut foreign = image_index(vec![entry("linux/amd64", "lin")]);
     foreign.artifact_type = Some("application/vnd.example.thing".to_string());
     foreign.media_type = None;
 
     let observation = Graph::new()
         .index("1.0.0", vec![entry("linux/amd64", "lin"), entry("darwin/arm64", "mac")])
+        .index("1.0.1", vec![entry("linux/amd64", "newer")])
         .raw("latest", foreign)
         .build();
 
@@ -1758,6 +1782,7 @@ fn e8_the_unserved_check_names_content_the_registry_does_not_serve() {
         index: image_index(vec![entry("linux/amd64", "never-pushed")]),
         observed_digest: None,
         referenced_digests: vec!["sha256:never-pushed".to_string()],
+        copy_of: None,
         reasons: Vec::new(),
     };
     assert_eq!(unserved(&[forged], &served), ["sha256:never-pushed"]);
@@ -1884,20 +1909,7 @@ fn e15_applying_a_plan_makes_the_graph_clean_and_the_next_plan_empty() {
     let writes = plan_of(&observation);
     assert!(!writes.is_empty());
 
-    // Apply in memory exactly as the registry would: the tag now resolves to
-    // the pushed index.
-    let mut applied = observation.clone();
-    for write in &writes {
-        let body = serde_json::to_vec(&write.index).expect("an index serializes");
-        applied.tags.insert(
-            write.tag.clone(),
-            ObservedTag {
-                digest: ocx_oci::Algorithm::Sha256.hash(&body),
-                size: i64::try_from(body.len()).expect("test body fits in i64"),
-                manifest: ocx_oci::Manifest::ImageIndex(write.index.clone()),
-            },
-        );
-    }
+    let applied = apply_plan(&observation, &writes);
 
     let report = check(&applied);
     assert!(!report.has_findings(), "{:?}", findings(&report));
@@ -2069,4 +2081,167 @@ fn a_stable_build_request_still_plans_its_whole_owned_chain() {
     for owned in ["1.0.0", "1.0", "1", "latest"] {
         assert!(tags.contains(&owned.to_string()), "{owned} missing from {tags:?}");
     }
+}
+
+// ── F: aliases a single build owns ──────────────────────────────
+
+fn with_source(mut index: ocx_oci::ImageIndex, source: &str) -> ocx_oci::ImageIndex {
+    index.annotations = Some(
+        [("org.opencontainers.image.source".to_string(), source.to_string())]
+            .into_iter()
+            .collect(),
+    );
+    index
+}
+
+/// A build tag as `ocx package push` without `--cascade` leaves it: manifests in push order, not platform order.
+fn build_index(source: &str) -> ocx_oci::ImageIndex {
+    with_source(
+        image_index(vec![
+            entry("linux/arm64", "arm"),
+            entry("linux/amd64", "amd"),
+            entry("darwin/arm64", "mac"),
+        ]),
+        source,
+    )
+}
+
+/// Applies a plan as the registry would: a copy keeps the build's own digest, a constructed write gets its own.
+fn apply_plan(observation: &TagGraphObservation, writes: &[PlannedWrite]) -> TagGraphObservation {
+    let mut applied = observation.clone();
+    for write in writes {
+        let body = serde_json::to_vec(&write.index).expect("a planned index serializes");
+        let digest = write
+            .copy_of
+            .clone()
+            .unwrap_or_else(|| ocx_oci::Algorithm::Sha256.hash(&body));
+        applied.tags.insert(
+            write.tag.clone(),
+            ObservedTag {
+                digest,
+                size: i64::try_from(body.len()).expect("a planned body fits i64"),
+                manifest: ocx_oci::Manifest::ImageIndex(write.index.clone()),
+            },
+        );
+    }
+    applied
+}
+
+fn assert_converged(observation: &TagGraphObservation) {
+    let report = check(observation);
+    assert!(
+        !report.has_findings(),
+        "a second pass finds nothing: {:?} {:?}",
+        findings(&report),
+        report.aliases
+    );
+    assert!(plan_of(observation).is_empty(), "a second pass plans nothing");
+}
+
+#[test]
+fn f1_a_build_with_no_aliases_gets_every_alias_as_a_copy_of_its_own_index() {
+    let leaf = build_index("https://example.com/src");
+    let observation = Graph::new().raw("1.0.0_b1", leaf.clone()).build();
+
+    let writes = plan_of(&observation);
+
+    assert_eq!(writes.len(), 4, "1.0.0, 1.0, 1 and latest");
+    for write in &writes {
+        assert_eq!(
+            serde_json::to_value(&write.index).unwrap(),
+            serde_json::to_value(&leaf).unwrap(),
+            "'{}' carries the build's index verbatim: its order, annotations and labels",
+            write.tag
+        );
+        assert_eq!(
+            write.copy_of,
+            Some(tag_digest("1.0.0_b1")),
+            "'{}' names the index it copies",
+            write.tag
+        );
+    }
+    assert_converged(&apply_plan(&observation, &writes));
+}
+
+#[test]
+fn f2_an_alias_holding_the_right_entries_in_the_wrong_shape_diverges_and_is_repaired() {
+    let leaf = build_index("https://example.com/src");
+    let mut sorted = image_index(vec![
+        entry("darwin/arm64", "mac"),
+        entry("linux/amd64", "amd"),
+        entry("linux/arm64", "arm"),
+    ]);
+    sorted.annotations = None;
+    let other_annotations = with_source(sorted.clone(), "https://example.com/previous-release");
+    let observation = Graph::new()
+        .raw("1.0.0_b1", leaf)
+        .raw("1.0.0", sorted.clone())
+        .raw("1.0", sorted)
+        .raw("1", other_annotations.clone())
+        .raw("latest", other_annotations)
+        .build();
+
+    let report = check(&observation);
+
+    assert_eq!(findings(&report), Vec::<String>::new(), "every slot is right");
+    assert!(report.has_findings(), "a diverged alias is a finding");
+    for tag in ["1.0.0", "1.0", "1", "latest"] {
+        let alias = AliasTag::parse(tag, &[]).expect("a graph node");
+        assert_eq!(
+            report.aliases[&alias],
+            AliasState::Diverged {
+                digest: observation.tags[&alias].digest.clone(),
+                source: version("1.0.0_b1"),
+                source_digest: tag_digest("1.0.0_b1"),
+            },
+            "'{tag}'"
+        );
+    }
+
+    let writes = plan_of(&observation);
+    assert_eq!(writes.len(), 4);
+    assert!(writes.iter().all(|write| write.copy_of == Some(tag_digest("1.0.0_b1"))));
+    assert_converged(&apply_plan(&observation, &writes));
+}
+
+#[test]
+fn f3_an_alias_made_of_two_builds_is_still_constructed() {
+    let older = with_source(image_index(vec![entry("linux/amd64", "old-amd")]), "older");
+    let newer = with_source(image_index(vec![entry("linux/arm64", "new-arm")]), "newer");
+    let mut existing = image_index(vec![entry("linux/amd64", "old-amd"), entry("linux/arm64", "new-arm")]);
+    existing.annotations = Some([("k".to_string(), "kept".to_string())].into_iter().collect());
+    let observation = Graph::new()
+        .raw("1.0.0_b1", older.clone())
+        .raw("1.0.1_b1", newer.clone())
+        .raw("1", existing.clone())
+        .build();
+
+    let report = check(&observation);
+    let alias_one = AliasTag::parse("1", &[]).expect("a graph node");
+    assert_eq!(
+        report.aliases[&alias_one],
+        AliasState::Present,
+        "two builds make it, so no single one can diverge it"
+    );
+
+    let writes = plan_of(&observation);
+    assert!(
+        writes.iter().all(|write| write.tag != alias_one),
+        "an in-shape mixed alias is left alone"
+    );
+
+    // A mixed alias that does not exist yet inherits the greatest source's labels.
+    let fresh = Graph::new()
+        .raw("1.0.0_b1", older)
+        .raw("1.0.1_b1", newer.clone())
+        .build();
+    let writes = plan_of(&fresh);
+    let write = write_for(&writes, "1");
+    assert_eq!(write.copy_of, None);
+    assert_eq!(write.index.annotations, newer.annotations);
+    assert_eq!(
+        planned(std::slice::from_ref(write))[0].1,
+        ["linux/amd64=sha256:old-amd", "linux/arm64=sha256:new-arm"],
+        "mixed aliases keep their platform order"
+    );
 }

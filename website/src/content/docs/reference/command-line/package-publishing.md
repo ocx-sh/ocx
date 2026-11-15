@@ -139,7 +139,7 @@ Report where a package's rolling tags disagree with its versions.
 
 Reads every version tag the registry holds for each package and folds them into the rolling-tag state the cascade rules imply. It reports each difference.
 
-That covers a rolling tag missing a platform, one pointing at outdated content, one that was never created, and any entry nothing accounts for. For an `ocx.sh/...` package it also compares the live public index with the registry, so an entry that is stale there is reported too.
+That covers a rolling tag missing a platform, one pointing at outdated content, one that was never created, one made of a single build's entries that is not that build's own index (`diverged`), and any entry nothing accounts for. For an `ocx.sh/...` package it also compares the live public index with the registry, so an entry that is stale there is reported too.
 
 Read-only. It authenticates for pull only and never writes anything.
 
@@ -173,7 +173,7 @@ ocx package cascade check <PACKAGES>...
 
 Re-point a package's rolling tags at the content its versions imply.
 
-Rebuilds the whole index for every rolling tag `cascade check` reports as wrong and pushes it, using only content the registry already serves. A repair publishes nothing new and only re-points.
+Writes a whole new index for every rolling tag `cascade check` reports as wrong, using only content the registry already serves. A repair publishes nothing new and only re-points.
 
 The full plan is computed first, and every manifest it references is checked to still exist. A run that cannot be completed therefore writes nothing at all.
 
@@ -185,7 +185,7 @@ Exits 64 when a package names a digest or a tag that is not a version, or when `
 
 `repair` writes by default, since `check` is already the read-only preview; `--dry-run` computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag writes only the aliases that build owns: a pre-release build never moves a stable alias.
 
-For each broken alias it rebuilds the whole platform index entry from the same fold `check` diffs against. It preserves every observed entry the fold does not supersede.
+An alias made of one build's entries alone is written as that build's own index, byte for byte, so it carries the build tag's digest. For any other broken alias `repair` rebuilds the whole index from the same fold `check` diffs against and preserves every observed entry the fold does not supersede.
 
 That includes annotations already on the index, non-platform entries such as attestations, and orphaned alias tags whose child manifests still exist. A missing referenced manifest is dropped only if every entry naming that digest is an orphan slot.
 
