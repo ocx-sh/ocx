@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-11-15
+
+### Fixed
+
+- Cascade repair points every alias a build owns at the build tag's own index *(cascade)*
+
 ## [0.6.7] - 2026-11-15
 
 ### Added
@@ -46,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The system config on Windows is %ProgramFiles%\ocx\config.toml *(config)* **BREAKING**
 - The index conformance fixtures match indexbot again and the publishers vector is ocx-authored *(test)*
 - Bin_scan scans the content root for a bare ${installPath} PATH entry *(package)*
+
+### Release
+
+- V0.6.7
 
 ## [0.6.6] - 2026-11-12
 
@@ -1395,6 +1405,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.8]: https://github.com/ocx-sh/ocx/compare/v0.6.7..v0.6.8
 [0.6.7]: https://github.com/ocx-sh/ocx/compare/v0.6.6..v0.6.7
 [0.6.6]: https://github.com/ocx-sh/ocx/compare/v0.6.5..v0.6.6
 [0.6.5]: https://github.com/ocx-sh/ocx/compare/v0.6.4..v0.6.5

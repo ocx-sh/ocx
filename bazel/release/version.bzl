@@ -7,4 +7,4 @@ difference and `task release:bump-files` rewrites both.
 
 visibility(["//crates/..."])
 
-OCX_VERSION = "0.6.7"
+OCX_VERSION = "0.6.8"
