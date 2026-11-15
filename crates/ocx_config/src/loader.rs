@@ -154,6 +154,13 @@ impl ConfigLoader {
             Self::tier_candidates()
         };
         config_tier_paths.extend(explicit_paths);
+        // The shell state decoder rejects a relative tier, and `/etc/...` has no drive on Windows.
+        // `absolute`, not `canonicalize`: the files may not exist and symlinks must stay unresolved.
+        for path in &mut config_tier_paths {
+            if let Ok(absolute) = std::path::absolute(&*path) {
+                *path = absolute;
+            }
+        }
 
         Ok(LoadedConfig {
             merged,
@@ -6213,6 +6220,52 @@ mod tests {
         );
     }
 
+    /// A relative `--config` / `OCX_CONFIG` is recorded absolute: the shell state decoder
+    /// rejects a relative tier, which left the per-prompt hook unable to read its own state.
+    #[tokio::test]
+    async fn recorded_config_tier_paths_are_absolute_for_a_relative_explicit_path() {
+        let env = ocx_env::overrides::lock();
+        without_system_config(&env);
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+
+        // A real file under the working directory, named relatively.
+        let dir = TempDir::new_in(".").expect("tempdir");
+        write_config(&dir, "config.toml", "[shell]\nhook = true\n");
+        let relative = Path::new(dir.path().file_name().expect("name")).join("config.toml");
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: Some(relative.as_path()),
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load");
+        assert!(relative.is_relative());
+        assert!(
+            loaded.config_tier_paths.iter().all(|path| path.is_absolute()),
+            "every recorded tier must be absolute: {:?}",
+            loaded.config_tier_paths
+        );
+    }
+
+    /// The default tiers, system candidate included, are absolute on Windows too.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn recorded_default_config_tier_paths_are_absolute_on_windows() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load");
+        assert!(loaded.config_tier_paths.iter().all(|path| path.is_absolute()));
+    }
+
     /// The loader stamps the tier a file belongs to, and only where that
     /// file set the scalar.
     #[tokio::test]
@@ -6263,7 +6316,9 @@ mod tests {
         .expect("load");
 
         assert!(
-            loaded.config_tier_paths.contains(&ConfigLoader::system_path()),
+            loaded
+                .config_tier_paths
+                .contains(&std::path::absolute(ConfigLoader::system_path()).expect("absolute")),
             "the system tier is recorded whether or not it exists today"
         );
         assert!(
@@ -6300,7 +6355,7 @@ mod tests {
 
         assert_eq!(
             loaded.config_tier_paths,
-            vec![ConfigLoader::system_path()],
+            vec![std::path::absolute(ConfigLoader::system_path()).expect("absolute")],
             "the system tier is still read under the flag, so it is still watched — and it is the only one"
         );
     }
