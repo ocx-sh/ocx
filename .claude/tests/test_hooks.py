@@ -282,9 +282,8 @@ class TestReleasePrepareGuard:
     `release:validate` and `release:verify` when the repository defines them.
     The predicates are shown red and green by `scripts/tests/test_commit_gate.py`;
     what this catches is the *call sites* drifting: a hook ocx stopped defining
-    (the template then skips it without a word), a gate that no longer asks for
-    the provenance proof or asks for a readiness run before the bump (`release.yml` demands it on the release
-    commit), a verify hook that runs the suite again.
+    (the template then skips it without a word), a gate without the provenance
+    proof or with a pre-bump readiness run, a verify hook that runs the suite again.
     """
 
     HOOKS = ("gate", "bump-files", "validate", "verify")
