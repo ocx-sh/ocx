@@ -2317,6 +2317,34 @@
           "description": "The tag exists but resolves to a bare image manifest, so it has no\nper-platform slots at all and every expected platform reads as missing."
         },
         {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "diverged"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "The index the alias holds now."
+            },
+            "source": {
+              "$ref": "#/$defs/PackageVersion",
+              "description": "The build whose entries make up the whole alias."
+            },
+            "source_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "The digest of that build's own index."
+            }
+          },
+          "required": [
+            "type",
+            "digest",
+            "source",
+            "source_digest"
+          ],
+          "description": "An image index whose slots are all right, but which is not the bytes of the\none build it is made of: the same entries in another order, or with other\nindex-level fields. Repair points it at that build's own index."
+        },
+        {
           "x-ocx-unknown-variant": true,
           "type": "object",
           "required": [
@@ -2329,7 +2357,8 @@
                 "enum": [
                   "present",
                   "absent",
-                  "not_an_index"
+                  "not_an_index",
+                  "diverged"
                 ]
               }
             }
@@ -2337,6 +2366,10 @@
         }
       ],
       "description": "What the registry holds at an alias tag, taken as a whole."
+    },
+    "PackageVersion": {
+      "type": "string",
+      "description": "An OCX package version, e.g. `3.28.1`, a rolling `3.28`, `0.5.0-canary` or a variant `debug-3.12.5`."
     },
     "SlotRow": {
       "type": "object",
@@ -2406,10 +2439,6 @@
           "description": "The alias carries more than one entry for this platform. Only the last\none resolves, so a shadowed entry is invisible to every consumer while\nstill being published — including when the surviving one is exactly what\nthe fold expects. One row per shadowed entry, beside the row for the\nentry that wins."
         }
       ]
-    },
-    "PackageVersion": {
-      "type": "string",
-      "description": "An OCX package version, e.g. `3.28.1`, a rolling `3.28`, `0.5.0-canary` or a variant `debug-3.12.5`."
     },
     "IndexFinding": {
       "oneOf": [
@@ -2651,6 +2680,10 @@
           },
           "description": "Every child manifest digest `index` references, deduped. Apply\npreflights each one so a missing child refuses the alias instead of\npublishing a dangling pointer."
         },
+        "copy_of": {
+          "description": "The digest of the build index `index` is a verbatim copy of, when one build\nowns the whole alias. Apply then writes that index's stored bytes, so the\nalias digest equals this one whatever serialiser produced it.",
+          "$ref": "#/$defs/Digest"
+        },
         "reasons": {
           "type": "array",
           "items": {
@@ -2665,7 +2698,7 @@
         "referenced_digests",
         "reasons"
       ],
-      "description": "One alias index to write, recomputed whole.\n\nA repair never patches an alias in place: it rebuilds the entire index from\ncontent the registry already serves and PUTs it, so the write is idempotent\nand a partially-applied run leaves every untouched alias byte-identical."
+      "description": "One alias index to write, recomputed whole.\n\nA repair never patches an alias in place. An alias one build owns is a copy of\nthat build's own index; any other is rebuilt from the entries the registry\nalready serves, keeping what the alias itself carries. Either way the write is\nidempotent and an untouched alias stays byte-identical."
     },
     "RepairOutcome": {
       "type": "object",

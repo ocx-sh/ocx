@@ -91,7 +91,10 @@ impl PackageCascadeRepair {
                         package.clone(),
                         planned.tag.to_string(),
                         "planned".to_string(),
-                        format!("{} slots", planned.reasons.len()),
+                        match &planned.copy_of {
+                            Some(source) => format!("copy of {}", source.to_short_string()),
+                            None => format!("{} slots", planned.reasons.len()),
+                        },
                     ]);
                 }
                 continue;
@@ -423,6 +426,7 @@ mod tests {
             },
             observed_digest: None,
             referenced_digests: Vec::new(),
+            copy_of: None,
             reasons: Vec::new(),
         }];
 
@@ -432,6 +436,12 @@ mod tests {
         assert_eq!(rows[0][2], "planned");
         assert_eq!(rows[0][3], "0 slots");
         assert!(!clean.wrote_anything(), "a preview never writes");
+
+        clean.items[0].planned[0].copy_of = Some(
+            ocx_oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .unwrap(),
+        );
+        assert_eq!(clean.table_rows()[0][3], "copy of sha256:cccccccccccc");
     }
 
     // ── JSON key stability ───────────────────────────────────────────────

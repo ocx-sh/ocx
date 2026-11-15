@@ -15,6 +15,7 @@ use super::graph::{AliasTag, PlannedWrite, SlotStatus, Unrepairable};
 use crate::error::Error as PackageError;
 type Result<T> = std::result::Result<T, PackageError>;
 use ocx_oci::client::ReadAddressing;
+use ocx_oci::media_type::MEDIA_TYPE_OCI_IMAGE_INDEX;
 
 /// How many alias indexes to work on at once; low, as registries throttle writes first.
 const CASCADE_APPLY_CONCURRENCY: usize = 8;
@@ -305,19 +306,51 @@ async fn write_alias(
         }
     }
 
-    match client.push_index(&target, &index).await {
+    let pushed = match &write.copy_of {
+        Some(source) if dropped.is_empty() => copy_build_index(client, identifier, &target, source).await,
+        _ => client
+            .push_index(&target, &index)
+            .await
+            .map_err(|error| error.to_string()),
+    };
+    match pushed {
         Ok(digest) => WriteOutcome::Written {
             verified: verify_write(client, &target, &digest).await,
             digest,
             dropped: dropped.into_iter().collect(),
         },
-        Err(source) => {
-            log::error!("Failed to write alias '{}' of {identifier}: {source}", write.tag);
-            WriteOutcome::Failed {
-                message: source.to_string(),
-            }
+        Err(message) => {
+            log::error!("Failed to write alias '{}' of {identifier}: {message}", write.tag);
+            WriteOutcome::Failed { message }
         }
     }
+}
+
+/// PUTs the stored bytes of the build index `source` at `target`, so the alias digest is `source`
+/// for an index of any serialiser; a re-serialisation would mint a different one.
+///
+/// The read verifies the bytes hash to `source`, so a registry serving other bytes is never copied.
+async fn copy_build_index(
+    client: &ocx_oci::Client,
+    identifier: &ocx_oci::OciIdentifier,
+    target: &ocx_oci::OciIdentifier,
+    source: &ocx_oci::Digest,
+) -> std::result::Result<ocx_oci::Digest, String> {
+    let build = identifier.without_tag().clone_with_digest(source.clone());
+    let (bytes, digest, manifest) = match client.fetch_manifest_raw_bytes(&build).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err(format!("the build index {source} is gone")),
+        Err(error) => return Err(format!("could not read the build index {source}: {error}")),
+    };
+    let ocx_oci::Manifest::ImageIndex(index) = manifest else {
+        return Err(format!("{source} is not an image index"));
+    };
+    let media_type = index.media_type.as_deref().unwrap_or(MEDIA_TYPE_OCI_IMAGE_INDEX);
+    client
+        .push_manifest_raw(target, bytes, media_type)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(digest)
 }
 
 /// Whether `target` still names what this run wrote; a mismatch or failed read
@@ -419,6 +452,7 @@ mod tests {
             },
             observed_digest: None,
             referenced_digests: children.to_vec(),
+            copy_of: None,
             reasons: Vec::new(),
         }
     }
@@ -1058,6 +1092,84 @@ mod tests {
             count_calls(&data, "fetch_manifest_digest"),
             0,
             "a digest that cannot be addressed is never probed for"
+        );
+        assert_eq!(count_calls(&data, "push_manifest_raw"), 0);
+    }
+
+    /// Seeds the build tag's index under its digest as a foreign serialiser stored it, and returns
+    /// those bytes with their digest.
+    fn seed_build_index(data: &StubTransportData, index: &ocx_oci::ImageIndex) -> (Vec<u8>, ocx_oci::Digest) {
+        let bytes = serde_json::to_vec_pretty(index).expect("an index serializes");
+        let digest = ocx_oci::Algorithm::Sha256.hash(&bytes);
+        data.write()
+            .manifests
+            .insert(child_key(&digest.to_string()), (bytes.clone(), digest.to_string()));
+        (bytes, digest)
+    }
+
+    /// An alias one build owns is written as that build's stored bytes, so its digest is the
+    /// build's whatever serialiser produced it; a re-serialisation would mint a new digest.
+    #[tokio::test]
+    async fn an_alias_a_build_owns_is_written_as_the_builds_stored_bytes() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let children = [child_digest(1), child_digest(2)];
+        seed_children(&data, &children);
+        let mut write = planned_write(latest(), &children);
+        let (bytes, digest) = seed_build_index(&data, &write.index);
+        write.copy_of = Some(digest.clone());
+        let client = test_client(&data);
+
+        let outcomes = apply(&client, &test_identifier(), &[write.clone()]).await.unwrap();
+
+        match &outcomes[0].outcome {
+            WriteOutcome::Written {
+                digest: written,
+                verified,
+                ..
+            } => {
+                assert_eq!(*written, digest, "the alias digest is the build's");
+                assert!(*verified);
+            }
+            other => panic!("expected a written alias, got {other:?}"),
+        }
+        let stored = data
+            .read()
+            .manifests
+            .get(&tag_key(&latest()))
+            .cloned()
+            .expect("alias pushed");
+        assert_eq!(stored.0, bytes, "the PUT body is the build's stored bytes");
+        assert_ne!(
+            bytes,
+            serde_json::to_vec(&write.index).unwrap(),
+            "the fixture's bytes differ from a re-serialisation, or this proves nothing"
+        );
+    }
+
+    /// Bytes that do not hash to the digest they were requested under are never written.
+    #[tokio::test]
+    async fn a_copy_whose_bytes_do_not_hash_to_their_digest_is_not_written() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let children = [child_digest(1)];
+        seed_children(&data, &children);
+        let mut write = planned_write(latest(), &children);
+        let (_, digest) = seed_build_index(&data, &write.index);
+        // A well-formed index, so the refusal is the hash check and not a parse failure.
+        let other = serde_json::to_vec(&write.index).expect("an index serializes");
+        data.write()
+            .manifests
+            .insert(child_key(&digest.to_string()), (other, digest.to_string()));
+        write.copy_of = Some(digest);
+        let client = test_client(&data);
+
+        let outcomes = apply(&client, &test_identifier(), &[write]).await.unwrap();
+
+        assert!(
+            matches!(&outcomes[0].outcome, WriteOutcome::Failed { message } if message.contains("digest mismatch")),
+            "got {:?}",
+            outcomes[0].outcome
         );
         assert_eq!(count_calls(&data, "push_manifest_raw"), 0);
     }

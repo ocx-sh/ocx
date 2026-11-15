@@ -4,7 +4,7 @@
 //! Report data for `ocx package cascade check`.
 
 use ocx_console::Cell;
-use ocx_package::cascade::graph::{CascadeReport, IndexFinding, Unrepairable};
+use ocx_package::cascade::graph::{AliasState, CascadeReport, IndexFinding, Unrepairable};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -44,6 +44,26 @@ impl PackageCascadeCheck {
                     row.status.as_str().to_string(),
                     digest_transition(row.observed.as_deref(), row.expected.as_deref()),
                 ]);
+            }
+            for (tag, state) in &report.aliases {
+                if let AliasState::Diverged {
+                    digest,
+                    source,
+                    source_digest,
+                } = state
+                {
+                    rows.push([
+                        package.clone(),
+                        tag.to_string(),
+                        String::new(),
+                        "diverged".to_string(),
+                        format!(
+                            "{} -> {} ({source})",
+                            digest.to_short_string(),
+                            source_digest.to_short_string()
+                        ),
+                    ]);
+                }
             }
             for finding in &report.index_findings {
                 let (tag, status, detail) = match finding {
@@ -458,5 +478,25 @@ mod tests {
             hint.contains("--refresh"),
             "a stale index is repaired by re-observing the committed set: {hint}"
         );
+    }
+
+    /// A diverged alias has only `ok` slots, so without its own row the plain table reads clean
+    /// while the exit code is not.
+    #[test]
+    fn a_diverged_alias_has_its_own_plain_row() {
+        let mut report = report_with(Vec::new(), Vec::new());
+        report.aliases.insert(
+            AliasTag::Root { variant: None },
+            AliasState::Diverged {
+                digest: ocx_oci::Digest::try_from(OBSERVED).unwrap(),
+                source: version("3.28.1_b1"),
+                source_digest: ocx_oci::Digest::try_from(EXPECTED).unwrap(),
+            },
+        );
+        let rows = PackageCascadeCheck::new(vec![report]).table_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], "latest");
+        assert_eq!(rows[0][3], "diverged");
+        assert!(rows[0][4].ends_with("(3.28.1_b1)"), "{:?}", rows[0][4]);
     }
 }

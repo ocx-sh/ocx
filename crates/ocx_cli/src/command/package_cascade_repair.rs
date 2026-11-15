@@ -17,8 +17,8 @@ use crate::options;
 #[derive(Parser)]
 #[command(long_about = "\
     Re-point a package's rolling tags at the content its versions imply.\n\n\
-    Rebuilds the whole index for every rolling tag `cascade check` reports as wrong and pushes \
-    it, using only content the registry already serves. A repair publishes nothing new and only \
+    Writes a whole new index for every rolling tag `cascade check` reports as wrong, \
+    using only content the registry already serves. A repair publishes nothing new and only \
     re-points. The full plan is computed first, and every manifest it references is checked to \
     still exist. A run that cannot be completed therefore writes nothing at all.\n\n\
     Repairing the registry does not update the public index. Pass `--tags-file PATH` to append \
@@ -30,8 +30,11 @@ use crate::options;
     `repair` writes by default, since `check` is already the read-only preview; `--dry-run` \
     computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag \
     writes only the aliases that build owns: a pre-release build never moves a stable alias.\n\n\
-    For each broken alias it rebuilds the whole platform index entry from the same fold \
-    `check` diffs against. It preserves every observed entry the fold does not supersede. That includes annotations already on the index, non-platform entries such as attestations, and \
+    An alias made of one build's entries alone is written as that build's own index, byte for \
+    byte, so it carries the build tag's digest. For any other broken alias `repair` rebuilds the \
+    whole index from the same fold `check` diffs against and preserves every observed entry the \
+    fold does not supersede. That includes annotations already on the index, non-platform entries \
+    such as attestations, and \
     orphaned alias tags whose child manifests still exist. A missing referenced manifest is \
     dropped only if every entry naming that digest is an orphan slot. Otherwise the whole \
     alias is refused and reported while other aliases still write.\n\n\
@@ -209,6 +212,7 @@ mod tests {
             },
             observed_digest: None,
             referenced_digests: Vec::new(),
+            copy_of: None,
             reasons: Vec::new(),
         }
     }

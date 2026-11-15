@@ -219,6 +219,17 @@ pub enum AliasState {
         /// The bare manifest the tag resolves to.
         digest: ocx_oci::Digest,
     },
+    /// An image index whose slots are all right, but which is not the bytes of the
+    /// one build it is made of: the same entries in another order, or with other
+    /// index-level fields. Repair points it at that build's own index.
+    Diverged {
+        /// The index the alias holds now.
+        digest: ocx_oci::Digest,
+        /// The build whose entries make up the whole alias.
+        source: Version,
+        /// The digest of that build's own index.
+        source_digest: ocx_oci::Digest,
+    },
 }
 
 /// A disagreement between the registry graph and the public index that
@@ -314,9 +325,10 @@ impl CascadeReport {
 
 /// One alias index to write, recomputed whole.
 ///
-/// A repair never patches an alias in place: it rebuilds the entire index from
-/// content the registry already serves and PUTs it, so the write is idempotent
-/// and a partially-applied run leaves every untouched alias byte-identical.
+/// A repair never patches an alias in place. An alias one build owns is a copy of
+/// that build's own index; any other is rebuilt from the entries the registry
+/// already serves, keeping what the alias itself carries. Either way the write is
+/// idempotent and an untouched alias stays byte-identical.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct PlannedWrite {
     /// The alias tag to write.
@@ -335,6 +347,11 @@ pub struct PlannedWrite {
     /// preflights each one so a missing child refuses the alias instead of
     /// publishing a dangling pointer.
     pub referenced_digests: Vec<String>,
+    /// The digest of the build index `index` is a verbatim copy of, when one build
+    /// owns the whole alias. Apply then writes that index's stored bytes, so the
+    /// alias digest equals this one whatever serialiser produced it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<ocx_oci::Digest>,
     /// The rows that justify the write — what the user is being told changed.
     ///
     /// Includes the alias's `orphan` rows even though an orphan never causes a
@@ -497,7 +514,7 @@ pub fn diff(observation: &TagGraphObservation, expected: &ExpectedGraph, scope: 
 
     for alias in scope {
         let observed = observation.tags.get(alias);
-        let state = match observed {
+        let mut state = match observed {
             None => AliasState::Absent,
             Some(tag) => match &tag.manifest {
                 ocx_oci::Manifest::ImageIndex(_) => AliasState::Present,
@@ -552,6 +569,19 @@ pub fn diff(observation: &TagGraphObservation, expected: &ExpectedGraph, scope: 
 
         if needs_write(&state, &alias_rows) && planned_entries(alias, observation, expected).is_empty() {
             unrepairable.push(Unrepairable::WouldEmptyIndex { tag: alias.clone() });
+        }
+
+        if state == AliasState::Present
+            && !needs_write(&state, &alias_rows)
+            && let Some(owner) = whole_owner(alias, observation, expected)
+            && let Some(observed) = observation.tags.get(alias)
+            && &observed.digest != owner.digest
+        {
+            state = AliasState::Diverged {
+                digest: observed.digest.clone(),
+                source: owner.version.clone(),
+                source_digest: owner.digest.clone(),
+            };
         }
 
         aliases.insert(alias.clone(), state);
@@ -652,6 +682,58 @@ fn planned_entries(
     entries
 }
 
+/// The one build whose own index an alias should be a verbatim copy of.
+struct WholeOwner<'a> {
+    version: &'a Version,
+    digest: &'a ocx_oci::Digest,
+    index: &'a ocx_oci::ImageIndex,
+}
+
+/// The build that owns the whole of `alias`: every folded slot comes from it and
+/// the complete planned entry list equals its own `manifests` as a set.
+///
+/// Anything else — slots from two builds, a preserved orphan, a platform-less
+/// entry one side lacks — is a mixed alias, which no build's index can stand for.
+fn whole_owner<'a>(
+    alias: &AliasTag,
+    observation: &'a TagGraphObservation,
+    expected: &'a ExpectedGraph,
+) -> Option<WholeOwner<'a>> {
+    let mut sources = expected.get(alias)?.values().map(|slot| &slot.source);
+    let version = sources.next()?;
+    if sources.any(|source| source != version) {
+        return None;
+    }
+    let leaf = observation.tags.get(&AliasTag::Version(version.clone()))?;
+    let ocx_oci::Manifest::ImageIndex(index) = &leaf.manifest else {
+        return None;
+    };
+    let planned = planned_entries(alias, observation, expected);
+    let covers = |from: &[ocx_oci::ImageIndexEntry], other: &[ocx_oci::ImageIndexEntry]| {
+        from.iter()
+            .all(|entry| other.iter().any(|candidate| same_descriptor(entry, candidate)))
+    };
+    (planned.len() == index.manifests.len() && covers(&planned, &index.manifests) && covers(&index.manifests, &planned))
+        .then_some(WholeOwner {
+            version,
+            digest: &leaf.digest,
+            index,
+        })
+}
+
+/// The index-level annotations of the greatest build folded into `alias`, for an alias that does not exist yet.
+fn greatest_source_annotations(
+    alias: &AliasTag,
+    observation: &TagGraphObservation,
+    expected: &ExpectedGraph,
+) -> Option<BTreeMap<String, String>> {
+    let greatest = expected.get(alias)?.values().map(|slot| &slot.source).max()?;
+    observation
+        .index(&AliasTag::Version(greatest.clone()))?
+        .annotations
+        .clone()
+}
+
 /// Turns a report into the index writes that would resolve it; an alias that
 /// would end up empty is left out. A `Some` `owned` (see [`announce_scope`]) bounds the plan to those
 /// aliases, so what a build-tag request writes and what it announces come from one set.
@@ -686,10 +768,11 @@ pub fn plan_repairs(
         let observed = observation.tags.get(alias);
         let observed_index = observation.index(alias);
         let referenced_digests: BTreeSet<String> = manifests.iter().map(|entry| entry.digest.clone()).collect();
+        let owner = whole_owner(alias, observation, expected);
 
-        writes.push(PlannedWrite {
-            tag: alias.clone(),
-            index: ocx_oci::ImageIndex {
+        let index = match &owner {
+            Some(owner) => owner.index.clone(),
+            None => ocx_oci::ImageIndex {
                 schema_version: ocx_oci::INDEX_SCHEMA_VERSION,
                 // Preserved verbatim, even when absent; only a fresh index states its own.
                 media_type: match observed_index {
@@ -701,10 +784,19 @@ pub fn plan_repairs(
                     .and_then(|index| index.artifact_type.clone())
                     .or_else(|| Some(MEDIA_TYPE_PACKAGE_V1.to_string())),
                 manifests,
-                annotations: observed_index.and_then(|index| index.annotations.clone()),
+                annotations: match observed_index {
+                    Some(index) => index.annotations.clone(),
+                    None => greatest_source_annotations(alias, observation, expected),
+                },
             },
+        };
+
+        writes.push(PlannedWrite {
+            tag: alias.clone(),
+            index,
             observed_digest: observed.map(|tag| tag.digest.clone()),
             referenced_digests: referenced_digests.into_iter().collect(),
+            copy_of: owner.map(|owner| owner.digest.clone()),
             reasons,
         });
     }

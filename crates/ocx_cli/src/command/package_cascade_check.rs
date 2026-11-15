@@ -15,8 +15,8 @@ use crate::options;
     Report where a package's rolling tags disagree with its versions.\n\n\
     Reads every version tag the registry holds for each package and folds them into the \
     rolling-tag state the cascade rules imply. It reports each difference. That covers a rolling tag \
-    missing a platform, one pointing at outdated content, one that was never created, and any \
-    entry nothing accounts for. For an `ocx.sh/...` package it also compares the live public \
+    missing a platform, one pointing at outdated content, one that was never created, one made of a single build's entries that is not \
+    that build's own index (`diverged`), and any entry nothing accounts for. For an `ocx.sh/...` package it also compares the live public \
     index with the registry, so an entry that is stale there is reported too.\n\n\
     Read-only. It authenticates for pull only and never writes anything.\n\n\
     Give a tag (`cmake:3.28`) to narrow the audit to that part of the graph.\n\n\

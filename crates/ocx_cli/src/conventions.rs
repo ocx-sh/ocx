@@ -918,6 +918,7 @@ mod tests {
                 },
                 observed_digest: None,
                 referenced_digests: Vec::new(),
+                copy_of: None,
                 reasons: Vec::new(),
             }
         }
