@@ -220,11 +220,6 @@ fn full_fields_root_parses_into_the_typed_index_root_with_the_real_yanked_object
     let bytes = std::fs::read(&path).expect("read full-fields fixture");
     let root: IndexRoot = serde_json::from_slice(&bytes).expect("typed IndexRoot parse of full-fields.json");
 
-    assert_eq!(
-        root.publishers.as_ref().and_then(|p| p[0]["kind"].as_str()),
-        Some("keyless"),
-        "publishers is carried raw"
-    );
     let tag = root.tags.get("1.0.0").expect("1.0.0 tag present");
     assert_eq!(
         tag.yanked,
@@ -232,6 +227,21 @@ fn full_fields_root_parses_into_the_typed_index_root_with_the_real_yanked_object
             reason: "critical security issue".to_string(),
             at: "2026-02-01T00:00:00Z".to_string(),
         })
+    );
+}
+
+#[test]
+fn a_root_declaring_publishers_parses_into_the_typed_index_root() {
+    // ocx-authored vector: upstream's corpus carries no `publishers` yet, so it
+    // lives outside the vendored `root/` leaf the drift gate compares.
+    let path = fixtures_dir().join("publishers/keyless.json");
+    let bytes = std::fs::read(&path).expect("read publishers fixture");
+    let root: IndexRoot = serde_json::from_slice(&bytes).expect("typed IndexRoot parse of publishers/keyless.json");
+
+    assert_eq!(
+        root.publishers.as_ref().and_then(|p| p[0]["kind"].as_str()),
+        Some("keyless"),
+        "publishers is carried raw"
     );
 }
 

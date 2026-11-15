@@ -78,6 +78,7 @@ ocx_authored=(
     "README.md"     # vendoring provenance, written by hand
     "SOURCE_COMMIT" # the pin this script maintains
     "cpython"       # escaping truth table generated against CPython's json
+    "publishers"    # roots declaring `publishers`, a field upstream does not model yet
 )
 
 die() {
