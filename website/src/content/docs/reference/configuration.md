@@ -11,7 +11,7 @@ OCX reads each file that exists, lowest precedence first. A file over 64 KiB is 
 
 | Tier | Path |
 | --- | --- |
-| System | `/etc/ocx/config.toml` |
+| System | `/etc/ocx/config.toml`, on Windows `%ProgramFiles%\ocx\config.toml` |
 | User on Linux | `$XDG_CONFIG_HOME/ocx/config.toml`, else `~/.config/ocx/config.toml` |
 | User on macOS | `~/Library/Application Support/ocx/config.toml` |
 | User on Windows | `%APPDATA%\ocx\config.toml` |

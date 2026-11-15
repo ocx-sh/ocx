@@ -29,7 +29,7 @@ OCX looks for config files in three tiers. None has to exist, and OCX silently s
 
 ### System tier \{#tier-system\}
 
-`/etc/ocx/config.toml` holds machine-wide defaults set by sysadmins, Dockerfiles or provisioning tools. It is the only tier the OS treats as privileged, and production environments lock it down with file permissions. The most common use is baking a private default registry into a base image:
+`/etc/ocx/config.toml` holds machine-wide defaults set by sysadmins, Dockerfiles or provisioning tools. On Windows the file is `%ProgramFiles%\ocx\config.toml`. It is the only tier the OS treats as privileged, and production environments lock it down with file permissions. The most common use is baking a private default registry into a base image:
 
 ```dockerfile
 RUN mkdir -p /etc/ocx
@@ -103,7 +103,7 @@ The full stack runs from compiled defaults at the bottom to CLI flags at the top
 | Priority | Source | Notes |
 |----------|--------|-------|
 | 1 (lowest) | Compiled defaults | Built into the binary: the `ocx.sh` index entry under `[registries."ocx.sh"]` |
-| 2 | System config, `/etc/ocx/config.toml` | Discovered tier |
+| 2 | System config, `/etc/ocx/config.toml` or `%ProgramFiles%\ocx\config.toml` on Windows | Discovered tier |
 | 3 | User config | Discovered tier |
 | 4 | OCX home config, `$OCX_HOME/config.toml` | Discovered tier |
 | 5 | [`[managed]`](#managed) snapshot | Local and identity-gated, see [Where it sits in the chain][managed-position] |

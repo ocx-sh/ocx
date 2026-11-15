@@ -220,7 +220,7 @@ fn config_locations() -> String {
             "OCX reads each file that exists, lowest precedence first. A file over {} KiB is refused with exit 78.",
             ocx_config::loader::MAX_CONFIG_SIZE / 1024
         ),
-        "| Tier | Path |\n| --- | --- |\n| System | `/etc/ocx/config.toml` |\n| User on Linux | `$XDG_CONFIG_HOME/ocx/config.toml`, else `~/.config/ocx/config.toml` |\n| User on macOS | `~/Library/Application Support/ocx/config.toml` |\n| User on Windows | `%APPDATA%\\ocx\\config.toml` |\n| OCX home | `$OCX_HOME/config.toml`, default `~/.ocx/config.toml` |\n| Explicit | [`OCX_CONFIG`](./environment.md#ocx-config) and [`--config`](./command-line/index.md#arg-config) |".to_owned(),
+        "| Tier | Path |\n| --- | --- |\n| System | `/etc/ocx/config.toml`, on Windows `%ProgramFiles%\\ocx\\config.toml` |\n| User on Linux | `$XDG_CONFIG_HOME/ocx/config.toml`, else `~/.config/ocx/config.toml` |\n| User on macOS | `~/Library/Application Support/ocx/config.toml` |\n| User on Windows | `%APPDATA%\\ocx\\config.toml` |\n| OCX home | `$OCX_HOME/config.toml`, default `~/.ocx/config.toml` |\n| Explicit | [`OCX_CONFIG`](./environment.md#ocx-config) and [`--config`](./command-line/index.md#arg-config) |".to_owned(),
     ])
 }
 

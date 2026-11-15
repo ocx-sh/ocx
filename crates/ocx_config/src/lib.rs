@@ -919,6 +919,21 @@ const SYSTEM_PREFIXES: [&str; 23] = [
 /// `/var` every ostree home.
 const SYSTEM_LOCATIONS_MATCHED_EXACTLY: [&str; 2] = ["/", "/var"];
 
+/// A Windows system location from its variable, with the default install path as fallback.
+fn windows_location(var: &'static ocx_env::EnvVar, fallback: &str) -> PathBuf {
+    var.get()
+        // POSIX-absolute is absent: a cross-compilation shell can export `ProgramFiles=/home/u`,
+        // which would refuse the operator's own home.
+        .filter(|value| !value.starts_with('/'))
+        .map_or_else(|| PathBuf::from(fallback), PathBuf::from)
+}
+
+/// `%ProgramFiles%`, the administrator-only root of the Windows system config.
+#[cfg(windows)]
+pub(crate) fn program_files() -> PathBuf {
+    windows_location(&ocx_env::PROGRAM_FILES, r"C:\Program Files")
+}
+
 /// The Windows system locations, from the environment with the default install paths as fallback.
 fn windows_system_prefixes() -> Vec<PathBuf> {
     [
@@ -928,13 +943,7 @@ fn windows_system_prefixes() -> Vec<PathBuf> {
         (&ocx_env::PROGRAM_DATA, r"C:\ProgramData"),
     ]
     .into_iter()
-    .map(|(var, fallback)| {
-        var.get()
-            // POSIX-absolute is absent: a cross-compilation shell can export `ProgramFiles=/home/u`,
-            // which would refuse the operator's own home.
-            .filter(|value| !value.starts_with('/'))
-            .map_or_else(|| PathBuf::from(fallback), PathBuf::from)
-    })
+    .map(|(var, fallback)| windows_location(var, fallback))
     .collect()
 }
 
