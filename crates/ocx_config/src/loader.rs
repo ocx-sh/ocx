@@ -1160,8 +1160,9 @@ impl ConfigLoader {
             .filter(|declared| !declared.policy.is_empty() || declared.sigstore.is_some());
     }
 
-    /// System config: `/etc/ocx/config.toml`, redirectable through `__OCX_TESTING_SYSTEM_CONFIG` in test
-    /// builds only.
+    /// System config: `/etc/ocx/config.toml`, or `%ProgramFiles%\ocx\config.toml` on Windows. The Windows
+    /// location must be one only an administrator can write: this tier locks settings for every lower tier.
+    /// Redirectable through `__OCX_TESTING_SYSTEM_CONFIG` in test builds only.
     pub fn system_path() -> PathBuf {
         #[cfg(any(test, feature = "__testing"))]
         if let Some(path) = ocx_env::__OCX_TESTING_SYSTEM_CONFIG
@@ -1170,6 +1171,9 @@ impl ConfigLoader {
         {
             return PathBuf::from(path);
         }
+        #[cfg(windows)]
+        return crate::program_files().join("ocx").join("config.toml");
+        #[cfg(not(windows))]
         PathBuf::from("/etc/ocx/config.toml")
     }
 
@@ -1893,7 +1897,35 @@ mod tests {
 
     // ── Path resolver tests ──────────────────────────────────────────────────
 
-    #[cfg(unix)]
+    #[cfg(windows)]
+    #[test]
+    fn system_path_is_under_program_files_and_absolute() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG);
+        env.set(&ocx_env::PROGRAM_FILES, r"D:\Apps");
+        let path = ConfigLoader::system_path();
+        assert_eq!(path, PathBuf::from(r"D:\Apps\ocx\config.toml"));
+        assert!(path.is_absolute(), "{path:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_path_falls_back_to_default_program_files() {
+        let env = ocx_env::overrides::lock();
+        env.remove(&ocx_env::__OCX_TESTING_SYSTEM_CONFIG);
+        env.set(&ocx_env::PROGRAM_FILES, "/home/u");
+        assert_eq!(
+            ConfigLoader::system_path(),
+            PathBuf::from(r"C:\Program Files\ocx\config.toml")
+        );
+        env.remove(&ocx_env::PROGRAM_FILES);
+        assert_eq!(
+            ConfigLoader::system_path(),
+            PathBuf::from(r"C:\Program Files\ocx\config.toml")
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn system_path_is_etc_ocx_config_toml() {
         // Holds the env lock so a concurrently-running test cannot have the
