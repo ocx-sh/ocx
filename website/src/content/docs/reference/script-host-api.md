@@ -1,5 +1,5 @@
 ---
-title: "Script Host API"
+title: "Script host API"
 ---
 <!-- doc_type: reference -->
 
@@ -23,7 +23,7 @@ if p.os == ocx.os.Linux:
 
 Every function is a method written with parens, while `ocx.target_platform` and the root paths are attributes. Returned values are typed, never anonymous dicts.
 
-### `ocx.run(prog, *args, *, env=None, cwd=None, stdin=None)` {#ocx-run}
+### `ocx.run(prog, *args, env=None, cwd=None, stdin=None)` {#ocx-run}
 
 Spawns a binary from the composed package env and captures stdout, stderr, exit code and wall-clock duration. A non-zero exit code does not raise, and the script decides whether to fail.
 
@@ -117,13 +117,13 @@ Returned by [`ocx.target_platform`](#ocx-target-platform). `str(p)` returns `"an
 
 | Attribute | Type | Description |
 |---|---|---|
-| `is_any` | `bool` | `True` for platform-agnostic packages (`Platform::Any`), `False` for a specific OS/arch target. |
+| `is_any` | `bool` | `True` for platform-agnostic packages, `False` for a specific OS/arch target. |
 | `os` | [`os`](#os-value) \| `None` | The target OS, or `None` when `is_any` is `True`. |
 | `arch` | [`arch`](#arch-value) \| `None` | The target CPU architecture, or `None` when `is_any` is `True`. |
 
 ### `os` (operating system) {#os-value}
 
-Typed enum value whose instances live in the [`ocx.os`](#ocx-os) namespace.
+Typed enum value whose instances live in [`ocx.os`](#ocx-os).
 
 - Type: `type(ocx.os.Linux) == "os"`
 - Equality: equal only to another `os` value of the same variant, never to a string or an `arch` value
@@ -132,7 +132,7 @@ Typed enum value whose instances live in the [`ocx.os`](#ocx-os) namespace.
 
 ### `arch` (CPU architecture) {#arch-value}
 
-Typed enum value whose instances live in the [`ocx.arch`](#ocx-arch) namespace.
+Typed enum value whose instances live in [`ocx.arch`](#ocx-arch).
 
 - Type: `type(ocx.arch.Amd64) == "arch"`
 - Equality and `str()`: same semantics as [`os`](#os-value)
@@ -151,7 +151,7 @@ Returned by [`ocx.run`](#ocx-run).
 
 ## Type namespaces {#type-namespaces}
 
-Closed sets of typed enum constants, one per platform variant. A structural parity test catches a Rust-side variant missing from a namespace.
+Closed sets of typed enum constants, one per platform variant.
 
 ### `ocx.os` {#ocx-os}
 
@@ -210,4 +210,4 @@ Each assertion exits the script with the documented exit code on failure. The fa
 [cmd-package-test]: ./command-line/package-publishing.md#package-test
 
 <!-- authoring -->
-[authoring-testing]: ../publishing/script-tests.md#scripted-tests
+[authoring-testing]: ../publishing/script-tests.mdx#scripted-tests

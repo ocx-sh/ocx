@@ -22,7 +22,7 @@ pub enum AnnounceError {
     #[exit(
         defer(Failure),
         slug = "forge_required",
-        summary = "No forge was supplied to read the committed index root through"
+        summary = "No forge was supplied to read the committed root document through"
     )]
     ForgeRequired,
 
@@ -59,7 +59,7 @@ pub enum AnnounceError {
         fallback(
             Failure,
             slug = "index_root_parse",
-            summary = "The committed index root is not valid JSON"
+            summary = "The committed root document is not valid JSON"
         )
     )]
     RootParse {
@@ -73,7 +73,7 @@ pub enum AnnounceError {
     #[exit(
         defer(Failure),
         slug = "index_root_not_object",
-        summary = "The committed index root is not a JSON object"
+        summary = "The committed root document is not a JSON object"
     )]
     RootNotObject { path: String },
 
@@ -83,7 +83,7 @@ pub enum AnnounceError {
     #[exit(
         DataError,
         slug = "root_name_mismatch",
-        summary = "The committed index root names a different package"
+        summary = "The committed root document names a different package"
     )]
     RootNameMismatch {
         path: String,
@@ -96,7 +96,7 @@ pub enum AnnounceError {
     #[exit(
         defer(Failure),
         slug = "index_root_missing_field",
-        summary = "The committed index root lacks a required field"
+        summary = "The committed root document lacks a required field"
     )]
     RootMissingField { field: &'static str },
 
@@ -106,7 +106,7 @@ pub enum AnnounceError {
     #[exit(
         defer(Failure),
         slug = "malformed_physical_repository",
-        summary = "The index root names a malformed registry repository"
+        summary = "The root document names a malformed registry repository"
     )]
     MalformedPhysicalRepository { value: String },
 
@@ -272,7 +272,7 @@ pub enum AnnounceError {
     #[exit(
         defer(Failure),
         slug = "missing_head_root",
-        summary = "A concurrent claim's or announce's head carries no index root"
+        summary = "A concurrent claim's or announce's head carries no root document"
     )]
     MissingHeadRoot { repo: String, path: String, sha: String },
 

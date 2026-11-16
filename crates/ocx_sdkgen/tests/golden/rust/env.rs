@@ -19,7 +19,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_ALLOW_YANKED",
         value: "bool",
-        summary: "Boolean — allow a tag resolving to a yanked index entry. Forwarded to child ocx.",
+        summary: "Boolean — allow a tag resolving to a yanked index entry. Forwarded to child OCX.",
         secret: false,
     },
     EnvVar {
@@ -61,7 +61,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_BINARY_PIN",
         value: "path",
-        summary: "Absolute path to the running `ocx`, set on every spawn so a child ocx runs the",
+        summary: "Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
         secret: false,
     },
     EnvVar {
@@ -151,13 +151,13 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_LAZY_MODE",
         value: "choice",
-        summary: "Lazy materialisation mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",
+        summary: "Lazy materialization mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",
         secret: false,
     },
     EnvVar {
         name: "OCX_LAZY_REPORT",
         value: "choice",
-        summary: "Lazy materialisation report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.",
+        summary: "Lazy materialization report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.",
         secret: false,
     },
     EnvVar {
@@ -217,7 +217,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_NO_HOOK",
         value: "bool",
-        summary: "Boolean — disables the per-prompt shell reconciler; `ocx self activate` still runs at shell start.",
+        summary: "Boolean — disables the per-prompt shell hook; `ocx self activate` still runs at shell start.",
         secret: false,
     },
     EnvVar {
@@ -235,13 +235,13 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_NO_UPDATE_CHECK",
         value: "bool",
-        summary: "Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child ocx.",
+        summary: "Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child OCX.",
         secret: false,
     },
     EnvVar {
         name: "OCX_NO_VERIFY",
         value: "bool",
-        summary: "Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child ocx.",
+        summary: "Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.",
         secret: false,
     },
     EnvVar {
@@ -295,7 +295,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_SELF_UPDATE",
         value: "choice",
-        summary: "`RefreshPolicy` wire value for ocx's own update check; beats `[update] self`. Not forwarded.",
+        summary: "`RefreshPolicy` wire value for OCX's own update check; beats `[update] self`. Not forwarded.",
         secret: false,
     },
     EnvVar {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProjectConfig",
-  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nA flat `[tools]` table is the implicit default group; `[group.<name>]`\ntables add optional named groups. Values are registry-qualified package\nreferences, `registry/repo[:tag][@digest]`; a bare tag with no registry\n(`cmake = \"3.28\"`) is rejected. A bare repository with no tag and no digest\n(`cmake = \"ocx.sh/cmake\"`) parses as `:latest`; a digest-pinned entry gets\nno default tag, since the digest is the canonical pin. Unknown keys are a\nparse error.",
+  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nA flat `[tools]` table is the implicit default group; `[group.<name>]`\ntables add optional named groups. Values are registry-qualified package\nreferences, `registry/repo[:tag][@digest]`; a bare tag with no registry\n(`node = \"24\"`) is rejected. A bare repository with no tag and no digest\n(`node = \"ocx.sh/nodejs/node\"`) parses as `:latest`; a digest-pinned entry gets\nno default tag, since the digest is the canonical pin. Unknown keys are a\nparse error.",
   "type": "object",
   "properties": {
     "tools": {
@@ -33,7 +33,7 @@
       "default": {}
     },
     "lazy-mode": {
-      "description": "Toolchain-tier `lazy-mode`, the least specific config tier: outranked by `[group.<g>]`,\n`[package.\"<id>\"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
+      "description": "Top-level `lazy-mode`, the least specific setting: outranked by `[group.<g>]`,\n`[package.\"<id>\"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyMode"
@@ -44,7 +44,7 @@
       ]
     },
     "lazy-report": {
-      "description": "Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.\n\nAn edit never invalidates `ocx.lock`.",
+      "description": "Top-level `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.\n\nAn edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyReport"
@@ -55,7 +55,7 @@
       ]
     },
     "activate": {
-      "description": "Toolchain-tier `activate` mode: how a project's rendered toolchain reaches a shell —\nper-prompt environment composition (`env`, the default), a `PATH` entry for\n`<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to\n`OCX_TOOLCHAIN_ACTIVATE`, then to `env`.\n\nAn unrecognized value is a parse error (exit 78). An edit never invalidates `ocx.lock`.",
+      "description": "Top-level `activate` mode: how a project's rendered toolchain reaches a shell —\nper-prompt environment composition (`env`, the default), a `PATH` entry for\n`<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to\n`OCX_TOOLCHAIN_ACTIVATE`, then to `env`.\n\nAn unrecognized value is a parse error (exit 78). An edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/ActivateMode"
@@ -67,7 +67,7 @@
       "default": "env"
     },
     "pinned": {
-      "description": "Toolchain-tier `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`\nlinks (`false`, the default) or pin to digest roots (`true`). Absent falls through to\n`OCX_TOOLCHAIN_PINNED`.\n\nAn edit never invalidates `ocx.lock`.",
+      "description": "Top-level `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`\nlinks (`false`, the default) or pin to digest roots (`true`). Absent falls through to\n`OCX_TOOLCHAIN_PINNED`.\n\nAn edit never invalidates `ocx.lock`.",
       "type": [
         "boolean",
         "null"
@@ -179,7 +179,7 @@
           "$ref": "#/$defs/ProjectEnv"
         },
         "lazy-mode": {
-          "description": "Group-tier `lazy-mode` override: outranks the toolchain tier and is outranked by\n`[package.\"<id>\"]` and the CLI flag. Absent inherits from the toolchain tier; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
+          "description": "Group-level `lazy-mode` override: outranks the top-level setting and is outranked by\n`[package.\"<id>\"]` and the CLI flag. Absent inherits from the top-level setting; it does not\nmean `never`.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -217,7 +217,7 @@
           "default": false
         },
         "lazy-mode": {
-          "description": "Package-tier `lazy-mode` override, the most specific config tier: only the CLI flag outranks\nit. Absent inherits from the group and toolchain tiers; it does not mean `never`.\n\nAn edit never invalidates `ocx.lock`.",
+          "description": "Package-level `lazy-mode` override, the most specific setting: only the CLI flag outranks\nit. Absent inherits from the group and top-level settings; it does not mean `never`.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -228,7 +228,7 @@
           ]
         },
         "lazy-report": {
-          "description": "Package-tier `lazy-report` override. Absent inherits from the toolchain tier.\n\nAn edit never invalidates `ocx.lock`.",
+          "description": "Package-level `lazy-report` override. Absent inherits from the top-level setting.\n\nAn edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyReport"
@@ -265,7 +265,7 @@
           "const": "env"
         },
         {
-          "description": "Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a\ntool is resolved by its launcher trampoline at invocation time.",
+          "description": "Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a\ntool is resolved by its launcher at invocation time.",
           "type": "string",
           "const": "bin"
         },
@@ -408,7 +408,7 @@
           ]
         },
         {
-          "description": "A `kind` this build does not know — an entry written by a newer ocx.\n\nIt narrows: it accepts nobody, and a sibling `keyless` entry in the same\npolicy keeps working. A policy whose signers are *all* unknown is refused\nwith an error naming it.",
+          "description": "A `kind` this build does not know — an entry written by a newer OCX.\n\nIt narrows: it accepts nobody, and a sibling `keyless` entry in the same\npolicy keeps working. A policy whose signers are *all* unknown is refused\nwith an error naming it.",
           "type": "object",
           "properties": {
             "kind": {

@@ -26,11 +26,11 @@ pub struct Exec {
 
     /// Expose the package's full env, including its private (self-only)
     /// entries. Off by default: only public + interface entries are loaded
-    /// (the consumer view). Generated launchers use `ocx launcher exec` which
+    /// (the interface surface). Generated launchers use `ocx launcher exec` which
     /// enables self-view internally.
     #[arg(long_help = "\
         Expose the package's full env, including its private (self-only) entries. Off by default: \
-        only public + interface entries are loaded (the consumer view). Generated launchers use \
+        only public + interface entries are loaded (the interface surface). Generated launchers use \
         `ocx launcher exec` which enables self-view internally.\n\n\
         See https://ocx.sh/docs/explanation/environments/#visibility-views for the full view semantics.\n\n\
         Cannot be combined with `--lazy-mode always`: a generated shim is a launcher, launchers are \
@@ -48,8 +48,8 @@ pub struct Exec {
         site-patch companion all stay. Removed and kept packages are logged at the `info` level.\n\n\
         The exit code is the command's, always. A removal that fails warns on stderr and leaves the \
         exit code alone.\n\n\
-        Without this flag ocx replaces itself with the command on Unix. With it, ocx stays running \
-        as the command's parent, and the command's process id is no longer ocx's. A kill of ocx \
+        Without this flag OCX replaces itself with the command on Unix. With it, OCX stays running \
+        as the command's parent, and the command's process id is no longer OCX's. A kill of OCX \
         itself skips the removal.")]
     #[clap(long = "rm", default_value_t = false)]
     rm: bool,

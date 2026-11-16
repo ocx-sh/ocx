@@ -7,7 +7,7 @@ description: "Announce every release from a GitHub or GitLab CI job with the rig
 
 This page sets up a CI job that announces every release to the index. You need a package that is already claimed (see
 [Announce a package][announce]). You also need a CI system on GitHub or GitLab and a credential for the index repository. Pick a posture from
-the table, then copy its recipe. The wider release pipeline (signing, SBOM, provenance) is on [Publisher CI][integration-publisher-ci].
+the table, then copy its recipe. The wider release pipeline (signing, SBOM, provenance) is on [Publish packages from CI][integration-publisher-ci].
 
 ## Choosing a posture {#announcing-postures}
 
@@ -42,8 +42,8 @@ Inside a GitLab job (`GITLAB_CI` non-empty), an unset or empty `OCX_ANNOUNCE_TOK
 `--transport git` only. Under `--transport api` it does not, because a job token cannot open the request there. That run needs a
 real access token in a masked variable.
 
-The version column is the floor ocx enforces itself. Under `--transport git` it runs `git --version` before it constructs the forge
-and exits 69 below 2.31.0. ocx checks no GitLab version number. Instead it asks the instance two questions: does this project
+The version column is the floor OCX enforces itself. Under `--transport git` it runs `git --version` before it constructs the forge
+and exits 69 below 2.31.0. OCX checks no GitLab version number. Instead it asks the instance two questions: does this project
 accept job-token pushes, and do its allowlists admit the publishing project? It exits 82 or 77 naming whichever answer is missing.
 The second question has two answers, because GitLab keeps a project list and a group list.
 
@@ -51,14 +51,14 @@ The index does not have to be on GitHub. Both commands speak **GitHub and GitLab
 instances. On GitLab the change arrives as a merge request. Name the host in `--index-repo` (`gitlab.com/acme/index`).
 
 For a self-hosted instance, add `--forge github` or `--forge gitlab`. A hostname says nothing about which forge runs behind it, so
-ocx asks rather than guessing where to send your credential. Nested GitLab group paths work as written:
+OCX asks rather than guessing where to send your credential. Nested GitLab group paths work as written:
 `--index-repo gitlab.example.com/acme/platform/tooling/index`.
 
 :::caution[Claim the public index from GitHub, not GitLab]
-The public catalog renders an entry's owner links from GitHub account ids. An entry claimed from GitLab records GitLab ids, and the
-catalog still renders those as github.com links. They point at whichever unrelated GitHub account holds that number.
+The catalog page of the public index renders an entry's owner links from GitHub account ids. An entry claimed from GitLab records GitLab ids, and the
+catalog page still renders those as github.com links. They point at whichever unrelated GitHub account holds that number.
 
-The GitLab recipes below are correct on the ocx side. Run them against **your own index repository**. Treat claiming the public
+The GitLab recipes below are correct on the OCX side. Run them against **your own index repository**. Treat claiming the public
 `ocx.sh` index from GitLab as blocked until that catalog issue closes.
 :::
 
@@ -120,7 +120,7 @@ jobs:
 The push step writes `tags.txt`, the record that [announcing tags][announcing-tags] describes. It also needs registry credentials, set through the `OCX_AUTH_<REGISTRY>_*` variables.
 
 `GITHUB_TOKEN` is not a substitute for `INDEX_PAT`. It is scoped to this repository and can neither fork nor write the index. Omit
-`--fork` only when the token can push to the index repository directly. ocx verifies that before it writes anything. If it cannot, it exits 80
+`--fork` only when the token can push to the index repository directly. OCX verifies that before it writes anything. If it cannot, it exits 80
 naming the repository and the missing permission.
 
 ### GitLab, with an access token {#announcing-gitlab-token}
@@ -163,7 +163,7 @@ announce:
 This is the plain-API posture, and the one to prefer when you can store a token. It needs no clone, no git binary and no capability
 preflight. `--transport` stays at its default.
 
-The hidden `.install-ocx` job puts ocx on the bare `alpine:3` image. The recipes that use `--transport git` also install `git`.
+The hidden `.install-ocx` job puts OCX on the bare `alpine:3` image. The recipes that use `--transport git` also install `git`.
 
 ### GitLab, from a CI job {#announcing-gitlab-job-token}
 
@@ -201,7 +201,7 @@ announce:
         acme/widget
 ```
 
-Nothing is stored. The runner sets `CI_JOB_TOKEN` and `GITLAB_CI`, and ocx falls through to the job token when `OCX_ANNOUNCE_TOKEN`
+Nothing is stored. The runner sets `CI_JOB_TOKEN` and `GITLAB_CI`, and OCX falls through to the job token when `OCX_ANNOUNCE_TOKEN`
 is unset or empty. The `--owner` pair is explicit on the claim on purpose, as the [owners section][announcing-owners] explains.
 Announce needs no `--owner`, because the entry already records who owns it.
 
@@ -213,7 +213,7 @@ Both are settings on the **index** project, not yours. If either is missing, the
 miss), and an administrator there has to act.
 
 A job token may read only [the endpoints GitLab opens to it][gitlab-job-token-access], which do not include the settings above. So
-in this posture ocx cannot check them before it pushes. It pushes and lets GitLab's own rejection decide. The exit code is 82
+in this posture OCX cannot check them before it pushes. It pushes and lets GitLab's own rejection decide. The exit code is 82
 either way, but the message is generic, because GitLab's rejection carries no field saying which setting was missing.
 
 The [split pair](#announcing-split) reads the same two settings up front, because its API half is an ordinary token. It gets the
@@ -262,11 +262,11 @@ announce:
 
 [`OCX_ANNOUNCE_GIT_USERNAME`][env-ocx-announce-git-username] defaults to `gitlab-ci-token`. Set it only when the instance expects a
 specific user for that token. Both secrets travel as an HTTP Basic header injected through git's own configuration environment.
-They never appear in a URL or in `argv`, and ocx never writes them to `.git/config`.
+They never appear in a URL or in `argv`, and OCX never writes them to `.git/config`.
 
 ## Secrets on a shared runner {#announcing-runner}
 
-Under `--transport git`, ocx hands the push secret to `git` through git's own configuration environment rather than the command
+Under `--transport git`, OCX hands the push secret to `git` through git's own configuration environment rather than the command
 line. So it is absent from `argv`, from the remote URL, from `.git/config` and from the reflog. That closes the surfaces a later
 reader of the repository or of `ps` could reach.
 
@@ -288,7 +288,7 @@ The credential variables follow a few fixed rules:
 - Without `--fork`, the credential must also carry write permission on the index repository. The run verifies this before writing anything.
 - `OCX_ANNOUNCE_GIT_TOKEN` is the push half only. Set to an empty string, it counts as unset. A wrapper that exports `OCX_ANNOUNCE_GIT_TOKEN=` therefore cannot turn an authenticated write into one that authenticates as nobody.
 - `OCX_ANNOUNCE_GIT_USERNAME` is ignored, with the default used instead, when it is empty or contains `:`. HTTP Basic has no escaping, and a server splits the decoded pair on the first colon.
-- With `a:b` as the username, the server would read user `a` and secret `b:<secret>`. That is a `401` that looks like a bad token. The username is not a credential, so ocx does not strip it from a plugin's environment.
+- With `a:b` as the username, the server would read user `a` and secret `b:<secret>`. That is a `401` that looks like a bad token. The username is not a credential, so OCX does not strip it from a plugin's environment.
 - OCX strips `OCX_ANNOUNCE_GIT_TOKEN` from the environment of every subprocess, plugins (`ocx-<name>`) included.
 - `OCX_ANNOUNCE_TOKEN` is deliberately not stripped. A plugin that announces from its own process inherits the API half and not the write half. A plugin that must write over the git transport has to be handed the git token explicitly.
 
@@ -311,9 +311,9 @@ For a failing run, see [troubleshooting][announcing-troubleshooting] on the anno
 [env-ocx-announce-git-username]: ../reference/environment.md#ocx-announce-git-username
 
 <!-- internal -->
-[announce]: ./announce.md
-[announcing-owners]: ./announce.md#announcing-owners
-[announcing-tags]: ./announce.md#announcing-tags
-[announcing-troubleshooting]: ./announce.md#announcing-troubleshooting
-[integration-publisher-ci]: ../integration/publisher-ci.md
+[announce]: ./announce.mdx
+[announcing-owners]: ./announce.mdx#announcing-owners
+[announcing-tags]: ./announce.mdx#announcing-tags
+[announcing-troubleshooting]: ./announce.mdx#announcing-troubleshooting
+[integration-publisher-ci]: ../integration/publisher-ci.mdx
 [authentication-storing]: ../guides/authenticate.mdx#authentication-storing

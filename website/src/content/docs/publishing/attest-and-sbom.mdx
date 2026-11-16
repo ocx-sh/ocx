@@ -5,6 +5,8 @@ description: "Publish an SBOM or other signed attestation with a package, and re
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
 
 Attach an SBOM, provenance record or other attestation to a package, and read it back with or without verification.
@@ -31,10 +33,14 @@ So `attach` has two shapes, and OCX picks one from what it sees in the environme
 
 With an identity available, [`ocx package push --sbom <PATH>`][cmd-package-push] attaches the SBOM in the same step as the push. It is shorthand for `attest --type cyclonedx` against the digest the push just wrote:
 
+<ShellSession>
+
 ```shell
 cyclonedx-cli ... > sbom.json
 ocx package push -p linux/amd64 --sbom sbom.json -i registry.example/pkg:1.0 pkg.tar.gz
 ```
+
+</ShellSession>
 
 Use [`ocx package attest`][cmd-package-attest] directly for any of these cases:
 
@@ -43,9 +49,13 @@ Use [`ocx package attest`][cmd-package-attest] directly for any of these cases:
 - attaching more than one predicate type to the same manifest
 - attesting something this invocation did not just publish
 
+<ShellSession>
+
 ```shell
 ocx package attest -p linux/amd64 --predicate sbom.json --type cyclonedx registry.example/pkg:1.0
 ```
+
+</ShellSession>
 
 `--predicate` names the file whose bytes the attestation wraps verbatim. `--type` is one of the cosign-compatible aliases (see [Predicate types](#attestations-types)) or any absolute predicate-type URI.
 
@@ -59,11 +69,11 @@ This recording runs against a real, self-hosted Sigstore stack. It signs a Cyclo
 
 With no signing identity visible, `attest` and `push --sbom` still succeed. They publish the SBOM document itself as the referrer's payload, typed by its own media type. That is `application/vnd.cyclonedx+json` for CycloneDX, and `application/spdx+json` or `text/spdx` for SPDX. There is no [DSSE][dsse] envelope, no Fulcio certificate and no Rekor entry.
 
-This is the wire shape [`oras attach`][oras-attach] writes. It is also the shape [`cosign attach sbom`][cosign-attach-sbom] writes under `--registry-referrers-mode oci-1-1`. An SBOM that ocx attached unsigned reads back with those tools, and one they attached reads back with `ocx package sbom`.
+This is the wire shape [`oras attach`][oras-attach] writes. It is also the shape [`cosign attach sbom`][cosign-attach-sbom] writes under `--registry-referrers-mode oci-1-1`. An SBOM that OCX attached unsigned reads back with those tools, and one they attached reads back with `ocx package sbom`.
 
-The **default** mode of cosign writes a `sha256-<hex>.sbom` tag instead of a referrer. ocx reads that shape too, though it never writes it. Neither shape is signed, so both list only under `--no-verify`. See [Read it back](#attestations-read).
+The **default** mode of cosign writes a `sha256-<hex>.sbom` tag instead of a referrer. OCX reads that shape too, though it never writes it. Neither shape is signed, so both list only under `--no-verify`. See [Read it back](#attestations-read).
 
-An unsigned SBOM carries exactly the trust of the unsigned package it describes. It has the same repository, the same set of people who can push to it and the same registry access controls. It is not a weaker copy of the signed case. It is a different claim.
+An unsigned SBOM carries exactly the trust of the unsigned package it describes. It has the same repository, the same set of people who can push to it and the same registry access controls. It is not a weaker copy of the signed case. It is a different assurance.
 
 A signed attestation says that an identity vouches for the document. An unsigned attach says only that the document was published alongside the package. That is already true of the package's binary layers.
 
@@ -103,7 +113,7 @@ The mode follows from what you asked for and what your environment already resol
 | `--verify` | yes, or identity flags given | Demand |
 | `--no-verify` | *(any)* | Permissive |
 
-`--verify` and `--no-verify` last-win when both are typed, like every `--x`/`--no-x` pair in ocx. Combining them is not an error.
+`--verify` and `--no-verify` last-win when both are typed, like every `--x`/`--no-x` pair in OCX. Combining them is not an error.
 
 `--no-verify` **does** conflict with the certificate flags. Supplying an identity while refusing to check it is contradictory, so that combination is a usage error in either order. The registry's [`signatures`][config-signatures] setting adjusts the default: `off` ignores declared publishers and gives Permissive, and `required` refuses a package that declares none (exit 81, `publishers_required`). `--verify` with nothing to verify against is also a usage error (`no_identity_provided`, exit 64). It never falls back silently to permissive, because an operator who typed `--verify` must not have it quietly ignored.
 
@@ -115,13 +125,17 @@ A verified entry carries `verified: true` plus the certificate identity, issuer 
 
 The listing's own `summary.verification` field (`verified` or `unverified`) names which mode produced the whole run. A script never has to infer it from the rows. Under Demand mode an unverified row cannot occur, and under Permissive mode nothing else can.
 
-`--output <PATH|->` extracts one predicate's bytes, byte-exact as the publisher wrote them, from the candidate the mode's own trust class resolved to:
+`--output <PATH|->` extracts one predicate's bytes, byte-exact as the publisher wrote them, from the referrer the mode's own trust class resolved to:
+
+<ShellSession>
 
 ```shell
 ocx package sbom -p linux/amd64 --type cyclonedx --output sbom.json registry.example/pkg:1.0
 ```
 
-More than one matching candidate is refused rather than guessed. The error names every colliding referrer digest and every distinct predicate type in the set, so `--type` has a value to narrow with.
+</ShellSession>
+
+More than one matching referrer is refused rather than guessed. The error names every colliding referrer digest and every distinct predicate type in the set, so `--type` has a value to narrow with.
 
 Under Permissive mode, writing a document nothing vouched for prints one line to stderr: `SBOM is unverified: no signature over referrer <digest> was checked, so nothing vouches for what it says`. The bytes written to `PATH` (or stdout) are unaffected. A script that pipes `--output -` into a file still gets exactly the predicate's bytes, and the warning stays visible separately.
 
@@ -155,7 +169,7 @@ The raw, unsigned wire shape exists for the three SBOM media types only: Cyclone
 
 ## Verification and trust floors \{#attestations-verification\}
 
-Demand mode keeps the rule that [automatic verification][guide-auto-verify] states for signatures. It cannot return an unverified result for a signed candidate, because an unverified attestation is no different from a text file an attacker wrote. Three failures each fail the read for that candidate:
+Demand mode keeps the rule that [automatic verification][guide-auto-verify] states for signatures. It cannot return an unverified result for a signed referrer, because an unverified attestation is no different from a text file an attacker wrote. Three failures each fail the read for that referrer:
 
 - a registry that cannot prove referrer support
 - a Rekor instance that will not confirm an inclusion proof

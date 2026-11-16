@@ -25,7 +25,7 @@ use crate::{api, conventions, options};
 /// is downloaded. Each entry reports `package` for a materialized root, or
 /// `shim` for a `--lazy-mode always` package whose content has not downloaded
 /// yet; the install symlinks only ever resolve to `package`. Scripting:
-/// `ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"].path'`
+/// `ocx package which --candidate --format json nodejs/node:24 | jq -r '.["nodejs/node:24"].path'`
 #[derive(Parser)]
 pub struct Which {
     #[clap(flatten)]

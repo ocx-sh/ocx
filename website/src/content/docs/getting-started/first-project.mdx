@@ -1,15 +1,19 @@
 ---
-title: "Pin your first project's tools"
-description: "Declare the tools a repository needs, lock them to exact digests and run a command with exactly those tools."
+title: "Pin a toolchain"
+description: "Pin a toolchain in ocx.toml and ocx.lock, share the pin with teammates, activate it in the shell, run it in CI and build offline."
 ---
 {/* doc_type: tutorial */}
 {/* doc_tier: first-steps */}
 
-By the end of this page a repository pins CMake in `ocx.toml`, locks it in `ocx.lock` and runs it with `ocx exec`. Every teammate and CI runner then gets the same binary. It assumes ocx is [installed][installation], including the shell hook that `ocx self setup` wires.
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
-## Pin the tools \{#project-toolchain\}
+By the end of this page a project pins [Node.js][nodejs], teammates and CI run the identical build, and it still builds with no network. It assumes OCX is [installed][installation]. The same file format pins the tools of a repository and, as `$OCX_HOME/ocx.toml`, your [global toolchain][global-toolchain]. This page walks through the repository.
 
-Create a project directory and write an empty `ocx.toml` into it:
+## Pin and run the tools \{#project-toolchain\}
+
+Every clone of this repository should build with the same Node.js, with nothing installed machine-wide.
+
+<ShellSession title="Pin Node.js and run it">
 
 \<\<\< @/_scripts/first-project/init.sh\{sh\}
 
@@ -17,92 +21,160 @@ Create a project directory and write an empty `ocx.toml` into it:
 created /home/you/my-project/ocx.toml
 ```
 
-Add CMake. The command resolves the tag to a digest for each platform, writes `ocx.lock` and downloads the package:
-
 \<\<\< @/_scripts/first-project/add.sh\{sh\}
 
 ```text
 Binding  Group    Digest
-cmake    default  sha256:...
+node     default  sha256:...
 ```
-
-Look at the file `ocx add` changed:
-
-```sh
-cat ocx.toml
-```
-
-```toml
-#:schema https://ocx.sh/schemas/project/v1.json
-
-[tools]
-cmake = "ocx.sh/kitware/cmake:3.31"
-```
-
-The left side is the binding name. The right side is the full package identifier, including the registry.
-
-## Run a command with the pinned tools \{#run\}
-
-`ocx exec` reads `ocx.lock` and runs the command with the locked tools on `PATH`. The `--` before the command is required:
 
 \<\<\< @/_scripts/first-project/exec.sh\{sh\}
 
 ```text
-cmake version 3.31.12
-
-CMake suite maintained and supported by Kitware (kitware.com/cmake).
+v24.22.3
 ```
 
-The tool came from the lock, not from your machine. A change to the tag in `ocx.toml` makes the lock stale, and `ocx exec` then fails with exit code 65 until you run `ocx lock`.
+</ShellSession>
+
+`ocx add` resolved the tag to a digest, wrote `ocx.lock` and added one line to `ocx.toml`:
+
+```toml title="ocx.toml"
+#:schema https://ocx.sh/schemas/project/v1.json
+
+[tools]
+node = "ocx.sh/nodejs/node:24"
+```
+
+Go deeper: [project toolchain guide][project-guide] and the [project file reference][project-file].
 
 ## Share the pin \{#share\}
 
-Commit both files. The rendered tools live in `.ocx/toolchain/`, which carries its own `.gitignore`, so `git status` stays clean:
+A teammate who clones the repository gets your build with one command. Commit both files first. `git init` starts a repository in this new directory; skip it in an existing one.
+
+<ShellSession title="Commit the pin">
 
 ```sh
+git init
 git add ocx.toml ocx.lock
+git commit -m "Pin Node.js with ocx"
 ```
 
-A teammate who clones the repository downloads the locked packages with one command, then runs the tool:
+</ShellSession>
+
+On a fresh clone, one command downloads the locked packages:
+
+<ShellSession title="On a fresh clone">
 
 \<\<\< @/_scripts/first-project/pull.sh\{sh\}
 
-They get the same build you did.
+</ShellSession>
 
-## Get the tools in your shell \{#shell\}
+They run the same bytes you did. Go deeper: [lock and reproduce][lock-guide] and [run project tools][run-guide].
 
-`ocx add` also recorded this project's consent stamp. Leave the directory and enter it again:
+## Use them from your shell \{#shell\}
+
+Inside the repository, `node` is the pinned one. Outside, your shell finds whatever `node` it found before.
+
+<ShellSession title="Enter the repository">
 
 ```sh
 cd .. && cd my-project
-cmake --version
+node --version
 ```
 
 ```text
-cmake version 3.31.12
-
-CMake suite maintained and supported by Kitware (kitware.com/cmake).
+v24.22.3
 ```
 
-At the next prompt the locked tools are on `PATH`. When you leave the directory they disappear again.
+</ShellSession>
+
+This needs the shell hook, which [`ocx self setup`][what-setup] wires into your profile, and your [consent][consent], which `ocx init` and `ocx add` recorded for this project. The hook puts the locked tools on `PATH` and sets the variables their packages declare at the next prompt, and takes both away when you leave. Go deeper: [shell integration][shell-integration] and [shell troubleshooting][shell-trouble].
+
+## Run the same tools in CI \{#ci\}
+
+A CI job must refuse a stale lock and build with exactly the locked tools.
+
+<ShellSession title="CI commands">
+
+\<\<\< @/_scripts/user-guide/ci-project.sh\{sh\}
+
+</ShellSession>
+
+`ocx lock --check` fails when `ocx.toml` and `ocx.lock` disagree. `--frozen` resolves tags from the local index only and never fetches an unknown tag. Go deeper: [GitHub Actions][github-actions], [GitLab CI][gitlab-ci] and [unattended CI][unattended-ci].
+
+## Build without the network \{#offline\}
+
+An air-gapped runner, or a laptop on a plane, still builds from what is on disk.
+
+<ShellSession title="Offline">
+
+\<\<\< @/_scripts/first-project/offline.sh\{sh\}
+
+```text
+v24.22.3
+```
+
+</ShellSession>
+
+`--offline` forbids every network call, so the command works only for packages already downloaded. Go deeper: [work offline][work-offline] and [corporate mirrors][corporate-mirror].
+
+## Keep tools current \{#update\}
+
+Move to another Node.js version on purpose, never by accident. `ocx update` re-resolves the tags in `ocx.toml` into `ocx.lock`. `ocx upgrade` moves the tag in `ocx.toml` itself. Go deeper: [update tools][update-guide], [`ocx update`][cmd-update] and [`ocx upgrade`][cmd-upgrade].
+
+## Everyday commands \{#everyday\}
+
+| Command | What it does |
+|---|---|
+| [`ocx status`][cmd-status] | Show whether the lock matches the project file |
+| [`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] | Add or drop a tool in `ocx.toml` |
+| [`ocx lock`][cmd-lock] | Resolve new or changed tools and rewrite `ocx.lock` |
+| [`ocx update`][cmd-update] | Re-resolve tags to their current digests |
+| [`ocx exec`][cmd-exec] | Run a command with the locked tools |
+| [`ocx --global add`][global-add] | Put a tool on `PATH` in every shell |
+| [`ocx clean`][cmd-clean] | Remove packages no project or install references |
 
 ## Next steps \{#next-steps\}
 
-- [Set up a project toolchain][project-guide] covers groups, updates and lifecycle commands.
-- [Run project tools][run-guide] explains `ocx exec` with named bindings and groups.
-- [Shell integration][shell-integration] lists which shells need extra setup, such as nushell and the strict-POSIX family, and how [direnv][direnv] fills the gap.
-- [GitHub Actions][github-actions] installs the same pinned toolchain in CI.
-- The [OCX VS Code extension][vscode-ext], also on [Open VSX][openvsx-ext], brings the project toolchain into your editor. Its terminal and tasks then resolve the same locked binaries.
-- Flags and exit codes are in the [`ocx exec` reference][cmd-exec] and the [project file reference][project-file].
-
+- [Put a tool on your `PATH` everywhere][global-add] with the global toolchain.
+- [Publish your own tool][publish] to any OCI registry.
+- [Provision Bazel][bazel] or a [dev container][devcontainers] with the same pin. The [OCX VS Code extension][vscode-ext], also on [Open VSX][openvsx-ext], brings the toolchain into your editor.
+- [Build container images][docker] with the locked tools.
+- [Install a package][first-package].
 
 [installation]: ./install-ocx.mdx
+[nodejs]: https://nodejs.org/
+[first-package]: ./first-package.mdx
+
 [project-guide]: ../guides/project-toolchain.mdx
-[run-guide]: ../guides/run-project-tools.mdx
+[run-guide]: ../guides/run-project-tools.mdx#exec
+[lock-guide]: ../guides/lock-and-reproduce.mdx
+[update-guide]: ../guides/update-tools.mdx
+[work-offline]: ../guides/work-offline.mdx#offline-modes
+[corporate-mirror]: ../guides/corporate-mirror.mdx
+[global-add]: ../guides/global-toolchain.mdx#global-toolchain-add
+[global-toolchain]: ../guides/global-toolchain.mdx
 [shell-integration]: ../explanation/shell-integration.mdx
-[github-actions]: ../integration/github-actions.md
+[consent]: ../explanation/shell-integration.mdx#consent
+[what-setup]: ../guides/install-options.mdx#install-bare-binary-what
+[shell-trouble]: ../troubleshooting/shell.mdx#diagnostics
+[github-actions]: ../integration/github-actions.mdx#ci-github-actions-toolchain
+[gitlab-ci]: ../integration/gitlab-ci.md
+[unattended-ci]: ../integration/unattended-ci.mdx
+[bazel]: ../integration/bazel.mdx#bazel-project
+[devcontainers]: ../integration/devcontainers-and-editors.mdx#devcontainer
+[docker]: ../integration/docker.mdx
+[publish]: ../publishing/index.mdx#tldr
+
+[cmd-add]: ../reference/command-line/commands.md#add
+[cmd-clean]: ../reference/command-line/commands.md#clean
 [cmd-exec]: ../reference/command-line/commands.md#exec
+[cmd-lock]: ../reference/command-line/commands.md#lock
+[cmd-remove]: ../reference/command-line/commands.md#remove
+[cmd-status]: ../reference/command-line/commands.md#status
+[cmd-update]: ../reference/command-line/commands.md#update
+[cmd-upgrade]: ../reference/command-line/commands.md#upgrade
 [project-file]: ../reference/project-file.md
-[direnv]: https://direnv.net/
+
 [vscode-ext]: https://marketplace.visualstudio.com/items?itemName=ocx-sh.ocx
 [openvsx-ext]: https://open-vsx.org/extension/ocx-sh/ocx

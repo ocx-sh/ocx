@@ -7,12 +7,12 @@
 set -euo pipefail
 
 # The setup:patches-consumer provider has already configured the [patches]
-# tier, published a corp-ca companion, installed cmake, and published the
+# tier, published a corp-ca companion, installed Python, and published the
 # descriptor. The region below is what an operator actually runs; `ocx patch
 # sync` is what installs the companion on screen.
 
 # region cast
 ocx patch sync
-ocx package env "$PKG_KITWARE_CMAKE" --show-patches
-ocx package exec "$PKG_KITWARE_CMAKE" -- cmake --version
+ocx package env "$PKG_ASTRAL_SH_PYTHON_BUILD_STANDALONE" --show-patches
+ocx package exec "$PKG_ASTRAL_SH_PYTHON_BUILD_STANDALONE" -- python3 --version
 # endregion cast

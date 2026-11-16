@@ -133,7 +133,7 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "integration_namespace_invalid",
-        summary = "An integrations namespace is invalid"
+        summary = "An integration key is invalid"
     )]
     IntegrationNamespaceInvalid { namespace: String, reason: &'static str },
 

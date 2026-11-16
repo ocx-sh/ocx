@@ -69,7 +69,7 @@ Reference and explanation sit outside the tiers: they are addressable from every
 | [T01](../../.agents/docs-plan/friction-logs/T01-first-package.md) | G02, G03 | 1 | The docs' running example `kitware/cmake:3.28` is not in the index (exit 79), so the first tutorial step fails. Global flag position (`--remote` before the command) is stated nowhere the persona read. The default registry (`ocx.sh`) is stated in no sentence. No page says how to call the selected tool by bare name after install. |
 | [T02](../../.agents/docs-plan/friction-logs/T02-project-toolchain.md) | G04, G05 | 0 | Commands worked. The persona found no way to confirm the child process used the locked tools, saw exit 65 documented for four unrelated causes, and found no ignore file for the `.ocx/` directory the pages say is ignored. |
 
-Rank by severity (blocked steps, then contradictions): T03 first, T01 second, T02 third. Consequences: `integration/unattended-ci.md` and `integration/registry-auth-recipes.md` are `write` actions; `getting-started/first-package.md` must use a package that resolves; the two CI pages merge three sources that disagree.
+Rank by severity (blocked steps, then contradictions): T03 first, T01 second, T02 third. Consequences: `integration/unattended-ci.mdx` and `integration/registry-auth-recipes.mdx` are `write` actions; `getting-started/first-package.md` must use a package that resolves; the two CI pages merge three sources that disagree.
 
 ## 3. Task list (40 goals, three tiers)
 
@@ -580,7 +580,7 @@ tasks:
     page_word_count: 1153
     page_status: adequate
     action: move
-    new_pages: ["publishing/declare-dependencies.md", "publishing/env-surface.md", "publishing/entry-points.md"]
+    new_pages: ["publishing/declare-dependencies.mdx", "publishing/env-surface.mdx", "publishing/entry-points.md"]
   - id: G29
     task: "test a package before pushing it"
     source: cli-subcommand
@@ -598,7 +598,7 @@ tasks:
     page_word_count: 2184
     page_status: adequate
     action: move
-    new_pages: ["publishing/test-locally.mdx", "publishing/script-tests.md"]
+    new_pages: ["publishing/test-locally.mdx", "publishing/script-tests.mdx"]
   - id: G30
     task: "announce a package so others can find it"
     source: cli-subcommand
@@ -616,7 +616,7 @@ tasks:
     page_word_count: 3040
     page_status: adequate
     action: move
-    new_pages: ["publishing/announce.md", "publishing/announce-from-ci.md"]
+    new_pages: ["publishing/announce.mdx", "publishing/announce-from-ci.md"]
   - id: G31
     task: "publish one package for several platforms and C libraries"
     source: cli-subcommand
@@ -634,7 +634,7 @@ tasks:
     page_word_count: 2844
     page_status: adequate
     action: move
-    new_pages: ["publishing/multi-platform.mdx", "publishing/libc-variants.md"]
+    new_pages: ["publishing/multi-platform.mdx", "publishing/libc-variants.mdx"]
   - id: G32
     task: "sign a release and attach an SBOM"
     source: cli-subcommand
@@ -670,7 +670,7 @@ tasks:
     page_word_count: 953
     page_status: duplicate
     action: merge
-    new_pages: ["integration/github-actions.md", "integration/gitlab-ci.md"]
+    new_pages: ["integration/github-actions.mdx", "integration/gitlab-ci.md"]
   - id: G34
     task: "run ocx unattended in a pipeline"
     source: issue-title
@@ -688,7 +688,7 @@ tasks:
     page_word_count: 16148
     page_status: missing
     action: write
-    new_pages: ["integration/unattended-ci.md", "integration/registry-auth-recipes.md"]
+    new_pages: ["integration/unattended-ci.mdx", "integration/registry-auth-recipes.mdx"]
   - id: G35
     task: "use ocx in a Docker image build"
     source: readme-heading
@@ -706,7 +706,7 @@ tasks:
     page_word_count: 848
     page_status: adequate
     action: move
-    new_pages: ["integration/docker.md"]
+    new_pages: ["integration/docker.mdx"]
   - id: G36
     task: "use ocx tools from Bazel"
     source: issue-title
@@ -742,7 +742,7 @@ tasks:
     page_word_count: null
     page_status: missing
     action: write
-    new_pages: ["integration/devcontainers-and-editors.md"]
+    new_pages: ["integration/devcontainers-and-editors.mdx"]
   - id: G38
     task: "consume ocx output from scripts and other programs"
     source: cli-subcommand
@@ -760,7 +760,7 @@ tasks:
     page_word_count: 1053
     page_status: adequate
     action: expand
-    new_pages: ["integration/scripts-and-json.md", "reference/machine-interface.md", "explanation/execution-records.md"]
+    new_pages: ["integration/scripts-and-json.mdx", "reference/machine-interface.md", "explanation/execution-records.mdx"]
   - id: G39
     task: "turn a Python lock file into packages"
     source: issue-title
@@ -778,7 +778,7 @@ tasks:
     page_word_count: null
     page_status: missing
     action: write
-    new_pages: ["integration/python.md"]
+    new_pages: ["integration/python.mdx"]
   - id: G40
     task: "promote builds and run snapshot tracks from a release pipeline"
     source: cli-subcommand
@@ -796,7 +796,7 @@ tasks:
     page_word_count: 1017
     page_status: adequate
     action: expand
-    new_pages: ["publishing/promote-packages.mdx", "publishing/snapshot-tracks.md", "integration/publisher-ci.md"]
+    new_pages: ["publishing/promote-packages.mdx", "publishing/snapshot-tracks.mdx", "integration/publisher-ci.mdx"]
 ```
 
 ## 4. Coverage against the 40 goals
@@ -832,23 +832,23 @@ Verdict reads: `move` the content already exists in one place and travels with i
 | G25 | everyday | work out why a package will not run on my operating system | `troubleshooting/platforms.md` | faq.md#linux; faq.md#macos; faq.md#windows (adequate) | move |
 | G26 | everyday | publish a package to a registry | `publishing/build-and-push.md`, `publishing/index.md` | authoring/building-pushing.md; authoring/index.md (adequate) | move |
 | G27 | everyday | package an existing binary release for ocx | `publishing/bundle-anatomy.md`, `publishing/repackage-releases.md` | authoring/bundle-anatomy.md; authoring/migration.md (adequate) | move |
-| G28 | everyday | declare dependencies, environment values and launchers in a package | `publishing/declare-dependencies.md`, `publishing/env-surface.md`, `publishing/entry-points.md` | authoring/dependencies.md; authoring/env-surface.md; authoring/entry-points.md (adequate) | move |
-| G29 | everyday | test a package before pushing it | `publishing/test-locally.md`, `publishing/script-tests.md` | authoring/testing.md (adequate) | move |
-| G30 | everyday | announce a package so others can find it | `publishing/announce.md`, `publishing/announce-from-ci.md` | authoring/announcing.md (adequate) | move |
-| G31 | everyday | publish one package for several platforms and C libraries | `publishing/multi-platform.md`, `publishing/libc-variants.md` | authoring/multi-platform.md (adequate) | move |
+| G28 | everyday | declare dependencies, environment values and launchers in a package | `publishing/declare-dependencies.mdx`, `publishing/env-surface.mdx`, `publishing/entry-points.md` | authoring/dependencies.md; authoring/env-surface.md; authoring/entry-points.md (adequate) | move |
+| G29 | everyday | test a package before pushing it | `publishing/test-locally.md`, `publishing/script-tests.mdx` | authoring/testing.md (adequate) | move |
+| G30 | everyday | announce a package so others can find it | `publishing/announce.mdx`, `publishing/announce-from-ci.md` | authoring/announcing.md (adequate) | move |
+| G31 | everyday | publish one package for several platforms and C libraries | `publishing/multi-platform.md`, `publishing/libc-variants.mdx` | authoring/multi-platform.md (adequate) | move |
 | G32 | everyday | sign a release and attach an SBOM | `publishing/sign-a-release.md`, `publishing/attest-and-sbom.md` | user-guide.md#supply-chain-signing; in-depth/signing.md#ci; user-guide/attestations.md (adequate) | write |
-| G33 | integration | provide pinned tools in a GitHub Actions or GitLab CI job | `integration/github-actions.md`, `integration/gitlab-ci.md` | in-depth/ci.md; user-guide.md#ci (duplicate) | merge |
-| G34 | integration | run ocx unattended in a pipeline | `integration/unattended-ci.md`, `integration/registry-auth-recipes.md` | reference/environment.md (scattered); [#400](https://github.com/ocx-sh/ocx/issues/400) and [#323](https://github.com/ocx-sh/ocx/issues/323) in the research (missing) | write |
-| G35 | integration | use ocx in a Docker image build | `integration/docker.md` | docker.md (adequate) | move |
+| G33 | integration | provide pinned tools in a GitHub Actions or GitLab CI job | `integration/github-actions.mdx`, `integration/gitlab-ci.md` | in-depth/ci.md; user-guide.md#ci (duplicate) | merge |
+| G34 | integration | run ocx unattended in a pipeline | `integration/unattended-ci.mdx`, `integration/registry-auth-recipes.mdx` | reference/environment.md (scattered); [#400](https://github.com/ocx-sh/ocx/issues/400) and [#323](https://github.com/ocx-sh/ocx/issues/323) in the research (missing) | write |
+| G35 | integration | use ocx in a Docker image build | `integration/docker.mdx` | docker.md (adequate) | move |
 | G36 | integration | use ocx tools from Bazel | `integration/bazel.md` | none ([#191](https://github.com/ocx-sh/ocx/issues/191) and [#192](https://github.com/ocx-sh/ocx/issues/192) in the research) (missing) | write |
-| G37 | integration | expose package tooling to a devcontainer or an editor | `integration/devcontainers-and-editors.md` | none (integrations metadata is described in reference/metadata.md) (missing) | write |
-| G38 | integration | consume ocx output from scripts and other programs | `integration/scripts-and-json.md`, `reference/machine-interface.md`, `explanation/execution-records.md` | reference/machine-interface.md; reference/execution-records.md (adequate) | expand |
-| G39 | integration | turn a Python lock file into packages | `integration/python.md` | none (ocx_python crate only) (missing) | write |
-| G40 | integration | promote builds and run snapshot tracks from a release pipeline | `publishing/promote-packages.md`, `publishing/snapshot-tracks.md`, `integration/publisher-ci.md` | user-guide/promoting-packages.md; user-guide/snapshot-tracks.md; [#108](https://github.com/ocx-sh/ocx/issues/108) in the research (adequate) | expand |
+| G37 | integration | expose package tooling to a devcontainer or an editor | `integration/devcontainers-and-editors.mdx` | none (integrations metadata is described in reference/metadata.md) (missing) | write |
+| G38 | integration | consume ocx output from scripts and other programs | `integration/scripts-and-json.mdx`, `reference/machine-interface.md`, `explanation/execution-records.mdx` | reference/machine-interface.md; reference/execution-records.md (adequate) | expand |
+| G39 | integration | turn a Python lock file into packages | `integration/python.mdx` | none (ocx_python crate only) (missing) | write |
+| G40 | integration | promote builds and run snapshot tracks from a release pipeline | `publishing/promote-packages.md`, `publishing/snapshot-tracks.mdx`, `integration/publisher-ci.mdx` | user-guide/promoting-packages.md; user-guide/snapshot-tracks.md; [#108](https://github.com/ocx-sh/ocx/issues/108) in the research (adequate) | expand |
 
 Gap goals (feature check required before writing; ocx side only, link `/integrations/<x>/` where the integration lives in its own repository): G13 update tools (a stub today), G23 find packages, G34 unattended CI, G36 Bazel, G37 devcontainers and editors, G39 Python lock translation. P13e confirms in the code that each feature exists and records "feature absent" in its ledger instead of writing the page when it does not; G39 is the doubtful one (`ocx_python` is a crate, no CLI verb was found in `cli.json`).
 
-Pages mapped to no goal (candidates for the delete test only): `website/src/index.md`, `website/src/team.md` (root site), `roadmap.md`, `changelog.md`, `contributing/bazel.md`. The last three are project pages that serve contributors and release readers, not the 40 reader goals, and stay.
+Pages mapped to no goal (candidates for the delete test only): `website/src/index.md`, `website/src/team.md` (root site), `roadmap.md`, `changelog.md`. The last two are project pages that serve release readers, not the 40 reader goals, and stay. `contributing/bazel.md` was deleted 2026-11-16 on owner feedback: a contributor page, carried by `AGENTS.md` and `bazel-quality.md`.
 
 ## 5. Page inventory (old path to new path)
 
@@ -882,40 +882,41 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | user-guide.mdx | guides/pin-signer-identity.mdx | how-to | everyday | everyday | settings |
 | (split from guides/pin-signer-identity.mdx) | guides/declare-publishers.mdx | how-to | everyday | everyday | settings |
 | in-depth/self-hosted-sigstore.md | guides/self-hosted-sigstore.md | how-to | everyday | explanation | settings |
-| in-depth/indices.md | guides/serve-an-index.md | how-to | everyday | explanation | settings |
-| user-guide.mdx | guides/update-ocx.mdx | how-to | everyday | everyday | settings |
+| in-depth/indices.md | guides/serve-an-index.md | how-to | everyday | explanation | publishing |
+| installation.mdx | guides/install-options.mdx | how-to | everyday | everyday | start |
+| user-guide.mdx | guides/update-ocx.mdx | how-to | everyday | everyday | start |
 | in-depth/shell-integration.mdx | troubleshooting/shell.mdx | troubleshooting | — | explanation | troubleshooting |
 | faq.mdx | troubleshooting/platforms.mdx | troubleshooting | — | misc | troubleshooting |
 | authoring/index.mdx | publishing/index.mdx | landing | everyday | publishing | publishing |
 | authoring/bundle-anatomy.mdx | publishing/bundle-anatomy.mdx | how-to | everyday | publishing | publishing |
-| authoring/dependencies.md | publishing/declare-dependencies.md | how-to | everyday | publishing | publishing |
-| authoring/env-surface.md | publishing/env-surface.md | how-to | everyday | publishing | publishing |
+| authoring/dependencies.md | publishing/declare-dependencies.mdx | how-to | everyday | publishing | publishing |
+| authoring/env-surface.md | publishing/env-surface.mdx | how-to | everyday | publishing | publishing |
 | authoring/entry-points.md | publishing/entry-points.md | how-to | everyday | publishing | publishing |
 | authoring/building-pushing.mdx | publishing/build-and-push.mdx | how-to | everyday | publishing | publishing |
 | authoring/testing.mdx | publishing/test-locally.mdx | how-to | everyday | publishing | publishing |
-| authoring/testing.mdx | publishing/script-tests.md | how-to | everyday | publishing | publishing |
+| authoring/testing.mdx | publishing/script-tests.mdx | how-to | everyday | publishing | publishing |
 | authoring/multi-platform.mdx | publishing/multi-platform.mdx | how-to | everyday | publishing | publishing |
-| authoring/multi-platform.mdx | publishing/libc-variants.md | how-to | everyday | publishing | publishing |
-| authoring/announcing.md | publishing/announce.md | how-to | everyday | publishing | publishing |
+| authoring/multi-platform.mdx | publishing/libc-variants.mdx | how-to | everyday | publishing | publishing |
+| authoring/announcing.md | publishing/announce.mdx | how-to | everyday | publishing | publishing |
 | authoring/announcing.md | publishing/announce-from-ci.md | how-to | everyday | publishing | publishing |
 | — | publishing/sign-a-release.md | how-to | everyday | publishing | publishing |
 | user-guide/attestations.mdx | publishing/attest-and-sbom.mdx | how-to | everyday | everyday | publishing |
 | user-guide/promoting-packages.mdx | publishing/promote-packages.mdx | how-to | everyday | everyday | publishing |
-| user-guide/snapshot-tracks.md | publishing/snapshot-tracks.md | how-to | everyday | everyday | publishing |
+| user-guide/snapshot-tracks.md | publishing/snapshot-tracks.mdx | how-to | everyday | everyday | publishing |
 | user-guide/patches.mdx | publishing/maintain-patches.mdx | how-to | everyday | everyday | publishing |
 | authoring/migration.mdx | publishing/repackage-releases.mdx | how-to | everyday | publishing | publishing |
 | — | integration/index.md | landing | integration | integration | integrations |
-| in-depth/ci.md | integration/github-actions.md | how-to | integration | integration | integrations |
+| in-depth/ci.md | integration/github-actions.mdx | how-to | integration | integration | integrations |
 | in-depth/ci.md | integration/gitlab-ci.md | how-to | integration | integration | integrations |
-| — | integration/unattended-ci.md | how-to | integration | integration | integrations |
-| — | integration/registry-auth-recipes.md | how-to | integration | integration | integrations |
-| — | integration/proxy-and-ca.md | how-to | integration | integration | integrations |
-| docker.md | integration/docker.md | how-to | integration | integration | integrations |
+| — | integration/unattended-ci.mdx | how-to | integration | integration | integrations |
+| — | integration/registry-auth-recipes.mdx | how-to | integration | integration | integrations |
+| — | integration/proxy-and-ca.mdx | how-to | integration | integration | integrations |
+| docker.md | integration/docker.mdx | how-to | integration | integration | integrations |
 | — | integration/bazel.md | how-to | integration | integration | integrations |
-| — | integration/devcontainers-and-editors.md | how-to | integration | integration | integrations |
-| — | integration/scripts-and-json.md | how-to | integration | integration | integrations |
-| — | integration/python.md | how-to | integration | integration | integrations |
-| — | integration/publisher-ci.md | how-to | integration | integration | integrations |
+| — | integration/devcontainers-and-editors.mdx | how-to | integration | integration | integrations |
+| — | integration/scripts-and-json.mdx | how-to | integration | integration | integrations |
+| — | integration/python.mdx | how-to | integration | integration | integrations |
+| — | integration/publisher-ci.mdx | how-to | integration | integration | integrations |
 | in-depth/storage.mdx | explanation/storage.mdx | explanation | — | explanation | concepts |
 | in-depth/storage.mdx | explanation/toolchain-tree.md | explanation | — | explanation | concepts |
 | in-depth/versioning.mdx | explanation/versioning.mdx | explanation | — | explanation | concepts |
@@ -926,19 +927,19 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | in-depth/project.md | explanation/project-toolchain.md | explanation | — | explanation | concepts |
 | in-depth/configuration.mdx | explanation/configuration.mdx | explanation | — | explanation | concepts |
 | in-depth/environments.mdx | explanation/environments.mdx | explanation | — | explanation | concepts |
-| — | explanation/toolchain-activation.md | explanation | — | explanation | concepts |
+| — | explanation/toolchain-activation.mdx | explanation | — | explanation | concepts |
 | in-depth/shell-integration.mdx | explanation/shell-integration.mdx | explanation | — | explanation | concepts |
-| in-depth/entry-points.md | explanation/entry-points.md | explanation | — | explanation | concepts |
+| in-depth/entry-points.md | explanation/entry-points.mdx | explanation | — | explanation | concepts |
 | in-depth/lazy-loading.mdx | explanation/deferred-packages.mdx | explanation | — | explanation | concepts |
 | user-guide/patches.mdx | explanation/patches.mdx | explanation | — | everyday | concepts |
 | — | explanation/integrations.md | explanation | — | explanation | concepts |
-| — | explanation/execution-records.md | explanation | — | explanation | concepts |
+| — | explanation/execution-records.mdx | explanation | — | explanation | concepts |
 | in-depth/signing.mdx | explanation/signing.mdx | explanation | — | explanation | concepts |
 | in-depth/cosign-parity.mdx | explanation/cosign-parity.mdx | explanation | — | explanation | concepts |
 | in-depth/environments.mdx | explanation/launcher-forwarding.md | explanation | — | explanation | concepts |
 | in-depth/configuration.mdx | explanation/managed-configuration.md | explanation | — | explanation | concepts |
-| in-depth/project.md | explanation/project-groups.md | explanation | — | explanation | concepts |
-| reference/execution-records.md | explanation/records-and-sbom.md | explanation | — | explanation | concepts |
+| in-depth/project.md | explanation/project-groups.mdx | explanation | — | explanation | concepts |
+| reference/execution-records.md | explanation/records-and-sbom.mdx | explanation | — | explanation | concepts |
 | reference/execution-records.md | explanation/records-launcher-frames.md | explanation | — | explanation | concepts |
 | in-depth/shell-integration.mdx | explanation/shell-consent.mdx | explanation | — | explanation | concepts |
 | in-depth/storage.mdx | explanation/toolchain-render.md | explanation | — | explanation | concepts |
@@ -968,13 +969,13 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | reference/configuration.md | reference/project-file.md | reference | — | generated | reference |
 | reference/command-line.md | reference/exit-codes.md | reference | — | generated | reference |
 | generated (SBOM task) | reference/dependencies.md | reference | — | generated | reference |
+| generated (glossary task) | reference/glossary.md | reference | — | generated | reference |
 | roadmap.md | roadmap.md | explanation | — | misc | project |
 | changelog.md | changelog.md | changelog | — | misc | project |
-| contributing/bazel.md | contributing/bazel.md | how-to | everyday | misc | project |
 
 Total: 104 new pages. Per cluster: first-steps 4, everyday 24, publishing 14, explanation 21, integration 12, misc 14, generated 15.
 
-Pages created before P12 (P9 writes them at their new path because they are the only home an overflow section has): `reference/metadata/{index,env,dependencies,entry-points,integrations}.md` (P9 splits `reference/metadata.md` and deletes it), `explanation/integrations.md`, `explanation/toolchain-activation.md`, `explanation/execution-records.md`, `integration/proxy-and-ca.md`. Every other split sibling is created by the owning P13 pipeline.
+Pages created before P12 (P9 writes them at their new path because they are the only home an overflow section has): `reference/metadata/{index,env,dependencies,entry-points,integrations}.md` (P9 splits `reference/metadata.md` and deletes it), `explanation/integrations.md`, `explanation/toolchain-activation.mdx`, `explanation/execution-records.mdx`, `integration/proxy-and-ca.mdx`. Every other split sibling is created by the owning P13 pipeline.
 
 Generated reference pages follow the page names in `crates/ocx_schema/src/docs/render.rs` on the P3 branch (commit 810724e26): a group is the first word of a command that has subcommands, every leaf command lands in `commands.md`, `package` splits into `package-publishing.md` and `package-consuming.md` (a fixed table of its subcommands in the generator). P3 owns the exact set; P12's cluster-set check reads the built set, so a rename on the P3 side needs only this table updated. **One conflict to settle in P3:** the `index` group writes `reference/command-line/index.md`, the same path as the command-line landing page. This table assumes the group file is renamed to `index-commands.md`. `reference/dependencies.md` is the git-ignored SBOM page (`sbom:generate:page`), a build-time generator page that the stub test must exempt.
 
@@ -991,16 +992,16 @@ Generated reference pages follow the page names in `crates/ocx_schema/src/docs/r
 | user-guide/patches.md | guides/patch-packages.md | publishing/maintain-patches.md, explanation/patches.md | split |
 | in-depth/indices.md | explanation/indices.md | guides/serve-an-index.md, explanation/local-index.md, explanation/public-index.md | split |
 | in-depth/shell-integration.md | explanation/shell-integration.md | troubleshooting/shell.md | split |
-| authoring/testing.md | publishing/test-locally.md | publishing/script-tests.md | split |
-| authoring/multi-platform.md | publishing/multi-platform.md | publishing/libc-variants.md | split |
-| authoring/announcing.md | publishing/announce.md | publishing/announce-from-ci.md | split |
-| in-depth/ci.md | integration/github-actions.md | integration/gitlab-ci.md | split |
+| authoring/testing.md | publishing/test-locally.md | publishing/script-tests.mdx | split |
+| authoring/multi-platform.md | publishing/multi-platform.md | publishing/libc-variants.mdx | split |
+| authoring/announcing.md | publishing/announce.mdx | publishing/announce-from-ci.md | split |
+| in-depth/ci.md | integration/github-actions.mdx | integration/gitlab-ci.md | split |
 | in-depth/storage.md | explanation/storage.md | explanation/toolchain-tree.md | split |
 | reference/metadata.md | reference/metadata/index.md (P9 splits; no mv) | reference/metadata/env.md, reference/metadata/dependencies.md, reference/metadata/entry-points.md, reference/metadata/integrations.md | split |
 | reference/command-line.md | none (P9 deletes; generated pages replace it) | reference/command-line/index.md, reference/command-line/commands.md, reference/command-line/config.md, reference/command-line/direnv.md, reference/command-line/index-commands.md, reference/command-line/package-publishing.md, reference/command-line/package-consuming.md, reference/command-line/patch.md, reference/command-line/self.md, reference/command-line/shell.md, reference/exit-codes.md | replace by generated pages |
 | reference/configuration.md | none (P9 deletes; generated pages replace it) | reference/configuration.md, reference/project-file.md | replace by generated pages |
 
-Merges without a split (several old sources feed one new page, the owner of the destination writes the merged page): `guides/update-ocx.md` (user-guide update + installation updating and uninstalling), `getting-started/install-ocx.md` (installation + user-guide bare-binary install + faq install-version), `integration/github-actions.md` and `gitlab-ci.md` (in-depth/ci + user-guide CI + installation CI setup), `guides/verify-installs.md` (user-guide verify + in-depth/signing offline verification), `publishing/sign-a-release.md` (user-guide sign + in-depth/signing CI + building-pushing signing-after-push), `troubleshooting/platforms.md` (faq Linux, macOS, Windows). Each source section is deleted by its own owner once the destination has the content; the destination page is the only live copy.
+Merges without a split (several old sources feed one new page, the owner of the destination writes the merged page): `guides/update-ocx.md` (user-guide update + installation updating and uninstalling), `getting-started/install-ocx.md` (installation + user-guide bare-binary install + faq install-version), `integration/github-actions.mdx` and `gitlab-ci.md` (in-depth/ci + user-guide CI + installation CI setup), `guides/verify-installs.md` (user-guide verify + in-depth/signing offline verification), `publishing/sign-a-release.md` (user-guide sign + in-depth/signing CI + building-pushing signing-after-push), `troubleshooting/platforms.md` (faq Linux, macOS, Windows). Each source section is deleted by its own owner once the destination has the content; the destination page is the only live copy.
 
 ### 6.2 Section map for split pages
 
@@ -1016,18 +1017,18 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | user-guide.md | #dependencies | 275 | guides/run-with-dependencies.md | move |
 | user-guide.md | #lock | 318 | guides/lock-and-reproduce.md | move |
 | user-guide.md | #global-toolchain | 341 | guides/global-toolchain.md | move |
-| user-guide.md | #global-toolchain-ci-path | 477 | integration/github-actions.md | merge into the existing section |
+| user-guide.md | #global-toolchain-ci-path | 477 | integration/github-actions.mdx | merge into the existing section |
 | user-guide.md | #project | 521 | guides/project-toolchain.md | move |
 | user-guide.md | "Lifecycle commands" | 536 | guides/update-tools.md | move |
 | user-guide.md | #exec | 663 | guides/run-project-tools.md | move |
-| user-guide.md | #ci | 721 | integration/github-actions.md | merge into the existing section |
+| user-guide.md | #ci | 721 | integration/github-actions.mdx | merge into the existing section |
 | user-guide.md | #publish | 750 | publishing/index.md | delete here, the target already carries it |
 | user-guide.md | #authentication | 758 | guides/authenticate.md | move |
 | user-guide.md | #offline | 830 | guides/work-offline.md | move |
 | user-guide.md | #mirrors | 884 | guides/corporate-mirror.md | move |
 | user-guide.md | #configuration | 961 | guides/configure-ocx.md | move |
 | user-guide.md | #managed-config | 985 | guides/manage-config-centrally.md | move |
-| user-guide.md | #managed-config-ca | 1093 | integration/proxy-and-ca.md | move |
+| user-guide.md | #managed-config-ca | 1093 | integration/proxy-and-ca.mdx | move |
 | user-guide.md | #update-ocx | 1135 | guides/update-ocx.md | move |
 | user-guide.md | #supply-chain | 1178 | guides/verify-installs.md | move |
 | user-guide.md | #supply-chain-signing | 1188 | publishing/sign-a-release.md | move |
@@ -1045,10 +1046,10 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | getting-started.md | #next-steps-config | 166 | guides/configure-ocx.md | delete here, the target already carries it |
 | installation.md | #with-script | 39 | getting-started/install-ocx.md | move |
 | installation.md | #manual | 109 | getting-started/install-ocx.md | move |
-| installation.md | #docker | 173 | integration/docker.md | delete here, the target already carries it |
+| installation.md | #docker | 173 | integration/docker.mdx | delete here, the target already carries it |
 | installation.md | #updating | 183 | guides/update-ocx.md | merge into the existing section |
 | installation.md | #uninstalling | 219 | guides/update-ocx.md | merge into the existing section |
-| installation.md | #ci | 246 | integration/github-actions.md | merge into the existing section |
+| installation.md | #ci | 246 | integration/github-actions.mdx | merge into the existing section |
 | installation.md | #dev-builds | 256 | getting-started/install-ocx.md | move |
 | installation.md | #next-steps | 274 | getting-started/install-ocx.md | move |
 | faq.md | "Versioning" | 6 | explanation/versioning.md | merge into the existing section |
@@ -1058,7 +1059,7 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | faq.md | "Linux" | 111 | troubleshooting/platforms.md | move |
 | faq.md | "macOS" | 143 | troubleshooting/platforms.md | move |
 | faq.md | "Windows" | 213 | troubleshooting/platforms.md | move |
-| in-depth/ci.md | #ci-github-actions | 16 | integration/github-actions.md | move |
+| in-depth/ci.md | #ci-github-actions | 16 | integration/github-actions.mdx | move |
 | in-depth/ci.md | #ci-gitlab | 98 | integration/gitlab-ci.md | move |
 | in-depth/indices.md | #format | 14 | explanation/indices.md | move |
 | in-depth/indices.md | #remote | 24 | explanation/indices.md | move |
@@ -1104,15 +1105,15 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | in-depth/storage.md | #symlinks | 203 | explanation/storage.md | move |
 | in-depth/storage.md | #toolchain | 247 | explanation/toolchain-tree.md | move |
 | in-depth/storage.md | "See Also" | 323 | explanation/storage.md | move |
-| authoring/announcing.md | #announcing-entry | 47 | publishing/announce.md | move |
-| authoring/announcing.md | #announcing-claim | 67 | publishing/announce.md | move |
-| authoring/announcing.md | #announcing-tags | 93 | publishing/announce.md | move |
+| authoring/announcing.md | #announcing-entry | 47 | publishing/announce.mdx | move |
+| authoring/announcing.md | #announcing-claim | 67 | publishing/announce.mdx | move |
+| authoring/announcing.md | #announcing-tags | 93 | publishing/announce.mdx | move |
 | authoring/announcing.md | #announcing-postures | 166 | publishing/announce-from-ci.md | move |
-| authoring/announcing.md | #announcing-owners | 376 | publishing/announce.md | move |
-| authoring/announcing.md | #announcing-review | 411 | publishing/announce.md | move |
-| authoring/announcing.md | #announcing-consumers | 448 | publishing/announce.md | move |
+| authoring/announcing.md | #announcing-owners | 376 | publishing/announce.mdx | move |
+| authoring/announcing.md | #announcing-review | 411 | publishing/announce.mdx | move |
+| authoring/announcing.md | #announcing-consumers | 448 | publishing/announce.mdx | move |
 | authoring/announcing.md | #announcing-runner | 462 | publishing/announce-from-ci.md | move |
-| authoring/announcing.md | #announcing-troubleshooting | 482 | publishing/announce.md | move |
+| authoring/announcing.md | #announcing-troubleshooting | 482 | publishing/announce.mdx | move |
 | authoring/testing.md | #motivation | 6 | publishing/test-locally.md | move |
 | authoring/testing.md | #basic | 16 | publishing/test-locally.md | move |
 | authoring/testing.md | #identifier | 49 | publishing/test-locally.md | move |
@@ -1122,7 +1123,7 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | authoring/testing.md | #clean | 101 | publishing/test-locally.md | move |
 | authoring/testing.md | #digest-layers | 112 | publishing/test-locally.md | move |
 | authoring/testing.md | #workflow | 124 | publishing/test-locally.md | move |
-| authoring/testing.md | #scripted-tests | 148 | publishing/script-tests.md | move |
+| authoring/testing.md | #scripted-tests | 148 | publishing/script-tests.mdx | move |
 | authoring/testing.md | #scripted-tests-ocx-api | 173 | reference/script-host-api.md | delete here, the target already carries it |
 | authoring/testing.md | #scripted-tests-expect-api | 213 | reference/script-host-api.md | delete here, the target already carries it |
 | authoring/testing.md | #exit-codes | 344 | publishing/test-locally.md | move |
@@ -1131,7 +1132,7 @@ Every old heading of a split page and where it lands. H3 rows appear only where 
 | authoring/multi-platform.md | #pattern | 16 | publishing/multi-platform.md | move |
 | authoring/multi-platform.md | #metadata | 38 | publishing/multi-platform.md | move |
 | authoring/multi-platform.md | #stability | 54 | publishing/multi-platform.md | move |
-| authoring/multi-platform.md | #libc | 58 | publishing/libc-variants.md | move |
+| authoring/multi-platform.md | #libc | 58 | publishing/libc-variants.mdx | move |
 | authoring/multi-platform.md | #wasm | 168 | publishing/multi-platform.md | move |
 | authoring/multi-platform.md | #dependency-platforms | 207 | publishing/multi-platform.md | move |
 | authoring/multi-platform.md | #see-also | 251 | publishing/multi-platform.md | move |
@@ -1191,7 +1192,7 @@ Columns: the reference page and section that leaves, what happens, the home, **w
 | reference/configuration.md | Unknown keys and sections (#unknown-keys) | one line stays; the rationale moves | explanation/configuration.md (#merge-rules) | in-depth/configuration.md | duplicate |
 | reference/configuration.md | `toolchain_dir`: Expansion, Refusals (#keys-toolchain_dir) | move | guides/project-toolchain.md | user-guide.md#project-toolchain_dir | duplicate |
 | reference/configuration.md | "Rolling it out to a fleet", "Publishing to a fleet", "System-locked" repeated per key | move once, delete the repeats | guides/manage-config-centrally.md; explanation/configuration.md (#managed) | user-guide.md#managed-config; in-depth/configuration.md#managed | duplicate |
-| reference/configuration.md | `extra_ca_certs`: Refused values, Where it sits (#keys-extra_ca_certs) | move | integration/proxy-and-ca.md | create (integration/proxy-and-ca.md) | duplicate |
+| reference/configuration.md | `extra_ca_certs`: Refused values, Where it sits (#keys-extra_ca_certs) | move | integration/proxy-and-ca.mdx | create (integration/proxy-and-ca.mdx) | duplicate |
 | reference/configuration.md | `[registry]`, `[registries.<name>]`: `trusted_hosts`, `insecure`, `file://` bases | move | guides/corporate-mirror.md; guides/serve-an-index.md (file:// bases) | user-guide.md#mirrors; in-depth/indices.md#servable-consuming | duplicate |
 | reference/configuration.md | `[mirrors]` (#keys-mirrors) | delete the narrative | guides/corporate-mirror.md | user-guide.md#mirrors | duplicate |
 | reference/configuration.md | `[patches]` (#keys-patches) | delete the narrative | guides/patch-packages.md | user-guide/patches.md#patches-config | duplicate |
@@ -1207,7 +1208,7 @@ Columns: the reference page and section that leaves, what happens, the home, **w
 | reference/configuration.md | Error Reference (#errors) | delete | reference/exit-codes.md (generated) | none | duplicate |
 | reference/configuration.md | Project Configuration, `[group.<name>]`, `[package."<id>"]`, names (#project-config) | move the narrative; entries stay in project-file.md | guides/project-toolchain.md | user-guide.md#project | duplicate |
 | reference/configuration.md | Toolchain-level `lazy-mode`, `lazy-report` (#project-config-toolchain-lazy) | move | explanation/deferred-packages.md | in-depth/lazy-loading.md | duplicate |
-| reference/configuration.md | Toolchain-level `activate` and `pinned`, resolution orders (#project-config-activate, #project-config-pinned) | move | explanation/toolchain-activation.md | create (explanation/toolchain-activation.md) | duplicate |
+| reference/configuration.md | Toolchain-level `activate` and `pinned`, resolution orders (#project-config-activate, #project-config-pinned) | move | explanation/toolchain-activation.mdx | create (explanation/toolchain-activation.mdx) | duplicate |
 | reference/configuration.md | JSON Schemas (#schemas) | delete | reference/machine-interface.md (#machine-interface-schemas) | none | duplicate |
 | reference/configuration.md | Future Config Keys (#future, #future-registries-fields, #future-clean, #future-project) | delete | none | none | speculative |
 | reference/environment.md | Primer: Truthy Values (#truthy-values) | one line stays on the generated page; the prose goes | explanation/configuration.md (new subsection "Environment overrides") | in-depth/configuration.md | duplicate |
@@ -1222,43 +1223,43 @@ Columns: the reference page and section that leaves, what happens, the home, **w
 | reference/environment.md | `OCX_MIRRORS`, `OCX_INSECURE_REGISTRIES`, `OCX_INDEX` essays | move | guides/corporate-mirror.md; guides/serve-an-index.md | user-guide.md#mirrors-env; in-depth/indices.md | duplicate |
 | reference/environment.md | `OCX_PATCHES`, `OCX_PATCH_SNAPSHOT` essays | move | guides/patch-packages.md | user-guide/patches.md#patches-config | duplicate |
 | reference/environment.md | `OCX_LAZY_MODE`, `OCX_LAZY_REPORT` essays | move | explanation/deferred-packages.md | in-depth/lazy-loading.md | duplicate |
-| reference/environment.md | `OCX_TOOLCHAIN_*` (activate, dir, pinned, update) essays | move | explanation/toolchain-activation.md; guides/project-toolchain.md (#project-toolchain_dir) | create; user-guide.md#project-toolchain_dir | duplicate |
+| reference/environment.md | `OCX_TOOLCHAIN_*` (activate, dir, pinned, update) essays | move | explanation/toolchain-activation.mdx; guides/project-toolchain.md (#project-toolchain_dir) | create; user-guide.md#project-toolchain_dir | duplicate |
 | reference/environment.md | `OCX_RECORDS_DIR`, `OCX_RECORDS_NAME`, `__OCX_LAUNCH_IDENTITIES` essays | move | reference/execution-records.md | reference/execution-records.md | duplicate |
 | reference/environment.md | `OCX_HOME` role in setup, `OCX_NO_MODIFY_PATH`, `OCX_NO_COMPLETION` essays | move | getting-started/install-ocx.md | installation.md#script-options | duplicate |
 | reference/environment.md | `OCX_OFFLINE`, `OCX_REMOTE`, `OCX_FROZEN` essays | move | guides/work-offline.md; guides/lock-and-reproduce.md | user-guide.md#offline; user-guide.md#lock | duplicate |
-| reference/environment.md | External CI variables: `CI`, `GITHUB_*`, `GITLAB_CI`, `CI_*`, `SOURCE_DATE_EPOCH` | move | integration/github-actions.md; integration/gitlab-ci.md; integration/unattended-ci.md | in-depth/ci.md | duplicate |
-| reference/environment.md | External proxy and CA variables: `HTTPS_PROXY` family, `SSL_CERT_*`, Git trust store; `OCX_EXTRA_CA_CERTS` | move | integration/proxy-and-ca.md | create (integration/proxy-and-ca.md) | duplicate |
+| reference/environment.md | External CI variables: `CI`, `GITHUB_*`, `GITLAB_CI`, `CI_*`, `SOURCE_DATE_EPOCH` | move | integration/github-actions.mdx; integration/gitlab-ci.md; integration/unattended-ci.mdx | in-depth/ci.md | duplicate |
+| reference/environment.md | External proxy and CA variables: `HTTPS_PROXY` family, `SSL_CERT_*`, Git trust store; `OCX_EXTRA_CA_CERTS` | move | integration/proxy-and-ca.mdx | create (integration/proxy-and-ca.mdx) | duplicate |
 | reference/environment.md | direnv and mise coexistence variables | delete the prose | troubleshooting/shell.md (#coexistence) | in-depth/shell-integration.md#coexistence | duplicate |
 | reference/environment.md | `ocx-mirror` section (#ocx-mirror-pipeline) | delete; the reference sidebar links the tool's own docs | none | none | duplicate |
 | reference/environment.md | Script env access (#script-env-access) | one line stays | reference/script-host-api.md | reference/script-host-api.md | duplicate |
-| reference/command-line.md | General Options: `--format` and the JSON documents | delete the prose | reference/machine-interface.md (#machine-interface-roots); integration/scripts-and-json.md | reference/machine-interface.md | duplicate |
+| reference/command-line.md | General Options: `--format` and the JSON documents | delete the prose | reference/machine-interface.md (#machine-interface-roots); integration/scripts-and-json.mdx | reference/machine-interface.md | duplicate |
 | reference/command-line.md | Exit codes (#exit-codes) | delete | reference/exit-codes.md (generated) | none | duplicate |
 | reference/command-line.md | `exec` running semantics | delete the restatement | explanation/project-toolchain.md (#running); guides/run-project-tools.md | in-depth/project.md#running | duplicate |
 | reference/command-line.md | Command narrative and examples: install, pull, select, deselect, uninstall, which, env, clean | move (P7 puts the help text in source first) | getting-started/first-package.md; guides/choose-versions.md; guides/clean-up.md | getting-started.md; user-guide.md | duplicate |
 | reference/command-line.md | Command narrative: init, add, remove, lock, update, upgrade, status, inspect, exec | move | guides/project-toolchain.md; guides/update-tools.md; guides/lock-and-reproduce.md; guides/run-project-tools.md | user-guide.md | duplicate |
-| reference/command-line.md | Command narrative: package create, push, cascade, description, announce, claim, test | move | publishing/build-and-push.md; publishing/announce.md; publishing/test-locally.md | authoring/building-pushing.md; authoring/announcing.md; authoring/testing.md | duplicate |
+| reference/command-line.md | Command narrative: package create, push, cascade, description, announce, claim, test | move | publishing/build-and-push.md; publishing/announce.mdx; publishing/test-locally.md | authoring/building-pushing.md; authoring/announcing.md; authoring/testing.md | duplicate |
 | reference/command-line.md | Command narrative: package sign, verify, attest, sbom | move | publishing/sign-a-release.md; guides/verify-installs.md; publishing/attest-and-sbom.md | user-guide.md#supply-chain; user-guide/attestations.md | duplicate |
 | reference/command-line.md | Command narrative: patch, config, index, login, logout, shell, direnv, self | move | guides/patch-packages.md; guides/manage-config-centrally.md; guides/find-packages.md; guides/authenticate.md; troubleshooting/shell.md; guides/update-ocx.md | user-guide/patches.md; user-guide.md; in-depth/shell-integration.md | duplicate |
-| reference/metadata.md | Dependencies: Authoring vs Published, Manifest Pins, No Version Ranges, Registry Requirement | move | explanation/dependencies.md; publishing/declare-dependencies.md | in-depth/dependencies.md; authoring/dependencies.md | duplicate |
-| reference/metadata.md | Entry Points: Disk Layout, Baked Arguments, Example; Executables: claim, scope, `None` vs empty, vs entry points, writing the field | move | explanation/entry-points.md; publishing/entry-points.md | in-depth/entry-points.md; authoring/entry-points.md | duplicate |
+| reference/metadata.md | Dependencies: Authoring vs Published, Manifest Pins, No Version Ranges, Registry Requirement | move | explanation/dependencies.md; publishing/declare-dependencies.mdx | in-depth/dependencies.md; authoring/dependencies.md | duplicate |
+| reference/metadata.md | Entry Points: Disk Layout, Baked Arguments, Example; Executables: claim, scope, `None` vs empty, vs entry points, writing the field | move | explanation/entry-points.mdx; publishing/entry-points.md | in-depth/entry-points.md; authoring/entry-points.md | duplicate |
 | reference/metadata.md | Integrations: No Merge, Ever, Namespace Keys, Size Caps, schemaVersion convention, who can declare | move | explanation/integrations.md | create (explanation/integrations.md) | duplicate |
 | reference/metadata.md | Extraction: `strip_components` | delete | publishing/bundle-anatomy.md (#strip-components) | authoring/bundle-anatomy.md | duplicate |
 | reference/metadata.md | JSON Schema: Editor Integration, Generating Locally, Validation | one line each stays | reference/machine-interface.md (#machine-interface-schemas); publishing/bundle-anatomy.md | reference/machine-interface.md | duplicate |
-| reference/metadata.md | OCI Platform Fields: `os.features` and libc tagging | delete the prose | publishing/libc-variants.md | authoring/multi-platform.md#libc | duplicate |
+| reference/metadata.md | OCI Platform Fields: `os.features` and libc tagging | delete the prose | publishing/libc-variants.mdx | authoring/multi-platform.md#libc | duplicate |
 | reference/env-composition.md | Strict Isolation (#strict-isolation) | move | explanation/environments.md | in-depth/environments.md | duplicate |
 | reference/env-composition.md | Patch Opt-Out Scope, Patch Companions (#patch-opt-out-scope, #visibility-surfaces-companions) | move | explanation/patches.md | user-guide/patches.md#patches-no-patches | duplicate |
 | reference/env-composition.md | Tier Selection (#tier-selection) | move | guides/global-toolchain.md | user-guide.md#global-toolchain | duplicate |
-| reference/env-composition.md | Toolchain Activation: matrix, trampolines, collisions (#toolchain-activation) | move; the matrix table stays | explanation/toolchain-activation.md | create (explanation/toolchain-activation.md) | duplicate |
+| reference/env-composition.md | Toolchain Activation: matrix, trampolines, collisions (#toolchain-activation) | move; the matrix table stays | explanation/toolchain-activation.mdx | create (explanation/toolchain-activation.mdx) | duplicate |
 | reference/env-composition.md | Self-Referencing Values (#self-referencing) | move | explanation/environments.md | in-depth/environments.md | duplicate |
 | reference/env-composition.md | Integrations (#integrations) | move | explanation/integrations.md | create (explanation/integrations.md) | duplicate |
 | reference/env-composition.md | Project Environment, Precedence (#project-env) | move; the precedence table stays | explanation/project-toolchain.md | in-depth/project.md | duplicate |
-| reference/execution-records.md | A policy check that works today (#execution-records-consumer) | move | explanation/execution-records.md; integration/scripts-and-json.md | create (explanation/execution-records.md) | duplicate |
-| reference/execution-records.md | What `pkg:oci` buys, Chaining to an SBOM or attestation, Two records per launcher invocation, The launcher shim frame, Patch companions in the record | move | explanation/execution-records.md | create (explanation/execution-records.md) | duplicate |
-| reference/script-host-api.md | At a glance, Cross-type wall (#overview, #cross-type-wall) | move | publishing/script-tests.md | authoring/testing.md#scripted-tests | duplicate |
-| reference/platforms.md | Compatibility: relation, scoring (#compatibility) | move | publishing/libc-variants.md (#libc-selection) | authoring/multi-platform.md#libc-selection | duplicate |
+| reference/execution-records.md | A policy check that works today (#execution-records-consumer) | move | explanation/execution-records.mdx; integration/scripts-and-json.mdx | create (explanation/execution-records.mdx) | duplicate |
+| reference/execution-records.md | What `pkg:oci` buys, Chaining to an SBOM or attestation, Two records per launcher invocation, The launcher shim frame, Patch companions in the record | move | explanation/execution-records.mdx | create (explanation/execution-records.mdx) | duplicate |
+| reference/script-host-api.md | At a glance, Cross-type wall (#overview, #cross-type-wall) | move | publishing/script-tests.mdx | authoring/testing.md#scripted-tests | duplicate |
+| reference/platforms.md | Compatibility: relation, scoring (#compatibility) | move | publishing/libc-variants.mdx (#libc-selection) | authoring/multi-platform.md#libc-selection | duplicate |
 | reference/platforms.md | Shared Digests (#shared-digests) | move | explanation/storage.md | in-depth/storage.md | duplicate |
 | reference/machine-interface.md | Exit Codes (#machine-interface-exit-codes) | delete | reference/exit-codes.md (generated) | none | duplicate |
-| reference/machine-interface.md | Consumer how-to prose (reading outcomes, error handling) | move | integration/scripts-and-json.md | reference/machine-interface.md | duplicate |
+| reference/machine-interface.md | Consumer how-to prose (reading outcomes, error handling) | move | integration/scripts-and-json.mdx | reference/machine-interface.md | duplicate |
 
 The generated entries keep today's anchors (C-006); an explanatory section never stays on a reference page, even as a collapsed block. A "one line stays" row means a single type, default or description sentence in the entry, which is the entry shape of C-001.
 
@@ -1274,7 +1275,7 @@ Measure used here: gzip of the Markdown source, which understates built HTML (ta
 | user-guide.md | 14008 | 44756 | split into 17 guide pages; sections also land in six other pages (table 6.2) |
 | reference/metadata.md | 6800 | 23705 | split into 5 reference pages, overflow leaves (table 7) |
 | in-depth/indices.md | 6858 | 19923 | split: indices, local-index, public-index, serve-an-index (table 6.2) |
-| reference/execution-records.md | 5351 | 17596 | trim to shape and filename grammar; five sections move to `explanation/execution-records.md` |
+| reference/execution-records.md | 5351 | 17596 | trim to shape and filename grammar; five sections move to `explanation/execution-records.mdx` |
 | in-depth/shell-integration.md | 5990 | 16743 | split: concept page and `troubleshooting/shell.md` (table 6.2) |
 | reference/env-composition.md | 4990 | 15631 | trim to tables; six sections move (table 7) |
 | in-depth/signing.md | 4459 | 13937 | shrink: five duplicate or misplaced sections leave (table 6.2) |
@@ -1282,7 +1283,6 @@ Measure used here: gzip of the Markdown source, which understates built HTML (ta
 | in-depth/project.md | 3551 | 12106 | near the line; P13d dedupes the running-binaries section against the guide |
 | authoring/announcing.md | 3040 | 11953 | split: announce, announce-from-ci |
 | in-depth/storage.md | 3457 | 11107 | split: toolchain section becomes `explanation/toolchain-tree.md` |
-| contributing/bazel.md | 3314 | 10303 | near the line; P13f measures built HTML and splits "Reading Grafana" if over |
 | faq.md | 2612 | 9281 | dissolves into task pages (table 6.4) |
 | authoring/multi-platform.md | 2844 | 9200 | split: multi-platform, libc-variants |
 | authoring/building-pushing.md | 2767 | 9123 | near the line; P13c measures built HTML |
@@ -1293,16 +1293,16 @@ Measure used here: gzip of the Markdown source, which understates built HTML (ta
 
 ## 9. Sidebar groups
 
-Ten top-level groups, two nesting levels at most. `start` holds the first-steps entry point and is a different top-level group from the everyday hub (`packages`). `slug` is the value of the `sidebar` column. P12 writes them as Starlight `label` groups in `astro.config.mjs`, in this order, `autogenerate` off.
+The sidebar has four top-level captions, never collapsed: **Start here** (its 6 pages inline), **Guides** (`packages`, `projects`, `settings`, `troubleshooting`), **Publish and integrate** (`publishing`, `integrations`) and **Look things up** (`concepts`, `reference`, `project`, then the glossary). The ten groups below are the collapsed groups nested under them (Start here is its own caption), so a page's `sidebar` column names its inner group. `start` holds the first-steps entry point and is a different top-level group from the everyday hub (`packages`). `slug` is the value of the `sidebar` column. P12 writes them as Starlight `label` groups in `astro.config.mjs`, in this order, `autogenerate` off. No route middleware flattens the sidebar: the theme defers the links of a nested collapsed group that does not hold the current page, which keeps the page weight.
 
 | order | slug | label | tier of its pages | pages |
 |---|---|---|---|---|
-| 1 | start | Start here | first-steps | 4 |
+| 1 | start | Start here | first-steps | 6 |
 | 2 | packages | Packages | everyday | 6 |
 | 3 | projects | Projects | everyday | 5 |
-| 4 | settings | Settings and trust | everyday | 10 |
+| 4 | settings | Settings and trust | everyday | 9 |
 | 5 | troubleshooting | Troubleshooting | none | 2 |
-| 6 | publishing | Publishing | everyday | 18 |
+| 6 | publishing | Publishing | everyday | 19 |
 | 7 | integrations | Integrations | integration | 12 |
 | 8 | concepts | Concepts | none (explanation) | 19 |
 | 9 | reference | Reference | none (reference) | 25 |
@@ -1310,27 +1310,27 @@ Ten top-level groups, two nesting levels at most. `start` holds the first-steps 
 
 Order inside each group is the order in the lists below (the inventory table is ordered for reading the plan, not for the sidebar).
 
-**Start here** (`start`): `index.md`, `getting-started/install-ocx.md`, `getting-started/first-package.md`, `getting-started/first-project.md`.
+**Start here** (`start`): `index.md`, `getting-started/install-ocx.md`, `getting-started/first-package.md`, `getting-started/first-project.md`, `guides/install-options.md`, `guides/update-ocx.md`.
 
 **Packages** (`packages`): `guides/choose-versions.md`, `guides/find-packages.md`, `guides/run-with-dependencies.md`, `guides/stable-paths.md`, `guides/patch-packages.md`, `guides/clean-up.md`.
 
 **Projects** (`projects`): `guides/project-toolchain.md`, `guides/run-project-tools.md`, `guides/lock-and-reproduce.md`, `guides/update-tools.md`, `guides/global-toolchain.md`.
 
-**Settings and trust** (`settings`): `guides/configure-ocx.md`, `guides/authenticate.md`, `guides/work-offline.md`, `guides/corporate-mirror.md`, `guides/manage-config-centrally.md`, `guides/verify-installs.md`, `guides/pin-signer-identity.md`, `guides/self-hosted-sigstore.md`, `guides/serve-an-index.md`, `guides/update-ocx.md`.
+**Settings and trust** (`settings`): `guides/configure-ocx.md`, `guides/authenticate.md`, `guides/work-offline.md`, `guides/corporate-mirror.md`, `guides/manage-config-centrally.md`, `guides/verify-installs.md`, `guides/pin-signer-identity.md`, `guides/declare-publishers.md`, `guides/self-hosted-sigstore.md`.
 
 **Troubleshooting** (`troubleshooting`): `troubleshooting/shell.md`, `troubleshooting/platforms.md`.
 
-**Publishing** (`publishing`): `publishing/index.md`, `publishing/bundle-anatomy.md`, `publishing/declare-dependencies.md`, `publishing/env-surface.md`, `publishing/entry-points.md`, `publishing/build-and-push.md`, `publishing/test-locally.md`, `publishing/script-tests.md`, `publishing/multi-platform.md`, `publishing/libc-variants.md`, `publishing/announce.md`, `publishing/announce-from-ci.md`, `publishing/sign-a-release.md`, `publishing/attest-and-sbom.md`, `publishing/promote-packages.md`, `publishing/snapshot-tracks.md`, `publishing/maintain-patches.md`, `publishing/repackage-releases.md`.
+**Publishing** (`publishing`): `publishing/index.md`, `publishing/bundle-anatomy.md`, `publishing/declare-dependencies.mdx`, `publishing/env-surface.mdx`, `publishing/entry-points.md`, `publishing/build-and-push.md`, `publishing/test-locally.md`, `publishing/script-tests.mdx`, `publishing/multi-platform.md`, `publishing/libc-variants.mdx`, `publishing/announce.mdx`, `publishing/announce-from-ci.md`, `publishing/sign-a-release.md`, `publishing/attest-and-sbom.md`, `publishing/promote-packages.md`, `publishing/snapshot-tracks.mdx`, `publishing/maintain-patches.md`, `publishing/repackage-releases.md`, `guides/serve-an-index.md`.
 
-**Integrations** (`integrations`): `integration/index.md`, `integration/github-actions.md`, `integration/gitlab-ci.md`, `integration/unattended-ci.md`, `integration/registry-auth-recipes.md`, `integration/proxy-and-ca.md`, `integration/docker.md`, `integration/bazel.md`, `integration/devcontainers-and-editors.md`, `integration/scripts-and-json.md`, `integration/python.md`, `integration/publisher-ci.md`.
+**Integrations** (`integrations`): `integration/index.md`, `integration/github-actions.mdx`, `integration/gitlab-ci.md`, `integration/unattended-ci.mdx`, `integration/registry-auth-recipes.mdx`, `integration/proxy-and-ca.mdx`, `integration/docker.mdx`, `integration/bazel.md`, `integration/devcontainers-and-editors.mdx`, `integration/scripts-and-json.mdx`, `integration/python.mdx`, `integration/publisher-ci.mdx`.
 
-**Concepts** (`concepts`): `explanation/storage.md`, `explanation/toolchain-tree.md`, `explanation/versioning.md`, `explanation/dependencies.md`, `explanation/indices.md`, `explanation/local-index.md`, `explanation/public-index.md`, `explanation/project-toolchain.md`, `explanation/configuration.md`, `explanation/environments.md`, `explanation/toolchain-activation.md`, `explanation/shell-integration.md`, `explanation/entry-points.md`, `explanation/deferred-packages.md`, `explanation/patches.md`, `explanation/integrations.md`, `explanation/execution-records.md`, `explanation/signing.md`, `explanation/cosign-parity.md`.
+**Concepts** (`concepts`): `explanation/storage.md`, `explanation/toolchain-tree.md`, `explanation/versioning.md`, `explanation/dependencies.md`, `explanation/indices.md`, `explanation/local-index.md`, `explanation/public-index.md`, `explanation/project-toolchain.md`, `explanation/configuration.md`, `explanation/environments.md`, `explanation/toolchain-activation.mdx`, `explanation/shell-integration.md`, `explanation/entry-points.mdx`, `explanation/deferred-packages.md`, `explanation/patches.md`, `explanation/integrations.md`, `explanation/execution-records.mdx`, `explanation/signing.md`, `explanation/cosign-parity.md`.
 
 **Reference** (`reference`): `reference/command-line/index.md`, `reference/command-line/commands.md`, `reference/command-line/config.md`, `reference/command-line/direnv.md`, `reference/command-line/index-commands.md`, `reference/command-line/package-publishing.md`, `reference/command-line/package-consuming.md`, `reference/command-line/patch.md`, `reference/command-line/self.md`, `reference/command-line/shell.md`, `reference/environment.md`, `reference/configuration.md`, `reference/project-file.md`, `reference/exit-codes.md`, `reference/metadata/index.md`, `reference/metadata/env.md`, `reference/metadata/dependencies.md`, `reference/metadata/entry-points.md`, `reference/metadata/integrations.md`, `reference/env-composition.md`, `reference/execution-records.md`, `reference/script-host-api.md`, `reference/platforms.md`, `reference/machine-interface.md`, `reference/dependencies.md`; external link `mirror.yml` to the ocx-mirror docs.
 
-**Project** (`project`): `roadmap.md`, `changelog.md`, `contributing/bazel.md`.
+**Project** (`project`): `roadmap.md`, `changelog.md`, `security.md`.
 
-The `reference` group shows the command-line pages as one nested group "Command line" (index first), the generated pages next, then the hand-written pages. The `project` group keeps `roadmap`, `changelog` and `contributing/bazel`.
+"Look things up" holds the Glossary as its last direct child, below the nested groups and outside them, so it is visible without opening one (owner feedback 2026-11-16). The `reference` group shows the command-line pages as one nested group "Command line" (index first), the generated pages next, then the hand-written pages. The `project` group keeps `roadmap`, `changelog` and `security`.
 
 ## 10. Declaration seed for P5 (old paths, as converted)
 
@@ -1349,7 +1349,6 @@ P5 converts pages in place (same relative path, under `src/content/docs/`) befor
 | authoring/multi-platform.md | how-to | everyday | content read | 2844 | 9200 |
 | authoring/testing.md | how-to | everyday | content read | 2184 | 8937 |
 | changelog.md | changelog | — | content read | 2 | 92 |
-| contributing/bazel.md | how-to | everyday | content read | 3314 | 10303 |
 | docker.md | how-to | integration | content read | 848 | 3776 |
 | faq.md | troubleshooting | — | content read | 2612 | 9281 |
 | getting-started.md | tutorial | first-steps | content read | 1558 | 5819 |

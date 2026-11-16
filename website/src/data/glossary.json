@@ -1,0 +1,2619 @@
+[
+  {
+    "id": "config-tier",
+    "term": "config tier",
+    "variants": [
+      "config tier",
+      "config tiers",
+      "configuration tier",
+      "configuration tiers",
+      "config-tier",
+      "system tier",
+      "system-tier",
+      "user tier",
+      "user-tier",
+      "managed tier",
+      "managed-tier"
+    ],
+    "definition": "One place OCX discovers settings: the system, user, OCX home or managed tier. A later tier overrides an earlier one.",
+    "learnMore": "explanation/configuration/#tiers",
+    "category": "config",
+    "avoid": [
+      "operator tier",
+      "SYSTEM scope",
+      "system-scope"
+    ]
+  },
+  {
+    "id": "default-registry",
+    "term": "default registry",
+    "variants": [
+      "default registry"
+    ],
+    "definition": "The registry name OCX puts in front of an identifier that names none: `ocx.sh` unless configured otherwise.",
+    "learnMore": "guides/corporate-mirror/#mirrors-default-registry",
+    "category": "config"
+  },
+  {
+    "id": "kill-switch",
+    "term": "kill switch",
+    "variants": [
+      "kill switch"
+    ],
+    "definition": "`OCX_NO_CONFIG=1`, which skips discovered config files and the managed config; locked system-tier sections and explicitly named files still load.",
+    "learnMore": "explanation/configuration/#kill-switch",
+    "category": "config",
+    "avoid": [
+      "off-switch"
+    ],
+    "except": [
+      "explicit kill switch",
+      "kill switch for the background",
+      "the same kill switch"
+    ]
+  },
+  {
+    "id": "ladder",
+    "term": "ladder",
+    "variants": [
+      "ladder",
+      "ladders",
+      "rung",
+      "rungs"
+    ],
+    "definition": "An ordered list of sources OCX checks strongest first for one setting or credential; the first match wins.",
+    "learnMore": "explanation/toolchain-activation/#ladders",
+    "category": "config",
+    "except": [
+      "the rung says",
+      "which rung it reached"
+    ]
+  },
+  {
+    "id": "managed-config",
+    "term": "managed config",
+    "variants": [
+      "managed config",
+      "managed configuration",
+      "managed-config",
+      "managed-configuration"
+    ],
+    "definition": "Corporate settings published as an ordinary OCX package. Each host keeps a synced copy and layers it over its config files.",
+    "learnMore": "explanation/configuration/#managed",
+    "category": "config"
+  },
+  {
+    "id": "mirror",
+    "term": "mirror",
+    "variants": [
+      "mirror",
+      "corporate mirrors"
+    ],
+    "definition": "A `[mirrors]` entry that sends all traffic for one registry host to a replacement endpoint, with no fallback to the origin.",
+    "learnMore": "guides/corporate-mirror/#mirrors-config",
+    "category": "config",
+    "except": [
+      "a full site mirror",
+      "a mirror publishes",
+      "can mirror",
+      "compromised mirror",
+      "each configured mirror",
+      "it mirrors",
+      "mirror copy",
+      "mirror of a floating",
+      "mirror runs",
+      "mirror spec",
+      "mirror the",
+      "mirror those",
+      "mirror tool",
+      "mirror yaml",
+      "mirrors --config",
+      "mirrors --frozen",
+      "mirrors direnv",
+      "mirrors ocx package",
+      "mirrors tar",
+      "ocx mirrors",
+      "package mirrors",
+      "read mirror each other",
+      "shape mirrors",
+      "this mirrors"
+    ]
+  },
+  {
+    "id": "operator",
+    "term": "operator",
+    "variants": [
+      "operator",
+      "operators"
+    ],
+    "definition": "The person who configures OCX on many hosts and publishes the patches or managed config they use.",
+    "learnMore": "explanation/managed-configuration/#managed-publish",
+    "category": "config",
+    "avoid": [
+      "site administrator"
+    ],
+    "except": [
+      "index operator",
+      "operator action",
+      "operator declaration",
+      "operator effort",
+      "pipeline's operator",
+      "pipeline’s operator"
+    ]
+  },
+  {
+    "id": "closure",
+    "term": "closure",
+    "variants": [
+      "closure",
+      "transitive closure",
+      "closures"
+    ],
+    "definition": "A package together with all its transitive dependencies, which composition walks deepest first.",
+    "learnMore": "explanation/environments/#composition-order",
+    "category": "env",
+    "except": [
+      "registered closure"
+    ]
+  },
+  {
+    "id": "composition",
+    "term": "composition",
+    "variants": [
+      "composition",
+      "composed environment",
+      "compose the environment",
+      "composes the environment",
+      "composing the environment"
+    ],
+    "definition": "Building one runtime environment from the environment entries of a package and its dependencies, in dependency order.",
+    "learnMore": "explanation/environments/#composition-order",
+    "category": "env",
+    "except": [
+      "composition to the"
+    ]
+  },
+  {
+    "id": "edge-visibility",
+    "term": "edge visibility",
+    "variants": [
+      "edge visibility"
+    ],
+    "definition": "The `visibility` of one dependency, choosing which of that dependency's surfaces reach the package that depends on it.",
+    "learnMore": "publishing/declare-dependencies/#edge-visibility",
+    "category": "env"
+  },
+  {
+    "id": "entry-visibility",
+    "term": "entry visibility",
+    "variants": [
+      "entry visibility"
+    ],
+    "definition": "The `visibility` of one environment entry in package metadata, choosing the surfaces it joins.",
+    "learnMore": "publishing/env-surface/#visibility",
+    "category": "env"
+  },
+  {
+    "id": "integration-key",
+    "term": "integration key",
+    "variants": [
+      "integration key",
+      "integration keys"
+    ],
+    "definition": "The reverse-DNS name that keys one entry in a package's `integrations` block, such as `com.microsoft.vscode`. OCX does not enforce the shape.",
+    "learnMore": "explanation/integrations/#namespaces",
+    "category": "env",
+    "avoid": [
+      "integration namespace",
+      "integration namespaces",
+      "integrations namespace"
+    ]
+  },
+  {
+    "id": "interface-surface",
+    "term": "interface surface",
+    "variants": [
+      "interface surface",
+      "interface surfaces",
+      "interface-surface"
+    ],
+    "definition": "The part of a package's environment that consumers see when they run the package or depend on it.",
+    "learnMore": "explanation/environments/#two-surfaces",
+    "category": "env",
+    "avoid": [
+      "consumer view"
+    ]
+  },
+  {
+    "id": "private-surface",
+    "term": "private surface",
+    "variants": [
+      "private surface",
+      "private surfaces",
+      "private-surface"
+    ],
+    "definition": "The part of a package's environment that only its own launchers see at run time, selected with `--self`.",
+    "learnMore": "explanation/environments/#two-surfaces",
+    "category": "env",
+    "avoid": [
+      "self view",
+      "private view",
+      "private side"
+    ]
+  },
+  {
+    "id": "strict-isolation",
+    "term": "strict isolation",
+    "variants": [
+      "strict isolation"
+    ],
+    "definition": "The rule that global toolchain packages never compose into, supplement or replace a project's resolved environment.",
+    "learnMore": "explanation/environments/#strict-isolation",
+    "category": "env"
+  },
+  {
+    "id": "topological-order",
+    "term": "topological order",
+    "variants": [
+      "topological order"
+    ],
+    "definition": "An order in which every dependency comes before the packages that need it.",
+    "learnMore": "explanation/dependencies/#composition",
+    "category": "env"
+  },
+  {
+    "id": "visibility",
+    "term": "visibility",
+    "variants": [
+      "visibility"
+    ],
+    "definition": "Which surface an environment entry or a dependency reaches: the interface surface, the private surface, both or neither.",
+    "learnMore": "explanation/environments/#truth-table",
+    "category": "env",
+    "except": [
+      "cve visibility",
+      "fleet visibility"
+    ],
+    "excludePages": [
+      "reference/environment/"
+    ]
+  },
+  {
+    "id": "announce",
+    "term": "announce",
+    "variants": [
+      "announce",
+      "announces",
+      "announced",
+      "announcing"
+    ],
+    "definition": "Publish a package's registry tags into its index entry, as a change request on the index repository.",
+    "learnMore": "publishing/announce/#announcing-overview",
+    "category": "index"
+  },
+  {
+    "id": "claim",
+    "term": "claim",
+    "variants": [
+      "claim the package",
+      "claim the name",
+      "claim a package",
+      "claimed package",
+      "already claimed",
+      "already-claimed",
+      "claimed unit",
+      "first-time claim"
+    ],
+    "definition": "Register a package in an index for the first time, through a reviewed change request. The claimed unit is the package.",
+    "learnMore": "publishing/announce/#announcing-claim",
+    "category": "index"
+  },
+  {
+    "id": "dispatch-object",
+    "term": "dispatch object",
+    "variants": [
+      "dispatch object",
+      "dispatch objects"
+    ],
+    "definition": "The image index a tag resolved to, stored verbatim in the local index under its own digest.",
+    "learnMore": "explanation/local-index/#local-dispatch",
+    "category": "index"
+  },
+  {
+    "id": "frozen",
+    "term": "frozen",
+    "variants": [
+      "frozen"
+    ],
+    "definition": "A mode, set by `--frozen` or `OCX_FROZEN`, in which tags resolve only from the local index and an unknown tag fails.",
+    "learnMore": "guides/lock-and-reproduce/#lock-frozen",
+    "category": "index",
+    "except": [
+      "are frozen",
+      "frozen artifact",
+      "frozen companion",
+      "frozen digest",
+      "frozen digests",
+      "frozen environment",
+      "not frozen yet",
+      "once frozen",
+      "stay frozen"
+    ]
+  },
+  {
+    "id": "index",
+    "term": "index",
+    "variants": [
+      "index",
+      "indices",
+      "indexes"
+    ],
+    "definition": "A catalog that maps each package's tags to digests, so OCX can choose a version without asking the registry.",
+    "learnMore": "explanation/indices/#format",
+    "category": "index",
+    "avoid": [
+      "index cache",
+      "index snapshot",
+      "tag store",
+      "tag-store snapshot"
+    ],
+    "except": [
+      "an index digest",
+      "assemble the index",
+      "block index",
+      "dual-libc index",
+      "each index is re-put",
+      "fetches the index",
+      "index from each configured mirror",
+      "index, manifest, config",
+      "its own index does not",
+      "left a mixed index apart",
+      "multi-platform index",
+      "never the index digest",
+      "per distinct index",
+      "pypi-compatible index",
+      "rebuilds the whole index from",
+      "referrers index",
+      "registry indexes",
+      "resolves to its index",
+      "selects index entries",
+      "signs the index each recorded",
+      "sit on the index",
+      "supersedes an index",
+      "sweep the indices a publish",
+      "tag's index",
+      "tag’s index",
+      "target's index is merged",
+      "target’s index is merged",
+      "that build's own index",
+      "that build’s own index",
+      "to name a given index",
+      "writes a whole new index"
+    ]
+  },
+  {
+    "id": "index-repository",
+    "term": "index repository",
+    "variants": [
+      "index repository"
+    ],
+    "definition": "The Git repository on a forge that stores an index's files; claims and announcements arrive there as change requests.",
+    "learnMore": "publishing/announce-from-ci/#announcing-transport",
+    "category": "index"
+  },
+  {
+    "id": "keep-tag",
+    "term": "keep tag",
+    "variants": [
+      "keep tag",
+      "keep tags",
+      "keep-tag"
+    ],
+    "definition": "A digest-named `__ocx.keep` tag a push writes for each platform manifest, so a deleted tag cannot leave the manifest unreachable.",
+    "learnMore": "explanation/indices/#keep-tags",
+    "category": "index",
+    "except": [
+      "reach back and keep-tag"
+    ]
+  },
+  {
+    "id": "local-index",
+    "term": "local index",
+    "variants": [
+      "local index",
+      "local-index"
+    ],
+    "definition": "A copy of an index under the OCX home, recording what this host last resolved. It changes only when a command refreshes it.",
+    "learnMore": "explanation/local-index/#local",
+    "category": "index"
+  },
+  {
+    "id": "offline",
+    "term": "offline",
+    "variants": [
+      "offline"
+    ],
+    "definition": "A mode, set by `--offline`, in which OCX makes no network request at all and fails on anything not already local.",
+    "learnMore": "guides/work-offline/#offline-modes",
+    "category": "index",
+    "excludePages": [
+      "explanation/cosign-parity/"
+    ]
+  },
+  {
+    "id": "owner",
+    "term": "owner",
+    "variants": [
+      "owner",
+      "owners"
+    ],
+    "definition": "A `login:id` pair in a root document that may announce the package; the numeric `id` is the half that counts.",
+    "learnMore": "publishing/announce/#announcing-owners",
+    "category": "index",
+    "except": [
+      "account owner",
+      "checkout owner",
+      "foreign-owned",
+      "interface-visible owner",
+      "owner of",
+      "owners are listed",
+      "whose owner"
+    ]
+  },
+  {
+    "id": "public-index",
+    "term": "public index",
+    "variants": [
+      "public index"
+    ],
+    "definition": "`index.ocx.sh`, the hosted index for the `ocx.sh` registry name; it points each package at the registry that stores it.",
+    "learnMore": "explanation/public-index/#public-index",
+    "category": "index",
+    "avoid": [
+      "public catalog",
+      "pointer index"
+    ],
+    "except": [
+      "on a public index repository"
+    ]
+  },
+  {
+    "id": "remote-index",
+    "term": "remote index",
+    "variants": [
+      "remote index"
+    ],
+    "definition": "The live source a resolve queries over the network: the registry itself, or an index service such as `index.ocx.sh`.",
+    "learnMore": "explanation/indices/#remote",
+    "category": "index"
+  },
+  {
+    "id": "root-document",
+    "term": "root document",
+    "variants": [
+      "root document",
+      "root documents"
+    ],
+    "definition": "A package's top-level entry in an index: its repository pointer, tags, owners and declared publishers.",
+    "learnMore": "explanation/public-index/#public-index-layout",
+    "category": "index",
+    "avoid": [
+      "index root"
+    ]
+  },
+  {
+    "id": "shipped-copy",
+    "term": "shipped copy",
+    "variants": [
+      "shipped copy",
+      "shipped copies",
+      "shipped-copy"
+    ],
+    "definition": "A local index subtree packaged inside a tool release and selected with `OCX_INDEX`, so that tool resolves offline.",
+    "learnMore": "explanation/indices/#bundled",
+    "category": "index",
+    "avoid": [
+      "bundled snapshot",
+      "frozen copy",
+      "bundled index"
+    ]
+  },
+  {
+    "id": "yank",
+    "term": "yank",
+    "variants": [
+      "yank",
+      "yanked",
+      "yanks",
+      "yanking"
+    ],
+    "definition": "A publisher's mark on a tag that OCX refuses to install by default; the tag itself stays in the registry.",
+    "learnMore": "guides/choose-versions/#versions-yanked",
+    "category": "index"
+  },
+  {
+    "id": "detail-slug",
+    "term": "detail slug",
+    "variants": [
+      "slug",
+      "slugs"
+    ],
+    "definition": "A short, stable machine-readable name for a failure cause, carried in an error document's `error.detail`.",
+    "learnMore": "reference/machine-interface/#machine-interface-error-document",
+    "category": "interface",
+    "except": [
+      "lowercase slug",
+      "ocx slug",
+      "plain slug",
+      "same slug rule"
+    ],
+    "excludePages": [
+      "reference/command-line/package-consuming/",
+      "reference/environment/"
+    ]
+  },
+  {
+    "id": "error-document",
+    "term": "error document",
+    "variants": [
+      "error document"
+    ],
+    "definition": "The JSON object a failing command prints on stdout under `--format json`, naming the exit code and a detail slug.",
+    "learnMore": "reference/machine-interface/#machine-interface-error-document",
+    "category": "interface"
+  },
+  {
+    "id": "annotation",
+    "term": "annotation",
+    "variants": [
+      "annotation",
+      "annotations"
+    ],
+    "definition": "A key-value string on an OCI manifest, such as `org.opencontainers.image.source`, that tools and catalogs read.",
+    "learnMore": "publishing/build-and-push/#source-annotation",
+    "category": "oci"
+  },
+  {
+    "id": "blob",
+    "term": "blob",
+    "variants": [
+      "blob",
+      "blobs"
+    ],
+    "definition": "Any content a registry stores by digest: a layer archive, a config or a manifest.",
+    "learnMore": "explanation/storage/#stores",
+    "category": "oci",
+    "except": [
+      "serialized blob"
+    ]
+  },
+  {
+    "id": "content-addressed",
+    "term": "content-addressed",
+    "variants": [
+      "content-addressed",
+      "content addressing"
+    ],
+    "definition": "Stored under a name derived from the content's own digest, so identical bytes are stored once and never change in place.",
+    "learnMore": "explanation/storage/#stores",
+    "category": "oci"
+  },
+  {
+    "id": "descriptor",
+    "term": "descriptor",
+    "variants": [
+      "descriptor",
+      "descriptors"
+    ],
+    "definition": "A small JSON record inside an OCI manifest that names other content by media type, digest and size.",
+    "learnMore": "https://github.com/opencontainers/image-spec/blob/main/descriptor.md",
+    "category": "oci",
+    "except": [
+      "dependency's descriptor",
+      "dependency’s descriptor",
+      "descriptor carries",
+      "descriptor per",
+      "names a descriptor"
+    ],
+    "excludePages": [
+      "reference/command-line/patch/"
+    ]
+  },
+  {
+    "id": "digest",
+    "term": "digest",
+    "variants": [
+      "digest",
+      "digests",
+      "manifest digest"
+    ],
+    "definition": "A SHA-256 hash of exact bytes, written `sha256:<hex>`; unlike a tag, it names one piece of content forever.",
+    "learnMore": "explanation/versioning/#tags",
+    "category": "oci",
+    "avoid": [
+      "content digest"
+    ]
+  },
+  {
+    "id": "fallback-tag",
+    "term": "fallback tag",
+    "variants": [
+      "fallback tag",
+      "fallback-tag"
+    ],
+    "definition": "The `sha256-<hex>` tag that holds referrers on a registry without the Referrers API.",
+    "learnMore": "explanation/signing/#referrers-write",
+    "category": "oci",
+    "avoid": [
+      "fallback index",
+      "tag-schema fallback index"
+    ]
+  },
+  {
+    "id": "identifier",
+    "term": "identifier",
+    "variants": [
+      "identifier",
+      "identifiers"
+    ],
+    "definition": "The string that names a package, `registry/repository[:tag][@digest]`, with the default registry filled in when omitted.",
+    "learnMore": "guides/find-packages/#namespaces",
+    "category": "oci",
+    "avoid": [
+      "OCX identifier",
+      "OCI identifier"
+    ],
+    "except": [
+      "free-form identifier"
+    ]
+  },
+  {
+    "id": "image-index",
+    "term": "image index",
+    "variants": [
+      "image index",
+      "OCI image index"
+    ],
+    "definition": "An OCI manifest that lists one platform manifest per platform under a single tag, so each host picks its own build.",
+    "learnMore": "publishing/multi-platform/#concept",
+    "category": "oci",
+    "avoid": [
+      "image-index",
+      "Image Index"
+    ]
+  },
+  {
+    "id": "layer",
+    "term": "layer",
+    "variants": [
+      "layer",
+      "layers"
+    ],
+    "definition": "One archive of files in a manifest, addressed by its digest; OCX extracts each layer once and shares it between packages.",
+    "learnMore": "explanation/storage/#layers",
+    "category": "oci",
+    "except": [
+      "another group layers",
+      "any layer",
+      "at three layers",
+      "cache layer",
+      "each layer contributes",
+      "every layer",
+      "explains the layers",
+      "file layers at",
+      "finding layer",
+      "from three layers",
+      "group layers",
+      "higher layer wins",
+      "highest layer wins",
+      "layer above",
+      "layer an",
+      "layer company-specific",
+      "layer in the order",
+      "layer of stable symlinks",
+      "layer on",
+      "layer the",
+      "layers a package",
+      "layers an extra file",
+      "layers global",
+      "layers on",
+      "layers onto",
+      "layers over",
+      "layers the",
+      "layers the composed",
+      "layers them over",
+      "layers this project",
+      "layers what",
+      "measured layer",
+      "neither layer",
+      "never layer",
+      "ocx layers",
+      "one layer down",
+      "one layer up",
+      "that layer when",
+      "transport layer",
+      "two layers compose",
+      "underneath the layer"
+    ]
+  },
+  {
+    "id": "manifest",
+    "term": "manifest",
+    "variants": [
+      "manifest",
+      "manifests"
+    ],
+    "definition": "An OCI JSON document that describes one stored artifact: its config and its layers, each by digest.",
+    "learnMore": "explanation/dependencies/#manifest-pins",
+    "category": "oci",
+    "except": [
+      "central manifest repository",
+      "declarative manifests",
+      "manifest, reached only through",
+      "release manifest"
+    ]
+  },
+  {
+    "id": "namespace",
+    "term": "namespace",
+    "variants": [
+      "namespace",
+      "namespaces"
+    ],
+    "definition": "The path segments of a repository before the package name, such as `acme` in `ocx.sh/acme/widget`.",
+    "learnMore": "guides/find-packages/#namespaces",
+    "category": "oci",
+    "except": [
+      "closed namespace",
+      "declare the same namespace",
+      "different namespace",
+      "fork namespace",
+      "from a namespace",
+      "integration namespaces",
+      "integrations namespace",
+      "into another namespace",
+      "into the namespace that",
+      "libc namespace",
+      "lives in this namespace",
+      "namespace (which carries",
+      "namespace for everything",
+      "namespace for name resolution",
+      "namespace grant",
+      "namespace grants",
+      "namespace in a",
+      "namespace in a value",
+      "namespace is closed",
+      "namespace is still reserved",
+      "namespaces populate",
+      "namespaces within one",
+      "nested namespace",
+      "nested namespaces",
+      "recognised namespace",
+      "target namespace",
+      "tree's own namespace",
+      "tree’s own namespace"
+    ]
+  },
+  {
+    "id": "oci",
+    "term": "OCI",
+    "variants": [
+      "OCI"
+    ],
+    "definition": "The Open Container Initiative, whose specifications define the registry protocol and artifact formats OCX stores packages in.",
+    "learnMore": "https://opencontainers.org/",
+    "category": "oci"
+  },
+  {
+    "id": "platform-manifest",
+    "term": "platform manifest",
+    "variants": [
+      "platform manifest",
+      "platform manifests",
+      "platform-manifest"
+    ],
+    "definition": "The manifest of one platform's build, listed in an image index; dependency pins and lock entries name its digest.",
+    "learnMore": "publishing/multi-platform/#dependency-platforms-digest-pin-prohibition",
+    "category": "oci",
+    "avoid": [
+      "leaf manifest",
+      "leaf manifests",
+      "per-platform manifest",
+      "per-platform manifests",
+      "leaf platform manifest"
+    ]
+  },
+  {
+    "id": "referrer",
+    "term": "referrer",
+    "variants": [
+      "referrer",
+      "referrers",
+      "Referrers API"
+    ],
+    "definition": "An artifact, such as a signature or SBOM, that names another manifest as its subject, so a registry lists it beside that manifest.",
+    "learnMore": "explanation/signing/#referrers-write",
+    "category": "oci"
+  },
+  {
+    "id": "registry",
+    "term": "registry",
+    "variants": [
+      "registry",
+      "registries"
+    ],
+    "definition": "A server that speaks the OCI distribution protocol and stores repositories of tags, manifests and blobs, such as GHCR or Docker Hub.",
+    "learnMore": "https://github.com/opencontainers/distribution-spec/blob/main/spec.md",
+    "category": "oci",
+    "except": [
+      "project registry",
+      "registry role"
+    ]
+  },
+  {
+    "id": "registry-name",
+    "term": "registry name",
+    "variants": [
+      "registry name",
+      "registry names"
+    ],
+    "definition": "The first segment of an identifier, such as `ocx.sh`; a mirror or the public index may route it to another storage host.",
+    "learnMore": "guides/corporate-mirror/#mirrors-registries",
+    "category": "oci",
+    "except": [
+      "registry names the next"
+    ]
+  },
+  {
+    "id": "repository",
+    "term": "repository",
+    "variants": [
+      "repository",
+      "repositories"
+    ],
+    "definition": "A named collection of tags and manifests inside a registry, such as `nodejs/node`; one repository holds one package.",
+    "learnMore": "guides/find-packages/#namespaces",
+    "category": "oci",
+    "except": [
+      "a new repository or",
+      "a repository's contributors",
+      "a repository’s contributors",
+      "build or repository chooses",
+      "checked into a repository",
+      "cloned repository",
+      "clones the repository",
+      "code repository",
+      "dead proxy repository",
+      "Git repository",
+      "git repository",
+      "GitHub repository",
+      "in the repository records",
+      "in this repository",
+      "leaving the repository",
+      "malicious repository",
+      "manifest repository",
+      "no repository marks",
+      "numeric repository id",
+      "one repository in",
+      "only repositories nested",
+      "own repository",
+      "packages a repository needs",
+      "proxy repositories",
+      "public index repository",
+      "publishing repository and",
+      "reader of the repository",
+      "repository cannot be forked",
+      "repository cloned into",
+      "repository holds a second",
+      "repository requires",
+      "repository rule",
+      "repository that could name",
+      "repository's own file",
+      "repository's own tree",
+      "repository’s own file",
+      "repository’s own tree",
+      "root of a repository",
+      "scoped to this repository",
+      "source repositories",
+      "source repository",
+      "survives a repository rename",
+      "that repository's permissions",
+      "that repository’s permissions",
+      "the repository can read",
+      "the repository in",
+      "the repository link",
+      "the repository write",
+      "this repository runs",
+      "this repository should",
+      "this repository's acceptance",
+      "this repository’s acceptance",
+      "under the repository at",
+      "upstream project's repository url",
+      "upstream project’s repository url",
+      "url and repository into",
+      "whole repository path",
+      "write the repository but",
+      "your repository commits"
+    ],
+    "excludePages": [
+      "integration/bazel/"
+    ]
+  },
+  {
+    "id": "tag",
+    "term": "tag",
+    "variants": [
+      "tag",
+      "tags"
+    ],
+    "definition": "A mutable, human-readable name in a repository, such as `3.28` or `latest`, that points at one manifest digest.",
+    "learnMore": "explanation/versioning/#tags",
+    "category": "oci",
+    "except": [
+      "abi tag",
+      "an exact tag ref",
+      "block's tag",
+      "block, the tag",
+      "block’s tag",
+      "branch or tag the same",
+      "discriminator tag",
+      "feature tag",
+      "feature tags",
+      "keep the tag as a comment",
+      "merge requests, tags",
+      "os.features tag",
+      "protected tags",
+      "requests, tags",
+      "sha of a release tag"
+    ]
+  },
+  {
+    "id": "back-reference",
+    "term": "back-reference",
+    "variants": [
+      "back-reference",
+      "back-references"
+    ],
+    "definition": "A link inside a package's `refs/` directory that records who uses the package, so garbage collection keeps it.",
+    "learnMore": "explanation/storage/#gc",
+    "category": "ocx"
+  },
+  {
+    "id": "candidate",
+    "term": "candidate",
+    "variants": [
+      "candidate symlink",
+      "candidate symlinks",
+      "candidate-symlink",
+      "candidate or current symlink",
+      "candidate or current symlinks",
+      "candidate and current symlinks"
+    ],
+    "definition": "A symlink at `symlinks/<registry>/<repo>/candidates/<tag>`, created by install, that keeps one installed version of a package reachable.",
+    "learnMore": "explanation/storage/#symlinks",
+    "category": "ocx"
+  },
+  {
+    "id": "companion-package",
+    "term": "companion package",
+    "variants": [
+      "companion package",
+      "companion packages",
+      "companion",
+      "companions"
+    ],
+    "definition": "A package that a patch descriptor names, whose environment entries OCX layers onto every matching target package.",
+    "learnMore": "explanation/patches/#patches-how",
+    "category": "ocx",
+    "except": [
+      "user/type companions"
+    ]
+  },
+  {
+    "id": "current",
+    "term": "current symlink",
+    "variants": [
+      "current symlink",
+      "current symlinks"
+    ],
+    "definition": "The one symlink per repository that points at the selected candidate; `ocx package select` and `install --select` move it.",
+    "learnMore": "explanation/storage/#symlinks",
+    "category": "ocx"
+  },
+  {
+    "id": "deferred-package",
+    "term": "deferred package",
+    "variants": [
+      "deferred package",
+      "deferred packages",
+      "deferred-package"
+    ],
+    "definition": "A package whose download waits until one of its commands first runs, chosen with the `lazy-mode` key.",
+    "learnMore": "explanation/deferred-packages/",
+    "category": "ocx",
+    "avoid": [
+      "lazy tool",
+      "lazy tools",
+      "deferred tool",
+      "deferred tools",
+      "lazy-loaded tool"
+    ]
+  },
+  {
+    "id": "entry-point",
+    "term": "entry point",
+    "variants": [
+      "entry point",
+      "entry points",
+      "entry-point"
+    ],
+    "definition": "A named command a package declares in its metadata; OCX generates a launcher for it so the command runs from `PATH`.",
+    "learnMore": "explanation/entry-points/#declaring",
+    "category": "ocx",
+    "avoid": [
+      "entrypoint",
+      "entrypoints"
+    ],
+    "except": [
+      "(direnv entry point)",
+      "an explicit entry point",
+      "entry points at",
+      "internal entry point",
+      "python entry point"
+    ]
+  },
+  {
+    "id": "execution-record",
+    "term": "execution record",
+    "variants": [
+      "execution record",
+      "execution records",
+      "execution-record"
+    ],
+    "definition": "One JSON file OCX writes just before it starts a binary, naming each package's manifest digest and the environment inputs of that launch.",
+    "learnMore": "explanation/execution-records/",
+    "category": "ocx"
+  },
+  {
+    "id": "garbage-collection",
+    "term": "garbage collection",
+    "variants": [
+      "garbage collection",
+      "garbage-collected",
+      "garbage-collection",
+      "garbage collected",
+      "garbage-collects"
+    ],
+    "definition": "The sweep `ocx clean` runs: it deletes every stored object that no symlink, project lock or dependency still reaches.",
+    "learnMore": "explanation/storage/#gc",
+    "category": "ocx",
+    "except": [
+      "eligible for garbage collection",
+      "garbage collection never reclaims",
+      "garbage collection reclaims",
+      "is garbage-collected and the"
+    ]
+  },
+  {
+    "id": "install",
+    "term": "install",
+    "variants": [
+      "install",
+      "installs",
+      "installed",
+      "installing"
+    ],
+    "definition": "Download a package into the object store. `ocx package install` also creates its candidate symlink; project commands such as `ocx add` install without one.",
+    "learnMore": "reference/command-line/package-consuming/#package-install",
+    "category": "ocx",
+    "except": [
+      "(install only)",
+      "also install",
+      "ambient installs",
+      "and install hook",
+      "bare-binary install",
+      "certificates installed",
+      "completions are installed",
+      "contributor installs",
+      "for pinned installs",
+      "from an earlier install",
+      "gcompat installed",
+      "id installs the editor",
+      "install a newer git",
+      "install a pinned version",
+      "install a prerelease",
+      "install an exact release",
+      "install conftest",
+      "install directory",
+      "install git",
+      "install into your profile",
+      "install it with",
+      "install must behave",
+      "install ocx",
+      "install path",
+      "install recipes",
+      "install script",
+      "install symlink",
+      "install symlinks",
+      "install the binary",
+      "install the root into",
+      "installed and a",
+      "installed and an",
+      "installed binary",
+      "installed machine-wide",
+      "installed on",
+      "installed to profiles",
+      "installed. the loader",
+      "installing ocx",
+      "installing the ca",
+      "installs ocx",
+      "installs the highest stable version",
+      "is not installed, and an ocx",
+      "is the installed",
+      "is the installed one",
+      "meant to install",
+      "on the install side",
+      "own install",
+      "portable install",
+      "portable ocx install",
+      "privately installed corporate",
+      "repeats the install",
+      "root installs as an anchor",
+      "system-level install",
+      "taplo installed",
+      "the install succeeds",
+      "the install with",
+      "they are installed on",
+      "whole ocx install",
+      "with install hint",
+      "your build installs"
+    ]
+  },
+  {
+    "id": "launcher",
+    "term": "launcher",
+    "variants": [
+      "launcher",
+      "launchers"
+    ],
+    "definition": "A generated executable that starts one entry point through `ocx launcher exec`, with the package root baked in; a native `.exe` on Windows.",
+    "learnMore": "explanation/launcher-forwarding/#launcher-embedding",
+    "category": "ocx",
+    "avoid": [
+      "launcher trampoline",
+      "launcher trampolines"
+    ],
+    "except": [
+      "desktop launcher",
+      "desktop launchers"
+    ]
+  },
+  {
+    "id": "launching-frame",
+    "term": "launching frame",
+    "variants": [
+      "launching frame",
+      "frame",
+      "frames",
+      "launcher frame"
+    ],
+    "definition": "One route into OCX that writes an execution record: `exec`, `package exec`, `launcher exec` or a shim.",
+    "learnMore": "explanation/records-launcher-frames/",
+    "category": "ocx",
+    "except": [
+      "frame of reference",
+      "hundreds of frames",
+      "terminal frame",
+      "terminal frames"
+    ]
+  },
+  {
+    "id": "materialize",
+    "term": "materialize",
+    "variants": [
+      "materialize",
+      "materializes",
+      "materialized",
+      "materialization"
+    ],
+    "definition": "Make a package's files present on disk by downloading and extracting its layers into the object store.",
+    "learnMore": "explanation/deferred-packages/#deferred-tools-materialize",
+    "category": "ocx",
+    "avoid": [
+      "materialise",
+      "materialised",
+      "materialisation"
+    ],
+    "except": [
+      "entries materialize as",
+      "materialization:",
+      "materialized at script-engine",
+      "partially materialized copy"
+    ]
+  },
+  {
+    "id": "native-launcher",
+    "term": "native launcher",
+    "variants": [
+      "native launcher"
+    ],
+    "definition": "The Windows `.exe` form of a launcher, the one executable every Windows caller can start.",
+    "learnMore": "explanation/entry-points/#windows",
+    "category": "ocx"
+  },
+  {
+    "id": "object-store",
+    "term": "object store",
+    "variants": [
+      "object store",
+      "object-store"
+    ],
+    "definition": "The content-addressed directories under the OCX home that hold every downloaded blob, extracted layer and assembled package, keyed by digest.",
+    "learnMore": "explanation/storage/#stores",
+    "category": "ocx",
+    "avoid": [
+      "package store",
+      "content store",
+      "local store",
+      "layer store",
+      "layer cache",
+      "install store",
+      "three-tier CAS",
+      "blob store"
+    ],
+    "except": [
+      "internal object store"
+    ]
+  },
+  {
+    "id": "ocx-home",
+    "term": "OCX home",
+    "variants": [
+      "OCX home"
+    ],
+    "definition": "The directory where OCX keeps its stores, local index, state and global toolchain: `$OCX_HOME`, or `~/.ocx` when unset.",
+    "learnMore": "reference/environment/#ocx-home",
+    "category": "ocx"
+  },
+  {
+    "id": "package",
+    "term": "package",
+    "variants": [
+      "package",
+      "packages"
+    ],
+    "definition": "A versioned set of pre-built files plus metadata, stored as OCI artifacts in a registry and installed by OCX as one unit.",
+    "learnMore": "explanation/storage/#packages",
+    "category": "ocx",
+    "except": [
+      "a private package must also allow",
+      "constituent packages",
+      "enough for packages the repository can read",
+      "enterprise packages api",
+      "github packages api",
+      "its package settings",
+      "link the package page",
+      "ocx package prune",
+      "on a github package",
+      "package api, for a",
+      "package manager",
+      "package managers",
+      "packages via",
+      "reads the packages api",
+      "stores every package at"
+    ]
+  },
+  {
+    "id": "package-metadata",
+    "term": "package metadata",
+    "variants": [
+      "package metadata"
+    ],
+    "definition": "The `metadata.json` document a package carries: how OCX extracts it, its environment entries, dependencies and entry points.",
+    "learnMore": "reference/metadata/#format",
+    "category": "ocx"
+  },
+  {
+    "id": "package-root",
+    "term": "package root",
+    "variants": [
+      "package root",
+      "package roots",
+      "package-root"
+    ],
+    "definition": "The directory of one assembled package in the object store; its `content/` subdirectory holds the package's files.",
+    "learnMore": "explanation/storage/#packages",
+    "category": "ocx",
+    "avoid": [
+      "pkg-root"
+    ]
+  },
+  {
+    "id": "patch",
+    "term": "patch",
+    "variants": [
+      "patch",
+      "patches"
+    ],
+    "definition": "An operator-published overlay that changes the environment a package runs in, without changing the package itself.",
+    "learnMore": "explanation/patches/#patches-how",
+    "category": "ocx",
+    "except": [
+      "a patch is released",
+      "debian patches",
+      "patch number",
+      "patch release",
+      "patch version",
+      "rolling patch",
+      "security patch",
+      "security patches"
+    ]
+  },
+  {
+    "id": "patch-descriptor",
+    "term": "patch descriptor",
+    "variants": [
+      "patch descriptor",
+      "patch descriptors"
+    ],
+    "definition": "A small JSON document in a registry that names which companion packages apply to which target packages.",
+    "learnMore": "explanation/patches/#patches-how",
+    "category": "ocx"
+  },
+  {
+    "id": "patch-snapshot",
+    "term": "patch snapshot",
+    "variants": [
+      "patch snapshot"
+    ],
+    "definition": "The file `ocx patch freeze` writes, pinning every patch to an exact digest for reproducible builds.",
+    "learnMore": "publishing/maintain-patches/#patches-maintainer-freeze",
+    "category": "ocx"
+  },
+  {
+    "id": "pin",
+    "term": "pin",
+    "variants": [
+      "pin",
+      "pins",
+      "pinned",
+      "pinning"
+    ],
+    "definition": "Fix a reference to one exact value, such as a tag to a digest or a trust policy to one signer identity.",
+    "learnMore": "explanation/dependencies/#manifest-pins",
+    "category": "ocx",
+    "except": [
+      "crate pins",
+      "for pinned installs and",
+      "pin check"
+    ],
+    "excludePages": [
+      "reference/machine-interface/"
+    ]
+  },
+  {
+    "id": "shim",
+    "term": "shim",
+    "variants": [
+      "shim",
+      "shims"
+    ],
+    "definition": "A placeholder executable written for a deferred package; its first run downloads the package, then starts the real binary.",
+    "learnMore": "explanation/deferred-packages/#deferred-tools-compose",
+    "category": "ocx",
+    "except": [
+      "asdf shims",
+      "direnv shims",
+      "generates shim scripts",
+      "mise shims"
+    ],
+    "excludePages": [
+      "explanation/toolchain-activation/",
+      "reference/command-line/self/"
+    ]
+  },
+  {
+    "id": "sidecar",
+    "term": "sidecar",
+    "variants": [
+      "sidecar",
+      "metadata sidecar"
+    ],
+    "definition": "A file stored next to an archive or blob to carry its metadata, such as the `metadata.json` beside a bundle.",
+    "learnMore": "publishing/bundle-anatomy/#sidecars",
+    "category": "ocx",
+    "except": [
+      "sidecar appends",
+      "sidecar shape",
+      "sidecar shapes",
+      "sidecar tag",
+      "sidecar tags"
+    ],
+    "excludePages": [
+      "explanation/cosign-parity/",
+      "reference/command-line/package-consuming/"
+    ]
+  },
+  {
+    "id": "sink",
+    "term": "sink",
+    "variants": [
+      "sink",
+      "sinks",
+      "sink directory"
+    ],
+    "definition": "The directory that receives execution records; configuring one is what turns recording on.",
+    "learnMore": "explanation/execution-records/#execution-records-enable",
+    "category": "ocx"
+  },
+  {
+    "id": "trampoline",
+    "term": "trampoline",
+    "variants": [
+      "trampoline",
+      "trampolines"
+    ],
+    "definition": "A generated executable in a toolchain tree's `active/bin` that re-enters `ocx exec` against its own project when it runs.",
+    "learnMore": "explanation/toolchain-activation/#trampolines",
+    "category": "ocx"
+  },
+  {
+    "id": "amfi",
+    "term": "AMFI",
+    "variants": [
+      "AMFI"
+    ],
+    "definition": "Apple Mobile File Integrity, the macOS kernel module that checks code signatures independently of Gatekeeper.",
+    "learnMore": "troubleshooting/platforms/#macos-codesign",
+    "category": "platform"
+  },
+  {
+    "id": "any-platform",
+    "term": "any platform",
+    "variants": [
+      "any platform",
+      "platform-agnostic",
+      "any-platform"
+    ],
+    "definition": "The platform `any`: a build with no platform requirement, used where no exact platform match exists.",
+    "learnMore": "publishing/multi-platform/#wasm",
+    "category": "platform",
+    "avoid": [
+      "universal build",
+      "universal builds",
+      "platformless"
+    ]
+  },
+  {
+    "id": "code-signature",
+    "term": "code signature",
+    "variants": [
+      "code signature",
+      "code signatures",
+      "ad-hoc signature"
+    ],
+    "definition": "A macOS seal embedded in a binary; Apple silicon refuses to run a binary whose signature does not match its bytes.",
+    "learnMore": "troubleshooting/platforms/#macos-codesign",
+    "category": "platform"
+  },
+  {
+    "id": "cpu-variant",
+    "term": "CPU variant",
+    "variants": [
+      "CPU variant"
+    ],
+    "definition": "The OCI `platform.variant` field, a CPU sub-architecture such as `v8` for `arm64`; unrelated to package variants.",
+    "learnMore": "explanation/versioning/#platform-fields",
+    "category": "platform"
+  },
+  {
+    "id": "dynamic-loader",
+    "term": "dynamic loader",
+    "variants": [
+      "dynamic loader"
+    ],
+    "definition": "The program, such as `ld-linux.so` or the musl loader, that loads a dynamically linked Linux binary and its libraries.",
+    "learnMore": "troubleshooting/platforms/#linux-gcompat",
+    "category": "platform",
+    "avoid": [
+      "dynamic linker",
+      "ELF interpreter"
+    ]
+  },
+  {
+    "id": "gatekeeper",
+    "term": "Gatekeeper",
+    "variants": [
+      "Gatekeeper"
+    ],
+    "definition": "The macOS check that stops downloaded apps and binaries without an approved signature from running.",
+    "learnMore": "troubleshooting/platforms/#macos-codesign",
+    "category": "platform"
+  },
+  {
+    "id": "gcompat",
+    "term": "gcompat",
+    "variants": [
+      "gcompat"
+    ],
+    "definition": "An Alpine package that lets some glibc binaries run on musl; the loader is still musl's own.",
+    "learnMore": "troubleshooting/platforms/#linux-gcompat",
+    "category": "platform"
+  },
+  {
+    "id": "glibc",
+    "term": "glibc",
+    "variants": [
+      "glibc"
+    ],
+    "definition": "The GNU C Library, the libc of Ubuntu, Debian, Fedora and most other Linux distributions.",
+    "learnMore": "publishing/libc-variants/#libc",
+    "category": "platform"
+  },
+  {
+    "id": "libc",
+    "term": "libc",
+    "variants": [
+      "libc"
+    ],
+    "definition": "The C library a Linux binary links against, glibc or musl; OCX records the requirement as a libc feature.",
+    "learnMore": "publishing/libc-variants/#libc",
+    "category": "platform"
+  },
+  {
+    "id": "libc-feature",
+    "term": "libc feature",
+    "variants": [
+      "libc feature",
+      "libc features"
+    ],
+    "definition": "The `libc.glibc` or `libc.musl` entry in a platform's `os.features`, stating the libc a Linux build requires.",
+    "learnMore": "publishing/libc-variants/#libc",
+    "category": "platform",
+    "avoid": [
+      "feature tag",
+      "feature tags"
+    ]
+  },
+  {
+    "id": "mach-o",
+    "term": "Mach-O",
+    "variants": [
+      "Mach-O"
+    ],
+    "definition": "The executable file format of macOS.",
+    "learnMore": "troubleshooting/platforms/#macos-codesign",
+    "category": "platform"
+  },
+  {
+    "id": "musl",
+    "term": "musl",
+    "variants": [
+      "musl"
+    ],
+    "definition": "A small libc used by Alpine Linux and static builds; a glibc binary does not run on it without help.",
+    "learnMore": "publishing/libc-variants/#libc",
+    "category": "platform"
+  },
+  {
+    "id": "pathext",
+    "term": "PATHEXT",
+    "variants": [
+      "PATHEXT"
+    ],
+    "definition": "The Windows variable listing the extensions a shell appends to a bare command name, such as `.EXE` and `.BAT`.",
+    "learnMore": "troubleshooting/platforms/#windows-exec-resolution",
+    "category": "platform"
+  },
+  {
+    "id": "platform",
+    "term": "platform",
+    "variants": [
+      "platform",
+      "platforms"
+    ],
+    "definition": "The operating system and CPU a build targets, written `os/arch`, optionally refined by a CPU variant and a libc feature.",
+    "learnMore": "reference/platforms/#grammar",
+    "category": "platform",
+    "except": [
+      "all three platforms",
+      "ci platform",
+      "differ by platform version",
+      "differs by platform",
+      "each platform has exactly",
+      "every platform and only",
+      "failure semantics for each platform",
+      "location per platform",
+      "on all platforms",
+      "platform certificate chain",
+      "platform floor",
+      "platform limit",
+      "platform path",
+      "platform separator",
+      "platform store",
+      "platform trust store",
+      "platform verifier",
+      "platform's claims",
+      "platform's verifier",
+      "platform’s claims",
+      "platform’s verifier",
+      "store per platform",
+      "this platform's path",
+      "this platform’s path",
+      "tools and platforms"
+    ]
+  },
+  {
+    "id": "quarantine-flag",
+    "term": "quarantine flag",
+    "variants": [
+      "quarantine flag",
+      "quarantine flags"
+    ],
+    "definition": "The `com.apple.quarantine` attribute macOS sets on downloaded files, which makes Gatekeeper check them.",
+    "learnMore": "troubleshooting/platforms/#macos-codesign",
+    "category": "platform"
+  },
+  {
+    "id": "static-binary",
+    "term": "static binary",
+    "variants": [
+      "static binary",
+      "static binaries",
+      "statically linked"
+    ],
+    "definition": "A binary that carries its libraries inside it and needs no libc from the host.",
+    "learnMore": "publishing/libc-variants/#libc-static",
+    "category": "platform"
+  },
+  {
+    "id": "wasi",
+    "term": "WASI",
+    "variants": [
+      "WASI",
+      "Wasm",
+      "WebAssembly"
+    ],
+    "definition": "The WebAssembly System Interface; OCX gives each WASI version its own platform, such as `wasip1/wasm`.",
+    "learnMore": "publishing/multi-platform/#wasm",
+    "category": "platform"
+  },
+  {
+    "id": "activation",
+    "term": "activation",
+    "variants": [
+      "activation",
+      "activate",
+      "activates",
+      "activated"
+    ],
+    "definition": "Applying a toolchain to a shell, set per project by `activate`: `env` sets `PATH` and the package variables, `bin` only `PATH`, `none` nothing.",
+    "learnMore": "explanation/toolchain-activation/#activate",
+    "category": "project",
+    "except": [
+      "afterwards to activate it",
+      "binary activates itself",
+      "mise's activation",
+      "mise's shell activation",
+      "mise’s activation",
+      "mise’s shell activation",
+      "never activated",
+      "nothing is activated",
+      "other tool activates",
+      "release and activates it"
+    ]
+  },
+  {
+    "id": "binding",
+    "term": "binding",
+    "variants": [
+      "binding",
+      "bindings"
+    ],
+    "definition": "One entry in a `[tools]` table: a local name on the left, the identifier it resolves to on the right.",
+    "learnMore": "explanation/project-groups/#groups-binding-identity",
+    "category": "project",
+    "except": [
+      "as binding",
+      "binding already exists",
+      "binding from tag",
+      "body binding",
+      "certificate binding",
+      "digest binding",
+      "its binding therefore",
+      "subject binding",
+      "subject-digest binding",
+      "tag-to-digest binding"
+    ]
+  },
+  {
+    "id": "global-toolchain",
+    "term": "global toolchain",
+    "variants": [
+      "global toolchain",
+      "global-toolchain"
+    ],
+    "definition": "The user-wide `ocx.toml` and `ocx.lock` in the OCX home, reached only with `--global` and never mixed into a project.",
+    "learnMore": "explanation/project-toolchain/#global-toolchain",
+    "category": "project",
+    "avoid": [
+      "global tier",
+      "global scope",
+      "global set"
+    ]
+  },
+  {
+    "id": "group",
+    "term": "group",
+    "variants": [
+      "group",
+      "groups"
+    ],
+    "definition": "A named subset of a project's bindings, declared as `[group.<name>.tools]`, so a host downloads only the tools it needs.",
+    "learnMore": "explanation/project-groups/#groups",
+    "category": "project",
+    "except": [
+      "and a group list",
+      "command group",
+      "command groups",
+      "concurrency group",
+      "dotted top-level group",
+      "GitLab group",
+      "GitLab groups",
+      "group policy",
+      "group serializes each",
+      "group token",
+      "in group path",
+      "in the group the",
+      "its groups",
+      "page of its group",
+      "project or group",
+      "project, group",
+      "readable by group or other",
+      "write to group or world"
+    ],
+    "excludePages": [
+      "publishing/announce-from-ci/"
+    ]
+  },
+  {
+    "id": "lock-file",
+    "term": "lock file",
+    "variants": [
+      "lock file",
+      "lock files",
+      "lock-file"
+    ],
+    "definition": "`ocx.lock`, written by `ocx lock` beside `ocx.toml`: it pins every binding to per-platform digests, so later commands skip the registry.",
+    "learnMore": "explanation/project-toolchain/#lock",
+    "category": "project",
+    "avoid": [
+      "lockfile",
+      "lockfiles",
+      "trial lock"
+    ],
+    "except": [
+      "lock files, ipc paths",
+      "lock-file paths"
+    ]
+  },
+  {
+    "id": "project",
+    "term": "project",
+    "variants": [
+      "project",
+      "projects"
+    ],
+    "definition": "A directory tree whose root holds an `ocx.toml`; commands run inside it resolve against that file and its lock file.",
+    "learnMore": "explanation/project-toolchain/#toml",
+    "category": "project",
+    "except": [
+      "a project list",
+      "and project the result",
+      "application project",
+      "between project path and",
+      "busy projects",
+      "check projects each",
+      "create projects in the group",
+      "fix the project path",
+      "GitLab project",
+      "GitLab projects",
+      "index project",
+      "internal projects",
+      "names project",
+      "of the job's project",
+      "of the job’s project",
+      "one file in one project",
+      "or project lacks",
+      "project before it writes",
+      "project index in group",
+      "project or group",
+      "project or one",
+      "project that publishes",
+      "project's monitoring",
+      "project’s monitoring",
+      "publishing project",
+      "separate projects",
+      "the project must accept",
+      "this project accept",
+      "upstream project",
+      "upstream projects",
+      "uv project"
+    ],
+    "excludePages": [
+      "publishing/announce-from-ci/"
+    ]
+  },
+  {
+    "id": "project-commands",
+    "term": "project commands",
+    "variants": [
+      "project command",
+      "project commands"
+    ],
+    "definition": "The commands that read `ocx.toml` and `ocx.lock` and take binding names, such as `ocx add` and `ocx lock`. The `ocx package` commands take identifiers.",
+    "learnMore": "guides/run-project-tools/#exec-vs-package-exec",
+    "category": "project",
+    "avoid": [
+      "OCI tier",
+      "OCI-tier",
+      "package commands",
+      "package command"
+    ]
+  },
+  {
+    "id": "render",
+    "term": "render",
+    "variants": [
+      "render",
+      "renders"
+    ],
+    "definition": "Write or refresh the toolchain tree from the lock file, as `ocx pull` and `ocx add` do.",
+    "learnMore": "explanation/toolchain-render/#pull-render",
+    "category": "project",
+    "except": [
+      "failed to render",
+      "is a render",
+      "paths render with",
+      "render modifier",
+      "render modifiers",
+      "render progress",
+      "render where the value",
+      "renders an entry",
+      "renders progress",
+      "renders the download",
+      "renders the package",
+      "separators render",
+      "still renders those",
+      "table renders",
+      "template that renders"
+    ]
+  },
+  {
+    "id": "render-marker",
+    "term": "render marker",
+    "variants": [
+      "render marker"
+    ],
+    "definition": "A file under `$OCX_HOME/state/` that records which lock and entries a toolchain tree was last rendered from.",
+    "learnMore": "explanation/toolchain-tree/#toolchain-stamp",
+    "category": "project",
+    "avoid": [
+      "render stamp"
+    ]
+  },
+  {
+    "id": "toolchain",
+    "term": "toolchain",
+    "variants": [
+      "toolchain",
+      "toolchains",
+      "project toolchain",
+      "project toolchains",
+      "project-toolchain"
+    ],
+    "definition": "The set of bindings an `ocx.toml` declares, each a local name that resolves to one package.",
+    "learnMore": "explanation/toolchain-tree/#toolchain",
+    "category": "project",
+    "avoid": [
+      "toolchain tier",
+      "toolchain-tier"
+    ],
+    "except": [
+      "C and C++ toolchain",
+      "compiler toolchain",
+      "toolchain rules",
+      "upstream toolchains",
+      "vendored toolchain",
+      "whichever toolchain is active"
+    ]
+  },
+  {
+    "id": "toolchain-tree",
+    "term": "toolchain tree",
+    "variants": [
+      "toolchain tree",
+      "rendered toolchain"
+    ],
+    "definition": "The directory `<project>/.ocx/toolchain/` that OCX renders from the lock file: stable links and trampolines for every binding.",
+    "learnMore": "explanation/toolchain-tree/#toolchain-location",
+    "category": "project",
+    "avoid": [
+      "toolchain home",
+      "toolchain directory"
+    ]
+  },
+  {
+    "id": "build-receipt",
+    "term": "build receipt",
+    "variants": [
+      "build receipt"
+    ],
+    "definition": "The `<stem>-receipt.json` file `ocx package create` writes beside a bundle, which `push` and `test` read back.",
+    "learnMore": "publishing/build-and-push/#create-receipt",
+    "category": "publishing"
+  },
+  {
+    "id": "build-tag",
+    "term": "build tag",
+    "variants": [
+      "build tag",
+      "build tags",
+      "build-tagged",
+      "build-tag"
+    ],
+    "definition": "A tag with a `_build` suffix, such as `3.28.1_20260301`, that by convention the publisher never re-pushes.",
+    "learnMore": "explanation/versioning/#versioning-build-separator",
+    "category": "publishing"
+  },
+  {
+    "id": "bundle",
+    "term": "bundle",
+    "variants": [
+      "bundle",
+      "bundles"
+    ],
+    "definition": "The build output a publisher pushes: one archive of the package's files plus its metadata sidecar.",
+    "learnMore": "publishing/bundle-anatomy/#what-goes-in",
+    "category": "publishing",
+    "except": [
+      ".app bundle",
+      "a bundle that includes",
+      "and bundle what it extracts",
+      "app bundle",
+      "archive to bundle",
+      "before you bundle",
+      "bundle a directory for you",
+      "bundle and push",
+      "bundle as a referrer",
+      "bundle carries no",
+      "bundle each platform",
+      "bundle elsewhere",
+      "bundle format",
+      "bundle has a",
+      "bundle instead when",
+      "bundle itself",
+      "bundle keeps its",
+      "bundle keeps its bundle signature",
+      "bundle once",
+      "bundle sealing",
+      "bundle the base archive",
+      "bundle the same content",
+      "bundle v0.3",
+      "bundles a directory",
+      "bundles are ordinary",
+      "bundles from",
+      "bundles that tree",
+      "bundles the directory",
+      "bundles the downloaded",
+      "CA bundle",
+      "CA bundles",
+      "can bundle",
+      "carry that bundle",
+      "certificate bundle",
+      "default bundle file",
+      "does not bundle",
+      "DSSE bundle",
+      "format to accept: bundle",
+      "in the bundle's",
+      "in the bundle’s",
+      "need to bundle",
+      "portable bundle",
+      "publish a bundle",
+      "signature bundle",
+      "signed bundle",
+      "sigstore bundle",
+      "since the bundle is",
+      "tampered bundle",
+      "third, bundle",
+      "v0.2 bundle",
+      "verifies a bundle",
+      "wire format: bundle"
+    ],
+    "excludePages": [
+      "explanation/cosign-parity/",
+      "explanation/signing/",
+      "integration/proxy-and-ca/"
+    ]
+  },
+  {
+    "id": "cascade",
+    "term": "cascade",
+    "variants": [
+      "cascade",
+      "cascades",
+      "cascading"
+    ],
+    "definition": "Moving a new release's rolling tags along with it, so pushing `3.28.1` also moves `3.28`, `3` and `latest`.",
+    "learnMore": "explanation/versioning/#cascades",
+    "category": "publishing"
+  },
+  {
+    "id": "change-request",
+    "term": "change request",
+    "variants": [
+      "change request",
+      "pull request",
+      "pull requests",
+      "merge request",
+      "merge requests",
+      "pull-request",
+      "merge-request"
+    ],
+    "definition": "A pull request on GitHub or a merge request on GitLab: the form in which claims and announcements reach an index.",
+    "learnMore": "publishing/announce/#announcing-review",
+    "category": "publishing"
+  },
+  {
+    "id": "forge",
+    "term": "forge",
+    "variants": [
+      "forge",
+      "forges"
+    ],
+    "definition": "A Git hosting service such as GitHub or GitLab, where index repositories and their change requests live.",
+    "learnMore": "publishing/announce-from-ci/#announcing-postures",
+    "category": "publishing",
+    "except": [
+      "cannot forge"
+    ]
+  },
+  {
+    "id": "package-description",
+    "term": "package description",
+    "variants": [
+      "package description"
+    ],
+    "definition": "The README, logo, title and keywords attached to a repository with `ocx package description push`, stored as an OCI manifest.",
+    "learnMore": "reference/command-line/package-publishing/#package-description",
+    "category": "publishing"
+  },
+  {
+    "id": "promote",
+    "term": "promote",
+    "variants": [
+      "promote",
+      "promotes",
+      "promoted",
+      "promotion"
+    ],
+    "definition": "Copy a package's platform manifests and blobs byte for byte from one repository to another with `ocx package copy`.",
+    "learnMore": "publishing/promote-packages/#promoting",
+    "category": "publishing",
+    "except": [
+      "only promote user-facing commands"
+    ]
+  },
+  {
+    "id": "publisher",
+    "term": "publisher",
+    "variants": [
+      "publisher",
+      "publishers"
+    ],
+    "definition": "The person or CI job that builds a package and pushes it to a registry.",
+    "learnMore": "publishing/#journey",
+    "category": "publishing",
+    "except": [
+      "declares no publishers",
+      "declares publishers",
+      "index-declared publishers",
+      "index-listed publishers",
+      "its publishers to fix",
+      "listed publisher",
+      "listed publishers",
+      "lists a publisher",
+      "lists its publishers",
+      "lists no publishers",
+      "lists publishers",
+      "no publisher listed",
+      "no publishers",
+      "publisher api",
+      "publisher check",
+      "publisher entry",
+      "publisher identities",
+      "publisher list",
+      "publishers declared",
+      "publishers the",
+      "publishers, or you have",
+      "publishers. freeze version discovery"
+    ]
+  },
+  {
+    "id": "rolling-tag",
+    "term": "rolling tag",
+    "variants": [
+      "rolling tag",
+      "rolling tags",
+      "rolling-tag"
+    ],
+    "definition": "A tag such as `3.28`, `3` or `latest` that moves forward to the newest matching release.",
+    "learnMore": "explanation/versioning/#tags",
+    "category": "publishing",
+    "avoid": [
+      "floating tag",
+      "floating tags",
+      "moving tag",
+      "moving tags",
+      "alias tag",
+      "alias tags",
+      "rolling alias",
+      "rolling aliases",
+      "ancestor tag",
+      "cascade alias",
+      "cascade aliases"
+    ]
+  },
+  {
+    "id": "semver",
+    "term": "semver",
+    "variants": [
+      "semver"
+    ],
+    "definition": "Semantic Versioning: versions written `MAJOR.MINOR.PATCH`, where each part signals breaking, additive or fix changes.",
+    "learnMore": "explanation/versioning/#tags",
+    "category": "publishing"
+  },
+  {
+    "id": "snapshot-build",
+    "term": "snapshot build",
+    "variants": [
+      "snapshot build",
+      "snapshot builds"
+    ],
+    "definition": "A pre-release tag meant to be deleted later, such as a canary or nightly, marked ephemeral when announced.",
+    "learnMore": "publishing/snapshot-tracks/",
+    "category": "publishing",
+    "avoid": [
+      "ephemeral build",
+      "ephemeral builds"
+    ]
+  },
+  {
+    "id": "starlark",
+    "term": "Starlark",
+    "variants": [
+      "Starlark"
+    ],
+    "definition": "A small, deterministic, Python-like language; `ocx package test --script` runs package tests written in it.",
+    "learnMore": "publishing/script-tests/#scripted-tests",
+    "category": "publishing"
+  },
+  {
+    "id": "track",
+    "term": "track",
+    "variants": [
+      "variant track",
+      "snapshot track"
+    ],
+    "definition": "One line of tags that cascade together, such as one variant's releases or a pre-release line like `0.5.0-canary`.",
+    "learnMore": "publishing/snapshot-tracks/",
+    "category": "publishing"
+  },
+  {
+    "id": "variant",
+    "term": "variant",
+    "variants": [
+      "variant",
+      "variants"
+    ],
+    "definition": "A build flavor of one package, such as `slim` or `debug`, published under a tag prefix like `slim-1.2.3`.",
+    "learnMore": "explanation/versioning/#variants",
+    "category": "publishing",
+    "except": [
+      "(a variant)",
+      ".ps1 variant",
+      "best matching variant",
+      "conflicting variants",
+      "platform variant",
+      "rust-side variant",
+      "same variant",
+      "selects the variant",
+      "two variants need",
+      "union variant",
+      "union variants"
+    ]
+  },
+  {
+    "id": "credential-helper",
+    "term": "credential helper",
+    "variants": [
+      "credential helper"
+    ],
+    "definition": "A Docker-style program that hands registry credentials to tools on request, configured in `~/.docker/config.json`.",
+    "learnMore": "guides/authenticate/#authentication-docker-credentials",
+    "category": "security"
+  },
+  {
+    "id": "ssrf",
+    "term": "SSRF",
+    "variants": [
+      "SSRF"
+    ],
+    "definition": "Server-side request forgery: tricking a tool into contacting internal addresses for an attacker, which OCX guards against when following redirects.",
+    "learnMore": "publishing/build-and-push/#redirect-refusals",
+    "category": "security"
+  },
+  {
+    "id": "trust-store",
+    "term": "trust store",
+    "variants": [
+      "trust store",
+      "trust-store"
+    ],
+    "definition": "The CA certificates OCX trusts for TLS: the compiled-in Mozilla roots plus the host's own store.",
+    "learnMore": "integration/proxy-and-ca/#ca-baseline",
+    "category": "security",
+    "except": [
+      "its default trust store",
+      "its trust-store flag",
+      "replace the whole trust store"
+    ]
+  },
+  {
+    "id": "ci-output-file",
+    "term": "CI output file",
+    "variants": [
+      "CI output file",
+      "CI output files"
+    ],
+    "definition": "A file a CI runner reads to carry variables and `PATH` entries to later steps, such as GitHub's `GITHUB_ENV`; `ocx env --ci` appends to it.",
+    "learnMore": "integration/unattended-ci/#ci-variables",
+    "category": "shell",
+    "avoid": [
+      "CI file",
+      "CI files",
+      "CI sink",
+      "CI sinks"
+    ]
+  },
+  {
+    "id": "consent",
+    "term": "consent",
+    "variants": [
+      "consent",
+      "consented"
+    ],
+    "definition": "Permission for the shell hook to activate a project; a fresh clone stays inert until a path grant, namespace grant or consent stamp covers it.",
+    "learnMore": "explanation/shell-integration/#consent",
+    "category": "shell"
+  },
+  {
+    "id": "consent-stamp",
+    "term": "consent stamp",
+    "variants": [
+      "consent stamp",
+      "consent stamps",
+      "consent-stamp"
+    ],
+    "definition": "The file `ocx init`, `ocx add` and `ocx shell allow` write, recording which sources a project's lock file resolved against at consent.",
+    "learnMore": "explanation/shell-integration/#consent",
+    "category": "shell"
+  },
+  {
+    "id": "env-file",
+    "term": "env file",
+    "variants": [
+      "env file",
+      "env files"
+    ],
+    "definition": "One thin file per shell family, such as `$OCX_HOME/env.sh`, that `ocx self setup` writes and the shell profile sources.",
+    "learnMore": "explanation/shell-integration/#activation-files",
+    "category": "shell",
+    "avoid": [
+      "env shim",
+      "env shims"
+    ]
+  },
+  {
+    "id": "managed-block",
+    "term": "managed block",
+    "variants": [
+      "managed block",
+      "managed blocks"
+    ],
+    "definition": "The marked section OCX writes into a shell profile and later updates or removes, leaving the rest of the file untouched.",
+    "learnMore": "explanation/shell-integration/#activation-files",
+    "category": "shell",
+    "avoid": [
+      "marked block",
+      "managed activation block"
+    ]
+  },
+  {
+    "id": "session-path",
+    "term": "session path",
+    "variants": [
+      "session path",
+      "session-path"
+    ],
+    "definition": "The login-session `PATH` entry `ocx self setup` registers, so IDEs and services that never read a shell profile still find OCX.",
+    "learnMore": "explanation/shell-integration/#session-path",
+    "category": "shell"
+  },
+  {
+    "id": "shell-hook",
+    "term": "shell hook",
+    "variants": [
+      "shell hook",
+      "per-prompt hook"
+    ],
+    "definition": "The per-prompt function OCX adds to a shell, which recomposes the environment, `PATH` and the package variables, after a `cd` or a lock change.",
+    "learnMore": "explanation/shell-integration/#activation",
+    "category": "shell",
+    "avoid": [
+      "reconciler"
+    ],
+    "except": [
+      "its own per-prompt hook",
+      "per-prompt hook of their own"
+    ]
+  },
+  {
+    "id": "attestation",
+    "term": "attestation",
+    "variants": [
+      "attestation",
+      "attestations"
+    ],
+    "definition": "A signed statement about a package, such as provenance or an SBOM, bound to the exact manifest digest it describes.",
+    "learnMore": "publishing/attest-and-sbom/#attestations-attach",
+    "category": "signing",
+    "except": [
+      "as an attestation"
+    ]
+  },
+  {
+    "id": "cosign",
+    "term": "cosign",
+    "variants": [
+      "cosign"
+    ],
+    "definition": "Sigstore's command-line signing tool; OCX signatures and attestations interoperate with it.",
+    "learnMore": "explanation/cosign-parity/#cosign-interop",
+    "category": "signing"
+  },
+  {
+    "id": "declared-publisher",
+    "term": "declared publisher",
+    "variants": [
+      "declared publishers"
+    ],
+    "definition": "A signer identity listed in a package's root document; OCX accepts its signatures as it would a matching trust policy.",
+    "learnMore": "guides/declare-publishers/#supply-chain-publishers",
+    "category": "signing"
+  },
+  {
+    "id": "dsse",
+    "term": "DSSE",
+    "variants": [
+      "DSSE"
+    ],
+    "definition": "Dead Simple Signing Envelope: the JSON wrapper that signs an attestation's payload together with its type.",
+    "learnMore": "explanation/cosign-parity/#attestations",
+    "category": "signing"
+  },
+  {
+    "id": "fulcio",
+    "term": "Fulcio",
+    "variants": [
+      "Fulcio"
+    ],
+    "definition": "Sigstore's certificate authority: it exchanges an OIDC token for a short-lived X.509 certificate naming the signer identity.",
+    "learnMore": "guides/self-hosted-sigstore/#components",
+    "category": "signing"
+  },
+  {
+    "id": "in-toto",
+    "term": "in-toto",
+    "variants": [
+      "in-toto"
+    ],
+    "definition": "A supply-chain metadata framework; its statement format carries an attestation's subject digest and predicate.",
+    "learnMore": "explanation/cosign-parity/#attestations",
+    "category": "signing"
+  },
+  {
+    "id": "keyless-signing",
+    "term": "keyless signing",
+    "variants": [
+      "keyless signing",
+      "keyless"
+    ],
+    "definition": "Signing with a throwaway key whose certificate Fulcio binds to an OIDC identity, so no long-lived key exists.",
+    "learnMore": "explanation/signing/#key-mode",
+    "category": "signing"
+  },
+  {
+    "id": "oidc",
+    "term": "OIDC",
+    "variants": [
+      "OIDC"
+    ],
+    "definition": "OpenID Connect: the token standard CI systems and identity providers use to prove a signer's identity to Fulcio.",
+    "learnMore": "publishing/sign-a-release/#identity-token",
+    "category": "signing"
+  },
+  {
+    "id": "predicate",
+    "term": "predicate",
+    "variants": [
+      "predicate",
+      "predicates"
+    ],
+    "definition": "The body of an attestation: the document, such as an SBOM, whose bytes the in-toto statement wraps.",
+    "learnMore": "publishing/attest-and-sbom/#attestations-attach-signed",
+    "category": "signing",
+    "except": [
+      "the full predicate"
+    ],
+    "excludePages": [
+      "explanation/environments/"
+    ]
+  },
+  {
+    "id": "purl",
+    "term": "purl",
+    "variants": [
+      "purl"
+    ],
+    "definition": "Package URL, a standard identifier string; execution records name packages as `pkg:oci` purls whose version is the digest.",
+    "learnMore": "explanation/records-and-sbom/#purl",
+    "category": "signing"
+  },
+  {
+    "id": "rekor",
+    "term": "Rekor",
+    "variants": [
+      "Rekor"
+    ],
+    "definition": "Sigstore's append-only transparency log; each logged signature gets a Signed Entry Timestamp that verifiers check.",
+    "learnMore": "guides/self-hosted-sigstore/#components",
+    "category": "signing"
+  },
+  {
+    "id": "san",
+    "term": "SAN",
+    "variants": [
+      "SAN",
+      "Subject Alternative Name"
+    ],
+    "definition": "Subject Alternative Name: the certificate field that holds the signer identity, such as a workflow URL or an email address.",
+    "learnMore": "explanation/signing/#identity-matching",
+    "category": "signing"
+  },
+  {
+    "id": "sbom",
+    "term": "SBOM",
+    "variants": [
+      "SBOM",
+      "SBOMs"
+    ],
+    "definition": "Software bill of materials: a list of the components inside a package, attached to it as a referrer.",
+    "learnMore": "publishing/attest-and-sbom/",
+    "category": "signing"
+  },
+  {
+    "id": "sct",
+    "term": "SCT",
+    "variants": [
+      "SCT",
+      "Signed Certificate Timestamp"
+    ],
+    "definition": "Signed Certificate Timestamp: proof embedded in a Fulcio certificate that a certificate-transparency log recorded it.",
+    "learnMore": "explanation/signing/#trust-root",
+    "category": "signing"
+  },
+  {
+    "id": "set",
+    "term": "SET",
+    "variants": [
+      "SET",
+      "Signed Entry Timestamp"
+    ],
+    "definition": "Signed Entry Timestamp: Rekor's signed promise that a signature entered its transparency log at a given time.",
+    "learnMore": "explanation/signing/#trust-root",
+    "category": "signing"
+  },
+  {
+    "id": "signer-identity",
+    "term": "signer identity",
+    "variants": [
+      "signer identity",
+      "signing identity"
+    ],
+    "definition": "The OIDC identity a signing certificate names, such as a CI workflow URL, which a trust policy pins.",
+    "learnMore": "explanation/signing/#identity-matching",
+    "category": "signing"
+  },
+  {
+    "id": "sigstore",
+    "term": "Sigstore",
+    "variants": [
+      "Sigstore"
+    ],
+    "definition": "An open signing service: Fulcio issues short-lived certificates, Rekor logs every signature, and verifiers check both.",
+    "learnMore": "explanation/signing/",
+    "category": "signing"
+  },
+  {
+    "id": "sigstore-bundle",
+    "term": "Sigstore bundle",
+    "variants": [
+      "Sigstore bundle",
+      "Sigstore bundles"
+    ],
+    "definition": "The JSON envelope that holds a signature, its certificate and its transparency-log proof, pushed as a referrer.",
+    "learnMore": "explanation/signing/#bundle-storage",
+    "category": "signing"
+  },
+  {
+    "id": "slsa",
+    "term": "SLSA",
+    "variants": [
+      "SLSA"
+    ],
+    "definition": "Supply-chain Levels for Software Artifacts: a framework whose provenance format records how and where a package was built.",
+    "learnMore": "publishing/sign-a-release/#sbom-and-provenance",
+    "category": "signing"
+  },
+  {
+    "id": "trust-policy",
+    "term": "trust policy",
+    "variants": [
+      "trust policy",
+      "trust policies"
+    ],
+    "definition": "A `[[trust.policy]]` entry naming the signer identities OCX accepts for every package under one registry scope.",
+    "learnMore": "guides/pin-signer-identity/#supply-chain-trust-policy",
+    "category": "signing"
+  },
+  {
+    "id": "trust-root",
+    "term": "trust root",
+    "variants": [
+      "trust root",
+      "trust roots",
+      "trusted root",
+      "trust-root",
+      "trusted-root"
+    ],
+    "definition": "The Sigstore keys and certificates a verifier trusts: the Fulcio CA, the Rekor key and the CT log keys.",
+    "learnMore": "explanation/signing/#trust-root",
+    "category": "signing",
+    "except": [
+      "tier's trust root",
+      "tier’s trust root"
+    ]
+  },
+  {
+    "id": "tuf",
+    "term": "TUF",
+    "variants": [
+      "TUF"
+    ],
+    "definition": "The Update Framework, the protocol Sigstore uses to distribute and rotate its trust root.",
+    "learnMore": "explanation/signing/#trust-root",
+    "category": "signing"
+  }
+]

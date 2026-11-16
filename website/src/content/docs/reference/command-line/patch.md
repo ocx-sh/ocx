@@ -19,7 +19,7 @@ Resolves every companion and descriptor digest in the active patch overlay and w
 
 Works offline: only the local object store is consulted.
 
-Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which scopes to the package tier). Companions are pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both versions independently.
+Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which applies to `ocx package` commands). Companions are pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both versions independently.
 
 Under `--global` the file is written beside `$OCX_HOME/ocx.lock`; the flag goes before the subcommand.
 
@@ -103,7 +103,7 @@ ocx patch test [OPTIONS] --descriptor <DESCRIPTOR> <BASE-ID> [-- <COMMAND>...]
 | `--companion-archive` | `PATH` | Path to a local archive for a companion package, read without a registry round-trip; needs a `<archive-stem>-metadata.json` sidecar whose identifier names a companion the descriptor lists. Repeatable |
 | `--descriptor` | `DESCRIPTOR` | Path to the patch descriptor JSON file to compose |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
+| `--isolate` |  | Remove every value OCX applied to the calling environment before composing |
 | `--platform`, `-p` | `PLATFORM` | Target platform for composing the environment. Defaults to the host platform |
 | `--registry` | `HOST/PATH` | Patch registry to compose against, as `HOST/PATH` (e.g. registry.corp.example/ocx-patches) |
 | `--script` | `SCRIPT` | Path to a Starlark test script to run in the composed environment. Mutually exclusive with a trailing command |

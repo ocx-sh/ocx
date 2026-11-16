@@ -105,7 +105,7 @@ def generate_markdown(components: list[dict]) -> str:
         for lic, names in sorted(by_license.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     )
     return f"""---
-title: Dependencies
+title: Third-party licences
 ---
 <!-- doc_type: reference -->
 

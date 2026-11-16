@@ -140,8 +140,8 @@ pub struct PackageAnnounce {
 
     /// Mark the tags this run adds as removable without review.
     ///
-    /// A tag already in the index keeps the marker it has. Push ephemeral
-    /// builds with `--no-keep-tag`, or prune frees no storage. A keep tag pins
+    /// A tag already in the index keeps the marker it has. Push snapshot
+    /// builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage. A keep tag pins
     /// the manifest past the tag's deletion.
     #[clap(long = "ephemeral", conflicts_with = "refresh")]
     ephemeral: bool,
@@ -800,7 +800,9 @@ mod tests {
     fn ephemeral_help_says_to_push_with_no_keep_tag() {
         let help = rendered_long_help(["package", "announce"]);
         assert!(
-            help.contains("Push ephemeral builds with `--no-keep-tag`, or prune frees no storage."),
+            help.contains(
+                "Push snapshot builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage."
+            ),
             "the --ephemeral long help must carry the keep-tag guidance; rendered help: {help}"
         );
     }

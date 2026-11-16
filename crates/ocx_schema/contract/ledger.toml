@@ -133,3 +133,206 @@ subjects = ["PackageCascadeRepair"]
 rule = "doc"
 pointer = "/$defs/PlannedWrite"
 reason = "PlannedWrite now says an alias one build owns is a copy of that build's own index, not rebuilt from observed content"
+
+[[break]]
+document = "reports"
+subjects = ["ShellStateReport", "VerboseShellState"]
+rule = "doc"
+pointer = "/$defs/ActivateMode/x-ocx-enum/1"
+reason = "reworded launcher trampoline to launcher; the mode is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["ConfigTestData"]
+rule = "doc"
+pointer = "/$defs/ConfigTestDataRoot/properties/unknown_keys"
+reason = "reworded to the OCX product name and the glossary term; the meaning is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/Constant/properties/value"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/Entrypoint/properties/args"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/Entrypoints"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["EnvVars", "WarmedPaths"]
+rule = "doc"
+pointer = "/$defs/LazyAdvisoryKind/x-ocx-enum/0"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["EnvVars", "WarmedPaths"]
+rule = "doc"
+pointer = "/$defs/LazyAdvisoryKind/x-ocx-enum/2"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/List/properties/value"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "reports"
+subjects = ["InspectReport", "Installs"]
+rule = "doc"
+pointer = "/$defs/Path/properties/value"
+reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/105"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/132"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/165"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/166"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/167"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/172"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/195"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/220"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/230"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/231"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/233"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/263"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/285"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/396"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/398"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/407"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/455"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/465"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/496"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "errors"
+subjects = ["*"]
+rule = "doc"
+pointer = "/$defs/ErrorDetail/x-ocx-enum/70"
+reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"

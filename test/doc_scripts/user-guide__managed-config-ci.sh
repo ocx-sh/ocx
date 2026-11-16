@@ -7,10 +7,10 @@ set -euo pipefail
 
 # The setup:managed-config-ci provider has already published the
 # managed-config artifact, aliased "internal.company.com" (via [mirrors]) to
-# the local test registry, and published cmake for the install step below.
+# the local test registry, and published nodejs/node for the install step below.
 
 # region cast
 export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
 ocx config update
-ocx package install "$PKG_KITWARE_CMAKE"
+ocx package install "$PKG_NODEJS_NODE"
 # endregion cast

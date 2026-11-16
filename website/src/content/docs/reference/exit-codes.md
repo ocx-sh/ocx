@@ -37,7 +37,7 @@ The command failed and no more specific code applies.
 | `forge_failed` | A forge operation failed with an unclassified cause |
 | `forge_missing_field` | A forge response lacks a required field |
 | `forge_request_encode` | A forge request body could not be encoded |
-| `forge_required` | No forge was supplied to read the committed index root through |
+| `forge_required` | No forge was supplied to read the committed root document through |
 | `forge_status` | The forge answered with an unexpected HTTP status |
 | `fork_base_unreachable` | The fork's branch cannot reach the upstream base |
 | `fork_field_missing` | A fork response lacks a required field |
@@ -48,9 +48,9 @@ The command failed and no more specific code applies.
 | `git_command_failed` | A git command failed |
 | `git_push_failed` | A git push failed for an unrecognised reason |
 | `index_path_invalid` | A local index path is invalid |
-| `index_root_missing_field` | The committed index root lacks a required field |
-| `index_root_not_object` | The committed index root is not a JSON object |
-| `index_root_parse` | The committed index root is not valid JSON |
+| `index_root_missing_field` | The committed root document lacks a required field |
+| `index_root_not_object` | The committed root document is not a JSON object |
+| `index_root_parse` | The committed root document is not valid JSON |
 | `index_singleflight_failed` | A shared index operation failed with an unclassified cause |
 | `index_source_failed` | An index source failed with an unclassified cause |
 | `internal` | A failure no classifier recognises |
@@ -60,10 +60,10 @@ The command failed and no more specific code applies.
 | `layer_not_staged` | A layer the package needs was not staged |
 | `libc_lint_scan_failed` | Walking the content tree for the libc check failed with an unclassified cause |
 | `malformed_fork_full_name` | A fork's full name is malformed |
-| `malformed_physical_repository` | The index root names a malformed registry repository |
+| `malformed_physical_repository` | The root document names a malformed registry repository |
 | `managed_config_update_failed` | Syncing the managed-config snapshot failed with an unclassified cause |
 | `missing_base_ref` | The index base branch does not exist |
-| `missing_head_root` | A concurrent claim's or announce's head carries no index root |
+| `missing_head_root` | A concurrent claim's or announce's head carries no root document |
 | `package_internal` | A package operation failed with an unclassified cause |
 | `package_task_failed` | A per-package operation failed with an unclassified cause |
 | `patch_discovery_failed` | Discovering patches failed with an unclassified cause |
@@ -71,7 +71,7 @@ The command failed and no more specific code applies.
 | `project_manifest_edit_diverged` | The edited ocx.toml no longer matches the staged configuration |
 | `push_option_refused` | The forge refused a git push option |
 | `record_inputs_incomplete` | An execution record frame carries no argv |
-| `setup_bootstrap_failed` | Installing ocx into the content store failed with an unclassified cause |
+| `setup_bootstrap_failed` | Installing OCX into the object store failed with an unclassified cause |
 | `singleflight_abandoned` | The leader of shared in-flight work stopped without a result |
 | `singleflight_failed` | Shared in-flight work failed with an unclassified cause |
 | `task_panicked` | A package task panicked |
@@ -125,7 +125,7 @@ The command line is invalid: unknown flag, wrong argument count or bad syntax.
 | `no_matching_platform` | The source index offers no requested platform |
 | `no_project` | No ocx.toml exists in the working directory or any parent |
 | `no_project_in` | The explicitly selected project directory holds no ocx.toml |
-| `ocx_home_needs_no_consent` | The ocx home is always active and takes no consent stamp |
+| `ocx_home_needs_no_consent` | The OCX home is always active and takes no consent stamp |
 | `owner_id_mismatch` | A supplied owner id disagrees with the forge account |
 | `platform_ambiguous` | The source is a single-platform manifest and more than one platform was named |
 | `platform_required` | The source is a single-platform manifest and no platform was named |
@@ -194,14 +194,14 @@ Input data is malformed or fails verification.
 | `dispatch_object_digest_mismatch` | A stored dispatch object does not hash to its claimed digest |
 | `duplicate_platform_key` | ocx.lock lists the same platform twice for one binding |
 | `empty_push_set` | A push names no target platform |
-| `entrypoint_collision` | Two packages declare the same entrypoint name |
+| `entrypoint_collision` | Two packages declare the same entry point name |
 | `extra_ca_certs_invalid` | The extra CA bundle the payload names is not usable |
 | `extra_ca_certs_not_utf8` | The extra CA bundle is not UTF-8 and cannot be persisted |
 | `extra_ca_file_invalid` | The extra CA bundle file holds no usable certificate |
 | `feature_mismatch` | The package needs a platform feature this host lacks |
 | `index_dispatch_digest_mismatch` | A dispatch object does not hash to the digest its root claims |
 | `index_serialization` | An index document could not be serialized |
-| `integration_namespace_invalid` | An integrations namespace is invalid |
+| `integration_namespace_invalid` | An integration key is invalid |
 | `integration_too_large` | An integrations payload exceeds its size limit |
 | `integrations_too_large` | A package's integrations exceed the per-package size limit |
 | `invalid_binary_name` | A binary name is not valid |
@@ -223,13 +223,13 @@ Input data is malformed or fails verification.
 | `layer_size_exceeded` | A layer declares a size above the allowed maximum |
 | `libc_scan_scope_modifier` | The libc scan scope carries a modifier it cannot honour |
 | `libc_scan_scope_unresolvable` | The libc scan scope cannot be resolved |
-| `link_path_occupied` | The install link path holds something other than an ocx package link |
+| `link_path_occupied` | The install link path holds something other than an OCX package link |
 | `list_separator_invalid` | A list-valued environment entry conflicts with or edges on its separator |
 | `lock_stale` | ocx.lock does not match ocx.toml |
 | `malformed_catalog_key` | An index source served a malformed catalog key |
 | `malformed_index_document` | An index document is not valid JSON of the expected shape |
-| `malformed_physical_ref` | An index root carries a malformed physical repository reference |
-| `malformed_root_document` | A local index root document is not valid JSON of the expected shape |
+| `malformed_physical_ref` | A root document carries a malformed physical repository reference |
+| `malformed_root_document` | A local root document is not valid JSON of the expected shape |
 | `managed_config_entry_too_large` | The managed-config config.toml entry exceeds the allowed size |
 | `managed_config_invalid_archive` | The managed-config layer is not a readable archive |
 | `managed_config_invalid_toml` | The fetched managed-config payload is not valid TOML |
@@ -279,9 +279,9 @@ Input data is malformed or fails verification.
 | `repository_escapes_index_home` | An index repository path escapes its source directory |
 | `repository_mismatch` | A re-claim supplied a repository other than the committed one |
 | `reserved_env_key` | A package env entry sets a reserved OCX key |
-| `root_name_mismatch` | The committed index root names a different package |
+| `root_name_mismatch` | The committed root document names a different package |
 | `root_references_unwritten_object` | The announce would commit a root that references an object it does not carry |
-| `root_repository_mismatch` | A derived index root points at another repository |
+| `root_repository_mismatch` | A derived root document points at another repository |
 | `sbom_media_type_unsupported` | An unsigned SBOM referrer declares a media type outside the SBOM set |
 | `selection_ambiguous` | The selection matches more than one package |
 | `separator_edged_list_value` | A package list value starts or ends with its separator |
@@ -311,7 +311,7 @@ Input data is malformed or fails verification.
 | `template_value_too_large` | An interpolated value exceeds its size budget |
 | `tlog_binding_mismatch` | The transparency log entry does not match the received envelope |
 | `too_many_attestations` | The target has more attestation referrers than the candidate limit |
-| `toolchain_home_not_absolute` | The toolchain home is not an absolute path |
+| `toolchain_home_not_absolute` | The toolchain root baked into a launcher is not an absolute path |
 | `transparency_body_mismatch` | The transparency log entry belongs to another subject |
 | `transparency_log_response_invalid` | The transparency log answered with a public-key body that is oversize or not text |
 | `traversal_limit_exceeded` | Copying a manifest graph exceeded a traversal limit |
@@ -323,7 +323,7 @@ Input data is malformed or fails verification.
 | `unfollowed_redirect` | The registry answered with a redirect the transport did not follow |
 | `unknown_env_modifier` | A package env entry declares a type this build does not know |
 | `unparseable_elf` | A file carries an ELF header but cannot be parsed |
-| `unrecognized_interpreter` | A binary names an ELF interpreter no libc family claims |
+| `unrecognized_interpreter` | A binary names a dynamic loader no libc family claims |
 | `unsafe_destination` | The registry named a destination the transport refuses |
 | `unsupported_index_format` | The index format version is not supported |
 | `unsupported_logo_format` | The logo file has an unsupported format |
@@ -481,7 +481,7 @@ Configuration is invalid or incomplete.
 | `invalid_auth_type` | The configured authentication type is not recognized |
 | `invalid_env` | An OCX environment variable holds a value its declaration refuses |
 | `invalid_index_url` | A configured index URL is invalid |
-| `invalid_managed_config_source` | The managed-config source is not a valid OCI identifier |
+| `invalid_managed_config_source` | The managed-config source is not a valid identifier |
 | `invalid_toolchain_name_charset` | A group or binding name carries a character toolchain paths refuse |
 | `invalid_trust_policy` | The payload declares an unusable trust-policy entry |
 | `lock_declared_mismatch` | ocx.lock records a declared spelling its version does not allow |
@@ -529,7 +529,7 @@ Configuration is invalid or incomplete.
 | `system_config_invalid` | The system-wide config file is unusable |
 | `toolchain_dir_group_or_world_writable` | The toolchain_dir directory is writable by other users |
 | `toolchain_dir_inaccessible` | The toolchain_dir setting names a path that cannot be inspected |
-| `toolchain_dir_inside_global_home` | The toolchain_dir setting resolves inside the global toolchain home |
+| `toolchain_dir_inside_global_home` | The toolchain_dir setting resolves inside $OCX_HOME/toolchain |
 | `toolchain_dir_is_containment_anchor` | The toolchain_dir setting names the home directory or OCX_HOME itself |
 | `toolchain_dir_no_containment_anchor` | No home directory or OCX_HOME exists to contain toolchain_dir |
 | `toolchain_dir_not_a_directory` | The toolchain_dir setting names something other than a directory |
@@ -617,7 +617,7 @@ A local policy or safeguard refused the operation; loosen the flag or pass --for
 
 | Slug | Meaning |
 | --- | --- |
-| `credential_helper_not_installed` | The credential helper is not installed, and an ocx started by a credential helper never downloads |
+| `credential_helper_not_installed` | The credential helper is not installed, and an OCX started by a credential helper never downloads |
 | `frozen_refused` | The verb discovers new digests, which frozen mode forbids |
 | `index_resolution_blocked` | A local policy refused resolving through the index |
 | `no_verify_refused` | --no-verify was refused because the system config requires signatures |
@@ -641,7 +641,7 @@ The operation as requested is not supported or not enabled by this registry, for
 | Slug | Meaning |
 | --- | --- |
 | `forge_capability_unavailable` | The forge or project lacks a capability the transport needs |
-| `publishers_unrecognized` | The index lists publishers only a newer ocx understands |
+| `publishers_unrecognized` | The index lists publishers only a newer OCX understands |
 | `referrers_unsupported` | The registry supports neither the OCI Referrers API nor a referrers fallback tag |
-| `registry_delete_unsupported` | The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github |
+| `registry_delete_unsupported` | The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes them |
 | `unsupported_key_backend` | A key reference names a recognised key backend this build does not implement |

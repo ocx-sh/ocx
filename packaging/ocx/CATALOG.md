@@ -32,12 +32,12 @@ container images.
 
 ```sh
 # Install a package and run it with a clean environment
-ocx package install cmake:4
-ocx package exec cmake:4 -- cmake --version
+ocx package install nodejs/node:24
+ocx package exec --clean nodejs/node:24 -- node --version
 
 # Declare a project toolchain, then run against it
-ocx add cmake:4
-ocx exec -- cmake --version
+ocx add nodejs/node:24
+ocx exec -- node --version
 ```
 
 ## Links

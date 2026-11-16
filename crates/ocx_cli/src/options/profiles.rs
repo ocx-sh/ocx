@@ -19,7 +19,7 @@ pub struct Profiles {
 
     /// Write no profile blocks at all.
     ///
-    /// Suppresses only the profile-block surface; the env shims and, unless
+    /// Suppresses only the profile-block surface; the env files and, unless
     /// `--no-modify-path` is also given, the session-PATH registration are
     /// still written. Combine with an explicit `--profile` and the one typed
     /// last wins, POSIX style.

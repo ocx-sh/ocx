@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pexpect
+
+from src.cast_screen import Screen, logical_lines
 
 # Regex to strip ANSI escape sequences from captured output
 _ANSI_RE = re.compile(r"\x1b\[[^a-zA-Z]*[a-zA-Z]|\x1b\][^\x07]*\x07")
@@ -27,6 +30,15 @@ _DIGEST_REF_RE = re.compile(r"@((?:\x1b\[[0-9;]*m)*)sha256:([a-f0-9]{8})[a-f0-9]
 # SGR sits outside the match and is left intact.
 _DIGEST_BARE_RE = re.compile(r"sha256:([a-f0-9]{8})[a-f0-9]{56}(?![a-f0-9])")
 
+# The unique-repo prefix every acceptance test puts in front of a repository
+# name (`unique_repo`, `t_<8 hex>_`). No recording may show one, whether the
+# display map knows that repository or not (an index query prints it bare, in
+# quotes, inside a path or after a registry host).
+_RUN_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])t_[0-9a-f]{8}_")
+
+# Random per-run id of a download or staging directory.
+_TEMP_ID_RE = re.compile(r"/temp/([0-9a-f]{8})[0-9a-f]{24}(?![0-9a-f])")
+
 # A single SGR escape (`\x1b[…m`). Realign only ever reflows styled table
 # output, which uses SGR colour codes exclusively.
 _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -46,14 +58,82 @@ _UNDERLINE = "\x1b[4m"  # marks the (bold+underlined) header row
 _DIM = "\x1b[2m"        # zebra wrap on odd data rows
 _RESET = "\x1b[0m"
 
-# Matches everything from a braille spinner char up to the final erase-line
-# before real output.  The spinner uses \r\x1b[2K to overwrite itself, and
-# the last occurrence precedes the actual command output (table header, tree, etc.).
+_PAD_BEFORE_CR_RE = re.compile(r" +(?=\r)")
+
+# From the start of the first line holding a braille spinner glyph up to the final
+# erase-line before real output. Lines before it are kept: a spinner shares a PTY
+# chunk with the text that precedes it.
 _PROGRESS_PREFIX_RE = re.compile(
-    r"^(.*\r\x1b\[2K)"                  # greedy: last \r\x1b[2K in the prefix
-    r"(?=\x1b\[[\d;]*m|[^\x1b\r])",     # followed by ANSI style or visible char
+    r"(?:^|(?<=\n))(?=[^\n]*[\u2800-\u28FF])"  # a line-start whose line has a glyph
+    r"(.*\r\x1b\[2K)"                           # greedy: last \r\x1b[2K after it
+    r"(?=\x1b\[[\d;]*m|[^\x1b\r])",              # followed by ANSI style or visible char
     re.DOTALL,
 )
+
+def _sanitize_passes(replacements: dict[str, str]) -> list[tuple[re.Pattern[str], str]]:
+    """Display map first (literal, in order), then any test-run prefix the map did not know."""
+    literal = [(re.compile(re.escape(old)), new.replace("\\", "\\\\")) for old, new in replacements.items()]
+    return [*literal, (_RUN_PREFIX_RE, "")]
+
+
+_DIGEST_PASSES: list[tuple[re.Pattern[str], str]] = [
+    (_DIGEST_PATH_RE, r"sha256/\1.."),
+    (_DIGEST_REF_RE, r"@\1sha256:\2.."),
+    (_DIGEST_BARE_RE, r"sha256:\1.."),
+    (_TEMP_ID_RE, r"/temp/\1.."),
+]
+
+
+def _apply(text: str, passes: list[tuple[re.Pattern[str], str]]) -> str:
+    for pattern, repl in passes:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def sanitize_text(text: str, replacements: dict[str, str]) -> str:
+    """Apply the display map, then drop any test-run prefix the map did not know."""
+    return _apply(text, _sanitize_passes(replacements))
+
+
+def truncate_digests_text(text: str) -> str:
+    """Shorten every digest form to its first 8 hex characters."""
+    return _apply(text, _DIGEST_PASSES)
+
+
+def _substitute_stream(chunks: list[str], pattern: re.Pattern[str], repl: str) -> list[str]:
+    """``pattern.sub`` over the concatenation of *chunks*, keeping the chunk boundaries.
+
+    A PTY read can end in the middle of a word, so a match may straddle two
+    events; matching each event alone then misses it. The replacement goes to
+    the chunk the match started in and the rest of the match is removed from
+    the chunks it ran into.
+    """
+    ends = []
+    total = 0
+    for chunk in chunks:
+        total += len(chunk)
+        ends.append(total)
+    combined = "".join(chunks)
+    out: list[list[str]] = [[] for _ in chunks]
+
+    def owner(pos: int) -> int:
+        return next(i for i, end in enumerate(ends) if pos < end)
+
+    def copy(a: int, b: int) -> None:
+        while a < b:
+            i = owner(a)
+            stop = min(b, ends[i])
+            out[i].append(combined[a:stop])
+            a = stop
+
+    cursor = 0
+    for m in pattern.finditer(combined):
+        copy(cursor, m.start())
+        out[owner(m.start())].append(m.expand(repl))
+        cursor = m.end()
+    copy(cursor, len(combined))
+    return ["".join(parts) for parts in out]
+
 
 @dataclass
 class CastEvent:
@@ -85,26 +165,53 @@ class CastRecording:
             ]))
         return "\n".join(lines) + "\n"
 
-    def auto_height(self, padding: int = 2, minimum: int = 5) -> CastRecording:
-        """Set height based on the actual number of lines in the recording."""
-        max_y = 0
-        y = 0
-        for event in self.events:
-            if event.event_type != "o":
+    def fit_width(self, minimum: int = 100, cap: int = 120) -> CastRecording:
+        """Pick the frame width in [minimum, cap] that wraps the least.
+
+        The player scales the frame to the page, so a wider frame means a
+        smaller font; a line over the cap wraps instead. Progress redraws move
+        the cursor by rows, so a width other than the PTY's can redraw over text
+        the PTY kept: only widths whose screen has the same lines count. Fewest
+        wrapped rows, then fewest wrapped characters, then the narrower width.
+        """
+
+        def replay(width: int) -> Screen:
+            screen = Screen(width, 10**6)
+            for event in self.events:
+                if event.event_type == "o":
+                    screen.feed(event.data)
+            return screen
+
+        reference = logical_lines(replay(self.width))
+        best: tuple[int, int, int] | None = None
+        for width in range(minimum, cap + 1):
+            screen = replay(width)
+            if logical_lines(screen) != reference:
                 continue
-            for char in event.data:
-                if char == "\n":
-                    y += 1
-                    max_y = max(max_y, y)
-        self.height = max(max_y + padding, minimum)
+            wrapped = [r for r in screen.rows if r.wrapped and r.text()]
+            score = (len(wrapped), sum(len(r.text()) for r in wrapped), width)
+            best = min(best or score, score)
+        self.width = best[2] if best else self.width
+        return self
+
+    def auto_height(self, padding: int = 2, minimum: int = 5) -> CastRecording:
+        """Set height from the rows the recording occupies at its width.
+
+        A line longer than the width wraps onto a further row. Counting only
+        newlines left the frame too short, the terminal scrolled, and the
+        first command of the cast was cut to its tail.
+        """
+        screen = Screen(self.width, 10**6)
+        for event in self.events:
+            if event.event_type == "o":
+                screen.feed(event.data)
+        self.height = max(screen.max_row + padding, minimum)
         return self
 
     def sanitize(self, replacements: dict[str, str]) -> CastRecording:
         """Replace literal strings in all event data (paths, registry names, etc.)."""
         self._merge_close_events()
-        for event in self.events:
-            for old, new in replacements.items():
-                event.data = event.data.replace(old, new)
+        self._substitute(_sanitize_passes(replacements))
         return self
 
     def strip_progress(self) -> CastRecording:
@@ -122,8 +229,9 @@ class CastRecording:
         """
         self._merge_close_events()
         for event in self.events:
-            if "\u2800" <= event.data[:1] <= "\u28FF" or "⠁" in event.data:
-                event.data = _PROGRESS_PREFIX_RE.sub("", event.data)
+            event.data = _PROGRESS_PREFIX_RE.sub("", event.data)
+        # A bar pads itself to the PTY width; those blanks would wrap in any narrower frame.
+        self._substitute([(_PAD_BEFORE_CR_RE, "")])
         return self
 
     def truncate_digests(self) -> CastRecording:
@@ -142,13 +250,12 @@ class CastRecording:
         Merges close events first so digest patterns aren't split across PTY chunks.
         """
         self._merge_close_events()
-        for event in self.events:
-            event.data = _DIGEST_PATH_RE.sub(r"sha256/\1..", event.data)
-            event.data = _DIGEST_REF_RE.sub(r"@\1sha256:\2..", event.data)
-            event.data = _DIGEST_BARE_RE.sub(r"sha256:\1..", event.data)
+        self._substitute(_DIGEST_PASSES)
         return self
 
-    def realign_tables(self) -> CastRecording:
+    def realign_tables(
+        self, shorten: Callable[[str], str] = lambda cell: cell
+    ) -> CastRecording:
         """Re-align decorated tables after content-shortening replacements.
 
         ``truncate_digests`` / ``sanitize`` shrink cell content *after* the
@@ -167,6 +274,10 @@ class CastRecording:
         underline is re-extended across the GAP so it stays one line; the
         zebra dim is re-applied across the GAP on odd rows.
         """
+        # `shorten` runs on each cell here, before sanitize/truncate, so a cell
+        # is found by the header's column starts while the binary's padding is
+        # intact; an empty cell then cannot shift its neighbours.
+        self._merge_close_events()
 
         def analyze(line: str) -> tuple[str, list[int], list[tuple[int, int]]]:
             """Return (visible, vmap, escs): visible text, the raw index of
@@ -245,9 +356,25 @@ class CastRecording:
                     dv, dmap, desc = analyze(lines[j])
                     if not dv.strip():
                         break
+                    if _UNDERLINE in lines[j]:
+                        break  # a new header, or a footnote: not a row
                     dsp = spans(dv)
                     if len(dsp) != ncols:
-                        break
+                        # An empty cell leaves a wider gap, not a missing one:
+                        # place each cell under the header column it starts in.
+                        starts = [hs for hs, _ in hsp]
+                        # A cell fits the header column it starts in; a longer
+                        # run is a sentence under the table, not a row.
+                        edges = [*starts[1:], 10**9]
+                        if not dsp or any(
+                            ds not in starts or de - ds > edges[starts.index(ds)] - ds - len(_GAP)
+                            for ds, de in dsp
+                        ):
+                            break
+                        cells: list[tuple[int, int] | None] = [None] * ncols
+                        for sp_ in dsp:
+                            cells[starts.index(sp_[0])] = sp_
+                        dsp = cells
                     block.append((j, lines[j], dmap, desc, dsp))
                     j += 1
                 if len(block) < 2:
@@ -255,9 +382,11 @@ class CastRecording:
                     continue
 
                 widths = [0] * ncols
-                for _, _, _, _, sp in block:
-                    for c, (s, e) in enumerate(sp):
-                        widths[c] = max(widths[c], e - s)
+                for _, raw, vmap, escs, sp in block:
+                    for c, span in enumerate(sp):
+                        if span is not None:
+                            cell = shorten(self._cell_raw(raw, vmap, escs, span))
+                            widths[c] = max(widths[c], len(_SGR_RE.sub("", cell)))
 
                 for rrow, (idx, raw, vmap, escs, sp) in enumerate(block):
                     is_header = rrow == 0
@@ -266,28 +395,21 @@ class CastRecording:
                     is_zebra = (not is_header) and (rrow - 1) % 2 == 1
                     lead_first = ""
                     parts: list[str] = []
-                    for c, (s, e) in enumerate(sp):
-                        cs = vmap[s]
-                        ce = vmap[e - 1] + 1
-                        # Absorb the ANSI directly bracketing the content so
-                        # colour / dim / underline is preserved; never a
-                        # space, so multi-part colour stays intact.
-                        ls = cs
-                        while any(en == ls for _, en in escs):
-                            ls = next(st for st, en in escs if en == ls)
-                        te = ce
-                        while any(st == te for st, _ in escs):
-                            te = next(en for st, en in escs if st == te)
-                        if c == 0:
-                            lead_first = raw[ls:cs]
-                        pad_n = widths[c] - (e - s)
+                    for c, span in enumerate(sp):
+                        if span is None:
+                            parts.append(" " * widths[c])
+                            continue
+                        cell = shorten(self._cell_raw(raw, vmap, escs, span))
+                        if c == 0 and is_header:
+                            lead_first = self._cell_lead(raw, vmap, escs, span)
+                        pad_n = widths[c] - len(_SGR_RE.sub("", cell))
                         if is_header:
                             # Keep the pad underlined too, else the header
                             # underline breaks under each column's padding.
                             pad = lead_first + " " * pad_n + _RESET
                         else:
                             pad = " " * pad_n
-                        parts.append(raw[ls:te] + pad)
+                        parts.append(cell + pad)
                     if is_header:
                         gap = lead_first + _GAP + _RESET
                     elif is_zebra:
@@ -302,6 +424,42 @@ class CastRecording:
             if changed:
                 event.data = prefix + "\r\n".join(new_lines)
         return self
+
+    def _substitute(self, passes: list[tuple[re.Pattern[str], str]]) -> None:
+        outputs = [e for e in self.events if e.event_type == "o"]
+        for pattern, repl in passes:
+            for event, data in zip(outputs, _substitute_stream([e.data for e in outputs], pattern, repl)):
+                event.data = data
+
+    @staticmethod
+    def _cell_bounds(
+        vmap: list[int], escs: list[tuple[int, int]], span: tuple[int, int]
+    ) -> tuple[int, int, int]:
+        """Raw ``(lead_start, content_start, trail_end)`` of a visible span.
+
+        Absorbs the ANSI directly bracketing the content so colour / dim /
+        underline is preserved; never a space, so multi-part colour stays
+        intact.
+        """
+        s, e = span
+        cs = vmap[s]
+        ls = cs
+        while any(en == ls for _, en in escs):
+            ls = next(st for st, en in escs if en == ls)
+        te = vmap[e - 1] + 1
+        while any(st == te for st, _ in escs):
+            te = next(en for st, en in escs if st == te)
+        return ls, cs, te
+
+    @classmethod
+    def _cell_raw(cls, raw, vmap, escs, span) -> str:
+        ls, _, te = cls._cell_bounds(vmap, escs, span)
+        return raw[ls:te]
+
+    @classmethod
+    def _cell_lead(cls, raw, vmap, escs, span) -> str:
+        ls, cs, _ = cls._cell_bounds(vmap, escs, span)
+        return raw[ls:cs]
 
     def _merge_close_events(self, threshold: float = 0.05) -> None:
         """Merge consecutive output events within *threshold* seconds."""
@@ -341,7 +499,7 @@ class CastRecorder:
         self,
         env: dict[str, str],
         *,
-        width: int = 100,
+        width: int = 120,
         height: int = 24,
         prompt: str = "$ ",
         typing_delay: float = 0.04,

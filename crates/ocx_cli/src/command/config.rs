@@ -54,7 +54,7 @@ pub enum ConfigGroup {
         first and records the pause only once the sync persists. An update without `--pause` \
         clears an active pause.\n\n\
         The snapshot identity is the repository, not the tag, so a pinned snapshot still \
-        satisfies the `required` gate of a seed tracking a floating tag. A pause affects only the \
+        satisfies the `required` gate of a seed tracking a rolling tag. A pause affects only the \
         background tick, never the `required` gate or an explicit update.\n\n\
         `--check` never modifies the pause file, and probes only the registry's top-level \
         manifest digest. Offline or on any probe failure it degrades to a local-state report \
@@ -70,22 +70,22 @@ pub enum ConfigGroup {
     /// Check a config file and preview the configuration it would produce.
     #[command(long_about = "\
         Check a config file and preview the configuration it would produce.\n\n\
-        Runs the same checks `ocx config push` runs before publishing (parses as an ocx \
+        Runs the same checks `ocx config push` runs before publishing (parses as an OCX \
         config, carries no `[managed]` section, at most 64 KiB). It reports the configuration \
         this machine would resolve once the payload is adopted: default registry, registries, \
         mirrors and the `[patches]` tier. It also reports the machine's own `[managed]` posture. \
-        Keys this ocx does not recognize are listed as warnings and do not fail the run. They \
-        are equally typos and settings a newer ocx understands.\n\n\
+        Keys this OCX does not recognize are listed as warnings and do not fail the run. They \
+        are equally typos and settings a newer OCX understands.\n\n\
         Keys inside a `[mirrors]` entry are not checked.\n\n\
         Validates locally; nothing is published, adopted, or written. Exits 78 when the file \
         is not a publishable payload.\n\n\
         The preview reproduces the adoption fold order: this machine's discovered tiers first, \
-        then the candidate, then any explicit `--config` / `OCX_CONFIG` overlay. The \
-        machine's current managed snapshot is never used, because the candidate stands in for it. An overlay wins \
-        over the candidate only for the keys it sets.\n\n\
+        then the payload under test, then any explicit `--config` / `OCX_CONFIG` overlay. The \
+        machine's current managed snapshot is never used, because the payload stands in for it. An overlay wins \
+        over the payload only for the keys it sets.\n\n\
         The merged result also passes the gates every invocation applies. An invalid \
         `[mirrors.\"<host>\"]` entry fails the command. That means an unparseable URL, or plain \
-        HTTP for a host the candidate does not declare insecure. An empty `[patches] registry` \
+        HTTP for a host the payload does not declare insecure. An empty `[patches] registry` \
         fails the command too.\n\n\
         `--format json` always carries `candidate`, `valid`, `registries`, `mirrors`, `plain_http` \
         and `unknown_keys`, each `[]` when empty. `registry_default`, `patches` and `managed` \
@@ -95,13 +95,13 @@ pub enum ConfigGroup {
     /// Publish a config file as a managed-config package.
     #[command(long_about = "\
         Publish a config file as a managed-config package.\n\n\
-        Validates the payload (must parse as an ocx config, must not contain a `[managed]` \
+        Validates the payload (must parse as an OCX config, must not contain a `[managed]` \
         section, at most 64 KiB) and stages it as `config.toml`. It then pushes the payload as an ordinary \
         package, so fleets adopt it via `ocx self setup --managed-config` and `ocx config update`.\n\n\
         The payload can never redirect the tier that fetches it, hence no `[managed]` section. It \
         is bundled as a tar+gzip layer and pushed with the machinery of `ocx package push`.\n\n\
         With `--cascade`, pushing `user-1.4.2` also advances `user-1.4`, `user-1` and `user`, so \
-        fleets track a floating tag while hosts can still pin any version.")]
+        fleets track a rolling tag while hosts can still pin any version.")]
     Push(super::config_push::ConfigPushArgs),
 }
 

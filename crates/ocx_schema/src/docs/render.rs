@@ -73,43 +73,55 @@ const PROJECT_ID_OVERRIDES: &[(&str, &str)] = &[
 
 /// `(key prefix, link text, target)`: the guide or explanation that uses a key, one See line per entry.
 const CONFIG_SEE: &[(&str, &str, &str)] = &[
-    ("extra_ca_certs", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("extra_ca_certs_pem", "Proxy and CA", "../integration/proxy-and-ca.md"),
+    (
+        "extra_ca_certs",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    (
+        "extra_ca_certs_pem",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
     (
         "managed",
-        "Manage configuration centrally",
+        "Manage configuration for a fleet",
         "../guides/manage-config-centrally.mdx",
     ),
-    ("mirrors", "Corporate mirror", "../guides/corporate-mirror.mdx"),
-    ("patches", "Patch packages", "../guides/patch-packages.mdx"),
-    ("records", "Execution records", "../explanation/execution-records.md"),
+    ("mirrors", "Use a corporate mirror", "../guides/corporate-mirror.mdx"),
+    (
+        "patches",
+        "Patch packages for your infrastructure",
+        "../guides/patch-packages.mdx",
+    ),
+    ("records", "Execution records", "../explanation/execution-records.mdx"),
     (
         "registries.<name>.index",
         "Public index",
-        "../explanation/public-index.md",
+        "../explanation/public-index.mdx",
     ),
     (
         "registries.<name>.index",
         "Serve an index",
-        "../guides/serve-an-index.md",
+        "../guides/serve-an-index.mdx",
     ),
     (
         "registries.<name>.insecure",
-        "Corporate mirror",
+        "Use a corporate mirror",
         "../guides/corporate-mirror.mdx",
     ),
     (
         "registries.<name>.trusted_hosts",
-        "Corporate mirror",
+        "Use a corporate mirror",
         "../guides/corporate-mirror.mdx",
     ),
-    ("registry", "Configure ocx", "../guides/configure-ocx.mdx"),
+    ("registry", "Configure OCX defaults", "../guides/configure-ocx.mdx"),
     (
         "shell.completions",
         "Shell integration",
         "../explanation/shell-integration.mdx",
     ),
-    ("shell.consent", "Shell consent", "../explanation/shell-consent.mdx"),
+    ("shell.consent", "Consent grammar", "../explanation/shell-consent.mdx"),
     (
         "shell.hook",
         "Shell integration",
@@ -127,19 +139,23 @@ const CONFIG_SEE: &[(&str, &str, &str)] = &[
     ),
     // After the `shell.*` rows: the first covering row wins, so the section itself gets the general page.
     ("shell", "Shell integration", "../explanation/shell-integration.mdx"),
-    ("toolchain_dir", "Project toolchain", "../guides/project-toolchain.mdx"),
+    ("toolchain_dir", "ocx.toml in depth", "../guides/project-toolchain.mdx"),
     (
         "trust.policy",
-        "Pin a signer identity",
+        "Trust signers with a policy",
         "../guides/pin-signer-identity.mdx",
     ),
     (
         "trust.sigstore",
         "Self-hosted Sigstore",
-        "../guides/self-hosted-sigstore.md",
+        "../guides/self-hosted-sigstore.mdx",
     ),
-    ("trust", "Pin a signer identity", "../guides/pin-signer-identity.mdx"),
-    ("update", "Update ocx", "../guides/update-ocx.mdx"),
+    (
+        "trust",
+        "Trust signers with a policy",
+        "../guides/pin-signer-identity.mdx",
+    ),
+    ("update", "Update or uninstall OCX", "../guides/update-ocx.mdx"),
 ];
 
 /// `(key, default)`: the default a key has when its schema states none, as the page prints it.
@@ -190,13 +206,13 @@ const CONFIG_VARIABLES: &[(&str, &str, &str, &str)] = &[
 ];
 const PROJECT_SEE: &[(&str, &str, &str)] = &[
     ("env", "Environments", "../explanation/environments.mdx"),
-    ("tools", "Project toolchain", "../guides/project-toolchain.mdx"),
+    ("tools", "ocx.toml in depth", "../guides/project-toolchain.mdx"),
     (
         "activate",
         "Toolchain activation",
-        "../explanation/toolchain-activation.md",
+        "../explanation/toolchain-activation.mdx",
     ),
-    ("group", "Project groups", "../explanation/project-groups.md"),
+    ("group", "Project groups", "../explanation/project-groups.mdx"),
     ("lazy-mode", "Deferred packages", "../explanation/deferred-packages.mdx"),
     (
         "lazy-report",
@@ -207,9 +223,13 @@ const PROJECT_SEE: &[(&str, &str, &str)] = &[
     (
         "pinned",
         "Toolchain activation",
-        "../explanation/toolchain-activation.md",
+        "../explanation/toolchain-activation.mdx",
     ),
-    ("trust", "Pin a signer identity", "../guides/pin-signer-identity.mdx"),
+    (
+        "trust",
+        "Trust signers with a policy",
+        "../guides/pin-signer-identity.mdx",
+    ),
 ];
 
 /// Where a `config.toml` is read from, and the size cap every file obeys.
@@ -285,7 +305,15 @@ pub(super) fn pages(model: &DocsModel) -> Result<Vec<Page>, DocsError> {
     if !listing.is_empty() {
         let rows = listing
             .iter()
-            .map(|(title, file, names)| format!("| [{title}](./{file}) | {names} |"))
+            .map(|(title, file, names)| {
+                // The command is code; a suffix such as ": consuming" stays prose.
+                let text = match title.split_once(':') {
+                    Some((command, rest)) if command.starts_with("ocx ") => format!("`{command}`:{rest}"),
+                    _ if title.starts_with("ocx ") => format!("`{title}`"),
+                    _ => title.clone(),
+                };
+                format!("| [{text}](./{file}) | {names} |")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         index_entries.push(entry(vec![
@@ -629,13 +657,29 @@ const TRUTHY_VALUES: &str = "A boolean variable reads these spellings in any cas
 
 /// `(variable, link text, target)`: the command reference or guide that uses a variable that names no flag.
 const ENV_SEE: &[(&str, &str, &str)] = &[
-    ("ALL_PROXY", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("CI", "Unattended CI", "../integration/unattended-ci.md"),
-    ("DOCKER_CONFIG", "Authenticate", "../guides/authenticate.mdx"),
-    ("HTTPS_PROXY", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("HTTP_PROXY", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("NO_PROXY", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("OCX_ALLOW_YANKED", "Public index", "../explanation/public-index.md"),
+    ("ALL_PROXY", "Proxy and corporate CA", "../integration/proxy-and-ca.mdx"),
+    (
+        "CI",
+        "Run OCX unattended in a pipeline",
+        "../integration/unattended-ci.mdx",
+    ),
+    (
+        "DOCKER_CONFIG",
+        "Authenticate with a private registry",
+        "../guides/authenticate.mdx",
+    ),
+    (
+        "HTTPS_PROXY",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    (
+        "HTTP_PROXY",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    ("NO_PROXY", "Proxy and corporate CA", "../integration/proxy-and-ca.mdx"),
+    ("OCX_ALLOW_YANKED", "Public index", "../explanation/public-index.mdx"),
     (
         "OCX_ANNOUNCE_GIT_TOKEN",
         "Announce from CI",
@@ -653,11 +697,19 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
     ),
     (
         "OCX_AUTH_{REGISTRY}_TOKEN",
-        "Authenticate",
+        "Authenticate with a private registry",
         "../guides/authenticate.mdx",
     ),
-    ("OCX_AUTH_{REGISTRY}_TYPE", "Authenticate", "../guides/authenticate.mdx"),
-    ("OCX_AUTH_{REGISTRY}_USER", "Authenticate", "../guides/authenticate.mdx"),
+    (
+        "OCX_AUTH_{REGISTRY}_TYPE",
+        "Authenticate with a private registry",
+        "../guides/authenticate.mdx",
+    ),
+    (
+        "OCX_AUTH_{REGISTRY}_USER",
+        "Authenticate with a private registry",
+        "../guides/authenticate.mdx",
+    ),
     (
         "OCX_BINARY_PIN",
         "Launcher forwarding",
@@ -665,29 +717,41 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
     ),
     (
         "OCX_CEILING_PATH",
-        "Project toolchain",
+        "ocx.toml in depth",
         "../guides/project-toolchain.mdx",
     ),
     (
         "OCX_CONSENT_NAMESPACES",
-        "Shell consent",
+        "Consent grammar",
         "../explanation/shell-consent.mdx",
     ),
-    ("OCX_CONSENT_PATHS", "Shell consent", "../explanation/shell-consent.mdx"),
-    ("OCX_DEFAULT_REGISTRY", "Configure ocx", "../guides/configure-ocx.mdx"),
-    ("OCX_EXTRA_CA_CERTS", "Proxy and CA", "../integration/proxy-and-ca.md"),
+    (
+        "OCX_CONSENT_PATHS",
+        "Consent grammar",
+        "../explanation/shell-consent.mdx",
+    ),
+    (
+        "OCX_DEFAULT_REGISTRY",
+        "Configure OCX defaults",
+        "../guides/configure-ocx.mdx",
+    ),
+    (
+        "OCX_EXTRA_CA_CERTS",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
     ("OCX_HOME", "Storage", "../explanation/storage.mdx"),
     (
         "OCX_IDENTITY_TOKEN",
         "Sign a release",
-        "../publishing/sign-a-release.md",
+        "../publishing/sign-a-release.mdx",
     ),
     (
         "OCX_INSECURE_REGISTRIES",
-        "Corporate mirror",
+        "Use a corporate mirror",
         "../guides/corporate-mirror.mdx",
     ),
-    ("OCX_KEY_PASSWORD", "Sign a release", "../publishing/sign-a-release.md"),
+    ("OCX_KEY_PASSWORD", "Sign a release", "../publishing/sign-a-release.mdx"),
     (
         "OCX_LAZY_MODE",
         "Deferred packages",
@@ -705,11 +769,19 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
     ),
     (
         "OCX_MANAGED_CONFIG",
-        "Manage configuration centrally",
+        "Manage configuration for a fleet",
         "../guides/manage-config-centrally.mdx",
     ),
-    ("OCX_MIRRORS", "Corporate mirror", "../guides/corporate-mirror.mdx"),
-    ("OCX_NO_CODESIGN", "Platforms", "../troubleshooting/platforms.mdx"),
+    (
+        "OCX_MIRRORS",
+        "Use a corporate mirror",
+        "../guides/corporate-mirror.mdx",
+    ),
+    (
+        "OCX_NO_CODESIGN",
+        "Platform problems",
+        "../troubleshooting/platforms.mdx",
+    ),
     (
         "OCX_NO_COMPLETION",
         "Shell integration",
@@ -721,57 +793,97 @@ const ENV_SEE: &[(&str, &str, &str)] = &[
         "Managed configuration",
         "../explanation/managed-configuration.md",
     ),
-    ("OCX_NO_CONSENT", "Shell consent", "../explanation/shell-consent.mdx"),
+    ("OCX_NO_CONSENT", "Consent grammar", "../explanation/shell-consent.mdx"),
     (
         "OCX_NO_HOOK",
         "Shell integration",
         "../explanation/shell-integration.mdx",
     ),
-    ("OCX_NO_PROJECT", "Project toolchain", "../guides/project-toolchain.mdx"),
-    ("OCX_NO_UPDATE_CHECK", "Update ocx", "../guides/update-ocx.mdx"),
-    ("OCX_NO_VERIFY", "Verify installs", "../guides/verify-installs.mdx"),
-    ("OCX_PATCHES", "Patch packages", "../guides/patch-packages.mdx"),
-    ("OCX_PATCH_SNAPSHOT", "Patch packages", "../guides/patch-packages.mdx"),
+    ("OCX_NO_PROJECT", "ocx.toml in depth", "../guides/project-toolchain.mdx"),
+    (
+        "OCX_NO_UPDATE_CHECK",
+        "Update or uninstall OCX",
+        "../guides/update-ocx.mdx",
+    ),
+    (
+        "OCX_NO_VERIFY",
+        "Verify what you install",
+        "../guides/verify-installs.mdx",
+    ),
+    (
+        "OCX_PATCHES",
+        "Patch packages for your infrastructure",
+        "../guides/patch-packages.mdx",
+    ),
+    (
+        "OCX_PATCH_SNAPSHOT",
+        "Patch packages for your infrastructure",
+        "../guides/patch-packages.mdx",
+    ),
     (
         "OCX_RECORDS_DIR",
         "Execution records",
-        "../explanation/execution-records.md",
+        "../explanation/execution-records.mdx",
     ),
     (
         "OCX_RECORDS_NAME",
         "Execution records",
-        "../explanation/execution-records.md",
+        "../explanation/execution-records.mdx",
     ),
-    ("OCX_SELF_UPDATE", "Update ocx", "../guides/update-ocx.mdx"),
-    ("OCX_SIGNING_KEY", "Sign a release", "../publishing/sign-a-release.md"),
+    ("OCX_SELF_UPDATE", "Update or uninstall OCX", "../guides/update-ocx.mdx"),
+    ("OCX_SIGNING_KEY", "Sign a release", "../publishing/sign-a-release.mdx"),
     (
         "OCX_SIGSTORE_TRUSTED_ROOT",
         "Self-hosted Sigstore",
-        "../guides/self-hosted-sigstore.md",
+        "../guides/self-hosted-sigstore.mdx",
     ),
     (
         "OCX_TOOLCHAIN_ACTIVATE",
         "Toolchain activation",
-        "../explanation/toolchain-activation.md",
+        "../explanation/toolchain-activation.mdx",
     ),
     (
         "OCX_TOOLCHAIN_DIR",
-        "Project toolchain",
+        "ocx.toml in depth",
         "../guides/project-toolchain.mdx",
     ),
     (
         "OCX_TOOLCHAIN_PINNED",
         "Toolchain activation",
-        "../explanation/toolchain-activation.md",
+        "../explanation/toolchain-activation.mdx",
     ),
-    ("OCX_TOOLCHAIN_UPDATE", "Update ocx", "../guides/update-ocx.mdx"),
-    ("OCX_UPDATE_CHECK_INTERVAL", "Update ocx", "../guides/update-ocx.mdx"),
-    ("SSL_CERT_DIR", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("SSL_CERT_FILE", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("all_proxy", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("http_proxy", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("https_proxy", "Proxy and CA", "../integration/proxy-and-ca.md"),
-    ("no_proxy", "Proxy and CA", "../integration/proxy-and-ca.md"),
+    (
+        "OCX_TOOLCHAIN_UPDATE",
+        "Update or uninstall OCX",
+        "../guides/update-ocx.mdx",
+    ),
+    (
+        "OCX_UPDATE_CHECK_INTERVAL",
+        "Update or uninstall OCX",
+        "../guides/update-ocx.mdx",
+    ),
+    (
+        "SSL_CERT_DIR",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    (
+        "SSL_CERT_FILE",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    ("all_proxy", "Proxy and corporate CA", "../integration/proxy-and-ca.mdx"),
+    (
+        "http_proxy",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    (
+        "https_proxy",
+        "Proxy and corporate CA",
+        "../integration/proxy-and-ca.mdx",
+    ),
+    ("no_proxy", "Proxy and corporate CA", "../integration/proxy-and-ca.mdx"),
 ];
 
 fn env_page(vars: &[EnvVarEntry]) -> Page {
@@ -816,7 +928,7 @@ fn env_page(vars: &[EnvVarEntry]) -> Page {
         for var in members {
             let id = ids.claim(&env_id(var), &kebab(&var.name));
             let mut facts = vec![
-                format!("- Visibility: {}", var.visibility),
+                format!("- Audience: {}", var.visibility),
                 format!("- Value: `{}`", var.value),
             ];
             if let Some(flag) = &var.flag {

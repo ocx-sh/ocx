@@ -105,12 +105,12 @@ pub enum Error {
     )]
     LauncherPathNotUtf8 { path: String },
 
-    /// A toolchain home baked into a rendered trampoline or its `.exec` sidecar is not absolute.
+    /// A toolchain root baked into a rendered launcher or its `.exec` sidecar is not absolute.
     #[error("toolchain home is not an absolute path: {value:?}")]
     #[exit(
         DataError,
         slug = "toolchain_home_not_absolute",
-        summary = "The toolchain home is not an absolute path"
+        summary = "The toolchain root baked into a launcher is not an absolute path"
     )]
     ToolchainHomeNotAbsolute { value: String },
     /// An OCI signature verification failed.
@@ -364,7 +364,7 @@ pub enum PackageErrorKind {
     #[exit(
         DataError,
         slug = "link_path_occupied",
-        summary = "The install link path holds something other than an ocx package link"
+        summary = "The install link path holds something other than an OCX package link"
     )]
     LinkPathOccupied(std::path::PathBuf),
     /// A spawned task panicked unexpectedly.
@@ -388,7 +388,7 @@ pub enum PackageErrorKind {
     #[exit(
         DataError,
         slug = "entrypoint_collision",
-        summary = "Two packages declare the same entrypoint name"
+        summary = "Two packages declare the same entry point name"
     )]
     EntrypointCollision {
         name: EntrypointName,

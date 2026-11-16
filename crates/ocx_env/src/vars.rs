@@ -6,10 +6,10 @@
 crate::env_vars! {
     // ── Core configuration ──
 
-    /// Absolute path to the running `ocx`, set on every spawn so a child ocx runs the
+    /// Absolute path to the running `ocx`, set on every spawn so a child OCX runs the
     /// same binary, not whatever `$PATH` resolves.
     ///
-    /// Set by ocx on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
+    /// Set by OCX on every subprocess it spawns, so the inner `ocx launcher exec` of a generated
     /// launcher runs the binary that installed the package. Unset, launchers fall back to
     /// `$PATH`-resolved `ocx`; set it by hand only to pin a specific binary.
     ///
@@ -47,9 +47,9 @@ crate::env_vars! {
     pub OCX_FROZEN: Bool, Public, on_invalid = Error, propagation = UserInput;
     /// Boolean — uses the remote index by default when truthy. Mirrors `--remote`.
     ///
-    /// Routes tag list, catalog and tag resolution to the registry. Pure-query commands (`ocx index
-    /// list`, `ocx index catalog`, `ocx package description pull`) persist nothing; run `ocx index
-    /// update` to refresh the snapshot.
+    /// Routes tag list, catalog and tag resolution to the registry. Pure-query commands (
+    /// `ocx index list`, `ocx index catalog`, `ocx package description pull`) persist nothing; run
+    /// `ocx index update` to refresh the snapshot.
     ///
     /// Digest-addressed reads still consult the local index first. `--remote` takes precedence.
     pub OCX_REMOTE: Bool, Public, propagation = UserInput;
@@ -62,14 +62,14 @@ crate::env_vars! {
     /// a hermetic load.
     pub OCX_CONFIG: Path, Public, propagation = UserInput;
     /// Boolean — skip the discovered config-tier chain; explicit `--config` / `OCX_CONFIG`
-    /// paths still load and a system-scope lock survives. Forwarded to child ocx.
+    /// paths still load and a system-tier lock survives. Forwarded to child OCX.
     ///
-    /// Also drops the `[managed]` snapshot and the `OCX_MANAGED_CONFIG` read. A system-scope policy
+    /// Also drops the `[managed]` snapshot and the `OCX_MANAGED_CONFIG` read. A system-tier policy
     /// in `/etc/ocx/config.toml` still loads, filtered to its locked sections, and an unreadable
     /// system file still aborts (exit 78).
     ///
-    /// Env-only: there is no `--no-config` flag. Hermetic pattern: `OCX_NO_CONFIG=1 ocx --config
-    /// /ci/ocx.toml ...`.
+    /// Env-only: there is no `--no-config` flag. Hermetic pattern:
+    /// `OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml ...`.
     pub OCX_NO_CONFIG: Bool, Public, propagation = UserInput;
     /// Path to an explicit project `ocx.toml`. Mirrors `--project`.
     ///
@@ -86,8 +86,8 @@ crate::env_vars! {
     /// Skips the CWD walk and ignores `OCX_PROJECT`; explicit `--project` still loads. Env-only: no
     /// `--no-project` flag.
     ///
-    /// Forwarded so children also skip discovery. Hermetic pattern: `OCX_NO_PROJECT=1 ocx
-    /// --project /ci/ocx.toml exec -- ...`.
+    /// Forwarded so children also skip discovery. Hermetic pattern:
+    /// `OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- ...`.
     pub OCX_NO_PROJECT: Bool, Public, propagation = UserInput;
     /// Path at which the CWD walk for a project `ocx.toml` stops; relative values join onto the
     /// working directory. An explicit `--project` or `OCX_PROJECT` is not bounded by it.
@@ -101,8 +101,8 @@ crate::env_vars! {
     ///
     /// Forwarded, else a script run by `ocx exec` that calls `ocx pull` stamps after all.
     ///
-    /// Covers `add`, `remove`, `lock`, `update`, `upgrade`, `pull`, `exec` and `init`. `ocx exec
-    /// --no-consent` sets it on the child too; `--consent` does not clear it.
+    /// Covers `add`, `remove`, `lock`, `update`, `upgrade`, `pull`, `exec` and `init`.
+    /// `ocx exec --no-consent` sets it on the child too; `--consent` does not clear it.
     ///
     /// Set it in a pipeline or image, not an interactive profile: exported globally, growing a lock
     /// past the stamped sources leaves the project inert.
@@ -134,13 +134,13 @@ crate::env_vars! {
     ///
     /// Forwarded, or a child with a narrower set cannot reach a registry the parent just pulled from.
     ///
-    /// Union with `[registries.<name>] insecure`; only a system-scope `insecure = false` subtracts.
+    /// Union with `[registries.<name>] insecure`; only a system-tier `insecure = false` subtracts.
     /// Names match exactly as `host[:port]`.
     ///
     /// Also gates plain `http://` `[mirrors]` targets. Credentials travel in the clear; an HTTPS
     /// registry naming an `http` token realm, or redirected to `http://`, is still refused.
     pub OCX_INSECURE_REGISTRIES: HostList, Public, propagation = UserInput;
-    /// Boolean — allow a tag resolving to a yanked index entry. Forwarded to child ocx.
+    /// Boolean — allow a tag resolving to a yanked index entry. Forwarded to child OCX.
     ///
     /// Without it a tag resolve against a yanked entry of the public index exits 65. This holds
     /// online and against a local copy with no network. `ocx index update` does not bypass it. A
@@ -151,18 +151,18 @@ crate::env_vars! {
     // ── Resolution and launch state ──
 
     /// Path to the patch snapshot file `ocx patch freeze` writes, whose pinned digests win over live tag lookups.
-    /// Forwarded to child ocx.
+    /// Forwarded to child OCX.
     ///
     /// While set, every command but `ocx patch sync` (refused, exit 78) and `ocx patch freeze` uses
     /// only the snapshot's pinned digests and records no pin. A companion the snapshot omits is
     /// absent, and a required one fails with exit 79, as does a missing pinned blob under
     /// `--offline`.
     ///
-    /// A format version this ocx cannot read exits 65. Independent of `--frozen`; `ocx clean` roots
+    /// A format version this OCX cannot read exits 65. Independent of `--frozen`; `ocx clean` roots
     /// the snapshot's companions only while this is set.
     pub OCX_PATCH_SNAPSHOT: Path, Public, propagation = UserInput;
     /// JSON object mapping an upstream host to a mirror string or `{"registry"?, "index"?}`,
-    /// the same union `[mirrors."<host>"]` accepts. Forwarded to child ocx.
+    /// the same union `[mirrors."<host>"]` accepts. Forwarded to child OCX.
     ///
     /// A string value redirects both the `registry` and `index` roles; the object form splits them.
     /// A role value is `scheme://host[/repo-key-prefix]`.
@@ -184,10 +184,10 @@ crate::env_vars! {
     /// enable it.
     pub OCX_NO_MODIFY_PATH: Bool, Public, propagation = UserInput;
     /// OCI reference overriding `[managed].source` for this invocation only; empty is unset,
-    /// `OCX_NO_CONFIG` suppresses it. Forwarded to child ocx.
+    /// `OCX_NO_CONFIG` suppresses it. Forwarded to child OCX.
     ///
-    /// Never written back to the seed; only `ocx config setup` and `ocx self setup
-    /// --managed-config` write it. Resolving the tier never fetches: pair the variable with an
+    /// Never written back to the seed; only `ocx config setup` and
+    /// `ocx self setup --managed-config` write it. Resolving the tier never fetches: pair the variable with an
     /// explicit `ocx config update` in CI.
     ///
     /// Forwarded to children. Suppressed entirely by `OCX_NO_CONFIG`.
@@ -201,16 +201,16 @@ crate::env_vars! {
     /// (use `--offline` to skip that).
     ///
     /// The tick is also off when `CI` is truthy, `OCX_OFFLINE` is set or stderr is not a terminal.
-    /// Distinct from `OCX_NO_UPDATE_CHECK`, which covers the ocx self-update notice.
+    /// Distinct from `OCX_NO_UPDATE_CHECK`, which covers the OCX self-update notice.
     pub OCX_NO_CONFIG_REFRESH: Bool, Public, propagation = UserInput;
     /// Directory execution records are written to; absent or empty turns recording off.
     /// Forwarded so every frame of a launch chain records into the outermost sink.
     ///
-    /// Equivalent to `--records-dir` on `ocx exec` and `ocx package exec` and to the `[records]
-    /// dir` key. Unset at every tier means no record and no added I/O.
+    /// Equivalent to `--records-dir` on `ocx exec` and `ocx package exec` and to the
+    /// `[records] dir` key. Unset at every tier means no record and no added I/O.
     ///
     /// Forwarded, so a launcher re-entry (`ocx launcher exec`, which takes no flags) writes to the
-    /// same sink. The flag overrides it; a system-scope `[records]` declaration locks the section
+    /// same sink. The flag overrides it; a system-tier `[records]` declaration locks the section
     /// and this variable then has no effect.
     pub OCX_RECORDS_DIR: Path, Public, propagation = UserInput;
     /// Filename template for each execution record; forwarded alongside `OCX_RECORDS_DIR`.
@@ -222,12 +222,12 @@ crate::env_vars! {
     /// configuration error (exit 78), never a literal.
     ///
     /// Needs a sink from `OCX_RECORDS_DIR`, `--records-dir` or `[records] dir`. Locked with the
-    /// rest of `[records]` under a system-scope policy.
+    /// rest of `[records]` under a system-tier policy.
     pub OCX_RECORDS_NAME: String, Public, propagation = UserInput;
 
     // ── Toolchain ──
 
-    /// Lazy materialisation mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.
+    /// Lazy materialization mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.
     ///
     /// Not forwarded: it changes when content materializes, never which digest resolves.
     ///
@@ -235,22 +235,22 @@ crate::env_vars! {
     /// first invocation. Case-insensitive, unlike the `--lazy-mode` flag and the `ocx.toml` key.
     ///
     /// An unrecognized value is ignored with a warning. Overridden by the `--lazy-mode` flag,
-    /// `[package."<id>"]`, `[group.<name>]` and the toolchain-level `lazy-mode` key.
+    /// `[package."<id>"]`, `[group.<name>]` and the top-level `lazy-mode` key.
     pub OCX_LAZY_MODE: Choice["never", "always"], Public, propagation = UserInput;
-    /// Lazy materialisation report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.
+    /// Lazy materialization report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.
     ///
     /// `silent` (default) or `progress`, case-insensitive. `progress` opens a channel on the
     /// controlling terminal only when the first-invocation download actually happens. It falls
     /// back to `silent` where no terminal is reachable (Docker build, CI, `setsid`).
     ///
     /// Read inside `ocx launcher shim`, never by the composing command. Overridden by
-    /// `--lazy-report`, `[package."<id>"]` and the toolchain-level key; there is no group tier.
+    /// `--lazy-report`, `[package."<id>"]` and the top-level key; there is no group tier.
     pub OCX_LAZY_REPORT: Choice["silent", "progress"], Public, propagation = UserInput;
     /// Toolchain activation mode (`env` / `bin` / `none`), the weakest tier of the `activate`
     /// ladder. Not forwarded, like `OCX_LAZY_MODE`.
     ///
     /// `env` composes the toolchain environment every prompt (default), `bin` puts the home's
-    /// `active/bin` on `PATH` only, `none` withdraws what ocx owns. Case-insensitive, not trimmed.
+    /// `active/bin` on `PATH` only, `none` withdraws what OCX owns. Case-insensitive, not trimmed.
     ///
     /// An unrecognized value warns and falls through to the next tier; the `ocx.toml` key is a
     /// parse error (exit 78). Sits below the `ocx.toml` `activate` key.
@@ -270,7 +270,7 @@ crate::env_vars! {
     ///
     /// Weakest tier: `config.toml` wins. A refused root exits 78.
     pub OCX_TOOLCHAIN_DIR: Path, Public, propagation = UserInput;
-    /// Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child ocx.
+    /// Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.
     ///
     /// Skips the policy-gated auto-verify on `install`, `pull` and every command that auto-installs
     /// on demand (`exec`, `env`, `package exec`, `package env`, patch discovery). Only `install`
@@ -307,7 +307,7 @@ crate::env_vars! {
     /// `ocx shell completion` without `--if-enabled` generates the script regardless; with it, this
     /// variable is the first rung of the policy that decides whether anything prints.
     pub OCX_NO_COMPLETION: Bool, Public, propagation = UserInput;
-    /// Boolean — disables the per-prompt shell reconciler; `ocx self activate` still runs at shell start.
+    /// Boolean — disables the per-prompt shell hook; `ocx self activate` still runs at shell start.
     ///
     /// `ocx self activate` still prepends `PATH`, loads completions and evals the global env, but
     /// registers no per-prompt hook. Read once at shell start, so exporting it mid-session takes
@@ -335,7 +335,7 @@ crate::env_vars! {
     /// Negative or non-numeric values are ignored with a warning; unset is unbounded. `--jobs`
     /// takes precedence.
     pub OCX_JOBS: Integer, Public, propagation = UserInput;
-    /// Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child ocx.
+    /// Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child OCX.
     ///
     /// The checks are also off when `CI` is truthy, `OCX_OFFLINE` is set, stderr is not a terminal,
     /// or the command is `version`, `about` or `shell completion`. The drift notice additionally
@@ -355,20 +355,20 @@ crate::env_vars! {
     /// when stderr is not a terminal or `CI` is set, whatever the interval; `ocx self update`
     /// always bypasses it.
     pub OCX_UPDATE_CHECK_INTERVAL: String, Public, propagation = UserInput;
-    /// `RefreshPolicy` wire value for ocx's own update check; beats `[update] self`. Not forwarded.
+    /// `RefreshPolicy` wire value for OCX's own update check; beats `[update] self`. Not forwarded.
     ///
-    /// `notify` (default) prints a notice naming `ocx self update`, `apply` installs the newer ocx
+    /// `notify` (default) prints a notice naming `ocx self update`, `apply` installs the newer OCX
     /// after the command finishes without changing its exit code, `manual` never checks. Lowercase
     /// only; an unrecognized value is ignored at debug level and falls through.
     ///
     /// Beats the config file. `apply` needs a terminal on stderr, `CI` unset, online, and
-    /// `OCX_NO_UPDATE_CHECK` unset, and does nothing for an ocx that `ocx self setup` did not
+    /// `OCX_NO_UPDATE_CHECK` unset, and does nothing for an OCX that `ocx self setup` did not
     /// install.
     pub OCX_SELF_UPDATE: Choice["apply", "notify", "manual"], Public, propagation = UserInput;
     /// `RefreshPolicy` wire value for the toolchain drift check; beats `[update] toolchain`. Not forwarded.
     ///
-    /// `notify` (default) prints one stderr line per toolchain file with drift, naming `ocx
-    /// update`; `apply` is read as `notify`, since only `ocx update` moves a pin; `manual` never
+    /// `notify` (default) prints one stderr line per toolchain file with drift, naming
+    /// `ocx update`; `apply` is read as `notify`, since only `ocx update` moves a pin; `manual` never
     /// checks. Lowercase only; other values are ignored at debug level.
     ///
     /// The check compares the lock's platform digests with the registry without writing the local
@@ -456,7 +456,7 @@ crate::env_vars! {
     /// `<REGISTRY>` is the registry name with every non-alphanumeric character replaced by `_`, case
     /// kept, so `docker.io` reads `OCX_AUTH_docker_io_TYPE`.
     ///
-    /// Any `OCX_AUTH_*` value set for a registry means ocx never invokes a Docker credential helper
+    /// Any `OCX_AUTH_*` value set for a registry means OCX never invokes a Docker credential helper
     /// for it; `anonymous` opts a registry out of helper lookup entirely.
     pub OCX_AUTH_TYPE = "OCX_AUTH_{REGISTRY}_TYPE": Choice["anonymous", "basic", "token", "bearer"], Public, propagation = UserInput;
     /// User name for one registry; `<REGISTRY>` is the registry slug.
@@ -470,9 +470,9 @@ crate::env_vars! {
 
     // ── Plumbing ──
 
-    /// The execution state: what ocx last applied to the shell, and the policy a parent ocx passed down.
+    /// The execution state: what OCX last applied to the shell, and the policy a parent OCX passed down.
     ///
-    /// The transport state: it tells a value ocx wrote from one you typed, and a child ocx reads it to see what
+    /// The transport state: it tells a value OCX wrote from one you typed, and a child OCX reads it to see what
     /// the shell applied. Crossing into the interactive shell makes it a user-facing contract despite the
     /// private name. `unset __OCX_ENV_STATE` (`unset-env` in elvish) means forget: the next prompt starts over
     /// and leaves the applied values in place.
@@ -490,11 +490,11 @@ crate::env_vars! {
     /// Kept by a shell hook that cannot hold an unexported variable across prompts (elvish); removed at
     /// every projected spawn, so it never reaches a child. Never set it by hand.
     pub __OCX_ENV_STOOD_DOWN: String, Plumbing, propagation = HookLocal;
-    /// Set by ocx on every credential helper it starts until 0.7; an ocx running under it never downloads.
+    /// Set by OCX on every credential helper it starts until 0.7; an OCX running under it never downloads.
     ///
-    /// A helper installed through ocx is a trampoline that starts `ocx exec`; without the marker that
-    /// ocx would install the package the outer ocx is still pulling and wait on its lock. Under the
-    /// marker ocx behaves as if `--offline` were given.
+    /// A helper installed through OCX is a trampoline that starts `ocx exec`; without the marker that
+    /// OCX would install the package the outer OCX is still pulling and wait on its lock. Under the
+    /// marker OCX behaves as if `--offline` were given.
     pub __OCX_CREDENTIAL_HELPER: Bool, Plumbing, propagation = HookLocal;
 
     // ── Test seams ──
@@ -531,7 +531,7 @@ crate::env_vars! {
     pub __OCX_TESTING_SELF_IMAGE: String, Testing, propagation = UserInput;
     /// Store root whose shim publish loses its race.
     pub __OCX_TESTING_SHIM_LOST_PUBLISH_RACE: Path, Testing, propagation = UserInput;
-    /// Path replacing the system-scope config file.
+    /// Path replacing the system-tier config file.
     pub __OCX_TESTING_SYSTEM_CONFIG: Path, Testing, propagation = UserInput;
     /// Milliseconds before the toolchain lock times out.
     pub __OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS: Integer, Testing, propagation = UserInput;

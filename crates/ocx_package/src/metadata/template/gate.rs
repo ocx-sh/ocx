@@ -14,7 +14,7 @@ pub enum Usage {
     EntryPointArgs,
 }
 
-/// The token classes the resolver may substitute; `${installPath}` and its alias always pass.
+/// The token classes the resolver may substitute; `${self.installPath}` and its alias `${installPath}` always pass.
 #[derive(Debug, Clone, Copy)]
 pub struct AllowedTokens {
     /// Whether `${deps.NAME.*}` tokens are permitted.

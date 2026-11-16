@@ -6,7 +6,7 @@ use ocx_package_manager::exec_env::ExecMode;
 /// How a spawned child treats the calling environment.
 #[derive(clap::Args, Clone, Copy, Debug, Default)]
 pub struct ExecModeOptions {
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     ///
     /// Values the user set stay. Without `--isolate` or `--clean`, the composition layers
     /// onto the calling environment. Conflicts with `--clean`.

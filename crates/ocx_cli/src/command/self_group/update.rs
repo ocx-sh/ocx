@@ -16,9 +16,9 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// 75 for `pulled` and `skipped`.
 #[derive(Parser)]
 pub struct SelfUpdate {
-    /// Check for a newer ocx version without installing it.
+    /// Check for a newer OCX version without installing it.
     #[arg(long_help = "\
-        Check for a newer ocx version without installing it.\n\n\
+        Check for a newer OCX version without installing it.\n\n\
         Behaviour:\n\n\
         * Looks up the latest published version live rather than from your local index. Under \
         `--offline` the check is skipped (exit 75). * Always bypasses the 24h auto-check throttle \

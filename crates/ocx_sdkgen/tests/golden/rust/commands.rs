@@ -19,7 +19,7 @@ use super::wire::{Argv, Hyphen, Presence, Secret};
 /// `--quiet`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GlobalOptions {
-    /// Path to the ocx configuration file
+    /// Path to the OCX configuration file
     pub config: Option<PathBuf>,
     /// Project directory, or the project file itself (project-tier toolchain config)
     pub project: Option<PathBuf>,
@@ -85,8 +85,8 @@ pub struct AddArgs {
     pub no_purge: bool,
     /// Target platform to resolve packages against
     pub platform: Option<String>,
-    /// Tool identifiers to add, each optionally prefixed with `NAME=` (e.g. `ocx.sh/cmake:3.28`,
-    /// `glab=ocx.sh/gitlab/cli`)
+    /// Tool identifiers to add, each optionally prefixed with `NAME=` (e.g.
+    /// `ocx.sh/nodejs/node:24`, `glab=ocx.sh/gitlab/cli`)
     pub identifiers: Vec<String>,
 }
 
@@ -320,7 +320,7 @@ impl EnvArgs {
 pub struct ExecArgs {
     /// Restrict to the named group(s)
     pub groups: Vec<String>,
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     pub isolate: bool,
     /// Start the child from an empty environment holding only the composed variables (plus
     /// `SystemRoot` on Windows)
@@ -1150,14 +1150,14 @@ impl PackageEnvArgs {
 /// The arguments of `ocx package exec`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageExecArgs {
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     pub isolate: bool,
     /// Start the child from an empty environment holding only the composed variables (plus
     /// `SystemRoot` on Windows)
     pub clean: bool,
     /// Expose the package's full env, including its private (self-only) entries. Off by default:
-    /// only public + interface entries are loaded (the consumer view). Generated launchers use `ocx
-    /// launcher exec` which enables self-view internally
+    /// only public + interface entries are loaded (the interface surface). Generated launchers use
+    /// `ocx launcher exec` which enables self-view internally
     pub self_view: bool,
     /// Remove the packages from the store once the command finishes
     pub rm: bool,
@@ -1218,8 +1218,7 @@ pub struct PackageInspectArgs {
     pub env: Vec<String>,
     /// Platform-select through the index and emit the OCI resolution chain (pinned identifier and
     /// walk-order chain digests: index, manifest, config) alongside the metadata and layers.
-    /// Without `--resolve` or `--closure`, an image-index reference lists its platform candidates
-    /// instead
+    /// Without `--resolve` or `--closure`, an image index reference lists its platforms instead
     pub resolve: bool,
     /// Compute the metadata-only dependency closure without installing
     pub closure: bool,
@@ -1604,7 +1603,7 @@ pub struct PackageTestArgs {
     /// neither names one. Parity with `package push`
     pub platform: Option<String>,
     /// Materialize into DIR instead of an auto-managed temp dir. DIR must not exist (created by
-    /// ocx) or be empty. Implies keep - the dir is never deleted by ocx. Must reside on the same
+    /// OCX) or be empty. Implies keep - the dir is never deleted by OCX. Must reside on the same
     /// filesystem as `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy
     pub output: Option<PathBuf>,
     /// Preserve the temp build directory after the command exits. Path is printed to stderr.
@@ -1613,7 +1612,7 @@ pub struct PackageTestArgs {
     /// Compose the package's private env surface (default: interface surface). Same semantics as
     /// `ocx exec --self` / `ocx env --self`
     pub self_view: bool,
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     pub isolate: bool,
     /// Start the child from an empty environment holding only the composed variables (plus
     /// `SystemRoot` on Windows)
@@ -1839,7 +1838,7 @@ pub struct PatchTestArgs {
     /// Path to a Starlark test script to run in the composed environment. Mutually exclusive with a
     /// trailing command
     pub script: Option<PathBuf>,
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     pub isolate: bool,
     /// Start the child from an empty environment holding only the composed variables (plus
     /// `SystemRoot` on Windows)
@@ -1924,8 +1923,8 @@ impl PullArgs {
 /// The arguments of `ocx remove`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RemoveArgs {
-    /// Bindings to remove (binding name or fully-qualified identifier, e.g. `cmake` or
-    /// `ocx.sh/cmake:3.28`)
+    /// Bindings to remove (binding name or fully-qualified identifier, e.g. `node` or
+    /// `ocx.sh/nodejs/node:24`)
     pub identifiers: Vec<String>,
     /// Target a specific group. Use `default` to target the implicit `\[tools\]` table, or a named
     /// group (e.g. `ci`) to target `\[group.ci\]`. Without this flag, all groups are searched; if
@@ -2005,7 +2004,7 @@ pub struct SelfSetupArgs {
     pub toolchain_activate: Option<String>,
     /// Version to install: tag, `sha256:<hex>`, or `tag@sha256:<hex>`
     pub version: Option<String>,
-    /// Write the env shims but touch neither a shell profile nor the session PATH
+    /// Write the env files but touch neither a shell profile nor the session PATH
     pub no_modify_path: bool,
     /// Target an explicit profile file. Repeatable
     pub profile: Vec<PathBuf>,
@@ -2046,7 +2045,7 @@ impl SelfSetupArgs {
 /// The arguments of `ocx self update`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SelfUpdateArgs {
-    /// Check for a newer ocx version without installing it
+    /// Check for a newer OCX version without installing it
     pub check: bool,
 }
 
@@ -2069,7 +2068,7 @@ pub struct ShellArgs {
     pub pinned: bool,
     /// Compose through the toolchain links instead of digest paths
     pub no_pinned: bool,
-    /// Remove every value ocx applied to the calling environment before composing
+    /// Remove every value OCX applied to the calling environment before composing
     pub isolate: bool,
     /// Start the child from an empty environment holding only the composed variables (plus
     /// `SystemRoot` on Windows)
@@ -2276,7 +2275,7 @@ impl VersionArgs {
 }
 
 impl Ocx {
-    /// Print ocx version, registry, platform, shell, and home directory
+    /// Print OCX version, registry, platform, shell, and home directory
     ///
     /// Runs `ocx about`.
     pub fn about(&self) -> Result<About, Error> {
@@ -2610,7 +2609,7 @@ impl Ocx {
         self.call_passthrough("package exec", &[], argv)
     }
 
-    /// Inspect one or more package references (candidates, metadata, or resolution chain)
+    /// Inspect one or more package references (platforms, metadata, or resolution chain)
     ///
     /// Runs `ocx package inspect`.
     pub fn package_inspect(&self, args: &PackageInspectArgs) -> Result<Outcome<InspectReport>, Error> {
@@ -2795,7 +2794,7 @@ impl Ocx {
         self.call("remove", "LockReport", argv)
     }
 
-    /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell.
+    /// Sourced from `$OCX_HOME/env.sh` at shell startup to activate OCX in the current shell.
     /// Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless
     /// `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source
     /// never duplicates an entry
@@ -2807,7 +2806,7 @@ impl Ocx {
         self.call_raw("self activate", &[], argv)
     }
 
-    /// Create or refresh ocx shell integration
+    /// Create or refresh OCX shell integration
     ///
     /// Runs `ocx self setup`.
     pub fn self_setup(&self, args: &SelfSetupArgs) -> Result<SelfSetupData, Error> {
@@ -2816,7 +2815,7 @@ impl Ocx {
         self.call("self setup", "SelfSetupData", argv)
     }
 
-    /// Update ocx itself to the latest released version. Without `--check`, downloads the newest
+    /// Update OCX itself to the latest released version. Without `--check`, downloads the newest
     /// release and activates it; with `--check`, reports the result without installing
     ///
     /// Runs `ocx self update`.
@@ -2898,7 +2897,7 @@ impl Ocx {
         self.call_raw("upgrade", &["UpgradeReport", "VerboseUpgradeReport"], argv)
     }
 
-    /// Print the version of ocx
+    /// Print the version of OCX
     ///
     /// Runs `ocx version`.
     pub fn version(&self, args: &VersionArgs) -> Result<Raw, Error> {

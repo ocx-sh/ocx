@@ -3,7 +3,7 @@
 
 //! Interpolation-token resolution for metadata string fields.
 //!
-//! Four bodies are recognised (`${installPath}`, alias `${self.installPath}`,
+//! Four bodies are recognised (`${self.installPath}`, alias `${installPath}`,
 //! `${self.env.KEY}`, `${deps.NAME.installPath}`), each with an optional `:native` /
 //! `:posix` modifier; any other `${…}` is an error, and `$${` is the only literal `${`.
 

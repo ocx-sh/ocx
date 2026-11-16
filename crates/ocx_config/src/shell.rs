@@ -55,7 +55,7 @@ pub struct ShellConfig {
     /// the session-PATH stores alike. Absent means true.
     pub modify_path: Option<bool>,
 
-    /// Which shell profile files receive the managed ocx block.
+    /// Which shell profile files receive the managed OCX block.
     ///
     /// Absent means auto-detect fresh on every run; an empty list means write
     /// no profile blocks at all.

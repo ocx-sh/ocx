@@ -7,7 +7,7 @@ Every OCX package carries a `metadata.json` that declares how OCX extracts and c
 
 ## Format {#format}
 
-The metadata file is a JSON object with a `type` discriminator. Only the `bundle` type exists, and ocx rejects an unknown `type` with an error.
+The metadata file is a JSON object with a `type` discriminator. Only the `bundle` type exists, and OCX rejects an unknown `type` with an error.
 
 ### Top-Level Structure {#format-top-level}
 
@@ -36,7 +36,7 @@ A package with no environment variables and no extraction options.
 
 ### Full Example {#format-full}
 
-A language runtime with environment variables, archive stripping, a dependency, declared executables and named entry points.
+A package, here `acme/mytool`, with environment variables, archive stripping, a dependency, declared executables and named entry points.
 
 ```json
 {
@@ -49,36 +49,36 @@ A language runtime with environment variables, archive stripping, a dependency, 
       "key": "PATH",
       "type": "path",
       "required": true,
-      "value": "${installPath}/bin",
+      "value": "${self.installPath}/bin",
       "visibility": "public"
     },
     {
-      "key": "JAVA_HOME",
+      "key": "MYTOOL_HOME",
       "type": "constant",
-      "value": "${installPath}",
+      "value": "${self.installPath}",
       "visibility": "public"
     },
     {
       "key": "LD_LIBRARY_PATH",
       "type": "path",
       "required": false,
-      "value": "${installPath}/lib"
+      "value": "${self.installPath}/lib"
     }
   ],
   "dependencies": [
     {
-      "identifier": "ocx.sh/gcc:13@sha256:a1b2c3d4e5f6..."
+      "identifier": "ghcr.io/acme/runtime:13@sha256:a1b2c3d4e5f6..."
     }
   ],
-  "binaries": ["cmake", "cpack", "ctest"],
+  "binaries": ["mytool", "mytool-format"],
   "entrypoints": {
-    "cmake": {},
-    "fmt": { "command": "cmake-format" }
+    "mytool": {},
+    "fmt": { "command": "mytool-format" }
   }
 }
 ```
 
-The `cmake` entry point dispatches to a binary named `cmake`, and `fmt` dispatches to `cmake-format`. `binaries` declares separately which executables the interface `PATH` carries, as [Executables](./entry-points.md#executables) describes.
+The `mytool` entry point dispatches to a binary named `mytool`, and `fmt` dispatches to `mytool-format`. `binaries` declares separately which executables the interface `PATH` carries, as [Executables](./entry-points.md#executables) describes.
 
 ## Extraction {#extraction}
 
@@ -91,7 +91,7 @@ Extraction options control how OCX unpacks the package layers into the object st
 | Value | Effect |
 |---|---|
 | omitted / `0` | Extract as-is. |
-| `1` | Remove one leading directory: `cmake-3.28/bin` becomes `bin`. |
+| `1` | Remove one leading directory: `node-v24.21.0-linux-x64/bin` becomes `bin`. |
 | `2` | Remove two: `a/b/bin` becomes `bin`. |
 
 - Per-layer override: a `strip`/`prefix` pair in the manifest layer descriptor's annotations, set with `<ref>:strip=N,prefix=P` on [`ocx package push`][cmd-package-push].
@@ -107,7 +107,7 @@ The schema is generated from the Rust source types and published at [`https://oc
 
 ## OCI Platform Fields {#oci-platform}
 
-The OCI platform descriptor, the `platform` object in an [OCI Image Index][oci-image-index] entry, is not part of `metadata.json`. The publisher declares it at push time and OCX consumes it at index resolution time.
+The OCI platform descriptor, the `platform` object in an [image index][oci-image-index] entry, is not part of `metadata.json`. The publisher declares it at push time and OCX consumes it at index resolution time.
 
 See [Platforms][reference-platforms] for the string form (`--platform`, lock keys, the build receipt's `platform` field) and the compatibility relation.
 
@@ -152,5 +152,5 @@ See [libc Differentiation][authoring-libc] for the publisher workflow.
 [machine-interface-schemas]: ../machine-interface.md#machine-interface-schemas
 
 <!-- guides -->
-[authoring-libc]: ../../publishing/libc-variants.md#libc
+[authoring-libc]: ../../publishing/libc-variants.mdx#libc
 [fs-objects]: ../../explanation/storage.mdx#packages

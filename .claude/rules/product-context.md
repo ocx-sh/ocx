@@ -79,7 +79,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 | 9 | First-class corporate / air-gapped mirror support | Explicit `[mirrors]` config routes OCI read traffic to Artifactory/Nexus/Harbor with host+repo-key path-prefix rewrite, replace semantics (no egress fallback), content-address verified; a gap mise/asdf/ORAS do not close. Reinforces Principle #7 (Private-first). |
 | 10 | Automatic libc/ABI resolution | glibc vs musl selected per-host from one OCI index; no `-musl` tag suffixes, no separate repos |
 | 11 | Centrally managed corporate config as ordinary OCX package | `[managed]` config tier syncs mirrors/patches-pointer/default-registry settings from one operator-published `config.toml` package per fleet (`ocx config push` — versioned tags, cascades, per-host pins/rollbacks/pause reuse the package machinery); identity-gated local snapshot means config resolution stays network-free on every ordinary command, refresh never blocks, required-but-absent snapshot fails closed. Deliberately pull-based and console-free: fleet visibility is `ocx config update --check --format json` in existing inventory tooling. Rolls out a fleet-wide config change without re-provisioning every host — a gap mise/asdf/ORAS do not close either. Reinforces Principle #7 (Private-first). |
-| 12 | Keyless Sigstore signing (v1 scope) | Sign + verify via OCI Referrers, identity-pinned `[[trust.policy]]`, offline/auto-verify. Real Sigstore throughout: public-good trust root over TUF, standard Rekor SET + Merkle proof (verification delegated to `sigstore-rs`), cosign 3.x bundle interop, and a self-hostable stack (Fulcio/Rekor/TesseraCT/dex) the acceptance suite runs against. Rekor v2 and DSSE attestations deferred — see signing.md § Deferred to Future Work |
+| 12 | Keyless Sigstore signing (v1 scope) | Sign + verify via OCI Referrers, identity-pinned `[[trust.policy]]`, offline/auto-verify. Real Sigstore throughout: public-good trust root over TUF, standard Rekor SET + Merkle proof (verification delegated to `sigstore-rs`), cosign 3.x bundle interop, and a self-hostable stack (Fulcio/Rekor/TesseraCT/dex) the acceptance suite runs against. Rekor v2 and DSSE attestations deferred — see the Current Limitations section of `website/src/content/docs/explanation/signing.mdx` |
 
 ## Competitive Positioning
 
@@ -117,14 +117,14 @@ Distributing pre-built binaries across platforms and teams fragmented:
 ## CLI at a Glance
 
 ```bash
-ocx install cmake:3.28              # Fetch + install (auto-detect platform)
-ocx install cmake:3.28 --select     # Also set as "current"
-ocx exec cmake:3.28 -- cmake --version   # Layer onto the caller's environment (--clean: package vars only)
-ocx env cmake:3.28                  # Print resolved environment variables
-ocx select cmake:3.28               # Set "current" to this version
-ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish
-ocx package sign -p linux/amd64 my/cmake:3.28            # Keyless Sigstore sign via OCI Referrers
-ocx package verify -p linux/amd64 my/cmake:3.28 \        # Keyless verify (self-hosted stack: --sigstore-trusted-root or [trust.sigstore])
+ocx package install nodejs/node:24            # Fetch + install (auto-detect platform)
+ocx package install nodejs/node:24 --select   # Also set as "current"
+ocx package exec nodejs/node:24 -- node --version   # Layer onto the caller's environment (--clean: package vars only)
+ocx package env nodejs/node:24                # Print resolved environment variables
+ocx package select nodejs/node:24             # Set "current" to this version
+ocx package push -p linux/amd64 -i acme/mytool:1.0.0 --cascade mytool.tar.xz  # Publish
+ocx package sign acme/mytool:1.0.0            # Keyless Sigstore sign via OCI Referrers
+ocx package verify acme/mytool:1.0.0 \        # Keyless verify (self-hosted stack: --sigstore-trusted-root or [trust.sigstore])
   --certificate-identity you@example.com \
   --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects

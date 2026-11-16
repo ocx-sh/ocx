@@ -70,7 +70,7 @@ config_io	IoError	Reading a config file failed
 config_parse	ConfigError	A config file does not parse
 credential_helper_failed	AuthError	The credential helper failed to supply credentials
 credential_helper_invalid_json	DataError	The credential helper answered with invalid JSON
-credential_helper_not_installed	PolicyBlocked	The credential helper is not installed, and an ocx started by a credential helper never downloads
+credential_helper_not_installed	PolicyBlocked	The credential helper is not installed, and an OCX started by a credential helper never downloads
 credential_helper_not_on_path	ConfigError	The configured credential helper is not on PATH
 credential_helper_timeout	TempFail	The credential helper did not answer in time
 credential_helper_unsafe_path	ConfigError	The credential helper resolves to an unsafe path
@@ -106,7 +106,7 @@ empty_group_filter	UsageError	A group filter names an empty group
 empty_group_filter	UsageError	A group filter names an empty group
 empty_push_set	DataError	A push names no target platform
 endpoint_unresolvable	Unavailable	An endpoint host does not resolve
-entrypoint_collision	DataError	Two packages declare the same entrypoint name
+entrypoint_collision	DataError	Two packages declare the same entry point name
 envrc_exists	ConfigError	An .envrc already exists and --force was not given
 extra_ca_certs_invalid	DataError	The extra CA bundle the payload names is not usable
 extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
@@ -135,8 +135,8 @@ forge_publisher_not_allowlisted	PermissionDenied	The publishing project is not o
 forge_push_access_denied	AuthError	The credential may not push to the repository
 forge_push_refused	PermissionDenied	The forge refused the push
 forge_request_encode	Failure	A forge request body could not be encoded
-forge_required	Failure	No forge was supplied to read the committed index root through
-forge_required	Failure	No forge was supplied to read the committed index root through
+forge_required	Failure	No forge was supplied to read the committed root document through
+forge_required	Failure	No forge was supplied to read the committed root document through
 forge_stale_lease	TempFail	The branch moved since it was read
 forge_status	Failure	The forge answered with an unexpected HTTP status
 forge_transient	TempFail	The forge answered with a status a retry may clear
@@ -169,14 +169,14 @@ index_manifest_not_found	NotFound	The registry has no manifest for a tag the ind
 index_named_by_digest	UsageError	The source names an image index by digest, which cannot merge into the target
 index_path_invalid	Failure	A local index path is invalid
 index_resolution_blocked	PolicyBlocked	A local policy refused resolving through the index
-index_root_missing_field	Failure	The committed index root lacks a required field
-index_root_not_object	Failure	The committed index root is not a JSON object
-index_root_parse	Failure	The committed index root is not valid JSON
+index_root_missing_field	Failure	The committed root document lacks a required field
+index_root_not_object	Failure	The committed root document is not a JSON object
+index_root_parse	Failure	The committed root document is not valid JSON
 index_serialization	DataError	An index document could not be serialized
 index_singleflight_failed	Failure	A shared index operation failed with an unclassified cause
 index_source_failed	Failure	An index source failed with an unclassified cause
 index_source_not_published	ConfigError	The registry is not a published index source, so it has no catalog to regenerate
-integration_namespace_invalid	DataError	An integrations namespace is invalid
+integration_namespace_invalid	DataError	An integration key is invalid
 integration_too_large	DataError	An integrations payload exceeds its size limit
 integrations_too_large	DataError	A package's integrations exceed the per-package size limit
 internal	Failure	A failure no classifier recognises
@@ -201,7 +201,7 @@ invalid_layer_layout	DataError	A layer's strip-components or prefix annotation i
 invalid_layer_ref	UsageError	A layer reference or its layout suffix does not parse
 invalid_list_separator	DataError	A package env entry declares an unusable list separator
 invalid_logo_content	DataError	The logo file's content does not match its format
-invalid_managed_config_source	ConfigError	The managed-config source is not a valid OCI identifier
+invalid_managed_config_source	ConfigError	The managed-config source is not a valid identifier
 invalid_manifest	DataError	A manifest is invalid
 invalid_owner_login	UsageError	An owner login carries a character outside letters, digits, dot, underscore and hyphen
 invalid_platform	DataError	A platform string does not follow the platform grammar
@@ -230,7 +230,7 @@ libc_lint_read	IoError	Reading a file while checking its libc requirement failed
 libc_lint_scan_failed	Failure	Walking the content tree for the libc check failed with an unclassified cause
 libc_scan_scope_modifier	DataError	The libc scan scope carries a modifier it cannot honour
 libc_scan_scope_unresolvable	DataError	The libc scan scope cannot be resolved
-link_path_occupied	DataError	The install link path holds something other than an ocx package link
+link_path_occupied	DataError	The install link path holds something other than an OCX package link
 list_separator_invalid	DataError	A list-valued environment entry conflicts with or edges on its separator
 lock_declared_mismatch	ConfigError	ocx.lock records a declared spelling its version does not allow
 lock_missing	ConfigError	ocx.lock does not exist
@@ -243,10 +243,10 @@ login_rejected	AuthError	The registry rejected the supplied credentials
 malformed_catalog_key	DataError	An index source served a malformed catalog key
 malformed_fork_full_name	Failure	A fork's full name is malformed
 malformed_index_document	DataError	An index document is not valid JSON of the expected shape
-malformed_physical_ref	DataError	An index root carries a malformed physical repository reference
-malformed_physical_repository	Failure	The index root names a malformed registry repository
+malformed_physical_ref	DataError	A root document carries a malformed physical repository reference
+malformed_physical_repository	Failure	The root document names a malformed registry repository
 malformed_repository	UsageError	The repository is not a well-formed oci:// pointer
-malformed_root_document	DataError	A local index root document is not valid JSON of the expected shape
+malformed_root_document	DataError	A local root document is not valid JSON of the expected shape
 managed_config_contains_managed_section	ConfigError	The managed-config payload contains a [managed] section
 managed_config_entry_too_large	DataError	The managed-config config.toml entry exceeds the allowed size
 managed_config_input_not_found	NotFound	A file the managed-config payload names does not exist
@@ -277,8 +277,8 @@ mirror_config_invalid	ConfigError	A registry mirror setting is invalid
 missing_base_ref	Failure	The index base branch does not exist
 missing_base_ref	Failure	The index base branch does not exist
 missing_digest	DataError	An identifier the store needs pinned carries no digest
-missing_head_root	Failure	A concurrent claim's or announce's head carries no index root
-missing_head_root	Failure	A concurrent claim's or announce's head carries no index root
+missing_head_root	Failure	A concurrent claim's or announce's head carries no root document
+missing_head_root	Failure	A concurrent claim's or announce's head carries no root document
 missing_list_separator	DataError	A list-valued package env entry omits its separator
 multiple_attestations	DataError	More than one verified attestation matched
 multiple_signatures	DataError	The envelope carries other than exactly one signature
@@ -302,7 +302,7 @@ not_a_manifest	DataError	The registry did not answer with a manifest
 not_in_index	NotFound	The package is not listed in the index
 not_in_index	NotFound	The package is not listed in the index
 observe_raced	TempFail	A tag appeared between the two reads of one announce
-ocx_home_needs_no_consent	UsageError	The ocx home is always active and takes no consent stamp
+ocx_home_needs_no_consent	UsageError	The OCX home is always active and takes no consent stamp
 offline_attest_refused	PolicyBlocked	Attaching was refused because offline mode is on
 offline_manifest_missing	PolicyBlocked	Offline mode and the manifest is not stored locally
 offline_mode	PolicyBlocked	A network operation was attempted in offline mode
@@ -390,7 +390,7 @@ prune_tag_still_present	TempFail	A deleted tag is still present in the registry
 publisher_mismatch	PermissionDenied	No publisher listed by the index signed the package
 publishers_invalid	DataError	The index lists publishers that are malformed
 publishers_required	PolicyBlocked	The registry requires index-declared publishers and the package has none
-publishers_unrecognized	Unsupported	The index lists publishers only a newer ocx understands
+publishers_unrecognized	Unsupported	The index lists publishers only a newer OCX understands
 pull_request_unmergeable	DataError	The open announce pull request conflicts with the index
 push_option_refused	Failure	The forge refused a git push option
 record_exemption_refused	IoError	The execution-record exemption was refused
@@ -406,7 +406,7 @@ referrers_unsupported	Unsupported	The registry supports neither the OCI Referrer
 referrers_unsupported	Unsupported	The registry supports neither the OCI Referrers API nor a referrers fallback tag
 registry_auth_failed	AuthError	The registry rejected the request's authentication
 registry_auth_failed	AuthError	The registry rejected the request's authentication
-registry_delete_unsupported	Unsupported	The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github
+registry_delete_unsupported	Unsupported	The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes them
 registry_transient	TempFail	A registry operation failed in a way a retry may clear
 registry_unavailable	Unavailable	A registry operation failed in a way a retry does not clear
 registry_unreachable	Unavailable	The registry could not be reached
@@ -424,10 +424,10 @@ reserved_env_key	DataError	A package env entry sets a reserved OCX key
 reserved_group_name	ConfigError	ocx.toml declares a reserved group name
 resolve_timeout	TempFail	Resolving a binding timed out
 retired_env	ConfigError	A retired OCX environment variable is set
-root_name_mismatch	DataError	The committed index root names a different package
-root_name_mismatch	DataError	The committed index root names a different package
+root_name_mismatch	DataError	The committed root document names a different package
+root_name_mismatch	DataError	The committed root document names a different package
 root_references_unwritten_object	DataError	The announce would commit a root that references an object it does not carry
-root_repository_mismatch	DataError	A derived index root points at another repository
+root_repository_mismatch	DataError	A derived root document points at another repository
 same_filesystem_check_failed	IoError	Probing whether two paths share a filesystem failed
 sbom_media_type_unsupported	DataError	An unsigned SBOM referrer declares a media type outside the SBOM set
 selection_ambiguous	DataError	The selection matches more than one package
@@ -436,7 +436,7 @@ separator_edged_list_value	DataError	A package list value starts or ends with it
 session_path_not_absolute	ConfigError	A session PATH entry is not an absolute path
 session_path_not_utf8	ConfigError	A session PATH entry is not valid UTF-8
 session_path_unencodable	ConfigError	A session PATH entry contains a character the host format cannot store
-setup_bootstrap_failed	Failure	Installing ocx into the content store failed with an unclassified cause
+setup_bootstrap_failed	Failure	Installing OCX into the object store failed with an unclassified cause
 setup_io	IoError	Reading or writing a setup file failed
 setup_profile_subprocess	Unavailable	A shell subprocess setup needs could not run
 shell_section_in_project	ConfigError	ocx.toml declares a [shell] section, which only config.toml may hold
@@ -486,7 +486,7 @@ tlog_binding_mismatch	DataError	The transparency log entry does not match the re
 too_many_attestations	DataError	The target has more attestation referrers than the candidate limit
 toolchain_dir_group_or_world_writable	ConfigError	The toolchain_dir directory is writable by other users
 toolchain_dir_inaccessible	ConfigError	The toolchain_dir setting names a path that cannot be inspected
-toolchain_dir_inside_global_home	ConfigError	The toolchain_dir setting resolves inside the global toolchain home
+toolchain_dir_inside_global_home	ConfigError	The toolchain_dir setting resolves inside $OCX_HOME/toolchain
 toolchain_dir_is_containment_anchor	ConfigError	The toolchain_dir setting names the home directory or OCX_HOME itself
 toolchain_dir_no_containment_anchor	ConfigError	No home directory or OCX_HOME exists to contain toolchain_dir
 toolchain_dir_not_a_directory	ConfigError	The toolchain_dir setting names something other than a directory
@@ -496,7 +496,7 @@ toolchain_dir_parent_component	ConfigError	The toolchain_dir setting contains a 
 toolchain_dir_relative	ConfigError	The toolchain_dir setting is a relative path
 toolchain_dir_system_prefix	ConfigError	The toolchain_dir setting resolves to a system location
 toolchain_dir_unexpandable	ConfigError	The toolchain_dir setting starts with a '~' that cannot be expanded
-toolchain_home_not_absolute	DataError	The toolchain home is not an absolute path
+toolchain_home_not_absolute	DataError	The toolchain root baked into a launcher is not an absolute path
 toolchain_name_control_character	ConfigError	A toolchain group or entry name contains a control character
 toolchain_name_empty	ConfigError	A toolchain group or entry name is empty
 toolchain_name_path_prefix	ConfigError	A toolchain group or entry name carries a path prefix
@@ -529,7 +529,7 @@ unknown_group	UsageError	A group filter names a group ocx.toml does not declare
 unknown_group	UsageError	A group filter names a group ocx.toml does not declare
 unknown_group_section	ConfigError	A group table holds an unknown key
 unparseable_elf	DataError	A file carries an ELF header but cannot be parsed
-unrecognized_interpreter	DataError	A binary names an ELF interpreter no libc family claims
+unrecognized_interpreter	DataError	A binary names a dynamic loader no libc family claims
 unresolved_tag	NotFound	A tag to announce does not exist in the registry
 unsafe_destination	DataError	The registry named a destination the transport refuses
 unsigned_rejected_by_policy	PermissionDenied	An unsigned document was refused because a signature is required

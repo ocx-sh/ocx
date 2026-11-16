@@ -1156,7 +1156,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Dotted paths of keys the config schema ignores, sorted. Advisory: the\nloader ignores unknown keys by design, so these are equally typos and\nsettings a newer ocx understands.\n\nKeys inside a `[mirrors]` entry are NOT covered: that table is parsed\nvalue-first from a raw TOML value, so nothing there is ever ignored by\nthe schema. A misspelled mirror role is silently dropped and reported\nhere as clean."
+          "description": "Dotted paths of keys the config schema ignores, sorted. Advisory: the\nloader ignores unknown keys by design, so these are equally typos and\nsettings a newer OCX understands.\n\nKeys inside a `[mirrors]` entry are NOT covered: that table is parsed\nvalue-first from a raw TOML value, so nothing there is ever ignored by\nthe schema. A misspelled mirror role is silently dropped and reported\nhere as clean."
         }
       },
       "required": [
@@ -1651,7 +1651,7 @@
       "x-ocx-enum": [
         {
           "value": "install_path_rooted_non_path_var",
-          "description": "A `constant` or `list` variable interpolating `${installPath}`, which a tool may read before the package\nis materialized."
+          "description": "A `constant` or `list` variable interpolating `${self.installPath}`, which a tool may read before the package\nis materialized."
         },
         {
           "value": "undeclared_binaries",
@@ -1659,7 +1659,7 @@
         },
         {
           "value": "combined_path_value",
-          "description": "A `path` value combining `${installPath}` with anything else, which the launcher cannot substitute."
+          "description": "A `path` value combining `${self.installPath}` with anything else, which the launcher cannot substitute."
         }
       ]
     },
@@ -1954,7 +1954,7 @@
         },
         "value": {
           "type": "string",
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
         }
       },
       "required": [
@@ -1968,7 +1968,7 @@
       "properties": {
         "value": {
           "type": "string",
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
         }
       },
       "required": [
@@ -1985,7 +1985,7 @@
         },
         "value": {
           "type": "string",
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`."
         }
       },
       "required": [
@@ -2035,7 +2035,7 @@
     },
     "Entrypoints": {
       "type": "object",
-      "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${installPath}` (or its alias `${self.installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
+      "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${self.installPath}` (or its alias `${installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
       "additionalProperties": {
         "$ref": "#/$defs/Entrypoint"
       },
@@ -2056,7 +2056,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${installPath}` — or its alias\n`${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing."
+          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${self.installPath}` — or its alias\n`${installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing."
         }
       },
       "description": "A single named entrypoint for a package.\n\nThe map key in `entrypoints` supplies the *invocable name* — the filename\nof the generated launcher; this object holds the per-entry value. The\nlauncher re-enters via `ocx launcher exec '<package-root>' -- <name> [args...]`,\npreserving clean-env execution semantics, and resolves the *dispatch\ncommand* against the composed `PATH` from the package's `env` block:\n`command` when set, otherwise the invocable name itself."
@@ -5455,7 +5455,7 @@
         },
         {
           "value": "bin",
-          "description": "Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a\ntool is resolved by its launcher trampoline at invocation time."
+          "description": "Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a\ntool is resolved by its launcher at invocation time."
         },
         {
           "value": "none",
@@ -8173,7 +8173,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Dotted paths of keys the config schema ignores, sorted. Advisory: the\nloader ignores unknown keys by design, so these are equally typos and\nsettings a newer ocx understands.\n\nKeys inside a `[mirrors]` entry are NOT covered: that table is parsed\nvalue-first from a raw TOML value, so nothing there is ever ignored by\nthe schema. A misspelled mirror role is silently dropped and reported\nhere as clean."
+          "description": "Dotted paths of keys the config schema ignores, sorted. Advisory: the\nloader ignores unknown keys by design, so these are equally typos and\nsettings a newer OCX understands.\n\nKeys inside a `[mirrors]` entry are NOT covered: that table is parsed\nvalue-first from a raw TOML value, so nothing there is ever ignored by\nthe schema. A misspelled mirror role is silently dropped and reported\nhere as clean."
         }
       },
       "required": [

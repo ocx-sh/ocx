@@ -5,39 +5,45 @@ description: "Freeze version discovery with a lock file and rebuild from it."
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import { Steps } from '@astrojs/starlight/components'
+
 Use this page to freeze version discovery with a lock file, so that a rebuild gets the same bytes as the first build.
 
-## Pick a pinning level \{#lock\}
+## Other ways to pin \{#lock\}
 
-Reproducibility in OCX has three levels, listed from the strongest guarantee to the easiest to maintain.
+Besides [the project lock](#lock-create), reproducibility in OCX has three levels, listed from the strongest guarantee to the easiest to maintain.
 
-**Pin the digest.** This is the strongest lock. `kitware/cmake@sha256:abc123…` bypasses [tag resolution][in-depth-indices] entirely. The bytes are content-addressed, so the digest is the binary. You can pin every package this way with no lockfile and no registry query.
+**Pin the digest.** This is the strongest lock. `nodejs/node@sha256:abc123…` bypasses [tag resolution][in-depth-indices] entirely. The bytes are content-addressed, so the digest is the binary. You can pin every package this way with no lock file and no registry query.
 
-**Pin the index.** The next level, and the one most users want, freezes the [local index][in-depth-indices-local]'s entry for a tag. The tag resolves to the digest recorded at the last [`ocx index update`][cmd-index-update], and that mapping does not change until you refresh. A CI runner that never refreshes its index gets the same binary on every run, even if the registry re-pushes the tag. This is version-choice determinism and not `ocx.lock`.
+**Pin the index.** The next level freezes the [local index][in-depth-indices-local]'s entry for a tag. The tag resolves to the digest recorded at the last [`ocx index update`][cmd-index-update], and that mapping does not change until you refresh. A CI runner that never refreshes its index gets the same binary on every run, even if the registry re-pushes the tag. This is version-choice determinism and not `ocx.lock`.
 
 A lock records the exact digest it pinned and never reads the index back to confirm it.
 
-**Pin a bundled index.** This is the most ergonomic option for authors of Actions, Bazel rules and other consumers. A local index subtree holds only metadata, which is small JSON files and no binaries. You can ship it inside a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules] or a [DevContainer feature][devcontainer-features]. Pinning the action version pins the bundled index, which pins the binary:
+**Pin a shipped copy.** This is the most ergonomic option for authors of Actions, Bazel rules and other consumers. A local index subtree holds only metadata, which is small JSON files and no binaries. You can ship it inside a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules] or a [DevContainer feature][devcontainer-features]. Pinning the action version pins the shipped copy, which pins the binary:
 
 ```yaml
-- uses: ocx-actions/setup-cmake@v2.1.0   # pins action → pins index → pins binary
+- uses: acme/setup-node@v2.1.0   # pins action → pins index → pins binary
   with:
-    version: "3.28"
+    version: "24"
 ```
 
-A version bump to the action advances the bundled index. [Dependabot][dependabot] or [Renovate][renovate] can propose that bump automatically. Users get the updated binary with no config changes. Compare that with maintaining a [hand-curated URL matrix][toolchains-llvm], which needs one `filename → checksum` entry per `version × os × arch`.
+A version bump to the action advances the shipped copy. [Dependabot][dependabot] or [Renovate][renovate] can propose that bump automatically. Users get the updated binary with no config changes. Compare that with maintaining a [hand-curated URL matrix][toolchains-llvm], which needs one `filename → checksum` entry per `version × os × arch`.
 
 ## Create and commit the lock \{#lock-create\}
 
 A project declares its tools in `ocx.toml`, as the [project toolchain guide][project-toolchain] shows. To reproduce a build from that file:
 
+<Steps>
+
 1. Run [`ocx lock`][cmd-lock] in the project root. It resolves every tag to a digest and writes `ocx.lock` beside `ocx.toml`.
 2. Commit `ocx.lock` with `ocx.toml`.
 3. On the machine that rebuilds, run [`ocx --frozen pull`][arg-frozen]. It installs the digests the lock records, and an unknown tag errors instead of being fetched.
 
+</Steps>
+
 [`ocx lock --check`][cmd-lock] exits non-zero when `ocx.toml` and `ocx.lock` have drifted, which makes it a CI gate.
 
-An install from `ocx.lock` in a fresh home makes no index request. With no committed index root to read, the package counts as undeclared and installs without the [publisher check][verify-installs]. Setting [`signatures = "required"`][config-registries] refuses that install (exit `81`, `publishers_required`) until [`ocx index update`][cmd-index-update] has committed a root that lists the package's publishers.
+An install from `ocx.lock` in a fresh home makes no index request. With no committed root document to read, the package counts as undeclared and installs without the [publisher check][verify-installs]. Setting [`signatures = "required"`][config-registries] refuses that install (exit `81`, `publishers_required`) until [`ocx index update`][cmd-index-update] has committed a root that lists the package's publishers.
 
 ## Freeze version discovery \{#lock-frozen\}
 
@@ -47,14 +53,14 @@ An unpinned tag missing from the local index errors with exit `81`. OCX does not
 
 Unlike [`OCX_OFFLINE`][env-offline], this is not a network ban. Known and digest-pinned content is still fetched. Combining it with `OCX_OFFLINE` is accepted, with offline taking effect. Combining it with [`OCX_REMOTE`][env-remote] is a usage error (exit `64`).
 
-The freeze scopes to the package tier, whose pin is the local index. A patch companion resolves live regardless, because patches float by design. It pins in the patch tier's own record under `$OCX_HOME/state/patch-companions/`. [`ocx patch sync`][cmd-patch-sync] advances that record, and `ocx patch freeze` plus [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] freeze it deliberately. The managed-configuration tier is unaffected too: `ocx config setup` and `ocx config update` behave identically with and without the variable.
+The freeze scopes to packages, whose pin is the local index. A patch companion resolves live regardless, because patches float by design. It pins in the patch record under `$OCX_HOME/state/patch-companions/`. [`ocx patch sync`][cmd-patch-sync] advances that record, and `ocx patch freeze` plus [`OCX_PATCH_SNAPSHOT`][env-ocx-patch-snapshot] freeze it deliberately. The managed configuration is unaffected too: `ocx config setup` and `ocx config update` behave identically with and without the variable.
 
 :::tip[Learn more]
-[Indices In Depth, Shipped copies][in-depth-indices-bundled] covers the full bundled-index pattern, the [`OCX_INDEX`][env-ocx-index] variable and the Dependabot and Renovate flow.
+[Indices In Depth, Shipped copies][in-depth-indices-bundled] covers the full shipped-copy pattern, the [`OCX_INDEX`][env-ocx-index] variable and the Dependabot and Renovate flow.
 [Versioning In Depth, Locking][in-depth-versioning-locking] covers the digest-pin rationale, OCI tag mutability and why `ocx.lock` never consults the index.
 :::
 
-## Find `--locked` and `--frozen` \{#locked-frozen-equivalents\}
+## If you look for `--locked` and `--frozen` \{#locked-frozen-equivalents\}
 
 Users coming from [uv][uv], [Cargo][cargo] or [pnpm][pnpm] often look for `--locked` and `--frozen` flags on read-path commands. OCX folds the lock-freshness guarantee into the defaults. Read paths refuse stale locks unconditionally, and only explicit mutators touch `ocx.lock`. OCX exposes the no-new-versions guarantee as the global [`--frozen`][arg-frozen] flag.
 
@@ -73,7 +79,7 @@ Use `--frozen` to guarantee that no unfamiliar version slips in. Use `--offline`
 
 The asymmetry has a reason. OCX is a backend tool, so read paths refuse stale locks unconditionally and CI scripts cannot drift silently. The mutating commands ([`ocx add`][cmd-add], [`ocx remove`][cmd-remove], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update] and [`ocx upgrade`][cmd-upgrade]) are the only commands that touch `ocx.lock`. If you do not run them, the lock cannot change.
 
-To verify that a subset would not change, without writing, use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the partial-resolve candidate against the predecessor.
+To verify that a subset would not change, without writing, use [`ocx update --check`][cmd-update]. It mirrors [`ocx lock --check`][cmd-lock] but evaluates the lock a partial resolve would write against the predecessor.
 
 [uv]: https://docs.astral.sh/uv/
 [uv-lock]: https://docs.astral.sh/uv/reference/cli/#uv-lock
@@ -106,7 +112,7 @@ To verify that a subset would not change, without writing, use [`ocx update --ch
 [cmd-patch-sync]: ../reference/command-line/patch.md#patch-sync
 [in-depth-versioning-locking]: ../explanation/versioning.mdx#locking
 [in-depth-indices]: ../explanation/indices.md
-[in-depth-indices-local]: ../explanation/local-index.md#local
+[in-depth-indices-local]: ../explanation/local-index.mdx#local
 [in-depth-indices-bundled]: ../explanation/indices.md#bundled
 [project-toolchain]: ./project-toolchain.mdx
 [verify-installs]: ./verify-installs.mdx

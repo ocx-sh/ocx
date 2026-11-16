@@ -18,7 +18,7 @@ pub enum ClaimError {
     #[exit(
         defer(Failure),
         slug = "forge_required",
-        summary = "No forge was supplied to read the committed index root through"
+        summary = "No forge was supplied to read the committed root document through"
     )]
     ForgeRequired,
 
@@ -103,7 +103,7 @@ pub enum ClaimError {
     #[exit(
         defer(Failure),
         slug = "missing_head_root",
-        summary = "A concurrent claim's or announce's head carries no index root"
+        summary = "A concurrent claim's or announce's head carries no root document"
     )]
     MissingHeadRoot { branch: String, path: String },
 
@@ -124,7 +124,7 @@ pub enum ClaimError {
     #[exit(
         DataError,
         slug = "root_name_mismatch",
-        summary = "The committed index root names a different package"
+        summary = "The committed root document names a different package"
     )]
     RootNameMismatch { committed: String, expected: String },
 

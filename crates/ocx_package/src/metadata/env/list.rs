@@ -35,7 +35,7 @@ pub struct List {
     #[schemars(required)]
     pub separator: Option<String>,
 
-    /// The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's
+    /// The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's
     /// content directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the
     /// resolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to
     /// pick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.

@@ -1,5 +1,5 @@
 ---
-title: "Update OCX"
+title: "Update or uninstall OCX"
 description: "Move OCX itself to a later release, stay informed about new releases, or remove OCX."
 ---
 {/* doc_type: how-to */}
@@ -7,56 +7,48 @@ description: "Move OCX itself to a later release, stay informed about new releas
 
 import Tabs from '@ocx-sh/theme/components/Tabs.astro'
 import TabItem from '@ocx-sh/theme/components/TabItem.astro'
+import InstallCommand from '@ocx-sh/theme/components/InstallCommand.astro'
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 Update the OCX binary in one command, choose how OCX tells you about new releases, or remove OCX from a machine.
 
 ## Update to the most recent release \{#updating\}
 
-OCX updates itself, with no index refresh, reinstall or reselect step. [`ocx self update`][cmd-self-update] queries the published index and registry live for the most recent stable release and downloads it. It then re-executes the new binary as its own `ocx self setup`, the same command a bare-binary install runs by hand. The swap, the shim refresh and the profile healing form one continuous step:
+OCX updates itself, with no index refresh, reinstall or reselect step. [`ocx self update`][cmd-self-update] queries the published index and registry live for the most recent stable release and downloads it. It then re-executes the new binary as its own `ocx self setup`, the same command a bare-binary install runs by hand. The swap, the env file refresh and the profile healing form one continuous step:
+
+<ShellSession>
 
 ```sh
 ocx self update
 ```
 
-Confirm the new binary is active with [`ocx version`][cmd-version]. Its first line is the installed version, which matches the release the update reported.
+</ShellSession>
+
+Confirm the new binary is active with [OCX version][cmd-version]. Its first line is the installed version, which matches the release the update reported.
 
 To report whether a later version exists without installing anything, add `--check`:
+
+<ShellSession>
 
 ```sh
 ocx self update --check
 ```
 
-Version discovery always queries live. [`--frozen`][arg-frozen] has no effect on it, and [`--offline`][arg-offline] skips the check instead of falling back to the [local index][fs-index]. The freshest upstream ocx is the whole point. [`--remote`][arg-remote] is redundant because it is already the default, but OCX accepts it.
+</ShellSession>
+
+Version discovery always queries live. [`--frozen`][arg-frozen] has no effect on it, and [`--offline`][arg-offline] skips the check instead of falling back to the [local index][fs-index]. The freshest upstream OCX is the whole point. [`--remote`][arg-remote] is redundant because it is already the default, but OCX accepts it.
 
 :::tip[Downloaded but not activated]
 If the hand-off cannot finish, the download still stands but nothing is activated. This most often happens when a shell profile carries edits OCX will not overwrite. `current` keeps pointing at the old binary, and `ocx self update` exits `75` to say so. Run [`ocx self setup`][cmd-self-setup] to finish the job. The [`ocx self update` reference][cmd-self-update] has the full outcome table and JSON shape.
 :::
 
 :::tip[`ocx self update` is not `ocx update`]
-[`ocx self update`][cmd-self-update] updates the ocx binary itself. [`ocx update`][cmd-update] re-resolves your toolchain's declared tags into `ocx.lock`. They are different verbs with different targets, so do not reach for one expecting the other.
+[`ocx self update`][cmd-self-update] updates the `ocx` binary itself. [`ocx update`][cmd-update] re-resolves your toolchain's declared tags into `ocx.lock`. They are different verbs with different targets, so do not reach for one expecting the other.
 :::
 
 Alternatively, re-run the installer. It always fetches the most recent release:
 
-<Tabs syncKey="shell">
-
-<TabItem label={"Shell"} icon="shell">
-
-```sh
-curl -fsSL https://setup.ocx.sh/sh | sh
-```
-
-</TabItem>
-
-<TabItem label={"PowerShell"} icon="powershell">
-
-```powershell
-Invoke-RestMethod 'https://setup.ocx.sh/pwsh' | Invoke-Expression
-```
-
-</TabItem>
-
-</Tabs>
+<InstallCommand />
 
 ## How the update works \{#update-ocx\}
 
@@ -72,7 +64,7 @@ If the hand-off reaches the select but a later phase hits a snag, the update sti
 
 ## Get notified of new releases \{#update-checks\}
 
-Two background checks run on an interactive terminal, outside CI, and online. One asks whether a later ocx exists. The other asks whether a tag pinned in a project's `ocx.lock` has moved. Each runs at most once per interval, one day by default.
+Two background checks run on an interactive terminal, outside CI, and online. One asks whether a later OCX exists. The other asks whether a tag pinned in a project's `ocx.lock` has moved. Each runs at most once per interval, one day by default.
 
 The check runs before your command and waits for one registry round trip. A failed check never fails a command.
 
@@ -81,7 +73,7 @@ When either check finds something, OCX prints one notice to stderr before your c
 ```text
 ocx: updates available
   ocx 1.1.0, run `ocx self update`
-  project (~/work/proj): cmake, ninja, uv and 6 more, run `ocx update`
+  project (~/work/proj): node, bun, uv and 6 more, run `ocx update`
   global: shellcheck, run `ocx --global update`
   details: `ocx update --check`, `ocx --global update --check`
 ```
@@ -96,7 +88,7 @@ interval = "1d"
 
 | Key | Values (default `notify`) | Environment override |
 |-----|---------------------------|----------------------|
-| `self` | `notify` prints a notice naming `ocx self update`. `apply` installs the later ocx after the command has finished, on success and failure alike, without changing its exit code. `manual` never checks and never touches the throttle state file | [`OCX_SELF_UPDATE`][env-ocx-self-update] |
+| `self` | `notify` prints a notice naming `ocx self update`. `apply` installs the later OCX after the command has finished, on success and failure alike, without changing its exit code. `manual` never checks and never touches the throttle state file | [`OCX_SELF_UPDATE`][env-ocx-self-update] |
 | `toolchain` | `notify` prints one stderr line per toolchain file with drift, naming `ocx update` (`ocx --global update` for the global toolchain). `manual` never checks. `apply` behaves as `notify` with one warning, so a value written for `self` does not break the file, because only [`ocx update`][cmd-update] moves a pin | [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update] |
 | `interval` | `\d+[smhd]?` (bare digits are seconds, default `1d`). `0` or `0s` checks on every eligible command. Both checks share it | [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] |
 
@@ -106,7 +98,7 @@ The [`[update]` reference][config-update] lists the keys. Set [`OCX_NO_UPDATE_CH
 
 `self = "apply"` installs through the same path as `ocx self update`, so the trust policy that covers an explicit install covers this one. The new binary takes effect on the next run. Stderr gets one line that describes the outcome. If the install fails, the line says so and names `ocx self update` as the retry. OCX does not retry a failed apply until the next interval.
 
-An ocx that `ocx self setup` did not install has no managed copy to replace, and `apply` does nothing for it.
+An OCX that `ocx self setup` did not install has no managed copy to replace, and `apply` does nothing for it.
 
 ### What the toolchain check reads \{#update-checks-toolchain\}
 
@@ -114,39 +106,47 @@ The toolchain check compares the platform digests recorded in the lock with what
 
 ### Where the settings live \{#update-checks-tiers\}
 
-`[update]` is a personal preference, so OCX reads it from the local `config.toml` tiers only (system, user, `$OCX_HOME`, `OCX_CONFIG` and `--config`). The `[managed]` tier drops it before the merge, with a debug log. A fleet publisher therefore cannot switch on binary replacement for hosts that sync the payload. `ocx.toml` refuses the section: a project file with an `[update]` table fails to parse (exit 78) and the message says the section belongs in `config.toml`.
+`[update]` is a personal preference, so OCX reads it from the local `config.toml` tiers only (system, user, `$OCX_HOME`, `OCX_CONFIG` and `--config`). The `[managed]` tier drops it before the merge, with a debug log. A fleet operator therefore cannot switch on binary replacement for hosts that sync the payload. `ocx.toml` refuses the section: a project file with an `[update]` table fails to parse (exit 78) and the message says the section belongs in `config.toml`.
 
 **`[update]` never fails a command.** OCX ignores an invalid or unknown value and falls back to the next source, then to the built-in default. A bad value in a `config.toml` prints one stderr warning that names the key. A bad value in an environment variable is logged at debug level.
 
-Tiers merge field by field and the nearest wins. Each key's environment variable **beats** the file, unlike the [weakest-tier variables](../explanation/toolchain-activation.md#ladders). The checks never run for `ocx version`, `ocx about` or `ocx shell completion`. The toolchain notice also skips the commands that move a lock.
+Tiers merge field by field and the nearest wins. Each key's environment variable **beats** the file, unlike the [weakest-rung variables](../explanation/toolchain-activation.mdx#ladders). The checks never run for OCX version, `ocx about` or `ocx shell completion`. The toolchain notice also skips the commands that move a lock.
 
-The throttle state lives under `$OCX_HOME/state/update-check/`. It holds one zero-byte file for the ocx check (`ocx_sh_ocx_cli`) and one marker per toolchain under `toolchain/`, where the file's modification time is the data. An `interval` of `6h` or `90s` is valid, while `1w` and `bogus` are not, and OCX trims surrounding whitespace. Values are lowercase and case-sensitive, and an empty variable reads as unset.
+The throttle state lives under `$OCX_HOME/state/update-check/`. It holds one zero-byte file for the OCX check (`ocx_sh_ocx_cli`) and one marker per toolchain under `toolchain/`, where the file's modification time is the data. An `interval` of `6h` or `90s` is valid, while `1w` and `bogus` are not, and OCX trims surrounding whitespace. Values are lowercase and case-sensitive, and an empty variable reads as unset.
 
 The two update variables and the interval are not forwarded to child `ocx` processes. A package's `env` or an `ocx.toml` `[env]` table cannot set them either, because OCX refuses them as reserved `OCX_*` keys. [`OCX_NO_UPDATE_CHECK`][env-ocx-no-update-check] is forwarded, so a `--clean` child keeps the checks off instead of probing a registry the parent was told not to contact.
 
-## Report a bug with build details \{#report-a-bug-with-build-details\}
+## Capture build details for a bug report \{#report-a-bug-with-build-details\}
 
 Run [`ocx version --verbose`][cmd-version] to capture the commit, build timestamp, target and CI run URL. For dev-channel builds the output also shows `channel: dev`.
 
 ## Uninstall OCX \{#uninstalling\}
 
-To remove ocx and all installed packages, delete the data directory. The default is [`~/.ocx`][env-home], or whatever [`OCX_HOME`][env-home] points to:
+To remove OCX and all installed packages, delete the data directory. The default is [`~/.ocx`][env-home], or whatever [`OCX_HOME`][env-home] points to:
 
 <Tabs syncKey="shell">
 
 <TabItem label={"Shell"} icon="shell">
 
+<ShellSession>
+
 ```sh
 rm -rf "${OCX_HOME:-$HOME/.ocx}"
 ```
+
+</ShellSession>
 
 </TabItem>
 
 <TabItem label={"PowerShell"} icon="powershell">
 
+<ShellSession>
+
 ```powershell
 Remove-Item -Recurse -Force $(if ($env:OCX_HOME) { $env:OCX_HOME } else { "$env:USERPROFILE\.ocx" })
 ```
+
+</ShellSession>
 
 </TabItem>
 
@@ -162,12 +162,12 @@ Then remove the managed activation that [`ocx self setup`][cmd-self-setup] added
 - **every platform**: also remove the session-level `PATH` registration, with one location each and the exact commands, in [Removing the session PATH by hand][cmd-self-setup-session-path-removal]
 
 :::caution[This deletes everything]
-This removes all installed packages, the local index cache and ocx itself. To remove only specific packages, use [`ocx package uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
+This removes all installed packages, the local index and OCX itself. To remove only specific packages, use [`ocx package uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
 :::
 
 :::tip[Learn more]
 [Command-line reference: `ocx self update`][cmd-self-update] covers exit codes, install path and throttle bypass.
-[Command-line reference: `ocx version`][cmd-version] covers verbose build provenance and the JSON schema.
+[Command-line reference: OCX version][cmd-version] covers verbose build provenance and the JSON schema.
 [Environment reference: `OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval] adjusts the background check frequency.
 [Configuration reference: `[update]`][config-update] lists `self`, `toolchain` and `interval`, and which tiers may set them.
 :::
@@ -184,8 +184,8 @@ This removes all installed packages, the local index cache and ocx itself. To re
 [arg-frozen]: ../reference/command-line/index.md#arg-frozen
 [arg-remote]: ../reference/command-line/index.md#arg-remote
 [arg-offline]: ../reference/command-line/index.md#arg-offline
-[fs-index]: ../explanation/local-index.md#local
+[fs-index]: ../explanation/local-index.mdx#local
 [env-home]: ../reference/environment.md#ocx-home
 [cmd-uninstall]: ../reference/command-line/package-consuming.md#package-uninstall
 [cmd-clean]: ../reference/command-line/commands.md#clean
-[cmd-self-setup-session-path-removal]: ../getting-started/install-ocx.mdx#session-path-removal
+[cmd-self-setup-session-path-removal]: ../guides/install-options.mdx#session-path-removal

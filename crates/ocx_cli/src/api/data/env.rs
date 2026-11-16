@@ -132,12 +132,12 @@ impl IntegrationAttribution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LazyAdvisoryKind {
-    /// A `constant` or `list` variable interpolating `${installPath}`, which a tool may read before the package
+    /// A `constant` or `list` variable interpolating `${self.installPath}`, which a tool may read before the package
     /// is materialized.
     InstallPathRootedNonPathVar,
     /// No `binaries` claim, so the deferred tool's launcher names cannot be enumerated.
     UndeclaredBinaries,
-    /// A `path` value combining `${installPath}` with anything else, which the launcher cannot substitute.
+    /// A `path` value combining `${self.installPath}` with anything else, which the launcher cannot substitute.
     CombinedPathValue,
 }
 

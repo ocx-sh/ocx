@@ -5,16 +5,22 @@ description: "Move pinned tools to later releases while keeping the pins you wan
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 Move the tools declared in `ocx.toml` to later releases, review what moved, and keep every other pin where it is. Four commands cover the cycle: [`ocx status`][cmd-status], [`ocx lock`][cmd-lock], [`ocx update`][cmd-update] and [`ocx upgrade`][cmd-upgrade].
 
 ## Read what is pinned \{#update-status\}
 
 [`ocx status`][cmd-status] shows what `ocx.toml` and `ocx.lock` declare before you change anything. It is offline and read-only, and it exits 0 even when the lock is missing or stale. Add `--verbose` to see each binding's host digest and the number of locked platforms.
 
+<ShellSession>
+
 ```shell
 ocx status
 ocx status --verbose
 ```
+
+</ShellSession>
 
 For what the declarations resolve to on this host, see [Read the project state][project-state].
 
@@ -24,10 +30,14 @@ For what the declarations resolve to on this host, see [Read the project state][
 
 The lock carries a hash of the canonicalized `ocx.toml`. If you edit `ocx.toml` and forget `ocx lock`, dependent commands refuse to run with stale digests and exit 65. Read paths never re-resolve silently, so CI cannot drift behind a stray editor save.
 
+<ShellSession>
+
 ```shell
 ocx lock          # reconcile ocx.lock with ocx.toml
 ocx lock --check  # exit 0 when current, 65 when stale, 78 when the lock is missing
 ```
+
+</ShellSession>
 
 :::tip[Edited `ocx.toml` by hand? Run `ocx lock`.]
 [`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. Adding or removing a binding never updates the others. Both commands carry every untouched lock entry forward unchanged, and only [`ocx update`][cmd-update] re-resolves surviving tags.
@@ -51,27 +61,31 @@ Three commands move a pin, and each moves a different thing.
 | [`ocx update`][cmd-update] | The lock, to where a declared tag points today. | Every run | No |
 | [`ocx upgrade`][cmd-upgrade] | The declared tag itself, then the lock for the retagged bindings only. | Tag listing every run | Yes |
 
-`ocx update` talks to the registry every time, because its purpose is to see where a moving tag such as `:latest` or `:3` points today. With no arguments it re-resolves every declared tag of the default group, even when the lock is current; `-g all` covers every group. A resolution failure writes nothing.
+`ocx update` talks to the registry every time, because its purpose is to see where a rolling tag such as `:latest` or `:3` points today. With no arguments it re-resolves every declared tag of the default group, even when the lock is current; `-g all` covers every group. A resolution failure writes nothing.
 
 By default `ocx update` also installs the packages whose pin moved; a pin that held still is not downloaded. Pass `--no-pull` to write the lock only, and let `ocx pull` or the next `ocx exec` fetch them.
 
-`ocx upgrade` rewrites the tag in `ocx.toml`, so `cmake:3.28` becomes `cmake:3.29`. Each binding keeps its variant and its precision. A `debug-3.28` binding considers only `debug-*` tags, and a two-component tag moves to a two-component tag. Comments and formatting in `ocx.toml` survive the edit.
+`ocx upgrade` rewrites the tag in `ocx.toml`, so a `3.13` tag becomes `3.14`. Each binding keeps its variant and its precision. A `slim-3.14` binding considers only `slim-*` tags, and a two-component tag moves to a two-component tag. Comments and formatting in `ocx.toml` survive the edit.
 
-A binding stays within its current major unless `--major` is given. The candidate must be strictly later, with no prerelease or build suffix.
+A binding stays within its current major unless `--major` is given. The new version must be strictly later, with no prerelease or build suffix.
 
-:::tip[A moving tag is the case for update, a pinned tag the case for upgrade]
-A binding on `:3` follows the tag with `ocx update`. A binding pinned to `:3.28` stays there until `ocx upgrade` rewrites it.
+:::tip[A rolling tag is the case for update, a pinned tag the case for upgrade]
+A binding on `:3` follows the tag with `ocx update`. A binding pinned to `:3.13` stays there until `ocx upgrade` rewrites it.
 :::
 
+<ShellSession>
+
 ```shell
-ocx update                # re-resolve the default group's tags against the registry
-ocx update -g all         # re-resolve every group
-ocx update ripgrep        # advance just ripgrep
-ocx update -g ci          # advance the ci group, freezing the rest
-ocx upgrade --check       # see which tags would move, write nothing
-ocx upgrade --major cmake # let cmake cross to a new major
+ocx update                 # re-resolve the default group's tags against the registry
+ocx update -g all          # re-resolve every group
+ocx update ripgrep         # advance just ripgrep
+ocx update -g ci           # advance the ci group, freezing the rest
+ocx upgrade --check        # see which tags would move, write nothing
+ocx upgrade --major node   # let node cross to a new major
 ocx upgrade -g ci --verbose
 ```
+
+</ShellSession>
 
 A scoped `ocx update` and every `ocx upgrade` need an existing `ocx.lock` (exit 78). Both refuse a drifted `ocx.toml` (exit 65), so run `ocx lock` first when either happens.
 
@@ -79,13 +93,17 @@ A scoped `ocx update` and every `ocx upgrade` need an existing `ocx.lock` (exit 
 
 Name bindings, pass `-g/--group`, or do both to advance only part of the toolchain. Every other pin is carried forward verbatim. An unknown name or group exits 64.
 
+<ShellSession>
+
 ```shell
 ocx update ripgrep shellcheck   # two bindings
 ocx update -g release           # one group
-ocx upgrade -g ci cmake         # one group and one extra binding
+ocx upgrade -g ci python        # one group and one extra binding
 ```
 
-Under `--frozen`, `ocx update` resolves against the local index snapshot only, and a tag missing from the snapshot exits 81. Under `--offline` it forbids network access. `ocx upgrade` is refused under either flag (exit 81), because its tag listings come from the registry every time.
+</ShellSession>
+
+Under `--frozen`, `ocx update` resolves against the local index only, and a tag missing from it exits 81. Under `--offline` it forbids network access. `ocx upgrade` is refused under either flag (exit 81), because its tag listings come from the registry every time.
 
 [Project Toolchain In Depth → Pin preservation][in-depth-pin-preservation] explains why `ocx add`, `ocx remove` and `ocx lock` never move a pin they were not asked to move.
 
@@ -95,7 +113,7 @@ Under `--frozen`, `ocx update` resolves against the local index snapshot only, a
 
 ## Read the update report \{#project-update-report\}
 
-`ocx update` reports what moved, not only what is pinned. It is the one command that holds both the predecessor lock and the candidate at the same moment. Plain output is one row per tool that moved, with the release it moves from and to:
+`ocx update` reports what moved, not only what is pinned. It is the one command that holds both the predecessor lock and the lock `ocx update` would write at the same moment. Plain output is one row per tool that moved, with the release it moves from and to:
 
 ```text
 Binding      From      To

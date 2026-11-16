@@ -140,7 +140,10 @@ class FakeRecording:
     def truncate_digests(self) -> FakeRecording:
         return self
 
-    def realign_tables(self) -> FakeRecording:
+    def realign_tables(self, shorten: Any = None) -> FakeRecording:
+        return self
+
+    def fit_width(self) -> FakeRecording:
         return self
 
     def auto_height(self, **kwargs: Any) -> FakeRecording:
@@ -148,7 +151,7 @@ class FakeRecording:
 
     def write(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('{"version":2}\n')
+        path.write_text('{"version":2,"width":100,"height":5}\n')
 
 
 # ---------------------------------------------------------------------------

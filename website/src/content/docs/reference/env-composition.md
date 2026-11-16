@@ -1,9 +1,9 @@
 ---
-title: "Environment Composition"
+title: "Environment composition"
 ---
 <!-- doc_type: reference -->
 
-How OCX assembles environment variables and selects the active toolchain tier. The reasoning behind each rule is in [Environments][in-depth-environments] and [Toolchain activation][explanation-toolchain-activation].
+How OCX assembles environment variables and selects the active toolchain. The reasoning behind each rule is in [Environments][in-depth-environments] and [Toolchain activation][explanation-toolchain-activation].
 
 ## Strict Isolation {#strict-isolation}
 
@@ -39,13 +39,13 @@ See [Idempotent re-application][env-strict-isolation-idempotent].
 `ocx exec` reads exactly two files, `ocx.toml` and its sibling `ocx.lock`, and composes only the packages they declare. It layers them over the caller's environment, prepending the composed `PATH` entries and setting the other composed variables on top.
 
 - Default: the caller's environment, unchanged underneath the layer
-- `--isolate`: reverts what earlier ocx layers applied before composing, and your own pre-existing values stay
+- `--isolate`: reverts what earlier OCX layers applied before composing, and your own pre-existing values stay
 - `--clean`: starts from an empty environment, so only package-declared variables reach the child (on Windows, plus the caller's `SystemRoot`, without which a process cannot start)
 - `--isolate --clean`: a usage error (exit 64)
 - Explicit exec: always composes what it was asked for, whatever is already loaded. The same project and group nested yields each value once, and another group layers on top
-- Named bindings: `ocx exec cmake -- …` resolves only the named bindings to a host leaf. Omit the names and the whole scope must resolve
+- Named bindings: `ocx exec node -- …` resolves only the named bindings to a host leaf. Omit the names and the whole scope must resolve
 - `-g GROUP`: selects the namespace for name resolution, not a mandate that every binding in it be available
-- Revert source: `--isolate` reads the applied values recorded in [`__OCX_ENV_STATE`][env-ocx-env-state]. A value that no longer matches what ocx wrote is left alone, and with no state there is nothing to revert
+- Revert source: `--isolate` reads the applied values recorded in [`__OCX_ENV_STATE`][env-ocx-env-state]. A value that no longer matches what OCX wrote is left alone, and with no state there is nothing to revert
 - Same flags: `ocx shell`, `ocx package exec`, `ocx package test` and `ocx patch test`
 
 See [Layered `ocx exec`][env-strict-isolation-exec].
@@ -56,20 +56,20 @@ See [Layered `ocx exec`][env-strict-isolation-exec].
 
 ## Patch Opt-Out Scope {#patch-opt-out-scope}
 
-A project's [`no-patches`][config-patches-no-patches] opt-out is read from `ocx.toml`, so it applies only where the project file is directly in scope. A [system-required][config-patches-scopes] tier is never subject to it.
+A project's [`no-patches`][config-patches-no-patches] opt-out is read from `ocx.toml`, so it applies only where the project file is directly in scope. A [system-required][config-patches-scopes] `[patches]` section is never subject to it.
 
 | Invocation | Honors the opt-out | How |
 |---|---|---|
 | [`ocx exec`][cmd-run] | Yes | Marks the opted-out packages in the names it records in [`__OCX_ENV_STATE`][env-ocx-env-state] |
-| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the per-prompt reconciler mark the opted-out package in the names carried by [`__OCX_ENV_STATE`][env-ocx-env-state] |
+| [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | Yes | Read the project config directly; they and the shell hook mark the opted-out package in the names carried by [`__OCX_ENV_STATE`][env-ocx-env-state] |
 | Launcher re-entered from those chains | Yes | Reads the mark from the inherited state |
 | Launcher run by absolute path or through [`ocx package exec`][cmd-package-exec] | No | Decodes no forwarded opt-out and composes the companion overlay as if `no-patches` were never set |
 
 See [Per-package opt-out][patches-no-patches-guide].
 
-## Tier Selection {#tier-selection}
+## Toolchain Selection {#tier-selection}
 
-OCX has two toolchain tiers, and selection is always explicit: there is no implicit fallback from project to global. `--global` and `--project` are mutually exclusive, and combining them exits with code 64 (`UsageError`).
+OCX has two toolchains, project and global, and selection is always explicit: there is no implicit fallback from project to global. `--global` and `--project` are mutually exclusive, and combining them exits with code 64 (`UsageError`).
 
 | Tier | How to activate | File |
 |------|----------------|------|
@@ -77,13 +77,13 @@ OCX has two toolchain tiers, and selection is always explicit: there is no impli
 | Global | `--global` flag | `$OCX_HOME/ocx.toml` |
 
 - CWD walk: stops at the first `ocx.toml` it meets. A nested project replaces the enclosing one, and two project files never layer
-- No home-tier discovery: a walk that finds nothing means no project tier is active, and the global toolchain is active only when requested
+- No home-directory discovery: a walk that finds nothing means no project is active, and the global toolchain is active only when requested
 
 See [Nested projects switch, they do not stack][in-depth-shell-integration-nested].
 
 ### Root `--global` commands {#tier-selection-commands}
 
-`--global` is a root flag and must appear before the subcommand, as in `ocx --global add ripgrep:14`. It affects these toolchain-tier commands:
+`--global` is a root flag and must appear before the subcommand, as in `ocx --global add ripgrep:14`. It affects these toolchain commands:
 
 | Command | With `--global` |
 |---------|----------------|
@@ -97,7 +97,7 @@ See [Nested projects switch, they do not stack][in-depth-shell-integration-neste
 
 ## Toolchain Activation {#toolchain-activation}
 
-Two `ocx.toml` keys decide how a selected toolchain reaches a shell, and both are read per tier from that tier's own file. [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `links/<group>/<entry>` links or name digest paths from `ocx.lock`.
+Two `ocx.toml` keys decide how a selected toolchain reaches a shell, and both are read per toolchain from that toolchain's own file. [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `links/<group>/<entry>` links or name digest paths from `ocx.lock`.
 
 See [Toolchain activation][explanation-toolchain-activation].
 
@@ -113,11 +113,11 @@ See [Toolchain activation][explanation-toolchain-activation].
 | `none` | `true` | nothing | digest paths from `ocx.lock`, consulting no link | the trampolines only |
 
 - Session directories: `$OCX_HOME/toolchain/active/bin` and OCX's install directory behind it are on `PATH` in every row, including `none`
-- Composing emitters: [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode reconciler and the `env`-mode login exporter. Only `ocx env` and `ocx exec` declare [`--pinned` / `--no-pinned`][arg-pinned]
-- `env`-mode reconciler and login exporter: read the global tier's `activate`, so under `bin` or `none` neither composes at all
+- Composing emitters: [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode shell hook and the `env`-mode login exporter. Only `ocx env` and `ocx exec` declare [`--pinned` / `--no-pinned`][arg-pinned]
+- `env`-mode shell hook and login exporter: read the global toolchain's `activate`, so under `bin` or `none` neither composes at all
 - Link cells: a lock entry whose link is absent, stale or not a link composes on its digest path. Only roots have links, so a dependency's `PATH` contributions and every `${deps.<name>.installPath}` are digest paths in both lanes. See [`--pinned`][arg-pinned-degrade]
 - `pinned = true`: suppresses the link pass without deleting a tree, so switching it on and off needs no re-render
-- `bin` gate: `<home>/toolchain/active/bin` is added only when the tree's render stamp matches this project and this lock. Otherwise nothing is added and the prompt prints the line below
+- `bin` gate: `<home>/toolchain/active/bin` is added only when the tree's render marker matches this project and this lock. Otherwise nothing is added and the prompt prints the line below
 
 ```text
 ocx: /home/dana/work/api: its toolchain has not been rendered for this lock; run `ocx pull` here
@@ -129,7 +129,7 @@ Within one prompt the entries land in this order, front to back:
 2. The project's `<home>/toolchain/active/bin`
 3. `$OCX_HOME/toolchain/active/bin`
 4. OCX's own install directory
-5. The global tier's composed entries
+5. The global toolchain's composed entries
 
 See [Order on PATH][explanation-path-order].
 
@@ -137,12 +137,12 @@ The trampoline body, its Windows sidecar and the name-collision rule are in [A t
 
 ## Visibility Surfaces {#visibility-surfaces}
 
-Each package declares an interface surface (what consumers see) and a private surface (what its own launchers see). The `--self` flag on `package env`, `package exec`, `package test` and `package deps` selects the surface, and it is OCI-tier only.
+Each package declares an interface surface (what consumers see) and a private surface (what its own launchers see). The `--self` flag on `package env`, `package exec`, `package test` and `package deps` selects the surface, and it exists only on the `ocx package` commands.
 
 | `--self` | Surface emitted | Use case |
 |----------|----------------|----------|
-| off (default) | Interface surface — vars where `has_interface()` is true | Human or CI script using the package |
-| on | Private surface — vars where `has_private()` is true | Generated launchers invoking `ocx launcher exec` internally |
+| off (default) | Interface surface — `public` and `interface` vars | Human or CI script using the package |
+| on | Private surface — `private` and `public` vars | Generated launchers invoking `ocx launcher exec` internally |
 
 - Launchers: generated launchers force `self_view = true` internally and do not expose `--self` to callers
 - Patch companions: a companion's env var is composed on the surfaces of the package it matches, read as if that package had declared it
@@ -179,7 +179,7 @@ See [What composition does][explanation-integrations-composition].
   "integrations": [
     {
       "namespace": "com.microsoft.vscode",
-      "package": "kitware/cmake:3.28@sha256:aaaa…",
+      "package": "acme/mytool:1.0@sha256:aaaa…",
       "payload": { "extensions": ["rust-lang.rust-analyzer"] }
     }
   ]
@@ -188,7 +188,7 @@ See [What composition does][explanation-integrations-composition].
 
 - `namespace`: the declared key
 - `package`: the canonical resolved identifier of the declaring package. The tag may be absent, and a digest-pinned identifier is legal
-- `payload`: that package's block, [interpolated][metadata-integrations-interpolation] against that package's own `${installPath}`, never the composing root's
+- `payload`: that package's block, [interpolated][metadata-integrations-interpolation] against that package's own `${self.installPath}`, never the composing root's
 - Filter: `.integrations[] | select(.namespace=="…")`
 
 ### Ordering {#integrations-ordering}
@@ -199,7 +199,7 @@ Rows follow the admitted-set walk order of [Composition Order](#composition-orde
 
 ### Interface Surface Only {#integrations-interface-surface}
 
-Integrations reach only the [interface surface](#visibility-surfaces), at every depth: `--self` always composes `"integrations": []`, including a generated [launcher's][cmd-launcher-exec] forced self view. An integrations block has no `visibility` field, unlike `binaries` and `entrypoints`, whose membership follows the two-axis [visibility][reference-visibility] of each declared entry.
+Integrations reach only the [interface surface](#visibility-surfaces), at every depth: `--self` always composes `"integrations": []`, including a generated [launcher's][cmd-launcher-exec] forced private surface. An integrations block has no `visibility` field, unlike `binaries` and `entrypoints`, whose membership follows the two-axis [visibility][reference-visibility] of each declared entry.
 
 - Private edge: a dependency reached only through a `private` edge contributes nothing on either surface
 
@@ -221,7 +221,7 @@ When several packages contribute to an environment, via `ocx exec -g GROUP1,GROU
 
 - `ocx exec` order: first by group-selection order (the order of `-g` flags, after `all` expansion, deduplicated). Then alphabetical by binding name within each group
 
-See [In Depth: Project Toolchain → Composition order rule][in-depth-project-composition].
+See [Project toolchain: composition order rule][in-depth-project-composition].
 
 ### List Variables {#composition-order-list}
 
@@ -254,7 +254,7 @@ See [Project and group `[env]`][in-depth-project-env].
 
 | Stage | Source | Notes |
 |---|---|---|
-| 1 (lowest) | Ambient inherited env | The caller's environment; minus what earlier ocx layers applied under `--isolate`, and skipped entirely under [`--clean`][cmd-run] |
+| 1 (lowest) | Ambient inherited env | The caller's environment; minus what earlier OCX layers applied under `--isolate`, and skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — each companion var on the surfaces of the package it matched; applied after all package env, before stages 4-6 |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
@@ -267,7 +267,7 @@ See [Project and group `[env]`][in-depth-project-env].
 
 ### Where `--env` lives {#project-env-flag-surfaces}
 
-`--env` is a per-invocation override and not project configuration, so it is available on every command that composes an environment, on both tiers. The package tier reads no `ocx.toml`, so stages 4 and 5 do not exist there.
+`--env` is a per-invocation override and not project configuration, so it is available on every command that composes an environment, on both command families. The `ocx package` commands read no `ocx.toml`, so stages 4 and 5 do not exist there.
 
 | Tier | Commands | Also available |
 |---|---|---|
@@ -278,7 +278,7 @@ See [Project and group `[env]`][in-depth-project-env].
 - `--clean`, `--isolate`: control only stage 1, what the child inherits from the parent shell. Package env values come from `ocx.lock` and the resolved digests alone, with or without it
 - Forwarded under `--clean`: [`__OCX_ENV_STATE`][env-ocx-env-state] and [`OCX_BINARY_PIN`][env-ocx-binary-pin] always, written afresh from this invocation's settings. They carry the resolution-affecting settings, including the root flags and the home
 - Project `[env]`: excluded from the lock's `declaration_hash`, and it has no visibility axis because a project is never a dependency of anything
-- `--self`: package vocabulary, absent from the project tier
+- `--self`: package vocabulary, absent from the project commands
 
 <!-- external -->
 [direnv]: https://direnv.net/
@@ -299,7 +299,7 @@ See [Project and group `[env]`][in-depth-project-env].
 [cmd-patch-test]: ./command-line/patch.md#patch-test
 [cmd-launcher-exec]: ../explanation/launcher-forwarding.md#launcher-embedding
 [arg-pinned]: ./project-file.md#project-config-pinned
-[arg-pinned-degrade]: ../explanation/toolchain-activation.md
+[arg-pinned-degrade]: ../explanation/toolchain-activation.mdx
 
 <!-- environment -->
 [env-ocx-project]: ./environment.md#ocx-project
@@ -311,8 +311,8 @@ See [Project and group `[env]`][in-depth-project-env].
 [env-no-config-refresh]: ./environment.md#ocx-no-config-refresh
 
 <!-- configuration -->
-[config-activate]: ../explanation/toolchain-activation.md#activate
-[config-pinned]: ../explanation/toolchain-activation.md#pinned
+[config-activate]: ../explanation/toolchain-activation.mdx#activate
+[config-pinned]: ../explanation/toolchain-activation.mdx#pinned
 [config-patches]: ./configuration.md#keys-patches
 [config-patches-no-patches]: ../guides/patch-packages.mdx#patches-config
 [config-patches-scopes]: ../guides/patch-packages.mdx#patches-config
@@ -336,10 +336,10 @@ See [Project and group `[env]`][in-depth-project-env].
 [env-strict-isolation-exec]: ../explanation/environments.mdx#strict-isolation-exec
 [env-last-wins-lists]: ../explanation/environments.mdx#last-wins-lists
 [env-last-wins-lists-separator]: ../explanation/environments.mdx#last-wins-lists-separator
-[explanation-toolchain-activation]: ../explanation/toolchain-activation.md
-[explanation-path-order]: ../explanation/toolchain-activation.md#path-order
-[explanation-trampolines]: ../explanation/toolchain-activation.md#trampolines
-[explanation-collisions]: ../explanation/toolchain-activation.md#collisions
+[explanation-toolchain-activation]: ../explanation/toolchain-activation.mdx
+[explanation-path-order]: ../explanation/toolchain-activation.mdx#path-order
+[explanation-trampolines]: ../explanation/toolchain-activation.mdx#trampolines
+[explanation-collisions]: ../explanation/toolchain-activation.mdx#collisions
 [explanation-integrations-composition]: ../explanation/integrations.md#composition
 [in-depth-shell-integration-nested]: ../explanation/shell-integration.mdx#activation-nested-projects
 [in-depth-project-composition]: ../explanation/project-toolchain.md#running-composition-order

@@ -13,13 +13,13 @@ A repeated package is not expanded again.
 
 `--flat` prints the resolved evaluation order instead, the exact order `ocx package exec` and `ocx package env` compose the environment in, one row of package, visibility and digest each.
 
-`--why <DEP>` traces every path from the given packages to one dependency, each printed as a chain such as `myapp:1.0 -> ocx.sh/kitware/cmake:3.28 -> ocx.sh/gcc:13`. With several packages, the command builds their combined graph.
+`--why <DEP>` traces every path from the given packages to one dependency, each printed as a chain such as `myapp:1.0 -> ocx.sh/pypa/pipx:1.18 -> ghcr.io/ocx-contrib/astral-sh/python-build-standalone:3.13.14`. With several packages, the command builds their combined graph.
 
 Works on locally present packages only (no auto-install) and never consults `ocx.toml`. It walks structural metadata and never resolves env values, so a package whose env references an undeclared dependency still appears.
 
 Only two things drop a package from the output, each logged at warn level. One is a `metadata.json` that fails to parse or validate.
 
-The other is an env-var modifier type this ocx does not recognize.
+The other is an env-var modifier type this OCX does not recognize.
 
 ```text
 ocx package deps [OPTIONS] <PACKAGE>...
@@ -49,13 +49,13 @@ ocx package deselect <PACKAGE>...
 
 Print the resolved environment variables for one or more installed packages.
 
-Plain output is an aligned `Key`, `Type`, `Value` table. When binaries, entry points or integration namespaces are admitted, it ends with one hint line counting each, for example `5 binaries available (...); 2 integration namespaces (...); use --format json for the full list`.
+Plain output is an aligned `Key`, `Type`, `Value` table. When binaries, entry points or integration keys are admitted, it ends with one hint line counting each, for example `5 binaries available (...); 2 integration namespaces (...); use --format json for the full list`.
 
 `--format json` emits `items` plus `binaries`, `entrypoints` and `integrations` arrays; `--shell[=NAME]` emits the only eval-safe form. A package's dependencies contribute their variables in topological order, dependencies before dependents.
 
 Packages missing from the object store are installed, with their transitive dependencies, and a package with index-listed publishers or a covering `[[trust.policy]]` is signature-verified before its environment is composed.
 
-`--candidate`, `--current` and `--link` resolve through an install symlink instead and never auto-install. `--self` selects the publisher's own view (private and public entries) instead of the consumer view (public and interface); `integrations` is always empty under `--self`.
+`--candidate`, `--current` and `--link` resolve through an install symlink instead and never auto-install. `--self` selects the private surface (private and public entries) instead of the interface surface (public and interface entries); `integrations` is always empty under `--self`.
 
 ```text
 ocx package env [OPTIONS] <PACKAGE>...
@@ -79,19 +79,19 @@ ocx package env [OPTIONS] <PACKAGE>...
 
 Runs installed packages.
 
-Identifiers are OCI references (for example `kitware/cmake:3.28`), resolved through the index and installed when missing. A package with index-listed publishers or a covering `[[trust.policy]]` is signature-verified before it runs.
+Identifiers are OCI references (for example `nodejs/node:24`), resolved through the index and installed when missing. A package with index-listed publishers or a covering `[[trust.policy]]` is signature-verified before it runs.
 
 Dependencies' environments apply in topological order before the package's own, and entries layer in the order the identifiers appear. For a project driven by `ocx.toml`, use `ocx exec`.
 
-Stdin is always inherited, so piped input reaches the command unchanged. On Unix ocx replaces itself with the command, so signals reach it directly and it keeps ocx's process id.
+Stdin is always inherited, so piped input reaches the command unchanged. On Unix OCX replaces itself with the command, so signals reach it directly and it keeps OCX's process id.
 
-On Windows ocx spawns the command, waits, and forwards its exit code.
+On Windows OCX spawns the command, waits, and forwards its exit code.
 
-`--rm` is the exception on Unix: cleanup must run after the command, so ocx stays resident as its parent.
+`--rm` is the exception on Unix: cleanup must run after the command, so OCX stays resident as its parent.
 
 The command is looked up once, before it starts. Only the composed packages' own `PATH` contributions are searched, never the ambient `PATH` or the working directory.
 
-A match that is itself an ocx launcher is refused. `--rm` runs the same lock-free store collection as `ocx package uninstall --purge` over the packages this run composed, so concurrent invocations sharing one `OCX_HOME` can race.
+A match that is itself an OCX launcher is refused. `--rm` runs the same lock-free store collection as `ocx package uninstall --purge` over the packages this run composed, so concurrent invocations sharing one `OCX_HOME` can race.
 
 Use it for one-off runs, not in a loop.
 
@@ -107,28 +107,28 @@ ocx package exec [OPTIONS] <PACKAGES>... <COMMAND>...
 | `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--current` |  | Resolve the content path via the current-selected symlink (`~/.ocx/symlinks/<registry>/<repo>/current`) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
-| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
+| `--isolate` |  | Remove every value OCX applied to the calling environment before composing |
 | `--lazy-mode` | `never\|always` | Control when a package's content downloads: now, or on first use |
 | `--link` | `PATH` | Resolve the content path via a link written by `ocx package install --link <PATH>` |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
 | `--records-dir` | `DIRECTORY` | Directory to write this invocation's execution record into |
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
 | `--rm` |  | Remove the packages from the store once the command finishes |
-| `--self` |  | Expose the package's full env, including its private (self-only) entries. Off by default: only public + interface entries are loaded (the consumer view). Generated launchers use `ocx launcher exec` which enables self-view internally |
+| `--self` |  | Expose the package's full env, including its private (self-only) entries. Off by default: only public + interface entries are loaded (the interface surface). Generated launchers use `ocx launcher exec` which enables self-view internally |
 
 ## `ocx package inspect` {#package-inspect}
 
-Inspect one or more package references (candidates, metadata, or resolution chain).
+Inspect one or more package references (platforms, metadata, or resolution chain).
 
 Read-only: nothing is installed and no symlinks are created. Default mode resolves a tag through the index, so a cache miss may populate the local index and blob cache.
 
 Unlike `ocx package test`, the identifier accepts an explicit `@digest`.
 
-The output adapts to the reference. An image-index reference lists its platform candidates (platform, child digest, media type, size) with no metadata loaded and no platform selected.
+The output adapts to the reference. An image index reference lists its platforms (platform, child digest, media type, size) with no metadata loaded and no platform selected.
 
 A single-manifest reference, a flat tag or an `@digest` at an image manifest, emits the declared metadata and the manifest's layers. `--resolve` platform-selects through the index and adds the resolution chain (index, manifest, config).
 
-`--closure` walks the declared dependencies and adds the metadata-only dependency closure plus the `interface` and `private` surface projections. On an image index it platform-selects first, as `--resolve` does, so it never returns the candidates listing.
+`--closure` walks the declared dependencies and adds the metadata-only dependency closure plus the `interface` and `private` surface projections. On an image index it platform-selects first, as `--resolve` does, so it never returns the platforms listing.
 
 `--closure` fails closed. If any dependency's manifest or metadata cannot be loaded, the whole request fails rather than rendering a partial closure.
 
@@ -145,17 +145,17 @@ ocx package inspect [OPTIONS] <PACKAGE>...
 | `--closure` |  | Compute the metadata-only dependency closure without installing |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--platform`, `-p` | `PLATFORM` | Target platform to resolve packages against |
-| `--resolve` |  | Platform-select through the index and emit the OCI resolution chain (pinned identifier and walk-order chain digests: index, manifest, config) alongside the metadata and layers. Without `--resolve` or `--closure`, an image-index reference lists its platform candidates instead |
+| `--resolve` |  | Platform-select through the index and emit the OCI resolution chain (pinned identifier and walk-order chain digests: index, manifest, config) alongside the metadata and layers. Without `--resolve` or `--closure`, an image index reference lists its platforms instead |
 
 ## `ocx package install` {#package-install}
 
 Install packages from a local or remote index (no `ocx.toml` touched).
 
-Downloads the packages and their transitive dependencies into the object store and creates a candidate symlink for each requested package; dependencies get no install symlinks. This is the OCI-tier install and never touches `ocx.toml`; use `ocx add` for a project.
+Downloads the packages and their transitive dependencies into the object store and creates a candidate symlink for each requested package; dependencies get no install symlinks. This is the `ocx package` install and never touches `ocx.toml`; use `ocx add` for a project.
 
 A package with index-listed publishers or a covering `[[trust.policy]]` is verified before any layer downloads (see `--verify`).
 
-Installing a foreign platform fills the object store but leaves the host's candidate and `current` symlinks alone. A platformless lookup therefore never resolves to a package the host cannot run.
+Installing a foreign platform fills the object store but leaves the host's candidate and `current` symlinks alone. A lookup with no platform therefore never resolves to a package the host cannot run.
 
 On Windows a warning is printed when `PATHEXT` lacks `.CMD`, which the generated entry-point launchers need.
 
@@ -187,9 +187,9 @@ For a namespace with an index, prune reads the package's root from the configure
 
 `--force` deletes such tags anyway and is required for a namespace with no index. A tag already gone from the registry is reported as absent.
 
-On the registry API prune deletes registry tags only: never a digest, a platform manifest, a keep tag or a referrer, and it never writes the index. A keep tag pins the manifest past the tag's deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.
+On the registry API prune deletes registry tags only: never a digest, a platform manifest, a keep tag or a referrer, and it never writes the index. A keep tag pins the manifest past the tag's deletion: push snapshot builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage.
 
-A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` registry needs `--forge github`.
+A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API with the credential OCX uses for that registry. A GitHub Enterprise `containers.<host>` registry needs `--forge github`.
 
 When the index supplies the host, that host must be `ghcr.io` or listed exactly in `trusted_hosts` of the package's namespace in `config.toml`, else the run is refused with exit 64. It deletes the version holding the tag, the platform manifests only that version lists, and the referrer tags of those manifests.
 
@@ -274,7 +274,7 @@ The receipt records the `--platform` and `--identifier` a build was given; `ocx 
 
 The receipt is resolved beside the bundle by the stem rule `push` uses (`hello-1.0.0.tar.xz` -> `hello-1.0.0-receipt.json`). The file itself is a build artifact; this report is the contract an SDK reads instead.
 
-Exits 79 when no receipt sits beside the bundle and 65 when the file exists but is not a receipt this ocx can read.
+Exits 79 when no receipt sits beside the bundle and 65 when the file exists but is not a receipt this OCX can read.
 
 ```text
 ocx package receipt <BUNDLE>
@@ -402,7 +402,7 @@ Name the signer in one of two ways. Pass both `--certificate-identity` and `--ce
 
 Or pass neither and let the publishers the index lists for the package, or `[[trust.policy]]`, decide. Policies are matched against the target's canonical `registry/repository`: the operator-tier (`config.toml`) ones first, the project `ocx.toml` ones only when none match.
 
-Reading `[[trust.policy]]` from `ocx.toml` is the one exception to OCI-tier commands never consulting it, because trust policy is a security posture rather than toolchain binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), and so is neither flag with no listed publishers and no covering policy (`no_identity_provided`).
+Reading `[[trust.policy]]` from `ocx.toml` is the one exception to the `ocx package` commands never consulting it, because trust policy is a security posture rather than toolchain binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), and so is neither flag with no listed publishers and no covering policy (`no_identity_provided`).
 
 Trust material carrying only CA anchors cannot verify anything, since the Fulcio certificate's SCT is checked against the CT log key. Verify refuses it with exit 78 (`trust root carries no CT log key`).
 

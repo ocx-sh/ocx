@@ -60,7 +60,7 @@ pub enum RoundsError {
     #[exit(
         Unsupported,
         slug = "publishers_unrecognized",
-        summary = "The index lists publishers only a newer ocx understands"
+        summary = "The index lists publishers only a newer OCX understands"
     )]
     PublishersUnrecognized {
         /// The package the round refused.

@@ -1,9 +1,11 @@
 ---
 title: "Bundle a release"
-description: "Turn a directory or an upstream archive into the deterministic archive that ocx package push expects."
+description: "Turn a directory or an upstream archive into the archive that `ocx package push` expects."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
 
@@ -13,17 +15,21 @@ import Node from '@ocx-sh/theme/components/TreeNode.astro'
 
 import Description from '@ocx-sh/theme/components/TreeDescription.astro'
 
-By the end of this page you have a tar archive and a sidecar `metadata.json` that `ocx package push` accepts. A package on the registry is two artefacts that travel together. One is the files your package needs at run time, and the other is the metadata that says how to install them. You need a directory of built files or an upstream release archive. The steps below cover what goes into the archive, how to compress it, and how to keep reruns from producing a different digest.
+By the end of this page you have a tar archive and a sidecar `metadata.json` that `ocx package push` accepts. A package on the registry is two artefacts that travel together. One is the files your package needs at run time, and the other is the metadata that says how to install them. You need a directory of built files or an upstream release archive. The steps below cover what goes into the archive, how to compress it, and how to reuse a layer by its digest.
 
 ## Choose what goes in the archive \{#what-goes-in\}
 
-Most upstream toolchains ship one root directory inside their archive, such as `cmake-3.28.1-linux-x86_64/bin/cmake`. A package manager needs a flat surface, so the declared `PATH` entry (`${installPath}/bin`) lands in the consumer's `bin/` without knowing the upstream naming. Either pre-flatten the tree before you bundle, or keep the upstream layout and tell OCX to strip the wrapper at install time with [`strip_components`][strip-components]. Keeping the layout avoids re-bundling cost. The [repackaging guide][authoring-repackage] walks through the common transformations.
+Most upstream toolchains ship one root directory inside their archive, such as `node-v24.21.0-linux-x64/bin/node`. A package manager needs a flat surface, so the declared `PATH` entry (`${self.installPath}/bin`) lands in the consumer's `bin/` without knowing the upstream naming. Either pre-flatten the tree before you bundle, or keep the upstream layout and tell OCX to strip the wrapper at install time with [`strip_components`][strip-components]. Keeping the layout avoids re-bundling cost. The [repackaging guide][authoring-repackage] walks through the common transformations.
 
 To turn an upstream archive into a package in one step, let `create` unpack it and drop the wrapper directory:
 
+<ShellSession>
+
 ```sh
-ocx package create --extract --strip-components 1 cmake-3.28.1-linux-x86_64.tar.gz -p linux/amd64 -m metadata.json -o cmake-3.28.1.tar.xz
+ocx package create --extract --strip-components 1 node-v24.21.0-linux-x64.tar.xz -p linux/amd64 -m metadata.json -o node-24.21.0.tar.xz
 ```
+
+</ShellSession>
 
 The [two `strip_components` forms](#strip-components) differ in when they apply.
 
@@ -31,9 +37,11 @@ OCX assembles every installed package under `content/` ([three-tier storage][in-
 
 ## Keep the archive stable \{#stable\}
 
-Entries are sorted by filename, so directory iteration order does not leak in. File mtimes come from the filesystem and are embedded in the tar headers. A rerun on a fresh checkout, on another host or after `touch` produces different bytes and a different digest. Treat the archive digest as a property of one run, not of the source tree. [`ocx package create`][cmd-package-create] does not change that.
+[`ocx package create`][cmd-package-create] sorts entries by filename and writes deterministic tar headers, so mtime, owner and directory iteration order do not reach the archive. The same tree packed with the same OCX version and the same compression settings (codec, level, and single- or multi-threaded) gives the same bytes and digest, also after `touch`. File content, names and the executable bit count. Changing any of them, or the codec, level or thread mode, gives a new digest, so a rebuilt binary is a new layer. A different OCX version may also change the bytes.
 
-[Layer reuse][in-depth-storage-layers] depends on digest equality. Bundle the same content twice and you get two layers in the registry, two downloads and no dedup. The fix is to record the digest after the first push and reference it on later pushes:
+[Layer reuse][in-depth-storage-layers] depends on digest equality. A new layer in the registry means a new download for every consumer. Record the digest after the first push and reference it on later pushes, so an unchanged layer is not uploaded or pulled again:
+
+<ShellSession>
 
 ```sh
 ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
@@ -47,9 +55,9 @@ BASE_DIGEST=$(sha256sum mytool-1.0.0.tar.xz | awk '{print $1}')
 ocx package push -p linux/amd64 -m metadata.json -i ghcr.io/acme/mytool:1.0.1 sha256:${BASE_DIGEST}.tar.xz
 ```
 
-The `sha256:<hex>.<ext>` form on [`ocx package push`][cmd-package-push] points a new manifest at a layer that already lives in the registry. See [Reusing layers across packages][authoring-layer-reuse] for the full pattern, including a stable base layer with a per-release top layer.
+</ShellSession>
 
-<Terminal src="/casts/authoring/package-create.cast" title="Bundling a package with ocx package create" collapsed />
+The `sha256:<hex>.<ext>` form on [`ocx package push`][cmd-package-push] points a new manifest at a layer that already lives in the registry. See [Reusing layers across packages][authoring-layer-reuse] for the full pattern, including a stable base layer with a per-release top layer.
 
 ## Choose the compression \{#compression\}
 
@@ -67,28 +75,37 @@ Layers download once and cache per digest ([three-tier storage][in-depth-storage
 
 ## Ship the sidecar metadata \{#sidecars\}
 
-[`ocx package create`][cmd-package-create] follows a sidecar convention so the metadata travels with the archive. Pass `-m metadata.json` and the command copies that file next to the output archive, named after the archive:
+[`ocx package create`][cmd-package-create] follows a sidecar convention so the metadata travels with the archive. Pass `-m metadata.json` and the command validates that file, resolves it and writes the result next to the output archive, named after the archive. The `<stem>-receipt.json` beside them is the [build receipt][create-receipt] that `push` and `test` read:
+
+<ShellSession>
 
 ```sh
 ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
 ```
+
+</ShellSession>
 
 This produces:
 
 <Tree collapsible={false}>
   <Node name="mytool-1.0.0.tar.xz" />
   <Node name="mytool-1.0.0-metadata.json">
-    <Description slot="description">sidecar, same bytes as the input metadata.json</Description>
+    <Description slot="description">sidecar, validated and rewritten in canonical form</Description>
   </Node>
+  <Node name="mytool-1.0.0-receipt.json" />
 </Tree>
 
-[`ocx package push`][cmd-package-push] uses the same convention in reverse. Omit `-m` from the push and OCX looks next to the first file layer for `<stem>-metadata.json`. You declare the metadata once at create time, and it follows the archive.
+<Terminal src="/casts/authoring/package-create.cast" title="Bundling a package with OCX" collapsed />
 
-The convention also names the output file when `-o` is a directory and `-i` and `-p` give the identifier and platform:
+[`ocx package push`][cmd-package-push] uses the same convention in reverse. Omit `-m` from the push and OCX looks next to the first file layer for `<stem>-metadata.json`. You declare the metadata once at create time, and it follows the archive. The convention also names the output file when `-o` is a directory and `-i` and `-p` give the identifier and platform:
+
+<ShellSession>
 
 ```sh
 ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 ```
+
+</ShellSession>
 
 This produces:
 
@@ -97,13 +114,14 @@ This produces:
   <Node name="mytool-1.0.0-linux-amd64-metadata.json">
     <Description slot="description">sidecar, picked up automatically by per-platform pushes</Description>
   </Node>
+  <Node name="mytool-1.0.0-linux-amd64-receipt.json" />
 </Tree>
 
-The pattern is `<name>-<tag>-<os>-<arch>.tar.xz`, where `<name>` is the last segment of the repository. So `myorg/mytool:1.0.0` infers `mytool-1.0.0-...`. Inference with `-o .` always uses LZMA, so pass an explicit filename such as `-o mytool-1.0.0.tar.gz` for another codec. Per-platform pushes pick the names up automatically, as the [multi-platform page][authoring-multi-platform] shows. The [`ocx_mirror`][in-tree-mirrors] pipeline runs the same `-o .` convention in production.
+The pattern is `<name>-<tag>-<os>-<arch>.tar.xz`, where `<name>` is the last segment of the repository. So `myorg/mytool:1.0.0` infers `mytool-1.0.0-...`. Inference with `-o .` always uses LZMA, so pass an explicit filename such as `-o mytool-1.0.0.tar.gz` for another codec. Per-platform pushes pick the names up automatically, as the [multi-platform page][authoring-multi-platform] shows. The [`ocx-mirror`][in-tree-mirrors] pipeline runs the same `-o .` convention in production.
 
 ## Strip upstream wrappers \{#strip-components\}
 
-When you repackage an upstream archive, [`strip_components`][strip-components] mirrors [`tar --strip-components`][gnu-tar-strip]. Declare it in `metadata.json` and OCX removes that many leading path segments while extracting each layer. A value of `1` collapses `cmake-3.28/bin/cmake` to `bin/cmake`. The default is `0`. The [metadata reference][strip-components] lists every constraint.
+When you repackage an upstream archive, [`strip_components`][strip-components] mirrors [`tar --strip-components`][gnu-tar-strip]. Declare it in `metadata.json` and OCX removes that many leading path segments while extracting each layer. A value of `1` collapses `node-v24.21.0-linux-x64/bin/node` to `bin/node`. The default is `0`. The [metadata reference][strip-components] lists every constraint.
 
 ```json
 {
@@ -114,16 +132,14 @@ When you repackage an upstream archive, [`strip_components`][strip-components] m
 ```
 
 :::note[Two `strip_components`, two different moments]
-The metadata field and [`ocx package create --strip-components`][cmd-package-create] share a name but apply at different points. The metadata field is baked into the sidecar and re-applies on every consumer install. The layer extracts into that consumer's object store. The flag implies [`--extract`][cmd-package-create] and runs once at authoring time. It strips the *input* archive named by `<PATH>` as it unpacks into the tree that `create` bundles from.
-
-Use the field for how every install unwraps your layers. Use the flag to turn an upstream release archive into your content tree.
+The metadata field and [`ocx package create --strip-components`][cmd-package-create] share a name but apply at different points. The metadata field is baked into the sidecar and re-applies on every consumer install. The layer extracts into that consumer's object store. The flag implies [`--extract`][cmd-package-create] and runs once at authoring time. It strips the *input* archive named by `<PATH>` as it unpacks into the tree that `create` bundles from. Use the field for how every install unwraps your layers. Use the flag to turn an upstream release archive into your content tree.
 :::
 
 ## See also \{#see-also\}
 
 - [`ocx package create` reference][cmd-package-create]
-- [Storage in depth: packages and layers][in-depth-storage]
-- [Publish a package to a registry][authoring-building-pushing] for taking the bundle to the registry
+- [Storage: packages and layers][in-depth-storage]
+- [Publish a package][authoring-building-pushing] for taking the bundle to the registry
 - [Repackage an upstream release][authoring-repackage] for Homebrew, GitHub Releases and raw tarballs
 
 
@@ -147,3 +163,4 @@ Use the field for how every install unwraps your layers. Use the flag to turn an
 [authoring-layer-reuse]: ./build-and-push.mdx#layer-reuse
 [authoring-repackage]: ./repackage-releases.mdx
 [authoring-multi-platform]: ./multi-platform.mdx
+[create-receipt]: ./build-and-push.mdx#create-receipt

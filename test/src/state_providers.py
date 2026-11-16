@@ -253,36 +253,35 @@ def _path_additions(before: str, after: str) -> tuple[Path, ...]:
 DECLARED_PACKAGES: dict[str, dict[str, str]] = {
     # ---- setup family (recordings.setups.SETUPS) ----
     "setup:basic": {
-        "astral-sh/uv": "astral-sh/uv:0.10.0",
+        "astral-sh/uv": "astral-sh/uv:0.12.5",
     },
     "setup:multi-version": {
         # versions[0].short — "first version wins" (DE6 guards ordering)
-        "amazon/corretto": "amazon/corretto:21.0.0",
+        "amazon/corretto": "amazon/corretto:21",
     },
-    "setup:cmake-versions": {
+    "setup:node-versions": {
         # versions[0].short — "first version wins" (DE6 guards ordering)
-        "kitware/cmake": "kitware/cmake:3.31",
+        "nodejs/node": "nodejs/node:22",
     },
     "setup:full-catalog": {
-        "astral-sh/uv": "astral-sh/uv:0.10.0",
-        "kitware/cmake": "kitware/cmake:4.2.0",
-        "amazon/corretto": "amazon/corretto:21.0.0",
+        "astral-sh/uv": "astral-sh/uv:0.12.5",
+        "amazon/corretto": "amazon/corretto:21",
         "ocx/cli": "ocx/cli:0.1.0",
-        "nodejs/node": "nodejs/node:24.0.0",
-        "oven-sh/bun": "oven-sh/bun:1.3.0",
+        "nodejs/node": "nodejs/node:24",
+        "oven-sh/bun": "oven-sh/bun:1.3.10",
     },
     "setup:variants": {
         # versions[0].short — "first version wins" (DE6 guards ordering)
-        "astral-sh/python-build-standalone": "astral-sh/python-build-standalone:3.13.14",
+        "astral-sh/python-build-standalone": "astral-sh/python-build-standalone:3.14.7",
     },
     "setup:dependencies": {
-        "nodejs/node": "nodejs/node:24.0.0",
-        "oven-sh/bun": "oven-sh/bun:1.3.0",
+        "nodejs/node": "nodejs/node:24",
+        "oven-sh/bun": "oven-sh/bun:1.3.10",
         "acme/webapp": "acme/webapp:2.0.0",
     },
     "setup:deps-visibility": {
-        "nodejs/node": "nodejs/node:24.0.0",
-        "oven-sh/bun": "oven-sh/bun:1.3.0",
+        "nodejs/node": "nodejs/node:24",
+        "oven-sh/bun": "oven-sh/bun:1.3.10",
         "acme/templates": "acme/templates:1.0.0",
         "acme/server": "acme/server:1.0.0",
         "acme/renderer": "acme/renderer:1.0.0",
@@ -293,7 +292,7 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
         "acme/mytool": "acme/mytool:display",
     },
     "setup:patches-consumer": {
-        "kitware/cmake": "kitware/cmake:4.2.0",
+        "astral-sh/python-build-standalone": "astral-sh/python-build-standalone:3.14",
         "corp/ca": "corp/ca:1.0.0",
     },
     "setup:patches-maintainer": {
@@ -304,7 +303,7 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
         "self": "ocx/cli:0.0.1",
     },
     "setup:managed-config-ci": {
-        "kitware/cmake": "kitware/cmake:3.28",
+        "nodejs/node": "nodejs/node:24",
     },
     "setup:signing": {
         "acme/mytool": "acme/mytool:1.0.0",

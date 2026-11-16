@@ -45,9 +45,9 @@ const GITLAB_REFUSAL: &str =
     already gone from the registry is reported as absent.\n\n\
     On the registry API prune deletes registry tags only: never a digest, a platform manifest, \
     a keep tag or a referrer, and it never writes the index. A keep tag pins the manifest past the tag's \
-    deletion: push ephemeral builds with `--no-keep-tag`, or prune frees no storage.\n\n\
+    deletion: push snapshot builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage.\n\n\
     A `ghcr.io` registry cannot delete a tag, so prune deletes through the GitHub packages API \
-    with the credential ocx uses for that registry. A GitHub Enterprise `containers.<host>` \
+    with the credential OCX uses for that registry. A GitHub Enterprise `containers.<host>` \
     registry needs `--forge github`. When the index supplies the host, that host must be `ghcr.io` \
     or listed exactly in `trusted_hosts` of the package's namespace in `config.toml`, else the run \
     is refused with exit 64. It deletes the version holding the tag, the platform \

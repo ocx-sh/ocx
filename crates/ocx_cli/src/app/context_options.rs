@@ -9,7 +9,7 @@ use crate::{api, options};
 
 #[derive(Debug, Parser)]
 pub struct ContextOptions {
-    /// Path to the ocx configuration file.
+    /// Path to the OCX configuration file.
     ///
     /// Can also be set via the `OCX_CONFIG` environment variable. The file must exist, or the command exits 79.
     /// To disable config discovery entirely, set `OCX_NO_CONFIG=1`.
@@ -34,7 +34,7 @@ pub struct ContextOptions {
     /// Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project
     /// file in effect, instead of discovering a project by CWD walk.
     ///
-    /// Mutually exclusive with `--project`. Applies to this invocation only: a child ocx process selects its own tier.
+    /// Mutually exclusive with `--project`. Applies to this invocation only: a child OCX process selects its own tier.
     ///
     /// The global toolchain never composes into project resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
     ///

@@ -1,79 +1,119 @@
 ---
-title: "Install your first package"
-description: "Run a tool once, install two versions side by side, switch between them and remove them again."
+title: "Install a package"
+description: "Run one tool once, install two versions side by side, switch between them, link one where you want it and remove them again."
 ---
 {/* doc_type: tutorial */}
 {/* doc_tier: first-steps */}
 
-By the end of this page you have run CMake without installing it, installed two versions side by side, switched between them and removed both. It assumes ocx is [installed][installation]. Package names such as `kitware/cmake` resolve against the default registry, `ocx.sh`.
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+By the end of this page you have run [Node.js][nodejs] without installing it, installed two versions side by side, switched between them and removed them, apart from the one you linked. It assumes OCX is [installed][installation]. Use this page for machine-wide installs with stable paths for editors and scripts. To get a tool on your `PATH` in every shell, use the [global toolchain][global-toolchain] instead. Package names such as `nodejs/node` resolve against the default registry, `ocx.sh`.
 
 ## Run a package once \{#quick-start\}
 
-Run CMake straight from the registry. The first call downloads the package. Later calls with the same version reuse the download.
+Run Node.js straight from the registry. The first call downloads the package. Later calls with the same version reuse the download.
+
+<ShellSession title="Run once">
 
 \<\<\< @/_scripts/first-package/exec.sh\{sh\}
 
 ```text
-cmake version 3.31.12
-
-CMake suite maintained and supported by Kitware (kitware.com/cmake).
+v22.23.5
 ```
 
-The command ran inside an isolated environment that holds only the variables the package declares. Nothing else persists on your machine: no install, no symlink. The patch number you see depends on the current 3.31 release.
+</ShellSession>
+
+The command ran with the package's variables layered over your own environment. Add `--clean` to start from an empty one. Nothing persists on your machine: no install, no symlink. The patch number you see depends on the current 22 release.
 
 ## Install it \{#installing\}
 
 Make the download permanent and give it a stable path. The paths on this page assume the default home directory, `~/.ocx`:
 
+<ShellSession title="Install a version">
+
 \<\<\< @/_scripts/first-package/install.sh\{sh\}
 
 ```text
-Package             Version                    Path
-kitware/cmake:3.31  ocx.sh/kitware/cmake:3.31  ~/.ocx/symlinks/ocx.sh/kitware/cmake/candidates/3.31
+Package         Version                Path
+nodejs/node:22  ocx.sh/nodejs/node:22  ~/.ocx/symlinks/ocx.sh/nodejs/node/candidates/22
 ```
 
-The `Path` column is a candidate symlink. It always points at the 3.31 build you installed, so an editor or script can use it as a fixed path.
+</ShellSession>
+
+The `Path` column is a candidate symlink. It points at the build installed for 22, so an editor or script can use it as a fixed path.
+
+## Link it where you want it \{#link\}
+
+Besides the candidate and `current` symlinks that OCX manages, you can ask for a link at a path you choose. It gives a build or an editor a stable path of your own, and the package behind it is kept from `ocx clean`. The path must not exist yet, and the flag takes one package.
+
+<ShellSession title="Install and link">
+
+\<\<\< @/_scripts/user-guide/install-link.sh\{sh\}
+
+</ShellSession>
+
+[Use stable paths][stable-paths] explains when to use it. The [`ocx package install` reference][cmd-install] lists the flag.
 
 ## Switch versions \{#switching-versions\}
 
 Install a second version and mark it as the one you use. The `--select` flag creates a `current` symlink next to the candidates:
 
+<ShellSession title="Install and select">
+
 \<\<\< @/_scripts/first-package/install-select.sh\{sh\}
 
 ```text
-Package            Version                   Path
-kitware/cmake:4.0  ocx.sh/kitware/cmake:4.0  ~/.ocx/symlinks/ocx.sh/kitware/cmake/current
+Package         Version                Path
+nodejs/node:24  ocx.sh/nodejs/node:24  ~/.ocx/symlinks/ocx.sh/nodejs/node/current
 ```
+
+</ShellSession>
 
 Run the binary through `current`. The path has no version in it:
 
+<ShellSession title="Run through current">
+
 ```sh
-~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake --version
+~/.ocx/symlinks/ocx.sh/nodejs/node/current/content/bin/node --version
 ```
 
 ```text
-cmake version 4.0.7
+v24.22.3
 ```
 
-Point `current` back at 3.31, then run the same path again:
+</ShellSession>
+
+Point `current` back at 22, then run the same path again:
+
+<ShellSession title="Switch back">
 
 \<\<\< @/_scripts/first-package/select-back.sh\{sh\}
 
+</ShellSession>
+
+<ShellSession title="Run after switching">
+
 ```sh
-~/.ocx/symlinks/ocx.sh/kitware/cmake/current/content/bin/cmake --version
+~/.ocx/symlinks/ocx.sh/nodejs/node/current/content/bin/node --version
 ```
 
 ```text
-cmake version 3.31.12
+v22.23.5
 ```
 
-The path stayed the same and the version behind it changed. Installing with `--select` does not put a bare `cmake` on your `PATH`. The [next steps](#next-steps) show how to get that.
+</ShellSession>
+
+The path stayed the same and the version behind it changed. Installing with `--select` does not put this `node` on your `PATH`. The [next steps](#next-steps) show how to get that.
 
 ## See the environment \{#environment\}
 
 A package can declare environment variables, such as the `PATH` entry for its `bin` directory. List what the installed package declares:
 
+<ShellSession title="List the environment">
+
 \<\<\< @/_scripts/first-package/env.sh\{sh\}
+
+</ShellSession>
 
 The output is a table with the columns `Key`, `Type` and `Value`. Each value is resolved against the install location. `ocx package exec` injects exactly these variables into the child process.
 
@@ -81,35 +121,46 @@ The output is a table with the columns `Key`, `Type` and `Value`. Each value is 
 
 Remove the selected version, clear the `current` pointer and delete the package data in one command:
 
+<ShellSession title="Remove one version">
+
 \<\<\< @/_scripts/first-package/uninstall.sh\{sh\}
 
 ```text
-Package             Status
-kitware/cmake:3.31  removed
-kitware/cmake:3.31  purged
+Package         Status
+nodejs/node:22  removed
+nodejs/node:22  purged
 ```
 
-A plain uninstall removes the candidate symlink and keeps the package data. Uninstall 4.0 that way, then let `ocx clean` delete every package nothing references anymore:
+</ShellSession>
+
+A plain uninstall removes the candidate symlink and keeps the package data. Uninstall 24 that way, then let `ocx clean` delete every package nothing references anymore:
+
+<ShellSession title="Clean up">
 
 \<\<\< @/_scripts/first-package/clean.sh\{sh\}
 
-The last command prints one line for each object it deletes. Both versions are gone.
+</ShellSession>
+
+The last command prints one line for each object it deletes. The 22 install is gone. The linked 24 package stays until you delete the link at `./.tools/node`, because `ocx clean` keeps what a link points at.
 
 ## Next steps \{#next-steps\}
 
-- Pin the tools of one repository in [your first project][first-project].
+- Declare the tools of one repository in [Pin a toolchain][first-project].
 - Put a tool on your `PATH` in every shell with the [global toolchain][global-toolchain], or let [shell integration][shell-integration] do it per project.
-- Learn how [version tags][versions] work, so you know why `3.31` and `4.0` pick the builds they do.
+- Learn how [version tags][versions] work, so you know why `22` and `24` pick the builds they do.
+- List the tags of a repository with [`--remote` index commands][find-versions], and look up exit code 79 in the [exit codes][exit-codes].
 - Look up flags in the [`ocx package` reference][cmd-package] and the [environment reference][env-ref].
-
-A tag that does not exist in the registry fails with exit code 79. On a fresh install the [local index][local-index] is empty, so index commands need `--remote` until a package is installed. List the tags a repository publishes with `ocx --remote index list kitware/cmake`. Global flags such as `--remote` go before the subcommand.
 
 
 [installation]: ./install-ocx.mdx
+[nodejs]: https://nodejs.org/
 [first-project]: ./first-project.mdx
+[stable-paths]: ../guides/stable-paths.mdx#stable-paths-link
+[cmd-install]: ../reference/command-line/package-consuming.md#package-install
 [global-toolchain]: ../guides/global-toolchain.mdx
 [shell-integration]: ../explanation/shell-integration.mdx
 [versions]: ../explanation/versioning.mdx
-[local-index]: ../explanation/local-index.md#local
+[find-versions]: ../guides/find-packages.mdx#find-versions
+[exit-codes]: ../reference/exit-codes.md#exit-79
 [cmd-package]: ../reference/command-line/package-publishing.md#package
 [env-ref]: ../reference/environment.md

@@ -129,3 +129,141 @@ def test_non_table_lines_untouched() -> None:
         rec = CastRecording(events=[CastEvent(0.0, "o", blob)])
         rec.realign_tables()
         assert rec.events[0].data == blob
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the published `package push` cast: an empty cell, a prefix
+# the display map does not know, and a command wider than the frame.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+
+from recordings.cast_layer import write_cast
+from src.cast_screen import problems, replay
+
+_DIGEST = "sha256:" + "a7a58964" + "0" * 56
+
+
+def _push_table() -> str:
+    """Identifier / Digest / Tags / Keep Tags / Layers, Keep Tags empty in the row."""
+    w = [30, 71, 4, 9, 31]
+    header = f"{_HDR}  {_R}".join(f"{_HDR}{t:<{n}}{_R}" for t, n in zip(
+        ["Identifier", "Digest", "Tags", "Keep Tags", "Layers"], w))
+    cells = ["localhost:5000/t_46fede8b_acme/mytool:1.0.0", _DIGEST, "1", "", "mounted=0,uploaded=1"]
+    cells[0] = cells[0][:30]
+    row = "  ".join(f"{c:<{n}}" for c, n in zip(cells, w))
+    return f"{header}\r\n{row}\r\n"
+
+
+def _write(tmp_path: Path, rec: CastRecording) -> Path:
+    path = tmp_path / "x.cast"
+    write_cast(rec, {"localhost:5000/t_46fede8b_acme/mytool": "acme/mytool", "localhost:5000/": ""}, path)
+    return path
+
+
+def test_table_with_an_empty_cell_is_realigned_after_shortening(tmp_path: Path) -> None:
+    rec = CastRecording(events=[CastEvent(0.0, "o", _push_table())])
+    path = _write(tmp_path, rec)
+    assert problems(path) == []
+    head, row = (r.text() for r in replay(path).rows[:2])
+    assert row.index("sha256:a7a58964..") == head.index("Digest")
+    assert row.index("1") == head.index("Tags")
+    assert row.index("mounted") == head.index("Layers")
+
+
+def test_unknown_test_run_prefix_is_removed_even_in_quotes() -> None:
+    rec = CastRecording(events=[CastEvent(0.0, "o", "for identifier 't_46fede8b_acme/mytool'.\r\n")])
+    rec.sanitize({})
+    assert rec.events[0].data == "for identifier 'acme/mytool'.\r\n"
+
+
+def test_command_wider_than_the_frame_keeps_its_start_visible(tmp_path: Path) -> None:
+    command = "$ ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64"
+    lines = "".join(f"{command}\r\nline {n}\r\n" for n in range(5))
+    rec = CastRecording(width=40, height=5, events=[CastEvent(0.0, "o", lines)])
+    path = _write(tmp_path, rec)
+    assert problems(path) == []
+    assert replay(path).rows[0].text() == command  # one row: the command is not wrapped
+
+
+def test_width_follows_the_longest_output_line(tmp_path: Path) -> None:
+    line = "x" * 102
+    path = _write(tmp_path, CastRecording(width=100, events=[CastEvent(0.0, "o", f"{line}\r\n")]))
+    screen = replay(path)
+    assert screen.width == 102
+    assert not any(r.wrapped for r in screen.rows)
+
+
+def test_width_is_capped_and_a_longer_line_wraps(tmp_path: Path) -> None:
+    path = _write(tmp_path, CastRecording(width=100, events=[CastEvent(0.0, "o", f"$ {'x' * 181}\r\n")]))
+    screen = replay(path)
+    assert screen.width == 120
+    assert [r.wrapped for r in screen.rows[:2]] == [False, True]
+
+
+def test_prefix_split_across_two_events_is_removed() -> None:
+    """A PTY read can end inside the word; the published cast showed `'t_46fede8b_acme/mytool'`."""
+    rec = CastRecording(events=[
+        CastEvent(0.0, "o", "for identifier 't_46fe"),
+        CastEvent(1.0, "o", "de8b_acme/mytool'.\r\n"),
+    ])
+    rec.sanitize({})
+    assert [e.data for e in rec.events] == ["for identifier '", "acme/mytool'.\r\n"]
+
+
+def test_footnote_under_a_table_is_not_a_row(tmp_path: Path) -> None:
+    """`2 binaries available (…)` follows the env table; it must not widen the Key column."""
+    note = "\x1b[2m\x1b[3m\x1b[4m2 binaries available (java, javac); use --format json\x1b[0m"
+    hdr = f"{_HDR}Key{_R}{_HDR}  {_R}{_HDR}Value{_R}"
+    rec = CastRecording(events=[CastEvent(0.0, "o", f"{hdr}\r\nPATH  /bin\r\n{note}\r\n")])
+    path = _write(tmp_path, rec)
+    assert [r.text() for r in replay(path).rows[:3]] == ["Key   Value", "PATH  /bin", "2 binaries available (java, javac); use --format json"]
+
+
+def test_row_whose_only_cell_is_the_first_stays_in_the_table(tmp_path: Path) -> None:
+    """`index list --variants`: a package with no variant prints one cell, the next row prints two."""
+    hdr = f"{_HDR}Package    {_R}{_HDR}  {_R}{_HDR}Variant{_R}"
+    rec = CastRecording(events=[CastEvent(0.0, "o", f"{hdr}\r\ncmake\r\ncmake       slim\r\n")])
+    path = _write(tmp_path, rec)
+    assert problems(path) == []
+    assert [r.text() for r in replay(path).rows[:3]] == ["Package  Variant", "cmake", "cmake    slim"]
+
+
+def test_progress_bar_padding_does_not_widen_or_wrap_the_frame(tmp_path: Path) -> None:
+    """A bar pads itself to the PTY width; the cast must not carry that padding."""
+    bar = "Uploading [====] 184 B/184 B" + " " * 90
+    rec = CastRecording(width=120, events=[CastEvent(0.0, "o", f"{bar}\r\x1b[2K{bar}\r\x1b[2Kdone\r\n")])
+    path = _write(tmp_path, rec)
+    assert replay(path).width == 100
+
+
+def test_strip_progress_keeps_the_line_before_a_spinner() -> None:
+    """The published cascade cast read `…metadata mytoUploading 1/1`: the kept tail was eaten."""
+    rec = CastRecording(events=[CastEvent(0.0, "o", "metadata mytool.json\r\n⠁ Verifying pins   \r\x1b[2Kstaging x\r\n")])
+    rec.strip_progress()
+    assert rec.events[0].data == "metadata mytool.json\r\nstaging x\r\n"
+
+
+def test_screen_joins_an_escape_split_across_events(tmp_path: Path) -> None:
+    """A PTY read can end between ESC and `[3m`; the player joins them, so must the decoder."""
+    path = tmp_path / "x.cast"
+    path.write_text('{"version":2,"width":40,"height":4}\n[0,"o","pulling \\u001b"]\n[0.1,"o","[3mcount\\u001b[0m=1\\r\\n"]\n')
+    assert replay(path).rows[0].text() == "pulling count=1"
+
+
+def test_temp_ids_are_shortened_like_digests() -> None:
+    rec = CastRecording(events=[CastEvent(0.0, "o", "to ~/.ocx/temp/24ab47c51379b50c5dc5035cea5fdce9\r\n")])
+    rec.truncate_digests()
+    assert rec.events[0].data == "to ~/.ocx/temp/24ab47c5..\r\n"
+
+
+def test_display_hosts_name_the_registries_a_page_talks_about() -> None:
+    from recordings.cast_layer import display_hosts
+
+    assert display_hosts({}, "localhost:5000") == {"localhost:5000": "registry.example.com"}
+    promo = display_hosts({"STAGING": "localhost:6000", "PROD": "localhost:7000"}, "localhost:5000")
+    assert promo == {
+        "localhost:5000": "dev.example.com",
+        "localhost:6000": "staging.example.com",
+        "localhost:7000": "prod.example.com",
+    }

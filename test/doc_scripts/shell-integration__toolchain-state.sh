@@ -12,7 +12,7 @@ cd "$SCENARIO_TMP"
 mkdir demo
 cd demo
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 ocx pull
 eval "$(ocx self activate --shell=bash)"
 ocx shell state

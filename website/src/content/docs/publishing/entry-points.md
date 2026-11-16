@@ -5,7 +5,7 @@ description: "Declare entry points so consumers get bare commands that run in th
 <!-- doc_type: how-to -->
 <!-- doc_tier: everyday -->
 
-By the end of this page your package declares named launchers. OCX generates one small script per name at install time. Each script lands on the consumer's PATH as a bare command once the consumer selects the package with `ocx package select` or `ocx package install --select`. The launcher runs the command in the package's own environment, so two packages that share a runtime stop fighting over one ambient interpreter.
+By the end of this page your package declares named launchers. OCX generates one small script per name at install time. Each script lands on the consumer's PATH as a bare command once the consumer selects the package with `ocx package select` or `ocx package install --select`, or whenever `ocx exec` or `ocx env` composes the package's environment. The launcher runs the command in the package's own environment, so two packages that share a runtime stop fighting over one ambient interpreter.
 
 You need a package with a `bin/` directory and, for scripted tools, a [dependency][authoring-dependencies] that provides the interpreter. The [concept page][in-depth-entry-points] explains how launchers work, and the [field reference][reference-entry-points] lists every key.
 
@@ -24,21 +24,21 @@ Declare `entrypoints` when one of these is true:
 - **The tool must run with the env you declared.** PATH exposure cannot do that, because the launched binary inherits whatever the consumer's shell carried in.
 - **Exposing `bin/` would leak too much.** A toolchain with fifty binaries can declare three entry points and keep `bin/` private.
 
-Skip entry points for self-contained static binaries such as [Go programs][go] or [Rust][rust] builds. [CMake][cmake], [ripgrep][ripgrep] and [mold][mold] have no runtime to conflict over, so a public `${installPath}/bin` on PATH is enough.
+Skip entry points for self-contained static binaries such as [Go programs][go] or [Rust][rust] builds. [uv][uv], [ripgrep][ripgrep] and [mold][mold] have no runtime to conflict over, so a public `${self.installPath}/bin` on PATH is enough.
 
-A package with entry points usually demotes `${installPath}/bin` from `public` to `private` (see [declare the environment][authoring-env-surface]). OCX prepends each installed package's `entrypoints/` directory to PATH at exec time, and consumers see it as `<symlink-root>/current/entrypoints`.
+A package with entry points usually demotes `${self.installPath}/bin` from `public` to `private` (see [declare the environment][authoring-env-surface]). OCX prepends each installed package's `entrypoints/` directory to PATH at exec time, and consumers see it as `<symlink-root>/current/entrypoints`.
 
 ## Pick names that do not collide {#naming}
 
-The name is what consumers type at the shell, so it should read like a top-level command. The [reference][reference-entry-points] gives the exact name grammar. `cmake-gen` is fine, and `__internal-helper` is rejected.
+The name is what consumers type at the shell, so it should read like a top-level command. The [reference][reference-entry-points] gives the exact name grammar. `mytool-gen` is fine, and `__internal-helper` is rejected.
 
 OCX checks for collisions at install time and when `ocx package exec` or `ocx env` receives two or more roots. It reports an `EntrypointCollision` error and never picks one silently. Three habits avoid the error:
 
-- **Match the upstream binary name** when you wrap a single upstream binary. If you ship [CMake][cmake], declare `cmake`, `ctest` and `cpack`.
-- **Namespace internal launchers.** A wrapper for `myorg/build-tools` should declare `myorg-build` or `mbt`, not a generic `build`.
+- **Match the upstream binary name** when you wrap a single upstream binary. If you ship [Node.js][nodejs], declare `node`, `npm` and `npx`.
+- **Prefix internal launchers.** A wrapper for `myorg/build-tools` should declare `myorg-build` or `mbt`, not a generic `build`.
 - **Search the [package catalog][catalog]** before you publish a public package. Names that upstream projects already use are the high-risk set.
 
-[Entry points in depth][in-depth-entry-points] covers the error format and the [collision rules][select-collision].
+[Entry points][in-depth-entry-points] covers the error format and the [collision rules][select-collision].
 
 ## Point the launcher at the binary {#dispatch}
 
@@ -49,10 +49,10 @@ To wrap a single bundled binary, put `bin/` on the PATH and declare the name:
 ```json
 {
   "env": [
-    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
+    { "key": "PATH", "type": "path", "value": "${self.installPath}/bin", "visibility": "private" }
   ],
   "entrypoints": {
-    "cmake": {}
+    "node": {}
   }
 }
 ```
@@ -62,19 +62,19 @@ To expose a binary from a dependency without re-bundling it, put the dependency'
 ```json
 {
   "dependencies": [
-    { "identifier": "ocx.sh/kitware/cmake:3.28@sha256:abc...", "name": "cmake", "visibility": "public" }
+    { "identifier": "ocx.sh/nodejs/node:24@sha256:abc...", "name": "node", "visibility": "public" }
   ],
   "env": [
-    { "key": "PATH", "type": "path", "value": "${deps.cmake.installPath}/bin", "visibility": "private" }
+    { "key": "PATH", "type": "path", "value": "${deps.node.installPath}/bin", "visibility": "private" }
   ],
   "entrypoints": {
-    "cmake": {}
+    "node": {}
   }
 }
 ```
 
 :::caution[OCX does not check the binary at install]
-A typo such as `cmke` for `cmake` installs cleanly and fails only when the launcher runs. Test every launcher with `ocx package exec <pkg> -- <name>` after install.
+A typo such as `nod` for `node` installs cleanly and fails only when the launcher runs. Test every launcher with `ocx package exec <pkg> -- <name>` after install.
 :::
 
 ### Bake leading arguments {#args}
@@ -84,7 +84,7 @@ Use `args` to put fixed arguments in front of the ones the user types. The launc
 ```json
 {
   "entrypoints": {
-    "mytool": { "command": "python", "args": ["${installPath}/app/main.py"] }
+    "mytool": { "command": "python", "args": ["${self.installPath}/app/main.py"] }
   }
 }
 ```
@@ -92,7 +92,7 @@ Use `args` to put fixed arguments in front of the ones the user types. The launc
 Running `mytool a b` runs `python <content>/app/main.py a b`.
 
 - Each `args` element is one argv token. There is no word splitting, so a path with spaces stays one argument.
-- `${installPath}` works in `args`, with its render modifiers. `${deps.*}` and `${self.env.*}` are refused at publish time.
+- `${self.installPath}` works in `args`, with its render modifiers. `${deps.*}` and `${self.env.*}` are refused at publish time.
 - `command` is a plain name, never a path, and it takes no interpolation. The launcher resolves it on the composed `PATH`.
 - To run a dependency's binary, put that dependency's `bin/` on the composed `PATH` through `env`, as in the dependency example above.
 
@@ -120,7 +120,7 @@ The shebang resolves `python3` from PATH at exec time. With `bin/` exposed as `p
     }
   ],
   "env": [
-    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "private" }
+    { "key": "PATH", "type": "path", "value": "${self.installPath}/bin", "visibility": "private" }
   ],
   "entrypoints": {
     "mytool": {}
@@ -138,28 +138,28 @@ The consumer never sees `python3` on their shell PATH. Keep the dependency edge 
 
 ## Declare the executables {#binaries}
 
-Tools such as CI matrices and [Bazel][bazel] toolchain rules want to know whether `cmake` resolves on PATH without installing the package. The optional `binaries` array answers that with bare names. List the names that an interface-visible [`path`][reference-env-path] variable puts on PATH:
+Tools such as CI matrices and [Bazel][bazel] toolchain rules want to know whether `node` resolves on PATH without installing the package. The optional `binaries` array answers that with bare names. List the names that an interface-visible [`path`][reference-env-path] variable puts on PATH:
 
 ```json
 {
   "env": [
-    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public" }
+    { "key": "PATH", "type": "path", "value": "${self.installPath}/bin", "visibility": "public" }
   ],
-  "binaries": ["cmake", "cpack", "ctest"]
+  "binaries": ["corepack", "node", "npm", "npx"]
 }
 ```
 
-The array is a claim, and OCX does not verify it. [`ocx package push`][cmd-package-push] streams layers without unpacking them, and a package can reuse layers by digest. No step ever holds the full content tree, so a check against disk would break the streaming model. Other ecosystems make the same trade: [npm's `bin`][npm-bin], [Cargo's `[[bin]]`][cargo-bin] and [nixpkgs' `meta.mainProgram`][nixpkgs-main-program].
+The array is an assertion, and OCX does not verify it. [`ocx package push`][cmd-package-push] streams layers without unpacking them, and a package can reuse layers by digest. No step ever holds the full content tree, so a check against disk would break the streaming model. Other ecosystems make the same trade: [npm's `bin`][npm-bin], [Cargo's `[[bin]]`][cargo-bin] and [nixpkgs' `meta.mainProgram`][nixpkgs-main-program].
 
-[`ocx package create`][cmd-package-create] with `--bin-scan` fills or checks the claim against the tree it can see. Declare layers added at push time by hand. The [reference][reference-binaries-writing] has the name grammar.
+[`ocx package create`][cmd-package-create] with `--bin-scan` fills or checks the assertion against the tree it can see. Declare layers added at push time by hand. The [reference][reference-binaries-writing] has the name grammar.
 
-An omitted `binaries` means nobody declared the field, and `"binaries": []` asserts that the package puts no executables on PATH. Never list a launcher name that only exists as an entry point. `binaries` names files you shipped, and `entrypoints` names launchers OCX generates. The same name may appear in both, as with `cmake` in the examples above. The reference explains [the difference][reference-binaries].
+An omitted `binaries` means nobody declared the field, and `"binaries": []` asserts that the package puts no executables on PATH. Never list a launcher name that only exists as an entry point. `binaries` names files you shipped, and `entrypoints` names launchers OCX generates. The same name may appear in both, as with `node` in the examples above. The reference explains [the difference][reference-binaries].
 
 ## See also {#see-also}
 
 - [Entry points reference][reference-entry-points] for every field and constraint
 - [Executables reference][reference-binaries] for the `binaries` field and its name grammar
-- [Entry points in depth][in-depth-entry-points] for launcher mechanics, synth-PATH and multi-owner reporting
+- [Entry points][in-depth-entry-points] for launcher mechanics, synth-PATH and multi-owner reporting
 - [Declare the environment][authoring-env-surface] for demoting `bin/` from public to private
 - [`select` collisions][select-collision] for detection at select time
 
@@ -170,7 +170,7 @@ An omitted `binaries` means nobody declared the field, and `"binaries": []` asse
 [ruby]: https://www.ruby-lang.org/
 [go]: https://go.dev/
 [rust]: https://www.rust-lang.org/
-[cmake]: https://cmake.org/
+[uv]: https://docs.astral.sh/uv/
 [ripgrep]: https://github.com/BurntSushi/ripgrep
 [mold]: https://github.com/rui314/mold
 [mise]: https://mise.jdx.dev/
@@ -185,16 +185,16 @@ An omitted `binaries` means nobody declared the field, and `"binaries": []` asse
 [reference-binaries]: ../reference/metadata/entry-points.md#executables
 [reference-binaries-writing]: ../reference/metadata/entry-points.md#executables-writing
 [reference-env-path]: ../reference/metadata/env.md#env-path
-[select-collision]: ../explanation/entry-points.md#collisions
+[select-collision]: ../explanation/entry-points.mdx#collisions
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line/package-publishing.md#package-create
 [cmd-package-push]: ../reference/command-line/package-publishing.md#package-push
 
 <!-- in-depth -->
-[in-depth-entry-points]: ../explanation/entry-points.md
+[in-depth-entry-points]: ../explanation/entry-points.mdx
 [in-depth-environments]: ../explanation/environments.mdx
 
 <!-- authoring -->
-[authoring-env-surface]: ./env-surface.md
-[authoring-dependencies]: ./declare-dependencies.md
+[authoring-env-surface]: ./env-surface.mdx
+[authoring-dependencies]: ./declare-dependencies.mdx

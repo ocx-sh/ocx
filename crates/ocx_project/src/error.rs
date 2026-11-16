@@ -461,7 +461,7 @@ pub enum ProjectErrorKind {
     /// A tools value lacks a registry; fully-qualified identifiers keep
     /// resolution independent of `OCX_DEFAULT_REGISTRY`.
     #[error(
-        "binding '{name}': value '{value}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ocx.sh/cmake:3.28')"
+        "binding '{name}': value '{value}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ocx.sh/nodejs/node:24')"
     )]
     #[exit(
         ConfigError,
@@ -498,7 +498,7 @@ pub enum ProjectErrorKind {
     },
 
     /// A `[package."<key>"]` key lacks a registry, as the `[tools]` rule requires.
-    #[error("package key '{key}' is missing a registry; expected 'registry/repo[:tag]' (e.g. 'ocx.sh/cmake')")]
+    #[error("package key '{key}' is missing a registry; expected 'registry/repo[:tag]' (e.g. 'ocx.sh/nodejs/node')")]
     #[exit(
         ConfigError,
         slug = "package_key_missing_registry",

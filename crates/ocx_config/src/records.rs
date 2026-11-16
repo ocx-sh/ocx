@@ -33,7 +33,7 @@ pub struct RecordsOptions {
     // No env or flag source for this: a fat-fingered `--records-dir` would then kill the build.
     pub required: Option<bool>,
 
-    /// Set by the loader when declared at SYSTEM scope; no lower tier can redirect or disable it.
+    /// Set by the loader when declared in the system tier; no lower tier can redirect or disable it.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
@@ -80,7 +80,7 @@ impl RecordsOptions {
         // `other.system_locked` is not adopted: only the loader locks, and only the system file.
     }
 
-    /// Mark this section as declared at SYSTEM scope.
+    /// Mark this section as declared in the system tier.
     pub fn lock_as_system(&mut self) {
         self.system_locked = true;
     }

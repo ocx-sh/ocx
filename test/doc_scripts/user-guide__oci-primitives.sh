@@ -6,10 +6,15 @@
 set -euo pipefail
 
 # region cast
-ocx package install "$PKG_KITWARE_CMAKE"
-ocx package select "$PKG_KITWARE_CMAKE"
-ocx package exec "$PKG_KITWARE_CMAKE" -- cmake --version
-ocx package env "$PKG_KITWARE_CMAKE"
+ocx package install "$PKG_NODEJS_NODE"
+ocx package select "$PKG_NODEJS_NODE"
+ocx package exec "$PKG_NODEJS_NODE" -- node --version
+ocx package env "$PKG_NODEJS_NODE"
 # endregion cast
-ocx package deselect "$REPO_KITWARE_CMAKE"
-ocx package uninstall "$PKG_KITWARE_CMAKE"
+# The runner ships its own node: a composed environment that lost the package would let it answer and still exit 0.
+[[ "$(ocx package exec "$PKG_NODEJS_NODE" -- node)" == marker-* ]] || {
+    echo "node did not resolve to the provisioned package" >&2
+    exit 1
+}
+ocx package deselect "$REPO_NODEJS_NODE"
+ocx package uninstall "$PKG_NODEJS_NODE"

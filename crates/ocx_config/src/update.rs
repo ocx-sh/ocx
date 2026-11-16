@@ -43,7 +43,7 @@ pub type Setting<T> = Result<T, Rejected>;
 /// The `[update]` section of `config.toml`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct UpdateConfig {
-    /// What ocx does when a newer ocx is published: `apply` installs it after the command
+    /// What OCX does when a newer OCX is published: `apply` installs it after the command
     /// finishes, `notify` (default) prints a notice, `manual` never checks.
     /// Overridden by the `OCX_SELF_UPDATE` environment variable.
     #[serde(rename = "self", default)]
@@ -51,7 +51,7 @@ pub struct UpdateConfig {
     #[schemars(with = "Option<RefreshPolicy>", extend("default" = "notify"))]
     pub self_policy: Option<Setting<RefreshPolicy>>,
 
-    /// What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,
+    /// What OCX does when a locked tool's tag has moved: `notify` (default) prints a notice,
     /// `manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.
     /// Overridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.
     #[serde(default)]

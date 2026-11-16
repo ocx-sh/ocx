@@ -4,7 +4,7 @@
 
 Pure file-content checks over markdown, no subprocess and no registry. The
 depth lives in ``explanation/project-toolchain.md`` (``ocx.toml``, the lock,
-activation, the global toolchain and reproducibility), ``explanation/project-groups.md``
+activation, the global toolchain and reproducibility), ``explanation/project-groups.mdx``
 holds the groups section, and the how-to ``guides/project-toolchain.mdx``
 links into the explanation page. The tests enforce:
 
@@ -28,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS = PROJECT_ROOT / "website" / "src" / "content" / "docs"
 USER_GUIDE = DOCS / "guides" / "project-toolchain.mdx"
 IN_DEPTH = DOCS / "explanation" / "project-toolchain.md"
-GROUPS = DOCS / "explanation" / "project-groups.md"
+GROUPS = DOCS / "explanation" / "project-groups.mdx"
 
 
 # Required anchors in their declared order on the explanation page. The
@@ -96,16 +96,16 @@ def _slice_section(text: str, anchor: str) -> str:
 
 
 def test_in_depth_is_titled_project_toolchain(in_depth_text: str) -> None:
-    """The explanation page is titled `Project Toolchain` in its front matter."""
-    assert 'title: "Project Toolchain"' in in_depth_text.split("---")[1], (
-        "explanation/project-toolchain.md must declare the title `Project Toolchain`"
+    """The explanation page is titled `Project toolchain` in its front matter."""
+    assert 'title: "Project toolchain"' in in_depth_text.split("---")[1], (
+        "explanation/project-toolchain.md must declare the title `Project toolchain`"
     )
 
 
 def test_groups_anchor_lives_on_the_groups_page() -> None:
     """The groups section moved to its own page and keeps the `{#groups}` anchor."""
-    assert "{#groups}" in GROUPS.read_text(encoding="utf-8"), (
-        "explanation/project-groups.md must carry the `{#groups}` anchor"
+    assert "\\{#groups\\}" in GROUPS.read_text(encoding="utf-8"), (
+        "explanation/project-groups.mdx must carry the `{#groups}` anchor"
     )
 
 
@@ -207,38 +207,33 @@ def test_locking_section_mentions_gitattributes(in_depth_text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Reproducibility subsection: SLSA framing (forward-looking, v2 attestation)
+# Reproducibility subsection: SLSA framing (no provenance claim, attestations via `package attest`)
 # ---------------------------------------------------------------------------
 
 
-def test_reproducibility_section_links_slsa_for_v2_context_only(
+def test_reproducibility_section_states_no_slsa_provenance_and_names_attest(
     in_depth_text: str,
 ) -> None:
-    """SLSA framing in the v1 doc is contextual / forward-looking only —
-    no level claim. Per the SLSA v1.0 spec, levels L1–L3 cover producer-
-    track build provenance, not consumer-side digest pinning, so the
-    section must reference SLSA only as the destination concept that v2
-    will deliver via signed attestations.
+    """The section says OCX does not produce SLSA build provenance itself and
+    points at ``ocx package attest`` for signed attestations. SLSA L1-L3 are
+    producer-track build provenance levels, not consumer-side digest pinning.
 
-    Asserts: the substring ``SLSA`` is present (so external readers can
-    follow the link to the spec), AND ``attestation`` is present (the
-    capability deferred to v2), AND ``v2`` is present (the release that
-    introduces it).
+    Asserts: ``SLSA`` is present (readers can follow the link to the spec),
+    ``does not produce`` is present (the non-claim), and ``package attest``
+    is present (where attestations come from).
     """
     section = _slice_section(in_depth_text, "{#reproducibility}")
     assert "SLSA" in section, (
-        "reproducibility subsection must mention `SLSA` as forward-looking "
-        "context for the v2 attestation work (no level claim — SLSA L1–L3 "
-        "are producer-track build provenance, not consumer-side digest "
-        "pinning)"
+        "reproducibility subsection must mention `SLSA` so readers can follow "
+        "the link to the spec"
     )
-    assert "attestation" in section.lower(), (
-        "reproducibility subsection must mention `attestation` "
-        "(deferred from v1 to v2)"
+    assert "does not produce" in section, (
+        "reproducibility subsection must say OCX `does not produce` SLSA "
+        "build provenance itself"
     )
-    assert "v2" in section, (
-        "reproducibility subsection must mention `v2` (the release that "
-        "introduces signed attestations)"
+    assert "package attest" in section, (
+        "reproducibility subsection must name `ocx package attest` as the "
+        "way to attach signed attestations"
     )
 
 
@@ -257,8 +252,8 @@ def test_reproducibility_section_makes_no_slsa_level_claim(
             f"reproducibility subsection must not contain the literal "
             f"`{token}` — SLSA L1–L3 are producer-track build provenance "
             f"levels (v1.0 spec), not consumer-side digest pinning. v1 "
-            f"makes no SLSA-level claim; reword to keep the framing "
-            f"forward-looking only."
+            f"makes no SLSA-level claim; reword to say what OCX does not "
+            f"produce."
         )
 
 

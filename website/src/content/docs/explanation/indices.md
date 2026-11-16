@@ -1,25 +1,25 @@
 ---
 title: "Indices"
-description: "What an OCX index is, the one wire format every copy shares, which index a command uses, and how index data reaches a repository."
+description: "What an OCX index is, the one wire format every copy shares, which index a command uses, and how index data reaches an index Git repository."
 ---
 <!-- doc_type: explanation -->
 
 This page explains what an OCX index is, which index a command reads and how a copy ships inside a tool. It also covers how an index is written. A tag that resolves differently on two machines breaks builds.
 
-OCI tags are mutable. The [OCI Distribution Specification][oci-dist-tag] defines tags as registry-side aliases that can be re-pointed at any moment. `kitware/cmake:3` today may resolve to a different digest after the next patch release.
+OCI tags are mutable. The [OCI Distribution Specification][oci-dist-tag] defines tags as registry-side aliases that can be re-pointed at any moment. `nodejs/node:24` today may resolve to a different digest after the next patch release.
 
 Choosing a version by tag must give the same digest every time. That holds for a devcontainer parameter, a Gradle property or a bare CLI argument. It must hold on your laptop, on CI and on a machine that has never talked to the registry.
 
 OCX solves this with a local index. It is a directory that holds a local copy of registry resolution data. The copy changes only when you refresh it explicitly.
 
-The [local index][local-index] page explains how the copy resolves without a network round trip. The [index.ocx.sh][public-index] page explains how OCX resolves packages from the public index. [Serve an index][serve-an-index] shows how to publish a copy. The user-facing surface lives in the [Indices section of the user guide][user-indices]: when to refresh, offline mode and `--remote`.
+The [local index][local-index] page explains how the copy resolves without a network round trip. The [public index][public-index] page explains how OCX resolves packages from the public index. [Serve an index][serve-an-index] shows how to publish a copy. The task-oriented surface is [how to work offline][user-indices]: when to refresh, offline mode and `--remote`.
 
 :::note[An index resolves versions, not `ocx.lock`]
 An index answers one question. Which versions of a package exist, and for a chosen version, which platform-manifest digest and physical registry location does it point to?
 
 An index never appears in `ocx.lock` resolution. A lock already records the exact platform-manifest digest it pinned (see [Locking][in-depth-versioning-locking]). Resolving a lock reads that digest straight off disk and fetches it, with no index consulted.
 
-What an index buys is free *version choice*. Something that names a tag rather than a digest still needs to resolve deterministically and offline. A devcontainer feature parameter, a Gradle property and a bare `ocx package install kitware/cmake:3.28` are all examples. A [shipped index copy](#bundled) closes exactly that gap.
+What an index buys is free *version choice*. Something that names a tag rather than a digest still needs to resolve deterministically and offline. A devcontainer feature parameter, a Gradle property and a bare `ocx package install nodejs/node:24` are all examples. A [shipped index copy](#bundled) closes exactly that gap.
 :::
 
 ## One format, many copies {#format}
@@ -37,13 +37,13 @@ Copying a published index with `rsync`, `wget --mirror` or `git add` produces a 
 
 Indices differ along three axes, never in format:
 
-- **Location.** An index is hosted (`index.ocx.sh` itself) or mirrored (a corporate static-file proxy in front of it). It can be shipped (a devcontainer feature, a CI artifact, a directory committed to a repository). It can also be local to a machine (`$OCX_HOME/index/<source>/`).
-- **Provenance.** A *published* copy is a copy of a remote ocx-index. Its bytes are copied from it and verify against themselves (see [index.ocx.sh][public-index]). A *derived* copy is built by OCX itself from a plain OCI registry's tags, because an ordinary OCI registry publishes no index of its own.
+- **Location.** An index is hosted (`index.ocx.sh` itself) or proxied (a corporate static-file proxy in front of it). It can be shipped (a devcontainer feature, a CI artifact, a directory committed to a Git repository). It can also be local to a machine (`$OCX_HOME/index/<source>/`).
+- **Provenance.** A *published* copy is a copy of a remote ocx-index. Its bytes are copied from it and verify against themselves (see [Public index][public-index]). A *derived* copy is built by OCX itself from a plain OCI registry's tags, because an ordinary OCI registry publishes no index of its own.
 - **Completeness.** A local copy is normally *partial*. [`ocx index update <pkg>`][cmd-index-update] grows it one package at a time. A full site mirror (`wget --mirror`) is the degenerate *complete* case, with the same grammar and more entries.
 
 ## Remote index {#remote}
 
-The remote index is the live OCI registry. For a package identified under `ocx.sh`, it is the live [`index.ocx.sh`][index-ocx-sh] service. It answers metadata queries directly and authoritatively. Examples are which tags exist for a package, which digest a tag points to and which platforms a manifest declares.
+The remote index is the live source: a registry, or an index service such as `index.ocx.sh`. For a package identified under `ocx.sh`, it is the live [`index.ocx.sh`][index-ocx-sh] service. It answers metadata queries directly and authoritatively. Examples are which tags exist for a package, which digest a tag points to and which platforms a manifest declares.
 
 [`ocx index catalog`][cmd-index-catalog] browses available packages. [`ocx index list`][cmd-index-list] lists the tags of one package. Both query the live registry when the global flag [`--remote`][arg-remote] is set.
 
@@ -55,7 +55,7 @@ Every command that resolves a package identifier uses one working index for that
 
 | Mode | Flag | Source | Network? |
 |---|---|---|---|
-| Default | *(none)* | Local index | No (unless fetching a new binary) |
+| Default | *(none)* | Local index | No, except for a tag the local index has no entry for, and for downloading new content |
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local index | Never |
 
@@ -65,19 +65,19 @@ A **query** reads the registry and reports. The local index is **not** updated. 
 
 A **resolve** still writes, despite the flag's name. Resolves are `ocx --remote package install`, `ocx --remote package exec` and similar. A resolve re-fetches the tag it resolved and rewrites the local copy for that one tag. This is exactly what an [`ocx index update`][cmd-index-update] scoped to the tag does (see [Two-hop fetch and caching][public-index-caching]). `--remote` skips only the *local-first* check, not the write.
 
-Layer data fetched under either shape still writes through to the [package store][in-depth-storage-packages]. Use a query for a one-off check that leaves the index alone. Use a `--remote` resolve to force-refresh one tag without typing `ocx index update <pkg>:<tag>` first.
+Layer data fetched under either shape still writes through to the [object store][in-depth-storage-packages]. Use a query for a one-off check that leaves the index alone. Use a `--remote` resolve to force-refresh one tag without typing `ocx index update <pkg>:<tag>` first.
 
-**`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately. It does not attempt a registry query. This verifies that the current index and package store are self-sufficient before a build in a restricted or air-gapped environment.
+**`--offline`** prevents all network access for that command. If the local index does not have a requested package, the command fails immediately. It does not attempt a registry query. This verifies that the current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
 
 [`--index`][arg-index] and [`OCX_INDEX`][env-ocx-index] do not change the active index *mode*. The local index stays active. They change only *which collection* is read. See [Shipped copies](#bundled).
 
-The active index controls tag and manifest resolution only. The [package store][in-depth-storage-packages] is independent. Installed binaries are accessible in all three modes, whichever index is active.
+The active index controls tag and manifest resolution only. The [object store][in-depth-storage-packages] is independent. Installed binaries are accessible in all three modes, whichever index is active.
 
 ## Shipped copies {#bundled}
 
 A local index subtree is small. It holds root documents and dispatch objects only, with no layer archives and no binaries. That is small enough to ship *inside* a tool release.
 
-[Bazel Rules][bazel-rules], [GitHub Actions][github-actions-docs] and [DevContainer Features][devcontainer-features] can bundle a frozen copy at release time. They set [`OCX_INDEX`][env-ocx-index] (or pass [`--index`][arg-index]) to point OCX at it. Consumers write `kitware/cmake:3` and the bundled copy resolves it deterministically. That needs no network and no other machine-global state. The [package store][in-depth-storage-packages] and [install symlinks][in-depth-storage-symlinks] stay in `OCX_HOME` as usual.
+[Bazel Rules][bazel-rules], [GitHub Actions][github-actions-docs] and [DevContainer Features][devcontainer-features] can bundle a shipped copy at release time. They set [`OCX_INDEX`][env-ocx-index] (or pass [`--index`][arg-index]) to point OCX at it. Consumers write `nodejs/node:24` and the shipped copy resolves it deterministically. That needs no network and no other machine-global state. The [object store][in-depth-storage-packages] and [install symlinks][in-depth-storage-symlinks] stay in `OCX_HOME` as usual.
 
 `OCX_INDEX` swaps the *whole* collection for the shipped one, never a partial overlay of the two. Without it, OCX reads `$OCX_HOME/index/`. A project that commits its own `.ocx/index/` copy exports the variable for the project's shell, pointing at that directory.
 
@@ -85,28 +85,28 @@ A local index subtree is small. It holds root documents and dispatch objects onl
 
 Under [`--remote`][arg-remote] or `OCX_REMOTE`, tag-addressed and catalog-addressed lookups bypass the redirected collection. They query the registry directly, so the variable has no effect on them. Digest-addressed lookups consult the redirected collection first in every mode.
 
-This produces a two-level pin on *version choice*, not on `ocx.lock`. A devcontainer feature or a GitHub Action has no lock file of its own, so this index-level pin is the only determinism it gets. The tool version pins the bundled index copy, and the copy pins the resolved binary. A version bump to the action or rule advances the bundled copy. [Dependabot][dependabot] or [Renovate][renovate] can propose that bump automatically.
+This produces a two-level pin on *version choice*, not on `ocx.lock`. A devcontainer feature or a GitHub Action has no lock file of its own, so this index-level pin is the only determinism it gets. The tool version pins the shipped copy, and the copy pins the resolved binary. A version bump to the action or rule advances the shipped copy. [Dependabot][dependabot] or [Renovate][renovate] can propose that bump automatically.
 
 Users get the updated binary with no config changes.
 
-:::tip[GitHub Action with a bundled index]
+:::tip[GitHub Action with a shipped copy]
 ```yaml
-- uses: ocx-actions/setup-cmake@v2.1.0   # pins action → pins index → pins binary
+- uses: acme/setup-node@v2.1.0   # pins action → pins index → pins binary
   with:
-    version: "3.28"                       # human-readable tag, no platform conditions
+    version: "24"                         # human-readable tag, no platform conditions
 ```
 
-`@v2.1.0` pins everything end to end. `@v2` follows minor releases. When the maintainer ships updated index copies, `kitware/cmake:3.28` may resolve to a later build when the action version changes. There are no SHA256 lists and no `if: runner.os == 'Linux'` conditionals.
+`@v2.1.0` pins everything end to end. `@v2` follows minor releases. When the maintainer ships updated index copies, `nodejs/node:24` may resolve to a later build when the action version changes. There are no SHA256 lists and no `if: runner.os == 'Linux'` conditionals.
 :::
 
 Compare this with a [hand-curated URL matrix][toolchains-llvm]. That matrix needs one `filename → checksum` entry per `version × os × arch`. With a shipped index, a version bump means editing one rule version, not a dictionary.
 
-:::caution[Content needs a network the first time, unless the layer cache is warm]
+:::caution[Content needs a network the first time, unless the object store is warm]
 A shipped copy resolves the tag to a platform-manifest digest offline. The manifest bytes and layers are content. They are fetched on demand from the registry the first time a given digest is installed.
 
-"First time" is scoped to the [layer store][in-depth-storage-layers] and the blob store, not to `packages/`. Copying `blobs/`, `layers/` and `index/` into a fresh `$OCX_HOME` is enough. Never copy `packages/`.
+"First time" is scoped to the layers and blobs of the [object store][in-depth-storage-layers], not to `packages/`. Copying `blobs/`, `layers/` and `index/` into a fresh `$OCX_HOME` is enough. Never copy `packages/`.
 
-A package's `packages/…/content/` directory is a hardlink assembly of its layers, built locally at install time. If every layer a package needs is already on disk, `ocx package install` reassembles `content/` from the local layer cache with no network. This holds even though `packages/` started out empty. Only a genuinely cold layer needs egress.
+A package's `packages/…/content/` directory is a hardlink assembly of its layers, built locally at install time. If every layer a package needs is already on disk, `ocx package install` reassembles `content/` from the local object store with no network. This holds even though `packages/` started out empty. Only a genuinely cold layer needs egress.
 :::
 
 ## Writing to an index {#writing}
@@ -115,9 +115,9 @@ Two commands write an index. [`ocx package claim`][cmd-package-claim] writes a p
 
 Neither ever commits to the default branch of the index. The history of the index is always something a human or a bot decided to merge.
 
-How that request gets *written* is `--transport`. The two values are not stylistic. The default, `api`, opens the request through the REST API of the forge. `git` clones the index repository into a temporary directory and builds the commit there. It then creates the request from a single authenticated push that carries [GitLab's merge-request push options][gitlab-push-options].
+How that request gets *written* is `--transport`. The two values are not stylistic. The default, `api`, opens the request through the REST API of the forge. `git` clones the index Git repository into a temporary directory and builds the commit there. It then creates the request from a single authenticated push that carries [GitLab's merge-request push options][gitlab-push-options].
 
-The `git` transport is GitLab-only and exists for one reason. A GitLab CI job token can push to a repository and read the API. It is read-only for merge requests, so the REST route is closed to the one credential a pipeline gets for free.
+The `git` transport is GitLab-only and exists for one reason. A GitLab CI job token can push to a Git repository and read the API. It is read-only for merge requests, so the REST route is closed to the one credential a pipeline gets for free.
 
 That leaves four credential postures, and the posture decides the transport:
 
@@ -128,21 +128,21 @@ That leaves four credential postures, and the posture decides the transport:
 | GitLab CI job token | The runner's `GITLAB_CI` and `CI_JOB_TOKEN`, with nothing stored | `git` |
 | GitLab, split pair | [`OCX_ANNOUNCE_GIT_TOKEN`][env-ocx-announce-git-token] carries the push, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] the API reads | `git` |
 
-The split pair is not redundancy. The two halves are asked for different things, and a real deployment often answers with different identities. A deploy token can write the repository but has no API surface to call. A job token can read the API but cannot open the merge request. Setting both lets each carry only what it can do.
+The split pair is not redundancy. The two halves are asked for different things, and a real deployment often answers with different identities. A deploy token can write the Git repository but has no API surface to call. A job token can read the API but cannot open the merge request. Setting both lets each carry only what it can do.
 
-Under `git`, ocx checks two things on the **index** project before it writes. The project must accept job-token pushes, and its job-token allowlist must admit the publishing project. ocx exits 82 when job-token pushes are off. It exits 77 when the allowlist omits the publisher. Only an administrator there can grant either. ocx also refuses to run on a `git` before 2.31.0, and checks this before the forge is constructed.
+Under `git`, OCX checks two things on the **index** project before it writes. The project must accept job-token pushes, and its job-token allowlist must admit the publishing project. OCX exits 82 when job-token pushes are off. It exits 77 when the allowlist omits the publisher. Only an administrator there can grant either. OCX also refuses to run on a `git` before 2.31.0, and checks this before the forge is constructed.
 
-[Announcing a package][authoring-announcing] walks a real pipeline through each posture.
+[Announce a package][authoring-announcing] walks a real pipeline through each posture.
 
 **Every write also removes what it stops referencing, in the same commit.** [`ocx package announce`][cmd-package-announce] deletes an index object the moment nothing in the rebuilt root references it. Examples are the old dispatch object of a moved tag, a replaced readme and a replaced logo. The request diff shows removals beside additions, so old bytes do not accumulate.
 
-This sweep is always on and has no flag. It mirrors the [local copy's own sweep][local-update-modes] one layer down. Only an object that the *previous* committed root named is ever a candidate.
+This sweep is always on and has no flag. It mirrors the [local copy's own sweep][local-update-modes] one layer down. Only an object that the *previous* committed root named is ever eligible for removal.
 
 A concurrent announce may have an open request that references an object a merged run just deleted. This is accepted because it self-heals. Every curated tag's bytes are rewritten on the next announce of that package.
 
 [`ocx package claim`][cmd-package-claim] runs the same sweep on every claim. That includes a re-claim that only adds an owner. A claim never writes tags, so the only object it orphans is the payload of the description. A claim that refreshes `desc` drops the readme or logo blob that the previous entry named.
 
-## Keep tags {#keep-tags}
+## Registry keep tags {#keep-tags}
 
 A registry tag can be deleted by mistake, even when someone's `ocx.lock` still pins a digest it once pointed at. Registry-side retention policies key on tags, not on which digests are in use somewhere. A stray delete can leave a manifest orphaned and eligible for garbage collection on the registry side.
 
@@ -152,7 +152,7 @@ There is no retroactive tagging. A push does not reach back and keep-tag manifes
 
 A digest whose algorithm makes the tag longer than the OCI limit of 128 characters gets no keep tag at all. `sha512` is one, at 146 characters. The digest is never truncated to fit. Two digests sharing one truncated tag would silently drop the protection of a manifest. That is worse than leaving it unprotected in the open.
 
-The local index never copies a leaf platform manifest, only its [dispatch object][local-dispatch]. An index-resolved install therefore always fetches the leaf from the registry on demand, sometimes long after the index entry was written.
+The local index never copies a platform manifest, only its [dispatch object][local-dispatch]. An index-resolved install therefore always fetches the platform manifest from the registry on demand, sometimes long after the index entry was written.
 
 A manifest stays reachable as long as *anything* still references it. A version tag does, and so does an image index that still lists it in its platform map. Most manifests never need a keep tag to stay alive.
 
@@ -167,22 +167,22 @@ Four OCX commands share the `update` verb. Each refreshes exactly one record, an
 | Command | Refreshes |
 |---|---|
 | [`ocx index update`][cmd-index-update] | The local index at [`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`][arg-index] |
-| [`ocx self update`][cmd-self-update] | The managed ocx installation itself |
-| [`ocx config update`][cmd-config-update] | The managed-config snapshot |
+| [`ocx self update`][cmd-self-update] | The managed OCX installation itself |
+| [`ocx config update`][cmd-config-update] | The cached managed-config payload |
 | [`ocx update`][cmd-update] | A project's `ocx.lock` |
 
 A fifth command belongs to the family without carrying the verb. [`ocx index sync`][cmd-index-sync] refreshes the same record that `ocx index update` does. It works over the catalog of a whole registry rather than a named list of packages.
 
 `ocx update` never writes a **tag pointer** into the local index. `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`. That object is content-addressed and pins nothing, so the write moves no tag.
 
-Re-resolving the pinned packages of a project therefore does not change what `kitware/cmake:3` resolves to for any other command on the same machine. That stays the job of [`ocx index update`][cmd-index-update].
+Re-resolving the pinned packages of a project therefore does not change what `nodejs/node:24` resolves to for any other command on the same machine. That stays the job of [`ocx index update`][cmd-index-update].
 
 ## See also {#see-also}
 
 - [Local index][local-index]: the layout, crash safety and update modes of the machine-local collection.
-- [index.ocx.sh][public-index]: how OCX resolves the public index and surfaces yanked and deprecated packages.
-- [Serve an index][serve-an-index]: publish a local snapshot over HTTPS or from disk, and build an air-gap pipeline.
-- [Indices section in the user guide][user-indices]: how to refresh, work offline and use `--remote`.
+- [Public index][public-index]: how OCX resolves the public index and surfaces yanked and deprecated packages.
+- [Serve an index][serve-an-index]: publish a local copy over HTTPS or from disk, and build an air-gap pipeline.
+- [Work offline][user-indices]: how to refresh, work offline and use `--remote`.
 - [Storage][in-depth-storage]: the home of the local index relative to the other stores under `$OCX_HOME`.
 - [Versioning][in-depth-versioning]: tag mutability, locking by digest and the `_` build suffix.
 - [Configuration][in-depth-configuration]: the `[registries]` and `[mirrors]` config-driven defaults.
@@ -225,14 +225,14 @@ Re-resolving the pinned packages of a project therefore does not change what `ki
 [env-ocx-announce-git-token]: ../reference/environment.md#ocx-announce-git-token
 
 <!-- internal -->
-[local-index]: ./local-index.md
-[local-dispatch]: ./local-index.md#local-dispatch
-[local-update-modes]: ./local-index.md#update-modes
-[public-index]: ./public-index.md
-[public-index-caching]: ./public-index.md#public-index-caching
-[serve-an-index]: ../guides/serve-an-index.md
+[local-index]: ./local-index.mdx
+[local-dispatch]: ./local-index.mdx#local-dispatch
+[local-update-modes]: ./local-index.mdx#update-modes
+[public-index]: ./public-index.mdx
+[public-index-caching]: ./public-index.mdx#public-index-caching
+[serve-an-index]: ../guides/serve-an-index.mdx
 [user-indices]: ../guides/work-offline.mdx#offline
-[authoring-announcing]: ../publishing/announce.md
+[authoring-announcing]: ../publishing/announce.mdx
 [in-depth-storage]: ./storage.mdx
 [in-depth-storage-packages]: ./storage.mdx#packages
 [in-depth-storage-layers]: ./storage.mdx#layers

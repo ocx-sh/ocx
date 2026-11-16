@@ -486,7 +486,7 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "The last repository segment, e.g. `cmake`.\n\n**Not unique on its own** — `ocx.sh/a/cli` and `ocx.sh/b/cli` both yield\n`cli`. Identity is name + `repository_url` + digest; a consumer joining\non `name` alone is wrong.",
+          "description": "The last repository segment, e.g. `node`.\n\n**Not unique on its own** — `ocx.sh/a/cli` and `ocx.sh/b/cli` both yield\n`cli`. Identity is name + `repository_url` + digest; a consumer joining\non `name` alone is wrong.",
           "type": "string"
         },
         "uri": {

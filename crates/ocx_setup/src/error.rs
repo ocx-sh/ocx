@@ -20,7 +20,7 @@ pub enum Error {
         fallback(
             Failure,
             slug = "setup_bootstrap_failed",
-            summary = "Installing ocx into the content store failed with an unclassified cause"
+            summary = "Installing OCX into the object store failed with an unclassified cause"
         )
     )]
     Bootstrap(#[from] ocx_package_manager::Error),
@@ -84,7 +84,7 @@ pub enum Error {
     #[exit(
         ConfigError,
         slug = "invalid_managed_config_source",
-        summary = "The managed-config source is not a valid OCI identifier"
+        summary = "The managed-config source is not a valid identifier"
     )]
     InvalidManagedConfigSource {
         /// The rejected `--managed-config` value.

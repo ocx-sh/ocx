@@ -18,7 +18,7 @@ use crate::options;
 /// Resolve package tags to digests and write `ocx.lock`.
 ///
 /// Only bindings whose `ocx.toml` entry changed are re-resolved; every other pin is carried
-/// forward, so a moving tag advances only through `ocx update`. A version 3 lock records no
+/// forward, so a rolling tag advances only through `ocx update`. A version 3 lock records no
 /// declared tags, so a drifted one re-resolves every binding. Transactional: every binding
 /// resolves or nothing is written.
 #[derive(Parser, Clone)]
@@ -129,7 +129,7 @@ impl Lock {
 }
 
 /// Says so when a drifted version 3 lock is about to re-resolve every binding: it records no
-/// declared tags, so no binding can be proved unchanged and a moving tag may advance.
+/// declared tags, so no binding can be proved unchanged and a rolling tag may advance.
 pub(crate) fn warn_v3_re_resolve(
     context: &crate::app::Context,
     previous: Option<&ocx_project::ProjectLock>,

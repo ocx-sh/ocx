@@ -1,18 +1,16 @@
 ---
 title: "Versioning"
-description: "How OCX tags, variants and platforms compose into one identifier, how rolling tags cascade, and how a pin or an index snapshot locks a version."
+description: "How OCX tags, variants and platforms compose into one identifier, how rolling tags cascade, and how a pin or the local index locks a version."
 ---
 {/* doc_type: explanation */}
-
-import Tooltip from '@ocx-sh/theme/components/Tooltip.astro'
 
 This page explains how OCX tags, variants and platforms compose into a single package identifier.
 
 Every binary package has three dimensions: *what it is*, *which version*, and *which platform build*. Most ecosystems handle these separately and leave the coordination to the consumer. Apt uses [arch suffixes and ports mirrors][apt-ports]. Pip uses [platform-encoded wheel filenames][pep-491]. Bazel rules use [hand-curated URL matrices][toolchains-llvm].
 
-OCX collapses all three dimensions into a single identifier. `kitware/cmake:3.28` resolves the right binary for the current machine, verifies it cryptographically, and installs it. It needs no flags, name suffixes, or mirror configuration.
+OCX collapses all three dimensions into a single identifier. `astral-sh/python-build-standalone:3.14` resolves the right binary for the current machine, verifies every layer against its digest (and the signature where a trust policy covers the package), and installs it. It needs no flags, name suffixes, or mirror configuration.
 
-The user-facing surface lives in the [Versioning section of the user guide][user-versioning]. It covers how to pick a tag, pin a digest, and override the platform.
+The task-oriented surface is [how to choose between versions][user-versioning]. It covers how to pick a tag, pin a digest, and override the platform.
 
 ## Tags \{#tags\}
 
@@ -30,19 +28,19 @@ The `_build` suffix is typically a UTC timestamp like `_20260216120000`. It sign
 
 | Tag | Publisher's intent | After index refresh |
 |---|---|---|
-| `kitware/cmake:3.28.1_20260216120000` | Do not re-push | Same build (by publisher convention) |
-| `kitware/cmake:3.28.1` | Rolling patch | Highest build of 3.28.1 |
-| `kitware/cmake:3.28` | Rolling minor | Newest 3.28.x build |
-| `kitware/cmake:3` | Rolling major | Newest stable 3.x build |
-| `kitware/cmake:latest` | Floating | Newest release |
+| `astral-sh/python-build-standalone:3.14.7_20260814` | Do not re-push | Same build (by publisher convention) |
+| `astral-sh/python-build-standalone:3.14.7` | Rolling patch | Highest build of 3.14.7 |
+| `astral-sh/python-build-standalone:3.14` | Rolling minor | Newest 3.14.x build |
+| `astral-sh/python-build-standalone:3` | Rolling major | Newest stable 3.x build |
+| `astral-sh/python-build-standalone:latest` | Rolling | Newest release |
 
 :::caution[OCI tags are not immutable]
 Any tag can be overwritten by the publisher, including build-tagged ones. Two mechanisms protect installs regardless of what the registry does later:
 
-- **[Local index][local-index] snapshot.** The tag → digest mapping only changes when [`ocx index update`][cmd-index-update] runs. The snapshot is yours until you decide to refresh it.
-- **[Content-addressed package store][in-depth-storage-packages].** Once a binary is installed, it lives at a path derived from its SHA-256 digest. The tag used to install it is irrelevant, because the bytes are permanent.
+- **[Local index][local-index] copy.** The tag → digest mapping changes only when a command refreshes it, such as [`ocx index update`][cmd-index-update] or a `--remote` resolve. It is yours until then.
+- **[Content-addressed object store][in-depth-storage-packages].** Once a binary is installed, it lives at a path derived from its SHA-256 digest. The tag used to install it is irrelevant, because the bytes are permanent.
 
-For absolute reproducibility without any index, reference the digest directly: `kitware/cmake@sha256:abc123…`
+For absolute reproducibility without any index, reference the digest directly: `nodejs/node@sha256:abc123…`
 :::
 
 ### Build separator \{#versioning-build-separator\}
@@ -57,7 +55,7 @@ OCX uses `_` as the build separator, so every version string is a valid OCI tag 
 [Helm][helm-oci] adopted the same `+` → `_` normalization when it moved chart distribution to OCI registries. See [helm/helm#10250][helm-issue] for the original discussion.
 :::
 
-Input is tolerant. If you type `+` out of habit, OCX accepts it and normalizes it to `_`. For example, `ocx package install kitware/cmake:3.28.1+20260216` installs the tag `3.28.1_20260216`. The normalization happens at the earliest boundary, the identifier parser, so all downstream code sees `_` only.
+Input is tolerant. If you type `+` out of habit, OCX accepts it and normalizes it to `_`. For example, `ocx package install astral-sh/python-build-standalone:3.14.7+20260814` installs the tag `3.14.7_20260814`. The normalization happens at the earliest boundary, the identifier parser, so all downstream code sees `_` only.
 
 ## Variants \{#variants\}
 
@@ -74,19 +72,19 @@ Without variant support, publishers create separate packages (`python-pgo`, `pyt
 
 </details>
 
-OCX uses a <Tooltip term="variant-prefix format">The variant name comes before the version, separated by a hyphen: `debug-3.12.5`. Because variants start with a letter and versions start with a digit, the boundary is always unambiguous. Variant names match `[a-z][a-z0-9.]*`, which means lowercase letters, digits, and dots only.</Tooltip> convention. The default variant's tags carry no prefix. For example, `astral-sh/python-build-standalone:3.12` resolves the same build as `astral-sh/python-build-standalone:pgo.lto-3.12` when `pgo.lto` is the default.
+OCX puts the variant name before the version, separated by a hyphen: `slim-3.14.7`. A variant name matches `[a-z][a-z0-9.]*`, so it holds lowercase letters, digits and dots only. Variants start with a letter and versions with a digit, so the boundary is unambiguous. The default variant's tags carry no prefix. So `astral-sh/python-build-standalone:3.14` names the default variant and `astral-sh/python-build-standalone:slim-3.14` names the `slim` one.
 
 | Tag | Meaning |
 |---|---|
-| `astral-sh/python-build-standalone:3.12` | Default variant at version 3.12 |
-| `astral-sh/python-build-standalone:debug-3.12` | Debug variant at version 3.12 |
-| `astral-sh/python-build-standalone:debug-3` | Newest version of the debug variant in the 3.x series |
-| `astral-sh/python-build-standalone:debug` | Newest version of the debug variant |
+| `astral-sh/python-build-standalone:3.14` | Default variant at version 3.14 |
+| `astral-sh/python-build-standalone:slim-3.14` | Slim variant at version 3.14 |
+| `astral-sh/python-build-standalone:slim-3` | Newest version of the slim variant in the 3.x series |
+| `astral-sh/python-build-standalone:slim` | Newest version of the slim variant |
 | `astral-sh/python-build-standalone:latest` | Newest version of the default variant |
 
-Rolling tags cascade within their variant track. For example, `debug-3.12.5` cascades to `debug-3.12`, then `debug-3`, then `debug`. Variants never cross: publishing a new `debug` build never updates `pgo.lto` or the default variant's tags. See [Cascades](#cascades) for the full cascade model.
+Rolling tags cascade within their variant track. For example, `slim-3.14.7` cascades to `slim-3.14`, then `slim-3`, then `slim`. Variants never cross: publishing a new `slim` build never updates the default variant's tags. See [Cascades](#cascades) for the full cascade model.
 
-Aliasing onto the bare track is opt-in, not automatic. [`ocx package push --default`][cmd-package-push] lets the pushed tag's own variant also own the un-prefixed track. That produces unadorned alias tags alongside its own prefixed ones. With `--cascade`, the bare `3.12.5` → `3.12` → `3` → `latest` track cascades too. Without `--default`, a variant-prefixed push never touches the bare track.
+Aliasing onto the bare track is opt-in, not automatic. [`ocx package push --default`][cmd-package-push] lets the pushed tag's own variant also own the un-prefixed track. That produces unadorned rolling tags alongside its own prefixed ones. With `--cascade`, the bare `3.14.7` → `3.14` → `3` → `latest` track cascades too. Without `--default`, a variant-prefixed push never touches the bare track.
 
 :::caution[Platform vs. variant]
 [OCI `platform.variant`][oci-image-index] is a CPU sub-architecture field (ARM `v6`, `v7`, `v8`). It determines *where* a binary can run and is selected automatically. OCX software variants determine *how* a binary was built and are selected by the user. The two concepts are orthogonal.
@@ -94,37 +92,37 @@ Aliasing onto the bare track is opt-in, not automatic. [`ocx package push --defa
 
 ## Cascades \{#cascades\}
 
-Publishers are expected to maintain the full tag hierarchy. When `kitware/cmake:3.28.1_20260216120000` is released, all rolling ancestors are re-pointed. This happens only if the release is genuinely the highest version at each specificity level:
+Publishers are expected to maintain the full tag hierarchy. When a build such as `astral-sh/python-build-standalone:3.14.10_<build>` is released, all rolling ancestors are re-pointed. This happens only if the release is genuinely the highest version at each specificity level:
 
 ```
-cmake:latest                  ← rolling — updated
+python-build-standalone:latest                 ← rolling — updated
        ↓
-cmake:3                       ← rolling — updated
+python-build-standalone:3                      ← rolling — updated
        ↓
-cmake:3.28                    ← rolling — updated
+python-build-standalone:3.14                   ← rolling — updated
        ↓
-cmake:3.28.1                  ← rolling — updated
+python-build-standalone:3.14.10                ← rolling — updated
        ↓
-cmake:3.28.1_20260216120000   ← source of truth
+python-build-standalone:3.14.10_<build>        ← source of truth
 ```
 
-Publishing `kitware/cmake:3.27.5_20260217` would update `kitware/cmake:3.27` but not `kitware/cmake:3` or `kitware/cmake:latest`. The `3.28.x` series is still ahead. Rolling tags only advance, never regress.
+Publishing a new 3.13 patch build updates `astral-sh/python-build-standalone:3.13` but not `astral-sh/python-build-standalone:3` or `astral-sh/python-build-standalone:latest`. The `3.14.x` series is still ahead. Rolling tags only advance, never regress.
 
 This is a publishing convention, not a guarantee enforced by the registry. Publishers must maintain the cascade manually, or have OCX do it for them.
 
-Cascades operate within a single variant track. Publishing `debug-3.28.1` updates `debug-3.28`, `debug-3`, and `debug`. It never touches the default variant's tags (`3.28`, `3`, `latest`) or any other variant's tags. The `--default` flag opts a variant-prefixed push into also aliasing the bare track, mirroring the variant-prefixed chain under `--cascade`. See [Variants](#variants) for details.
+Cascades operate within a single variant track. Publishing `slim-3.14.7` updates `slim-3.14`, `slim-3`, and `slim`. It never touches the default variant's tags (`3.14`, `3`, `latest`) or any other variant's tags. The `--default` flag opts a variant-prefixed push into also aliasing the bare track, mirroring the variant-prefixed chain under `--cascade`. See [Variants](#variants) for details.
 
 :::tip[Cascading a new release]
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically. Publish one build and let OCX re-point all rolling ancestors in a single command.
 :::
 
-Because cascading is a publishing convention rather than a registry-enforced rule, the chain above can also drift silently. A transient registry error partway through a cascade push can leave one alias level un-repointed. For example, `kitware/cmake:3` still points at last week's build even though `kitware/cmake:3.28.1` published successfully as a newer version at that level.
+Because cascading is a publishing convention rather than a registry-enforced rule, the chain above can also drift silently. A transient registry error partway through a cascade push can leave one rolling-tag level un-repointed. For example, `astral-sh/python-build-standalone:3` still points at last week's build even though `astral-sh/python-build-standalone:3.14.7` published successfully as a newer version at that level.
 
 Nothing about ordinary resolution notices this. A rolling tag that resolves to *some* valid manifest looks the same whether or not it is the *highest* one.
 
-[`ocx package cascade check`][cmd-package-cascade-check] closes that gap by re-deriving what every alias tag *should* point to. It does not trust the push that maybe updated the alias. It folds over every published version. For a given alias and platform, the expected build is the highest version under that alias which publishes the platform at all.
+[`ocx package cascade check`][cmd-package-cascade-check] closes that gap by re-deriving what every rolling tag *should* point to. It does not trust the push that maybe updated the rolling tag. It folds over every published version. For a given rolling tag and platform, the expected build is the highest version under that rolling tag which publishes the platform at all.
 
-Diffing the registry's actual tags against that fold finds exactly the aliases a swallowed push error left behind. [`ocx package cascade repair`][cmd-package-cascade-repair] rewrites the affected alias indexes to match.
+Diffing the registry's actual tags against that fold finds exactly the rolling tags a swallowed push error left behind. [`ocx package cascade repair`][cmd-package-cascade-repair] rewrites the affected rolling-tag image indexes to match.
 
 :::note[Cascade the mechanism vs. `cascade` the command]
 "Cascade" names two related but distinct things. `ocx package push --cascade` is the *push-time* mechanism above. It re-points rolling ancestors as part of publishing one build.
@@ -134,7 +132,7 @@ Diffing the registry's actual tags against that fold finds exactly the aliases a
 
 ## Platforms \{#platforms\}
 
-The [OCI Image Index specification][oci-image-index] defines a <Tooltip term="multi-platform manifest">An image index is a top-level OCI manifest. It lists several per-platform sub-manifests under one tag. Clients resolve the entry that matches their platform.</Tooltip> format. It allows multiple platform builds to live under a single tag, with the same repository name for all of them.
+The [OCI image index specification][oci-image-index] defines a multi-platform manifest format. It allows multiple platform builds to live under a single tag, with the same repository name for all of them.
 
 When you install a package, OCX reads your running system and selects the matching build automatically. It needs no flags, no configuration, and no separate repository per architecture.
 
@@ -144,9 +142,9 @@ When you install a package, OCX reads your running system and selects the matchi
 | Linux on ARM (Graviton, Ampere, RPi 4+) | `linux/arm64` |
 | macOS on Intel | `darwin/amd64` |
 | macOS on Apple Silicon | `darwin/arm64` |
-| Windows on x86-64 | `windows/amd64` |
+| Windows on x86-64 or ARM | `windows/amd64`, `windows/arm64` |
 
-If a package publishes a universal build with no platform field in the manifest, OCX uses it as a fallback. This is common for interpreted runtimes and truly portable binaries.
+If a package publishes an `any`-platform build with no platform field in the manifest, OCX uses it as a fallback. This is common for interpreted runtimes and truly portable binaries.
 
 ### Richer platform descriptors \{#platform-fields\}
 
@@ -156,30 +154,30 @@ The OCI platform model supports finer-grained descriptors for precise compatibil
 - **`os.features`**: OS capability flags, for example `win32k` for Windows container isolation modes.
 - **`features`**: Reserved for future platform extensions in the OCI spec.
 
-OCX matches all declared fields when selecting among manifest entries. The directed compatibility relation and scoring are documented in [Platforms][reference-platforms]. See the [OCI Image Index specification][oci-image-index] for the complete field reference.
+OCX matches all declared fields when selecting among manifest entries. The directed compatibility relation and scoring are documented in [Platforms][reference-platforms]. See the [OCI image index specification][oci-image-index] for the complete field reference.
 
 :::caution[OCI platform.variant ≠ OCX variants]
-[`platform.variant`][oci-image-index] is a CPU sub-architecture field. It is distinct from [OCX software variants](#variants), which describe build-time characteristics like optimization profiles or feature sets.
+[`platform.variant`][oci-image-index] is the CPU variant field. It is distinct from [OCX software variants](#variants), which describe build-time characteristics like optimization profiles or feature sets.
 :::
 
 ## Locking \{#locking\}
 
-The most direct lock is a digest. `kitware/cmake@sha256:abc123…` bypasses the [local index][local-index] entirely and identifies an exact binary regardless of what any tag points to. All installed bytes are content-addressed, so every package can be pinned this way. It needs no lockfiles and no registry queries, just the hash.
+The most direct lock is a digest. `nodejs/node@sha256:abc123…` bypasses the [local index][local-index] entirely and identifies an exact binary regardless of what any tag points to. All installed bytes are content-addressed, so every package can be pinned this way. It needs no lock files and no registry queries, just the hash.
 
-For most use cases, the [local index snapshot][local-index] already provides the lock. Tags resolve to the digest recorded at last update. That mapping does not change until [`ocx index update`][cmd-index-update] runs. A CI runner that never updates its local index gets the same binary on every run.
+For most use cases, the [local index][local-index] already provides the lock. Tags resolve to the digest recorded at last update. That mapping does not change until [`ocx index update`][cmd-index-update] runs. A CI runner that never updates its local index gets the same binary on every run.
 
 For tool authors distributing OCX-powered workflows, there is a more ergonomic option. The local index holds only manifest metadata: small JSON files, with no layer archives and no binaries. It can therefore be shipped inside a [GitHub Action][github-actions-docs], [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features].
 
-The result is a two-level lock. The *tool version* locks the *index snapshot*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lockfiles.
+The result is a two-level lock. The *tool version* locks the *local index*, which locks the *resolved binary*. Users pin the tool and get deterministic builds without managing digests, platform conditionals, or separate lock files.
 
-The full pattern lives in [Indices][in-depth-indices]. It covers bundled snapshots, [`OCX_INDEX`][env-ocx-index], the `--remote` and `--offline` interaction, and the Dependabot and Renovate flow.
+The full pattern lives in [Indices][in-depth-indices]. It covers shipped copies, [`OCX_INDEX`][env-ocx-index], the `--remote` and `--offline` interaction, and the Dependabot and Renovate flow.
 
 ## See Also
 
-- [Versioning section in the user guide][user-versioning]: pick a tag, pin a digest, override the platform
+- [Choose between versions][user-versioning]: pick a tag, pin a digest, override the platform
 - [Platforms][reference-platforms]: the canonical platform grammar and compatibility relation
-- [Indices][in-depth-indices]: local index snapshots, `index.ocx.sh`, the bundled index pattern, lock semantics
-- [Storage][in-depth-storage]: content-addressed package store, layer dedup
+- [Indices][in-depth-indices]: local index copies, `index.ocx.sh`, the shipped copy pattern, lock semantics
+- [Storage][in-depth-storage]: content-addressed object store, layer dedup
 
 
 [oci-dist-tag]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
@@ -214,4 +212,4 @@ The full pattern lives in [Indices][in-depth-indices]. It covers bundled snapsho
 [in-depth-storage]: ./storage.mdx
 [in-depth-storage-packages]: ./storage.mdx#packages
 [in-depth-indices]: ./indices.md
-[local-index]: ./local-index.md#local
+[local-index]: ./local-index.mdx#local

@@ -55,6 +55,21 @@ tasks:
       - install
     cmd: pnpm test
 
+  glossary:generate:
+    desc: Write reference/glossary.md from src/data/glossary.json
+    dir: '{{.TASKFILE_DIR}}'
+    deps:
+      - install
+    cmd: node scripts/glossary.mjs
+
+  glossary:check:
+    desc: Fail when reference/glossary.md differs from what src/data/glossary.json generates
+    # Also asserted by tests/glossary.test.mjs, which `website:test` runs.
+    dir: '{{.TASKFILE_DIR}}'
+    deps:
+      - install
+    cmd: node scripts/glossary.mjs --check
+
   check:
     desc: Gate a built site — links, then the built-site tests with dist required
     # No `check:budget`: it stays red by owner decision (ocx-sh/ocx#606).

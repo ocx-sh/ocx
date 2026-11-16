@@ -32,7 +32,7 @@
         "last": false,
         "trailing_var_arg": false,
         "stdin_secret": false,
-        "help": "Path to the ocx configuration file",
+        "help": "Path to the OCX configuration file",
         "env": "OCX_CONFIG"
       },
       {
@@ -1077,7 +1077,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Tool identifiers to add, each optionally prefixed with `NAME=` (e.g. `ocx.sh/cmake:3.28`, `glab=ocx.sh/gitlab/cli`)"
+            "help": "Tool identifiers to add, each optionally prefixed with `NAME=` (e.g. `ocx.sh/nodejs/node:24`, `glab=ocx.sh/gitlab/cli`)"
           }
         ],
         "groups": [],
@@ -2223,7 +2223,7 @@
           "about"
         ],
         "version": 1,
-        "summary": "Print ocx version, registry, platform, shell, and home directory",
+        "summary": "Print OCX version, registry, platform, shell, and home directory",
         "hidden": false,
         "external_subcommands": false,
         "output": [
@@ -7072,7 +7072,7 @@
               "inspect"
             ],
             "version": 1,
-            "summary": "Inspect one or more package references (candidates, metadata, or resolution chain)",
+            "summary": "Inspect one or more package references (platforms, metadata, or resolution chain)",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -7163,7 +7163,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Platform-select through the index and emit the OCI resolution chain (pinned identifier and walk-order chain digests: index, manifest, config) alongside the metadata and layers. Without `--resolve` or `--closure`, an image-index reference lists its platform candidates instead"
+                "help": "Platform-select through the index and emit the OCI resolution chain (pinned identifier and walk-order chain digests: index, manifest, config) alongside the metadata and layers. Without `--resolve` or `--closure`, an image index reference lists its platforms instead"
               },
               {
                 "id": "closure",
@@ -9557,7 +9557,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Materialize into DIR instead of an auto-managed temp dir. DIR must not exist (created by ocx) or be empty. Implies keep - the dir is never deleted by ocx. Must reside on the same filesystem as `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy"
+                "help": "Materialize into DIR instead of an auto-managed temp dir. DIR must not exist (created by OCX) or be empty. Implies keep - the dir is never deleted by OCX. Must reside on the same filesystem as `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy"
               },
               {
                 "id": "keep",
@@ -9642,7 +9642,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Remove every value ocx applied to the calling environment before composing"
+                "help": "Remove every value OCX applied to the calling environment before composing"
               },
               {
                 "id": "clean",
@@ -10237,7 +10237,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Remove every value ocx applied to the calling environment before composing"
+                "help": "Remove every value OCX applied to the calling environment before composing"
               },
               {
                 "id": "clean",
@@ -10293,7 +10293,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Expose the package's full env, including its private (self-only) entries. Off by default: only public + interface entries are loaded (the consumer view). Generated launchers use `ocx launcher exec` which enables self-view internally"
+                "help": "Expose the package's full env, including its private (self-only) entries. Off by default: only public + interface entries are loaded (the interface surface). Generated launchers use `ocx launcher exec` which enables self-view internally"
               },
               {
                 "id": "rm",
@@ -11369,7 +11369,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Remove every value ocx applied to the calling environment before composing"
+                "help": "Remove every value OCX applied to the calling environment before composing"
               },
               {
                 "id": "clean",
@@ -11816,7 +11816,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Bindings to remove (binding name or fully-qualified identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`)"
+            "help": "Bindings to remove (binding name or fully-qualified identifier, e.g. `node` or `ocx.sh/nodejs/node:24`)"
           },
           {
             "id": "group",
@@ -11974,7 +11974,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Remove every value ocx applied to the calling environment before composing"
+            "help": "Remove every value OCX applied to the calling environment before composing"
           },
           {
             "id": "clean",
@@ -12377,7 +12377,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Remove every value ocx applied to the calling environment before composing"
+            "help": "Remove every value OCX applied to the calling environment before composing"
           },
           {
             "id": "clean",
@@ -12860,7 +12860,7 @@
             "last": false,
             "trailing_var_arg": false,
             "stdin_secret": false,
-            "help": "Remove every value ocx applied to the calling environment before composing"
+            "help": "Remove every value OCX applied to the calling environment before composing"
           },
           {
             "id": "clean",
@@ -13309,7 +13309,7 @@
               "activate"
             ],
             "version": 1,
-            "summary": "Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source never duplicates an entry",
+            "summary": "Sourced from `$OCX_HOME/env.sh` at shell startup to activate OCX in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source never duplicates an entry",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -13621,7 +13621,7 @@
               "setup"
             ],
             "version": 1,
-            "summary": "Create or refresh ocx shell integration",
+            "summary": "Create or refresh OCX shell integration",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -13836,7 +13836,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Write the env shims but touch neither a shell profile nor the session PATH"
+                "help": "Write the env files but touch neither a shell profile nor the session PATH"
               },
               {
                 "id": "profile",
@@ -14011,7 +14011,7 @@
               "update"
             ],
             "version": 1,
-            "summary": "Update ocx itself to the latest released version. Without `--check`, downloads the newest release and activates it; with `--check`, reports the result without installing",
+            "summary": "Update OCX itself to the latest released version. Without `--check`, downloads the newest release and activates it; with `--check`, reports the result without installing",
             "hidden": false,
             "external_subcommands": false,
             "output": [
@@ -14050,7 +14050,7 @@
                 "last": false,
                 "trailing_var_arg": false,
                 "stdin_secret": false,
-                "help": "Check for a newer ocx version without installing it"
+                "help": "Check for a newer OCX version without installing it"
               }
             ],
             "groups": [],
@@ -14291,7 +14291,7 @@
           "version"
         ],
         "version": 1,
-        "summary": "Print the version of ocx",
+        "summary": "Print the version of OCX",
         "hidden": false,
         "external_subcommands": false,
         "output": [
@@ -14344,7 +14344,7 @@
       "name": "OCX_BINARY_PIN",
       "value": "path",
       "visibility": "public",
-      "summary": " Absolute path to the running `ocx`, set on every spawn so a child ocx runs the",
+      "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
       "secret": false,
       "propagation": "binary_pin",
       "on_invalid": "default"
@@ -14485,7 +14485,7 @@
       "name": "OCX_ALLOW_YANKED",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — allow a tag resolving to a yanked index entry. Forwarded to child ocx.",
+      "summary": " Boolean — allow a tag resolving to a yanked index entry. Forwarded to child OCX.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14570,7 +14570,7 @@
         "always"
       ],
       "visibility": "public",
-      "summary": " Lazy materialisation mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",
+      "summary": " Lazy materialization mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14583,7 +14583,7 @@
         "progress"
       ],
       "visibility": "public",
-      "summary": " Lazy materialisation report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.",
+      "summary": " Lazy materialization report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14624,7 +14624,7 @@
       "name": "OCX_NO_VERIFY",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child ocx.",
+      "summary": " Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "error"
@@ -14660,7 +14660,7 @@
       "name": "OCX_NO_HOOK",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — disables the per-prompt shell reconciler; `ocx self activate` still runs at shell start.",
+      "summary": " Boolean — disables the per-prompt shell hook; `ocx self activate` still runs at shell start.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14708,7 +14708,7 @@
       "name": "OCX_NO_UPDATE_CHECK",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child ocx.",
+      "summary": " Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child OCX.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14731,7 +14731,7 @@
         "manual"
       ],
       "visibility": "public",
-      "summary": " `RefreshPolicy` wire value for ocx's own update check; beats `[update] self`. Not forwarded.",
+      "summary": " `RefreshPolicy` wire value for OCX's own update check; beats `[update] self`. Not forwarded.",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"
@@ -14868,7 +14868,7 @@
       "name": "__OCX_ENV_STATE",
       "value": "string",
       "visibility": "plumbing",
-      "summary": " The execution state: what ocx last applied to the shell, and the policy a parent ocx passed down.",
+      "summary": " The execution state: what OCX last applied to the shell, and the policy a parent OCX passed down.",
       "secret": false,
       "propagation": "state",
       "on_invalid": "default"
@@ -14895,7 +14895,7 @@
       "name": "__OCX_CREDENTIAL_HELPER",
       "value": "bool",
       "visibility": "plumbing",
-      "summary": " Set by ocx on every credential helper it starts until 0.7; an ocx running under it never downloads.",
+      "summary": " Set by OCX on every credential helper it starts until 0.7; an OCX running under it never downloads.",
       "secret": false,
       "propagation": "hook_local",
       "on_invalid": "default"

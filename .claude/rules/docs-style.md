@@ -71,19 +71,35 @@ Be exactly correct. Nuances that came up:
 
 - **OCI tags are mutable.** Never imply tag is "frozen" or "pinned" absolute. `_build` suffix is publisher *convention*, not enforced by registry.
 - **"Pinned until index refresh" applies to ALL tags equally.** Distinction between rolling and build-tagged is what happens *after* refresh: rolling tags advance, build-tagged conventionally stay same. Table column should be "After index refresh", not "Resolves to".
-- **Content-addressed = universally lockable.** Any package pin with digest (`kitware/cmake@sha256:abc…`), bypass tags and indexes. Make clear in locking docs before describing convenient options.
+- **Content-addressed = universally lockable.** Any package pin with digest (`nodejs/node@sha256:abc…`), bypass tags and indexes. Make clear in locking docs before describing convenient options.
 - **Cascade is convention, not enforced.** Publishers maintain manually. `ocx package push --cascade` automates, but not guaranteed at registry level.
 
 ---
 
-## Tooltips
+## Terms
 
-Use `<Tooltip term="short label">explanation</Tooltip>` to hide technical detail that interrupt prose flow.
+One term per concept: the approved vocabulary is the decisions table in
+`.claude/skills/docs/references/vocabulary.md`, the full conflict table C1–C46 in `research_docs_glossary.md`.
 
-- `term` appears inline (underlined). Natural noun phrase fitting sentence.
-- Slot content is popup text. Backticks for inline code inside tooltips (render as `<code>`).
-- Good candidates: technical terms, jargon, protocol-level concepts, long command sequences cluttering sentence.
-- Bad candidates: anything reader need to follow flow — put in prose.
+- A word used in a second sense is **reworded**, never explained in place. The build links every usage of a term, so one in another sense is fixed by the full term, an `except` phrase, `excludePages` or a reword (`vocabulary.md` § The glossary).
+- A glossary word is written as plain prose: the build links it (`website/src/data/glossary.json`, `adr_docs_glossary.md`). Never hand-link it or wrap it in `<Tooltip>`; to add or change a term see `vocabulary.md` § The glossary.
+- Define a new term in one sentence or link the page that owns it.
+- The product is **OCX** in prose; `ocx` is only the command, in code font. The wordmark `ocx` stays in the site title, the logo and the README heading. `website/tests/product-name.test.mjs` fails a bare lowercase `ocx` on any page but the changelog.
+- An env variable's reader column is labelled "Audience" (C16); `ocx remove` takes a `<BINDING>` (D8).
+
+---
+
+## Terminal Commands
+
+A command a reader types sits in a `<ShellSession>` frame, which draws the prompt and keeps a command with its output.
+Mechanics (output fold, badges, imports, budget pages) → `.claude/skills/docs/references/terminal-commands.md`.
+
+- **Framed:** every command fence a reader types, comment lines, blank lines and multi-line commands included, and every doc-script include, on every page. A shell fence outside a session fails `website/tests/shell-session.test.mjs`.
+- **Plain fence:** file content only (script, rc snippet, CI YAML, config), and it carries `title="<file name>"`: the title is how that test tells a file from a command.
+- Fences alternate command, output by position; a command-only session is **one** fence. Never write the `$` yourself.
+- A tested doc-script include is a command block and is never replaced by an inline fence. `text`-tagged `ocx` fences exist on pages with includes because NC1 (`test/lint/test_doc_binding.py`) scans only `sh` and `bash`.
+- Never invent output (DOC-EX-12): a command without shown output stays a command-only fence.
+- A `#` comment or blank line inside a command fence draws no prompt and may stay. One that explains a command may become a numbered badge plus a prose legend; never a marker without a legend.
 
 ---
 
@@ -118,26 +134,8 @@ See the [OCI Image Index specification][oci-image-index] for details.
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 ```
 
-Collect all link definitions at **bottom of file**, grouped with comments:
-
-```markdown
-<!-- external -->
-[nix]: https://nixos.org/
-[semver]: https://semver.org/
-...
-
-<!-- commands -->
-[cmd-exec]: ./reference/command-line/commands.md#exec
-...
-
-<!-- environment -->
-[env-auth-token]: ./reference/environment.md#ocx-auth-registry-token
-...
-
-<!-- internal -->
-[fs-index]: #file-structure-index
-[fs-objects]: #file-structure-objects
-```
+Collect all link definitions at **bottom of file**, grouped by comment (`<!-- external -->`, `<!-- commands -->`,
+`<!-- environment -->`, `<!-- internal -->`), e.g. `[nix]: https://nixos.org/`, `[cmd-exec]: ./reference/command-line/commands.md#exec`, `[fs-index]: #file-structure-index`.
 
 ---
 
@@ -145,11 +143,13 @@ Collect all link definitions at **bottom of file**, grouped with comments:
 
 A page using a component is `.mdx` and imports it; props → `subsystem-website.md` § Components and Markup.
 
-- `<Tooltip term="label">popup text</Tooltip>` — inline term with hover popup (`@ocx-sh/theme/components/Tooltip.astro`)
+- `<Tooltip term="label">popup text</Tooltip>` — a skippable aside, never a term definition: glossary terms link themselves (§ Terms)
 - `<Tree>` / `<Node>` / `<Description>` — filesystem trees with annotations (`Tree.astro`, `TreeNode.astro`, `TreeDescription.astro`)
 - `<Tabs>` / `<TabItem>` — tabbed alternatives (`Tabs.astro`, `TabItem.astro`)
 - `<Steps>` — numbered procedure (`@astrojs/starlight/components`)
 - `<Terminal>` — recorded `.cast` session (`@ocx-sh/theme/components/Terminal.astro`)
+- `<ShellSession title="...">` — a terminal frame, see § Terminal Commands (`ShellSession.astro`)
+- `<InstallCommand />` — the installer one-liner for every shell; never hand-copy the command (`InstallCommand.astro`)
 - `<PlatformIcons>` — OS glyph lists (`PlatformIcons.astro`)
 - `:::note | tip | caution | danger` — callout boxes
 

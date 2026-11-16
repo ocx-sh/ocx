@@ -3,11 +3,11 @@ title: "Metadata: Integrations"
 ---
 <!-- doc_type: reference -->
 
-The `integrations` field of [`metadata.json`](./index.md#format) carries vendor-namespaced configuration for tools OCX does not model.
+The `integrations` field of [`metadata.json`](./index.md#format) carries vendor-keyed configuration for tools OCX does not model.
 
 ## Integrations {#integrations}
 
-`integrations` is an optional object mapping a namespace key to an arbitrary JSON payload (an object, array, string, number or `null`). OCX stores the payload and resolves its own `${...}` tokens inside string values.
+`integrations` is an optional object mapping an integration key to an arbitrary JSON payload (an object, array, string, number or `null`). OCX stores the payload and resolves its own `${...}` tokens inside string values.
 
 - Propagation: the whole map is carried through the dependency graph without interpreting, validating or merging it
 
@@ -19,7 +19,7 @@ The `integrations` field of [`metadata.json`](./index.md#format) carries vendor-
   "integrations": {
     "com.microsoft.vscode": {
       "extensions": ["rust-lang.rust-analyzer"],
-      "settings": { "rust-analyzer.server.path": "${installPath}/bin/rust-analyzer" }
+      "settings": { "rust-analyzer.server.path": "${self.installPath}/bin/rust-analyzer" }
     },
     "com.jetbrains": { "plugins": ["com.jetbrains.rust"] }
   }
@@ -31,9 +31,9 @@ The `integrations` field of [`metadata.json`](./index.md#format) carries vendor-
 
 See [Integrations][explanation-integrations] for the design, including why OCX never merges two packages' blocks.
 
-### Namespace Keys {#integrations-namespace}
+### Integration keys {#integrations-namespace}
 
-A namespace key follows the reverse-DNS convention (`com.microsoft.vscode`), which OCX does not enforce. An invalid key is rejected with exit 65, naming the key, wherever `metadata.json` is validated: [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push], and every later read.
+An integration key follows the reverse-DNS convention (`com.microsoft.vscode`), which OCX does not enforce. An invalid key is rejected with exit 65, naming the key, wherever `metadata.json` is validated: [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push], and every later read.
 
 | Rule | Rejects |
 |---|---|
@@ -43,18 +43,18 @@ A namespace key follows the reverse-DNS convention (`com.microsoft.vscode`), whi
 | No invisible characters: general category `Cf` and the `Default_Ignorable_Code_Point` property, since neither contains the other | a key containing `U+202E` (right-to-left override), `U+200B` (zero-width space), `U+FEFF` (byte-order mark) or `U+3164` (Hangul filler) |
 | No Unicode whitespace, not just ASCII spaces | `"com.foo bar"`, a key containing `U+00A0` (no-break space) |
 
-- Everything else is legal: `vscode`, `VSCode`, `com.微软`, `a`, `x/y` and `123` all pass. Case is preserved, so `Foo` and `foo` are two distinct namespaces.
-- The `sh.ocx.` prefix is reserved for first-party namespaces by convention only. No rule refuses a third-party key under it.
+- Everything else is legal: `vscode`, `VSCode`, `com.微软`, `a`, `x/y` and `123` all pass. Case is preserved, so `Foo` and `foo` are two distinct keys.
+- The `sh.ocx.` prefix is reserved for first-party keys by convention only. No rule refuses a third-party key under it.
 
 ### Size Caps {#integrations-caps}
 
 | Cap | Limit |
 |---|---|
-| One namespace's payload | 8 KiB |
+| One key's payload | 8 KiB |
 | The whole `integrations` map | 32 KiB |
 
 - Measured as compact (whitespace-free) JSON, the per-package cap over the whole map including every key and its punctuation.
-- A namespace over its own cap is rejected first, then the per-package cap.
+- A key over its own cap is rejected first, then the per-package cap.
 - Enforced everywhere `metadata.json` is validated, with exit 65.
 - Both caps are raise-only.
 
@@ -62,21 +62,21 @@ A namespace key follows the reverse-DNS convention (`com.microsoft.vscode`), whi
 
 A payload gets the same interpolation engine as [`env`](./env.md#env) values, resolved inside every string in the payload at any depth. It never applies to object keys, numbers, booleans or `null`, and a `${…}` outside the closed vocabulary is refused (see [Interpolation Tokens](./env.md#env-interpolation)).
 
-- A payload that is not an object is legal too. A bare string is interpolated the same way, so `"integrations": { "com.example": "${installPath}/notes.txt" }` is valid metadata.
-- `${installPath}` and `${self.installPath}` resolve to the declaring package's own content directory, never the consuming root's, even when the payload propagates through the dependency graph. See [Aliases](./env.md#env-interpolation-self).
+- A payload that is not an object is legal too. A bare string is interpolated the same way, so `"integrations": { "com.example": "${self.installPath}/notes.txt" }` is valid metadata.
+- `${self.installPath}` and its alias `${installPath}` resolve to the declaring package's own content directory, never the consuming root's, even when the payload propagates through the dependency graph. See [Aliases](./env.md#env-interpolation-self).
 - `${deps.NAME.installPath}` resolves to a direct dependency's content directory. A `${deps.NAME}` naming an undeclared dependency is invalid metadata, rejected at publish time.
 - All three install-path bodies accept the `:native` / `:posix` modifier. See [Render Modifiers](./env.md#env-interpolation-render).
-- `$${installPath}` escapes to the literal text `${installPath}`.
+- `$${self.installPath}` escapes to the literal text `${self.installPath}`.
 - Every other `${...}` token (`${workspaceFolder}`, VS Code's [`${env:VAR}`][vscode-variables], devcontainer's [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-vars]) is refused with exit 65, naming the token, by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] and again at composition ([`ocx env`][cmd-env-root], [`ocx package exec`][cmd-exec], [`ocx exec`][cmd-run]).
 - Read-only paths ([`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect]) echo an unrecognised token verbatim instead of refusing it.
-- Resolved for a package at `/home/u/.ocx/packages/.../content`: `toolPath` becomes `/home/u/.ocx/packages/.../content/bin/tool`, `literalToken` becomes `${installPath}`, and `editorVariable` becomes `${workspaceFolder}/config`. A bare `"${workspaceFolder}/config"` is refused at exit 65.
+- Resolved for a package at `/home/u/.ocx/packages/.../content`: `toolPath` becomes `/home/u/.ocx/packages/.../content/bin/tool`, `literalToken` becomes `${self.installPath}`, and `editorVariable` becomes `${workspaceFolder}/config`. A bare `"${workspaceFolder}/config"` is refused at exit 65.
 
 ```json
 {
   "integrations": {
     "com.example": {
-      "toolPath": "${installPath}/bin/tool",
-      "literalToken": "$${installPath}",
+      "toolPath": "${self.installPath}/bin/tool",
+      "literalToken": "$${self.installPath}",
       "editorVariable": "$${workspaceFolder}/config"
     }
   }

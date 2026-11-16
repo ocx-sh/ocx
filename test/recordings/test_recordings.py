@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 
-from recordings.cast_layer import _cast_path, _substitute_command_head, rewrite_command
+from recordings.cast_layer import (
+    _cast_path,
+    _substitute_command_head,
+    display_hosts,
+    rewrite_command,
+    write_cast,
+)
 from recordings.cast_recorder import CastRecorder
 from src.doc_scripts import strip_ansi
 from src.runner import OcxRunner, registry_dir
@@ -153,6 +159,8 @@ def test_record(
     work_dir = provider.work_dir if provider.work_dir is not None else tmp_path
     recorder.silent_setup(f"cd {shlex.quote(str(work_dir))}")
     sanitize_map[str(work_dir)] = "~"
+    # After the `host/` entries above, which blank the default registry in a reference.
+    sanitize_map.update(display_hosts(provider.script_env(), registry))
 
     # Give the recorder shell an *installed* ocx, which is what every reader of
     # a cast has and what `self activate` assumes.  Two things need it: the
@@ -235,15 +243,7 @@ def test_record(
     # website <Terminal src="/casts/<slug>.cast"> reference and the publish
     # nested scheme.  Falls back to path stem when # doc: is absent.
     cast_output = _cast_path(meta, cast_dir)
-    (
-        recorder.build(title=title)
-        .strip_progress()
-        .sanitize(sanitize_map)
-        .truncate_digests()
-        .realign_tables()
-        .auto_height()
-        .write(cast_output)
-    )
+    write_cast(recorder.build(title=title), sanitize_map, cast_output)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,8 @@ description: "Give OCX credentials for a private registry through environment va
 import Tabs from '@ocx-sh/theme/components/Tabs.astro'
 import TabItem from '@ocx-sh/theme/components/TabItem.astro'
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 Give OCX credentials for a registry that needs a login, so that installs, pulls and pushes against it succeed.<a id="authentication"></a>
 
 OCX looks for credentials per registry, so different registries can use different credentials. It tries each method in order and the first one that succeeds wins:
@@ -19,25 +21,33 @@ OCX looks for credentials per registry, so different registries can use differen
 
 Set the `OCX_AUTH_*` variables for a registry:
 
-<Tabs syncKey="shell">
+<Tabs>
 
 <TabItem label={"bearer"}>
+
+<ShellSession>
 
 ```sh
 export OCX_AUTH_docker_io_TYPE=bearer
 export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
 
+</ShellSession>
+
 
 </TabItem>
 
 <TabItem label={"basic"}>
+
+<ShellSession>
 
 ```sh
 export OCX_AUTH_docker_io_TYPE=basic
 export OCX_AUTH_docker_io_USER="<user>"
 export OCX_AUTH_docker_io_TOKEN="<token>"
 ```
+
+</ShellSession>
 
 </TabItem>
 
@@ -54,15 +64,19 @@ The variables are:
 OCX normalizes the registry name in the variable by replacing every non-alphanumeric character with an underscore. For `docker.io`, it looks for `OCX_AUTH_docker_io_TYPE`. This is stricter than the [path component encoding][in-depth-storage-stores] used for filesystem paths, which preserves dots and hyphens.
 :::
 
-If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is ignored. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variant.
+If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is ignored. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variable.
 
 ## Docker credentials \{#authentication-docker-credentials\}
 
 If a Docker configuration is found, OCX uses the stored credentials. The configuration is typically at `~/.docker/config.json` and managed via:
 
+<ShellSession>
+
 ```sh
 docker login "<registry>"
 ```
+
+</ShellSession>
 
 Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `auths[REGISTRY]`, then `credsStore`. Any `OCX_AUTH_*` variable for the registry wins over all of them, and then OCX runs no credential helper for that registry.
 
@@ -75,8 +89,9 @@ A credential helper such as the [Amazon ECR credential helper][ecr-helper] can i
 - To keep a registry away from the helper altogether, set `OCX_AUTH_<REGISTRY>_TYPE=anonymous`, or give it a `TOKEN`.
 
 :::tip[Learn more]
-[Environment variable reference][env-ref]: every `OCX_AUTH_*` variant and the complete normalization rules.
-[Configuration In Depth][in-depth-configuration]: pair auth variables with per-tier config defaults.
+[Environment variable reference][env-ref]: every `OCX_AUTH_*` variable and the complete normalization rules.
+[Configuration][in-depth-configuration]: pair auth variables with per-tier config defaults.
+[Per-registry settings][guide-registries]: a registry on a private network or plain HTTP.
 :::
 
 ## Storing credentials \{#authentication-storing\}
@@ -91,7 +106,11 @@ Storage tier (highest priority first):
 
 For headless CI without a native keychain daemon, pipe the token via `--password-stdin` and pass `--allow-insecure-store` to opt into the plaintext tier. `OCX_AUTH_*` environment variables still take precedence over any docker-config-stored credential at read time.
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/login.sh\{sh\}
+
+</ShellSession>
 
 After `ocx login`, confirm the credential works by pulling a package from the private registry, for example `ocx package pull registry.example.com/team/tool:1.0`. The pull succeeds when the registry accepts the credential, and fails with a non-zero exit when it does not.
 
@@ -107,4 +126,5 @@ Remove credentials with [`ocx logout`][cmd-logout]. Logout exits 0 when the regi
 [ecr-helper]: https://github.com/awslabs/amazon-ecr-credential-helper
 [guide-project-toolchain]: ./project-toolchain.mdx
 [in-depth-storage-stores]: ../explanation/storage.mdx#stores
+[guide-registries]: ./corporate-mirror.mdx#mirrors-registries
 [in-depth-configuration]: ../explanation/configuration.mdx

@@ -344,7 +344,7 @@ pub(super) fn rounds_need_trust_root(rounds: &[Round]) -> bool {
         .any(|backend| matches!(backend, ocx_trust::PolicyBackend::Keyless(_)))
 }
 
-/// The in-effect project's `[[trust.policy]]` set, empty without a project file: the one OCI-tier
+/// The in-effect project's `[[trust.policy]]` set, empty without a project file: the one `ocx package`
 /// read of `ocx.toml` (`adr_trust_policy.md`).
 async fn project_trust_policies(
     context: &crate::app::Context,

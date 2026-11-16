@@ -19,18 +19,18 @@ use crate::options;
     that build's own index (`diverged`), and any entry nothing accounts for. For an `ocx.sh/...` package it also compares the live public \
     index with the registry, so an entry that is stale there is reported too.\n\n\
     Read-only. It authenticates for pull only and never writes anything.\n\n\
-    Give a tag (`cmake:3.28`) to narrow the audit to that part of the graph.\n\n\
+    Give a tag (`nodejs/node:24`) to narrow the audit to that part of the graph.\n\n\
     Exits 0 when everything agrees, 65 when anything does not, and 64 when a package names a \
     digest or a tag that is not a version.\n\n\
     Nothing re-checks the cascade graph if a cascade push is interrupted partway through. \
     `check` finds that drift afterwards without republishing anything, and never writes to the \
     registry or any local index. Identifiers may be logical or physical.\n\n\
-    A logical one (a namespace with an index configured, such as `ocx.sh/kitware/cmake:3.28`) \
+    A logical one (a namespace with an index configured, such as `ocx.sh/nodejs/node:24`) \
     resolves to its registry location as `ocx package install` does. It also fetches the \
-    namespace's live index root. That adds a third finding layer, index staleness, which compares each \
-    observed alias digest with the digest committed in the index. A physical one \
-    (`ghcr.io/ocx-contrib/cmake:3.28`) skips that layer.\n\n\
-    The tag on an identifier selects the scope. No tag audits every alias tag in every variant \
+    namespace's live root document. That adds a third finding layer, index staleness, which compares each \
+    observed rolling-tag digest with the digest committed in the index. A physical one \
+    (`ghcr.io/ocx-contrib/nodejs/node:24`) skips that layer.\n\n\
+    The tag on an identifier selects the scope. No tag audits every rolling tag in every variant \
     track. `:latest` audits only the default variant's track.\n\n\
     A rolling tag such as `:3.28` or `:debug-3` audits that tag's subtree plus the path up to its \
     root. A fully build-tagged leaf audits only the path up to the root. The leaf is the source \
