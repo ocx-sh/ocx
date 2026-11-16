@@ -19,7 +19,7 @@ Resolves every companion and descriptor digest in the active patch overlay and w
 
 Works offline: only the local object store is consulted.
 
-Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which applies to `ocx package` commands). Companions are pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both versions independently.
+Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which freezes package tags only; companions still resolve live). Companions are pinned per `repository:tag`, so a descriptor naming one repository at two tags freezes both versions independently.
 
 Under `--global` the file is written beside `$OCX_HOME/ocx.lock`; the flag goes before the subcommand.
 

@@ -22,8 +22,8 @@ pub enum PatchGroup {
         `patches.snapshot.json` file beside `ocx.lock`. Once frozen, setting `OCX_PATCH_SNAPSHOT` \
         to that path makes all env composition prefer the pinned digests over live tag lookups.\n\n\
         Works offline: only the local object store is consulted.\n\n\
-        Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which applies to \
-        `ocx package` commands). Companions are pinned per `repository:tag`, so a descriptor naming one \
+        Adopting a snapshot is a deliberate opt-in, independent of `--frozen` (which freezes \
+        package tags only; companions still resolve live). Companions are pinned per `repository:tag`, so a descriptor naming one \
         repository at two tags freezes both versions independently.\n\n\
         Under `--global` the file is written beside `$OCX_HOME/ocx.lock`; the flag goes before \
         the subcommand.")]
