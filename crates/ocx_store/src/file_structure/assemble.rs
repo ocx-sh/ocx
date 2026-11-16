@@ -672,6 +672,7 @@ async fn handle_symlink_entry(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use super::*;
     use std::path::Path;

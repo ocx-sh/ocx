@@ -343,11 +343,13 @@ pub async fn append_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow
     let existing = crate::options::tags::read_tags_file_if_present(path).await?;
     let merged = merge_tags_file(&existing, tags);
     let target = path.to_path_buf();
-    tokio::task::spawn_blocking(move || ocx_util::fs::write_bytes_atomic(&target, merged.as_bytes()))
-        .await
-        .context("tags file writer panicked")?
-        .map_err(|error| ocx_util::error::FileError::new(path, error))
-        .with_context(|| format!("writing tags file {}", path.display()))
+    tokio::task::spawn_blocking(move || {
+        ocx_util::fs::replace_user_file(&target, merged.as_bytes(), ocx_util::fs::NewFileMode::UmaskDefault)
+    })
+    .await
+    .context("tags file writer panicked")?
+    .map_err(|error| ocx_util::error::FileError::new(path, error))
+    .with_context(|| format!("writing tags file {}", path.display()))
 }
 
 /// Export resolved env entries into a CI system's persistence channel; `--export-file` is refused for GitHub.
@@ -771,18 +773,57 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn append_tags_file_writes_owner_only_mode() {
+    async fn append_tags_file_keeps_the_mode_of_an_existing_file() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("announce.txt");
+        std::fs::write(&path, "3.27\n").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
         append_tags_file(&path, &["3.28".to_string()])
             .await
             .expect("append succeeds");
 
         let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        assert_eq!(mode, 0o644);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "3.27\n3.28\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_tags_file_keeps_a_symlinked_file_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.txt");
+        let link = dir.path().join("announce.txt");
+        std::fs::write(&target, "3.27\n").expect("seed");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        append_tags_file(&link, &["3.28".to_string()])
+            .await
+            .expect("append succeeds");
+
+        assert!(std::fs::symlink_metadata(&link).expect("meta").file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).expect("read_link"), target);
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "3.27\n3.28\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_tags_file_creates_a_fresh_file_with_the_umask_default() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let probe = dir.path().join("probe");
+        std::fs::File::create(&probe).expect("probe");
+        let path = dir.path().join("announce.txt");
+
+        append_tags_file(&path, &["3.28".to_string()])
+            .await
+            .expect("append succeeds");
+
+        let mode_of = |p: &std::path::Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode_of(&path), mode_of(&probe));
     }
 
     #[test]

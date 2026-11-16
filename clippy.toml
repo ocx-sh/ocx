@@ -15,4 +15,9 @@ disallowed-methods = [
     { path = "std::env::remove_var", reason = "set through ocx_env::overrides" },
     { path = "ocx_package_manager::launch::Launch::exempt", reason = "a non-recording launch is sanctioned only for package test and patch test; claim it with an item-level #[expect]" },
     { path = "std::os::unix::process::CommandExt::exec", allow-invalid = true, reason = "replace the process only inside ocx_package_manager::launch" },
+    { path = "tempfile::NamedTempFile::persist", reason = "publish through ocx_util::fs: replace_user_file for a file the user owns, write_private_file_atomic for ocx state" },
+    { path = "tempfile::NamedTempFile::persist_noclobber", reason = "publish through ocx_util::fs: replace_user_file for a file the user owns, write_private_file_atomic for ocx state" },
+    { path = "tempfile::TempPath::persist", reason = "publish through ocx_util::fs: replace_user_file for a file the user owns, write_private_file_atomic for ocx state" },
+    { path = "std::fs::rename", reason = "publish through ocx_util::fs: replace_user_file for a file the user owns, write_private_file_atomic for ocx state" },
+    { path = "tokio::fs::rename", reason = "publish through ocx_util::fs: replace_user_file for a file the user owns, write_private_file_atomic for ocx state" },
 ]

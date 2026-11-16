@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
-use ocx_util::fs::write_bytes_atomic;
+use ocx_util::fs::write_private_file_atomic;
 
 /// `$OCX_HOME/env.sh` — POSIX (sh/bash/zsh) shim.
 pub const ENV_SH: &str = r#"#!/bin/sh
@@ -346,7 +346,7 @@ pub fn write_shims(ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error
             continue;
         }
         if !dry_run {
-            write_bytes_atomic(&target, body.as_bytes()).map_err(|source| Error::Io {
+            write_private_file_atomic(&target, body.as_bytes()).map_err(|source| Error::Io {
                 path: target.to_path_buf(),
                 source,
             })?;

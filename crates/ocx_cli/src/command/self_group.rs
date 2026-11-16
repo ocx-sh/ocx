@@ -114,8 +114,11 @@ pub enum SelfGroup {
         `managed_config` and `extra_ca_certs`. `reload_hint` is true when a PATH surface changed, \
         and `dirty_profiles` lists the profiles skipped for user edits when `status` is `skipped`. `bootstrap.status` is `already_present`, `pulled` or \
         `would_pull`.\n\n\
-        A profile outcome is `completed`, `no_op`, `migrated` or `skipped_dirty`. A session PATH \
-        store outcome is `written`, `unchanged`, `removed`, `skipped_opt_out`, \
+        A profile outcome is `completed`, `no_op`, `migrated`, `skipped_dirty` or \
+        `skipped_unwritable`. A profile that cannot be read or written is reported, warned about on stderr \
+        with the text to add by hand, and never fatal. A skipped profile does not change the root \
+        `status`, so a run that skipped every profile still reports `no_op`. Read each profile's \
+        `outcome` to tell that run from one with nothing to do. A session PATH store outcome is `written`, `unchanged`, `removed`, `skipped_opt_out`, \
         `skipped_unsupported` or `failed`.\n\n\
         `jq .status` returns the root status, not the bootstrap status. Read `jq .bootstrap.status` \
         for the install step.\n\n\

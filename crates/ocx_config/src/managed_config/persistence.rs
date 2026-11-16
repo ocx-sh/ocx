@@ -483,8 +483,8 @@ async fn write_snapshot_atomic(paths: &ManagedConfigPaths, snapshot: &ManagedCon
         std::fs::create_dir_all(&dir)?;
         // ponytail: two atomic renames, so racing writers can pair one's metadata with another's
         // payload; drift-sync self-heals it, tighten to a temp-dir swap if that ever bites.
-        ocx_util::fs::write_bytes_atomic(&payload_path, &payload)?;
-        ocx_util::fs::write_bytes_atomic(&snapshot_path, &metadata)?;
+        ocx_util::fs::write_private_file_atomic(&payload_path, &payload)?;
+        ocx_util::fs::write_private_file_atomic(&snapshot_path, &metadata)?;
         Ok(())
     })
     .await

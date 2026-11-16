@@ -86,7 +86,7 @@ pub async fn write_pause(paths: &ManagedConfigPaths, pause: &ManagedConfigPause)
 
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
-        ocx_util::fs::write_bytes_atomic(&path, &bytes)
+        ocx_util::fs::write_private_file_atomic(&path, &bytes)
     })
     .await
     .map_err(|join_error| std::io::Error::other(join_error.to_string()))?

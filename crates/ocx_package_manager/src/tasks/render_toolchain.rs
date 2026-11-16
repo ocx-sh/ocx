@@ -1699,7 +1699,7 @@ async fn publish_windows_trampoline(
     let sidecar_target = sidecar_path.to_path_buf();
     let sidecar_bytes = sidecar_body.as_bytes().to_vec();
     blocking(sidecar_path.to_path_buf(), move || {
-        ocx_util::fs::write_bytes_atomic(&sidecar_target, &sidecar_bytes)
+        ocx_util::fs::write_private_file_atomic(&sidecar_target, &sidecar_bytes)
             .map_err(|error| crate::error::file_error(&sidecar_target, error))
     })
     .await?;

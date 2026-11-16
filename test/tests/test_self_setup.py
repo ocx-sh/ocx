@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -832,6 +833,90 @@ def test_setup_crlf_profile_stays_crlf(ocx: OcxRunner, tmp_path: Path) -> None:
     content = profile.read_bytes()
     assert b"\r\n" in content, f"CRLF line endings must be preserved; got:\n{content!r}"
     assert b"# >>> ocx v1" in content, f"the v1 fence opener must be spliced in; got:\n{content!r}"
+
+
+# ---------------------------------------------------------------------------
+# Symlinked profiles: the link and the target's mode survive; unwritable ones are skipped
+# ---------------------------------------------------------------------------
+
+
+def test_setup_symlinked_profile_keeps_link_and_mode(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A profile that is a symlink to a 0644 file stays a symlink, and its target keeps 0644."""
+    _seed_candidate(ocx)
+    target = tmp_path / "dotfiles-profile"
+    target.write_text("# header\n")
+    target.chmod(0o644)
+    profile = tmp_path / "profile"
+    profile.symlink_to(target)
+
+    result = _setup(ocx, profile=profile)
+    assert result.returncode == 0, f"setup must exit 0; stderr:\n{result.stderr}"
+    assert profile.is_symlink(), "the profile must still be a symlink"
+    assert os.readlink(profile) == str(target)
+    assert "# >>> ocx v1" in target.read_text(), "the block must land in the link target"
+    assert target.stat().st_mode & 0o7777 == 0o644
+
+    again = _setup(ocx, profile=profile)
+    assert again.returncode == 0, f"re-run must exit 0; stderr:\n{again.stderr}"
+    payload = json.loads(again.stdout)
+    assert payload["profiles"][0]["outcome"] == "no_op", f"re-run must be a no-op; got: {payload!r}"
+    assert profile.is_symlink()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege on Windows")
+def test_setup_quiet_still_warns_about_a_profile_it_skipped(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``--quiet`` silences stdout, but a skipped profile is still named on stderr with the block to add."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.symlink_to(tmp_path / "missing" / "profile")
+
+    result = subprocess.run(
+        [str(ocx.binary), "--quiet", "--offline", "self", "setup", "--profile", str(profile)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=dict(ocx.env),
+        check=False,
+    )
+
+    assert result.returncode == 0, f"a skipped profile must not fail the run; stderr:\n{result.stderr}"
+    assert result.stdout == "", f"--quiet must leave stdout empty; got:\n{result.stdout}"
+    assert str(profile) in result.stderr, f"stderr must name the skipped profile:\n{result.stderr}"
+    assert "# >>> ocx v1" in result.stderr, f"stderr must carry the block to add by hand:\n{result.stderr}"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" and os.geteuid() == 0, reason="root can write into a 0555 directory"
+)
+def test_setup_profile_in_read_only_directory_is_skipped_with_the_block(ocx: OcxRunner, tmp_path: Path) -> None:
+    """An unwritable profile is reported ``skipped_unwritable``, warned about on stderr, never fatal."""
+    _seed_candidate(ocx)
+    # Shims are written on this first run, so the second run's only candidate change is the profile.
+    first = _setup(ocx, profile=tmp_path / "plain-profile")
+    assert first.returncode == 0, f"first setup must exit 0; stderr:\n{first.stderr}"
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    target = locked / "profile"
+    target.write_text("# header\n")
+    profile = tmp_path / "profile"
+    profile.symlink_to(target)
+    locked.chmod(0o555)
+    try:
+        result = _setup(ocx, profile=profile)
+        before = target.read_bytes()
+    finally:
+        locked.chmod(0o755)
+
+    assert result.returncode == 0, f"an unwritable profile must not fail the run; stderr:\n{result.stderr}"
+    payload = json.loads(result.stdout)  # stdout stays one JSON document
+    assert payload["profiles"] == [{"path": str(profile), "outcome": "skipped_unwritable"}], payload
+    # Shims are already current from the first run, so nothing else changed.
+    assert payload["status"] == "no_op", f"got: {payload!r}"
+    assert "# >>> ocx v1" in result.stderr, f"stderr must carry the block to add by hand:\n{result.stderr}"
+    assert str(profile) in result.stderr
+    assert profile.is_symlink() and os.readlink(profile) == str(target)
+    assert before == b"# header\n", "the target must be byte-identical"
 
 
 # ---------------------------------------------------------------------------

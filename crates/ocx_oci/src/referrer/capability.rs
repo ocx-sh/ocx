@@ -77,7 +77,7 @@ impl ReferrersApiCapability {
 
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        tokio::task::spawn_blocking(move || ocx_util::fs::write_bytes_atomic(&target, &bytes))
+        tokio::task::spawn_blocking(move || ocx_util::fs::write_private_file_atomic(&target, &bytes))
             .await
             .map_err(|e| io::Error::other(format!("write_cache tempfile+rename panicked: {e}")))??;
         Ok(())

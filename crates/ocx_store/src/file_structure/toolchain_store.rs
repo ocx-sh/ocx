@@ -251,7 +251,7 @@ impl ToolchainHome {
 
         std::fs::create_dir_all(&self.root).map_err(|e| ocx_util::error::FileError::new(&self.root, e))?;
         // Never `fs::write`, which follows a hostile `.gitignore` symlink to `~/.bashrc` and truncates it.
-        ocx_util::fs::write_bytes_atomic(&path, GITIGNORE_CONTENT)
+        ocx_util::fs::write_private_file_atomic(&path, GITIGNORE_CONTENT)
             .map_err(|e| ocx_util::error::FileError::new(&path, e))?;
         Ok(true)
     }
@@ -611,7 +611,7 @@ mod tests {
     /// A hostile clone can ship `.ocx/toolchain/.gitignore` as a symlink to
     /// `~/.bashrc`: `fs::write` follows and truncates the victim, while
     /// temp-in-parent-then-rename replaces the link itself. This is the case
-    /// that discriminates `write_bytes_atomic` from `fs::write`, and it is why
+    /// that discriminates `write_private_file_atomic` from `fs::write`, and it is why
     /// the contract names the helper rather than leaving the write unspecified.
     #[cfg(unix)]
     #[test]

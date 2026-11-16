@@ -96,7 +96,7 @@ A credential helper such as the [Amazon ECR credential helper][ecr-helper] can i
 
 ## Storing credentials \{#authentication-storing\}
 
-[`ocx login REGISTRY`][cmd-login] writes credentials to the same `~/.docker/config.json` that `docker login` and `oras login` use. The three tools interoperate, so a credential written by any of them is readable by the others.
+[`ocx login REGISTRY`][cmd-login] writes credentials to the same `~/.docker/config.json` that `docker login` and `oras login` use. The three tools interoperate, so a credential written by any of them is readable by the others. `ocx login` keeps the permissions of an existing file and writes through a symlink to its target. A file that other users can already read stays readable, so check its mode once with `ls -l`. If OCX cannot keep the file's owner or group, it writes the file in place, so both stay as they are. A file that does not exist yet is created readable by its owner only.
 
 Storage tier (highest priority first):
 

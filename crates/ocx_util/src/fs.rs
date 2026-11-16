@@ -14,6 +14,7 @@ mod same_filesystem;
 mod scoped_lock;
 pub mod symlink;
 mod symlink_walk;
+mod user_file;
 
 pub use bounded_read::{BoundedReadError, read_bounded, read_bounded_async};
 pub use dir_walker::{DirWalker, WalkDecision};
@@ -25,6 +26,7 @@ pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
 pub use scoped_lock::lock_scoped;
 pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};
+pub use user_file::{NewFileMode, UserFileRefusal, replace_user_file, resolve_user_file, user_file_refusal};
 // The blocking arm is used only by this crate's own archive extractors.
 pub(crate) use symlink_walk::refuse_if_symlink_in_path_sync;
 
@@ -87,6 +89,10 @@ fn is_transient_windows_error(error: &std::io::Error) -> bool {
 /// Renames `src` to `dst`, retrying Windows transient errors (Defender opens freshly written files).
 ///
 /// An already-present `dst` is not success; what it means is the caller's call.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this is the raw-rename publish primitive; callers own what they rename"
+)]
 pub async fn rename_with_windows_retry(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -124,6 +130,7 @@ where
 /// Atomically publish a written temp file to `target` via `persist`, retrying Windows transient errors. Blocking.
 ///
 /// An already-present `target` is not success: a mutable destination may hold stale content.
+/// For ocx-owned paths only; a file the user owns takes [`replace_user_file`].
 pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
     persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Existing))
 }
@@ -131,6 +138,7 @@ pub fn persist_temp_file(tmp: tempfile::NamedTempFile, target: &std::path::Path)
 /// [`persist_temp_file`], except an existing `target` is left alone and reported as `AlreadyExists`. Blocking.
 ///
 /// For a destination whose file identity matters: a replacing racer orphans what hardlinks the winner's file.
+/// For ocx-owned paths only; a file the user owns takes [`replace_user_file`].
 pub fn persist_temp_file_if_absent(tmp: tempfile::NamedTempFile, target: &std::path::Path) -> std::io::Result<()> {
     persist_with_retry(tmp, |tmp| persist_at(tmp, target, Replace::Never))
 }
@@ -148,6 +156,7 @@ pub enum PersistOutcome {
 /// Publish a temp file to `target` without replacing anything there; an occupied target is a value. Blocking.
 ///
 /// For append-only destinations whose names are chosen, where a replacing publish lets one write destroy another.
+/// For ocx-owned paths only; a file the user owns takes [`replace_user_file`].
 pub fn persist_temp_file_noclobber(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
@@ -205,6 +214,10 @@ enum Replace {
 ///
 /// Every publish goes through here: `tempfile` passes its paths to `MoveFileExW` unprefixed, so a long
 /// one fails with `ERROR_PATH_NOT_FOUND`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "this is the tempfile persist primitive every ocx_util publish helper routes through"
+)]
 fn persist_at(
     tmp: tempfile::NamedTempFile,
     target: &std::path::Path,
@@ -262,10 +275,12 @@ fn persist_with_retry<Published>(
 
 /// Atomically write `bytes` to `target` as a private file (`0o600` on Unix); `target`'s parent must exist. Blocking.
 ///
+/// For ocx-owned paths only; a file the user owns takes [`replace_user_file`].
+///
 /// # Errors
 ///
 /// Any I/O failure; `InvalidInput` when `target` has no parent.
-pub fn write_bytes_atomic(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_private_file_atomic(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let dir = target
@@ -291,7 +306,8 @@ mod tests {
     use std::io::Write as _;
 
     use super::{
-        PersistOutcome, persist_temp_file, persist_temp_file_noclobber, rename_with_windows_retry, write_bytes_atomic,
+        PersistOutcome, persist_temp_file, persist_temp_file_noclobber, rename_with_windows_retry,
+        write_private_file_atomic,
     };
 
     /// Baseline (all platforms): a written tempfile is published to the target.
@@ -307,19 +323,19 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"payload");
     }
 
-    /// `write_bytes_atomic` publishes the bytes and, on Unix, the resulting
+    /// `write_private_file_atomic` publishes the bytes and, on Unix, the resulting
     /// file is private (`0o600`) — the contract the referrers/trust-root caches
     /// and managed-config state depend on.
     #[test]
-    fn write_bytes_atomic_publishes_private_file() {
+    fn write_private_file_atomic_publishes_private_file() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("cache.json");
 
-        write_bytes_atomic(&target, b"{\"ok\":true}").unwrap();
+        write_private_file_atomic(&target, b"{\"ok\":true}").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"{\"ok\":true}");
 
         // A second write replaces the content atomically (overwrite path).
-        write_bytes_atomic(&target, b"replaced").unwrap();
+        write_private_file_atomic(&target, b"replaced").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"replaced");
 
         #[cfg(unix)]
@@ -333,8 +349,8 @@ mod tests {
     /// A target with no parent component is rejected rather than silently
     /// writing to the current directory.
     #[test]
-    fn write_bytes_atomic_rejects_parentless_target() {
-        let err = write_bytes_atomic(std::path::Path::new("/"), b"x").unwrap_err();
+    fn write_private_file_atomic_rejects_parentless_target() {
+        let err = write_private_file_atomic(std::path::Path::new("/"), b"x").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 

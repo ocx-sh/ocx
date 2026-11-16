@@ -302,7 +302,7 @@ impl StateStore {
         let bytes = serde_json::to_vec_pretty(stamp)
             .map_err(|e| ocx_util::error::FileError::new(&path, std::io::Error::other(e)))?;
 
-        // `write_bytes_atomic` does not create the parent.
+        // `write_private_file_atomic` does not create the parent.
         let parent = path.parent().ok_or_else(|| {
             ocx_util::error::FileError::new(
                 &path,
@@ -310,7 +310,7 @@ impl StateStore {
             )
         })?;
         std::fs::create_dir_all(parent).map_err(|e| ocx_util::error::FileError::new(parent, e))?;
-        ocx_util::fs::write_bytes_atomic(&path, &bytes).map_err(|e| ocx_util::error::FileError::new(&path, e))
+        ocx_util::fs::write_private_file_atomic(&path, &bytes).map_err(|e| ocx_util::error::FileError::new(&path, e))
     }
 
     fn render_stamp_path(&self, target: RenderStampTarget<'_>) -> PathBuf {
@@ -353,6 +353,10 @@ impl StateStore {
 }
 
 /// Publishes a zero-byte file at `path` by rename, so readers never see it absent.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "publishes ocx's own zero-byte throttle marker under state/"
+)]
 fn touch_atomic(path: &Path) -> std::io::Result<()> {
     use std::fs;
 

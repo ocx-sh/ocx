@@ -198,6 +198,7 @@ impl IndexTransport for FileIndexTransport {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use std::path::Path;
 

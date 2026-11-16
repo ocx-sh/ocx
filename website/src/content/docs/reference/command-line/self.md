@@ -113,7 +113,11 @@ The report also carries `bootstrap`, `shims`, `profiles`, `session_path_stores`,
 
 `bootstrap.status` is `already_present`, `pulled` or `would_pull`.
 
-A profile outcome is `completed`, `no_op`, `migrated` or `skipped_dirty`. A session PATH store outcome is `written`, `unchanged`, `removed`, `skipped_opt_out`, `skipped_unsupported` or `failed`.
+A profile outcome is `completed`, `no_op`, `migrated`, `skipped_dirty` or `skipped_unwritable`. A profile that cannot be read or written is reported, warned about on stderr with the text to add by hand, and never fatal.
+
+A skipped profile does not change the root `status`, so a run that skipped every profile still reports `no_op`. Read each profile's `outcome` to tell that run from one with nothing to do.
+
+A session PATH store outcome is `written`, `unchanged`, `removed`, `skipped_opt_out`, `skipped_unsupported` or `failed`.
 
 `jq .status` returns the root status, not the bootstrap status. Read `jq .bootstrap.status` for the install step.
 

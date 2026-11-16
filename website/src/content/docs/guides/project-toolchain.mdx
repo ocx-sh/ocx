@@ -158,6 +158,8 @@ By default a command walks up from the working directory to the nearest `ocx.tom
 
 Explicit paths follow symlinks, while the walk rejects a symlinked `ocx.toml`. Naming the path is how you opt a symlinked file in.
 
+Mutating commands write through a symlinked `ocx.toml` or `ocx.lock`: the link stays and its target is rewritten. A link checked into a repository can point a mutating command at another file you own. OCX follows only links that you or root created, and only to a file that already exists. That check covers the file's own link chain; a linked directory on the way is followed as it is.
+
 [`OCX_CEILING_PATH`][env-ocx-ceiling-path] bounds the walk where no repository marks the edge, such as a CI workspace mounted under a shared parent. The walk probes the ceiling directory and never ascends above it. A project file at the ceiling is found, and one in a parent is not. A relative value joins onto the working directory the walk starts from. An explicit `--project` or `OCX_PROJECT` is not bounded by it, and the variable is not forwarded to child `ocx` processes.
 
 [`OCX_NO_PROJECT`][env-ocx-no-project] prunes the walk and `OCX_PROJECT` for a run that reads no project. See [the kill switch][in-depth-configuration-kill-switch].

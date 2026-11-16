@@ -7829,6 +7829,8 @@ pub enum ProfileOutcomeKind {
     Migrated,
     /// The managed block carried user edits and was left untouched.
     SkippedDirty,
+    /// The profile could not be written and was left untouched.
+    SkippedUnwritable,
     /// A value this SDK was not generated for, kept as sent.
     Unknown(String),
 }
@@ -7841,6 +7843,7 @@ impl ProfileOutcomeKind {
             Self::NoOp => "no_op",
             Self::Migrated => "migrated",
             Self::SkippedDirty => "skipped_dirty",
+            Self::SkippedUnwritable => "skipped_unwritable",
             Self::Unknown(value) => value,
         }
     }
@@ -7852,6 +7855,7 @@ impl ProfileOutcomeKind {
             "no_op" => Self::NoOp,
             "migrated" => Self::Migrated,
             "skipped_dirty" => Self::SkippedDirty,
+            "skipped_unwritable" => Self::SkippedUnwritable,
             _ => Self::Unknown(value),
         }
     }

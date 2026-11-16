@@ -336,3 +336,10 @@ subjects = ["*"]
 rule = "doc"
 pointer = "/$defs/ErrorDetail/x-ocx-enum/70"
 reason = "reworded summary to the glossary vocabulary (OCX, root document, object store, entry point, integration key, dynamic loader, identifier); same condition, same slug"
+
+[[break]]
+document = "cli"
+subjects = ["self setup"]
+rule = "semantic"
+pointer = "/root/commands/21/commands/1/args/7"
+reason = "a shell profile that cannot be written is reported as skipped_unwritable and the command exits 0 instead of failing with exit 74"

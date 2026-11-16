@@ -273,6 +273,7 @@ pub fn extract_tar_from_reader<R: std::io::Read>(reader: R, output: &Path, strip
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use super::*;
 

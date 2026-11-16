@@ -5,7 +5,6 @@
 //! rename under the scoped mutation lock. Helpers take the resolved config
 //! path (`ocx.toml` or a `--project` name); the lock is keyed by it.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::Error;
@@ -14,11 +13,11 @@ use crate::mutation::ManifestSnapshot;
 use crate::project_lock::acquire_project_lock_for_file;
 use ocx_oci::PackageRef;
 
-/// Publish `bytes` as the whole of `path` by atomic rename, carrying the
-/// existing mode, then fsync the parent. Blocking; async code uses [`publish_by_rename_async`].
+/// Publish `bytes` as the whole of `path` by atomic rename. Blocking; async
+/// code uses [`publish_by_rename_async`].
 /// Rename, so unlocked readers never see a spliced document; not
-/// `write_bytes_atomic`, whose `0o600` is wrong for a committed file.
-/// The mode is carried whole: a `0o644` cap breaks umask-002 shared checkouts.
+/// `write_private_file_atomic`, whose `0o600` is wrong for a committed file.
+/// A symlink at `path` is written through and kept; mode and owner carry over.
 pub(crate) fn publish_by_rename(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -26,61 +25,8 @@ pub(crate) fn publish_by_rename(path: &Path, bytes: &[u8]) -> Result<(), Error> 
     };
     std::fs::create_dir_all(parent).map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
 
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.write_all(bytes)
-        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    carry_existing_mode(path, &tmp)?;
-    tmp.as_file()
-        .sync_data()
-        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    ocx_util::fs::persist_temp_file(tmp, path)
+    ocx_util::fs::replace_user_file(path, bytes, ocx_util::fs::NewFileMode::UmaskDefault)
         .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-
-    fsync_parent(parent)
-}
-
-/// Fsync `parent` so the rename itself survives a crash.
-#[cfg(unix)]
-fn fsync_parent(parent: &Path) -> Result<(), Error> {
-    let dir =
-        std::fs::File::open(parent).map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    dir.sync_all()
-        .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    Ok(())
-}
-
-/// No-op off Unix: Windows cannot open a directory as a `File`.
-#[cfg(not(unix))]
-fn fsync_parent(_parent: &Path) -> Result<(), Error> {
-    Ok(())
-}
-
-/// Carry the mode of the file at `path` onto `tmp`; an absent file keeps the default.
-/// `symlink_metadata`: a symlink's own `0o777` is not the project file's mode.
-/// Set on the open file (`fchmod`), which `umask` does not clip; passing it to
-/// `tempfile::Builder` would turn `0664` into `0644`.
-#[cfg(unix)]
-fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return Ok(());
-    };
-    if !metadata.is_file() {
-        return Ok(());
-    }
-    // Permission bits only; setuid/setgid/sticky are not carried.
-    let mode = metadata.permissions().mode() & 0o0777;
-    tmp.as_file()
-        .set_permissions(std::fs::Permissions::from_mode(mode))
-        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    Ok(())
-}
-
-/// No-op off Unix: the temp file inherits the parent's ACLs.
-#[cfg(not(unix))]
-fn carry_existing_mode(_path: &Path, _tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
     Ok(())
 }
 
@@ -1491,7 +1437,7 @@ mod tests {
 
     /// The published replacement wears the mode the file already had.
     ///
-    /// Without this, publishing through `ocx_util::fs::write_bytes_atomic`
+    /// Without this, publishing through `ocx_util::fs::write_private_file_atomic`
     /// (`0o600`, correct for a credential file) or through a bare
     /// `NamedTempFile` (`0o600` by `tempfile` default) would silently turn
     /// every VCS-committed project manifest owner-only on the first `ocx add`.
@@ -1523,7 +1469,7 @@ mod tests {
         }
     }
 
-    /// `carry_existing_mode` carries permission bits only: setuid/setgid/sticky
+    /// The publish carries permission bits only: setuid/setgid/sticky
     /// confer nothing on a manifest and are dropped on publish.
     #[cfg(unix)]
     #[tokio::test]
@@ -1823,33 +1769,126 @@ mod tests {
         }
     }
 
-    /// C-042 / E-C9: the write path is new, so the symlink refusal is asserted
-    /// rather than assumed. `$OCX_HOME/ocx.toml` is a path an attacker who can
-    /// write the store root could replace with a link to something else, and
-    /// the acquire is what refuses to follow it.
+    /// A symlink at the config path is written through: the link survives, the
+    /// target takes the edit and keeps its mode.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_activate_refuses_a_symlink_at_the_config_path() {
+    async fn set_activate_writes_through_a_symlink_at_the_config_path() {
         use crate::activate::ActivateMode;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempdir().unwrap();
         let elsewhere = dir.path().join("elsewhere.toml");
         fs::write(&elsewhere, "[tools]\n").unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o644)).unwrap();
         std::os::unix::fs::symlink(&elsewhere, toml(dir.path())).unwrap();
 
-        let err = set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Bin)
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Bin)
             .await
-            .expect_err("a symlink at the config path must be refused, not followed");
+            .expect("a symlinked config path must be written through");
 
+        assert_eq!(fs::read_link(toml(dir.path())).unwrap(), elsewhere);
+        assert!(fs::read_to_string(&elsewhere).unwrap().contains("activate"));
+        assert_eq!(fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o7777, 0o644);
+    }
+
+    /// A mutation through a symlinked `ocx.toml` edits the target and writes
+    /// `ocx.lock` beside the link, not beside the target.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_through_a_symlinked_manifest_keeps_the_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        let target = real_dir.join("ocx.toml");
+        fs::write(&target, "[tools]\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, toml(dir.path())).unwrap();
+
+        let id = test_id("example.com", "cmake", "3.28");
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .expect("the mutation must write through the link");
+
+        assert_eq!(fs::read_link(toml(dir.path())).unwrap(), target);
+        assert!(fs::read_to_string(&target).unwrap().contains("cmake"));
+        assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o644);
         assert!(
-            matches!(&err, Error::Project(pe) if !matches!(pe.kind, ProjectErrorKind::ManifestEditDiverged)),
-            "expected a refusal from the lock acquire; got: {err}"
+            dir.path().join("ocx.lock").exists(),
+            "the lock lands beside the named path"
         );
-        assert_eq!(
-            fs::read_to_string(&elsewhere).unwrap(),
-            "[tools]\n",
-            "the link target must not be written through"
-        );
+        assert!(!real_dir.join("ocx.lock").exists(), "not beside the target");
+    }
+
+    /// A dangling `ocx.toml` link fails the mutation as `Io` and stays as it was.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_refuses_a_dangling_manifest_link() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        std::os::unix::fs::symlink(&missing, toml(dir.path())).unwrap();
+
+        let id = test_id("example.com", "cmake", "3.28");
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .expect_err("a dangling link must be refused");
+
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Io(_))));
+        assert_eq!(fs::read_link(toml(dir.path())).unwrap(), missing);
+        assert!(!missing.exists());
+    }
+
+    /// A dangling `ocx.lock` link fails the mutation as `Io`; the link and `ocx.toml` stay as they were.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_refuses_a_dangling_lock_link() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let missing = dir.path().join("missing.lock");
+        let lock_link = dir.path().join("ocx.lock");
+        std::os::unix::fs::symlink(&missing, &lock_link).unwrap();
+
+        let id = test_id("example.com", "cmake", "3.28");
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .expect_err("a dangling lock link must be refused");
+
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Io(_))));
+        assert_eq!(fs::read_link(&lock_link).unwrap(), missing);
+        assert!(!missing.exists());
+        assert_eq!(fs::read_to_string(toml(dir.path())).unwrap(), "[tools]\n");
+    }
+
+    /// `init_project` still refuses a dangling link at the path.
+    #[cfg(unix)]
+    #[test]
+    fn init_project_refuses_a_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        std::os::unix::fs::symlink(&missing, toml(dir.path())).unwrap();
+
+        let err = init_project(&toml(dir.path())).expect_err("a dangling link counts as present");
+
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::ConfigAlreadyExists { .. })));
+        assert!(!missing.exists());
+    }
+
+    /// A fresh `ocx.toml` gets the umask default, as a plain `File::create` would.
+    #[cfg(unix)]
+    #[test]
+    fn init_project_creates_the_manifest_with_the_umask_default_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().unwrap();
+        let probe = dir.path().join("probe");
+        fs::File::create(&probe).unwrap();
+
+        init_project(&toml(dir.path())).expect("init must succeed");
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&toml(dir.path())), mode(&probe));
     }
 
     /// C-042 / E-C10: another process holding the mutation lock yields

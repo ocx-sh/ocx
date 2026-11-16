@@ -122,7 +122,10 @@ SUITE = REPO_ROOT / "test"
 #: `tests` +534, `skipped` +13, `parametrized` +54, `xfailed` unchanged.
 #: -> 3526 / 144 / 4 / 224 with the five `test_hardening_*.py` modules and the
 #: HFIX param rename: `tests` +107, `skipped` +1, `parametrized` +23.
-PINNED = {"tests": 3526, "skipped": 144, "xfailed": 4, "parametrized": 224}
+#: skipped 144 -> 145: `test_user_file_publish.py` skips on `win32`, which has no umask or POSIX mode to carry.
+#: skipped 145 -> 146: the `--quiet` skipped-profile case in `test_self_setup.py` needs a dangling symlink,
+#: which takes a privilege on `win32`.
+PINNED = {"tests": 3526, "skipped": 146, "xfailed": 4, "parametrized": 224}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

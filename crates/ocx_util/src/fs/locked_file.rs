@@ -403,6 +403,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -479,7 +480,7 @@ mod tests {
     /// must not match it.
     ///
     /// Replacement **by rename**, not by unlink-and-recreate: that is what
-    /// `fs::write_bytes_atomic` does when `auth::store` publishes the docker
+    /// `fs::write_private_file_atomic` does when `auth::store` publishes the docker
     /// config, so it is the case the predicate now has to catch. It is also the
     /// only executable form of the claim in `lock_matches_path`'s doc comment —
     /// that a rename over a target Rust holds open succeeds on Windows too,

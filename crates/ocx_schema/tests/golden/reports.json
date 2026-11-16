@@ -4917,6 +4917,10 @@
         {
           "value": "skipped_dirty",
           "description": "The managed block carried user edits and was left untouched."
+        },
+        {
+          "value": "skipped_unwritable",
+          "description": "The profile could not be written and was left untouched."
         }
       ]
     },

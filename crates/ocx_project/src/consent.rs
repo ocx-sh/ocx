@@ -506,7 +506,7 @@ fn record_at(target: &Path, project_dir: &Path, sources: &BTreeSet<String>) -> c
     };
     let bytes = serde_json::to_vec_pretty(&stamp).map_err(|e| io_error(target, std::io::Error::other(e)))?;
 
-    // `write_bytes_atomic` stages beside the target, so the directory must exist.
+    // `write_private_file_atomic` stages beside the target, so the directory must exist.
     let parent = target.parent().ok_or_else(|| {
         io_error(
             target,
@@ -514,7 +514,7 @@ fn record_at(target: &Path, project_dir: &Path, sources: &BTreeSet<String>) -> c
         )
     })?;
     std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
-    ocx_util::fs::write_bytes_atomic(target, &bytes).map_err(|e| io_error(target, e))
+    ocx_util::fs::write_private_file_atomic(target, &bytes).map_err(|e| io_error(target, e))
 }
 
 /// Attach `path` context to an I/O failure on the stamp path.
@@ -1664,7 +1664,7 @@ mod tests {
 
         // The atomic publish leaves nothing behind: a staging file surviving in
         // the parent is the tell that the write did not go through
-        // `write_bytes_atomic`'s temp-then-rename, and the next reader would
+        // `write_private_file_atomic`'s temp-then-rename, and the next reader would
         // then be racing a partial file.
         let siblings: Vec<_> = std::fs::read_dir(target.parent().expect("parent"))
             .expect("read the stamp directory")
