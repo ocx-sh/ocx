@@ -70,13 +70,13 @@ CONFIG_REMINDERS: list[tuple[str, str, str]] = [
         "website/taskfile.yml",
         (
             "- .claude/rules/subsystem-website.md (Task Commands section)\n"
-            "- .claude/skills/docs/SKILL.md (Website Build section)"
+            "- .claude/skills/docs/SKILL.md (Verification Facts section)"
         ),
         "the website Taskfile",
     ),
     (
         "website/astro.config.mjs",
-        "- .claude/rules/subsystem-website.md (Astro Configuration section)",
+        "- .claude/rules/subsystem-website.md (Sidebar and Page Weight section)",
         "the Astro config",
     ),
     (

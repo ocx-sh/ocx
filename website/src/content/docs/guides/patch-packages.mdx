@@ -6,23 +6,28 @@ description: "Layer company-specific changes onto packages you consume without r
 {/* doc_tier: everyday */}
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 Layer company-specific changes, such as an internal CA bundle, onto the packages you run, without forking them.<a id="patches"></a>
 
 Say your organization runs a JDK that works fine externally. Inside the corporate network every TLS handshake fails, because Java does not trust the internal CA bundle. The upstream package should not carry that bundle, since the bundle is your organization's concern.
 
-The patches tier solves this without a fork. A maintainer [publishes a companion package][maintain-patches] that carries the bundle, plus a descriptor that says "apply this companion to every JDK install". From then on every `ocx exec` or `ocx package exec` of any JDK version picks up the right bundle. This page covers the consumer and administrator side. For how a companion joins its target, see [How patches work][patches-how].
+The `[patches]` section solves this without a fork. An operator [publishes a companion package][maintain-patches] that carries the bundle, plus a patch descriptor that says "apply this companion to every JDK install". From then on every `ocx exec` or `ocx package exec` of any JDK version picks up the right bundle. This page covers the consumer and administrator side. For how a companion joins its target, see [How patches work][patches-how].
 
 ## Run patched packages \{#patches-consumer\}
 
 <Terminal src="/casts/user-guide/patches-consumer.cast" title="Running packages with patch overlays" collapsed />
 
-Once a site administrator configures the `[patches]` tier, you need no special commands. Install a base package and run it as usual:
+Once an operator configures the `[patches]` section, you need no special commands. Install a base package and run it as usual:
+
+<ShellSession>
 
 ```sh
 ocx package install java:21
 ocx package exec java:21 -- java -version
 ```
+
+</ShellSession>
 
 Companion packages install during `ocx patch sync`, or during the next `ocx exec` or `ocx package exec` for a new package. Project commands discover them too. `ocx lock`, `ocx pull` and `ocx exec` install the companions of the tools in `ocx.toml`, with no `ocx package install` first.
 
@@ -36,11 +41,15 @@ Three limits apply to discovery:
 
 Show the composed environment with `--show-patches`:
 
+<ShellSession>
+
 ```sh
 ocx package env java:21 --show-patches
 ```
 
-Plain output adds a `Source` column for every entry a companion contributed. The column names the companion and the descriptor rule glob that admitted it, for example `corp/jdk-trust:1.0 (rule: ocx.sh/java:*)`. JSON output carries the same provenance as `"source": { "type": "patch", "rule": "...", "companion": "..." }`.
+</ShellSession>
+
+Plain output adds a `Source` column for every entry a companion contributed. The column names the companion and the patch descriptor rule glob that admitted it, for example `corp/jdk-trust:1.0 (rule: ocx.sh/java:*)`. JSON output carries the same provenance as `"source": { "type": "patch", "rule": "...", "companion": "..." }`.
 
 A companion's `integrations` rows need no provenance object. They appear in `ocx env` and `ocx package env` JSON output without `--show-patches`. The row's own `package` field names the companion, as it does for every package. See [Patch companions contribute too][env-composition-integrations-companions] in the environment composition reference.
 
@@ -48,22 +57,30 @@ A companion's `integrations` rows need no provenance object. They appear in `ocx
 
 To ask which companion set a variable, without reading the full environment, use [`ocx patch why`][cmd-patch-why]:
 
+<ShellSession title="Trace a variable">
+
 ```sh
 ocx patch why java:21
 ```
 
-```
+```text
 Variable     Rule          Companion
 JAVA_TRUST   ocx.sh/java:* corp/jdk-trust:1.0
 ```
+
+</ShellSession>
 
 The output is the `Variable | Rule | Companion` provenance table and nothing else. A base with no applicable patch prints "no patches apply" and exits `0`, which is not an error.
 
 `patch why` traces the surface the base's consumers see. Add `--self` to trace the private surface instead, the one the base's own launchers see:
 
+<ShellSession>
+
 ```sh
 ocx patch why java:21 --self
 ```
+
+</ShellSession>
 
 A companion's `private` variables appear in that table and not in the consumer one.
 
@@ -76,43 +93,43 @@ The `required` field controls what happens when a matched companion is unavailab
 | `true` (default) | Execution aborts with an error. Use for CA bundles and proxy config, anything that makes running without the companion unsafe. |
 | `false` | OCX logs a warning and continues. Use for convenience overlays (metrics endpoints, license server hints) where running without the companion is acceptable. |
 
-The same posture governs patch **discovery** at install time. Installing a base package triggers a lazy lookup of the patch descriptors on the registry. If that registry is empty or unreachable, the outcome depends on the tier:
+The same posture governs patch **discovery** at install time. Installing a base package triggers a lazy lookup of the patch descriptors on the registry. If that registry is empty or unreachable, the outcome depends on the `required` setting:
 
-- A non-required tier (`required = false`) logs a warning and installs the base without companions.
-- A required tier fails the install closed, because OCX cannot confirm that no mandated companion applies.
+- A non-required section (`required = false`) logs a warning and installs the base without companions.
+- A required section fails the install closed, because OCX cannot confirm that no mandated companion applies.
 
-A registry that carries no descriptor yet is not an error under either posture. Discovery records "no patch" and moves on.
+A registry that carries no patch descriptor yet is not an error under either posture. Discovery records "no patch" and moves on.
 
 :::caution[System-required patches]
-A `[patches]` tier in the system config (`/etc/ocx/config.toml`) with `required = true` is locked.
+A `[patches]` section in the system config (`/etc/ocx/config.toml`) with `required = true` is locked.
 So is one with no `required` line, which defaults to `true`. User-level config files,
-`OCX_PATCHES`, and per-package `no-patches` opt-outs cannot override a locked tier. This is the
+`OCX_PATCHES`, and per-package `no-patches` opt-outs cannot override a locked section. This is the
 fail-closed posture for corporate CA distribution.
 :::
 
 ## Opt a package out \{#patches-no-patches\}
 
-A project can opt a base package out of the patch tier. Add `no-patches = true` to the package's entry in the project's `ocx.toml`:
+A project can opt a base package out of the patches. Add `no-patches = true` to the package's entry in the project's `ocx.toml`:
 
 ```toml
-[package."ocx.sh/kitware/cmake:3.28"]
+[package."ocx.sh/astral-sh/python-build-standalone:3.14"]
 no-patches = true
 ```
 
-A system-required tier always applies, whatever `no-patches` says. Enforcement wins over the opt-out.
+A system-required section always applies, whatever `no-patches` says. Enforcement wins over the opt-out.
 
 The opt-out is read from the project's `ocx.toml`, so it applies only where that file is in scope: [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and [`ocx direnv export`][cmd-direnv-export]. Each of them composes the environment itself after reading the project config.
 
-A binary launched by `ocx exec` can honor the opt-out one hop further. The opted-out package is marked in the names of [`__OCX_ENV_STATE`][env-ocx-env-state], which `ocx exec` writes for the child. A launcher that re-enters ocx reads the state and honors the opt-out.
+A binary launched by `ocx exec` can honor the opt-out one hop further. The opted-out package is marked in the names of [`__OCX_ENV_STATE`][env-ocx-env-state], which `ocx exec` writes for the child. A launcher that re-enters OCX reads the state and honors the opt-out.
 
 `ocx env`, `ocx direnv export` and the shell hook write the same mark where they write a fresh state. A launcher run from that exported `PATH` therefore honors it too.
 
 Any other launcher invocation has no opt-out to decode. That covers a launcher run by absolute path and one run through [`ocx package exec`][cmd-package-exec]. It composes the companion overlay as if `no-patches` were never set. The [environment composition reference][env-composition-patch-opt-out] lists each case.
 
 :::note[Why not everywhere?]
-The opt-out lives in a project's `ocx.toml`. OCI-tier commands (`ocx package install`,
+The opt-out lives in a project's `ocx.toml`. The `ocx package` commands (`ocx package install`,
 `ocx package env`, `ocx package exec`) never read `ocx.toml`, which is the point of the
-tier split described in the [command reference][cmd-patch]. There is no project in scope for
+command split described in the [command reference][cmd-patch]. There is no project in scope for
 them to opt anything out of.
 :::
 
@@ -122,24 +139,28 @@ Composing the environment resolves companions from what is already installed loc
 
 An unpinned optional companion is skipped with no network call. These commands pick it up: `ocx package install`, `ocx package pull`, `ocx pull`, `ocx lock`, `ocx add`, `ocx update` and `ocx patch sync`.
 
-That live resolve never happens under `--offline` or with a patch snapshot (`OCX_PATCH_SNAPSHOT`). Under `--offline`, an unpinned required companion fails the command with exit 81 (`patch_policy_blocked`). Under a snapshot it fails with exit 79, because the freeze omitted it. The [enforcement rule](#patches-enforcement) applies whether or not `--offline` is set.
+That live resolve never happens under `--offline` or with a patch snapshot (`OCX_PATCH_SNAPSHOT`). Under `--offline`, an unpinned required companion fails the command with exit 81 (`patch_policy_blocked`). Under a patch snapshot it fails with exit 79, because the freeze omitted it. The [enforcement rule](#patches-enforcement) applies whether or not `--offline` is set.
+
+<ShellSession>
 
 ```sh
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
-ocx --offline exec -- cmake --version
+ocx --offline exec -- python3 --version
 ```
 
-With a snapshot in place, OCX resolves the pinned digests from the local object store and needs no network. This works for `required` companions only when each pinned descriptor and companion is already in the local store. A missing one fails with exit 79 instead of being fetched. A maintainer writes the snapshot with [`ocx patch freeze`][patches-maintainer-freeze].
+</ShellSession>
+
+With a patch snapshot in place, OCX resolves the pinned digests from the object store and needs no network. This works for `required` companions only when each pinned patch descriptor and companion is already in the object store. A missing one fails with exit 79 instead of being fetched. An operator writes the patch snapshot with [`ocx patch freeze`][patches-maintainer-freeze].
 
 `ocx env --no-pull` never reaches a registry either, patch companions included. It composes from what is installed, and a required companion that is missing fails with exit 79.
 
-Without a snapshot, `ocx --offline exec` still applies the companions already installed locally. An optional (`required = false`) companion that is not installed is skipped silently, with a debug log line. A **required** companion that is not installed fails closed and aborts the run, the same as online. `--offline` never turns a required companion into an optional one.
+Without a patch snapshot, `ocx --offline exec` still applies the companions already installed locally. An optional (`required = false`) companion that is not installed is skipped silently, with a debug log line. A **required** companion that is not installed fails closed and aborts the run, the same as online. `--offline` never turns a required companion into an optional one.
 
-Run `ocx patch sync` while you still have network access, so every required companion is in the local store before you disconnect. The lazy install-time hook of `ocx package install` does the same job.
+Run `ocx patch sync` while you still have network access, so every required companion is in the object store before you disconnect. The lazy install-time hook of `ocx package install` does the same job.
 
-## Configure the patch tier \{#patches-config\}
+## Configure the patches section \{#patches-config\}
 
-Site administrators configure the patch tier in a `config.toml` tier: `/etc/ocx/config.toml` for the system tier, `~/.config/ocx/config.toml` for the user tier on Linux, or `$OCX_HOME/config.toml`. The system tier is the only one that can lock `required`, as [Require patches](#patches-enforcement) explains. The [configuration guide](./configure-ocx.mdx#configuration-files) lists every path:
+Operators configure the `[patches]` section in a `config.toml` tier: `/etc/ocx/config.toml` for the system tier, `~/.config/ocx/config.toml` for the user tier on Linux, or `$OCX_HOME/config.toml`. The system tier is the only one that can lock `required`, as [Require patches](#patches-enforcement) explains. The [configuration guide](./configure-ocx.mdx#configuration-files) lists every path:
 
 ```toml
 [patches]
@@ -151,7 +172,7 @@ required = true
 The [`[patches]` reference][config-patches] lists the keys. The behavior behind each one is below.
 
 :::note[Analogy: patches and mirrors]
-The `[patches]` tier is the execution-environment twin of the `[mirrors]` tier.
+The `[patches]` section is the execution-environment twin of the `[mirrors]` section.
 `[mirrors]` adapts *where bytes come from*, and `[patches]` adapts *what environment a binary
 runs in*. Both are operator-controlled, opt-in, and configured in the same `config.toml`
 file.
@@ -159,9 +180,9 @@ file.
 
 ### `registry` \{#patches-config-registry\}
 
-`registry` (string, overridden by [`OCX_PATCHES`][env-ocx-patches]) is the OCI registry root that hosts patch descriptors. Omitting it, or the whole `[patches]` section, leaves the patch tier inactive. Only a present-but-empty `registry = ""` is a hard error at config resolve time, the same footgun guard as an empty `[mirrors]` value.
+`registry` (string, overridden by [`OCX_PATCHES`][env-ocx-patches]) is the OCI registry root that hosts patch descriptors. Omitting it, or the whole `[patches]` section, leaves patches inactive. Only a present-but-empty `registry = ""` is a hard error at config resolve time, the same footgun guard as an empty `[mirrors]` value.
 
-The global descriptor applies to all packages. It lives at `<registry>/global:__ocx.patch`, in the reserved `global` repository. Per-package descriptors live at sub-paths computed from the `path` template.
+The global patch descriptor applies to all packages. It lives at `<registry>/global:__ocx.patch`, in the reserved `global` repository. Per-package patch descriptors live at sub-paths computed from the `path` template.
 
 ### `path` \{#patches-config-path\}
 
@@ -172,21 +193,25 @@ The global descriptor applies to all packages. It lives at `<registry>/global:__
 | `{registry}` | Slugified registry host of the base package: `ocx.sh` stays `ocx.sh`, `localhost:5000` becomes `localhost_5000` |
 | `{repository}` | Repository path of the base package verbatim: `java` for `ocx.sh/java:21` |
 
-The default suits most setups. Customise it only if the patch registry lays out sub-paths differently, for example `path = "bases/{repository}"`. The expanded path always produces a non-empty sub-path. The reserved `global` repository name is the fixed location of the global descriptor, so do not use it as a per-package path.
+The default suits most setups. Customise it only if the patch registry lays out sub-paths differently, for example `path = "bases/{repository}"`. The expanded path always produces a non-empty sub-path. The reserved `global` repository name is the fixed location of the global patch descriptor, so do not use it as a per-package path.
 
 ### `required` \{#patches-config-required\}
 
 `required` (boolean, default `true`) is the fail posture described under [Require patches](#patches-enforcement). The section merges across tiers field by field, and a higher-precedence tier overrides: `$OCX_HOME` over user over system.
 
-A tier declared at the system scope with `required = true`, or with no `required` line, is locked as system-required. An explicit `required = false` in the system config is not locked, so a higher-precedence tier may still override it.
+A section declared in the system tier with `required = true`, or with no `required` line, is locked as system-required. An explicit `required = false` in the system config is not locked, so a higher-precedence tier may still override it.
 
-### How OCX forwards the tier \{#patches-config-forwarding\}
+### How OCX forwards the section \{#patches-config-forwarding\}
 
-The resolved tier reaches every ocx descendant through [`__OCX_ENV_STATE`][env-ocx-env-state], so generated launchers and nested `ocx exec` calls apply the same companion overlay. You do not set [`OCX_PATCHES`][env-ocx-patches] by hand. Setting it anyway overrides the config-file tier, and a child inherits it unchanged under the default and `--isolate` modes.
+The resolved section reaches every OCX descendant through [`__OCX_ENV_STATE`][env-ocx-env-state], so generated launchers and nested `ocx exec` calls apply the same companion overlay. You do not set [`OCX_PATCHES`][env-ocx-patches] by hand. Setting it anyway overrides the config-file value, and a child inherits it unchanged under the default and `--isolate` modes.
+
+<ShellSession>
 
 ```sh
 export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_template":"{registry}/{repository}","required":true,"system_required":false,"no_patches":[]}'
 ```
+
+</ShellSession>
 
 The `no_patches` array in the JSON below is part of that override. The project's [per-package opt-out](#patches-no-patches) does not travel in it. It travels as a mark on the package names in [`__OCX_ENV_STATE`][env-ocx-env-state], and a launcher reads it from there.
 

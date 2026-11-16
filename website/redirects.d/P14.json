@@ -318,7 +318,7 @@
     "fragments": {
       "bundle-storage": "/docs/explanation/signing/#bundle-storage",
       "current-limitations": "/docs/explanation/signing/#current-limitations",
-      "deferred-future-work": "/docs/explanation/signing/#deferred-future-work",
+      "deferred-future-work": "/docs/explanation/signing/#current-limitations",
       "deployments": "/docs/explanation/signing/#deployments",
       "identity-matching": "/docs/explanation/signing/#identity-matching",
       "key-mode": "/docs/explanation/signing/#key-mode",
@@ -360,13 +360,13 @@
   },
   "/docs/installation/": {
     "fragments": {
-      "dev-builds": "/docs/getting-started/install-ocx/#dev-builds",
+      "dev-builds": "/docs/guides/install-options/#dev-builds",
       "manual": "/docs/getting-started/install-ocx/#manual",
-      "manual-pinned": "/docs/getting-started/install-ocx/#manual-pinned",
+      "manual-pinned": "/docs/guides/install-options/#manual-pinned",
       "next-steps": "/docs/getting-started/install-ocx/#next-steps",
-      "script-options": "/docs/getting-started/install-ocx/#script-options",
-      "shells": "/docs/getting-started/install-ocx/#shells",
-      "with-script": "/docs/getting-started/install-ocx/#with-script"
+      "script-options": "/docs/guides/install-options/#script-options",
+      "shells": "/docs/guides/install-options/#shells",
+      "with-script": "/docs/guides/install-options/#with-script"
     }
   },
   "/docs/user-guide/": {
@@ -430,11 +430,6 @@
   "/docs/changelog/": {
     "fragments": {
       "changelog": "/docs/changelog/"
-    }
-  },
-  "/docs/contributing/bazel/": {
-    "fragments": {
-      "contributing-bazel": "/docs/contributing/bazel/"
     }
   },
   "/docs/reference/env-composition/": {

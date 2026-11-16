@@ -1,33 +1,46 @@
 ---
-title: "Run binaries from your project"
+title: "Run project tools"
 description: "Run the project toolchain's binaries and export their environment."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
-Run a binary with exactly the tools `ocx.lock` pins, or export that environment to a shell or a CI job. Start with an [`ocx.toml`](./project-toolchain.mdx) and a [current lock](./lock-and-reproduce.mdx#lock-create), and call each tool by its binding name instead of its OCI identifier.
+Run a binary with exactly the tools `ocx.lock` pins, or export that environment to a shell or a CI job. Start with an [`ocx.toml`](./project-toolchain.mdx) and a [current lock](./lock-and-reproduce.mdx#lock-create), and call each tool by its binding name instead of its identifier.
 
 ## Run a command \{#exec\}
 
 [`ocx exec`][cmd-run] runs a command in the default group (`[tools]`) environment:
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/run-basic.sh\{sh\}
+
+</ShellSession>
 
 The argument shape is:
 
-```shell
+```text
 ocx exec [-g GROUP[,GROUP,...]]... [NAME...] -- ARGV...
 ```
 
-`--` is mandatory, and at least one token must follow it. Every token after `--` is forwarded unchanged to the child. `ocx exec cmake` without `--` exits 64. `ocx exec -- echo hi` with no `NAME` composes every binding in the default scope. Pass `-g` to scope to a named group:
+`--` is mandatory, and at least one token must follow it. Every token after `--` is forwarded unchanged to the child. `ocx exec node` without `--` exits 64. `ocx exec -- echo hi` with no `NAME` composes every binding in the default scope. Pass `-g` to scope to a named group:
+
+<ShellSession>
 
 \<\<\< @/_scripts/user-guide/run-group.sh\{sh\}
 
+</ShellSession>
+
 To compose the environment from every group at once, use the `all` keyword:
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/run-all.sh\{sh\}
+
+</ShellSession>
 
 `-g all` expands to `[tools]` plus every declared `[group.*]` before env composition. Groups listed later win PATH lookup. See [Project Toolchain In Depth → Running binaries][in-depth-project-running] for the composition order.
 
@@ -39,13 +52,17 @@ The `-g` forms select these scopes:
 | `ocx exec -g ci -- CMD` | `[group.ci]` only |
 | `ocx exec -g ci,release -- CMD` | `[group.ci]` and `[group.release]` |
 | `ocx exec -g all -- CMD` | `[tools]` plus every declared `[group.*]` |
-| `ocx exec cmake -- CMD` | Default scope, filtered to the `cmake` binding |
+| `ocx exec node -- CMD` | Default scope, filtered to the `node` binding |
 
 Omitting `-g` means the default group, not everything. The word `all` is reserved. `[group.all]` in `ocx.toml` is rejected at parse time (exit 78), and `ocx add --group all` is rejected with exit 64.
 
 When you only need a specific binding from the composed set, name it:
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/run-named.sh\{sh\}
+
+</ShellSession>
 
 The name must resolve unambiguously in the selected scope. `ocx exec` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
 
@@ -70,9 +87,9 @@ The [exit codes reference][exit-codes] lists every code the CLI uses. Clap usage
 
 **Short rule:** if you have an `ocx.toml`, use [`ocx exec`][cmd-run]. If you do not, use [`ocx package exec`][cmd-package-exec].
 
-`ocx package exec` is the OCI-tier command. Its first argument is an OCI identifier such as `node:20` or `ocx.sh/kitware/cmake:3.28@sha256:…`. It never reads `ocx.toml` or `ocx.lock`, so it behaves identically in every directory and beside any project file. That makes it the right primitive for [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules] and CI scripts that manage their own tool pins.
+`ocx package exec` is an `ocx package` command. Its first argument is an identifier such as `nodejs/node:24` or `ocx.sh/nodejs/node:24@sha256:…`. It never reads `ocx.toml` or `ocx.lock`, so it behaves identically in every directory and beside any project file. That makes it the right primitive for [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules] and CI scripts that manage their own tool pins.
 
-`ocx exec` is the project-tier command. Its symbols are binding names declared in `ocx.toml`, such as `cmake` or `shellcheck`. It resolves those names through `ocx.lock` and installs missing packages. It then composes the declared environment and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
+`ocx exec` is the project command. Its symbols are binding names declared in `ocx.toml`, such as `node` or `shellcheck`. It resolves those names through `ocx.lock` and installs missing packages. It then composes the declared environment and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to `ocx package` command behavior.
 
 Both commands share these behaviors:
 
@@ -82,7 +99,7 @@ Both commands share these behaviors:
 - Accept `--env KEY[:TYPE[:SEP]]=VALUE` for a per-invocation override, or a bare `--env NAME` to carry one of the caller's own variables through.
 - Forward the child's exit code byte-for-byte.
 
-Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's `entrypoints/` off `PATH`. Launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every package it declares, so the self view would compose a strictly worse toolchain there.
+Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's `entrypoints/` off `PATH`. Launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every package it declares, so the private surface would compose a strictly worse toolchain there.
 
 The two commands cover complementary cases: running a package by its binding name (`exec`) and running it by its registry identity (`package exec`). See [Project Toolchain In Depth → Running binaries][in-depth-project-running] for binary resolution and composition order, and [Read the exit code](#exec-exit-codes) for the codes.
 
@@ -101,7 +118,7 @@ That convenience is a risk for a build that has to reproduce byte for byte. Supp
 pinned = true
 
 [tools]
-cmake = "ocx.sh/kitware/cmake:3.28"
+node = "ocx.sh/nodejs/node:24"
 ```
 
 :::note[Like a digest instead of a tag]
@@ -111,16 +128,18 @@ This is the trade a registry reference makes between a rolling tag and a digest.
 :::tip[Learn more]
 [`--pinned` / `--no-pinned` reference][arg-pinned] covers the full resolution ladder, `pinned` in `ocx.toml`, and why the flag is not on [`ocx pull`][cmd-pull].
 [Project Toolchain In Depth → Running binaries][in-depth-project-running] covers binary resolution, composition order and PATH precedence.
-[Environments In Depth][in-depth-environments] covers what the composed environment contains.
+[Environments][in-depth-environments] covers what the composed environment contains.
 :::
 
 ## Export the environment \{#exec-env\}
 
 [`ocx env`][cmd-env-root] is the exporter counterpart of `ocx exec`. It reads `ocx.toml` and `ocx.lock` (or the global toolchain under `--global`) and prints the composed environment instead of running a child. The default is an aligned table, `--format json` is a document, and `--shell[=NAME]` prints export lines. Only `--shell` is safe to `eval`, and the table and the JSON are not sourceable.
 
-`--shell` needs the equals form, `--shell=bash` and not `--shell bash`, so an unquoted positional token cannot inject shell. A package missing from the object store is installed as part of composition, and one covered by a `[[trust.policy]]`, or whose index root lists publishers, is signature-verified first. `--no-pull` skips that fallback and keeps the command strictly offline. Unmaterialised packages are warned about on stderr and omitted, and nothing downloads.
+`--shell` needs the equals form, `--shell=bash` and not `--shell bash`, so an unquoted positional token cannot inject shell. A package missing from the object store is installed as part of composition, and one covered by a `[[trust.policy]]`, or whose root document lists publishers, is signature-verified first. `--no-pull` skips that fallback and keeps the command strictly offline. Unmaterialized packages are warned about on stderr and omitted, and nothing downloads.
 
-The global tier is lenient. `ocx --global env` never fails on an unconfigured or corrupt global toolchain and exports an empty environment instead. That rule does not depend on `--shell`. A corrupt global lock surfaces through the commands that rewrite it, and the project tier stays strict. The installer's `env.sh` and `env.ps1` call `ocx self activate` on every shell start. That evaluates `ocx --global env --shell=…` only when the global toolchain's `activate` is `env`. The nushell hook reads `ocx --format json --global env`. Global toolchain state cannot break either.
+The global toolchain is lenient. `ocx --global env` never fails on an unconfigured or corrupt global toolchain and exports an empty environment instead. That rule does not depend on `--shell`. A corrupt global lock surfaces through the commands that rewrite it, and the project toolchain stays strict. The installer's `env.sh` and `env.ps1` call `ocx self activate` on every shell start. That evaluates `ocx --global env --shell=…` only when the global toolchain's `activate` is `env`. The nushell hook reads `ocx --format json --global env`. Global toolchain state cannot break either.
+
+<ShellSession>
 
 ```shell
 eval "$(ocx env --shell=bash)"            # the current project toolchain
@@ -128,6 +147,8 @@ eval "$(ocx --global env --shell=sh)"     # the global toolchain
 ocx env --ci=github                       # persist to $GITHUB_ENV and $GITHUB_PATH
 ocx env --ci=gitlab >> "${{ export_file }}"
 ```
+
+</ShellSession>
 
 `--ci=gitlab` writes JSON lines for the GitLab step runner's `${{ export_file }}`. That is an experimental path for `run:` keyword jobs and does not work with traditional `script:` jobs. [CI Integration][in-depth-ci] has a full step-runner example.
 
@@ -143,4 +164,4 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 [arg-pinned]: ../reference/project-file.md#project-config-pinned
 [in-depth-environments]: ../explanation/environments.mdx
 [in-depth-project-running]: ../explanation/project-toolchain.md#running
-[in-depth-ci]: ../integration/github-actions.md
+[in-depth-ci]: ../integration/github-actions.mdx

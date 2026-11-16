@@ -26,7 +26,7 @@ Packages declare dependencies on other packages, enabling automatic resolution f
 | Dependency mounting | Planned | [#31](https://github.com/ocx-sh/ocx/issues/31) |
 | Path interpolation | Planned | [#32](https://github.com/ocx-sh/ocx/issues/32) |
 | Parallel resolution | Planned | [#28](https://github.com/ocx-sh/ocx/issues/28) |
-| Toolchain config | Planned | [#33](https://github.com/ocx-sh/ocx/issues/33) |
+| Toolchain config | Shipped | [#33](https://github.com/ocx-sh/ocx/issues/33), [Project toolchain][guide-project-toolchain] |
 | Transitive constraints | Planned | — |
 
 ## System Requirements
@@ -46,9 +46,9 @@ Attach SBOMs, signatures, and attestations to existing releases using the OCI Re
 
 | Feature | Status | Link |
 |---|---|---|
-| OCI referrers | Planned | [#24](https://github.com/ocx-sh/ocx/issues/24) |
-| SBOM attachment | Planned | — |
-| Post-publish attestations | Planned | — |
+| OCI referrers | Shipped | [#24](https://github.com/ocx-sh/ocx/issues/24), [Verify what you install][guide-verify-installs] |
+| SBOM attachment | Shipped | [Attach attestations and SBOMs][guide-attest-sbom] |
+| Post-publish attestations | Shipped | [Attach attestations and SBOMs][guide-attest-sbom] |
 | Signature discovery | Planned | — |
 
 ## Interoperability
@@ -61,7 +61,7 @@ First-class integrations with the tools and platforms where developers already w
 | GitHub Actions | In progress | [ocx-sh/setup-ocx](https://github.com/ocx-sh/setup-ocx) |
 | DevContainer features | Planned | — |
 | mise backend plugin | Planned | [#34](https://github.com/ocx-sh/ocx/issues/34) |
-| Shims & lazy loading | Planned | — |
+| Shims & lazy loading | Shipped | [Deferred packages][explanation-deferred-packages] |
 | Air-gap export/import | Planned | [#25](https://github.com/ocx-sh/ocx/issues/25) |
 
 ## Hardening
@@ -76,3 +76,9 @@ Stabilizing the CLI interface and package metadata format for long-term reliabil
 | Relocatable symlinks | Planned | [#23](https://github.com/ocx-sh/ocx/issues/23) |
 | Content dedup fix | Planned | [#27](https://github.com/ocx-sh/ocx/issues/27) |
 | API documentation | Planned | — |
+
+<!-- internal -->
+[guide-project-toolchain]: ./guides/project-toolchain.mdx
+[guide-verify-installs]: ./guides/verify-installs.mdx
+[guide-attest-sbom]: ./publishing/attest-and-sbom.mdx
+[explanation-deferred-packages]: ./explanation/deferred-packages.mdx

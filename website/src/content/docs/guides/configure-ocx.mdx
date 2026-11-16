@@ -5,6 +5,8 @@ description: "Change the tool's defaults with a configuration file."
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 Change OCX defaults, such as the default registry or the mirror map, with a TOML configuration file.<a id="configuration"></a>
 
 OCX reads settings from three layers: config files, environment variables and CLI flags. A higher layer wins, so a CLI flag overrides an environment variable, which overrides a config file.
@@ -18,6 +20,7 @@ Config files are in [TOML][toml] format and come from three tiers:
 | System | `/etc/ocx/config.toml`, on Windows `%ProgramFiles%\ocx\config.toml` |
 | User (Linux) | [`$XDG_CONFIG_HOME`][xdg-basedir]`/ocx/config.toml` or `~/.config/ocx/config.toml` |
 | User (macOS) | `~/Library/Application Support/ocx/config.toml` (`XDG_CONFIG_HOME` is not consulted on macOS) |
+| User (Windows) | `%APPDATA%\ocx\config.toml` |
 | OCX home | [`$OCX_HOME`][env-ocx-home]`/config.toml` (default: `~/.ocx/config.toml`) |
 
 OCX loads the files from lowest to highest and merges them. It skips missing files silently, and no config file is required.
@@ -41,21 +44,26 @@ default = "ghcr.io"
 
 Check that OCX reads a file the way you meant before you install it. [`ocx config test`][cmd-config-test] only previews: it merges the file onto this machine's config, prints the result and applies nothing. The report has a `Default registry` row that reads `ghcr.io`, and it lists any key OCX did not recognize:
 
+<ShellSession>
+
 ```sh
 ocx config test ./config.toml
 ```
+
+</ShellSession>
 
 Every key, its type and its default are in the [configuration reference][config-ref]. The registry setting is [`registry.default`][config-registry-default].
 
 ## Next steps \{#configuration-next\}
 
-- [Route traffic through a corporate mirror](./corporate-mirror.mdx) sets the `[mirrors]` table.
+- [Use a corporate mirror](./corporate-mirror.mdx) sets the `[mirrors]` table.
 - [Authenticate with a private registry](./authenticate.mdx) gives OCX credentials.
+- [Per-registry settings](./corporate-mirror.mdx#mirrors-registries) set a registry's index, trusted hosts and plain HTTP.
 - [Manage configuration for a fleet](./manage-config-centrally.mdx) publishes one config to every host.
 
 :::tip[Learn more]
 [Configuration reference][config-ref]: every config key, type, default and error string.
-[Configuration In Depth][in-depth-configuration]: discovery tier rationale, merge semantics and worked examples (Docker base image, hermetic CI, portable install).
+[Configuration][in-depth-configuration]: discovery tier rationale, merge semantics and worked examples (Docker base image, hermetic CI, portable install).
 :::
 
 [toml]: https://toml.io/

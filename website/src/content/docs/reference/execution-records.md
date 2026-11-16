@@ -1,5 +1,5 @@
 ---
-title: "Execution Records"
+title: "Execution records"
 ---
 <!-- doc_type: reference -->
 
@@ -64,12 +64,12 @@ A record describes what OCX was about to run and not what happened, so it has no
 | Key | Holds |
 |---|---|
 | `schemaVersion`, `kind`, `recordedAt` | The schema version, the constant `sh.ocx.execution-record` and the UTC time of the write |
-| `ocx` | `version` and `binary` of the writing ocx |
+| `ocx` | `version` and `binary` of the writing OCX |
 | `frame` | `command` that launched the frame, `identity` (`complete` or `degraded`) and, on a degraded frame, `identityNote` |
 | `process` | `pid`, `user`, `parent`, `arch`, `executable` and `working_directory` of the process that runs the binary |
 | `host`, `os` | `host.name` and `os.type` |
 | `executable` | `sh.ocx.provenance`, `sh.ocx.kind` and `sh.ocx.package` of the resolved executable |
-| `envMode` | The starting environment of the composition, a snake_case value from an open set that a consumer must tolerate. `layer` composed over the calling environment (the default), `isolate` reverted what earlier ocx layers applied first (`--isolate`), `clean` started empty (`--clean`) |
+| `envMode` | The starting environment of the composition, a snake_case value from an open set that a consumer must tolerate. `layer` composed over the calling environment (the default), `isolate` reverted what earlier OCX layers applied first (`--isolate`), `clean` started empty (`--clean`) |
 | `scope` | `tier`, `cleanEnv`, and the requested identifiers or the project's `projectRoot`, `lock`, `groups` and, when `--with` named any, `with` |
 | `resolution` | How the closure was resolved: see [Resolution](#execution-records-format-resolution) |
 | `packages` | One descriptor per package that composed the child's environment |
@@ -82,8 +82,8 @@ A record describes what OCX was about to run and not what happened, so it has no
 
 - `process.user.id`: from the kernel, cannot be forged by the caller's environment
 - `process.user.name`: read from `$USER`/`$LOGNAME`, can be forged. Omitted with `user` when the host has no passwd entry
-- `process.parent`: the pid of the process that launched ocx, when it is identifiable. Omitted for a bare shell invocation
-- `process.arch`: the architecture of the running ocx binary, in [OTel][otel-host]'s `host.arch` vocabulary
+- `process.parent`: the pid of the process that launched OCX, when it is identifiable. Omitted for a bare shell invocation
+- `process.arch`: the architecture of the running `ocx` binary, in [OTel][otel-host]'s `host.arch` vocabulary
 - `process.executable`: the resolved executable, as a flat string
 - `process.args`: absent by design, command-line arguments are never recorded
 
@@ -91,8 +91,8 @@ A record describes what OCX was about to run and not what happened, so it has no
 
 `executable` describes the resolved executable, and `sh.ocx.*` is the namespace for everything OCX-specific. `sh.ocx.provenance` and `sh.ocx.kind` are present whenever the executable lives inside the OCX store, root or dependency alike.
 
-- `sh.ocx.provenance`: `ocx-package` for an executable inside the store, a shim target included. `external` when the executable was not supplied by ocx
-- `sh.ocx.kind`: `binary` for the leaf executable, `launcher` when the resolved path is an entrypoint launcher, `shim` when nothing has been downloaded yet
+- `sh.ocx.provenance`: `ocx-package` for an executable inside the store, a shim target included. `external` when the executable was not supplied by OCX
+- `sh.ocx.kind`: `binary` for the leaf executable, `launcher` when the resolved path is an entry point launcher, `shim` when nothing has been downloaded yet
 - `sh.ocx.package`: the purl of a root package. Omitted when the executable comes from one of that root's dependencies, whose identity is recorded in full in `packages[]` with `sh.ocx.role: "dependency"`
 
 ### Resolution {#execution-records-format-resolution}
@@ -116,7 +116,7 @@ A record describes what OCX was about to run and not what happened, so it has no
 - `mirrors`: per-host map keyed by the upstream host a [`[mirrors]`][config-mirrors] entry rewrites. `registry` covers OCI blob and manifest traffic, `index` covers index-tree lookups, and a host declaring both carries both keys
 - `mirrors` shape: only rewritten hosts appear. `{}` when `[mirrors]` is not configured. Omitted at the launcher frame. Any `user:password@` userinfo is stripped from both endpoints
 - `insecureRegistries`: the hosts of `registries` declared plain-HTTP for this resolution, through an [`insecure = true`][config-registries-insecure] entry or [`OCX_INSECURE_REGISTRIES`][env-ocx-insecure-registries]. Absent when none were
-- `frozen`: mirrors [`--frozen`][arg-frozen], which freezes package-tier resolution only. `true` means the package closure could not have added a new pin during this run. The patch tier is frozen separately by [`ocx patch freeze`][cmd-patch-freeze] and `OCX_PATCH_SNAPSHOT`
+- `frozen`: mirrors [`--frozen`][arg-frozen], which freezes package resolution only. `true` means the package closure could not have added a new pin during this run. Patches are frozen separately by [`ocx patch freeze`][cmd-patch-freeze] and `OCX_PATCH_SNAPSHOT`
 - `noVerify`: `true` when [`OCX_NO_VERIFY`][env-ocx-no-verify] disabled the install-time signature gate for this invocation. Env-tier only, a posture and never an outcome. `false` says nothing disabled the gate. Whether a package triggered it is an install-time fact this record does not carry. The per-command `--no-verify` flag is never recorded
 - `managedConfig`: the source of the managed-config tier in force and its applied digest when known. Absent when no managed tier applies
 - `autoInstalled`: the packages this invocation materialized on the spot. Depends on cache state, so the same command reports it only the first time
@@ -124,7 +124,7 @@ A record describes what OCX was about to run and not what happened, so it has no
 
 ### Scope {#execution-records-format-scope}
 
-`scope.tier` is `package` for an OCI-tier command, `project` for a project-tier `ocx exec` and `launcher` for a launcher re-entry, which carries no other scope field. A project-tier record also carries `lock` and the `ocx.toml` binding and group each package was selected under.
+`scope.tier` is `package` for an `ocx package` command, `project` for a project `ocx exec` and `launcher` for a launcher re-entry, which carries no other scope field. A project record also carries `lock` and the `ocx.toml` binding and group each package was selected under.
 
 ```json
 {
@@ -152,16 +152,16 @@ A record describes what OCX was about to run and not what happened, so it has no
 
 ```json
 {
-  "name": "cmake",
-  "uri": "pkg:oci/cmake@sha256:3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0?arch=amd64&repository_url=index.ocx.sh%2Focx%2Fcmake",
-  "digest": { "sha256": "3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0" },
+  "name": "pipx",
+  "uri": "pkg:oci/pipx@sha256:f9e5166e5429e3b5f41b1f7f19a349dcca2cd7e8529fafd61b8040db49873458?arch=amd64&repository_url=ocx.sh%2Fpypa%2Fpipx",
+  "digest": { "sha256": "f9e5166e5429e3b5f41b1f7f19a349dcca2cd7e8529fafd61b8040db49873458" },
   "annotations": {
     "sh.ocx.role": "root",
-    "sh.ocx.binding": "cmake",
+    "sh.ocx.binding": "pipx",
     "sh.ocx.group": "default",
     "sh.ocx.platform": "linux/amd64+libc.glibc",
     "sh.ocx.visibility": "public",
-    "sh.ocx.entrypoints": ["cmake", "ctest", "cpack"]
+    "sh.ocx.entrypoints": ["pipx", "python"]
   }
 }
 ```
@@ -194,14 +194,14 @@ Every borrowed field name is pinned by this page and not by the standard it came
 
 ## Frames {#execution-records-frames}
 
-An entrypoint launcher re-enters OCX, so one invocation through a launcher writes two records, one per frame. Both carry the same package content digest, which is the join key.
+An entry point launcher re-enters OCX, so one invocation through a launcher writes two records, one per frame. Both carry the same package manifest digest, which is the join key.
 
 | | Outer frame (`exec` / `package exec`) | Inner frame (`launcher exec`) |
 |---|---|---|
 | `frame.command` | `exec` or `package exec` | `launcher exec` |
 | `frame.identity` | `complete` | `complete` when the parent forwarded the package name, otherwise `degraded` |
 | `executable["sh.ocx.kind"]` | `launcher` — the resolved path is the launcher shim | `binary` — the actual leaf executable |
-| `packages[0].digest.sha256` | same content digest as the inner frame | same content digest as the outer frame |
+| `packages[0].digest.sha256` | same manifest digest as the inner frame | same manifest digest as the outer frame |
 
 - Sink: [`ocx launcher exec`][cmd-launcher-exec] takes no `--records-*` flags and inherits the sink through the `OCX_RECORDS_DIR` and `OCX_RECORDS_NAME` variables, which a child inherits (under `--clean` it reads them from [`__OCX_ENV_STATE`][env-ocx-env-state])
 
@@ -247,7 +247,7 @@ The sink is always a directory. OCX writes one self-named file per record into i
 - Debris: a crash between publish and cleanup can strand a hidden `.tmp*` file. A collector that lists the directory rather than globbing `*.json` must skip every `.tmp*` entry
 - Authenticity: a record is not signed and the sink is not authenticated. On a shared sink a collector should reject a record whose owning uid disagrees with `process.user.id` and treat `process.user.name` as display only
 - Symlink pin: the configured sink is resolved to its real location once per invocation and re-checked before every write. A sink that no longer resolves to itself refuses the write with the configured failure posture. The posture is a warning by default or exit `78` under `required = true`, classified as a configuration fault
-- Limits of the pin: it compares a canonical path and not directory identity. It is not shared across the outer and inner frame of an entrypoint invocation. It is an integrity control and not a security boundary
+- Limits of the pin: it compares a canonical path and not directory identity. It is not shared across the outer and inner frame of an entry point invocation. It is an integrity control and not a security boundary
 - Paths: records contain absolute paths, including the invoking user's home directory (`process.executable` and the package `content/` and `entrypoints/` paths), so size sink permissions and retention accordingly
 
 See [What the sink guarantees][execution-records-explanation-sink].
@@ -287,18 +287,18 @@ required = true
 - Precedence: [`[records]`][config-records] config, then the variables, then the flags on [`ocx exec`][cmd-exec] or [`ocx package exec`][cmd-package-exec]. The highest layer wins per field
 - Empty variable: reads as unset, so a profile-exported value can be disabled for one invocation
 - Forwarding: both variables are inherited by a child under the default and `--isolate` modes. Under `--clean` the child reads the values from [`__OCX_ENV_STATE`][env-ocx-env-state]
-- SYSTEM lock: a SYSTEM-scope `[records]` declaration locks the whole block, `dir`, `name` and `required` together, and the variables and flags have no effect once it is locked
+- SYSTEM lock: a system-tier `[records]` declaration locks the whole block, `dir`, `name` and `required` together, and the variables and flags have no effect once it is locked
 - Lock survival: the lock survives [`OCX_NO_CONFIG=1`][env-ocx-no-config], and an unreadable `/etc/ocx/config.toml` aborts the invocation with exit `78`. An absent system file is silent
 - Relative `dir` in a config file: anchored at the declaring file's directory, like [`[trust.sigstore] trusted_root`][config-trust-sigstore]. `--records-dir` and `OCX_RECORDS_DIR` resolve against the process's working directory
-- Project tier: a project `ocx.toml` cannot set `[records]`. The section is stripped
+- Project file: a project `ocx.toml` cannot set `[records]`. The section is stripped
 - Managed tier: an operator-published [`[managed]`][config-managed] configuration can set `required = true` in its `[records]` payload
 - Placeholder error: an unrecognized placeholder in `name` is a configuration error (exit `78`) at resolve time
-- `required` without `dir`: a configuration error (exit `78`), except a SYSTEM-scope `[records]` block with neither `dir` nor `required`, which locks recording off for the host
+- `required` without `dir`: a configuration error (exit `78`), except a system-tier `[records]` block with neither `dir` nor `required`, which locks recording off for the host
 
 | `required` | Default | Behavior when a record cannot be written |
 |---|---|---|
-| `true` | when a SYSTEM-scope (`/etc/ocx/config.toml`) `[records]` policy is present | The invocation aborts — exit `74` for an unwritable sink, exit `78` when the sink resolves through a symlink. |
-| `false` | when no SYSTEM-scope policy is present | A warning prints to stderr; the child still runs. |
+| `true` | when a system-tier (`/etc/ocx/config.toml`) `[records]` policy is present | The invocation aborts — exit `74` for an unwritable sink, exit `78` when the sink resolves through a symlink. |
+| `false` | when no system-tier policy is present | A warning prints to stderr; the child still runs. |
 
 - Exit codes: `required` decides only whether OCX aborts or warns, never which code an abort uses
 - Windows: the sink is probed before the child is spawned and the record written after, so `required = true` can abort after the child has begun work. OCX stops and reaps that child
@@ -351,11 +351,11 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [env-ocx-patch-snapshot]: ./environment.md#ocx-patch-snapshot
 
 <!-- internal -->
-[execution-records-explanation]: ../explanation/execution-records.md
-[execution-records-explanation-frames]: ../explanation/execution-records.md#frames
+[execution-records-explanation]: ../explanation/execution-records.mdx
+[execution-records-explanation-frames]: ../explanation/execution-records.mdx#frames
 [records-launcher-frames]: ../explanation/records-launcher-frames.md
-[execution-records-explanation-sink]: ../explanation/execution-records.md#sink-guarantees
-[execution-records-explanation-required]: ../explanation/execution-records.md#required-details
+[execution-records-explanation-sink]: ../explanation/execution-records.mdx#sink-guarantees
+[execution-records-explanation-required]: ../explanation/execution-records.mdx#required-details
 [patches-how]: ../explanation/patches.mdx#patches-how
 [in-depth-lazy-loading]: ../explanation/deferred-packages.mdx
 [in-depth-lazy-loading-materialize]: ../explanation/deferred-packages.mdx#deferred-tools-materialize

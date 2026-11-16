@@ -1,11 +1,12 @@
 ---
-title: "Run a command with its dependencies"
+title: "Run with dependencies"
 description: "Run a tool together with the tools it depends on, and inspect the dependency tree."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 Use this page to run a tool together with the tools it depends on, and to inspect the dependency tree.
 
@@ -15,13 +16,21 @@ A publisher can declare that a package needs other packages to work. A web app n
 
 Pull the package, and OCX [resolves the closure transitively][in-depth-dependencies-resolution]:
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/deps-pull.sh\{sh\}
 
-Say `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`. All three packages land in the [package store][in-depth-storage-packages]. Only `acme/webapp:2.0` is the explicit install. The dependencies are stored but do not show up as top-level installs.
+</ShellSession>
+
+Say `acme/webapp:2.0` declares dependencies on `nodejs/node:24` and `oven-sh/bun:1.3`. All three packages land in the [object store][in-depth-storage-packages]. Only `acme/webapp:2.0` is the explicit install. The dependencies are stored but do not show up as top-level installs.
 
 To run the package with its dependency environments configured, use [`ocx package exec`][cmd-package-exec]:
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/deps-exec.sh\{sh\}
+
+</ShellSession>
 
 [`ocx package exec`][cmd-package-exec] first [composes the environments][in-depth-environments-composition-order] of all dependencies in topological order. Then it launches the command. [`ocx package env`][cmd-package-env] exports the same composed environment for use in your own shell.
 
@@ -33,9 +42,13 @@ To run the package with its dependency environments configured, use [`ocx packag
 
 Name more than one package before `--` to run a command with all their environments composed. A dependency that two roots share is emitted once, as [composition order][in-depth-environments-composition-order] describes:
 
+<ShellSession>
+
 \<\<\< @/_scripts/getting-started/exec-multi.sh\{sh\}
 
-This puts Node.js and Bun on `PATH` for the one `bun --version` command. [`ocx package env`][cmd-package-env] takes the same list when you need the variables in your own shell.
+</ShellSession>
+
+This puts Node.js and Bun on `PATH`, and sets the variables they declare, for the one `bun --version` command. [`ocx package env`][cmd-package-env] takes the same list when you need the variables in your own shell.
 
 ## Inspecting the dependency tree
 
@@ -51,15 +64,15 @@ This puts Node.js and Bun on `PATH` for the one `bun --version` command. [`ocx p
 
 <Terminal src="/casts/user-guide/deps-why.cast" title="Tracing why a dependency is pulled in" collapsed />
 
-## Conflict warnings
+## Conflicting variables \{#conflict-warnings\}
 
 Two dependencies may set the same scalar variable, for example both set `JAVA_HOME` to different paths. OCX applies [last-writer-wins][in-depth-environments-last-wins] semantics: the package later in topological order wins, silently. Inspect the order with [`ocx package deps --flat`][cmd-deps] and decide whether the conflict is real.
 
 Project toolchains behave the same way. Suppose you add a package with dependencies and also declare one of those dependencies as a top-level binding in `ocx.toml`. Both contribute environment variables. Either remove the redundant binding, because the transitive dependency provides it, or accept that the top-level entry's value wins the conflict.
 
 :::tip[Learn more]
-[Dependencies In Depth][in-depth-dependencies] covers the transitive resolution algorithm and the scope philosophy: no version ranges and no auto-update.
-[Environments In Depth][in-depth-environments] covers composition order, the visibility model (sealed, private, public, interface), the `--self` flag and last-writer-wins.
+[Dependencies][in-depth-dependencies] covers the transitive resolution algorithm and the scope philosophy: no version ranges and no auto-update.
+[Environments][in-depth-environments] covers composition order, the visibility model (sealed, private, public, interface), the `--self` flag and last-writer-wins.
 :::
 
 [cmd-package-install]: ../reference/command-line/package-consuming.md#package-install

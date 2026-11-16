@@ -74,7 +74,7 @@ pub enum ActivateMode {
     /// Compose the toolchain environment on every prompt. The default.
     Env,
     /// Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a tool is resolved
-    /// by its launcher trampoline at invocation time.
+    /// by its launcher at invocation time.
     Bin,
     /// Neither. The reconciler withdraws whatever it owns and adds nothing.
     None,
@@ -1707,7 +1707,7 @@ pub struct ConfigTestData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed: Option<ManagedView>,
     /// Dotted paths of keys the config schema ignores, sorted. Advisory: the loader ignores unknown
-    /// keys by design, so these are equally typos and settings a newer ocx understands.
+    /// keys by design, so these are equally typos and settings a newer OCX understands.
     pub unknown_keys: Vec<String>,
 }
 
@@ -2466,7 +2466,7 @@ pub struct Entrypoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<EntrypointName>,
     /// Fixed leading arguments the generated launcher prepends before the user's own arguments.
-    /// Each element may carry `${installPath}` — or its alias `${self.installPath}` —
+    /// Each element may carry `${self.installPath}` — or its alias `${installPath}` —
     /// optionally suffixed `:native` or `:posix`; `${deps.*}` and `${self.env.*}` are NOT permitted
     /// here, and every other `${...}` is rejected (write `$${` for a literal `${`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3021,7 +3021,7 @@ pub enum ErrorDetail {
     CredentialHelperFailed,
     /// The credential helper answered with invalid JSON
     CredentialHelperInvalidJson,
-    /// The credential helper is not installed, and an ocx started by a credential helper never
+    /// The credential helper is not installed, and an OCX started by a credential helper never
     /// downloads
     CredentialHelperNotInstalled,
     /// The configured credential helper is not on PATH
@@ -3092,7 +3092,7 @@ pub enum ErrorDetail {
     EmptyPushSet,
     /// An endpoint host does not resolve
     EndpointUnresolvable,
-    /// Two packages declare the same entrypoint name
+    /// Two packages declare the same entry point name
     EntrypointCollision,
     /// An .envrc already exists and --force was not given
     EnvrcExists,
@@ -3146,7 +3146,7 @@ pub enum ErrorDetail {
     ForgePushRefused,
     /// A forge request body could not be encoded
     ForgeRequestEncode,
-    /// No forge was supplied to read the committed index root through
+    /// No forge was supplied to read the committed root document through
     ForgeRequired,
     /// The branch moved since it was read
     ForgeStaleLease,
@@ -3212,11 +3212,11 @@ pub enum ErrorDetail {
     IndexPathInvalid,
     /// A local policy refused resolving through the index
     IndexResolutionBlocked,
-    /// The committed index root lacks a required field
+    /// The committed root document lacks a required field
     IndexRootMissingField,
-    /// The committed index root is not a JSON object
+    /// The committed root document is not a JSON object
     IndexRootNotObject,
-    /// The committed index root is not valid JSON
+    /// The committed root document is not valid JSON
     IndexRootParse,
     /// An index document could not be serialized
     IndexSerialization,
@@ -3226,7 +3226,7 @@ pub enum ErrorDetail {
     IndexSourceFailed,
     /// The registry is not a published index source, so it has no catalog to regenerate
     IndexSourceNotPublished,
-    /// An integrations namespace is invalid
+    /// An integration key is invalid
     IntegrationNamespaceInvalid,
     /// An integrations payload exceeds its size limit
     IntegrationTooLarge,
@@ -3273,7 +3273,7 @@ pub enum ErrorDetail {
     InvalidListSeparator,
     /// The logo file's content does not match its format
     InvalidLogoContent,
-    /// The managed-config source is not a valid OCI identifier
+    /// The managed-config source is not a valid identifier
     InvalidManagedConfigSource,
     /// A manifest is invalid
     InvalidManifest,
@@ -3323,7 +3323,7 @@ pub enum ErrorDetail {
     LibcScanScopeModifier,
     /// The libc scan scope cannot be resolved
     LibcScanScopeUnresolvable,
-    /// The install link path holds something other than an ocx package link
+    /// The install link path holds something other than an OCX package link
     LinkPathOccupied,
     /// A list-valued environment entry conflicts with or edges on its separator
     ListSeparatorInvalid,
@@ -3343,13 +3343,13 @@ pub enum ErrorDetail {
     MalformedForkFullName,
     /// An index document is not valid JSON of the expected shape
     MalformedIndexDocument,
-    /// An index root carries a malformed physical repository reference
+    /// A root document carries a malformed physical repository reference
     MalformedPhysicalRef,
-    /// The index root names a malformed registry repository
+    /// The root document names a malformed registry repository
     MalformedPhysicalRepository,
     /// The repository is not a well-formed oci:// pointer
     MalformedRepository,
-    /// A local index root document is not valid JSON of the expected shape
+    /// A local root document is not valid JSON of the expected shape
     MalformedRootDocument,
     /// The managed-config payload contains a \[managed\] section
     ManagedConfigContainsManagedSection,
@@ -3409,7 +3409,7 @@ pub enum ErrorDetail {
     MissingBaseRef,
     /// An identifier the store needs pinned carries no digest
     MissingDigest,
-    /// A concurrent claim's or announce's head carries no index root
+    /// A concurrent claim's or announce's head carries no root document
     MissingHeadRoot,
     /// A list-valued package env entry omits its separator
     MissingListSeparator,
@@ -3455,7 +3455,7 @@ pub enum ErrorDetail {
     NotInIndex,
     /// A tag appeared between the two reads of one announce
     ObserveRaced,
-    /// The ocx home is always active and takes no consent stamp
+    /// The OCX home is always active and takes no consent stamp
     OcxHomeNeedsNoConsent,
     /// Attaching was refused because offline mode is on
     OfflineAttestRefused,
@@ -3625,7 +3625,7 @@ pub enum ErrorDetail {
     PublishersInvalid,
     /// The registry requires index-declared publishers and the package has none
     PublishersRequired,
-    /// The index lists publishers only a newer ocx understands
+    /// The index lists publishers only a newer OCX understands
     PublishersUnrecognized,
     /// The open announce pull request conflicts with the index
     PullRequestUnmergeable,
@@ -3653,8 +3653,8 @@ pub enum ErrorDetail {
     ReferrersUnsupported,
     /// The registry rejected the request's authentication
     RegistryAuthFailed,
-    /// The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through
-    /// --forge github
+    /// The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes
+    /// them
     RegistryDeleteUnsupported,
     /// A registry operation failed in a way a retry may clear
     RegistryTransient,
@@ -3691,11 +3691,11 @@ pub enum ErrorDetail {
     ResolveTimeout,
     /// A retired OCX environment variable is set
     RetiredEnv,
-    /// The committed index root names a different package
+    /// The committed root document names a different package
     RootNameMismatch,
     /// The announce would commit a root that references an object it does not carry
     RootReferencesUnwrittenObject,
-    /// A derived index root points at another repository
+    /// A derived root document points at another repository
     RootRepositoryMismatch,
     /// Probing whether two paths share a filesystem failed
     SameFilesystemCheckFailed,
@@ -3713,7 +3713,7 @@ pub enum ErrorDetail {
     SessionPathNotUtf8,
     /// A session PATH entry contains a character the host format cannot store
     SessionPathUnencodable,
-    /// Installing ocx into the content store failed with an unclassified cause
+    /// Installing OCX into the object store failed with an unclassified cause
     SetupBootstrapFailed,
     /// Reading or writing a setup file failed
     SetupIo,
@@ -3809,7 +3809,7 @@ pub enum ErrorDetail {
     ToolchainDirGroupOrWorldWritable,
     /// The toolchain_dir setting names a path that cannot be inspected
     ToolchainDirInaccessible,
-    /// The toolchain_dir setting resolves inside the global toolchain home
+    /// The toolchain_dir setting resolves inside $OCX_HOME/toolchain
     ToolchainDirInsideGlobalHome,
     /// The toolchain_dir setting names the home directory or OCX_HOME itself
     ToolchainDirIsContainmentAnchor,
@@ -3829,7 +3829,7 @@ pub enum ErrorDetail {
     ToolchainDirSystemPrefix,
     /// The toolchain_dir setting starts with a '~' that cannot be expanded
     ToolchainDirUnexpandable,
-    /// The toolchain home is not an absolute path
+    /// The toolchain root baked into a launcher is not an absolute path
     ToolchainHomeNotAbsolute,
     /// A toolchain group or entry name contains a control character
     ToolchainNameControlCharacter,
@@ -3891,7 +3891,7 @@ pub enum ErrorDetail {
     UnknownGroupSection,
     /// A file carries an ELF header but cannot be parsed
     UnparseableElf,
-    /// A binary names an ELF interpreter no libc family claims
+    /// A binary names a dynamic loader no libc family claims
     UnrecognizedInterpreter,
     /// A tag to announce does not exist in the registry
     UnresolvedTag,
@@ -5901,12 +5901,12 @@ impl Unknowns for LayerCounts {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LazyAdvisoryKind {
-    /// A `constant` or `list` variable interpolating `${installPath}`, which a tool may read before
-    /// the package is materialized.
+    /// A `constant` or `list` variable interpolating `${self.installPath}`, which a tool may read
+    /// before the package is materialized.
     InstallPathRootedNonPathVar,
     /// No `binaries` claim, so the deferred tool's launcher names cannot be enumerated.
     UndeclaredBinaries,
-    /// A `path` value combining `${installPath}` with anything else, which the launcher cannot
+    /// A `path` value combining `${self.installPath}` with anything else, which the launcher cannot
     /// substitute.
     CombinedPathValue,
     /// A value this SDK was not generated for, kept as sent.
@@ -11257,7 +11257,7 @@ pub enum Var {
         /// Whether the resolved path must exist on disk. If `true` and the path is missing,
         /// installation fails. Defaults to `false`.
         required: bool,
-        /// The value template. `${installPath}` — or its alias `${self.installPath}` — is this
+        /// The value template. `${self.installPath}` — or its alias `${installPath}` — is this
         /// package's content directory, `${deps.NAME.installPath}` a declared dependency's, and
         /// `${self.env.KEY}` the resolved value of a variable declared earlier in this same list.
         /// Append `:native` or `:posix` to pick the path style.
@@ -11272,7 +11272,7 @@ pub enum Var {
         /// `public` or `interface` to expose them to consumers. `"sealed"` is rejected at parse
         /// time.
         visibility: VarVisibility,
-        /// The value template. `${installPath}` — or its alias `${self.installPath}` — is this
+        /// The value template. `${self.installPath}` — or its alias `${installPath}` — is this
         /// package's content directory, `${deps.NAME.installPath}` a declared dependency's, and
         /// `${self.env.KEY}` the resolved value of a variable declared earlier in this same list.
         /// Append `:native` or `:posix` to pick the path style.
@@ -11291,7 +11291,7 @@ pub enum Var {
         /// The string joining this contribution to the variable's existing value — a single space
         /// for `JDK_JAVA_OPTIONS`, a comma for `GODEBUG`.
         separator: String,
-        /// The value template. `${installPath}` — or its alias `${self.installPath}` — is this
+        /// The value template. `${self.installPath}` — or its alias `${installPath}` — is this
         /// package's content directory, `${deps.NAME.installPath}` a declared dependency's, and
         /// `${self.env.KEY}` the resolved value of a variable declared earlier in this same list.
         /// Append `:native` or `:posix` to pick the path style.

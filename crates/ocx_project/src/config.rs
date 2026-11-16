@@ -49,8 +49,8 @@ pub struct Group {
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
 
-    /// Group-tier `lazy-mode` override: outranks the toolchain tier and is outranked by
-    /// `[package."<id>"]` and the CLI flag. Absent inherits from the toolchain tier; it does not
+    /// Group-level `lazy-mode` override: outranks the top-level setting and is outranked by
+    /// `[package."<id>"]` and the CLI flag. Absent inherits from the top-level setting; it does not
     /// mean `never`.
     ///
     /// An edit never invalidates `ocx.lock`.
@@ -97,14 +97,14 @@ pub struct PackageSettings {
     #[serde(default, rename = "no-patches")]
     pub no_patches: bool,
 
-    /// Package-tier `lazy-mode` override, the most specific config tier: only the CLI flag outranks
-    /// it. Absent inherits from the group and toolchain tiers; it does not mean `never`.
+    /// Package-level `lazy-mode` override, the most specific setting: only the CLI flag outranks
+    /// it. Absent inherits from the group and top-level settings; it does not mean `never`.
     ///
     /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Package-tier `lazy-report` override. Absent inherits from the toolchain tier.
+    /// Package-level `lazy-report` override. Absent inherits from the top-level setting.
     ///
     /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
@@ -116,8 +116,8 @@ pub struct PackageSettings {
 /// A flat `[tools]` table is the implicit default group; `[group.<name>]`
 /// tables add optional named groups. Values are registry-qualified package
 /// references, `registry/repo[:tag][@digest]`; a bare tag with no registry
-/// (`cmake = "3.28"`) is rejected. A bare repository with no tag and no digest
-/// (`cmake = "ocx.sh/cmake"`) parses as `:latest`; a digest-pinned entry gets
+/// (`node = "24"`) is rejected. A bare repository with no tag and no digest
+/// (`node = "ocx.sh/nodejs/node"`) parses as `:latest`; a digest-pinned entry gets
 /// no default tag, since the digest is the canonical pin. Unknown keys are a
 /// parse error.
 // Schema shape: adr_project_toolchain_config.md.
@@ -163,7 +163,7 @@ pub struct ProjectConfig {
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, PackageSettings>,
 
-    /// Toolchain-tier `lazy-mode`, the least specific config tier: outranked by `[group.<g>]`,
+    /// Top-level `lazy-mode`, the least specific setting: outranked by `[group.<g>]`,
     /// `[package."<id>"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not
     /// mean `never`.
     ///
@@ -172,13 +172,13 @@ pub struct ProjectConfig {
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.
+    /// Top-level `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.
     ///
     /// An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
 
-    /// Toolchain-tier `activate` mode: how a project's rendered toolchain reaches a shell —
+    /// Top-level `activate` mode: how a project's rendered toolchain reaches a shell —
     /// per-prompt environment composition (`env`, the default), a `PATH` entry for
     /// `<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to
     /// `OCX_TOOLCHAIN_ACTIVATE`, then to `env`.
@@ -190,7 +190,7 @@ pub struct ProjectConfig {
     #[schemars(extend("default" = "env"))]
     pub activate: Option<ActivateMode>,
 
-    /// Toolchain-tier `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`
+    /// Top-level `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`
     /// links (`false`, the default) or pin to digest roots (`true`). Absent falls through to
     /// `OCX_TOOLCHAIN_PINNED`.
     ///

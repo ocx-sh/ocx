@@ -264,7 +264,7 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "malformed_physical_ref",
-        summary = "An index root carries a malformed physical repository reference"
+        summary = "A root document carries a malformed physical repository reference"
     )]
     MalformedPhysicalRef { value: String },
 
@@ -283,7 +283,7 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "root_repository_mismatch",
-        summary = "A derived index root points at another repository"
+        summary = "A derived root document points at another repository"
     )]
     RootRepositoryMismatch {
         repository: String,

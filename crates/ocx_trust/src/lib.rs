@@ -471,7 +471,7 @@ pub enum SignerSpec {
     /// `{ kind = "key", key | key_pem }`.
     Key(KeyMatcher),
 
-    /// A `kind` this build does not know — an entry written by a newer ocx.
+    /// A `kind` this build does not know — an entry written by a newer OCX.
     ///
     /// It narrows: it accepts nobody, and a sibling `keyless` entry in the same
     /// policy keeps working. A policy whose signers are *all* unknown is refused

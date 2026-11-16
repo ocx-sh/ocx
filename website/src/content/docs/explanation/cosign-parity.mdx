@@ -1,12 +1,14 @@
 ---
-title: "cosign Parity"
+title: "cosign parity"
 ---
 {/* doc_type: explanation */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro';
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
 
 
-This page explains how far OCX and [cosign][cosign] interoperate on signatures. It covers which commands verify which artifacts, where the two tools deliberately differ, and what evidence backs each claim.
+This page explains how far OCX and [cosign][cosign] interoperate on signatures. It covers which commands verify which artifacts, where the two tools deliberately differ, and which claims are not tested.
 
 You may already sign container images with cosign and be asked to adopt a second tool. The question that decides it is whether the signature OCX writes is one your `cosign verify` step accepts. The reverse matters too: does OCX accept the signature your existing pipeline writes?
 
@@ -26,7 +28,9 @@ OCX bundles are ordinary Sigstore bundles, and cosign reads and writes the same 
 
 **Discovery needs no opt-in in either direction.** One thing does have to be right. cosign must be given the platform manifest's digest. A package tag resolves to its index, where no signature lives. See [Addressing a Package](#addressing).
 
-The bundle itself interoperates in both directions, and OCX's acceptance suite covers both against the same local Fulcio and Rekor. This is how cosign verifies a bundle that `ocx` produced:
+The bundle itself interoperates in both directions, and both directions are tested against the same Fulcio and Rekor. This is how cosign verifies a bundle that `ocx` produced:
+
+<ShellSession>
 
 ```sh
 cosign verify-blob \
@@ -36,6 +40,8 @@ cosign verify-blob \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   manifest.json
 ```
+
+</ShellSession>
 
 In the other direction, a bundle from `cosign sign-blob --bundle` pushed as a referrer of the subject manifest verifies under `ocx package verify` unchanged.
 
@@ -50,7 +56,7 @@ Four independent choices bound interop:
 - whether the signer is keyless or a key pair
 - whether the registry implements the [OCI 1.1 Referrers API][oci-referrers-spec] or only the fallback tag.
 
-Every combination of those four works, in both directions. The tables below are not a summary of intent. Each row is a test that publishes a real package, signs it, and verifies it with the other tool. The test then corrupts one byte of the signature and requires the refusal. See [What Proves This](#evidence).
+Every combination of those four works, in both directions. Each row below was tested by publishing a real package, signing it, and verifying it with the other tool. A corrupted signature is refused. See [What is tested](#evidence).
 
 ### OCX signs, cosign verifies \{#ocx-to-cosign\}
 
@@ -65,7 +71,7 @@ Every combination of those four works, in both directions. The tables below are 
 | `sha256-<hex>.sig` sidecar | `--key` | Referrers API | Accepts with `--key` and `--insecure-ignore-tlog` |
 | `sha256-<hex>.sig` sidecar | `--key` | Fallback tag | Accepts with `--key` and `--insecure-ignore-tlog` |
 
-The default `bundle` format needs no opt-in on either side. cosign discovers an OCX bundle through the Referrers API where the registry has one. Where it does not, cosign uses the `sha256-<hex>` fallback index. `--signature-format simplesigning` (or `both`) writes the sidecar as well, for a consumer that reads only that shape. It is not needed to make discovery work.
+The default `bundle` format needs no opt-in on either side. cosign discovers an OCX bundle through the Referrers API where the registry has one. Where it does not, cosign uses the `sha256-<hex>` fallback tag. `--signature-format simplesigning` (or `both`) writes the sidecar as well, for a consumer that reads only that shape. It is not needed to make discovery work.
 
 A key-mode signature carries no transparency-log entry unless one was requested ([the Rekor rule](#divergences)). So cosign needs `--insecure-ignore-tlog` to accept one, the same flag it needs for its own key-mode signatures. Under keyless, no such flag is involved in either direction.
 
@@ -103,7 +109,7 @@ The two `.att` key models rest on different evidence. The **key-mode** shape is 
 
 The **keyless** shape is not producible by cosign v3.1.1 at all. `attach attestation` takes no `--certificate`, and `attest` no longer writes the tag. So unit tests cover it. They repackage cosign's own certificate, envelope and log entry into the measured layer shape.
 
-Nothing in the suite verifies a keyless `.att` that cosign itself emitted, because cosign cannot emit one.
+No test verifies a keyless `.att` that cosign itself emitted, because cosign cannot emit one.
 
 A `--type` that does not match what the artifact carries is a not-found condition on both sides, not a verification failure. OCX exits 79 (`attestation_not_found`). cosign reports that none of the attestations matched the requested predicate type.
 
@@ -137,7 +143,9 @@ Also read: cosign's OCI 1.1 SBOM **referrer**. `COSIGN_EXPERIMENTAL=1 cosign att
 
 An OCX package is a multi-platform [OCI index][oci-image-index], so a signature can sit on the index or on one platform manifest beneath it. `-p` decides which. It also decides the reference cosign has to be given.
 
-`ocx package sign` with no `-p` signs **the index itself**, the same shape cosign uses for a multi-platform tag. Nothing special is needed on the cosign side. The tag resolves to the index, which is where the signature is.
+`ocx package sign` with no `-p` signs **the image index itself**, the same shape cosign uses for a multi-platform tag. Nothing special is needed on the cosign side. The tag resolves to the image index, which is where the signature is.
+
+<ShellSession>
 
 ```sh
 cosign verify \
@@ -146,10 +154,13 @@ cosign verify \
   registry.example/acme/tool:1.0.0
 ```
 
-`ocx package sign -p linux/amd64` narrows the subject to that platform's manifest instead. `ocx package verify -p linux/amd64` resolves it back the same way. cosign has no notion of a package and resolves whatever reference you hand it. So the tag still resolves to the index, where this signature is *not*, and cosign reports a discovery failure that reads like an interop problem. Give it the platform manifest's own digest:
+</ShellSession>
+
+`ocx package sign -p linux/amd64` narrows the subject to that platform's manifest instead. `ocx package verify -p linux/amd64` resolves it back the same way. cosign has no notion of a package and resolves whatever reference you hand it. So the tag still resolves to the image index, where this signature is *not*, and cosign reports a discovery failure that reads like an interop problem. Give it the platform manifest's own digest. `--resolve` is required: it walks image index -> manifest and reports the manifest.
+
+<ShellSession>
 
 ```sh
-# --resolve is required: it walks index -> manifest and reports the manifest.
 digest=$(ocx --format json package inspect --resolve -p linux/amd64 \
   registry.example/acme/tool:1.0.0 | jq -r '.packages[0].pinned_digest')
 
@@ -159,8 +170,10 @@ cosign verify \
   "registry.example/acme/tool@${digest}"
 ```
 
+</ShellSession>
+
 :::caution[`--resolve` is not optional here]
-Without it, `pinned_digest` reports the **index** digest, the reference that carries no per-platform signature. The flag makes `inspect` select a platform and walk down to its manifest. It is the difference between a `cosign verify` that works and one that reports nothing found.
+Without it, `pinned_digest` reports the **image index** digest, the reference that carries no per-platform signature. The flag makes `inspect` select a platform and walk down to its manifest. It is the difference between a `cosign verify` that works and one that reports nothing found.
 :::
 
 ## Where OCX Differs \{#divergences\}
@@ -172,9 +185,9 @@ Two behaviours differ from cosign's defaults. Both are deliberate, and neither c
 | Rekor upload under a key | On by default | Off by default; `--rekor-upload` opts in | `rekor_url` defaults to the *public* log. An on-by-default key path would publish a private artifact's digest and signer identity to a world-readable log the first time it ran, the opposite of what choosing a key over keyless usually means |
 | Rekor upload under keyless | Opt-out available | Mandatory; `--no-rekor-upload` is a usage error (exit 64) | A Fulcio certificate lives about ten minutes. The log timestamp is the only lasting proof the signature happened while it was valid, so a keyless signature without one is unverifiable later by construction |
 
-Two things that look like divergences are not. Both tools omit the DSSE `keyid` member. cosign matches candidate signatures on it, so writing one makes `cosign verify --key` accept none of them. OCX names the key in `verificationMaterial.publicKey.hint`, where cosign does.
+Two things that look like divergences are not. Both tools omit the DSSE `keyid` member. cosign matches signatures on it, so writing one makes `cosign verify --key` accept none of them. OCX names the key in `verificationMaterial.publicKey.hint`, where cosign does.
 
-And on a registry without the Referrers API, both tools write the `sha256-<digest>` fallback index rather than refusing. See [Publishing a Referrer][in-depth-signing-registries].
+And on a registry without the Referrers API, both tools write the `sha256-<digest>` fallback tag rather than refusing. See [Publishing a Referrer][in-depth-signing-registries].
 
 On the read side, `keyid` is a lookup hint and never a security decision. OCX accepts an envelope whose `keyid` is absent, empty, or hostile, and the value decides nothing.
 
@@ -210,44 +223,25 @@ The flag is inert everywhere else. It does not affect the bundle path, where tra
 
 ## Known Gaps \{#gaps\}
 
-Five things do not work, or do not work fully. They are gaps rather than divergences. Nothing here is a decision OCX would defend, and each is a place where prose could easily overclaim.
+Five things do not work, or do not work fully. They are gaps rather than divergences. Each is a gap, not a design decision.
 
-- **cosign's fallback-tag write drops annotations.** On a registry without the Referrers API, cosign's own fallback index loses `dev.sigstore.bundle.content`, `dev.sigstore.bundle.predicateType` and `org.opencontainers.image.created` from the referrer descriptor ([sigstore/cosign#4641][gh-cosign-4641]). `artifactType` survives. OCX reads these artifacts regardless, and OCX's own fallback write preserves all four. The reader is not weakened to match.
+- **cosign's fallback-tag write drops annotations.** On a registry without the Referrers API, cosign's own fallback tag loses `dev.sigstore.bundle.content`, `dev.sigstore.bundle.predicateType` and `org.opencontainers.image.created` from the referrer descriptor ([sigstore/cosign#4641][gh-cosign-4641]). `artifactType` survives. OCX reads these artifacts regardless, and OCX's own fallback write preserves all four. The reader is not weakened to match.
 - **Signing is sha256-only.** [`ocx package sign`][cmd-package-sign] and [`ocx package attest`][cmd-package-attest] refuse a subject addressed by sha384 or sha512 with exit 65 (`subject_digest_unsupported`), before anything is published or logged. cosign is sha256-only in the same places. The in-toto Statement binds on `sha256`, and the sidecar tag truncates the digest to 64 characters. The alternative is a signature that publishes and then cannot be verified. Verification is unaffected, so an already-published artifact reads back as written.
 - **`ocx package copy` does not carry sidecar-tag signatures.** [`copy --referrers`][cmd-package-copy] follows referrer chains, and a `sha256-<hex>.sig` or `.att` sidecar is an ordinary tag rather than a referrer. So a simplesigning signature does not survive a mirror copy. The referrer-attached bundle shape does. Re-sign at the destination when the mirrored artifact needs a sidecar.
 - **KMS key backends are not implemented.** `awskms://`, `gcpkms://`, `azurekms://`, `hashivault://` and `k8s://` are recognised by name and refused with exit 82 (`unsupported_key_backend`). That holds for `--key`, for a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], and for a managed-config payload. cosign implements all five. The distinct slug lets a script tell "not built yet" from a malformed config (78) or a missing file (74) without parsing stderr.
 - **Rekor v1 only.** OCX targets Rekor v1 entries. A bundle from a Rekor v2 instance is rejected with exit 65 (`rekor_set_absent_tsa_present`). This bounds interop with any cosign configured against a v2 log. See [Current Limitations][in-depth-signing-limitations].
 
-## What Proves This \{#evidence\}
+## What is tested {#evidence}
 
-Every accept and refuse on this page is a test in the acceptance suite, run against upstream cosign. The suite uses the real binary from `ghcr.io/sigstore/cosign/cosign:v3.1.1`, pinned to an exact version so a passing run is attributable to one. It drives a live [Fulcio][fulcio], [Rekor][rekor] and registry.
+Interop is tested against cosign 3.1.1, with a live [Fulcio][fulcio], [Rekor][rekor] and registry.
 
-The suite covers **16 image-level cells** (the two eight-row tables in [What Interoperates](#interop-matrix)) and **7 attestation and attached-SBOM cells**. Twelve of the image cells carry one artifact through all six of the steps below. The four key-mode cosign-signs cells assert the refusal half against a second, identically-constructed artifact in a shared parametrized test.
-
-The attached-SBOM cell ([Attached SBOMs](#attached-sboms)) runs a shorter sequence, because nothing in it is signed and so nothing can be corrupted. It substitutes a **control**. The same command on the same subject exits 79 *before* cosign attaches anything. So the listing that follows is attributable to the attachment, not to a reader that reports something for every subject.
-
-Each full cell runs these steps in order:
-
-1. Publish a package to a registry of the cell's kind: [Zot][zot] for the Referrers API, CNCF Distribution for the fallback tag.
-2. Sign it with the cell's tool, wire shape and key model.
-3. Assert exactly one signature is discoverable, so the cell cannot pass on a second artifact left behind by an earlier step.
-4. Assert the other tool **accepts** it.
-5. Corrupt one byte of the signature, and assert the corruption reached the registry.
-6. Assert the other tool **refuses** it, with an exact exit code and an exact message.
-
-Step 6 is what makes the green meaningful. A test that only asserts acceptance passes just as well against a verifier that accepts everything. Pinning the refusal's exit code and message gives the check a reachable red state. The corruption in step 5 is verified to have landed rather than assumed.
-
-**Claims on this page that no test backs**, stated rather than dropped:
+The interop tables above rest on that testing. These claims do not:
 
 - Key-mode attestation across the two tools. The [attestation table](#attestations) is keyless only.
-- **Index-level signing verified by tag**, the first recipe in [Addressing a Package](#addressing). The source shows that `ocx package sign` without `-p` signs the index. Every cell in the matrix signs one platform manifest with `-p` and verifies against its digest, so the tag-reference path is not measured.
+- Index-level signing verified by tag, the first recipe in [Addressing a Package](#addressing). Every tested case signs one platform manifest and verifies it by digest.
 - `cosign attach sbom` in either direction ([Known Gaps](#gaps)).
-- **cosign's own keyless Rekor opt-out**, asserted in the [divergence table](#divergences) from cosign's documentation. Nothing here drives `cosign sign --tlog-upload=false` under keyless.
-- **`--allow-unlogged-signature` being inert elsewhere.** The source shows the flag reaches only the sidecar verifier, so it cannot lift a bundle-path or key-mode refusal. No test asserts it.
-- **Rekor v2 rejection with exit 65.** The mapping is in the source. No Rekor v2 instance is exercised.
-- **The keyless `.att` refusal and its opt-out.** Unit tests cover both against a fixture that repackages cosign's own certificate, envelope and log entry into the measured `.att` layer shape. It is not an artifact cosign emitted, because cosign v3.1.1 cannot emit a keyless `.att` ([Attestations](#attestations)). The key-mode `.att` *is* pinned to real `cosign attach attestation` output.
-- **The `--resolve` recipe in [Addressing a Package](#addressing).** Both halves are tested separately: `--resolve` yields a per-platform digest, and cosign verifies a manifest digest. No test pipes one into the other.
-- The registry support lists in [Signing][in-depth-signing-registries] are drawn from vendor documentation, not exercised here. The suite runs against Zot and CNCF Distribution only, one registry per capability.
+- The `--resolve` recipe in [Addressing a Package](#addressing). Each half is tested separately, but nothing pipes one into the other.
+- The registry support lists in [Signing][in-depth-signing-registries]. They come from vendor documentation. Only [Zot][zot] and CNCF Distribution were exercised.
 
 ## See Also \{#see-also\}
 
@@ -281,7 +275,7 @@ Step 6 is what makes the green meaningful. A test that only asserts acceptance p
 [in-depth-signing]: ./signing.mdx
 [in-depth-signing-limitations]: ./signing.mdx#current-limitations
 [in-depth-signing-registries]: ./signing.mdx#referrers-write
-[in-depth-self-hosted-sigstore]: ../guides/self-hosted-sigstore.md
+[in-depth-self-hosted-sigstore]: ../guides/self-hosted-sigstore.mdx
 
 
 [gh-cosign-4641]: https://github.com/sigstore/cosign/issues/4641

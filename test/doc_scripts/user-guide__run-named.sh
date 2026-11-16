@@ -8,8 +8,14 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 # `ocx add` names the binding after the repository basename, so a two-segment
-# identifier still binds as `cmake` — the binding name is what `ocx exec` takes.
-ocx exec cmake -- cmake --version
+# identifier still binds as `node` — the binding name is what `ocx exec` takes.
+ocx exec node -- node --version
 # endregion cast
+
+# The runner ships its own node: a composed environment that lost the package would let it answer and still exit 0.
+[[ "$(ocx exec node -- node)" == marker-* ]] || {
+    echo "node did not resolve to the provisioned package" >&2
+    exit 1
+}

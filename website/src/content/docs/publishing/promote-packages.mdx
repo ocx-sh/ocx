@@ -5,6 +5,8 @@ description: "Copy a tested package from one registry to the next without rebuil
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
 
 Promote a tested package from one registry to the next with `ocx package copy`, so the build that QA approved is the one that ships.
@@ -15,14 +17,14 @@ You need credentials for both registries: read access to the source and write ac
 
 Your organization runs three registries. Developers publish to `dev`, QA validates in `staging`, and only what QA signed off reaches `prod`. The build that was tested is the one that has to ship.
 
-Without a way to move a published artifact, the only route to production is to build it again. A rebuild produces *different bytes*. Compression is not byte-stable, archive timestamps move, and the platform manifest that names the result gets a new digest.
+Without a way to move a published artifact, the only route to production is to build it again. A rebuild of the software produces *different bytes*, and the platform manifest that names the result gets a new digest.
 
 That digest is load-bearing twice over. A [Sigstore signature][ug-signing]'s subject **is** the platform manifest digest, and every [`ocx.lock`][lock-format] entry pins it. A rebuilt production package therefore arrives without the staging signature applying to it. Every downstream lock then points at an artifact that no longer exists in the pipeline, while the release job reports success.
 
 [`ocx package copy`][cmd-package-copy] moves the bytes instead. It transfers the platform manifests and their blobs verbatim, so the digest at production is the digest dev published. Everything anchored to that digest travels with it, including signatures, SBOMs and attestations.
 
 :::note[Analogy: promotion and patches]
-Both tiers keep an upstream artifact intact rather than forking it. [`[patches]`][ug-patches] adapts what environment a binary *runs in* without touching the package. Promotion moves a package *between registries* without touching its bytes. Neither rebuilds anything.
+Both keep an upstream artifact intact rather than forking it. [`[patches]`][ug-patches] adapts what environment a binary *runs in* without touching the package. Promotion moves a package *between registries* without touching its bytes. Neither rebuilds anything.
 :::
 
 ## How it works \{#promoting-how\}
@@ -47,13 +49,16 @@ The copy is also written in two phases. Manifests, blobs and referrers land firs
 
 `--to` rewrites only the registry host and keeps the repository path and the tag. That is the shape a promotion almost always has:
 
-```sh
-# dev -> staging
-ocx package copy --to staging.example.com --cascade acme/mytool:1.4.2
+<ShellSession>
 
-# staging -> prod, once QA signs off
+```sh {"1":1} {"2":2}
+ocx package copy --to staging.example.com --cascade acme/mytool:1.4.2
 ocx package copy --to prod.example.com --cascade staging.example.com/acme/mytool:1.4.2
 ```
+
+</ShellSession>
+
+Line 1 promotes dev to staging. Line 2 promotes staging to prod, once QA signs off.
 
 Each run reports one row per platform, saying what happened to it:
 
@@ -66,7 +71,7 @@ Each run reports one row per platform, saying what happened to it:
 
 Read that last row rather than skimming it. Promoting a subset of platforms into a registry that offers more is legitimate. It is also a common mistake, and the row list is the only thing that tells the two apart.
 
-Re-running a finished promotion is idempotent, not free. Every row reads `unchanged`. OCX still re-verifies each platform's leaf manifest and referrer set against the target instead of trusting the index entry. A retry therefore re-fetches and re-PUTs the manifest, and the referrer chain too when signatures are attached.
+Re-running a finished promotion is idempotent, not free. Every row reads `unchanged`. OCX still re-verifies each platform's platform manifest and referrer set against the target instead of trusting the index entry. A retry therefore re-fetches and re-PUTs the manifest, and the referrer chain too when signatures are attached.
 
 OCX skips only blob content, using a HEAD request against the target. Pipelines can retry the step without special-casing it. See [`ocx package copy`][cmd-package-copy] for the mechanism.
 
@@ -74,17 +79,25 @@ OCX skips only blob content, using a HEAD request against the target. Pipelines 
 
 **Signatures travel by default.** Everything anchored to a manifest through the [OCI Referrers API][oci-referrers-spec] is copied along with it. That covers Sigstore bundles, SBOMs and attestations. OCX follows referrer chains recursively, so a signature over an SBOM arrives too. Verify at the target exactly as you would at the source:
 
+<ShellSession>
+
 ```sh
 ocx package verify -p linux/amd64 prod.example.com/acme/mytool:1.4.2
 ```
+
+</ShellSession>
 
 This works only because the digest did not move. It is also why OCX refuses a target registry without the Referrers API, with exit 82. Such a registry takes a referrer manifest as an ordinary upload and then never lists it, so the provenance would be lost silently. Pass `--no-referrers` to promote the package alone, deliberately.
 
 **Descriptions do not travel by default.** The README, logo and catalog annotations on the `__ocx.desc` tag are repository-level prose, not part of the version being promoted. Environments legitimately carry different ones. A staging catalog page that says "not for production use" should not follow the package to production. Add `--with-description` to copy it along, or promote it on its own once it is right:
 
+<ShellSession>
+
 ```sh
 ocx package description push --from staging.example.com/acme/mytool prod.example.com/acme/mytool
 ```
+
+</ShellSession>
 
 **A copy is not a re-sign.** The signature that travels still names the identity that signed it in the source environment. If your policy requires a production-specific attestation, sign again at the target. Promotion preserves provenance and does not manufacture it.
 
@@ -92,13 +105,19 @@ ocx package description push --from staging.example.com/acme/mytool prod.example
 
 `--platform` filters a tag's platforms. A release that ships four can be promoted one at a time as each one clears validation:
 
+<ShellSession>
+
 ```sh
 ocx package copy --to prod.example.com --platform linux/amd64 staging.example.com/acme/mytool:1.4.2
 ```
 
+</ShellSession>
+
 Against a **digest** the same flag means something different. It *declares* the platform, and exactly one is required. A platform manifest carries no platform of its own, because OCX records that in the index entry and never in the manifest. There is nothing to read it from, and guessing would file the package under a platform nobody built it for.
 
 A digest source also needs `--identifier`, because a digest carries no tag for `--to` to preserve:
+
+<ShellSession>
 
 ```sh
 ocx package copy \
@@ -107,15 +126,21 @@ ocx package copy \
   staging.example.com/acme/mytool@sha256:<hex>
 ```
 
+</ShellSession>
+
 OCX refuses to name an *image index* by digest (exit 64). An index digest is a snapshot of a mutable set. There is no honest way to merge "the platform list as it was" into a target that has moved on, so name the tag instead.
 
 ## Check before committing \{#promoting-dry-run\}
 
 `--dry-run` reports the per-platform rows and writes nothing, so a release job can show the plan before it acts. Plain output labels each row `would add` or `would replace`, and `--format json` keeps `added` and `replaced`:
 
+<ShellSession>
+
 ```sh
 ocx package copy --to prod.example.com --dry-run staging.example.com/acme/mytool:1.4.2
 ```
+
+</ShellSession>
 
 The preview stops at the per-platform disposition. With `--cascade`, `--dry-run` does not compute the rolling tags that would move at the target. It does not compute the `__ocx.keep.<algorithm>-<hex>` keep tag that `--keep-tag` (the default) would write either. Both are decided in the second phase of a copy, which `--dry-run` never runs.
 

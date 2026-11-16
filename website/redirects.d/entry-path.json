@@ -1,0 +1,21 @@
+{
+  "/docs/getting-started/install-ocx/": {
+    "fragments": {
+      "dev-builds": "/docs/guides/install-options/#dev-builds",
+      "install-bare-binary-what": "/docs/guides/install-options/#install-bare-binary-what",
+      "manual-pinned": "/docs/guides/install-options/#manual-pinned",
+      "script-options": "/docs/guides/install-options/#script-options",
+      "session-path": "/docs/guides/install-options/#session-path",
+      "session-path-removal": "/docs/guides/install-options/#session-path-removal",
+      "session-path-stores": "/docs/guides/install-options/#session-path-stores",
+      "shells": "/docs/guides/install-options/#shells",
+      "verify-signature": "/docs/guides/install-options/#verify-signature",
+      "with-script": "/docs/guides/install-options/#with-script"
+    }
+  },
+  "/docs/getting-started/first-project/": {
+    "fragments": {
+      "run": "/docs/getting-started/first-project/#project-toolchain"
+    }
+  }
+}

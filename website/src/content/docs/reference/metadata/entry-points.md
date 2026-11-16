@@ -1,5 +1,5 @@
 ---
-title: "Metadata: Entry Points and Executables"
+title: "Metadata: Entry points and executables"
 ---
 <!-- doc_type: reference -->
 
@@ -11,9 +11,9 @@ The `entrypoints` object declares named launchers that [`ocx package install`][c
 
 - Each launcher re-enters through [`ocx launcher exec`][cmd-launcher-exec] with the package root baked in, and resolves its dispatch command against the composed `PATH` of the package's [`env`](./env.md#env) block.
 - The dispatch command is the entry point's own name unless the optional `command` field sets another.
-- A package with no entrypoints produces no `entrypoints/` directory.
+- A package with no entry points produces no `entrypoints/` directory.
 
-See [Entry points in depth][in-depth-entry-points] for how launchers are generated, reached and reported.
+See [Entry points][in-depth-entry-points] for how launchers are generated, reached and reported.
 
 ### Wire Shape {#entry-points-wire-shape}
 
@@ -24,15 +24,15 @@ See [Entry points in depth][in-depth-entry-points] for how launchers are generat
 | Key | string | Yes | The invocable name: the launcher script filename and the command users invoke. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 bytes. |
 | Value | object | Yes | Per-entry fields. `{}` is the common case: the invocable name is the dispatched command. |
 | `command` | string | No | Dispatch target resolved on the composed `PATH` when it differs from the invocable name. Same slug rule and 64-byte limit as the key. Not interpolated, so it must be a plain slug and not a path. |
-| `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments at dispatch. Each element is one argv token with no shell word-splitting. `${installPath}` and `${self.installPath}` (with the `:native` / `:posix` modifier) are interpolated per element; `${deps.*}` and `${self.env.*}` are rejected at publish time with `DisallowedToken`. Omitted and `[]` are wire-identical. |
+| `args` | array of strings | No | Fixed leading arguments prepended before user-supplied arguments at dispatch. Each element is one argv token with no shell word-splitting. `${self.installPath}` and its alias `${installPath}` (with the `:native` / `:posix` modifier) are interpolated per element; `${deps.*}` and `${self.env.*}` are rejected at publish time with `DisallowedToken`. Omitted and `[]` are wire-identical. |
 
 ```json
 {
   "entrypoints": {
-    "cmake": {},
-    "ctest": {},
+    "acme-tool": {},
+    "acme-fmt": {},
     "hello": { "command": "hello-bin" },
-    "mytool": { "command": "python", "args": ["${installPath}/app/main.py"] }
+    "mytool": { "command": "python", "args": ["${self.installPath}/app/main.py"] }
   }
 }
 ```
@@ -41,7 +41,7 @@ Invoking `mytool a b` runs `python <content>/app/main.py a b`, with baked argume
 
 ### Uniqueness {#entry-points-uniqueness}
 
-Duplicate keys in the on-wire JSON are rejected at deserialization with a descriptive error, instead of the `serde_json` default of last wins. Name collisions across different selected packages are detected at select time.
+Duplicate keys in the on-wire JSON are rejected at deserialization with a descriptive error, instead of the `serde_json` default of last wins. Name collisions are detected at install time and when several packages are composed (`ocx env`, `ocx package exec`).
 
 ## Executables {#executables}
 
@@ -49,7 +49,7 @@ The optional `binaries` array lists bare executable names the package exposes on
 
 - Claim: the array is a publisher-declared claim that OCX does not verify against the package content
 - Launchers: a generated entry-point launcher name never appears in it
-- Same name in both: `binaries` and `entrypoints` may both name `cmake`, because `entrypoints/` is prepended ahead of `bin/` on the composed `PATH` and so the launcher, not the raw binary, resolves
+- Same name in both: `binaries` and `entrypoints` may both name `acme-tool`, because `entrypoints/` is prepended ahead of `bin/` on the composed `PATH` and so the launcher, not the raw binary, resolves
 
 ```json
 {
@@ -57,9 +57,9 @@ The optional `binaries` array lists bare executable names the package exposes on
   "type": "bundle",
   "version": 1,
   "env": [
-    { "key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public" }
+    { "key": "PATH", "type": "path", "value": "${self.installPath}/bin", "visibility": "public" }
   ],
-  "binaries": ["cmake", "cpack", "ctest"]
+  "binaries": ["acme-tool", "node"]
 }
 ```
 
@@ -70,10 +70,10 @@ See [Declaring executables][authoring-binaries] for why the claim is unverified 
 
 ### Interface Surface, Own Package Only {#executables-scope}
 
-A name is eligible only if it is reachable through a `${installPath}`- or `${self.installPath}`-rooted [`path`](./env.md#env-path) variable named `PATH` with [interface visibility](./env.md#env-entry-visibility).
+A name is eligible only if it is reachable through a `${self.installPath}`- or `${installPath}`-rooted [`path`](./env.md#env-path) variable named `PATH` with [interface visibility](./env.md#env-entry-visibility).
 
 - Private, `libexec`-style directories are never candidates.
-- A bare `${installPath}` (or `${self.installPath}`) `PATH` entry names the content root itself; its immediate entries are scanned, subdirectories are not descended into.
+- A bare `${self.installPath}` (or `${installPath}`) `PATH` entry names the content root itself; its immediate entries are scanned, subdirectories are not descended into.
 - Only the `PATH` variable is scanned (`Path` also counts for a Windows target). `LD_LIBRARY_PATH` and every other path variable never contribute a name.
 - Shared libraries in a scanned directory are never claimed: ELF shared objects and Mach-O files that are not executables are skipped even when their exec bit is set. Scripts and unrecognized files are claimed.
 - The claim is own-package only and never transitive: a package never lists a dependency's executables. What is reachable through a dependency chain is reported by [`ocx env`][cmd-env-root] and [`ocx package env`][cmd-package-env] in their `binaries` array, attributed per admitted package.
@@ -99,7 +99,7 @@ The two wire states carry different meaning, so a consumer reading `metadata.jso
 - No leading `-`, and no leading or trailing `.`.
 - Non-empty, at most 64 bytes.
 - Reserved Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`) are rejected case-insensitively, checked against the basename before the first `.`, so `CON.txt` is rejected too.
-- Two names that differ only by case (`Cmake` and `cmake`) are rejected.
+- Two names that differ only by case (`Node` and `node`) are rejected.
 - Bare names only, never `.exe` or any other extension.
 
 <!-- commands -->
@@ -111,5 +111,5 @@ The two wire states carry different meaning, so a consumer reading `metadata.jso
 [cmd-package-env]: ../command-line/package-consuming.md#package-env
 
 <!-- guides -->
-[in-depth-entry-points]: ../../explanation/entry-points.md
+[in-depth-entry-points]: ../../explanation/entry-points.mdx
 [authoring-binaries]: ../../publishing/entry-points.md#binaries

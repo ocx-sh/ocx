@@ -1,16 +1,16 @@
 ---
-title: "Managed configuration in depth"
+title: "Managed configuration"
 description: "Where the managed tier sits in the configuration chain, why refresh never blocks, how locks and publishing work."
 ---
 <!-- doc_type: explanation -->
 
-This page explains how the `[managed]` configuration tier behaves once a host has adopted it. It covers the tier's place in the chain, the refresh and offline rules, system locks and what a fleet publisher may put in a payload. The [Configuration page][config-page] introduces the tier and the chain around it.
+This page explains how the `[managed]` configuration tier behaves once a host has adopted it. It covers the tier's place in the chain, the refresh and offline rules, system locks and what a fleet operator may put in a payload. The [Configuration page][config-page] introduces the tier and the chain around it.
 
 ## Where it sits in the chain {#managed-position}
 
-The seed pointer is part of the ordinary `$OCX_HOME/config.toml` file, the [OCX home tier][tier-ocx-home]. The package it resolves to is a **synthetic fifth tier**. It is a locally cached snapshot, folded in after the three static-file tiers and below [`OCX_CONFIG`][env-config] and [`--config`][arg-config]. The [full precedence table][config-precedence] shows where it sits among every other source.
+The seed pointer is part of the ordinary `$OCX_HOME/config.toml` file, the [OCX home tier][tier-ocx-home]. The package it resolves to is a **synthetic fifth tier**. It is a locally cached payload, folded in after the three static-file tiers and below [`OCX_CONFIG`][env-config] and [`--config`][arg-config]. The [full precedence table][config-precedence] shows where it sits among every other source.
 
-The snapshot lives at `$OCX_HOME/state/managed-config/snapshot.json`. Only [`ocx config update`][cmd-config-update], [`ocx config setup`][cmd-config-setup], `ocx self setup --managed-config` and the background tick under `refresh = "apply"` write it. It records:
+The cached payload lives at `$OCX_HOME/state/managed-config/snapshot.json`. Only [`ocx config update`][cmd-config-update], [`ocx config setup`][cmd-config-setup], `ocx self setup --managed-config` and the background tick under `refresh = "apply"` write it. It records:
 
 - the source it was fetched from,
 - the tag it tracked at that moment,
@@ -70,9 +70,9 @@ None of that gates the setup-time re-sync. `ocx config setup` and `ocx self setu
 
 That re-sync is also best-effort rather than tick-like. A fetch failure keeps the existing snapshot and exits 0 instead of degrading to a silent no-op probe.
 
-## One file, many ocx versions {#managed-forward-compat}
+## One file, many OCX versions {#managed-forward-compat}
 
-A fleet is never on one ocx version. That is the reason this tier exists. The payload an operator publishes is read by whatever binaries the hosts happen to run, including binaries released before the payload was written.
+A fleet is never on one OCX version. That is the reason this tier exists. The payload an operator publishes is read by whatever binaries the hosts happen to run, including binaries released before the payload was written.
 
 OCX answers by [ignoring what it does not recognize][config-unknown-keys]. It skips an unknown section, and an unknown key inside a known section, and everything else in the file still applies.
 
@@ -84,15 +84,15 @@ The trade is that a typo silently does nothing instead of failing loudly. Three 
 - Run [`ocx config test`][cmd-config-test] before publishing to catch the rest.
 - Run [`ocx config update --check`][cmd-config-update] afterward to see what a host resolved.
 
-The same tolerance covers a value this binary does not know. A later ocx may add a new [`refresh`][config-managed-refresh] posture. A host running an earlier ocx ignores it with one warning and applies the default. It does not fail the file, so the rest of the section still takes effect.
+The same tolerance covers a value this binary does not know. A later OCX may add a new [`refresh`][config-managed-refresh] posture. A host running an earlier OCX ignores it with one warning and applies the default. It does not fail the file, so the rest of the section still takes effect.
 
 Tolerance handles *added* keys. A key whose meaning or value shape changes needs the other lever: a new tag family, with fleets moving over as they upgrade. See [rolling out an incompatible change][user-guide-managed-config-incompatible].
 
 ## What a payload cannot set {#managed-update}
 
-One section is deliberately outside the managed tier's reach. [`[update]`][config-update] decides whether this host installs a new ocx in the background, and that is a personal choice. A payload that carries `[update]` has the section dropped before the merge. An `ocx.toml` that carries it fails to parse.
+One section is deliberately outside the managed tier's reach. [`[update]`][config-update] decides whether this host installs a new OCX in the background, and that is a personal choice. A payload that carries `[update]` has the section dropped before the merge. An `ocx.toml` that carries it fails to parse.
 
-The reason is the direction of trust. A fleet publisher or a cloned repository can supply registries, mirrors and patches, because those name where content comes from. Neither should be able to switch on binary replacement on a host that did not ask for it. The checks never run in CI at all, so a fleet has no need to push the setting.
+The reason is the direction of trust. A fleet operator or a cloned repository can supply registries, mirrors and patches, because those name where content comes from. Neither should be able to switch on binary replacement on a host that did not ask for it. The checks never run in CI at all, so a fleet has no need to push the setting.
 
 [`[update]`][config-update] never fails a command either. An invalid value is ignored and the next source applies. That holds for the file and for [`OCX_SELF_UPDATE`][env-ocx-self-update], [`OCX_TOOLCHAIN_UPDATE`][env-ocx-toolchain-update] and [`OCX_UPDATE_CHECK_INTERVAL`][env-ocx-update-check-interval]. A setting about convenience must not be able to take a host out of service.
 
@@ -126,7 +126,7 @@ OCX strips a `[managed]` section inside the fetched payload before the merge, wi
 
 ## System locks {#managed-locks}
 
-A section declared at the system scope (`/etc/ocx/config.toml`) is locked. No lower tier, no managed payload and, where the section has one, no environment variable can change it. The lock applies before OCX folds in the managed content, the same as for any lower tier. Each section locks in the shape that fits it:
+A section declared at the system tier (`/etc/ocx/config.toml`) is locked. No lower tier, no managed payload and, where the section has one, no environment variable can change it. The lock applies before OCX folds in the managed content, the same as for any lower tier. Each section locks in the shape that fits it:
 
 | Section | What the system declaration locks |
 |---|---|
@@ -138,7 +138,7 @@ A section declared at the system scope (`/etc/ocx/config.toml`) is locked. No lo
 | `[managed]` | A declaration with `required = true` (the default) is itself non-overridable by a lower tier. |
 | `[[trust.policy]]` | Each entry **governs alone** for the scopes it matches. Policies otherwise pool across tiers, see [tier precedence](./signing.mdx#identity-matching-tiers). |
 | `[trust.sigstore]` | The whole sub-table, per table and not per field. A scalar trust root cannot pool, because two Fulcio CAs are an ambiguity, not a merge. |
-| `extra_ca_certs`, `extra_ca_certs_pem` | The pair, once the system file sets either one. See [proxy and CA](../integration/proxy-and-ca.md#ca-system-lock). |
+| `extra_ca_certs`, `extra_ca_certs_pem` | The pair, once the system file sets either one. See [proxy and CA](../integration/proxy-and-ca.mdx#ca-system-lock). |
 
 ## Publishing to a fleet {#managed-publish}
 

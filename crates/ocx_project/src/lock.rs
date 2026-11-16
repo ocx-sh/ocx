@@ -131,7 +131,7 @@ pub struct ProjectLock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockedTool {
-    /// Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).
+    /// Local binding name (TOML key from `ocx.toml`, e.g. `node`).
     pub name: String,
     /// Owning group. `"default"` for entries from the top-level
     /// `[tools]` table; otherwise the named `[group.*]` key.
@@ -140,7 +140,7 @@ pub struct LockedTool {
     #[schemars(with = "PackageRef")]
     pub repository: Repository,
     /// The `ocx.toml` spelling this entry was resolved from (e.g.
-    /// `ocx.sh/kitware/cmake:3.29`). Present on every `V4` entry, absent on `V3`.
+    /// `ocx.sh/nodejs/node:24`). Present on every `V4` entry, absent on `V3`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declared: Option<String>,
     /// Available-only per-platform leaf digests, keyed by the canonical

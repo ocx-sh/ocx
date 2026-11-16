@@ -1,50 +1,61 @@
 ---
-title: "Get started with ocx"
-description: "Install ocx, run your first package and pin the tools of a project, then find the guide for what you do next."
+title: "Get started with OCX"
+description: "Install OCX, run one tool or declare a set of tools in ocx.toml, then find the guide for what you do next."
 ---
 {/* doc_type: landing */}
 {/* doc_tier: first-steps */}
 
-ocx fetches pre-built tools from any OCI registry and runs them in a clean, reproducible environment.
+OCX fetches pre-built tools from any OCI registry and runs them in a clean, reproducible environment.
 
-```sh
-curl -fsSL https://setup.ocx.sh/sh | sh
+## Install OCX \{#install\}
+
+<InstallCommand />
+
+## Run a tool once \{#run-once\}
+
+import InstallCommand from '@ocx-sh/theme/components/InstallCommand.astro'
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+This runs [Node.js][nodejs] straight from the registry, with no install and no symlink.
+
+<ShellSession>
+
+\<\<\< @/_scripts/first-package/exec.sh\{sh\}
+
+```text
+v22.23.5
 ```
 
-That installs ocx. Other shells and a download-only route are on the [install page][install].
+</ShellSession>
 
-## Start here \{#start-here\}
+## Pick your job \{#start-here\}
 
-Three short pages take you from an empty machine to a pinned project.
-
-- [Install ocx][install] puts the binary on your `PATH` and checks it.
-- [Install your first package][first-package] runs a tool, installs two versions and switches between them.
-- [Pin your first project's tools][first-project] locks a repository's tools so everyone runs the same builds.
-
-## Use ocx every day \{#everyday\}
-
-- [Choose a version][choose-versions] of a tool, by tag or by digest.
-- [Set up a project toolchain][project-toolchain] for a repository.
-- [Configure ocx][configure] for a private registry, a mirror or an offline machine.
-
-## Publish and integrate \{#publish\}
-
-- [Publish a package][publishing] to your own registry.
-- [Use ocx in CI][integration], in containers and from scripts.
+- [Install a package][first-package] now and switch its versions
+- [Pin a toolchain][first-project]: declare a set of tools in `ocx.toml`, for a repository or as the global toolchain
+- Give [CI][first-project-ci] the same tools, with [GitHub Actions][github-actions]
+- [Put a tool on your PATH][global-toolchain] in every shell
+- [Publish your own tool][publishing]
+- Provision [Bazel][bazel] or a [dev container][devcontainer]
+- Work [offline][offline] or through a [mirror][mirror]
 
 ## Look things up \{#look-up\}
 
-The [command line][cmd-ref], [environment variables][env-ref] and [project file][project-file] pages list every flag, variable and key. The [concepts][storage] pages explain how ocx stores and resolves packages.
+The [glossary][glossary] defines every term OCX uses. The [command line][cmd-ref], [environment variables][env-ref] and [project file][project-file] pages list every flag, variable and key. The [concepts][storage] pages explain how OCX stores and resolves packages.
 
 
-[install]: ./getting-started/install-ocx.mdx
-[first-package]: ./getting-started/first-package.mdx
 [first-project]: ./getting-started/first-project.mdx
-[choose-versions]: ./guides/choose-versions.mdx
-[project-toolchain]: guides/project-toolchain.mdx
-[configure]: guides/configure-ocx.mdx
-[publishing]: ./publishing/index.mdx
-[integration]: ./integration/index.md
+[nodejs]: https://nodejs.org/
+[first-project-ci]: ./getting-started/first-project.mdx#ci
+[first-package]: ./getting-started/first-package.mdx
+[global-toolchain]: ./guides/global-toolchain.mdx#global-toolchain-add
+[publishing]: ./publishing/index.mdx#tldr
+[github-actions]: ./integration/github-actions.mdx#ci-github-actions-toolchain
+[bazel]: ./integration/bazel.mdx#bazel-project
+[devcontainer]: ./integration/devcontainers-and-editors.mdx#devcontainer
+[offline]: ./guides/work-offline.mdx#offline-modes
+[mirror]: ./guides/corporate-mirror.mdx
+[glossary]: ./reference/glossary.md
 [cmd-ref]: ./reference/command-line/index.md
 [env-ref]: ./reference/environment.md
 [project-file]: ./reference/project-file.md

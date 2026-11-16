@@ -35,8 +35,8 @@ pub struct Upgrade {
 
     /// Allow a tag to move to a newer major version.
     ///
-    /// Without it a binding stays within its current major (`cmake:3.28` moves
-    /// to `3.29`, never to `4.0`), and a newer major is listed for information
+    /// Without it a binding stays within its current major (`nodejs/node:24.21` stays
+    /// on the 24 line, never `26`), and a newer major is listed for information
     /// only.
     #[arg(long = "major", default_value_t = false)]
     pub major: bool,

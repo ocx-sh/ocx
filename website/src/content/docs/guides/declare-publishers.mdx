@@ -1,15 +1,17 @@
 ---
-title: "Declare publishers"
-description: "List who signs a package's releases in its index root, and set the registry policy around that list."
+title: "List publishers in the index"
+description: "List who signs a package's releases in its root document, and set the registry policy around that list."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
-List the identities that sign a package's releases in its index root, so a client verifies them with no operator configuration.
+List the identities that sign a package's releases in its root document, so a client verifies them with no operator configuration.
 
 ## Declare publishers in the index {#supply-chain-publishers}
 
 A package's root document can list who signs its releases, in a `publishers` array. The list lives in the index, so it reaches a client with the root and needs no operator configuration. Before a pull, OCX reads the committed root and checks the release signature against the list: the signature must match at least one entry. A package that lists no publishers is verified only if an operator [`[[trust.policy]]`][config-trust] covers it. Under `signatures = "required"`, such a package is refused instead.
+
+The index maintainer adds the array to the package's root document in the index repository. Publishers do not set it with a command.
 
 Each entry names a `kind`:
 
@@ -68,10 +70,10 @@ An operator `[[trust.policy]]` signer takes the same `claims` table, under the s
 
 When no listed publisher signed the release, the install fails with `publisher_mismatch` (exit 77). Install a release a listed publisher signed, run [`ocx index update <package>`][cmd-index-update] to refresh the root, or pass `--no-verify`.
 
-The other refusals have their own remedies. `publishers_required` is cleared by loosening `signatures` or passing `--no-verify`. `publishers_unrecognized` is cleared by upgrading OCX or setting `signatures = "off"`. A `publishers_invalid` refusal is a defect in the index entry for its maintainer.
+The other refusals have their own remedies. `publishers_required` is cleared by loosening `signatures` or passing `--no-verify`. `publishers_unrecognized` is cleared by upgrading OCX or setting `signatures = "off"`. A `publishers_invalid` refusal is a defect in the index entry for its publishers to fix.
 
 :::tip[Learn more]
-[Signing In Depth][in-depth-signing] covers trust root mechanics, how a referrer is published, Sigstore bundle storage, slice boundaries and offline semantics. [Identity matching][in-depth-signing-identity] covers most-specific-wins resolution, regex identities and operator-versus-project tier precedence.
+[Signing][in-depth-signing] covers trust root mechanics, how a referrer is published, Sigstore bundle storage, slice boundaries and offline semantics. [Identity matching][in-depth-signing-identity] covers most-specific-wins resolution, regex identities and operator-versus-project precedence.
 The [`package sign`][cmd-package-sign] and [`package verify`][cmd-package-verify] references list flags, exit codes and CI examples.
 :::
 

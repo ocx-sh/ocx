@@ -15,8 +15,8 @@ use crate::options;
 
 /// Remove one or more package bindings from `ocx.toml`.
 ///
-/// Each argument reduces to a binding name (`ocx.sh/cmake:3.28` matches
-/// `cmake`; an explicitly named binding only by its name), searched in
+/// Each argument reduces to a binding name (`ocx.sh/nodejs/node:24` matches
+/// `node`; an explicitly named binding only by its name), searched in
 /// `[tools]` and every group, or only in `--group <name>`. Matches are removed,
 /// `ocx.lock` keeps every survivor's pin exactly. Any argument matching
 /// nothing fails the whole command with `ocx.toml` untouched. Exits 65 when
@@ -26,8 +26,8 @@ use crate::options;
 #[derive(Parser, Clone)]
 pub struct Remove {
     /// Bindings to remove (binding name or fully-qualified
-    /// identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`).
-    #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
+    /// identifier, e.g. `node` or `ocx.sh/nodejs/node:24`).
+    #[arg(required = true, num_args = 1.., value_name = "BINDING")]
     pub identifiers: Vec<String>,
 
     /// Target a specific group. Use `default` to target the implicit

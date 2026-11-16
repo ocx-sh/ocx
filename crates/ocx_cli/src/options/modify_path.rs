@@ -5,10 +5,10 @@
 /// shell profiles and session PATH.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct ModifyPath {
-    /// Write the env shims but touch neither a shell profile nor the
+    /// Write the env files but touch neither a shell profile nor the
     /// session PATH.
     ///
-    /// Suppresses both PATH surfaces: the managed activation block in your
+    /// Suppresses both PATH surfaces: the managed block in your
     /// shell profiles, and the session-level registration. Remembered in
     /// `[shell] modify_path`, so later runs keep honouring it, including the
     /// setup that `ocx self update` performs. Remove that key to resume

@@ -202,7 +202,7 @@ ENV_FROZEN_BODIES: dict[str, frozenset[Path]] = {
             PROJECT_ROOT / "crates" / "ocx_package_manager" / "src" / "launcher" / "env_tests.rs",
             PROJECT_ROOT / "test" / "tests" / "test_toolchain_cli.py",
             PROJECT_ROOT / "test" / "tests" / "data" / "exec_env" / "v0.6.5" / "trampoline.sh.in",
-            PROJECT_ROOT / "website" / "src" / "content" / "docs" / "explanation" / "toolchain-activation.md",
+            PROJECT_ROOT / "website" / "src" / "content" / "docs" / "explanation" / "toolchain-activation.mdx",
         }
     ),
 }

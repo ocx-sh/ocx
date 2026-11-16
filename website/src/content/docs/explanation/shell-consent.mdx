@@ -1,10 +1,10 @@
 ---
-title: "Consent Grammar"
+title: "Consent grammar"
 description: "Where a shell consent grant can live, and how path and namespace entries are parsed, matched and merged across configuration tiers."
 ---
 {/* doc_type: explanation */}
 
-This page explains where a shell consent grant can live and how `[shell.consent]` entries are parsed, matched and merged. [Shell Integration](./shell-integration.mdx#consent) explains what the three grants are and why a project is inert without one.
+This page explains where a shell consent grant can live and how `[shell.consent]` entries are parsed, matched and merged. [Shell integration](./shell-integration.mdx#consent) explains what the three grants are and why a project is inert without one.
 
 ## Where a grant can live \{#consent-tiers\}
 
@@ -32,7 +32,7 @@ None of the three grants above authenticate *who* published the bytes a consente
 
 ## Grammar and merging \{#consent-grammar\}
 
-**`[shell.consent]` is the one table in the configuration tree with strict parsing.** Every other section ignores an unknown key. A key here that an older ocx does not recognize could only ever *narrow* a grant, so silently dropping it would *widen* trust. An unrecognized key inside `[shell.consent]`, or inside a `namespaces` table, drops the whole `[shell.consent]` table from that file with a warning rather than applying it partially. Every other section in the same file (`[registries]`, `[mirrors]`, `[[trust.policy]]`, `[shell] hook`) still applies.
+**`[shell.consent]` is the one table in the configuration tree with strict parsing.** Every other section ignores an unknown key. A key here that an older OCX does not recognize could only ever *narrow* a grant, so silently dropping it would *widen* trust. An unrecognized key inside `[shell.consent]`, or inside a `namespaces` table, drops the whole `[shell.consent]` table from that file with a warning rather than applying it partially. Every other section in the same file (`[registries]`, `[mirrors]`, `[[trust.policy]]`, `[shell] hook`) still applies.
 
 Every tier's contribution **accumulates** rather than overriding:
 
@@ -81,7 +81,7 @@ The one reading that defeats these classes is a directory literally named `*` (`
 | `*` anywhere but a single trailing `/*` | matching is segment-bounded, not a substring glob |
 | an empty path segment, or three or more segments | a source is exactly two components, `<host>/<org>` |
 
-The table form's `include` is required: an empty one is a parse error, not a catch-all, so `namespaces = { exclude = [...] }` alone does not compile. Write the withdrawal alongside the grant it narrows, as in the carve-out example above. The match is against the package store's own record of the coordinate each locked digest was fetched under on this machine. It is never matched against the text of `ocx.lock`. See [What consent does not cover](./shell-integration.mdx#residual).
+The table form's `include` is required: an empty one is a parse error, not a catch-all, so `namespaces = { exclude = [...] }` alone does not compile. Write the withdrawal alongside the grant it narrows, as in the carve-out example above. The match is against the object store's own record of the coordinate each locked digest was fetched under on this machine. It is never matched against the text of `ocx.lock`. See [What consent does not cover](./shell-integration.mdx#residual).
 
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
 [cmd-shell-state]: ../reference/command-line/shell.md#shell-state

@@ -5,6 +5,8 @@ description: "Check who signed a package before you install it, online or air-ga
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
 Check who signed a package before you install it, online or on an air-gapped runner.
 
 ## How keyless signing works \{#supply-chain\}
@@ -23,6 +25,8 @@ GPG signing needs a long-lived key pair that someone must generate, distribute a
 
 Against public Sigstore, that is all you need. OCX fetches the trust root and verifies it over TUF. A private or self-hosted Sigstore deployment needs one more input: where the trust root comes from. Pass [`--sigstore-trusted-root`][env-sigstore-trusted-root], or configure it once and never pass it again ([Self-hosted Sigstore][in-depth-self-hosted-sigstore]).
 
+<ShellSession>
+
 ```shell
 ocx package verify \
   -p linux/amd64 \
@@ -31,10 +35,12 @@ ocx package verify \
   registry.example/pkg:1.0
 ```
 
+</ShellSession>
+
 Exit 0 means the signature matched the identity and issuer you passed. Any other exit code is a failure from the table below.
 
 :::tip[Want this to happen automatically?]
-Once you [pin a signer identity](./pin-signer-identity.mdx#supply-chain-trust-policy), or the package's index root [lists publishers][index-publishers], [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install. You pass no flags and add no step. See [Verify by default](#supply-chain-auto-verify).
+Once you [pin a signer identity](./pin-signer-identity.mdx#supply-chain-trust-policy), or the package's root document [lists publishers][index-publishers], [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] run this same check on every install. You pass no flags and add no step. See [Verify by default](#supply-chain-auto-verify).
 :::
 
 ## Verify without network access \{#supply-chain-offline\}
@@ -45,6 +51,8 @@ Verification has two separate network surfaces. One is the registry that holds t
 
 So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-trusted-root] carries the Fulcio CA, the certificate-transparency log keys and the pinned Rekor key together, so OCX fetches nothing:
 
+<ShellSession>
+
 ```shell
 ocx --offline package verify \
   -p linux/amd64 \
@@ -53,6 +61,8 @@ ocx --offline package verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.internal/pkg:1.0
 ```
+
+</ShellSession>
 
 A successful online verify also caches the trust material it used. A later [`--offline`][arg-offline] verify against the same Rekor instance reuses that cache, so you can drop `--sigstore-trusted-root`. On a fleet, nobody passes the flag. The trust root is distributed once through configuration. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
@@ -66,12 +76,15 @@ A [`[[trust.policy]]`][config-trust] entry only helps if the check it describes 
 
 Two sources can cover a package. A policy in the operator `config.toml` covers it by scope. A root that lists [`publishers`][index-publishers] covers it with no local configuration. When both apply, both must accept the signature.
 
-Once a package is covered, every command that fetches it verifies its signature. That includes [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull]. It also includes every command that installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] and [`ocx patch test`][cmd-patch-test]). You add no flag and no separate step:
+Once a package is covered, every command that fetches it verifies its signature. That includes [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull]. It also includes every command that installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] and [`ocx patch test`][cmd-patch-test]). You add no flag and no separate step. With the `ghcr.io/acme/*` policy from the previous section in place:
+
+<ShellSession>
 
 ```shell
-# with the ghcr.io/acme/* policy from the previous section in place
 ocx package install ghcr.io/acme/tool:1.0
 ```
+
+</ShellSession>
 
 The check runs once the manifest digest resolves, before OCX downloads any layer. A tampered digest or a signer outside the pinned identity aborts the install at that point. The exit codes match [`ocx package verify`][cmd-package-verify]:
 
@@ -84,7 +97,7 @@ The check runs once the manifest digest resolves, before OCX downloads any layer
 | `79` | Missing signature |
 | `65` | Tampered bundle, or a malformed publisher entry (`publishers_invalid`) |
 
-Nothing has reached the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
+Nothing has reached the object store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
 
 Trust applies per package. A package whose root lists no publishers and that lies outside every `[[trust.policy]]` scope installs unverified. OCX logs an `INFO` line that nothing covered it, and nothing blocks. The same rule applies to transitive dependencies, which are verified only if their own root or a policy covers them.
 
@@ -125,4 +138,4 @@ Under [`--offline`][arg-offline], a policy-covered install needs its trust mater
 [config-trust]: ../reference/configuration.md#keys-trust
 [index-publishers]: ./declare-publishers.mdx#supply-chain-publishers
 [index-publishers-signatures]: ./declare-publishers.mdx#supply-chain-publishers-signatures
-[in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md
+[in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.mdx

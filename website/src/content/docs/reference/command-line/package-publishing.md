@@ -143,7 +143,7 @@ That covers a rolling tag missing a platform, one pointing at outdated content, 
 
 Read-only. It authenticates for pull only and never writes anything.
 
-Give a tag (`cmake:3.28`) to narrow the audit to that part of the graph.
+Give a tag (`nodejs/node:24`) to narrow the audit to that part of the graph.
 
 Exits 0 when everything agrees, 65 when anything does not, and 64 when a package names a digest or a tag that is not a version.
 
@@ -151,11 +151,11 @@ Nothing re-checks the cascade graph if a cascade push is interrupted partway thr
 
 Identifiers may be logical or physical.
 
-A logical one (a namespace with an index configured, such as `ocx.sh/kitware/cmake:3.28`) resolves to its registry location as `ocx package install` does. It also fetches the namespace's live index root.
+A logical one (a namespace with an index configured, such as `ocx.sh/nodejs/node:24`) resolves to its registry location as `ocx package install` does. It also fetches the namespace's live root document.
 
-That adds a third finding layer, index staleness, which compares each observed alias digest with the digest committed in the index. A physical one (`ghcr.io/ocx-contrib/cmake:3.28`) skips that layer.
+That adds a third finding layer, index staleness, which compares each observed rolling-tag digest with the digest committed in the index. A physical one (`ghcr.io/ocx-contrib/nodejs/node:24`) skips that layer.
 
-The tag on an identifier selects the scope. No tag audits every alias tag in every variant track.
+The tag on an identifier selects the scope. No tag audits every rolling tag in every variant track.
 
 `:latest` audits only the default variant's track.
 
@@ -183,13 +183,13 @@ Exits 0 when every attempted write succeeded. Exits 65 when a finding remains, i
 
 Exits 64 when a package names a digest or a tag that is not a version, or when `--tags-file` is given more than one package.
 
-`repair` writes by default, since `check` is already the read-only preview; `--dry-run` computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag writes only the aliases that build owns: a pre-release build never moves a stable alias.
+`repair` writes by default, since `check` is already the read-only preview; `--dry-run` computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag writes only the rolling tags that build owns: a pre-release build never moves a stable rolling tag.
 
-An alias made of one build's entries alone is written as that build's own index, byte for byte, so it carries the build tag's digest. For any other broken alias `repair` rebuilds the whole index from the same fold `check` diffs against and preserves every observed entry the fold does not supersede.
+A rolling tag made of one build's entries alone is written as that build's own index, byte for byte, so it carries the build tag's digest. For any other broken rolling tag `repair` rebuilds the whole index from the same fold `check` diffs against and preserves every observed entry the fold does not supersede.
 
-That includes annotations already on the index, non-platform entries such as attestations, and orphaned alias tags whose child manifests still exist. A missing referenced manifest is dropped only if every entry naming that digest is an orphan slot.
+That includes annotations already on the index, non-platform entries such as attestations, and orphaned rolling tags whose child manifests still exist. A missing referenced manifest is dropped only if every entry naming that digest is an orphan slot.
 
-Otherwise the whole alias is refused and reported while other aliases still write.
+Otherwise the whole rolling tag is refused and reported while other rolling tags still write.
 
 Writes are batched after the whole plan is built and run concurrently per tag.
 
@@ -199,11 +199,11 @@ There is no conditional-request guard, so avoid repairing a repository with a pu
 
 Reaching the public index with the fix is a second hop through `ocx package announce`. Refreshing one machine's local copy is `ocx index update`'s job.
 
-`--tags-file` records the tags whose write landed (not `raced`, `refused` or `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for an alias or whole-graph request), unioned with every tag an index-staleness finding names, so one file covers both hops and a retry after a failed announce still lists the tags the first run moved. It is written on every run, empty included, so a workflow can feed it to `announce` unconditionally.
+`--tags-file` records the tags whose write landed (not `raced`, `refused` or `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for a rolling-tag or whole-graph request), unioned with every tag an index-staleness finding names, so one file covers both hops and a retry after a failed announce still lists the tags the first run moved. It is written on every run, empty included, so a workflow can feed it to `announce` unconditionally.
 
 A preview contributes no landed tag, and its plan is in the JSON report as each entry's `planned`.
 
-A follow-up `announce` updates or creates the listed aliases; a repair never produces a removal.
+A follow-up `announce` updates or creates the listed rolling tags; a repair never produces a removal.
 
 ```text
 ocx package cascade repair [OPTIONS] <PACKAGES>...
@@ -240,7 +240,7 @@ A re-claim that moves the description drops the README and logo blobs the previo
 
 `--index-repo`, `--forge`, `--fork` and `--output` are one grammar shared with `announce`, including forge selection, nested GitLab groups and self-hosted instances.
 
-An owner is a `login:id` pair, and the numeric id is what matters, since logins get renamed. Without `--owner`, ocx takes the CI user variables (`GITLAB_USER_LOGIN` with `GITLAB_USER_ID`, or `GITHUB_ACTOR` with `GITHUB_ACTOR_ID`, both halves required), else the identity behind the credential.
+An owner is a `login:id` pair, and the numeric id is what matters, since logins get renamed. Without `--owner`, OCX takes the CI user variables (`GITLAB_USER_LOGIN` with `GITLAB_USER_ID`, or `GITHUB_ACTOR` with `GITHUB_ACTOR_ID`, both halves required), else the identity behind the credential.
 
 A bot account is refused at exit 64. The report's `owner_identity_source` says which rule produced the list.
 
@@ -295,7 +295,7 @@ The tag's image index is merged one platform at a time, so copying `linux/amd64`
 
 The report has one row per platform the target offers afterwards, labelled `added`, `unchanged`, `replaced` or `kept (not in source)`. That tells a filtered promotion that left a mixed index apart from a complete one.
 
-A second identical copy changes nothing but is not free. Every platform re-fetches and re-PUTs its leaf manifest and, with `--referrers`, its referrer set.
+A second identical copy changes nothing but is not free. Every platform re-fetches and re-PUTs its platform manifest and, with `--referrers`, its referrer set.
 
 Each index is re-PUT. Only blob bodies are skipped, via a HEAD against the target.
 
@@ -349,17 +349,17 @@ With neither `--platform` nor `--identifier` no receipt is written.
 
 `--bin-scan` also verifies a declared list: an executable missing from it, or a declared name that exists but is not executable, fails with exit 65. `--no-bin-scan` never scans.
 
-The scan only fills the sidecar written next to the output, never the authored `-m` file. It considers only `${installPath}`-rooted `path` variables with interface visibility and no render modifier.
+The scan only fills the sidecar written next to the output, never the authored `-m` file. It considers only `${self.installPath}`-rooted `path` variables with interface visibility and no render modifier.
 
 Anything else needs a hand-authored `binaries`.
 
 A scan needs a host that can evaluate the target's executable convention. A Windows host targeting anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan.
 
-The exception is metadata with no `${installPath}`-rooted `PATH` variable of interface visibility, which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.
+The exception is metadata with no `${self.installPath}`-rooted `PATH` variable of interface visibility, which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.
 
 An unreadable content directory exits 74.
 
-With `--metadata` and a Linux or `any` target, `create` also checks the libc the binaries need against the `os.features` the platform declares. It reads the ELF interpreter header of every file placed on an interface `PATH` directory.
+With `--metadata` and a Linux or `any` target, `create` also checks the libc the binaries need against the `os.features` the platform declares. It reads the dynamic loader named in the `PT_INTERP` program header of every file placed on an interface `PATH` directory.
 
 The check runs before the archive is written, so a refusal leaves no bundle. It reads only the dynamic loader.
 
@@ -508,7 +508,7 @@ Keyless by default, or under `--key`. Keyless, it generates an ephemeral ECDSA P
 
 It then signs the manifest digest and logs a Rekor v1 `hashedrekord` entry (Rekor v2 is not supported yet).
 
-The resulting Sigstore bundle v0.3 is pushed as a referrer of the target manifest, where `ocx package verify` and `cosign verify` find it. The push uses the Referrers API where the registry has one and the fallback index where it does not.
+The resulting Sigstore bundle v0.3 is pushed as a referrer of the target manifest, where `ocx package verify` and `cosign verify` find it. The push uses the Referrers API where the registry has one and the fallback tag where it does not.
 
 `--signature-format simplesigning` (or `both`) also writes the cosign `sha256-<hex>.sig` sidecar tag for consumers that read only that shape.
 
@@ -522,7 +522,7 @@ A tag that resolves to a single manifest is skipped with a warning. The sweep co
 
 When every failure shares one exit code, the sweep returns that code; a mix returns 1.
 
-A signature is a referrer of a digest, not a tag, so the cascade aliases of one release share one signature. Tags after the first to name a given index are reported `covered`.
+A signature is a referrer of a digest, not a tag, so the rolling tags of one release share one signature. Tags after the first to name a given index are reported `covered`.
 
 `sign` appends rather than replaces, so re-running a sweep adds one referrer per distinct index, and `verify` reads at most eight signature candidates.
 
@@ -581,11 +581,11 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... [-- <COMMAND>..
 | `--clean` |  | Start the child from an empty environment holding only the composed variables (plus `SystemRoot` on Windows) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--identifier`, `-i` | `IDENTIFIER` | Identifier under which the package is materialized. Tag form (`repo:tag`) only; an explicit `@digest` is rejected (the digest is computed locally during this command and supplying one would conflict) |
-| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
+| `--isolate` |  | Remove every value OCX applied to the calling environment before composing |
 | `--junit` | `PATH` | Write a JUnit XML report for the scripted run to PATH, truncating an existing file, even on a red run; needs `--script`, and an unwritable path exits 74 |
 | `--keep` |  | Preserve the temp build directory after the command exits. Path is printed to stderr. Default temp root is `$OCX_HOME/temp/test/` |
 | `--metadata`, `-m` | `METADATA` | Path to the package metadata JSON file. Defaults to a sibling of the first file layer (e.g. `pkg.tar.gz` -> `pkg-metadata.json`). Required when no file layers are provided |
-| `--output`, `-o` | `OUTPUT` | Materialize into DIR instead of an auto-managed temp dir. DIR must not exist (created by ocx) or be empty. Implies keep - the dir is never deleted by ocx. Must reside on the same filesystem as `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy |
+| `--output`, `-o` | `OUTPUT` | Materialize into DIR instead of an auto-managed temp dir. DIR must not exist (created by OCX) or be empty. Implies keep - the dir is never deleted by OCX. Must reside on the same filesystem as `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy |
 | `--platform`, `-p` | `PLATFORM` | Target platform (e.g. `linux/amd64`). An explicit value is used as given. Omit it to take the platform the build receipt beside the bundle recorded; a usage error (exit 64) when neither names one. Parity with `package push` |
 | `--script` | `PATH\|-` | Path to a Starlark test script. Mutually exclusive with the trailing command. When given, the materialized package env is interpreted by the embedded engine instead of exec'ing a command |
 | `--self` |  | Compose the package's private env surface (default: interface surface). Same semantics as `ocx exec --self` / `ocx env --self` |

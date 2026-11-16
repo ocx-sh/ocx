@@ -28,7 +28,7 @@ feature       = value ;                       (* e.g. "libc.glibc" *)
 |---|---|
 | `linux/amd64` | Linux on x86-64, no refinements |
 | `linux/arm/v7` | Linux on 32-bit ARM, [`variant`][oci-image-index] `v7` |
-| `linux/amd64+libc.glibc` | Linux on x86-64, requires the `libc.glibc` [`os.features`][oci-image-index] tag |
+| `linux/amd64+libc.glibc` | Linux on x86-64, requires the `libc.glibc` entry in [`os.features`][oci-image-index] |
 | `linux/amd64+libc.glibc,libc.musl` | Linux on x86-64, requires both glibc and musl (a dual-libc override) |
 | `linux/arm64/v8+libc.glibc` | Every field combined |
 | `wasip1/wasm` | A WebAssembly module targeting the WASI 0.1 ABI |
@@ -69,11 +69,11 @@ Only the pairs below parse, because a valid `os` and a valid `arch` do not alway
 
 ## Compatibility {#compatibility}
 
-OCX evaluates the directed relation `is_compatible(required, offered)` wherever a platform decision is made. Those places are resolving an install against an [OCI Image Index][oci-image-index], reading a locked digest out of `ocx.lock` and pinning a dependency during [`ocx package create`][cmd-package-create].
+OCX evaluates the directed relation `is_compatible(required, offered)` wherever a platform decision is made. Those places are resolving an install against an [image index][oci-image-index], reading a locked digest out of `ocx.lock` and pinning a dependency during [`ocx package create`][cmd-package-create].
 
 ### The relation {#compatibility-relation}
 
-`is_compatible(required, offered)` reads "does `offered` satisfy `required`?", where `required` is the detected host, an explicit `--platform` value or a lock lookup key and `offered` is an image-index child platform. The relation is not symmetric.
+`is_compatible(required, offered)` reads "does `offered` satisfy `required`?", where `required` is the detected host, an explicit `--platform` value or a lock lookup key and `offered` is an image index child platform. The relation is not symmetric.
 
 - An `any` offer satisfies every requirement.
 - An `any` requirement is satisfied only by an `any` offer.
@@ -108,7 +108,7 @@ When an image index offers several compatible manifests for one requirement, OCX
 
 ## See Also {#see-also}
 
-- [Multi-Platform Packages][authoring-multi-platform]
+- [Publish for several platforms][authoring-multi-platform]
 - [`--platform` flag reference][cmd-platform-option]
 - [Dependencies][reference-dependencies]
 - [Lock format][in-depth-project-lock-format]
@@ -129,6 +129,6 @@ When an image index offers several compatible manifests for one requirement, OCX
 
 <!-- authoring -->
 [authoring-multi-platform]: ../publishing/multi-platform.mdx
-[authoring-libc-selection]: ../publishing/libc-variants.md#libc-selection
+[authoring-libc-selection]: ../publishing/libc-variants.mdx#libc-selection
 [authoring-multi-platform-wasm]: ../publishing/multi-platform.mdx#wasm
 [cmd-package-create-libc-check]: ../publishing/build-and-push.mdx#create-libc-check

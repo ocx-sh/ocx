@@ -1,5 +1,5 @@
 ---
-title: "Machine Interface"
+title: "Machine interface"
 ---
 <!-- doc_type: reference -->
 
@@ -44,7 +44,7 @@ Two kinds of version exist, and both are plain integers.
   - a flag, argument, output mode or exit code is removed or renumbered
   - a value keeps its name but changes meaning
 - A version does not change for additions: a new property, root, enum value, union variant, command or flag.
-- A contract ledger in the repository records each break for tooling, and a gate refuses a break missing from the ledger or the version bump. What changed in a release is stated in the [changelog][changelog].
+- What changed in a release is stated in the [changelog][changelog].
 
 ## Open Values {#machine-interface-open-values}
 
@@ -83,7 +83,7 @@ A command that fails without writing a report prints one error document on stdou
     "kind": "auth_error",
     "detail": "oidc_token_rejected",
     "message": "Fulcio rejected OIDC token: issuer not in trust root",
-    "context": { "identifier": "ocx.sh/cmake:3.28" }
+    "context": { "identifier": "ghcr.io/acme/mytool:1.0.0" }
   }
 }
 ```
@@ -102,7 +102,7 @@ A command that fails without writing a report prints one error document on stdou
 - A failure with no slug, such as a plain I/O error, carries only `error.kind`.
 - A `--format json` or `--json` after a bare `--` belongs to the child command and asks for nothing.
 - Under `--quiet`, a failure still prints the error document.
-- A child run by [`ocx exec`][cmd-exec] is the one case where the exit code is not ocx's own: the child's code is forwarded unchanged.
+- A child run by [`ocx exec`][cmd-exec] is the one case where the exit code is not OCX's own: the child's code is forwarded unchanged.
 
 See [exit codes][cmd-exit-codes].
 
@@ -126,7 +126,6 @@ Each document is described by a JSON Schema published on this site, so a program
 - The `project-lock` schema carries a top-level `$comment` marking `ocx.lock` machine-generated.
 - The `reports` schema lists each root as a wrapper with `schema_version` pinned to a constant.
 - The schemas allow unknown properties and encode [open values](#machine-interface-open-values) as strings that carry a documented list of known values.
-- Generating locally: `task schema:generate` writes the schemas to `website/src/public/schemas/`.
 - Validation: `uvx check-jsonschema --schemafile https://ocx.sh/schemas/metadata/v1.json metadata.json` ([check-jsonschema][check-jsonschema]).
 
 See the [command reference][cmd-reference] for flags, arguments and output modes, and the [environment reference][env-reference] for the `OCX_*` variables.

@@ -10,8 +10,7 @@ use crate::{conventions, options};
 /// Inspect what sits at one or more package references. Read-only - nothing
 /// is installed and no symlinks are created. Accepts a tag or an `@digest`.
 ///
-/// Output adapts to each reference's shape: an image index lists its platform
-/// candidates, a single manifest emits its metadata and layers, `--resolve`
+/// Output adapts to each reference's shape: an image index lists its platforms, a single manifest emits its metadata and layers, `--resolve`
 /// adds the resolution chain and `--closure` the dependency closure. Several
 /// packages render as a JSON object keyed by identifier. A script testing
 /// whether `--closure` ran checks the `closure` key, not `resolution`, which
@@ -28,7 +27,7 @@ pub struct PackageInspect {
     /// Platform-select through the index and emit the OCI resolution chain
     /// (pinned identifier and walk-order chain digests: index, manifest,
     /// config) alongside the metadata and layers. Without `--resolve` or
-    /// `--closure`, an image-index reference lists its platform candidates
+    /// `--closure`, an image index reference lists its platforms
     /// instead.
     #[clap(long)]
     resolve: bool,

@@ -6,7 +6,7 @@ body:
     id: name
     attributes:
       label: Package name
-      description: Short name for use in OCX (e.g. `cmake`, `uv`, `buf`)
+      description: Short name for use in OCX (e.g. `node`, `uv`, `buf`)
       placeholder: my-tool
     validations:
       required: true

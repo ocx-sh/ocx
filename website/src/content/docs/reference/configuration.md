@@ -26,11 +26,11 @@ traffic in addition to the platform trust store.
 A relative path resolves against the directory of the `config.toml` that declared it.
 
 Overridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every
-`config.toml` tier unless the pair is declared at system scope.
+`config.toml` tier unless the pair is declared in the system tier.
 
 - Type: `string`
 - Default: unset
-- See: [Proxy and CA](../integration/proxy-and-ca.md)
+- See: [Proxy and corporate CA](../integration/proxy-and-ca.mdx)
 
 ## `extra_ca_certs_pem` {#keys-extra-ca-certs-pem}
 
@@ -40,7 +40,7 @@ This is the form a fleet receives; `ocx config push` inlines a path-form `extra_
 
 - Type: `string`
 - Default: unset
-- See: [Proxy and CA](../integration/proxy-and-ca.md)
+- See: [Proxy and corporate CA](../integration/proxy-and-ca.mdx)
 
 ## `managed` {#keys-managed}
 
@@ -55,7 +55,7 @@ Absent → no managed tier configured (opt-in, seeded by
 `ocx self setup --managed-config`).
 
 - Type: `table`
-- See: [Manage configuration centrally](../guides/manage-config-centrally.mdx)
+- See: [Manage configuration for a fleet](../guides/manage-config-centrally.mdx)
 
 ## `managed.interval` {#keys-managed-interval}
 
@@ -64,7 +64,7 @@ Defaults to `"1d"`.
 
 - Type: `string`
 - Default: `"1d"`
-- See: [Manage configuration centrally](../guides/manage-config-centrally.mdx)
+- See: [Manage configuration for a fleet](../guides/manage-config-centrally.mdx)
 
 ## `managed.refresh` {#keys-managed-refresh}
 
@@ -81,7 +81,7 @@ An unknown value is ignored with a warning, so the default applies.
   - `notify`: A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.
   - `manual`: The background check is skipped entirely; only an explicit command refreshes.
 - Default: `"notify"`
-- See: [Manage configuration centrally](../guides/manage-config-centrally.mdx)
+- See: [Manage configuration for a fleet](../guides/manage-config-centrally.mdx)
 
 ## `managed.required` {#keys-managed-required}
 
@@ -94,7 +94,7 @@ Fail posture when the snapshot is required but absent.
 
 - Type: `boolean`
 - Default: `true`
-- See: [Manage configuration centrally](../guides/manage-config-centrally.mdx)
+- See: [Manage configuration for a fleet](../guides/manage-config-centrally.mdx)
 
 ## `managed.source` {#keys-managed-source}
 
@@ -105,7 +105,7 @@ Absent → no managed tier configured. The `OCX_MANAGED_CONFIG` environment vari
 overrides it for one invocation.
 
 - Type: `string`
-- See: [Manage configuration centrally](../guides/manage-config-centrally.mdx)
+- See: [Manage configuration for a fleet](../guides/manage-config-centrally.mdx)
 
 ## `mirrors.<name>` {#keys-mirrors}
 
@@ -122,7 +122,7 @@ and vice versa.
 
 - Type: `table`
 - Overridden by: [`OCX_MIRRORS`](./environment.md#ocx-mirrors) (per host and role; a role it omits still comes from `[mirrors]`)
-- See: [Corporate mirror](../guides/corporate-mirror.mdx)
+- See: [Use a corporate mirror](../guides/corporate-mirror.mdx)
 
 ## `mirrors.<name>.index` {#keys-mirrors-index}
 
@@ -130,7 +130,7 @@ Endpoint for index-tree traffic (`/config.json`, `/c`, `/p`) to this
 host, if an index role was declared for it.
 
 - Type: `string`
-- See: [Corporate mirror](../guides/corporate-mirror.mdx)
+- See: [Use a corporate mirror](../guides/corporate-mirror.mdx)
 
 ## `mirrors.<name>.registry` {#keys-mirrors-registry}
 
@@ -139,7 +139,7 @@ registry role was declared for it (a bare string, `{registry: ...}`,
 or `{registry: ..., index: ...}`).
 
 - Type: `string`
-- See: [Corporate mirror](../guides/corporate-mirror.mdx)
+- See: [Use a corporate mirror](../guides/corporate-mirror.mdx)
 
 ## `patches` {#keys-patches}
 
@@ -152,7 +152,7 @@ They are layered onto unmodified upstream packages at compose time.
 Absent → no patch tier configured (opt-in, not required).
 
 - Type: `table`
-- See: [Patch packages](../guides/patch-packages.mdx)
+- See: [Patch packages for your infrastructure](../guides/patch-packages.mdx)
 
 ## `patches.path` {#keys-patches-path}
 
@@ -163,7 +163,7 @@ outside `[a-zA-Z0-9._-]` become `_`); `{repository}` — the base identifier's r
 
 - Type: `string`
 - Default: `"{registry}/{repository}"`
-- See: [Patch packages](../guides/patch-packages.mdx)
+- See: [Patch packages for your infrastructure](../guides/patch-packages.mdx)
 
 ## `patches.registry` {#keys-patches-registry}
 
@@ -174,7 +174,7 @@ Absent → no patch tier configured.
 
 - Type: `string`
 - Overridden by: [`OCX_PATCHES`](./environment.md#ocx-patches)
-- See: [Patch packages](../guides/patch-packages.mdx)
+- See: [Patch packages for your infrastructure](../guides/patch-packages.mdx)
 
 ## `patches.required` {#keys-patches-required}
 
@@ -187,7 +187,7 @@ Fail posture when a matched companion is unavailable.
 
 - Type: `boolean`
 - Default: `true`
-- See: [Patch packages](../guides/patch-packages.mdx)
+- See: [Patch packages for your infrastructure](../guides/patch-packages.mdx)
 
 ## `records` {#keys-records}
 
@@ -195,13 +195,13 @@ Execution-record sink (`[records]`).
 
 Designates where OCX writes one JSON resolution record per tool launch —
 the resolved package closure with digests, plus the resolved executable.
-Declared at SYSTEM scope it clamps: no lower tier can redirect or
+Declared in the system tier it clamps: no lower tier can redirect or
 disable it.
 
 Absent → no records written (opt-in).
 
 - Type: `table`
-- See: [Execution records](../explanation/execution-records.md)
+- See: [Execution records](../explanation/execution-records.mdx)
 
 ## `records.dir` {#keys-records-dir}
 
@@ -210,7 +210,7 @@ Directory records are written to. Absent → recording is off.
 Overridden by the `--records-dir` flag and the `OCX_RECORDS_DIR` environment variable.
 
 - Type: `string`
-- See: [Execution records](../explanation/execution-records.md)
+- See: [Execution records](../explanation/execution-records.mdx)
 
 ## `records.name` {#keys-records-name}
 
@@ -222,7 +222,7 @@ Overridden by the `--records-name` flag and the `OCX_RECORDS_NAME` environment v
 
 - Type: `string`
 - Default: `"{time}-{pid}-{rand}.json"`
-- See: [Execution records](../explanation/execution-records.md)
+- See: [Execution records](../explanation/execution-records.mdx)
 
 ## `records.required` {#keys-records-required}
 
@@ -234,7 +234,7 @@ never settable from the environment or a flag.
 Defaults `false` unlocked, `true` when SYSTEM-locked.
 
 - Type: `boolean`
-- See: [Execution records](../explanation/execution-records.md)
+- See: [Execution records](../explanation/execution-records.mdx)
 
 ## `registries.<name>` {#keys-registries}
 
@@ -261,18 +261,18 @@ namespace in a config file you control suppresses the compiled-in index; the man
 and `OCX_MIRRORS` cannot.
 
 - Type: `string`
-- See: [Public index](../explanation/public-index.md), [Serve an index](../guides/serve-an-index.md)
+- See: [Public index](../explanation/public-index.mdx), [Serve an index](../guides/serve-an-index.mdx)
 
 ## `registries.<name>.insecure` {#keys-registries-insecure}
 
 Contact this registry over plain HTTP instead of HTTPS.
 
-Unioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating
+Unioned with `OCX_INSECURE_REGISTRIES`, except that a system-tier entry stating
 `insecure = false` locks that host shut against the env list too.
 
 - Type: `boolean`
 - Default: `false`
-- See: [Corporate mirror](../guides/corporate-mirror.mdx)
+- See: [Use a corporate mirror](../guides/corporate-mirror.mdx)
 
 ## `registries.<name>.signatures` {#keys-registries-signatures}
 
@@ -303,19 +303,19 @@ Enterprise packages API of a `containers.<host>` registry that this namespace's 
 Only an exact hostname vouches for that; a CIDR block does not.
 
 - Type: `array`
-- See: [Corporate mirror](../guides/corporate-mirror.mdx)
+- See: [Use a corporate mirror](../guides/corporate-mirror.mdx)
 
 ## `registry` {#keys-registry}
 
 Global registry-subsystem settings (`[registry]` section).
 
 - Type: `table`
-- See: [Configure ocx](../guides/configure-ocx.mdx)
+- See: [Configure OCX defaults](../guides/configure-ocx.mdx)
 
 ## `registry.default` {#keys-registry-default}
 
-Default registry for bare identifiers (e.g. `cmake:3.28` expands to
-`<default>/cmake:3.28`).
+Default registry for bare identifiers (e.g. `nodejs/node:24` expands to
+`<default>/nodejs/node:24`).
 
 Overridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a
 literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never resolved through
@@ -323,7 +323,7 @@ the `[registries.<name>]` table.
 
 - Type: `string`
 - Default: `"ocx.sh"`
-- See: [Configure ocx](../guides/configure-ocx.mdx)
+- See: [Configure OCX defaults](../guides/configure-ocx.mdx)
 
 ## `shell` {#keys-shell}
 
@@ -352,7 +352,7 @@ Whether shell completions load, with the same precedence as `hook`:
 The activation consent whitelist (`[shell.consent]`).
 
 - Type: `table`
-- See: [Shell consent](../explanation/shell-consent.mdx)
+- See: [Consent grammar](../explanation/shell-consent.mdx)
 
 ## `shell.consent.namespaces` {#keys-shell-consent-namespaces}
 
@@ -363,21 +363,21 @@ One pattern, or one `{include, exclude}` table where `exclude` beats `include`, 
 
 - Type: `string or table`
 - Joined by: [`OCX_CONSENT_NAMESPACES`](./environment.md#ocx-consent-namespaces) (the two are unioned across tiers)
-- See: [Shell consent](../explanation/shell-consent.mdx)
+- See: [Consent grammar](../explanation/shell-consent.mdx)
 
 ## `shell.consent.namespaces.exclude` {#keys-shell-consent-namespaces-exclude}
 
 Patterns carved back out. Beats `include` wherever both match.
 
 - Type: `array`
-- See: [Shell consent](../explanation/shell-consent.mdx)
+- See: [Consent grammar](../explanation/shell-consent.mdx)
 
 ## `shell.consent.namespaces.include` {#keys-shell-consent-namespaces-include}
 
 Patterns the policy covers. Required in the table form; an empty list drops the `[shell.consent]` table with a warning.
 
 - Type: `array`
-- See: [Shell consent](../explanation/shell-consent.mdx)
+- See: [Consent grammar](../explanation/shell-consent.mdx)
 
 ## `shell.consent.paths` {#keys-shell-consent-paths}
 
@@ -395,7 +395,7 @@ A `paths` grant is drift-blind and writes no stamp, so revoking it is immediate.
 - Type: `array`
 - Default: `[]`
 - Joined by: [`OCX_CONSENT_PATHS`](./environment.md#ocx-consent-paths) (the two are unioned across tiers)
-- See: [Shell consent](../explanation/shell-consent.mdx)
+- See: [Consent grammar](../explanation/shell-consent.mdx)
 
 ## `shell.hook` {#keys-shell-hook}
 
@@ -421,7 +421,7 @@ the session-PATH stores alike. Absent means true.
 
 ## `shell.profiles` {#keys-shell-profiles}
 
-Which shell profile files receive the managed ocx block.
+Which shell profile files receive the managed OCX block.
 
 Absent means auto-detect fresh on every run; an empty list means write
 no profile blocks at all.
@@ -434,12 +434,12 @@ no profile blocks at all.
 
 Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
 
-The global toolchain home ignores this key, and the directory need not exist yet.
+The global toolchain tree ignores this key, and the directory need not exist yet.
 
 - Type: `string`
 - Default: unset (each project renders at `<project>/.ocx/toolchain`)
 - Environment fallback: [`OCX_TOOLCHAIN_DIR`](./environment.md#ocx-toolchain_dir) (read only when no config file sets the key)
-- See: [Project toolchain](../guides/project-toolchain.mdx)
+- See: [ocx.toml in depth](../guides/project-toolchain.mdx)
 
 ## `trust` {#keys-trust}
 
@@ -452,7 +452,7 @@ At verify time this operator set takes precedence over the project `ocx.toml`.
 Consumed by `ocx package verify`.
 
 - Type: `table`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy` {#keys-trust-policy}
 
@@ -460,7 +460,7 @@ The declared policies. Empty when `[trust]` is present but lists none.
 
 - Type: `array`
 - Default: `[]`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.builder` {#keys-trust-policy-builder}
 
@@ -471,7 +471,7 @@ Ignored in signature mode, without an error.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope` {#keys-trust-policy-scope}
 
@@ -486,21 +486,21 @@ scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"
 
 - Type: `string or table`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope.exclude` {#keys-trust-policy-scope-exclude}
 
 Patterns carved back out. Beats `include` wherever both match.
 
 - Type: `array`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope.include` {#keys-trust-policy-scope-include}
 
 Patterns the policy covers. Empty is a catch-all.
 
 - Type: `array`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers` {#keys-trust-policy-signers}
 
@@ -519,7 +519,7 @@ catch-all.
 
 - Type: `array`
 - Default: `[]`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.claims.<name>` {#keys-trust-policy-signers-claims}
 
@@ -533,7 +533,7 @@ name matches nobody.
 Alone or beside `identity` / `identity_regexp`.
 
 - Type: `string`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.identity` {#keys-trust-policy-signers-identity}
 
@@ -543,7 +543,7 @@ Mutually exclusive with `identity_regexp`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.identity_regexp` {#keys-trust-policy-signers-identity-regexp}
 
@@ -553,7 +553,7 @@ Mutually exclusive with `identity`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.key` {#keys-trust-policy-signers-key}
 
@@ -563,7 +563,7 @@ Mutually exclusive with `key_pem`, and refused in a managed-config payload.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.key_pem` {#keys-trust-policy-signers-key-pem}
 
@@ -573,7 +573,7 @@ Mutually exclusive with `key`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.kind` {#keys-trust-policy-signers-kind}
 
@@ -583,8 +583,8 @@ Selects the variant of this entry; the other fields depend on the value.
 - Values:
   - `keyless`: `{ kind = "keyless", identity | identity_regexp, oidc_issuer }`.
   - `key`: `{ kind = "key", key | key_pem }`.
-  - `unknown`: A `kind` this build does not know — an entry written by a newer ocx.
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+  - `unknown`: A `kind` this build does not know — an entry written by a newer OCX.
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.oidc_issuer` {#keys-trust-policy-signers-oidc-issuer}
 
@@ -592,7 +592,7 @@ Exact expected OIDC issuer URL (byte-equal).
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore` {#keys-trust-sigstore}
 
@@ -604,7 +604,7 @@ consulted.
 
 - Type: `table`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `trust.sigstore.fulcio_url` {#keys-trust-sigstore-fulcio-url}
 
@@ -613,7 +613,7 @@ omitted.
 
 - Type: `string`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `trust.sigstore.rekor_upload` {#keys-trust-sigstore-rekor-upload}
 
@@ -624,7 +624,7 @@ Absent means off; keyless signing always uploads and ignores this field.
 
 - Type: `boolean`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `trust.sigstore.rekor_url` {#keys-trust-sigstore-rekor-url}
 
@@ -633,7 +633,7 @@ Default Rekor base URL for `ocx package sign` / `verify` when
 
 - Type: `string`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `trust.sigstore.trusted_root` {#keys-trust-sigstore-trusted-root}
 
@@ -646,7 +646,7 @@ Mutually exclusive with `trusted_root_json`.
 
 - Type: `string`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `trust.sigstore.trusted_root_json` {#keys-trust-sigstore-trusted-root-json}
 
@@ -658,18 +658,18 @@ with `trusted_root`.
 
 - Type: `string`
 - Default: unset
-- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.md)
+- See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
 ## `update` {#keys-update}
 
-Background update checks (`[update]`): the posture for ocx itself and for the toolchain,
+Background update checks (`[update]`): the posture for OCX itself and for the toolchain,
 plus the interval between checks.
 
 A personal setting, read from `config.toml` only: a managed payload's `[update]` is
 ignored and an `ocx.toml` refuses it. An unknown value never fails a command.
 
 - Type: `table`
-- See: [Update ocx](../guides/update-ocx.mdx)
+- See: [Update or uninstall OCX](../guides/update-ocx.mdx)
 
 ## `update.interval` {#keys-update-interval}
 
@@ -679,11 +679,11 @@ Overridden by the `OCX_UPDATE_CHECK_INTERVAL` environment variable.
 
 - Type: `string`
 - Default: `"1d"`
-- See: [Update ocx](../guides/update-ocx.mdx)
+- See: [Update or uninstall OCX](../guides/update-ocx.mdx)
 
 ## `update.self` {#keys-update-self}
 
-What ocx does when a newer ocx is published: `apply` installs it after the command
+What OCX does when a newer OCX is published: `apply` installs it after the command
 finishes, `notify` (default) prints a notice, `manual` never checks.
 Overridden by the `OCX_SELF_UPDATE` environment variable.
 
@@ -693,11 +693,11 @@ Overridden by the `OCX_SELF_UPDATE` environment variable.
   - `notify`: A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.
   - `manual`: The background check is skipped entirely; only an explicit command refreshes.
 - Default: `"notify"`
-- See: [Update ocx](../guides/update-ocx.mdx)
+- See: [Update or uninstall OCX](../guides/update-ocx.mdx)
 
 ## `update.toolchain` {#keys-update-toolchain}
 
-What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice, `manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.
+What OCX does when a locked tool's tag has moved: `notify` (default) prints a notice, `manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.
 
 Overridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.
 
@@ -707,4 +707,4 @@ Overridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.
   - `notify`: A change prints a stderr notice naming the command that applies it; the check probes the registry but applies nothing.
   - `manual`: The background check is skipped entirely; only an explicit command refreshes.
 - Default: `"notify"`
-- See: [Update ocx](../guides/update-ocx.mdx)
+- See: [Update or uninstall OCX](../guides/update-ocx.mdx)

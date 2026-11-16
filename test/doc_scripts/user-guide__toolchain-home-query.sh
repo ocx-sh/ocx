@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$SCENARIO_TMP"
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 # region cast
 ocx pull
 ocx --format json shell state

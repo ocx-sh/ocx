@@ -123,12 +123,6 @@
 /docs/authoring/testing/#workflow
 /docs/changelog/
 /docs/changelog/#changelog
-/docs/contributing/bazel/
-/docs/contributing/bazel/#contributing-bazel
-/docs/contributing/bazel/#contributing-bazel-acceptance
-/docs/contributing/bazel/#contributing-bazel-first-build
-/docs/contributing/bazel/#contributing-bazel-grafana
-/docs/contributing/bazel/#contributing-bazel-warm-cache
 /docs/docker/
 /docs/docker/#build-auth
 /docs/docker/#copy-from
@@ -1019,3 +1013,14 @@
 /docs/user-guide/snapshot-tracks/#snapshot-tracks-rerun
 /docs/user-guide/snapshot-tracks/#snapshot-tracks-serialize
 /docs/user-guide/snapshot-tracks/#snapshot-tracks-teardown
+/docs/getting-started/install-ocx/#dev-builds
+/docs/getting-started/install-ocx/#install-bare-binary-what
+/docs/getting-started/install-ocx/#manual-pinned
+/docs/getting-started/install-ocx/#script-options
+/docs/getting-started/install-ocx/#session-path
+/docs/getting-started/install-ocx/#session-path-removal
+/docs/getting-started/install-ocx/#session-path-stores
+/docs/getting-started/install-ocx/#shells
+/docs/getting-started/install-ocx/#verify-signature
+/docs/getting-started/install-ocx/#with-script
+/docs/getting-started/first-project/#run

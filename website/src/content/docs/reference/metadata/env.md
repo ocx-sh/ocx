@@ -1,5 +1,5 @@
 ---
-title: "Metadata: Environment Variables"
+title: "Metadata: Environment variables"
 ---
 <!-- doc_type: reference -->
 
@@ -18,8 +18,8 @@ The `env` array feeds [`ocx package exec`][cmd-exec] and [`ocx env`][cmd-env-roo
 
 | Body | Resolves to |
 |---|---|
-| `${installPath}` | This package's own `content/` directory. |
-| `${self.installPath}` | Exact alias of `${installPath}`; see [Aliases](#env-interpolation-self). |
+| `${self.installPath}` | This package's own `content/` directory. |
+| `${installPath}` | Exact alias of `${self.installPath}`, kept for packages already published; see [Aliases](#env-interpolation-self). |
 | `${self.env.KEY}` | The resolved value of this package's own `KEY` var, declared earlier in the same `env` array. Env values only, not legal in entry-point `args`; see [`self.env`](#env-interpolation-self-env). |
 | `${deps.NAME.installPath}` | A declared dependency's `content/` directory, where `NAME` is the dependency's repository basename or its explicit `name` field. |
 
@@ -27,7 +27,7 @@ The `env` array feeds [`ocx package exec`][cmd-exec] and [`ocx env`][cmd-env-roo
 {
   "key": "PATH",
   "type": "path",
-  "value": "${self.installPath}/bin:${deps.cmake.installPath}/bin"
+  "value": "${self.installPath}/bin:${deps.node.installPath}/bin"
 }
 ```
 
@@ -36,7 +36,7 @@ The `env` array feeds [`ocx package exec`][cmd-exec] and [`ocx env`][cmd-env-roo
 
 #### Render Modifiers {#env-interpolation-render}
 
-The three install-path bodies accept a `:native` or `:posix` suffix, for example `${installPath:posix}`, that controls how path separators render. It is independent of `type`, which governs how the value as a whole composes.
+The three install-path bodies accept a `:native` or `:posix` suffix, for example `${self.installPath:posix}`, that controls how path separators render. It is independent of `type`, which governs how the value as a whole composes.
 
 - `:native` (default when omitted): Windows paths render with `\`, POSIX paths with `/`.
 - `:posix`: always `/`. It suits values read by tools that expect forward slashes regardless of host. Examples are an MSYS2/Git Bash binary or a value piped into a shell script.
@@ -46,7 +46,7 @@ The three install-path bodies accept a `:native` or `:posix` suffix, for example
 
 ```json
 [
-  { "key": "SDK_ROOT", "type": "constant", "value": "${installPath:posix}/sdk" },
+  { "key": "SDK_ROOT", "type": "constant", "value": "${self.installPath:posix}/sdk" },
   { "key": "SDK_TOOL", "type": "constant", "value": "${self.env.SDK_ROOT}/bin/tool" }
 ]
 ```
@@ -55,14 +55,14 @@ The three install-path bodies accept a `:native` or `:posix` suffix, for example
 
 Write `$${` to emit a literal `${`: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`. This is the only escape, and a bare `$` not immediately followed by `${` is ordinary text.
 
-- A value that ships another tool's `${…}` syntax, such as a devcontainer snippet, needs `$${workspaceFolder}` so ocx leaves it for that tool to resolve
+- A value that ships another tool's `${…}` syntax, such as a devcontainer snippet, needs `$${workspaceFolder}` so OCX leaves it for that tool to resolve
 
 #### Aliases {#env-interpolation-self}
 
-`${self.installPath}` is an exact alias of `${installPath}`: same referent, same resolution, interchangeable.
+`${installPath}` is an exact alias of `${self.installPath}`: same referent, same resolution, interchangeable.
 
-- Preferred in new values, because it reads unambiguously next to `${self.env.KEY}` and `${deps.NAME.installPath}`.
-- `${installPath}` and `${self.installPath}` are interchangeable.
+- Write `${self.installPath}` in new values, because it reads unambiguously next to `${self.env.KEY}` and `${deps.NAME.installPath}`.
+- `${installPath}` stays valid so packages already published keep resolving.
 
 #### `self.env` {#env-interpolation-self-env}
 
@@ -81,7 +81,7 @@ OCX claims the entire `${…}` namespace in a `value`: there is no fifth body an
 - A near-miss (`${slef.installPath}`) suggests the root it is closest to.
 - An unknown root (`${workspaceFolder}`) explains the `$${` escape.
 - A recognised root with an illegal body (`${self.env.A B}`) lists the supported bodies for that root.
-- A recognised namespace with an unknown leaf (`${deps.cmake.version}`) names the field and lists the leaves that exist for it (`installPath`).
+- A recognised namespace with an unknown leaf (`${deps.node.version}`) names the field and lists the leaves that exist for it (`installPath`).
 - Refusing (exit 65, naming the token): [`ocx env`][cmd-env-root], [`ocx package exec`][cmd-exec], [`ocx exec`][cmd-run], any environment composition, [`ocx package create`][cmd-package-create], [`ocx package push`][cmd-package-push].
 - Refusing at run time, after install: a generated entry-point launcher whose baked `args` element holds the token.
 - Succeeding on such a document: [`ocx package pull`][cmd-package-pull], [`ocx package install`][cmd-package-install], [`ocx package inspect`][cmd-package-inspect], [`ocx package description pull`][cmd-package-info], [`ocx package which`][cmd-package-which] and [`ocx package deps`][cmd-package-deps], none of which resolve `env` values. `ocx package description pull` never reads `env` at all, only the package's `__ocx.desc` tag.
@@ -158,7 +158,7 @@ Unlike `path` and `constant`, `separator` has no default in package metadata: a 
 - Rejected with exit 65, naming the variable: a separator that is empty, contains `=`, a newline or a carriage return, or edges the `value`.
 - Enforced wherever `metadata.json` is validated: [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push], and every later read.
 
-See [Env Composition][env-composition-list] for the per-key agreement rule across a composition.
+See [Environment composition][env-composition-list] for the per-key agreement rule across a composition.
 
 ### Entry Visibility {#env-entry-visibility}
 
@@ -172,7 +172,7 @@ Each `env` entry carries a `visibility` field that controls which surface the en
 
 - `"sealed"` is rejected at parse time on `env` entries, because an entry invisible on both surfaces is dead configuration.
 
-See [Env Composition][env-composition] for how entry values interact with dependency-edge visibility during the composition walk.
+See [Environment composition][env-composition] for how entry values interact with dependency-edge visibility during the composition walk.
 
 <!-- commands -->
 [cmd-exec]: ../command-line/package-consuming.md#package-exec

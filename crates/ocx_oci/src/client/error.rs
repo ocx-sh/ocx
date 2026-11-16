@@ -248,7 +248,7 @@ pub enum ClientError {
     #[exit(
         Unsupported,
         slug = "registry_delete_unsupported",
-        summary = "The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github"
+        summary = "The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes them"
     )]
     DeleteUnsupported { registry: String, status: u16 },
 

@@ -9,20 +9,25 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add --no-pull "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
+ocx add --no-pull "$PKG_NODEJS_NODE" "$PKG_ASTRAL_SH_UV"
 ocx env --lazy-mode always
-ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
-ocx exec --lazy-mode always -- cmake --version
-ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
+ocx package which --lazy-mode always "$PKG_NODEJS_NODE" "$PKG_ASTRAL_SH_UV"
+ocx exec --lazy-mode always -- node --version
+ocx package which --lazy-mode always "$PKG_NODEJS_NODE" "$PKG_ASTRAL_SH_UV"
 # endregion cast
+# The runner ships its own node: a composed environment that lost the package would let it answer and still exit 0.
+[[ "$(ocx exec --lazy-mode always -- node)" == marker-* ]] || {
+    echo "node did not resolve to the provisioned package" >&2
+    exit 1
+}
 
-# cmake was invoked, so its shim materialized into a real package. uv was
+# node was invoked, so its shim materialized into a real package. uv was
 # composed but never invoked, so it is still a shim — proving the deferral
 # is per-package, not an all-or-nothing property of the compose.
-cmake_which=$(ocx --format json package which --lazy-mode always "$PKG_KITWARE_CMAKE")
-cmake_kind=$(grep -o -m1 '"kind":[[:space:]]*"[a-z]*"' <<<"$cmake_which")
-[[ "$cmake_kind" == *package* ]] || {
-    echo "ERROR: expected cmake to be materialized after invocation, got: $cmake_kind" >&2
+node_which=$(ocx --format json package which --lazy-mode always "$PKG_NODEJS_NODE")
+node_kind=$(grep -o -m1 '"kind":[[:space:]]*"[a-z]*"' <<<"$node_which")
+[[ "$node_kind" == *package* ]] || {
+    echo "ERROR: expected node to be materialized after invocation, got: $node_kind" >&2
     exit 1
 }
 

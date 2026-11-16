@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$SCENARIO_TMP"
 # region cast
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 ocx add -g ci "$PKG_ASTRAL_SH_UV"
 ocx pull -g ci
 ocx lock

@@ -12,7 +12,7 @@ cd "$SCENARIO_TMP"
 mkdir demo
 cd demo
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 ocx pull
 ocx env
 ocx env --pinned

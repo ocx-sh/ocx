@@ -33,7 +33,7 @@ pub struct PackageCopy {
     ///
     /// Against a tag this filters the source index; omit it to copy every
     /// platform the source offers. Against a digest it *declares* the platform,
-    /// and exactly one is required - a leaf manifest carries no platform of its
+    /// and exactly one is required - a platform manifest carries no platform of its
     /// own, so there is nothing to read it from.
     #[clap(short = 'p', long = "platform")]
     platform: Vec<ocx_oci::Platform>,
@@ -71,7 +71,7 @@ pub struct PackageCopy {
     /// Record an OCI annotation on the target's image index. Repeatable.
     ///
     /// Merged into whatever the index already carries; a repeated key keeps the
-    /// last value. Leaf manifests are never touched - annotating one would
+    /// last value. Platform manifests are never touched - annotating one would
     /// change its digest, which is the one thing a copy must not do.
     #[clap(long = "annotation", value_name = "KEY=VALUE", value_parser = super::package_push::parse_annotation)]
     annotation: Vec<(String, String)>,

@@ -22,14 +22,14 @@ Install pre-built binaries with a single command, switch versions instantly, and
 curl -fsSL https://setup.ocx.sh/sh | sh
 
 # Install a package
-ocx package install kitware/cmake:4
+ocx package install nodejs/node:24
 
-# Run with a clean environment
-ocx package exec kitware/cmake:4 -- cmake --version
+# Run it
+ocx package exec nodejs/node:24 -- node --version
 
 # Switch versions
-ocx package install kitware/cmake:3 --select
-ocx package select kitware/cmake:4    # switch back
+ocx package install nodejs/node:22 --select
+ocx package select nodejs/node:24    # switch back
 ```
 
 See the [Getting Started guide][getting-started] for more.

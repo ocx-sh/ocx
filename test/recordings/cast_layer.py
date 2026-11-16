@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from recordings.cast_recorder import sanitize_text, truncate_digests_text
+from src.cast_screen import problems
 
 if TYPE_CHECKING:
     from recordings.cast_recorder import CastRecorder
@@ -152,8 +155,8 @@ def maybe_record_cast(
         recorder: An open ``CastRecorder`` (or compatible fake).  Must support
             ``run_command(display_cmd, actual_cmd, **kwargs)``,
             ``build(title=…)``, and the ``CastRecording`` chain
-            (``.strip_progress().sanitize(…).truncate_digests()``
-            ``.realign_tables().auto_height(…).write(path)``).
+            (``.strip_progress().realign_tables(…).sanitize(…)``
+            ``.truncate_digests().auto_height(…).write(path)``).
         casts_dir: Directory where the ``.cast`` file is written.  Created
             recursively if absent.
 
@@ -195,17 +198,34 @@ def maybe_record_cast(
 
     # Build, sanitize and write via the recorder chain
     title = meta.title or meta.path.stem
-    (
-        recorder.build(title=title)
-        .strip_progress()
-        .sanitize(sanitize_map)
-        .truncate_digests()
-        .realign_tables()
-        .auto_height()
-        .write(cast_path)
-    )
+    write_cast(recorder.build(title=title), sanitize_map, cast_path)
 
     return cast_path
+
+
+def display_hosts(env: dict[str, str], registry: str) -> dict[str, str]:
+    """Test-only `localhost:<port>` hosts and the names the docs use for them."""
+    if "STAGING" in env and "PROD" in env:
+        return {registry: "dev.example.com", env["STAGING"]: "staging.example.com", env["PROD"]: "prod.example.com"}
+    return {registry: "registry.example.com"}
+
+
+def write_cast(recording: Any, sanitize_map: dict[str, str], path: Path) -> None:
+    """The one post-processing chain every recording goes through before it is written."""
+    (
+        recording.strip_progress()
+        # Tables first: they are read by the binary's own padding, which the
+        # shortening below destroys. The cells are shortened inside the realign.
+        .realign_tables(lambda cell: truncate_digests_text(sanitize_text(cell, sanitize_map)))
+        .sanitize(sanitize_map)
+        .truncate_digests()
+        .fit_width()
+        .auto_height()
+        .write(path)
+    )
+    # The same check `test/lint/test_cast_frames.py` runs over the casts on disk.
+    if found := problems(path):
+        raise AssertionError(f"{path.name} would publish a defective frame: {found}")
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +311,8 @@ def _resolve_ocx_binary(provider: StateProvider) -> str:
 
 __all__ = [
     "_substitute_command_head",
+    "display_hosts",
     "maybe_record_cast",
     "rewrite_command",
+    "write_cast",
 ]

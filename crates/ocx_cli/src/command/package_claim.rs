@@ -48,7 +48,7 @@ use crate::options;
     `--output` are one grammar shared with `announce`, including forge selection, nested \
     GitLab groups and self-hosted instances.\n\n\
     An owner is a `login:id` pair, and the numeric id is what matters, since logins get \
-    renamed. Without `--owner`, ocx takes the CI user variables (`GITLAB_USER_LOGIN` with \
+    renamed. Without `--owner`, OCX takes the CI user variables (`GITLAB_USER_LOGIN` with \
     `GITLAB_USER_ID`, or `GITHUB_ACTOR` with `GITHUB_ACTOR_ID`, both halves required), else \
     the identity behind the credential.\n\n\
     A bot account is refused at exit 64. The report's `owner_identity_source` says which rule \

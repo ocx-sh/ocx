@@ -20,7 +20,7 @@ pub enum ActivateMode {
     /// Compose the toolchain environment on every prompt. The default.
     Env,
     /// Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a
-    /// tool is resolved by its launcher trampoline at invocation time.
+    /// tool is resolved by its launcher at invocation time.
     Bin,
     /// Neither. The reconciler withdraws whatever it owns and adds nothing.
     None,

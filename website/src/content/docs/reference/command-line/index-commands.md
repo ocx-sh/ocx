@@ -17,7 +17,7 @@ ocx index <COMMAND>
 
 List available repositories in the registry.
 
-Uses the local index by default; with `--remote` it queries the registry directly without writing through to the local index. Repository names are always prefixed with their registry (for example `ocx.sh/kitware/cmake`), and the registry defaults to `OCX_DEFAULT_REGISTRY` (or `ocx.sh`) when none is given.
+Uses the local index by default; with `--remote` it queries the registry directly without writing through to the local index. Repository names are always prefixed with their registry (for example `ocx.sh/nodejs/node`), and the registry defaults to `OCX_DEFAULT_REGISTRY` (or `ocx.sh`) when none is given.
 
 With `--remote`, a registry served by an index is listed from that index's catalog, and fails when the index serves none rather than listing nothing.
 
@@ -78,7 +78,7 @@ ocx index regenerate <REGISTRY>...
 
 Refresh every package one or more registries' catalogs list.
 
-The whole-registry form of `ocx index update`: instead of naming packages, name the registries, and each one's own catalog names the packages. This is how a whole mirror is snapshotted in one command.
+The whole-registry form of `ocx index update`: instead of naming packages, name the registries, and each one's own catalog names the packages. This is how a whole registry is refreshed in one command.
 
 The set is read from the source live, never from the local copy, which is the set you already have. For a published source that is its own `c/index.json`, for a plain-OCI registry its repository listing.
 
@@ -130,7 +130,7 @@ Run it without `--frozen`. Recording a new tag-to-digest mapping is the discover
 
 So `--frozen` rejects this command with exit 81 and moves no pin.
 
-A tagged identifier (`cmake:3.28`) records only that tag; a bare identifier (`cmake`) records every tag.
+A tagged identifier (`nodejs/node:24`) records only that tag; a bare identifier (`nodejs/node`) records every tag.
 
 Only the packages you name are touched: every other package keeps the version it already resolves to. The local copy is the set of snapshots you asked for, never a mirror of a floating remote.
 
@@ -140,7 +140,7 @@ A merge never deletes a durable pin. It does drop an ephemeral local row the sou
 
 If any package fails to refresh, the whole command fails; packages that refresh successfully keep their updated tags. A failed tag withholds only itself (and any tag sharing its digest); the exit code follows the first failure in request order.
 
-Per tag it writes the tag's dispatch object and root document into the local index, never a leaf platform manifest. Then it upserts the package's catalog entry.
+Per tag it writes the tag's dispatch object and root document into the local index, never a platform manifest. Then it upserts the package's catalog entry.
 
 A committed index is therefore self-contained for version choice, and a locked package's platform-manifest digest resolves with no other store or network access. Manifests and layers are content and stay on the registry until installed, so `ocx --offline package install` after an update resolves the digest but still fails to install.
 

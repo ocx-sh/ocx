@@ -580,7 +580,7 @@
         },
         {
           "value": "credential_helper_not_installed",
-          "description": "The credential helper is not installed, and an ocx started by a credential helper never downloads",
+          "description": "The credential helper is not installed, and an OCX started by a credential helper never downloads",
           "exit_code": 81
         },
         {
@@ -755,7 +755,7 @@
         },
         {
           "value": "entrypoint_collision",
-          "description": "Two packages declare the same entrypoint name",
+          "description": "Two packages declare the same entry point name",
           "exit_code": 65
         },
         {
@@ -890,7 +890,7 @@
         },
         {
           "value": "forge_required",
-          "description": "No forge was supplied to read the committed index root through",
+          "description": "No forge was supplied to read the committed root document through",
           "exit_code": 1
         },
         {
@@ -1055,17 +1055,17 @@
         },
         {
           "value": "index_root_missing_field",
-          "description": "The committed index root lacks a required field",
+          "description": "The committed root document lacks a required field",
           "exit_code": 1
         },
         {
           "value": "index_root_not_object",
-          "description": "The committed index root is not a JSON object",
+          "description": "The committed root document is not a JSON object",
           "exit_code": 1
         },
         {
           "value": "index_root_parse",
-          "description": "The committed index root is not valid JSON",
+          "description": "The committed root document is not valid JSON",
           "exit_code": 1
         },
         {
@@ -1090,7 +1090,7 @@
         },
         {
           "value": "integration_namespace_invalid",
-          "description": "An integrations namespace is invalid",
+          "description": "An integration key is invalid",
           "exit_code": 65
         },
         {
@@ -1205,7 +1205,7 @@
         },
         {
           "value": "invalid_managed_config_source",
-          "description": "The managed-config source is not a valid OCI identifier",
+          "description": "The managed-config source is not a valid identifier",
           "exit_code": 78
         },
         {
@@ -1330,7 +1330,7 @@
         },
         {
           "value": "link_path_occupied",
-          "description": "The install link path holds something other than an ocx package link",
+          "description": "The install link path holds something other than an OCX package link",
           "exit_code": 65
         },
         {
@@ -1380,12 +1380,12 @@
         },
         {
           "value": "malformed_physical_ref",
-          "description": "An index root carries a malformed physical repository reference",
+          "description": "A root document carries a malformed physical repository reference",
           "exit_code": 65
         },
         {
           "value": "malformed_physical_repository",
-          "description": "The index root names a malformed registry repository",
+          "description": "The root document names a malformed registry repository",
           "exit_code": 1
         },
         {
@@ -1395,7 +1395,7 @@
         },
         {
           "value": "malformed_root_document",
-          "description": "A local index root document is not valid JSON of the expected shape",
+          "description": "A local root document is not valid JSON of the expected shape",
           "exit_code": 65
         },
         {
@@ -1545,7 +1545,7 @@
         },
         {
           "value": "missing_head_root",
-          "description": "A concurrent claim's or announce's head carries no index root",
+          "description": "A concurrent claim's or announce's head carries no root document",
           "exit_code": 1
         },
         {
@@ -1660,7 +1660,7 @@
         },
         {
           "value": "ocx_home_needs_no_consent",
-          "description": "The ocx home is always active and takes no consent stamp",
+          "description": "The OCX home is always active and takes no consent stamp",
           "exit_code": 64
         },
         {
@@ -2085,7 +2085,7 @@
         },
         {
           "value": "publishers_unrecognized",
-          "description": "The index lists publishers only a newer ocx understands",
+          "description": "The index lists publishers only a newer OCX understands",
           "exit_code": 82
         },
         {
@@ -2155,7 +2155,7 @@
         },
         {
           "value": "registry_delete_unsupported",
-          "description": "The registry API cannot delete tags; on ghcr.io, ocx package prune deletes them through --forge github",
+          "description": "The registry API cannot delete tags; on ghcr.io, `ocx package prune --forge github` deletes them",
           "exit_code": 82
         },
         {
@@ -2245,7 +2245,7 @@
         },
         {
           "value": "root_name_mismatch",
-          "description": "The committed index root names a different package",
+          "description": "The committed root document names a different package",
           "exit_code": 65
         },
         {
@@ -2255,7 +2255,7 @@
         },
         {
           "value": "root_repository_mismatch",
-          "description": "A derived index root points at another repository",
+          "description": "A derived root document points at another repository",
           "exit_code": 65
         },
         {
@@ -2300,7 +2300,7 @@
         },
         {
           "value": "setup_bootstrap_failed",
-          "description": "Installing ocx into the content store failed with an unclassified cause",
+          "description": "Installing OCX into the object store failed with an unclassified cause",
           "exit_code": 1
         },
         {
@@ -2540,7 +2540,7 @@
         },
         {
           "value": "toolchain_dir_inside_global_home",
-          "description": "The toolchain_dir setting resolves inside the global toolchain home",
+          "description": "The toolchain_dir setting resolves inside $OCX_HOME/toolchain",
           "exit_code": 78
         },
         {
@@ -2590,7 +2590,7 @@
         },
         {
           "value": "toolchain_home_not_absolute",
-          "description": "The toolchain home is not an absolute path",
+          "description": "The toolchain root baked into a launcher is not an absolute path",
           "exit_code": 65
         },
         {
@@ -2745,7 +2745,7 @@
         },
         {
           "value": "unrecognized_interpreter",
-          "description": "A binary names an ELF interpreter no libc family claims",
+          "description": "A binary names a dynamic loader no libc family claims",
           "exit_code": 65
         },
         {

@@ -33,7 +33,7 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "malformed_root_document",
-        summary = "A local index root document is not valid JSON of the expected shape"
+        summary = "A local root document is not valid JSON of the expected shape"
     )]
     MalformedRootDocument {
         index_source: String,

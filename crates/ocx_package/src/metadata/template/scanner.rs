@@ -41,7 +41,7 @@ pub struct Token<'a> {
 /// The closed set of recognised token bodies, each fully validated by [`scan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenShape<'a> {
-    /// `${installPath}` or its alias `${self.installPath}`: the package's `content/` directory.
+    /// `${self.installPath}` or its alias `${installPath}`: the package's `content/` directory.
     InstallPath,
     /// `${self.env.KEY}`: the resolved value of this package's earlier-declared var `KEY`,
     /// which passes [`ocx_env::is_valid_env_key`], the emitters' own validator.

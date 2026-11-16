@@ -29,7 +29,7 @@ pub enum CliRefusal {
     #[exit(
         UsageError,
         slug = "ocx_home_needs_no_consent",
-        summary = "The ocx home is always active and takes no consent stamp"
+        summary = "The OCX home is always active and takes no consent stamp"
     )]
     OcxHomeNeedsNoConsent(String),
 
@@ -97,7 +97,7 @@ pub enum CliRefusal {
     #[exit(
         PolicyBlocked,
         slug = "credential_helper_not_installed",
-        summary = "The credential helper is not installed, and an ocx started by a credential helper never downloads"
+        summary = "The credential helper is not installed, and an OCX started by a credential helper never downloads"
     )]
     CredentialHelperNotInstalled(String),
 

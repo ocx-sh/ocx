@@ -29,15 +29,15 @@ use crate::options;
     or a tag that is not a version, or when `--tags-file` is given more than one package.\n\n\
     `repair` writes by default, since `check` is already the read-only preview; `--dry-run` \
     computes and reports the same plan. Identifier forms and scope are those of `check`, except that a build tag \
-    writes only the aliases that build owns: a pre-release build never moves a stable alias.\n\n\
-    An alias made of one build's entries alone is written as that build's own index, byte for \
-    byte, so it carries the build tag's digest. For any other broken alias `repair` rebuilds the \
+    writes only the rolling tags that build owns: a pre-release build never moves a stable rolling tag.\n\n\
+    A rolling tag made of one build's entries alone is written as that build's own index, byte for \
+    byte, so it carries the build tag's digest. For any other broken rolling tag `repair` rebuilds the \
     whole index from the same fold `check` diffs against and preserves every observed entry the \
     fold does not supersede. That includes annotations already on the index, non-platform entries \
     such as attestations, and \
-    orphaned alias tags whose child manifests still exist. A missing referenced manifest is \
+    orphaned rolling tags whose child manifests still exist. A missing referenced manifest is \
     dropped only if every entry naming that digest is an orphan slot. Otherwise the whole \
-    alias is refused and reported while other aliases still write.\n\n\
+    rolling tag is refused and reported while other rolling tags still write.\n\n\
     Writes are batched after the whole plan is built and run concurrently per tag.\n\n\
     After each write `repair` re-reads the tag and warns when the digest disagrees, which is \
     evidence of a concurrent publisher. An outcome is `raced` only when nothing was written \
@@ -47,12 +47,12 @@ use crate::options;
     index with the fix is a second hop through `ocx package announce`. Refreshing one \
     machine's local copy is `ocx index update`'s job.\n\n\
     `--tags-file` records the tags whose write landed (not `raced`, `refused` or \
-    `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for an alias or whole-graph request), unioned with \
+    `failed` ones) and the tags a build-tag scope writes that already carry the expected content (never a tag it would not write, and none for a rolling-tag or whole-graph request), unioned with \
     every tag an index-staleness finding names, so one file covers both hops and a retry after a \
     failed announce still lists the tags the first run moved. It is written on every run, empty included, so a workflow can feed it to \
     `announce` unconditionally. A preview contributes no landed tag, and its plan is in the \
     JSON report as each entry's `planned`.\n\n\
-    A follow-up `announce` updates or creates the listed aliases; a repair never produces a \
+    A follow-up `announce` updates or creates the listed rolling tags; a repair never produces a \
     removal.")]
 pub struct PackageCascadeRepair {
     /// Compute and print the same plan without writing anything.

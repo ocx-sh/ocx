@@ -92,7 +92,7 @@ Recurring attack surfaces in OCX codebase. Use as STRIDE scoping checklist for a
 - Signing no mask malicious binaries
 
 ### Environment Variable Injection
-- `${installPath}` template expansion in `metadata.json` env vars
+- `${self.installPath}` template expansion in `metadata.json` env vars
 - PATH prepend ordering (OCX packages vs system tools)
 
 ## OCX Audit Checklist

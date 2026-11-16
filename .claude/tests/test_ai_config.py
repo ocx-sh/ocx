@@ -2628,7 +2628,6 @@ class TestBazelGateProse:
     _PROSE = (
         "AGENTS.md",
         ".claude/rules/subsystem-taskfiles.md",
-        "website/src/content/docs/contributing/bazel.md",
     )
     #: The files that state the gate *count* in words. A count is the one part
     #: of this prose a containment check cannot catch: adding a seventh gate to

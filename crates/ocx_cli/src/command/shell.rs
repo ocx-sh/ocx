@@ -19,7 +19,7 @@ https://ocx.sh/docs/guides/project-toolchain/";
 ///
 /// Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it:
 /// `-g` selects groups, `--with` adds packages not in `ocx.toml`. The composition layers onto the
-/// calling environment; `--isolate` first reverts what ocx applied to it, `--clean` starts from
+/// calling environment; `--isolate` first reverts what OCX applied to it, `--clean` starts from
 /// nothing. The shell stays tied to its project: its hook refreshes that layer when `ocx.toml` or
 /// `ocx.lock` change, and `cd` elsewhere applies nothing. `exit` returns to the parent shell.
 ///
@@ -142,7 +142,7 @@ pub enum Shell {
         Grants that live in configuration instead - a directory under `[shell.consent] paths`, \
         an organisation under `[shell.consent] namespaces` - are edited in `config.toml`, not \
         here.\n\n\
-        Exits 64 when no `ocx.toml` governs PATH, and when PATH names the ocx home: the global \
+        Exits 64 when no `ocx.toml` governs PATH, and when PATH names the OCX home: the global \
         toolchain is always consented and never carries a stamp.\n\n\
         https://ocx.sh/docs/explanation/shell-integration/")]
     Allow(super::shell_allow::ShellAllow),
@@ -181,7 +181,7 @@ pub enum Shell {
         The shell yielded to direnv, mise or an enclosing `ocx exec`; the report names the live \
         signal. Stop that tool or accept the yield.\n\n\
         `ocx.lock` is unavailable: absent, unreadable or unparseable. Run `ocx lock`.\n\n\
-        A `[shell.consent] namespaces` grant matches the lock's claim, but the package store does \
+        A `[shell.consent] namespaces` grant matches the lock's claim, but the object store does \
         not corroborate those sources. The report names both source sets. Consent with `ocx shell allow`.\n\n\
         The source set drifted from the stamp; the report names the new sources. Run \
         `ocx shell allow` again.\n\n\

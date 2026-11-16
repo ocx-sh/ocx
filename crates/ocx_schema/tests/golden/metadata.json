@@ -123,7 +123,7 @@
           "default": false
         },
         "value": {
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
           "type": "string"
         }
       },
@@ -136,7 +136,7 @@
       "type": "object",
       "properties": {
         "value": {
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
           "type": "string"
         }
       },
@@ -153,7 +153,7 @@
           "type": "string"
         },
         "value": {
-          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "description": "The value template. `${self.installPath}` — or its alias `${installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
           "type": "string"
         }
       },
@@ -233,7 +233,7 @@
       "maxLength": 64
     },
     "Entrypoints": {
-      "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${installPath}` (or its alias `${self.installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
+      "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${self.installPath}` (or its alias `${installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/Entrypoint"
@@ -259,7 +259,7 @@
           ]
         },
         "args": {
-          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${installPath}` — or its alias\n`${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing.",
+          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${self.installPath}` — or its alias\n`${installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing.",
           "type": "array",
           "items": {
             "type": "string"

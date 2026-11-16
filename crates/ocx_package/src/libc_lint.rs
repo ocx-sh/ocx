@@ -410,7 +410,7 @@ pub enum LibcLintError {
     #[exit(
         DataError,
         slug = "unrecognized_interpreter",
-        summary = "A binary names an ELF interpreter no libc family claims"
+        summary = "A binary names a dynamic loader no libc family claims"
     )]
     UnrecognizedInterpreter {
         /// The file naming the unrecognised loader.

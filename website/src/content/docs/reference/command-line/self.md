@@ -13,7 +13,7 @@ ocx self <COMMAND>
 
 ## `ocx self activate` {#self-activate}
 
-Sourced from `$OCX_HOME/env.sh` at shell startup to activate ocx in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source never duplicates an entry.
+Sourced from `$OCX_HOME/env.sh` at shell startup to activate OCX in the current shell. Prepends `$OCX_HOME/symlinks/.../bin` to `PATH`, injects completions (unless `OCX_NO_COMPLETION=1`) and evaluates the global toolchain env, idempotently, so a re-source never duplicates an entry.
 
 Prints up to three blocks of shell code.
 
@@ -51,11 +51,11 @@ ocx self activate [OPTIONS]
 
 ## `ocx self setup` {#self-setup}
 
-Create or refresh ocx shell integration.
+Create or refresh OCX shell integration.
 
-Completes a bare-binary install. It installs the latest published ocx into the content store and writes the per-shell env shims into `$OCX_HOME`.
+Completes a bare-binary install. It installs the latest published OCX into the object store and writes the per-shell env files into `$OCX_HOME`.
 
-It also adds a managed activation block to your shell profiles. Pass an optional VERSION to install a specific release instead of the latest.
+It also adds a managed block to your shell profiles. Pass an optional VERSION to install a specific release instead of the latest.
 
 Setup also registers the installed `bin` directory and `$OCX_HOME/toolchain/active/bin` on the session PATH. That is the Windows user environment, an `environment.d` drop-in on Linux, and a login LaunchAgent on macOS.
 
@@ -134,14 +134,14 @@ ocx self setup [OPTIONS] [VERSION]
 | `--managed-config` | `REF` | Adopt the corporate managed-config tier; an empty value (`--managed-config ""`) clears the seed and deletes the snapshot |
 | `--no-completion` |  | Turn shell completions off: writes `[shell] completions = false` |
 | `--no-hook` |  | Turn the per-prompt shell hook off: writes `[shell] hook = false` |
-| `--no-modify-path` |  | Write the env shims but touch neither a shell profile nor the session PATH |
+| `--no-modify-path` |  | Write the env files but touch neither a shell profile nor the session PATH |
 | `--no-profile` |  | Write no profile blocks at all |
 | `--profile` | `PATH` | Target an explicit profile file. Repeatable |
 | `--toolchain-activate` | `env\|bin\|none` | Record how a toolchain reaches PATH: writes `activate` to `$OCX_HOME/ocx.toml` |
 
 ## `ocx self update` {#self-update}
 
-Update ocx itself to the latest released version. Without `--check`, downloads the newest release and activates it; with `--check`, reports the result without installing.
+Update OCX itself to the latest released version. Without `--check`, downloads the newest release and activates it; with `--check`, reports the result without installing.
 
 Downloading and activating are two separate steps. The newest release is pulled first, then the new binary activates itself by running its own `ocx self setup`.
 
@@ -175,4 +175,4 @@ ocx self update [OPTIONS]
 
 | Flag | Value | Description |
 | --- | --- | --- |
-| `--check` |  | Check for a newer ocx version without installing it |
+| `--check` |  | Check for a newer OCX version without installing it |

@@ -170,7 +170,7 @@ pub struct LazyModeLadder {
     pub package: Option<LazyMode>,
     /// `[group.<g>].lazy-mode` for the active group.
     pub group: Option<LazyMode>,
-    /// Toolchain-tier `lazy-mode` (`ocx.toml`'s top-level scalar).
+    /// Top-level `lazy-mode` (`ocx.toml`'s scalar).
     pub toolchain: Option<LazyMode>,
     /// `OCX_LAZY_MODE` via [`LazyMode::from_env`]; `FromStr` alone drops `Always`.
     pub environment: Option<LazyMode>,
@@ -207,7 +207,7 @@ pub struct LazyReportLadder {
     pub cli: Option<LazyReport>,
     /// `[package."<id>"].lazy-report` for the identifier being resolved.
     pub package: Option<LazyReport>,
-    /// Toolchain-tier `lazy-report` (`ocx.toml`'s top-level scalar).
+    /// Top-level `lazy-report` (`ocx.toml`'s scalar).
     pub toolchain: Option<LazyReport>,
     /// `OCX_LAZY_REPORT` via [`LazyReport::from_env`]; `FromStr` alone drops `Progress`.
     pub environment: Option<LazyReport>,

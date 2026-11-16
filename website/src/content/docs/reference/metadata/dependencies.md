@@ -10,16 +10,16 @@ The `dependencies` array of [`metadata.json`](./index.md#format) declares the pa
 Every dependency identifier is pinned by OCI digest in the published form. The same dependency graph is therefore reproduced on every machine regardless of the current registry state.
 
 - Limit: a package declares at most 256 dependencies, and a longer array is rejected when the file is read (`too many dependencies`, exit 65)
-- The platform a bundle targets is not part of this file. On the wire it lives in the [OCI Image Index][oci-image-index]. Between [`ocx package create`][cmd-package-create] and [`ocx package push`][cmd-package-push] or [`ocx package test`][cmd-package-test] it lives in a build receipt, readable with [`ocx package receipt`][cmd-package-receipt].
+- The platform a bundle targets is not part of this file. On the wire it lives in the [image index][oci-image-index]. Between [`ocx package create`][cmd-package-create] and [`ocx package push`][cmd-package-push] or [`ocx package test`][cmd-package-test] it lives in a build receipt, readable with [`ocx package receipt`][cmd-package-receipt].
 - Authoring sidecar versus published form: the digest is optional while authoring and mandatory once published. The published form is a strict subset of the authoring form, so an already-published `metadata.json` is a valid sidecar for `ocx package create` and `ocx package push` and needs no migration.
 
-See [Dependencies in depth][in-depth-dependencies] for the pin rules and [Declaring dependencies][authoring-dependencies] for the publisher workflow.
+See [Dependencies][in-depth-dependencies] for the pin rules and [Declare dependencies][authoring-dependencies] for the publisher workflow.
 
 ### Dependency Entry {#dependencies-entry}
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `identifier` | string | Yes | OCX identifier with an explicit registry; one without is rejected at deserialization. In the authoring sidecar the digest is optional, and a tag-only identifier tells [`ocx package create`][cmd-package-create] to resolve it. In the published form the digest is mandatory and must reference a platform manifest, never an OCI Image Index. The tag is always advisory. E.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`. |
+| `identifier` | string | Yes | Identifier with an explicit registry; one without is rejected at deserialization. In the authoring sidecar the digest is optional, and a tag-only identifier tells [`ocx package create`][cmd-package-create] to resolve it. In the published form the digest is mandatory and must reference a platform manifest, never an image index. The tag is always advisory. E.g. `ocx.sh/java:21@sha256:a1b2c3d4e5f6...`. |
 | `name` | string | No | Short name used to reference this dependency in `${deps.NAME.installPath}` templates, instead of the repository basename. Must match `^[a-z0-9][a-z0-9_-]*$` and be at most 64 characters. |
 | `visibility` | string | No | Controls how the dependency's environment variables propagate. Default: `sealed`. See [Visibility](#dependencies-visibility). |
 
@@ -29,7 +29,7 @@ See [Dependencies in depth][in-depth-dependencies] for the pin rules and [Declar
   "type": "bundle",
   "version": 1,
   "env": [
-    { "key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin", "visibility": "public" },
+    { "key": "PATH", "type": "path", "required": true, "value": "${self.installPath}/bin", "visibility": "public" },
     { "key": "JDK_HOME", "type": "constant", "value": "${deps.java.installPath}", "visibility": "public" }
   ],
   "dependencies": [
@@ -38,8 +38,8 @@ See [Dependencies in depth][in-depth-dependencies] for the pin rules and [Declar
       "visibility": "private"
     },
     {
-      "identifier": "ocx.sh/kitware/cmake:3.28@sha256:f6e5d4c3b2a1...",
-      "name": "cmake"
+      "identifier": "ocx.sh/nodejs/node:24@sha256:f6e5d4c3b2a1...",
+      "name": "node"
     }
   ]
 }
@@ -56,12 +56,12 @@ A dependency's `visibility` controls how its environment variables propagate thr
 | `public` | Yes | Yes | Both the package and consumers need the dep's env. |
 | `interface` | No | Yes | Meta-packages that forward env to consumers without using it. |
 
-- `has_private()` is `true` for `private` and `public`. `has_interface()` is `true` for `public` and `interface`.
-- The [composer][env-composition-edge-filter] uses these accessors to gate entry emission per surface at exec time.
+- A package's own runtime sees `private` and `public` dependencies. Consumers see `public` and `interface` ones.
+- The [composer][env-composition-edge-filter] uses this split to gate entry emission per surface at exec time.
 
 #### Transitive Propagation {#dependencies-through-edge}
 
-Along a chain (Root, Dep, Transitive), `Visibility::through_edge(child_eff)` yields `sealed` when the child's effective visibility does not export to consumers (`child_eff.has_interface() == false`), and the edge unchanged otherwise.
+Along a chain (Root, Dep, Transitive), the effective visibility is `sealed` when the child's effective visibility does not export to consumers (`private` or `sealed`), and the edge unchanged otherwise.
 
 | Edge | Child effective | Result (from root) |
 |---|---|---|
@@ -75,7 +75,7 @@ Along a chain (Root, Dep, Transitive), `Visibility::through_edge(child_eff)` yie
 
 #### Diamond Merge {#dependencies-merge}
 
-When two paths reach the same dependency, the most open visibility wins: each axis is OR-merged independently via `Visibility::merge`. It is computed at install time and stored in `resolve.json` (see [Env Composition: Edge Filter][env-composition-edge-filter]).
+When two paths reach the same dependency, the most open visibility wins: each axis (own runtime, consumers) is OR-merged independently. It is computed at install time and stored in `resolve.json` (see [Environment composition: edge filter][env-composition-edge-filter]).
 
 ### Ordering {#dependencies-ordering}
 
@@ -92,5 +92,5 @@ Array position defines the canonical order for environment composition, and the 
 
 <!-- guides -->
 [in-depth-dependencies]: ../../explanation/dependencies.mdx
-[authoring-dependencies]: ../../publishing/declare-dependencies.md
+[authoring-dependencies]: ../../publishing/declare-dependencies.mdx
 [env-composition-edge-filter]: ../../explanation/environments.mdx#edge-filter

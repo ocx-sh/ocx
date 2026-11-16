@@ -83,7 +83,7 @@ pub struct ConfigTestData {
     pub(crate) managed: Option<ManagedView>,
     /// Dotted paths of keys the config schema ignores, sorted. Advisory: the
     /// loader ignores unknown keys by design, so these are equally typos and
-    /// settings a newer ocx understands.
+    /// settings a newer OCX understands.
     ///
     /// Keys inside a `[mirrors]` entry are NOT covered: that table is parsed
     /// value-first from a raw TOML value, so nothing there is ever ignored by

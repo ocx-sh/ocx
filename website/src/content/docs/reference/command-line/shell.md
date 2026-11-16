@@ -7,7 +7,7 @@ title: "ocx shell"
 
 Open your shell inside the project environment.
 
-Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it: `-g` selects groups, `--with` adds packages not in `ocx.toml`. The composition layers onto the calling environment; `--isolate` first reverts what ocx applied to it, `--clean` starts from nothing.
+Bare `ocx shell` composes the environment like `ocx exec` and starts your shell in it: `-g` selects groups, `--with` adds packages not in `ocx.toml`. The composition layers onto the calling environment; `--isolate` first reverts what OCX applied to it, `--clean` starts from nothing.
 
 The shell stays tied to its project: its hook refreshes that layer when `ocx.toml` or `ocx.lock` change, and `cd` elsewhere applies nothing. `exit` returns to the parent shell.
 
@@ -24,7 +24,7 @@ ocx shell <COMMAND>
 | `--consent` |  | Record a consent stamp (the default unless OCX_NO_CONSENT is set) |
 | `--env` | `NAME\|KEY[:TYPE[:SEP]]=VALUE` | Set an environment variable, or pass one by name. An unset NAME adds nothing; a TYPE without a value exits 64 |
 | `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
-| `--isolate` |  | Remove every value ocx applied to the calling environment before composing |
+| `--isolate` |  | Remove every value OCX applied to the calling environment before composing |
 | `--no-consent` |  | Run without consenting to this project's shell activation |
 | `--no-pinned` |  | Compose through the toolchain links instead of digest paths |
 | `--pinned` |  | Compose digest paths instead of the toolchain links |
@@ -44,7 +44,7 @@ Undo with `ocx shell revoke`. See which grant is in effect with `ocx shell state
 
 Grants that live in configuration instead - a directory under `[shell.consent] paths`, an organisation under `[shell.consent] namespaces` - are edited in `config.toml`, not here.
 
-Exits 64 when no `ocx.toml` governs PATH, and when PATH names the ocx home: the global toolchain is always consented and never carries a stamp.
+Exits 64 when no `ocx.toml` governs PATH, and when PATH names the OCX home: the global toolchain is always consented and never carries a stamp.
 
 https://ocx.sh/docs/explanation/shell-integration/
 
@@ -107,7 +107,7 @@ The shell yielded to direnv, mise or an enclosing `ocx exec`; the report names t
 
 `ocx.lock` is unavailable: absent, unreadable or unparseable. Run `ocx lock`.
 
-A `[shell.consent] namespaces` grant matches the lock's claim, but the package store does not corroborate those sources. The report names both source sets.
+A `[shell.consent] namespaces` grant matches the lock's claim, but the object store does not corroborate those sources. The report names both source sets.
 
 Consent with `ocx shell allow`.
 

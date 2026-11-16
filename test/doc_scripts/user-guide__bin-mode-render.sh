@@ -7,12 +7,12 @@ set -euo pipefail
 
 cd "$SCENARIO_TMP"
 printf 'activate = "bin"\n[tools]\n' >ocx.toml
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 # region cast
 ocx pull
 # endregion cast
-[[ -x .ocx/toolchain/active/bin/cmake ]] || {
-    echo "expected ocx pull to render .ocx/toolchain/active/bin/cmake" >&2
+[[ -x .ocx/toolchain/active/bin/node ]] || {
+    echo "expected ocx pull to render .ocx/toolchain/active/bin/node" >&2
     exit 1
 }
 # `active` is the PATH-facing indirection, so assert it is a link and not a

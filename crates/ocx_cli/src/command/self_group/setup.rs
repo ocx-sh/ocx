@@ -37,7 +37,7 @@ use crate::options::{ModifyPath, Profiles};
 /// | bad VERSION syntax | 64 |
 /// | tag@digest mismatch (immutability assertion failed) | 65 |
 /// | registry unreachable | 69 |
-/// | writing env shims, a profile, the `[shell]` toggle, or the `activate` key failed | 74 |
+/// | writing env files, a profile, the `[shell]` toggle, or the `activate` key failed | 74 |
 /// | invalid `--managed-config` seed or source | 78 |
 /// | `$OCX_HOME` cannot be encoded for this platform's session-PATH format | 78 |
 /// | package not found in registry | 79 |

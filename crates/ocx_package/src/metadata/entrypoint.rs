@@ -108,8 +108,8 @@ pub struct Entrypoint {
     command: Option<EntrypointName>,
 
     /// Fixed leading arguments the generated launcher prepends before the user's
-    /// own arguments. Each element may carry `${installPath}` — or its alias
-    /// `${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`
+    /// own arguments. Each element may carry `${self.installPath}` — or its alias
+    /// `${installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`
     /// and `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected
     /// (write `$${` for a literal `${`). Absent/empty serializes to nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -252,7 +252,7 @@ impl schemars::JsonSchema for Entrypoints {
         let value_schema = generator.subschema_for::<Entrypoint>();
         schemars::json_schema!({
             "type": "object",
-            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${installPath}` (or its alias `${self.installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
+            "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${self.installPath}` (or its alias `${installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
             "additionalProperties": value_schema,
             "propertyNames": {
                 "pattern": SLUG_PATTERN_STR,

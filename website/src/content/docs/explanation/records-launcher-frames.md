@@ -1,21 +1,21 @@
 ---
 title: "Launcher frames in records"
-description: "Why an entrypoint launcher writes two execution records, how the inner frame learns its package name, and how previews, deferred packages and patch companions appear."
+description: "Why an entry-point launcher writes two execution records, how the inner frame learns its package name, and how previews, deferred packages and patch companions appear."
 ---
 <!-- doc_type: explanation -->
 
-This page explains the extra frames that appear in execution records when an entrypoint launcher, a deferred package or a patch companion is involved. It extends [Two records per launcher invocation][records-frames-summary] in [Execution Records][records].
+This page explains the extra frames that appear in execution records when an entry-point launcher, a deferred package or a patch companion is involved. It extends [Two records per launcher invocation][records-frames-summary] in [Execution records][records].
 
 ## Forwarded names and degraded frames {#frames-identity}
 
 The inner frame can name its package only when the parent forwarded the name in [`__OCX_ENV_STATE`][env-ocx-env-state]. A launcher finds its package by directory. Every name that resolves to the same digest shares that directory, so only the parent knows which name it used.
 
-OCX writes the state, never you, and records names only while a [`[patches]`][config-patches] tier is in effect. The names map each content digest a composition resolved to the `registry/repository[:tag]` names it was resolved under. `no_patches` marks a package the project opted out.
+OCX writes the state, never you, and records names only while the [`[patches]`][config-patches] table is in effect. The names map each manifest digest a composition resolved to the `registry/repository[:tag]` names it was resolved under. `no_patches` marks a package the project opted out.
 
 These commands write the state for the process they spawn:
 
 - [`ocx exec`][cmd-exec], `ocx package exec`, `ocx package test`,
-- a lazy tool's shim.
+- a deferred package's shim.
 
 These commands export a fresh minimal state carrying the names they composed. A shell that already carries a readable state keeps it, and `ocx env --shell` and `ocx direnv export` add none:
 
@@ -23,11 +23,11 @@ These commands export a fresh minimal state carrying the names they composed. A 
 - `ocx direnv export`,
 - the per-prompt shell hook, which keeps its own session records and restores the replaced values when you leave a project.
 
-An unreadable state is never an error: the launcher stands down to a synthetic identity and ocx prints one warning. With a forwarded name the frame is `complete`. Its package descriptor carries the real name and a purl without a `tag` qualifier, as a shim frame does.
+An unreadable state is never an error: the launcher stands down to a synthetic identity and OCX prints one warning. With a forwarded name the frame is `complete`. Its package descriptor carries the real name and a purl without a `tag` qualifier, as a shim frame does.
 
-Without a forwarded name, the identifier is a synthetic content digest minted at the launcher. Package directories are content-shared and never persist their own registry or repository. The frame is then `degraded`, even when an outer `exec` or `package exec` frame pairs with it a few milliseconds earlier.
+Without a forwarded name, the identifier is a synthetic identifier carrying the manifest digest, minted at the launcher. Package directories are content-shared and never persist their own registry or repository. The frame is then `degraded`, even when an outer `exec` or `package exec` frame pairs with it a few milliseconds earlier.
 
-On a host without a patch tier, a consumer whose policy assumes "degraded means no ocx parent" fires on every ordinary entrypoint invocation.
+On a host without patches, a consumer whose policy assumes "degraded means no OCX parent" fires on every ordinary entry point invocation.
 
 Every degraded frame states the limitation in-band, so a consumer reading one record in isolation still learns why the name is missing. The frame carries `frame.identityNote`. The package descriptor carries `sh.ocx.identity: "synthetic"` and no `uri` at all, since a purl cannot be built without a repository.
 
@@ -48,19 +48,19 @@ Every degraded frame states the limitation in-band, so a consumer reading one re
 }
 ```
 
-A launcher run from a `PATH` that no ocx command composed produces this shape too. Only the content digest identifies what ran.
+The `name` of a degraded frame is a placeholder (`file-url-mode/` plus the digest), not a repository, so do not parse it. A launcher run from a `PATH` that no OCX command composed produces this shape too. Only the manifest digest identifies what ran.
 
-A launcher run from a `PATH` that [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] or the shell hook composed names its package. Those exports carry the same variable while a patch tier is in effect.
+A launcher run from a `PATH` that [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] or the shell hook composed names its package. Those exports carry the same variable while patches are in effect.
 
 ## Previews write no record {#frames-previews}
 
-[`ocx package test`][cmd-package-test] and [`ocx patch test`][cmd-patch-test] write no record, entrypoint or not. They are maintainer previews over locally materialised, unpublished artifacts, and a record from one would describe something that was never published.
+[`ocx package test`][cmd-package-test] and [`ocx patch test`][cmd-patch-test] write no record, entry point or not. They are authoring previews over locally materialized, unpublished artifacts, and a record from one would describe something that was never published.
 
 The exclusion covers the launcher re-entry too. A launcher built into a package under one of those commands' scratch roots carries it. No forwarded sink makes that frame record, and neither does a sink the child re-reads from its own config chain.
 
 The exemption stops at `required = true`. Under a fail-closed posture the two contradict each other. The policy says this invocation must be recorded, and the exemption says it will not be. OCX resolves the contradiction in the operator's favour. It grants no exemption and refuses the launch with exit 74, naming the `[records]` policy that refused it.
 
-The reason is that the exemption is claimed from a path. [`ocx launcher exec`][cmd-launcher-exec] grants it when the pkg-root it was handed sits under one of those scratch roots. Both roots are inside the invoking user's own `$OCX_HOME`. Anyone who can place a directory there can claim the exemption. No capability handshake fixes that when the parent and the caller run as the same user.
+The reason is that the exemption is claimed from a path. [`ocx launcher exec`][cmd-launcher-exec] grants it when the package root it was handed sits under one of those scratch roots. Both roots are inside the invoking user's own `$OCX_HOME`. Anyone who can place a directory there can claim the exemption. No capability handshake fixes that when the parent and the caller run as the same user.
 
 On a host with a fail-closed policy, run a preview command with the policy relaxed, or accept that previews do not run there.
 
@@ -68,9 +68,9 @@ On a host with a fail-closed policy, run a preview command with the policy relax
 
 [Deferred packages][deferred-packages] add a fourth launching frame beside `exec`, `package exec` and `launcher exec`. It is the hidden [`ocx launcher shim`][deferred-materialize] subcommand. A package composed with `lazy-mode = always` puts a generated shim on `PATH` instead of an eager install. Nothing about it exists on disk until that shim runs for the first time.
 
-The shim frame is therefore the only place a deferred package's content is downloaded. Its first invocation produces two records, for a different reason than the entrypoint split.
+The shim frame is therefore the only place a deferred package's content is downloaded. Its first invocation produces two records, for a different reason than the entry point split.
 
-The join key is the same content digest used everywhere else. Unlike an `ocx launcher exec` frame with no forwarded name, a shim's generated launcher carries [the pinned identifier it was built for][deferred-materialize] as an argument. `ocx launcher shim` reads that identifier directly, so it needs no parent to know its own logical name.
+The join key is the same manifest digest used everywhere else. Unlike an `ocx launcher exec` frame with no forwarded name, a shim's generated launcher carries [the pinned identifier it was built for][deferred-materialize] as an argument. `ocx launcher shim` reads that identifier directly, so it needs no parent to know its own logical name.
 
 A later invocation of the same binary resolves straight to its real `entrypoints/`, which outranks the shim on `PATH`. It produces exactly one record, the same shape as any package that was never deferred.
 
@@ -80,11 +80,11 @@ A [patch companion][patches-how] composes as part of the packages it patches rat
 
 A companion that contributes only [integrations][env-composition-integrations] is recorded too, because OCX loaded it into the environment like any other package.
 
-The patch tier's freeze is independent of the package tier's. `resolution.patchSnapshot` can be present while `resolution.frozen` is `false`, and the reverse. Each fact is carried by its own field.
+The patch freeze is independent of the package freeze. `resolution.patchSnapshot` can be present while `resolution.frozen` is `false`, and the reverse. Each fact is carried by its own field.
 
 <!-- internal -->
-[records]: execution-records.md
-[records-frames-summary]: execution-records.md#frames
+[records]: execution-records.mdx
+[records-frames-summary]: execution-records.mdx#frames
 [deferred-packages]: deferred-packages.mdx
 [deferred-materialize]: deferred-packages.mdx#deferred-tools-materialize
 [patches-how]: patches.mdx#patches-how

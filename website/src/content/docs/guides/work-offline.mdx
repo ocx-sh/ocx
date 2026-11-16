@@ -5,11 +5,13 @@ description: "Run OCX without network access from a prepared local copy."
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
-Run OCX without network access, from a local index and package store you prepared earlier.<a id="offline"></a>
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
-## Choose how strictly to avoid the network \{#offline-modes\}
+Run OCX without network access, from a local index and object store you prepared earlier.<a id="offline"></a>
 
-<a id="indices-routing"></a>Once the [local index][in-depth-indices-local] is populated and the [package store][in-depth-storage-packages] holds the binaries you need, OCX runs without network access. Two flags control how strictly it avoids the network:
+## Choose where OCX reads from \{#offline-modes\}
+
+<a id="indices-routing"></a>Once the [local index][in-depth-indices-local] is populated and the [object store][in-depth-storage-packages] holds the binaries you need, OCX runs without network access. Two flags control how strictly it avoids the network:
 
 <a id="indices-selected"></a>
 
@@ -19,15 +21,19 @@ Run OCX without network access, from a local index and package store you prepare
 | Remote | [`--remote`][arg-remote] | OCI registry | Yes |
 | Offline | [`--offline`][arg-offline] | Local index | Never |
 
-`--offline` prevents any network access for that command. If the local index does not have a requested package, the command fails immediately instead of querying a registry. Use it to verify that the current index and package store are self-sufficient before a build in a restricted or air-gapped environment.
+`--offline` prevents any network access for that command. If the local index does not have a requested package, the command fails immediately instead of querying a registry. Use it to verify that the current index and object store are self-sufficient before a build in a restricted or air-gapped environment.
 
-To prove that, prepare while online, then repeat the build commands with `--offline`:
+To prove that, prepare while online, then repeat the same commands with `--offline`:
+
+<ShellSession>
 
 ```sh
-ocx index update kitware/cmake
-ocx package install kitware/cmake:3.31
-ocx --offline package install kitware/cmake:3.31
+ocx index update nodejs/node
+ocx package install nodejs/node:24
+ocx --offline package install nodejs/node:24
 ```
+
+</ShellSession>
 
 The last command succeeds without contacting a registry when the index and store hold everything the package needs. If anything is missing, it fails at once instead of querying a registry.
 
@@ -38,11 +44,11 @@ Each flag has an environment spelling for CI and container setups where the comm
 - [`OCX_OFFLINE`][env-offline] set to a truthy value is the same as `--offline`. Tag to digest resolution must then come from the local index or from a digest-pinned identifier. An unpinned tag missing from the local index errors immediately.
 - [`OCX_REMOTE`][env-remote] is the same as `--remote`. It routes mutable lookups (tag list, catalog, tag to manifest resolution) to the registry.
 
-The pure-query commands `ocx index list`, `ocx index catalog` and `ocx package description pull` do not persist what they read. Run [`ocx index update`][cmd-index-update] explicitly to refresh the snapshot. Digest-addressed reads still consult the local index first, since immutable content is safe to cache.
+The pure-query commands `ocx index list`, `ocx index catalog` and `ocx package description pull` do not persist what they read. Run [`ocx index update`][cmd-index-update] explicitly to refresh the local index. Digest-addressed reads still consult the local index first, since immutable content is safe to cache.
 
 Set both and you get pinned-only mode: no registry contact and no local writes. A tag-addressed resolution that the local copy cannot satisfy errors instead of falling back. For `ocx package verify`, offline scopes to the Sigstore trust services (the Rekor key fetch and TUF), not the artifact registry. See [air-gapped verification](./verify-installs.mdx#supply-chain-offline).
 
-[`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] only change *which collection* is read from. They are useful when consuming a [bundled index copy][in-depth-indices-bundled] from a GitHub Action or Bazel rule.
+[`--index`][arg-index] / [`OCX_INDEX`][env-ocx-index] only change *which collection* is read from. They are useful when consuming a [shipped copy][in-depth-indices-bundled] from a GitHub Action or Bazel rule.
 
 ## What the index resolves offline \{#offline-index-scope\}
 
@@ -50,7 +56,7 @@ The index resolves *version choice* offline, meaning which platform-manifest dig
 
 A tag's local entry points at a [dispatch object][in-depth-indices-dispatch]. That object is an OCI image index carrying the full platform to digest map, cached alongside the tag pointer and verified by digest. A digest-pinned reference (`pkg@sha256:...`) names the platform-manifest digest directly and has no dispatch object at all.
 
-Either way, a git-committed `.ocx/index/` resolves the tag's version choice on a clean clone with no network. Fetching the actual manifest and layers still needs the registry the first time a given digest is installed, unless the package store is already warm.
+Either way, a git-committed `.ocx/index/` resolves the tag's version choice on a clean clone with no network. Fetching the actual manifest and layers still needs the registry the first time a given digest is installed, unless the object store is already warm.
 
 ## What has to travel for a home copy to work offline \{#offline-portable\}
 
@@ -58,34 +64,34 @@ A CI cache restore, a container image layer or a devcontainer feature's shipped 
 
 Three stores make a copy fully offline-capable: `blobs/` (manifests), `layers/` (extracted archives) and the local index (tag to digest resolution). `packages/` does not need to be part of the copy, because it holds hardlink assemblies of `layers/` content built locally at install time.
 
-A fresh `$OCX_HOME` seeded with only `blobs/`, `layers/` and `index/` still installs, runs and toolchain-runs every package those three stores cover. OCX reconstructs `packages/` on demand from the local layer cache, with no egress required.
+A fresh `$OCX_HOME` seeded with only `blobs/`, `layers/` and `index/` still installs, runs and toolchain-runs every package those three stores cover. OCX reconstructs `packages/` on demand from the local object store, with no egress required.
 
 Anything the copy is missing fails closed instead of reaching the network. `--offline` refuses with exit code 81 rather than falling through to a registry a restricted or air-gapped environment may not even reach.
 
 :::tip[Learn more]
-[Indices In Depth][in-depth-indices]: wire layout, dispatch objects, shipped copies.
-[Storage In Depth][in-depth-storage]: the layer store and how `packages/` is assembled from it.
+[Indices][in-depth-indices]: wire layout, dispatch objects, shipped copies.
+[Storage][in-depth-storage]: the object store and how `packages/` is assembled from it.
 :::
 
 ## Refreshing the index
 
 `ocx index update <package>` syncs the local index for a specific package:
 
-- **Bare identifier** (e.g., `cmake`) downloads every tag.
-- **Tagged identifier** (e.g., `kitware/cmake:3.28`) fetches only that single tag, ideal for lockfile workflows.
+- **Bare identifier** (e.g., `nodejs/node`) downloads every tag.
+- **Tagged identifier** (e.g., `nodejs/node:24`) fetches only that single tag, ideal for lock file workflows.
 
 To refresh a whole registry rather than one package, [`ocx index sync <REGISTRY>`][cmd-index-sync] refreshes every package that registry's own catalog lists, each as if named bare.
 
-On a fresh machine, [`ocx package install kitware/cmake:3.28`][cmd-package-install] does not need an explicit `index update` first. When the local index has no entry for the requested tag, OCX resolves it against the registry, persists it and proceeds with the install.
+On a fresh machine, [`ocx package install nodejs/node:24`][cmd-package-install] does not need an explicit `index update` first. When the local index has no entry for the requested tag, OCX resolves it against the registry, persists it and proceeds with the install.
 
 ## Packages published through `index.ocx.sh` \{#offline-public-index\}
 
-A package identified as `ocx.sh/<namespace>/<package>` resolves through [index.ocx.sh][index-ocx-sh], a pointer index that tracks which physical registry hosts each package. Resolution and offline behavior work the same way as for a direct registry reference. Publisher signals like `deprecated` or `yanked` surface as warnings rather than being acted on silently.
+A package identified as `ocx.sh/<namespace>/<package>` resolves through [index.ocx.sh][index-ocx-sh], the public index, which tracks which physical registry hosts each package. Resolution and offline behavior work the same way as for a direct registry reference. Publisher signals like `deprecated` or `yanked` surface as warnings rather than being acted on silently.
 
 :::tip[Learn more]
-[Indices In Depth][in-depth-indices]: one format with many copies, the remote query path, index internals and the fresh-machine fallback.
-[Indices In Depth: index.ocx.sh][in-depth-indices-public]: why the identity is stable across registry moves, resolution pipeline, caching, status surfacing.
-[Versioning In Depth: Locking][in-depth-versioning-locking]: how `ocx.lock` pins independent of any index.
+[Indices][in-depth-indices]: one format with many copies, the remote query path, index internals and the fresh-machine fallback.
+[Public index][in-depth-indices-public]: why the identity is stable across registry moves, resolution pipeline, caching, status surfacing.
+[Versioning: locking][in-depth-versioning-locking]: how `ocx.lock` pins independent of any index.
 :::
 
 [index-ocx-sh]: https://index.ocx.sh
@@ -102,7 +108,7 @@ A package identified as `ocx.sh/<namespace>/<package>` resolves through [index.o
 [in-depth-storage-packages]: ../explanation/storage.mdx#packages
 [in-depth-versioning-locking]: ../explanation/versioning.mdx#locking
 [in-depth-indices]: ../explanation/indices.md
-[in-depth-indices-local]: ../explanation/local-index.md#local
-[in-depth-indices-dispatch]: ../explanation/local-index.md#local-dispatch
+[in-depth-indices-local]: ../explanation/local-index.mdx#local
+[in-depth-indices-dispatch]: ../explanation/local-index.mdx#local-dispatch
 [in-depth-indices-bundled]: ../explanation/indices.md#bundled
-[in-depth-indices-public]: ../explanation/public-index.md#public-index
+[in-depth-indices-public]: ../explanation/public-index.mdx#public-index

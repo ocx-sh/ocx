@@ -22,6 +22,7 @@ from src.helpers import (
     mint_identity_token,
     start_sigstore_stack,
 )
+from src.real_packages import stub_outputs
 from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.cosign import cosign_binary, signing_config
@@ -36,8 +37,8 @@ def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[Pa
     return {
         "astral-sh/uv": [
             make_package(
-                ocx, f"{prefix}astral-sh/uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
-                outputs={"uv": {"--version": "uv 0.10.10"}},
+                ocx, f"{prefix}astral-sh/uv", "0.12.5", tmp_path, bins=["uv"], env=uv_env,
+                outputs=stub_outputs("astral-sh/uv", "0.12.5"),
             ),
         ],
     }
@@ -54,44 +55,32 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
     return {
         "amazon/corretto": [
             make_package(
-                ocx, f"{prefix}amazon/corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "21", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"-version": (
-                    "openjdk 21.0.10 2026-01-20 LTS\n"
-                    "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
-                    "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
-                )}},
+                outputs=stub_outputs("amazon/corretto", "21"),
             ),
             make_package(
-                ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "25.0.5", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"-version": (
-                    "openjdk 25.0.2 2026-01-20 LTS\n"
-                    "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
-                    "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
-                )}},
+                outputs=stub_outputs("amazon/corretto", "25.0.5"),
             ),
         ],
     }
 
 
-def cmake_versions(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
-    """CMake in two minor lines, for the first-steps tutorials' version switching."""
-    cmake_env = [
+def node_versions(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Node.js in two major lines, for the first-steps tutorials' version switching."""
+    node_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
     ]
-    banner = "\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
     return {
-        "kitware/cmake": [
+        "nodejs/node": [
             make_package(
-                ocx, f"{prefix}kitware/cmake", "3.31", tmp_path, bins=["cmake"], env=cmake_env,
-                outputs={"cmake": {"--version": "cmake version 3.31.12\n" + banner}},
-            ),
-            make_package(
-                ocx, f"{prefix}kitware/cmake", "4.0", tmp_path, bins=["cmake"], env=cmake_env,
-                outputs={"cmake": {"--version": "cmake version 4.0.7\n" + banner}},
-            ),
+                ocx, f"{prefix}nodejs/node", tag, tmp_path, bins=["node"], env=node_env,
+                outputs=stub_outputs("nodejs/node", tag),
+            )
+            for tag in ("22", "24")
         ],
     }
 
@@ -100,12 +89,6 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     """Multiple packages for index/catalog demos."""
     uv_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
-         "visibility": "public"},
-    ]
-    cmake_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
-         "visibility": "public"},
-        {"key": "MANPATH", "type": "path", "value": "${installPath}/share/man",
          "visibility": "public"},
     ]
     corretto_env = [
@@ -129,38 +112,20 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     return {
         "astral-sh/uv": [
             make_package(
-                ocx, f"{prefix}astral-sh/uv", "0.10.0", tmp_path, bins=["uv"], env=uv_env,
-                outputs={"uv": {"--version": "uv 0.10.10"}},
-            ),
-        ],
-        "kitware/cmake": [
-            make_package(
-                ocx, f"{prefix}kitware/cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
-                outputs={"cmake": {"--version": (
-                    "cmake version 4.2.3\n"
-                    "\n"
-                    "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
-                )}},
+                ocx, f"{prefix}astral-sh/uv", "0.12.5", tmp_path, bins=["uv"], env=uv_env,
+                outputs=stub_outputs("astral-sh/uv", "0.12.5"),
             ),
         ],
         "amazon/corretto": [
             make_package(
-                ocx, f"{prefix}amazon/corretto", "21.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "21", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"-version": (
-                    "openjdk 21.0.10 2026-01-20 LTS\n"
-                    "OpenJDK Runtime Environment Corretto-21.0.10.7.1 (build 21.0.10+7-LTS)\n"
-                    "OpenJDK 64-Bit Server VM Corretto-21.0.10.7.1 (build 21.0.10+7-LTS, mixed mode, sharing)"
-                )}},
+                outputs=stub_outputs("amazon/corretto", "21"),
             ),
             make_package(
-                ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
+                ocx, f"{prefix}amazon/corretto", "25.0.5", tmp_path,
                 bins=["java", "javac"], env=corretto_env,
-                outputs={"java": {"-version": (
-                    "openjdk 25.0.2 2026-01-20 LTS\n"
-                    "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
-                    "OpenJDK 64-Bit Server VM Corretto-25.0.2.10.1 (build 25.0.2+10-LTS, mixed mode, sharing)"
-                )}},
+                outputs=stub_outputs("amazon/corretto", "25.0.5"),
             ),
         ],
         "ocx/cli": [
@@ -171,14 +136,14 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
         ],
         "nodejs/node": [
             make_package(
-                ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
-                outputs={"node": {"--version": "v24.14.0"}},
+                ocx, f"{prefix}nodejs/node", "24", tmp_path, bins=["node"], env=node_env,
+                outputs=stub_outputs("nodejs/node", "24"),
             ),
         ],
         "oven-sh/bun": [
             make_package(
-                ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
-                outputs={"bun": {"--version": "1.3.10"}},
+                ocx, f"{prefix}oven-sh/bun", "1.3.10", tmp_path, bins=["bun"], env=bun_env,
+                outputs=stub_outputs("oven-sh/bun", "1.3.10"),
             ),
         ],
     }
@@ -189,8 +154,6 @@ def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list
     python_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
-        {"key": "PYTHON_HOME", "type": "constant", "value": "${installPath}",
-         "visibility": "public"},
     ]
     return {
         "astral-sh/python-build-standalone": [
@@ -199,14 +162,14 @@ def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list
             # `pgo.lto` / `freethreaded` here taught a tag grammar no reader
             # could reproduce against ocx.sh.
             make_package(
-                ocx, f"{prefix}astral-sh/python-build-standalone", "3.13.14", tmp_path / "default",
+                ocx, f"{prefix}astral-sh/python-build-standalone", "3.14.7", tmp_path / "default",
                 bins=["python3"], env=python_env,
-                outputs={"python3": {"--version": "Python 3.13.14"}},
+                outputs=stub_outputs("astral-sh/python-build-standalone", "3.14.7"),
             ),
             make_package(
-                ocx, f"{prefix}astral-sh/python-build-standalone", "slim-3.13.14", tmp_path / "slim",
+                ocx, f"{prefix}astral-sh/python-build-standalone", "slim-3.14.7", tmp_path / "slim",
                 bins=["python3"], env=python_env,
-                outputs={"python3": {"--version": "Python 3.13.14"}},
+                outputs=stub_outputs("astral-sh/python-build-standalone", "3.14.7"),
             ),
         ],
     }
@@ -222,13 +185,9 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     node_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
-        {"key": "NODE_HOME", "type": "constant", "value": "${installPath}",
-         "visibility": "public"},
     ]
     bun_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
-         "visibility": "public"},
-        {"key": "BUN_HOME", "type": "constant", "value": "${installPath}",
          "visibility": "public"},
     ]
     webapp_env = [
@@ -239,12 +198,12 @@ def dependencies(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
     ]
 
     nodejs = make_package(
-        ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
-        outputs={"node": {"--version": "v24.14.0"}},
+        ocx, f"{prefix}nodejs/node", "24", tmp_path, bins=["node"], env=node_env,
+        outputs=stub_outputs("nodejs/node", "24"),
     )
     bun = make_package(
-        ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
-        outputs={"bun": {"--version": "1.3.10"}},
+        ocx, f"{prefix}oven-sh/bun", "1.3.10", tmp_path, bins=["bun"], env=bun_env,
+        outputs=stub_outputs("oven-sh/bun", "1.3.10"),
     )
 
     node_digest = fetch_platform_manifest_digest(ocx.registry, nodejs.repo, nodejs.tag)
@@ -293,23 +252,17 @@ def deps_visibility(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[st
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
     ]
-    node_env = path_env + [
-        {"key": "NODE_HOME", "type": "constant", "value": "${installPath}",
-         "visibility": "public"},
-    ]
-    bun_env = path_env + [
-        {"key": "BUN_HOME", "type": "constant", "value": "${installPath}",
-         "visibility": "public"},
-    ]
+    node_env = path_env
+    bun_env = path_env
 
     # Leaf packages (no deps of their own)
     nodejs = make_package(
-        ocx, f"{prefix}nodejs/node", "24.0.0", tmp_path, bins=["node"], env=node_env,
-        outputs={"node": {"--version": "v24.14.0"}},
+        ocx, f"{prefix}nodejs/node", "24", tmp_path, bins=["node"], env=node_env,
+        outputs=stub_outputs("nodejs/node", "24"),
     )
     bun = make_package(
-        ocx, f"{prefix}oven-sh/bun", "1.3.0", tmp_path, bins=["bun"], env=bun_env,
-        outputs={"bun": {"--version": "1.3.10"}},
+        ocx, f"{prefix}oven-sh/bun", "1.3.10", tmp_path, bins=["bun"], env=bun_env,
+        outputs=stub_outputs("oven-sh/bun", "1.3.10"),
     )
     templates = make_package(
         ocx, f"{prefix}acme/templates", "1.0.0", tmp_path, bins=["tpl"],
@@ -447,10 +400,10 @@ def publisher(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
 def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Provision a working corporate-patches scenario for the consumer cast.
 
-    Publishes ``cmake`` (the base tool) and an env-only companion ``corp-ca``
-    that carries an INTERFACE ``SSL_CERT_FILE`` overlay, configures the
-    ``[patches]`` tier, installs cmake, then publishes a per-base descriptor
-    mapping cmake → corp-ca.
+    Publishes Python (the base tool) and an env-only companion ``corp-ca``
+    carrying an INTERFACE ``SSL_CERT_FILE`` overlay (the CA bundle CPython's
+    OpenSSL reads), configures the ``[patches]`` tier, installs Python, then
+    publishes a per-base descriptor mapping Python → corp-ca.
 
     The descriptor is published *after* the base install so lazy discovery
     records "no descriptor" at install time — the recorded ``ocx patch sync``
@@ -460,7 +413,7 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
     The ``[patches]`` registry is prefixed per provision (SP7) so concurrent
     xdist workers never collide on a shared descriptor location.
     """
-    cmake_env = [
+    python_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
     ]
@@ -469,13 +422,9 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
         {"key": "SSL_CERT_FILE", "type": "constant", "value": "/etc/ssl/certs/corp-ca.pem",
          "visibility": "interface"},
     ]
-    cmake = make_package(
-        ocx, f"{prefix}kitware/cmake", "4.2.0", tmp_path, bins=["cmake"], env=cmake_env,
-        outputs={"cmake": {"--version": (
-            "cmake version 4.2.3\n"
-            "\n"
-            "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
-        )}},
+    python = make_package(
+        ocx, f"{prefix}astral-sh/python-build-standalone", "3.14", tmp_path, bins=["python3"],
+        env=python_env, outputs=stub_outputs("astral-sh/python-build-standalone", "3.14"),
     )
     # Published `any`: a binary-free, env-only cert bundle is the canonical
     # `any`-published companion (adr_platform_model_unification.md D1) — it
@@ -503,18 +452,18 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
 
     # Install the base BEFORE the descriptor exists so lazy discovery finds
     # nothing — the on-screen `ocx patch sync` is what installs the companion.
-    ocx.run("package", "install", cmake.short, format=None)
+    ocx.run("package", "install", python.short, format=None)
 
-    # Publish a per-base descriptor (cmake → corp-ca).  Per-base keeps the
+    # Publish a per-base descriptor (Python → corp-ca).  Per-base keeps the
     # descriptor path scoped to the prefixed base repo (no cross-worker clash).
     descriptor = tmp_path / "consumer-descriptor.json"
     descriptor.write_text(json.dumps({
         "version": 1,
         "rules": [{"match": "*", "packages": [companion.fq], "required": True}],
     }))
-    ocx.run("patch", "publish", "--descriptor", str(descriptor), cmake.fq, format=None)
+    ocx.run("patch", "publish", "--descriptor", str(descriptor), python.fq, format=None)
 
-    return {"kitware/cmake": [cmake], "corp/ca": [companion]}
+    return {"astral-sh/python-build-standalone": [python], "corp/ca": [companion]}
 
 
 def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
@@ -676,22 +625,18 @@ def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> 
 def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """Provision a CI recipe onto the ``[managed]`` config tier.
 
-    Publishes ``cmake`` for the install step and pushes a managed-config
+    Publishes ``nodejs/node`` for the install step and pushes a managed-config
     artifact, aliasing ``internal.company.com`` to the local test registry
     exactly like ``managed_config_onboard`` — the CI recipe never writes a
     seed, so no ``self setup`` bootstrap seam is needed here.
     """
-    cmake_env = [
+    node_env = [
         {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
          "visibility": "public"},
     ]
-    cmake = make_package(
-        ocx, f"{prefix}kitware/cmake", "3.28", tmp_path, bins=["cmake"], env=cmake_env,
-        outputs={"cmake": {"--version": (
-            "cmake version 3.28.3\n"
-            "\n"
-            "CMake suite maintained and supported by Kitware (kitware.com/cmake)."
-        )}},
+    node = make_package(
+        ocx, f"{prefix}nodejs/node", "24", tmp_path, bins=["node"], env=node_env,
+        outputs=stub_outputs("nodejs/node", "24"),
     )
 
     path_prefix = prefix.rstrip("_")
@@ -701,7 +646,7 @@ def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[
     )
     _alias_managed_config_host(ocx, path_prefix)
 
-    return {"kitware/cmake": [cmake]}
+    return {"nodejs/node": [node]}
 
 
 
@@ -952,7 +897,7 @@ def promotion(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, lis
     )
 
     mytool_env = [
-        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+        {"key": "PATH", "type": "path", "required": True, "value": "${self.installPath}/bin",
          "visibility": "public"},
     ]
     return {
@@ -970,7 +915,7 @@ SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 SETUPS: dict[str, SetupFn] = {
     "basic": basic,
     "multi-version": multi_version,
-    "cmake-versions": cmake_versions,
+    "node-versions": node_versions,
     "full-catalog": full_catalog,
     "variants": variants,
     "dependencies": dependencies,

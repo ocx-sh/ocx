@@ -148,7 +148,7 @@ pub enum Command {
         An object is unreferenced when no candidate or current symlink points to it and no \
         installed package depends on it. A registered project's `ocx.lock` also pins objects, \
         patch companions included. Projects register in the `$OCX_HOME/projects/` ledger when \
-        `ocx lock` or `ocx add` writes a lockfile.\n\n\
+        `ocx lock` or `ocx add` writes a lock file.\n\n\
         Dependencies of a removed package become unreferenced and are collected in the same pass.\n\n\
         With `--format json`, each item carries `kind`, `dry_run`, `path` and `held_by`. \
         A dry run adds a `Held By` column naming the projects that pin an object it keeps.\n\n\
@@ -156,7 +156,7 @@ pub enum Command {
         rewrites from `ocx.lock`; `clean` never walks or collects from it. Every run also removes \
         the consent stamp of any project whose directory no longer exists, and `--dry-run` lists \
         those stamps without removing them.\n\n\
-        Do not run `clean` while other ocx commands are running: a concurrent install may \
+        Do not run `clean` while other OCX commands are running: a concurrent install may \
         reference an object that `clean` is about to remove.")]
     Clean(clean::Clean),
     /// Manage the corporate managed-configuration tier.
@@ -174,9 +174,9 @@ pub enum Command {
     /// `ocx package announce`.
     #[command(subcommand)]
     Index(index::Index),
-    /// Print ocx version, registry, platform, shell, and home directory.
+    /// Print OCX version, registry, platform, shell, and home directory.
     #[command(long_about = "\
-        Print ocx version, registry, platform, shell, and home directory.\n\n\
+        Print OCX version, registry, platform, shell, and home directory.\n\n\
         Also lists the detected libc family on Linux. When build provenance was baked in at \
         compile time, two more rows appear: `Commit` (short SHA and clean or dirty status) and \
         `Channel` (for example `dev`). Both are absent on local builds and on stable releases.\n\n\
@@ -206,7 +206,7 @@ pub enum Command {
         lock yet. The next shell prompt in that directory applies it, and the first `ocx add` \
         re-records it. `--no-consent` skips the stamp (consent later with `ocx shell allow`) and \
         `OCX_NO_CONSENT` makes that the default; the flag outranks the variable.\n\n\
-        Under `--global` no stamp is written, since the ocx home toolchain is always consented. \
+        Under `--global` no stamp is written, since the OCX home toolchain is always consented. \
         `ocx --global add` and its siblings also create the global file, so `ocx --global init` \
         is for scaffolding it ahead of the first binding.")]
     Init(init::Init),
@@ -216,7 +216,7 @@ pub enum Command {
         Resolves the bindings in the nearest `ocx.toml` to per-platform leaf digests and writes \
         `ocx.lock` beside it. Each lock entry records `declared`, the `ocx.toml` spelling it was \
         resolved from. Only a binding that is new, or whose spelling or repository changed, is \
-        re-resolved. Every other pin is carried forward verbatim, even if a moving tag has moved \
+        re-resolved. Every other pin is carried forward verbatim, even if a rolling tag has moved \
         upstream. A lock whose entries all match `ocx.toml` is rewritten byte-identically.\n\n\
         To advance pins whose declaration did not change, use `ocx update`.\n\n\
         Each binding records its registry and repository plus a table of every platform the \
@@ -259,10 +259,10 @@ pub enum Command {
         Re-resolve declared tags against the registry; the default group or a subset.\n\n\
         Resolves declared tags live against the registry by default (the root `--remote` flag \
         is redundant here, but accepted). It records the result in `ocx.lock` only and never modifies the local \
-        index tag snapshot. A moving tag (`:latest`, `:3`) advances to \
+        index tag snapshot. A rolling tag (`:latest`, `:3`) advances to \
         wherever it points today.\n\n\
-        Under `--frozen`, resolution is capped at the local index snapshot (an unsnapshotted \
-        tag exits 81); `--offline` forbids network access. Without `-g` only the default group \
+        Under `--frozen`, resolution is capped at the local index (a tag the \
+        local index lacks exits 81); `--offline` forbids network access. Without `-g` only the default group \
         is re-resolved; `-g ci` selects a group and `-g all` every group. Binding names narrow \
         the selection further: `ocx update ripgrep` advances one binding. A group tool declared \
         `{ from = \"default\" }` moves with its source: both land on the same pin.\n\n\
@@ -292,8 +292,8 @@ pub enum Command {
         Move declared tags in ocx.toml to the newest published release.\n\n\
         `ocx update` moves the lock to where a tag points now; `ocx upgrade` moves the tag \
         itself. A binding keeps its variant and precision and stays within its major: \
-        `cmake:3.28` moves to `cmake:3.29`, and `cmake:3` has nothing to move to until \
-        `--major` lets it cross to `cmake:4`.\n\n\
+        `astral-sh/python-build-standalone:3.13` moves to `3.14`, and `nodejs/node:24.21` stays on \
+        the 24 line until `--major` lets it cross to `26`.\n\n\
         A newer major is listed as a hint either way. A binding that cannot move is left alone \
         and reported with one reason: `digest_pinned`, `latest`, `not_a_version`, \
         `prerelease_or_build` or `up_to_date`.\n\n\
@@ -341,7 +341,7 @@ pub enum Command {
         so `git status` stays clean.\n\n\
         This is the primary way a project toolchain is rendered; `--dry-run` reports the delta \
         and writes nothing.\n\n\
-        The package store's own `candidate` and `current` symlinks are left alone: those move \
+        The `candidate` and `current` symlinks are left alone: those move \
         only when you install or select a package.\n\n\
         Every package comes from the digest-pinned `ocx.lock`, never from the index, which makes \
         this the primitive for reproducible CI setups; use `ocx package pull` for OCI \
@@ -352,8 +352,8 @@ pub enum Command {
     /// Remove one or more package bindings from ocx.toml.
     #[command(long_about = "\
         Remove one or more package bindings from ocx.toml.\n\n\
-        Each argument is a bare binding name (`cmake`), a name with a tag (`kitware/cmake:3.28`) \
-        or a fully-qualified identifier (`ocx.sh/kitware/cmake:3.28`). An identifier is reduced \
+        Each argument is a bare binding name (`node`), a name with a tag (`nodejs/node:24`) \
+        or a fully-qualified identifier (`ocx.sh/nodejs/node:24`). An identifier is reduced \
         to its repository basename and matched against the `ocx.toml` map key. The tag and \
         registry only locate the entry. A binding added under \
         an explicit name (`ocx add glab=...`) is matched only by that name.\n\n\
@@ -392,7 +392,7 @@ pub enum Command {
         `PATH`.\n\n\
         The command is looked up once, before the child starts. Only the composed packages' \
         own `PATH` contributions are searched, never the ambient `PATH` or the working directory. A \
-        match that is itself an ocx launcher is refused. `--env PATH=...` replaces the composed \
+        match that is itself an OCX launcher is refused. `--env PATH=...` replaces the composed \
         `PATH` outright; write `--env PATH:path=...` to prepend.")]
     #[command(visible_alias = "x")]
     Exec(toolchain_exec::ToolchainExec),
@@ -423,22 +423,22 @@ pub enum Command {
     /// Inspect what the project toolchain resolves to, without installing.
     #[command(long_about = "\
         Inspect what the project toolchain resolves to, without installing.\n\n\
-        The toolchain-tier counterpart to `ocx package inspect`: the same report and flags, keyed \
+        The toolchain counterpart to `ocx package inspect`: the same report and flags, keyed \
         by `ocx.toml` binding instead of raw identifier. It adds the project's composed `env` as an \
         ordered array: `[env]`, then each selected group's `[env]` in `-g` order, then `--env`. Every declaration is kept, so one key can repeat. Selects the bindings in the requested \
         groups, narrows them to any NAMEs given, and reports each.\n\n\
         Nothing is installed and neither project file is written.\n\n\
-        By default each binding lists the platform candidates `ocx.lock` pins. The report is a \
+        By default each binding lists the platforms `ocx.lock` pins. The report is a \
         pure projection of the two project files: no registry is contacted, no host leaf is \
-        chosen, and `-p` is inert. `--resolve` selects a platform exactly as on the OCI-tier \
-        command.\n\n\
+        chosen, and `-p` is inert. `--resolve` selects a platform exactly as on `ocx package \
+        inspect`.\n\n\
         A cold `--closure` costs one config-blob fetch per selected binding; a warm one works \
         under `--offline`. Needs a current lock: exit 78 when absent, 65 when it no longer \
         matches `ocx.toml`; use `ocx status` for those states.\n\n\
         Under `--resolve`, an unnamed sibling that ships no leaf for this host does not block the \
         report.")]
     Inspect(inspect::Inspect),
-    /// Print the version of ocx
+    /// Print the version of OCX
     ///
     /// Without flags it prints a bare `major.minor.patch` string for scripts. `--verbose` prints a
     /// multi-line build provenance summary.

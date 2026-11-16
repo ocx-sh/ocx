@@ -6,18 +6,18 @@
 set -euo pipefail
 
 # region cast
-ocx package install --select "$PKG_KITWARE_CMAKE"
-ocx package which --current "$PKG_KITWARE_CMAKE"
-ocx package which --candidate "$PKG_KITWARE_CMAKE"
+ocx package install --select "$PKG_NODEJS_NODE"
+ocx package which --current "$PKG_NODEJS_NODE"
+ocx package which --candidate "$PKG_NODEJS_NODE"
 # endregion cast
 
-current_path="$(ocx package which --current "$REPO_KITWARE_CMAKE")"
+current_path="$(ocx package which --current "$REPO_NODEJS_NODE")"
 [[ -n "$current_path" ]] || {
     echo "ERROR: ocx package which --current returned empty output" >&2
     exit 1
 }
 
-candidate_path="$(ocx package which --candidate "$PKG_KITWARE_CMAKE")"
+candidate_path="$(ocx package which --candidate "$PKG_NODEJS_NODE")"
 [[ -n "$candidate_path" ]] || {
     echo "ERROR: ocx package which --candidate returned empty output" >&2
     exit 1

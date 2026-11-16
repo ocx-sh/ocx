@@ -5,4 +5,4 @@
 # description: Write the package link at a path of your own with install --link, so ocx clean keeps the package.
 set -euo pipefail
 
-ocx package install --link ./.tools/cmake "$PKG_KITWARE_CMAKE"
+ocx package install --link ./.tools/node "$PKG_NODEJS_NODE"

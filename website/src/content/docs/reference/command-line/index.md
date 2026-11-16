@@ -15,7 +15,7 @@ Default `auto`: color only on a terminal. An explicit `--color` outranks `NO_COL
 
 ## `--config` {#arg-config}
 
-Path to the ocx configuration file.
+Path to the OCX configuration file.
 
 Can also be set via the `OCX_CONFIG` environment variable. The file must exist, or the command exits 79.
 
@@ -55,7 +55,7 @@ Conflicts with `--remote`. Env var: `OCX_FROZEN`.
 
 Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project file in effect, instead of discovering a project by CWD walk.
 
-Mutually exclusive with `--project`. Applies to this invocation only: a child ocx process selects its own tier.
+Mutually exclusive with `--project`. Applies to this invocation only: a child OCX process selects its own tier.
 
 The global toolchain never composes into project resolution; `ocx exec` and `ocx package exec` stay hermetic and never read it.
 
@@ -159,14 +159,14 @@ Every command is documented on the page of its group.
 | Page | Commands |
 | --- | --- |
 | [Top-level commands](./commands.md) | `ocx about`, `ocx add`, `ocx clean`, `ocx env`, `ocx exec`, `ocx init`, `ocx inspect`, `ocx lock`, `ocx login`, `ocx logout`, `ocx pull`, `ocx remove`, `ocx status`, `ocx update`, `ocx upgrade`, `ocx version` |
-| [ocx config](./config.md) | `ocx config`, `ocx config push`, `ocx config setup`, `ocx config test`, `ocx config update` |
-| [ocx direnv](./direnv.md) | `ocx direnv`, `ocx direnv export`, `ocx direnv init` |
-| [ocx index](./index-commands.md) | `ocx index`, `ocx index catalog`, `ocx index list`, `ocx index regenerate`, `ocx index sync`, `ocx index update` |
-| [ocx package: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package push`, `ocx package sign`, `ocx package test` |
-| [ocx package: consuming](./package-consuming.md) | `ocx package deps`, `ocx package deselect`, `ocx package env`, `ocx package exec`, `ocx package inspect`, `ocx package install`, `ocx package prune`, `ocx package pull`, `ocx package receipt`, `ocx package sbom`, `ocx package select`, `ocx package uninstall`, `ocx package verify`, `ocx package which` |
-| [ocx patch](./patch.md) | `ocx patch`, `ocx patch freeze`, `ocx patch publish`, `ocx patch sync`, `ocx patch test`, `ocx patch why` |
-| [ocx self](./self.md) | `ocx self`, `ocx self activate`, `ocx self setup`, `ocx self update` |
-| [ocx shell](./shell.md) | `ocx shell`, `ocx shell allow`, `ocx shell completion`, `ocx shell revoke`, `ocx shell state` |
+| [`ocx config`](./config.md) | `ocx config`, `ocx config push`, `ocx config setup`, `ocx config test`, `ocx config update` |
+| [`ocx direnv`](./direnv.md) | `ocx direnv`, `ocx direnv export`, `ocx direnv init` |
+| [`ocx index`](./index-commands.md) | `ocx index`, `ocx index catalog`, `ocx index list`, `ocx index regenerate`, `ocx index sync`, `ocx index update` |
+| [`ocx package`: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package push`, `ocx package sign`, `ocx package test` |
+| [`ocx package`: consuming](./package-consuming.md) | `ocx package deps`, `ocx package deselect`, `ocx package env`, `ocx package exec`, `ocx package inspect`, `ocx package install`, `ocx package prune`, `ocx package pull`, `ocx package receipt`, `ocx package sbom`, `ocx package select`, `ocx package uninstall`, `ocx package verify`, `ocx package which` |
+| [`ocx patch`](./patch.md) | `ocx patch`, `ocx patch freeze`, `ocx patch publish`, `ocx patch sync`, `ocx patch test`, `ocx patch why` |
+| [`ocx self`](./self.md) | `ocx self`, `ocx self activate`, `ocx self setup`, `ocx self update` |
+| [`ocx shell`](./shell.md) | `ocx shell`, `ocx shell allow`, `ocx shell completion`, `ocx shell revoke`, `ocx shell state` |
 
 ## Anchors on other pages {#moved-anchors}
 

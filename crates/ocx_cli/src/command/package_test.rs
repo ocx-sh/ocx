@@ -50,8 +50,8 @@ pub struct PackageTest {
     platform: Option<ocx_oci::Platform>,
 
     /// Materialize into DIR instead of an auto-managed temp dir. DIR must not
-    /// exist (created by ocx) or be empty. Implies keep - the dir is never
-    /// deleted by ocx. Must reside on the same filesystem as
+    /// exist (created by OCX) or be empty. Implies keep - the dir is never
+    /// deleted by OCX. Must reside on the same filesystem as
     /// `$OCX_HOME/layers/` - hardlink assembly does not fall back to copy.
     #[clap(short = 'o', long, conflicts_with = "keep")]
     output: Option<PathBuf>,

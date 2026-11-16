@@ -9,7 +9,7 @@ Use this page to remove a package you no longer need and to reclaim the disk spa
 
 ## Remove a package \{#cleanup\}
 
-[`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [package store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary when no [other reference][in-depth-storage-gc] remains.
+[`ocx package uninstall nodejs/node:24`][cmd-package-uninstall] removes the candidate symlink for that tag. The binary stays in the [object store][in-depth-storage-packages] in case other references hold it. Pass `--purge` to also drop the binary when no [other reference][in-depth-storage-gc] remains.
 
 Toolchain commands only drop references too. [`ocx remove`][cmd-remove], [`ocx update`][cmd-update] and the other commands that rewrite `ocx.lock` take the same `--purge` for the packages they unpin.
 
@@ -17,7 +17,7 @@ Toolchain commands only drop references too. [`ocx remove`][cmd-remove], [`ocx u
 
 [`ocx clean`][cmd-clean] sweeps the whole store in one pass. It removes every package that has no live install symlink and no [forward-ref][in-depth-storage-gc] from a dependent package. Layers and blobs that become unreachable go with them.
 
-Projects that share one `OCX_HOME` also share the store. `ocx clean` keeps every package referenced by any registered project's `ocx.lock`, not just the active one. A project is registered whenever `ocx add`, `ocx remove`, `ocx lock`, `ocx update` or `ocx upgrade` writes its lockfile. Browse `$OCX_HOME/projects/` to see which projects are registered.
+Projects that share one `OCX_HOME` also share the store. `ocx clean` keeps every package referenced by any registered project's `ocx.lock`, not just the active one. A project is registered whenever `ocx add`, `ocx remove`, `ocx lock`, `ocx update` or `ocx upgrade` writes its lock file. Browse `$OCX_HOME/projects/` to see which projects are registered.
 
 Deleting a project's directory makes its packages collectable at the next clean, with no warning. Pass `--force` to bypass the project registry. Live install symlinks are always honoured.
 
@@ -51,7 +51,7 @@ A blank cell means the entry is unreferenced and will be collected. A filled cel
 
 ### Limits \{#cleanup-limits\}
 
-Do not run `clean` while other ocx commands run. A concurrent install may reference an object that `clean` is about to remove, and the install then fails.
+Do not run `clean` while other OCX commands run. A concurrent install may reference an object that `clean` is about to remove, and the install then fails.
 
 The rendered toolchain tree under `<home>/toolchain/` sits outside the reference graph. It is derived state that `ocx pull` rewrites, so `clean` never walks it. The packages its links point at stay live through the project's own lock.
 

@@ -58,7 +58,7 @@
       ]
     },
     "update": {
-      "description": "Background update checks (`[update]`): the posture for ocx itself and for the toolchain,\nplus the interval between checks.\n\nA personal setting, read from `config.toml` only: a managed payload's `[update]` is\nignored and an `ocx.toml` refuses it. An unknown value never fails a command.",
+      "description": "Background update checks (`[update]`): the posture for OCX itself and for the toolchain,\nplus the interval between checks.\n\nA personal setting, read from `config.toml` only: a managed payload's `[update]` is\nignored and an `ocx.toml` refuses it. An unknown value never fails a command.",
       "anyOf": [
         {
           "$ref": "#/$defs/UpdateConfig"
@@ -91,7 +91,7 @@
       ]
     },
     "records": {
-      "description": "Execution-record sink (`[records]`).\n\nDesignates where OCX writes one JSON resolution record per tool launch —\nthe resolved package closure with digests, plus the resolved executable.\nDeclared at SYSTEM scope it clamps: no lower tier can redirect or\ndisable it.\n\nAbsent → no records written (opt-in).",
+      "description": "Execution-record sink (`[records]`).\n\nDesignates where OCX writes one JSON resolution record per tool launch —\nthe resolved package closure with digests, plus the resolved executable.\nDeclared in the system tier it clamps: no lower tier can redirect or\ndisable it.\n\nAbsent → no records written (opt-in).",
       "anyOf": [
         {
           "$ref": "#/$defs/RecordsOptions"
@@ -102,7 +102,7 @@
       ]
     },
     "toolchain_dir": {
-      "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain home ignores this key, and the directory need not exist yet.",
+      "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain tree ignores this key, and the directory need not exist yet.",
       "type": [
         "string",
         "null"
@@ -110,7 +110,7 @@
       "default": null
     },
     "extra_ca_certs": {
-      "description": "Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge\ntraffic in addition to the platform trust store.\n\nA relative path resolves against the directory of the `config.toml` that declared it.\n\nOverridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every\n`config.toml` tier unless the pair is declared at system scope.",
+      "description": "Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge\ntraffic in addition to the platform trust store.\n\nA relative path resolves against the directory of the `config.toml` that declared it.\n\nOverridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every\n`config.toml` tier unless the pair is declared in the system tier.",
       "type": [
         "string",
         "null"
@@ -132,7 +132,7 @@
       "type": "object",
       "properties": {
         "default": {
-          "description": "Default registry for bare identifiers (e.g. `cmake:3.28` expands to\n`<default>/cmake:3.28`).\n\nOverridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a\nliteral prefix (e.g. `\"ghcr.io\"`, `\"ocx.sh\"`) — never resolved through\nthe `[registries.<name>]` table.",
+          "description": "Default registry for bare identifiers (e.g. `nodejs/node:24` expands to\n`<default>/nodejs/node:24`).\n\nOverridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a\nliteral prefix (e.g. `\"ghcr.io\"`, `\"ocx.sh\"`) — never resolved through\nthe `[registries.<name>]` table.",
           "type": [
             "string",
             "null"
@@ -163,7 +163,7 @@
           }
         },
         "insecure": {
-          "description": "Contact this registry over plain HTTP instead of HTTPS.\n\nUnioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating\n`insecure = false` locks that host shut against the env list too.",
+          "description": "Contact this registry over plain HTTP instead of HTTPS.\n\nUnioned with `OCX_INSECURE_REGISTRIES`, except that a system-tier entry stating\n`insecure = false` locks that host shut against the env list too.",
           "type": [
             "boolean",
             "null"
@@ -318,7 +318,7 @@
       "type": "object",
       "properties": {
         "self": {
-          "description": "What ocx does when a newer ocx is published: `apply` installs it after the command\nfinishes, `notify` (default) prints a notice, `manual` never checks.\nOverridden by the `OCX_SELF_UPDATE` environment variable.",
+          "description": "What OCX does when a newer OCX is published: `apply` installs it after the command\nfinishes, `notify` (default) prints a notice, `manual` never checks.\nOverridden by the `OCX_SELF_UPDATE` environment variable.",
           "anyOf": [
             {
               "$ref": "#/$defs/RefreshPolicy"
@@ -330,7 +330,7 @@
           "default": "notify"
         },
         "toolchain": {
-          "description": "What ocx does when a locked tool's tag has moved: `notify` (default) prints a notice,\n`manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.\nOverridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.",
+          "description": "What OCX does when a locked tool's tag has moved: `notify` (default) prints a notice,\n`manual` never checks. `apply` is treated as `notify`: only `ocx update` moves a pin.\nOverridden by the `OCX_TOOLCHAIN_UPDATE` environment variable.",
           "anyOf": [
             {
               "oneOf": [
@@ -499,7 +499,7 @@
           ]
         },
         {
-          "description": "A `kind` this build does not know — an entry written by a newer ocx.\n\nIt narrows: it accepts nobody, and a sibling `keyless` entry in the same\npolicy keeps working. A policy whose signers are *all* unknown is refused\nwith an error naming it.",
+          "description": "A `kind` this build does not know — an entry written by a newer OCX.\n\nIt narrows: it accepts nobody, and a sibling `keyless` entry in the same\npolicy keeps working. A policy whose signers are *all* unknown is refused\nwith an error naming it.",
           "type": "object",
           "properties": {
             "kind": {
@@ -644,7 +644,7 @@
           ]
         },
         "profiles": {
-          "description": "Which shell profile files receive the managed ocx block.\n\nAbsent means auto-detect fresh on every run; an empty list means write\nno profile blocks at all.",
+          "description": "Which shell profile files receive the managed OCX block.\n\nAbsent means auto-detect fresh on every run; an empty list means write\nno profile blocks at all.",
           "type": [
             "array",
             "null"

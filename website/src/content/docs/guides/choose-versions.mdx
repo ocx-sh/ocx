@@ -1,11 +1,13 @@
 ---
 title: "Choose between versions"
-description: "Pick a tag, variant or exact digest, and handle yanked tags."
+description: "Select the current version, pick a tag, variant or exact digest, and handle yanked tags."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
 
 import Terminal from '@ocx-sh/theme/components/Terminal.astro'
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 Use this page to pick a tag, variant or exact digest for a package, and to decide which installed version is current.
 
@@ -13,42 +15,46 @@ Use this page to pick a tag, variant or exact digest for a package, and to decid
 
 Once two or more versions are installed, [`ocx package select`][cmd-package-select] picks the one that becomes "current":
 
+<ShellSession>
+
 \<\<\< @/_scripts/user-guide/versions-select.sh\{sh\}
 
-The `current` symlink is a [floating pointer][in-depth-storage-symlinks]. It moves only when you select a different version. Installing a newer version does not advance `current`, and neither does updating the [tag-store snapshot][in-depth-indices-local]. Tools that reference `current` change behavior only when you decide they should.
+</ShellSession>
 
-[`ocx package deselect cmake`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall kitware/cmake:3.28`][cmd-package-uninstall] removes the candidate. Pass `--purge` to remove the binary too when no other reference holds it.
+The `current` symlink is a [floating pointer][in-depth-storage-symlinks]. It moves only when you select a different version. Installing a newer version does not advance `current`, and neither does refreshing the [local index][in-depth-indices-local]. Tools that reference `current` change behavior only when you decide they should.
+
+[`ocx package deselect nodejs/node`][cmd-package-deselect] clears `current` without uninstalling. [`ocx package uninstall nodejs/node:22`][cmd-package-uninstall] removes the candidate. Pass `--purge` to remove the binary too when no other reference holds it.
 
 To see which tags exist before you choose, read [Find packages and versions][guide-find-packages].
 
 ## Tags, variants, digests \{#tags-variants-digests\}
 
-A single OCX identifier covers what, which version, how built and which platform. The specificity of the tag signals your intent:
+A single identifier covers what, which version, how built and which platform. The specificity of the tag signals your intent:
 
 | Tag | Meaning | Resolves to after refresh |
 |---|---|---|
-| `kitware/cmake:3.28.1_20260216120000` | Specific build, do not re-push | Same build (publisher convention) |
-| `kitware/cmake:3.28.1` | Rolling patch | Latest 3.28.1 build |
-| `kitware/cmake:3.28` | Rolling minor | Latest 3.28.x build |
-| `kitware/cmake:3` | Rolling major | Latest 3.x build |
-| `kitware/cmake:latest` | Floating | Latest release |
+| `astral-sh/python-build-standalone:3.14.7_20260814` | Specific build, do not re-push | Same build (publisher convention) |
+| `astral-sh/python-build-standalone:3.14.7` | Rolling patch | Latest 3.14.7 build |
+| `astral-sh/python-build-standalone:3.14` | Rolling minor | Latest 3.14.x build |
+| `astral-sh/python-build-standalone:3` | Rolling major | Latest 3.x build |
+| `astral-sh/python-build-standalone:latest` | Floating | Latest release |
 
-For a build flavor such as debug, PGO or slim, use a [variant prefix][in-depth-versioning-variants], as in `astral-sh/python-build-standalone:debug-3.12`. For exact reproducibility regardless of any tag, use a digest: `kitware/cmake@sha256:abc123…`. Platform is auto-detected. Override it with `-p, --platform` only for cross-arch installs.
+For a build flavor such as slim, use a [variant prefix][in-depth-versioning-variants], as in `astral-sh/python-build-standalone:slim-3.14`. For exact reproducibility regardless of any tag, use a digest: `nodejs/node@sha256:abc123…`. Platform is auto-detected. Override it with `-p, --platform` only for cross-arch installs.
 
-`ocx --remote index list kitware/cmake --variants` shows the available variants without downloading anything.
+`ocx --remote index list astral-sh/python-build-standalone --variants` shows the available variants without downloading anything.
 
 <Terminal src="/casts/user-guide/variants.cast" title="Working with variants" collapsed />
 
 ### Platform and libc detection \{#versions-libc\}
 
-On Linux, platform detection also identifies the libc family. OCX probes the host's dynamic linker once at startup. It then selects among glibc-tagged, musl-tagged and untagged entries.
+On Linux, platform detection also identifies the libc family. OCX probes the host's dynamic loader once at startup. It then selects among glibc-tagged, musl-tagged and untagged entries.
 
 A package that ships distinct glibc and musl builds under one tag keeps them in the same image index. OCX picks the right one.
 
 Run [`ocx about`][cmd-about] to inspect the detected libc and the supported-platform set. Run [`ocx version -v`][cmd-version] for verbose build context, including the host row. [libc Differentiation][authoring-libc] covers the publisher side.
 
 :::tip[Learn more]
-[Versioning In Depth][in-depth-versioning] covers the full tag hierarchy, cascade mechanics, OCI tag character rules, the `_build` suffix convention and the OCI Image Index multi-platform spec.
+[Versioning][in-depth-versioning] covers the full tag hierarchy, cascade mechanics, OCI tag character rules, the `_build` suffix convention and the OCI image index multi-platform spec.
 [Storage In Depth, Symlinks][in-depth-storage-symlinks] explains why `current` floats, with the SDKMAN, Homebrew and `update-alternatives` analogy.
 :::
 
@@ -63,7 +69,7 @@ Set [`OCX_ALLOW_YANKED=1`][env-ocx-allow-yanked] to opt in to such a tag, or pin
 A digest-pinned reference never needs the variable. A project resolved from `ocx.lock` is unaffected by a yank either way, since the lock always stores digests. The variable affects only resolution through the public index. It is forwarded to child `ocx` processes, so generated launchers honor the same opt-in.
 
 [guide-find-packages]: ./find-packages.mdx
-[authoring-libc]: ../publishing/libc-variants.md#libc
+[authoring-libc]: ../publishing/libc-variants.mdx#libc
 [index-ocx-sh]: https://index.ocx.sh
 [cmd-version]: ../reference/command-line/commands.md#version
 [cmd-package-select]: ../reference/command-line/package-consuming.md#package-select
@@ -74,4 +80,4 @@ A digest-pinned reference never needs the variable. A project resolved from `ocx
 [in-depth-storage-symlinks]: ../explanation/storage.mdx#symlinks
 [in-depth-versioning]: ../explanation/versioning.mdx
 [in-depth-versioning-variants]: ../explanation/versioning.mdx#variants
-[in-depth-indices-local]: ../explanation/local-index.md#local
+[in-depth-indices-local]: ../explanation/local-index.mdx#local

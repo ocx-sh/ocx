@@ -72,7 +72,7 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).",
+          "description": "Local binding name (TOML key from `ocx.toml`, e.g. `node`).",
           "type": "string"
         },
         "group": {
@@ -84,7 +84,7 @@
           "$ref": "#/$defs/PackageRef"
         },
         "declared": {
-          "description": "The `ocx.toml` spelling this entry was resolved from (e.g.\n`ocx.sh/kitware/cmake:3.29`). Present on every `V4` entry, absent on `V3`.",
+          "description": "The `ocx.toml` spelling this entry was resolved from (e.g.\n`ocx.sh/nodejs/node:24`). Present on every `V4` entry, absent on `V3`.",
           "type": [
             "string",
             "null"

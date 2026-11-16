@@ -24,7 +24,7 @@ const KEEP_TAG_LONG_HELP: &str = "\
 Write a `__ocx.keep.sha256-<hex>` tag for each platform manifest published (default).\n\n\
 The keep tag names the digest directly, so a stray delete of a rolling or cascade tag can never \
 orphan a manifest something else still pins. It also pins the manifest against pruning: push \
-ephemeral builds with `--no-keep-tag`, or prune frees no storage.";
+snapshot builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage.";
 
 #[derive(Parser)]
 // The shared flag's help is generic; only a push knows its builds may be ephemeral.
@@ -55,7 +55,7 @@ pub struct PackagePush {
         prefix stripped - one upload, two tag sets.\n\n\
         With `--cascade` the bare track cascades too (`1.2.3`, `1.2`, `1`, `latest`), blocked by \
         newer bare versions exactly as any other track is; without it only the bare version is \
-        written. Only the index of each alias tag is written - no blob and no manifest is uploaded \
+        written. Only the index of each rolling tag is written - no blob and no manifest is uploaded \
         twice.\n\n\
         The pushed tag must carry a variant; `--default` on a tag with no variant is a usage error. \
         In a pipeline that pushes every variant, pass this flag only on the build whose variant \
@@ -753,7 +753,11 @@ mod keep_tag_help_tests {
             .find(|a| a.get_id() == "keep_tag")
             .expect("keep_tag");
         let help = arg.get_long_help().expect("long help").to_string();
-        assert!(help.contains("push ephemeral builds with `--no-keep-tag`, or prune frees no storage"));
+        assert!(
+            help.contains(
+                "push snapshot builds (marked `--ephemeral`) with `--no-keep-tag`, or prune frees no storage"
+            )
+        );
     }
 }
 

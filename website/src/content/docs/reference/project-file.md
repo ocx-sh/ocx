@@ -7,7 +7,7 @@ Keys of `ocx.toml`, from the published project schema. An unknown key is a parse
 
 ## `activate` {#project-config-activate}
 
-Toolchain-tier `activate` mode: how a project's rendered toolchain reaches a shell —
+Top-level `activate` mode: how a project's rendered toolchain reaches a shell —
 per-prompt environment composition (`env`, the default), a `PATH` entry for
 `<home>/toolchain/active/bin` (`bin`), or neither (`none`). Absent falls through to
 `OCX_TOOLCHAIN_ACTIVATE`, then to `env`.
@@ -17,10 +17,10 @@ An unrecognized value is a parse error (exit 78). An edit never invalidates `ocx
 - Type: `string`
 - Values:
   - `env`: Compose the toolchain environment on every prompt.
-  - `bin`: Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a tool is resolved by its launcher trampoline at invocation time.
+  - `bin`: Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a tool is resolved by its launcher at invocation time.
   - `none`: Neither.
 - Default: `"env"`
-- See: [Toolchain activation](../explanation/toolchain-activation.md)
+- See: [Toolchain activation](../explanation/toolchain-activation.mdx)
 
 ## `env.<name>` {#project-config-env}
 
@@ -74,7 +74,7 @@ Under `[group.<name>]` only `tools`, `env` and `lazy-mode` are accepted. Anythin
 including a binding written directly there, is a parse error (exit 78).
 
 - Type: `table`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.env.<name>` {#project-group-env}
 
@@ -83,7 +83,7 @@ Environment variables applied when this group is selected.
 A key is a POSIX name and must not start with `OCX_` or `__OCX_`; either is a parse error (exit 78).
 
 - Type: `string or table`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.env.<name>.separator` {#project-group-env-separator}
 
@@ -92,7 +92,7 @@ For `list` only: the string this contribution is joined to the variable's existi
 It must be non-empty and free of `=`, newline and carriage return. A separator on a non-list entry, an unusable one, or a list value that starts or ends with it is a parse error (exit 78).
 
 - Type: `string`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.env.<name>.type` {#project-group-env-type}
 
@@ -103,7 +103,7 @@ It must be non-empty and free of `=`, newline and carriage return. A separator o
   - `path`: Prepended to any existing value of the variable.
   - `constant`: Replaces any existing value of the variable.
   - `list`: Appended to any existing value of the variable, joined by its separator.
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.env.<name>.value` {#project-group-env-value}
 
@@ -112,12 +112,12 @@ The literal value. For `path`, a relative value resolves against the project roo
 A `path` value containing the platform path separator is a data error (exit 65): declare one directory per entry.
 
 - Type: `string`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.lazy-mode` {#project-group-lazy-mode}
 
-Group-tier `lazy-mode` override: outranks the toolchain tier and is outranked by
-`[package."<id>"]` and the CLI flag. Absent inherits from the toolchain tier; it does not
+Group-level `lazy-mode` override: outranks the top-level setting and is outranked by
+`[package."<id>"]` and the CLI flag. Absent inherits from the top-level setting; it does not
 mean `never`.
 
 An edit never invalidates `ocx.lock`.
@@ -126,7 +126,7 @@ An edit never invalidates `ocx.lock`.
 - Values:
   - `never`: Compose eagerly: content materializes before the tool reaches `PATH`.
   - `always`: Compose a shim: content materializes on the first invocation of one of the tool's declared names.
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.tools.<name>` {#project-group-tools}
 
@@ -137,17 +137,17 @@ to reuse the `[tools]` entry of the same name.
 A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
 
 - Type: `string or table`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `group.<name>.tools.<name>.from` {#project-group-tools-from}
 
 - Type: `enum`
 - Values: `default`
-- See: [Project groups](../explanation/project-groups.md)
+- See: [Project groups](../explanation/project-groups.mdx)
 
 ## `lazy-mode` {#project-config-toolchain-lazy}
 
-Toolchain-tier `lazy-mode`, the least specific config tier: outranked by `[group.<g>]`,
+Top-level `lazy-mode`, the least specific setting: outranked by `[group.<g>]`,
 `[package."<id>"]` and the CLI flag. Absent falls through to `OCX_LAZY_MODE`; it does not
 mean `never`.
 
@@ -161,7 +161,7 @@ An edit never invalidates `ocx.lock`.
 
 ## `lazy-report` {#project-lazy-report}
 
-Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.
+Top-level `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`, then to `silent`.
 
 An edit never invalidates `ocx.lock`.
 
@@ -184,8 +184,8 @@ invalidates `ocx.lock`.
 
 ## `package.<name>.lazy-mode` {#project-package-lazy-mode}
 
-Package-tier `lazy-mode` override, the most specific config tier: only the CLI flag outranks
-it. Absent inherits from the group and toolchain tiers; it does not mean `never`.
+Package-level `lazy-mode` override, the most specific setting: only the CLI flag outranks
+it. Absent inherits from the group and top-level settings; it does not mean `never`.
 
 An edit never invalidates `ocx.lock`.
 
@@ -197,7 +197,7 @@ An edit never invalidates `ocx.lock`.
 
 ## `package.<name>.lazy-report` {#project-package-lazy-report}
 
-Package-tier `lazy-report` override. Absent inherits from the toolchain tier.
+Package-level `lazy-report` override. Absent inherits from the top-level setting.
 
 An edit never invalidates `ocx.lock`.
 
@@ -219,7 +219,7 @@ A system-required patch still applies (enforcement beats opt-out).
 
 ## `pinned` {#project-config-pinned}
 
-Toolchain-tier `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`
+Top-level `pinned`: whether composed paths follow the rendered `links/<group>/<entry>`
 links (`false`, the default) or pin to digest roots (`true`). Absent falls through to
 `OCX_TOOLCHAIN_PINNED`.
 
@@ -227,7 +227,7 @@ An edit never invalidates `ocx.lock`.
 
 - Type: `boolean`
 - Default: `false`
-- See: [Toolchain activation](../explanation/toolchain-activation.md)
+- See: [Toolchain activation](../explanation/toolchain-activation.mdx)
 
 ## `tools.<name>` {#project-tools}
 
@@ -237,7 +237,7 @@ Tools in the reserved `default` group (the top-level `[tools]` table in
 A binding name matches `^[A-Za-z0-9][A-Za-z0-9._-]*$` and is at most 64 bytes.
 
 - Type: `string`
-- See: [Project toolchain](../guides/project-toolchain.mdx)
+- See: [ocx.toml in depth](../guides/project-toolchain.mdx)
 
 ## `trust` {#project-trust}
 
@@ -248,7 +248,7 @@ Consumed by `ocx package verify`. A project policy applies only to targets that 
 Resolve-time policy, not a tool binding: a policy edit never invalidates `ocx.lock`.
 
 - Type: `table`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy` {#project-trust-policy}
 
@@ -256,7 +256,7 @@ The declared policies. Empty when `[trust]` is present but lists none.
 
 - Type: `array`
 - Default: `[]`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.builder` {#project-trust-policy-builder}
 
@@ -267,7 +267,7 @@ Ignored in signature mode, without an error.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope` {#project-trust-policy-scope}
 
@@ -282,21 +282,21 @@ scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"
 
 - Type: `string or table`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope.exclude` {#project-trust-policy-scope-exclude}
 
 Patterns carved back out. Beats `include` wherever both match.
 
 - Type: `array`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.scope.include` {#project-trust-policy-scope-include}
 
 Patterns the policy covers. Empty is a catch-all.
 
 - Type: `array`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers` {#project-trust-policy-signers}
 
@@ -315,7 +315,7 @@ catch-all.
 
 - Type: `array`
 - Default: `[]`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.claims.<name>` {#project-trust-policy-signers-claims}
 
@@ -329,7 +329,7 @@ name matches nobody.
 Alone or beside `identity` / `identity_regexp`.
 
 - Type: `string`
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.identity` {#project-trust-policy-signers-identity}
 
@@ -339,7 +339,7 @@ Mutually exclusive with `identity_regexp`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.identity_regexp` {#project-trust-policy-signers-identity-regexp}
 
@@ -349,7 +349,7 @@ Mutually exclusive with `identity`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.key` {#project-trust-policy-signers-key}
 
@@ -359,7 +359,7 @@ Mutually exclusive with `key_pem`, and refused in a managed-config payload.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.key_pem` {#project-trust-policy-signers-key-pem}
 
@@ -369,7 +369,7 @@ Mutually exclusive with `key`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.kind` {#project-trust-policy-signers-kind}
 
@@ -379,8 +379,8 @@ Selects the variant of this entry; the other fields depend on the value.
 - Values:
   - `keyless`: `{ kind = "keyless", identity | identity_regexp, oidc_issuer }`.
   - `key`: `{ kind = "key", key | key_pem }`.
-  - `unknown`: A `kind` this build does not know — an entry written by a newer ocx.
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+  - `unknown`: A `kind` this build does not know — an entry written by a newer OCX.
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.policy.signers.oidc_issuer` {#project-trust-policy-signers-oidc-issuer}
 
@@ -388,7 +388,7 @@ Exact expected OIDC issuer URL (byte-equal).
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore` {#project-trust-sigstore}
 
@@ -400,7 +400,7 @@ consulted.
 
 - Type: `table`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore.fulcio_url` {#project-trust-sigstore-fulcio-url}
 
@@ -409,7 +409,7 @@ omitted.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore.rekor_upload` {#project-trust-sigstore-rekor-upload}
 
@@ -420,7 +420,7 @@ Absent means off; keyless signing always uploads and ignores this field.
 
 - Type: `boolean`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore.rekor_url` {#project-trust-sigstore-rekor-url}
 
@@ -429,7 +429,7 @@ Default Rekor base URL for `ocx package sign` / `verify` when
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore.trusted_root` {#project-trust-sigstore-trusted-root}
 
@@ -442,7 +442,7 @@ Mutually exclusive with `trusted_root_json`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)
 
 ## `trust.sigstore.trusted_root_json` {#project-trust-sigstore-trusted-root-json}
 
@@ -454,4 +454,4 @@ with `trusted_root`.
 
 - Type: `string`
 - Default: unset
-- See: [Pin a signer identity](../guides/pin-signer-identity.mdx)
+- See: [Trust signers with a policy](../guides/pin-signer-identity.mdx)

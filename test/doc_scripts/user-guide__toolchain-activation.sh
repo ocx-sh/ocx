@@ -12,9 +12,18 @@ cd "$SCENARIO_TMP"
 mkdir demo
 cd demo
 ocx init
-ocx add "$PKG_KITWARE_CMAKE"
+ocx add "$PKG_NODEJS_NODE"
 ocx pull
 eval "$(ocx env --shell=bash)"
-command -v cmake
-cmake --version
+command -v node
+node --version
 # endregion cast
+
+# The runner ships its own node, so `command -v node` alone would pass on a host
+# binary. Assert the resolved path is under the rendered toolchain.
+resolved="$(command -v node)"
+[[ $resolved == "$PWD/.ocx/toolchain/"* ]] || {
+    echo "expected node to resolve under $PWD/.ocx/toolchain/" >&2
+    echo "  resolved: $resolved" >&2
+    exit 1
+}

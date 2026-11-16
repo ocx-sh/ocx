@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# state: setup:cmake-versions
+# state: setup:node-versions
 # doc: first-project/init
 # title: Create a project
 # description: Create a project directory and an empty ocx.toml.

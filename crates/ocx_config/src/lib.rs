@@ -125,7 +125,7 @@ pub struct Config {
     /// `ocx self setup --managed-config`).
     pub managed: Option<ManagedConfig>,
 
-    /// Background update checks (`[update]`): the posture for ocx itself and for the toolchain,
+    /// Background update checks (`[update]`): the posture for OCX itself and for the toolchain,
     /// plus the interval between checks.
     ///
     /// A personal setting, read from `config.toml` only: a managed payload's `[update]` is
@@ -156,7 +156,7 @@ pub struct Config {
     ///
     /// Designates where OCX writes one JSON resolution record per tool launch —
     /// the resolved package closure with digests, plus the resolved executable.
-    /// Declared at SYSTEM scope it clamps: no lower tier can redirect or
+    /// Declared in the system tier it clamps: no lower tier can redirect or
     /// disable it.
     ///
     /// Absent → no records written (opt-in).
@@ -165,7 +165,7 @@ pub struct Config {
     // Reach a home root only through `ToolchainRoot::resolve`; using the field directly skips every refusal.
     /// Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
     ///
-    /// The global toolchain home ignores this key, and the directory need not exist yet.
+    /// The global toolchain tree ignores this key, and the directory need not exist yet.
     #[serde(default)]
     pub toolchain_dir: Option<PathBuf>,
 
@@ -175,7 +175,7 @@ pub struct Config {
     /// A relative path resolves against the directory of the `config.toml` that declared it.
     ///
     /// Overridden by the `OCX_EXTRA_CA_CERTS` environment variable, which outranks every
-    /// `config.toml` tier unless the pair is declared at system scope.
+    /// `config.toml` tier unless the pair is declared in the system tier.
     #[serde(default)]
     pub extra_ca_certs: Option<PathBuf>,
 
@@ -205,8 +205,8 @@ pub struct Config {
 /// Unknown keys are ignored, like in every other `config.toml` table.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RegistryDefaults {
-    /// Default registry for bare identifiers (e.g. `cmake:3.28` expands to
-    /// `<default>/cmake:3.28`).
+    /// Default registry for bare identifiers (e.g. `nodejs/node:24` expands to
+    /// `<default>/nodejs/node:24`).
     ///
     /// Overridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a
     /// literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never resolved through
@@ -517,7 +517,7 @@ pub enum ToolchainRootError {
     #[exit(
         ConfigError,
         slug = "toolchain_dir_inside_global_home",
-        summary = "The toolchain_dir setting resolves inside the global toolchain home"
+        summary = "The toolchain_dir setting resolves inside $OCX_HOME/toolchain"
     )]
     InsideGlobalToolchainHome {
         tier: ToolchainRootTier,

@@ -5,11 +5,11 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-/// OCI-tier package commands.
+/// The `ocx package` commands.
 ///
 /// These commands operate on OCI identifiers directly and never consult
 /// `ocx.toml`.  They own the `candidate`/`current` floating symlinks. The
-/// toolchain-tier counterparts (`ocx env`, `ocx exec`) stay at root.
+/// toolchain counterparts (`ocx env`, `ocx exec`) stay at root.
 #[derive(Subcommand)]
 pub enum Package {
     // No doc: a variant doc replaces the struct's help and would drop the credential guidance, which
@@ -77,7 +77,7 @@ pub enum Package {
         `unchanged`, `replaced` or `kept (not in source)`. That tells a filtered promotion that \
         left a mixed index apart from a complete one.\n\n\
         A second identical copy changes nothing but is not free. Every platform re-fetches and \
-        re-PUTs its leaf manifest and, with `--referrers`, its referrer set. Each index is \
+        re-PUTs its platform manifest and, with `--referrers`, its referrer set. Each index is \
         re-PUT. Only blob bodies are skipped, via a HEAD against the target.\n\n\
         A copy is not a re-sign. The signature travels with the manifest and still names the \
         identity that signed it in the source environment. Sign again at the target when \
@@ -113,17 +113,17 @@ pub enum Package {
         through unverified.\n\n\
         `--bin-scan` also verifies a declared list: an executable missing from it, or a declared \
         name that exists but is not executable, fails with exit 65. `--no-bin-scan` never scans.\n\n\
-        The scan only fills the sidecar written next to the output, never the authored `-m` file. It considers only `${installPath}`-rooted `path` variables with interface visibility and \
+        The scan only fills the sidecar written next to the output, never the authored `-m` file. It considers only `${self.installPath}`-rooted `path` variables with interface visibility and \
         no render modifier. Anything else needs a hand-authored `binaries`.\n\n\
         A scan needs a host \
         that can evaluate the target's executable convention. A Windows host targeting \
         anything but Windows (including `any`) therefore fails with exit 65 in every mode that would scan. \
-        The exception is metadata with no `${installPath}`-rooted `PATH` variable of interface visibility, \
+        The exception is metadata with no `${self.installPath}`-rooted `PATH` variable of interface visibility, \
         which leaves nothing to scan. Hand-author `binaries` or pass `--no-bin-scan`.\n\n\
         An unreadable content directory exits 74.\n\n\
         With `--metadata` and a Linux or `any` target, `create` also checks the libc the binaries \
-        need against the `os.features` the platform declares. It reads the ELF interpreter \
-        header of every file placed on an interface `PATH` directory. The check runs before the \
+        need against the `os.features` the platform declares. It reads the dynamic loader named in the `PT_INTERP` \
+        program header of every file placed on an interface `PATH` directory. The check runs before the \
         archive is written, so a refusal leaves no bundle. It reads only the dynamic loader. Other shared libraries and glibc versions are not checked, and non-Linux targets are not \
         checked at all.\n\n\
         `--no-libc-lint` skips it with a warning.")]
@@ -150,20 +150,20 @@ pub enum Package {
         and `ocx package env` compose the environment in, one row of package, visibility and digest \
         each.\n\n\
         `--why <DEP>` traces every path from the given packages to one dependency, each printed as \
-        a chain such as `myapp:1.0 -> ocx.sh/kitware/cmake:3.28 -> ocx.sh/gcc:13`. With several \
+        a chain such as `myapp:1.0 -> ocx.sh/pypa/pipx:1.18 -> ghcr.io/ocx-contrib/astral-sh/python-build-standalone:3.13.14`. With several \
         packages, the command builds their combined graph.\n\n\
         Works on locally present packages only (no auto-install) and never consults `ocx.toml`. \
         It walks structural metadata and never resolves env values, so a package whose env \
         references an undeclared dependency still appears.\n\n\
         Only two things drop a package from the output, each logged at warn level. One is a \
-        `metadata.json` that fails to parse or validate. The other is an env-var modifier type this ocx \
+        `metadata.json` that fails to parse or validate. The other is an env-var modifier type this OCX \
         does not recognize.")]
     Deps(super::deps::Deps),
     /// Print the resolved environment variables for one or more installed packages.
     #[command(long_about = "\
         Print the resolved environment variables for one or more installed packages.\n\n\
         Plain output is an aligned `Key`, `Type`, `Value` table. When binaries, entry points or \
-        integration namespaces are admitted, it ends with one hint line counting each, for example \
+        integration keys are admitted, it ends with one hint line counting each, for example \
         `5 binaries available (...); 2 integration namespaces (...); use --format json for the full \
         list`. `--format json` emits `items` plus `binaries`, `entrypoints` and `integrations` \
         arrays; `--shell[=NAME]` emits the only eval-safe form. A package's dependencies contribute their variables in topological order, \
@@ -172,25 +172,25 @@ pub enum Package {
         and a package with index-listed publishers or a covering `[[trust.policy]]` is \
         signature-verified before its environment is composed.\n\n\
         `--candidate`, `--current` and `--link` resolve through an install symlink instead and \
-        never auto-install. `--self` selects the publisher's own view (private and public \
-        entries) instead of the consumer view (public and interface); `integrations` is always \
+        never auto-install. `--self` selects the private surface (private and public \
+        entries) instead of the interface surface (public and interface entries); `integrations` is always \
         empty under `--self`.")]
     Env(super::env::Env),
-    /// Inspect one or more package references (candidates, metadata, or resolution chain).
+    /// Inspect one or more package references (platforms, metadata, or resolution chain).
     #[command(long_about = "\
-        Inspect one or more package references (candidates, metadata, or resolution chain).\n\n\
+        Inspect one or more package references (platforms, metadata, or resolution chain).\n\n\
         Read-only: nothing is installed and no symlinks are created. Default mode resolves \
         a tag through the index, so a cache miss may populate the local index and blob cache. \
         Unlike `ocx package test`, the identifier accepts an explicit `@digest`.\n\n\
-        The output adapts to the reference. An image-index reference lists its platform \
-        candidates (platform, child digest, media type, size) with no metadata loaded and no \
+        The output adapts to the reference. An image index reference lists its platforms (\
+        platform, child digest, media type, size) with no metadata loaded and no \
         platform selected.\n\n\
         A single-manifest reference, a flat tag or an `@digest` at an image manifest, emits the \
         declared metadata and the manifest's layers. `--resolve` platform-selects through the \
         index and adds the resolution chain (index, manifest, config).\n\n\
         `--closure` walks the declared dependencies and adds the metadata-only dependency closure \
         plus the `interface` and `private` surface projections. On an image index it \
-        platform-selects first, as `--resolve` does, so it never returns the candidates listing.\n\n\
+        platform-selects first, as `--resolve` does, so it never returns the platforms listing.\n\n\
         `--closure` fails closed. If any dependency's manifest or metadata cannot be loaded, the \
         whole request fails rather than rendering a partial closure. A conflict exits 65 with \
         the report still printed in full. JSON is one envelope with `platform` (only with \
@@ -204,12 +204,12 @@ pub enum Package {
         Install packages from a local or remote index (no `ocx.toml` touched).\n\n\
         Downloads the packages and their transitive dependencies into the object store and \
         creates a candidate symlink for each requested package; dependencies get no install \
-        symlinks. This is the OCI-tier install and never touches `ocx.toml`; use `ocx add` for a \
+        symlinks. This is the `ocx package` install and never touches `ocx.toml`; use `ocx add` for a \
         project.\n\n\
         A package with index-listed publishers or a covering `[[trust.policy]]` is verified before any layer downloads (see \
         `--verify`).\n\n\
         Installing a foreign platform fills the object store but leaves the host's candidate and \
-        `current` symlinks alone. A platformless lookup therefore never resolves to a package the host \
+        `current` symlinks alone. A lookup with no platform therefore never resolves to a package the host \
         cannot run. On Windows a warning is printed when `PATHEXT` lacks `.CMD`, which the \
         generated entry-point launchers need.")]
     Install(super::install::Install),
@@ -268,7 +268,7 @@ pub enum Package {
         (`hello-1.0.0.tar.xz` -> `hello-1.0.0-receipt.json`). The file itself is a build \
         artifact; this report is the contract an SDK reads instead.\n\n\
         Exits 79 when no receipt sits beside the bundle and 65 when the file exists but is not a \
-        receipt this ocx can read.")]
+        receipt this OCX can read.")]
     Receipt(super::package_receipt::PackageReceiptCommand),
     /// List or extract the SBOM attestations a published package carries.
     #[command(long_about = "\
@@ -332,7 +332,7 @@ pub enum Package {
         is not supported yet).\n\n\
         The resulting Sigstore bundle v0.3 is pushed as a referrer of the target manifest, where \
         `ocx package verify` and `cosign verify` find it. The push uses the Referrers API where the \
-        registry has one and the fallback index where it does not. `--signature-format \
+        registry has one and the fallback tag where it does not. `--signature-format \
         simplesigning` (or `both`) also writes the cosign `sha256-<hex>.sig` sidecar tag for \
         consumers that read only that shape.\n\n\
         Signing needs network access: `--offline` exits 81.\n\n\
@@ -343,7 +343,7 @@ pub enum Package {
         A tag that resolves to a single manifest is skipped with a warning. The sweep continues \
         past a per-tag failure and exits non-zero at the end with every failure listed. When every \
         failure shares one exit code, the sweep returns that code; a mix returns 1.\n\n\
-        A signature is a referrer of a digest, not a tag, so the cascade aliases of one release \
+        A signature is a referrer of a digest, not a tag, so the rolling tags of one release \
         share one signature. Tags after the first to name a given index are reported `covered`. \
         `sign` appends rather than replaces, so re-running a sweep adds one referrer per distinct \
         index, and `verify` reads at most eight signature candidates.\n\n\
@@ -417,7 +417,7 @@ pub enum Package {
         pass neither and let the publishers the index lists for the package, or `[[trust.policy]]`, \
         decide. Policies are matched against the target's canonical `registry/repository`: the \
         operator-tier (`config.toml`) ones first, the project `ocx.toml` ones only when none match.\n\n\
-        Reading `[[trust.policy]]` from `ocx.toml` is the one exception to OCI-tier commands \
+        Reading `[[trust.policy]]` from `ocx.toml` is the one exception to the `ocx package` commands \
         never consulting it, because trust policy is a security posture rather than toolchain \
         binding. Exactly one of the two flags is a usage error rejected at parse time (exit 64), \
         and so is neither flag with no listed publishers and no covering policy (`no_identity_provided`).\n\n\
@@ -435,20 +435,20 @@ pub enum Package {
     /// Runs installed packages.
     #[command(long_about = "\
         Runs installed packages.\n\n\
-        Identifiers are OCI references (for example `kitware/cmake:3.28`), resolved through the \
+        Identifiers are OCI references (for example `nodejs/node:24`), resolved through the \
         index and installed when missing. A package with index-listed publishers or a covering `[[trust.policy]]` is \
         signature-verified before it runs.\n\n\
         Dependencies' environments apply in topological order before the package's own, and \
         entries layer in the order the identifiers appear. For a project driven by `ocx.toml`, \
         use `ocx exec`.\n\n\
-        Stdin is always inherited, so piped input reaches the command unchanged. On Unix ocx \
-        replaces itself with the command, so signals reach it directly and it keeps ocx's process \
-        id. On Windows ocx spawns the command, waits, and forwards its exit code.\n\n\
-        `--rm` is the exception on Unix: cleanup must run after the command, so ocx stays \
+        Stdin is always inherited, so piped input reaches the command unchanged. On Unix OCX \
+        replaces itself with the command, so signals reach it directly and it keeps OCX's process \
+        id. On Windows OCX spawns the command, waits, and forwards its exit code.\n\n\
+        `--rm` is the exception on Unix: cleanup must run after the command, so OCX stays \
         resident as its parent.\n\n\
         The command is looked up once, before it starts. Only the composed packages' own \
         `PATH` contributions are searched, never the ambient `PATH` or the working directory. A match \
-        that is itself an ocx launcher is refused. `--rm` runs the same lock-free store \
+        that is itself an OCX launcher is refused. `--rm` runs the same lock-free store \
         collection as `ocx package uninstall --purge` over the packages this run composed, so \
         concurrent invocations sharing one `OCX_HOME` can race. Use it for one-off runs, not in a \
         loop.")]

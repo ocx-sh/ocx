@@ -37,12 +37,12 @@ pub struct RegistryConfig {
 
     /// Contact this registry over plain HTTP instead of HTTPS.
     ///
-    /// Unioned with `OCX_INSECURE_REGISTRIES`, except that a SYSTEM-scope entry stating
+    /// Unioned with `OCX_INSECURE_REGISTRIES`, except that a system-tier entry stating
     /// `insecure = false` locks that host shut against the env list too.
     #[schemars(extend("default" = false))]
     pub insecure: Option<bool>,
 
-    /// Set by the loader when declared at SYSTEM scope; no lower tier can override this entry.
+    /// Set by the loader when declared in the system tier; no lower tier can override this entry.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,

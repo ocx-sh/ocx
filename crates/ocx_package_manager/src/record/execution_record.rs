@@ -287,7 +287,7 @@ pub struct Os {
 /// resolved-dependency list without a translator.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ResourceDescriptor {
-    /// The last repository segment, e.g. `cmake`.
+    /// The last repository segment, e.g. `node`.
     ///
     /// **Not unique on its own** — `ocx.sh/a/cli` and `ocx.sh/b/cli` both yield
     /// `cli`. Identity is name + `repository_url` + digest; a consumer joining

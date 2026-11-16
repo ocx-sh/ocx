@@ -1,11 +1,11 @@
 ---
-title: "Use ocx in GitLab CI"
-description: "Put a pinned ocx toolchain on PATH in a GitLab CI job, with the classic script runner or the step runner."
+title: "Use OCX in GitLab CI"
+description: "Export a pinned OCX toolchain, its PATH entries and variables, to a GitLab CI job, with the classic script runner or the step runner."
 ---
 <!-- doc_type: how-to -->
 <!-- doc_tier: integration -->
 
-This page shows how to make an ocx toolchain available in a GitLab CI/CD job. It covers traditional `script:` jobs, which most pipelines use, and the experimental step runner's export file.
+This page shows how to make an OCX toolchain available in a GitLab CI/CD job. It covers traditional `script:` jobs, which most pipelines use, and the experimental step runner's export file.
 
 GitLab has two ways to give a job its tools. A `script:` job runs every line in one shell, so a single `eval` reaches the lines after it. The step runner starts a fresh process per step and reads an export file between them.
 
@@ -23,7 +23,7 @@ build:
     - export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin:$PATH"
     - ocx pull
     - eval "$(ocx env --shell=sh)"
-    - cmake --version
+    - node --version
     - shellcheck --version
 ```
 
@@ -32,12 +32,12 @@ build:
 ```yaml
 build:
   script:
-    - ocx exec -- cmake --version
+    - ocx exec -- node --version
 ```
 
 The environment stops at the end of the job. A later job repeats the install and the `eval`, and the cache below keeps that cheap.
 
-### Cache the package store {#ci-gitlab-cache}
+### Cache the object store {#ci-gitlab-cache}
 
 A job that downloads every package on each run is slow and depends on the registry. Point `OCX_HOME` inside the project directory, because GitLab caches only paths under it. Key the cache on `ocx.lock`, so the cache changes exactly when the toolchain does.
 
@@ -52,7 +52,6 @@ cache:
   paths:
     - .ocx-home/blobs
     - .ocx-home/layers
-    - .ocx-home/packages
     - .ocx-home/index
 ```
 
@@ -80,9 +79,9 @@ A [`list`][reference-env-list]-type variable flattens the same way but folds the
 For passing variables between jobs in a traditional pipeline, GitLab offers [`artifacts: reports: dotenv`][gitlab-ci-dotenv]. That needs bare `KEY=VALUE` lines, which OCX does not emit. Repeat the `eval` in each job instead.
 :::
 
-### Toolchain-tier example {#ci-gitlab-toolchain}
+### Project example {#ci-gitlab-toolchain}
 
-The example needs `ocx.toml` and `ocx.lock` committed to the repository, with `kitware/cmake` and `shellcheck` declared as tools. [Your first project][guide-first-project] creates both files.
+The example needs `ocx.toml` and `ocx.lock` committed to the repository, with `nodejs/node` and `shellcheck` declared as tools. The [Pin a toolchain][guide-first-project] walkthrough creates both files.
 
 Install OCX and set up the toolchain in two steps of the same job. A third step of the same job then uses the binaries:
 
@@ -97,7 +96,7 @@ build:
       script: ocx env --ci=gitlab --export-file="${{ export_file }}"
     - name: Build
       script: |
-        cmake --version
+        node --version
         shellcheck --version
 ```
 
@@ -116,9 +115,9 @@ When `--export-file` is omitted, output goes to stdout. Redirect it to the file 
 
 The `>>` append is only needed without `--export-file`. With the option, OCX opens the file in append mode itself.
 
-### OCI-tier example {#ci-gitlab-oci}
+### `ocx package` example {#ci-gitlab-oci}
 
-For individual OCI packages rather than a project toolchain:
+For individual packages with the `ocx package` commands, rather than a project toolchain:
 
 ```yaml
 test:
@@ -128,10 +127,10 @@ test:
         curl -fsSL https://setup.ocx.sh/sh | sh
         export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin:$PATH"
     - name: Resolve package environment
-      script: ocx package env --ci=gitlab --export-file="${{ export_file }}" ocx.sh/kitware/cmake:3.28 ocx.sh/shellcheck/shellcheck:0.11
+      script: ocx package env --ci=gitlab --export-file="${{ export_file }}" ocx.sh/nodejs/node:24 ocx.sh/shellcheck/shellcheck:0.11
     - name: Test
       script: |
-        cmake --version
+        node --version
         shellcheck --version
 ```
 
@@ -141,9 +140,9 @@ Bare `--ci` without `=gitlab` also works inside [GitLab CI/CD][gitlab-ci-docs], 
 
 ## Go further {#ci-next}
 
-- [Run ocx unattended][p-unattended-ci] lists the variables to set and the runner variables ocx reads, including the GitLab ones.
-- [Registry authentication recipes][p-registry-auth-recipes] cover private registries.
-- [Use ocx in GitHub Actions][p-github-actions] covers the other provider and the shared pull flow.
+- [Run OCX unattended in a pipeline][p-unattended-ci] lists the variables to set and the runner variables OCX reads, including the GitLab ones.
+- [Authenticate to GHCR and ECR][p-registry-auth-recipes] cover private registries.
+- [Use OCX in GitHub Actions][p-github-actions] covers the other provider and the shared pull flow.
 
 <!-- external -->
 [gitlab-ci-docs]: https://docs.gitlab.com/ee/ci/
@@ -162,7 +161,7 @@ Bare `--ci` without `=gitlab` also works inside [GitLab CI/CD][gitlab-ci-docs], 
 [reference-env-list]: ../reference/metadata/env.md#env-list
 
 <!-- pages -->
-[p-unattended-ci]: ./unattended-ci.md
-[p-registry-auth-recipes]: ./registry-auth-recipes.md
-[p-github-actions]: ./github-actions.md
+[p-unattended-ci]: ./unattended-ci.mdx
+[p-registry-auth-recipes]: ./registry-auth-recipes.mdx
+[p-github-actions]: ./github-actions.mdx
 [guide-first-project]: ../getting-started/first-project.mdx

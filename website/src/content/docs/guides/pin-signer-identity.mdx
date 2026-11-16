@@ -1,9 +1,11 @@
 ---
-title: "Pin the signer identity"
+title: "Trust signers with a policy"
 description: "Require packages from a registry namespace to be signed by an identity you trust."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 Require every package under a registry namespace to be signed by an identity you trust, with no flags on the command line.
 
@@ -23,11 +25,15 @@ signers = [
 ]
 ```
 
-Declare it in a [`config.toml` tier](./configure-ocx.mdx#configuration-files) (system, user or `$OCX_HOME`) or in the project's `ocx.toml`. Then `ocx package verify` resolves the identity for any package under `ghcr.io/acme/`. You pass no identity flags. Install and pull verify only from a `config.toml` tier, or when the package's index root [lists publishers][declare-publishers]. An `ocx.toml` policy gates `ocx package verify` alone, as [Verify installs](./verify-installs.mdx#supply-chain-auto-verify) explains. The trust-root requirement from [Verify a package](./verify-installs.mdx#supply-chain-verification) still applies:
+Declare it in a [`config.toml` tier](./configure-ocx.mdx#configuration-files) (system, user or `$OCX_HOME`) or in the project's `ocx.toml`. Then `ocx package verify` resolves the identity for any package under `ghcr.io/acme/`. You pass no identity flags. Install and pull verify only from a `config.toml` tier, or when the package's root document [lists publishers][declare-publishers]. An `ocx.toml` policy gates `ocx package verify` alone, as [Verify installs](./verify-installs.mdx#supply-chain-auto-verify) explains. The trust-root requirement from [Verify a package](./verify-installs.mdx#supply-chain-verification) still applies:
+
+<ShellSession>
 
 ```shell
 ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
 ```
+
+</ShellSession>
 
 Exit 0 means the policy accepted the signer. Any other exit code is a failure from the exit-code table in [Verify a package](./verify-installs.mdx#supply-chain-verification).
 
@@ -83,11 +89,11 @@ signers = [
 
 ## Policy fields \{#supply-chain-trust-policy-fields\}
 
-`[[trust.policy]]` is an array of tables, one entry per scope. It is valid in every `config.toml` tier and in the project `ocx.toml`. Reading it from `ocx.toml` is a deliberate exception. Every other OCI-tier command ignores that file, but a trust policy is a security posture the checkout owner controls.
+`[[trust.policy]]` is an array of tables, one entry per scope. It is valid in every `config.toml` tier and in the project `ocx.toml`. Reading it from `ocx.toml` is a deliberate exception. Every other `ocx package` command ignores that file, but a trust policy is a security posture the checkout owner controls.
 
 The [configuration reference][config-trust] lists the fields: [`scope`][config-trust-scope], [`builder`][config-trust-builder] and [`signers`][config-trust-signers].
 
-An omitted `scope` is a catch-all that governs every package. `builder` is the expected SLSA provenance `builder.id`, compared byte-equal. OCX consults it only for `ocx package verify --attestation` on SLSA provenance, and a mismatch is `builder_mismatch` (exit 65). Unknown keys are ignored like everywhere else in `config.toml`. A file written for a future ocx release still loads on a release that predates a key.
+An omitted `scope` is a catch-all that governs every package. `builder` is the expected SLSA provenance `builder.id`, compared byte-equal. OCX consults it only for `ocx package verify --attestation` on SLSA provenance, and a mismatch is `builder_mismatch` (exit 65). Unknown keys are ignored like everywhere else in `config.toml`. A file written for a future OCX release still loads on a release that predates a key.
 
 :::caution[A dropped `scope` key widens the policy]
 An absent `scope` is a catch-all, so the tolerance cuts both ways. A policy whose `scope` key is misspelled loses its scope and governs **every** package rather than none. The one place the tolerance stops is inside a `scope` table.
@@ -95,7 +101,7 @@ An absent `scope` is a catch-all, so the tolerance cuts both ways. A policy whos
 
 ## Signers \{#supply-chain-trust-policy-signers\}
 
-`signers` is an array of tables, each tagged `kind = "keyless"` or `kind = "key"`. An absent or empty array is a configuration error and fails closed. The list is ANY-of. To narrow a policy, remove entries or declare a [system-locked policy][in-depth-signing-lock] at the operator tier, which displaces the lower tiers.
+`signers` is an array of tables, each tagged `kind = "keyless"` or `kind = "key"`. An absent or empty array is a configuration error and fails closed. The list is ANY-of. To narrow a policy, remove entries or declare a [system-locked policy][in-depth-signing-lock] in the system tier, which displaces the lower tiers.
 
 | `kind = "keyless"` field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -164,11 +170,11 @@ A `*` anywhere but the end globs on the literal text before it, with no `/` boun
 
 A table scope combines the same per-pattern rules. A target matches when it matches **at least one** `include` **and no** `exclude`. The table must carry one of the two keys, and the other defaults to an empty list. `exclude` beats `include` whenever both match, and it is segment-bounded too. `exclude = ["ghcr.io/acme/tool"]` carves out `ghcr.io/acme/tool` and everything under it, but not `ghcr.io/acme/tool-cli`.
 
-`scope = {}` is a **parse error**, not a catch-all. So is a table whose only keys ocx does not recognise, such as a misspelled `includ`. This is the single exception to unknown-key tolerance. Dropping the key would leave both lists empty and turn a narrow pin into one over every package.
+`scope = {}` is a **parse error**, not a catch-all. So is a table whose only keys OCX does not recognise, such as a misspelled `includ`. This is the single exception to unknown-key tolerance. Dropping the key would leave both lists empty and turn a narrow pin into one over every package.
 
 An unknown key beside `include` or `exclude` is dropped as usual. Write `scope = ""`, or omit it, when you mean a catch-all. Scopes have no regex form in either spelling. `identity_regexp` is the only regex surface, because an over-broad pattern here silently widens trust rather than failing loudly.
 
-A package can also declare its own signers in the index root. [Declare publishers][declare-publishers] covers that `publishers` array and the registry `signatures` policy.
+A package can also declare its own signers in its root document. [List publishers in the index][declare-publishers] covers that `publishers` array and the registry `signatures` policy.
 
 [cosign]: https://docs.sigstore.dev/cosign/overview/
 [cmd-config-push]: ../reference/command-line/config.md#config-push
