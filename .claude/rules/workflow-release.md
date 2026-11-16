@@ -146,9 +146,10 @@ Once `publish` is green, the floating tags, signatures and attestations exist. W
 - **`github-release`** creates the tag at the run's SHA, and `gh release create` fails when the release exists. Run `gh release view vX.Y.Z` before rerunning.
 - **`announce` and `prune`** wait for the `ocx.sh` environment reviewer again. `announce` refuses an empty `published-tags.txt` or a missing token. `prune` runs in release mode only.
 - **`post-docker` and `post-sdkgen`** start only after `github-release` is green; rerunning it unblocks them.
+- **`post-setup-dist`** dispatches `ocx-released` at `ocx-sh/www-setup` after `github-release` (release and candidate, never dev) so `dist.json` rebuilds now; its hourly cron is the fallback. It fails when the dispatch or `SETUP_OCX_DISPATCH_TOKEN` does; rerun it alone.
 - **Fresh dispatch is the last resort** (artifacts expired, or the run cannot be rerun). `plan` refuses a non-main ref, the wrong repository, a malformed version and an existing `refs/tags/vX.Y.Z`; it does not refuse a published-but-untagged version. A fresh dispatch builds a new `X.Y.Z_<timestamp>` build tag, adds one more signature and attestation referrer per platform, and re-cascades the floating tags.
 
-Afterwards check: git tag, GitHub release, index row, and both post jobs.
+Afterwards check: git tag, GitHub release, index row, and the post jobs.
 
 ### Version Between Releases
 

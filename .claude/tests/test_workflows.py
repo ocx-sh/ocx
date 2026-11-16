@@ -3802,7 +3802,7 @@ def _eval_if(expression: object, mode: str, results: dict[str, str] | None = Non
 
 
 _RELEASE_ONLY = ("prune", "post-docker", "post-sdkgen")
-_NEVER_ON_DEV = ("github-release", "announce", *_RELEASE_ONLY)
+_NEVER_ON_DEV = ("github-release", "announce", "post-setup-dist", *_RELEASE_ONLY)
 
 
 def _dev_isolation_findings(documents: list[tuple[str, dict]]) -> list[str]:

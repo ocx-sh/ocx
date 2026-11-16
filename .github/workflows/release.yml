@@ -4,9 +4,9 @@ name: Release
 #
 #   release    `X.Y.Z`, the Cargo.toml version, from refs/heads/main. Readiness gate, six platforms signed and
 #              attested, then tag `vX.Y.Z` and the GitHub release, the index announce, the prune of old
-#              candidates, and the docker and sdkgen publishes.
+#              candidates, the docker and sdkgen publishes, and the dispatch that rebuilds the setup.ocx.sh manifest.
 #   candidate  `X.Y.Z-rcN` of the same Cargo.toml version, from refs/heads/main. As a release, but a
-#              GitHub pre-release, an ephemeral index row, and no docker or sdkgen.
+#              GitHub pre-release, an ephemeral index row, the manifest dispatch, and no docker or sdkgen.
 #   dev        a build of the dispatched branch to the dev package: nothing but that package changes
 #              (no git tag, no GitHub release, no announce, no docker, no sdkgen). Old dev builds are pruned.
 #
@@ -563,3 +563,33 @@ jobs:
     uses: ./.github/workflows/sdkgen-publish.yml
     with:
       version_tag: ${{ needs.plan.outputs.tag }}
+
+  # Tells setup.ocx.sh to rebuild its dist.json now; its hourly cron is only the fallback, and in practice fires
+  # every ~7 hours. Candidates count: the manifest lists pre-releases too. Nothing depends on this leaf job, but it
+  # fails loudly on purpose: a silent failure (an expired token) is how this path stayed dead unnoticed.
+  post-setup-dist:
+    name: setup.ocx.sh manifest
+    if: ${{ inputs.mode != 'dev' }}
+    needs: [plan, github-release]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Dispatch ocx-released to ocx-sh/www-setup
+        env:
+          GIT_TAG: ${{ needs.plan.outputs.git_tag }}
+          SETUP_OCX_DISPATCH_TOKEN: ${{ secrets.SETUP_OCX_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SETUP_OCX_DISPATCH_TOKEN" ]]; then
+            echo "::error::SETUP_OCX_DISPATCH_TOKEN is not set"
+            exit 1
+          fi
+          body=$(jq -nc --arg v "$GIT_TAG" '{event_type: "ocx-released", client_payload: {version: $v}}')
+          # The token travels on stdin as a header file, never on argv.
+          printf 'Authorization: Bearer %s\n' "$SETUP_OCX_DISPATCH_TOKEN" | curl --silent --show-error --fail-with-body \
+            --retry 3 --connect-timeout 10 --max-time 60 \
+            -X POST -H @- \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -d "$body" \
+            https://api.github.com/repos/ocx-sh/www-setup/dispatches
