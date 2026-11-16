@@ -23,16 +23,28 @@ pub async fn acquire_project_lock(project_root: &Path, locks_root: &Path) -> Res
 }
 
 /// Acquire the exclusive mutation lock for `config_path` under `locks_root`,
-/// creating the parent directory; `config_path` itself is never opened.
+/// creating the parent directory; `config_path` itself is never opened. A
+/// symlink is keyed by the file it resolves to.
 ///
 /// # Errors
 ///
 /// - [`ProjectErrorKind::Locked`] — still held after [`CONTENTION_BUDGET`].
-/// - [`ProjectErrorKind::Io`] — lock I/O failed, or `config_path` is a symlink.
+/// - [`ProjectErrorKind::Io`] — lock I/O failed, or `config_path` is a symlink that
+///   does not resolve to an existing regular file.
 pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path) -> Result<LockedFile, Error> {
     let io = |path: &Path, error: std::io::Error| Error::from(ProjectError::new(path, ProjectErrorKind::Io(error)));
 
-    let parent = config_path
+    // Keyed on the link's target, so every path to one file shares a lock.
+    // Before any directory or lock file is created: a refused path leaves no trace.
+    let keyed = {
+        let path = config_path.to_path_buf();
+        tokio::task::spawn_blocking(move || ocx_util::fs::resolve_user_file(&path))
+            .await
+            .map_err(|join| io(config_path, std::io::Error::other(join)))?
+            .map_err(|error| io(config_path, error))?
+    };
+
+    let parent = keyed
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -40,41 +52,19 @@ pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path
     tokio::fs::create_dir_all(parent)
         .await
         .map_err(|error| io(parent, error))?;
-    let file_name = config_path
+    let file_name = keyed
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let guard = ocx_util::fs::lock_scoped(locks_root, LOCK_SCOPE, parent, &file_name, CONTENTION_BUDGET)
+    ocx_util::fs::lock_scoped(locks_root, LOCK_SCOPE, parent, &file_name, CONTENTION_BUDGET)
         .await
         .map_err(|error| {
             if error.cause.kind() == std::io::ErrorKind::TimedOut {
                 return Error::from(ProjectError::new(config_path, ProjectErrorKind::Locked));
             }
             io(&error.path, error.cause)
-        })?;
-
-    // Under the lock, before the caller reads: an unrefused symlink redirects that read.
-    refuse_symlink_at(config_path).await?;
-
-    Ok(guard)
-}
-
-/// Refuse a symlink at `config_path`: it hands the mutator an attacker-chosen
-/// document to edit and re-publish. A one-scheduling-gap window survives until
-/// the caller's read; closing it needs `O_NOFOLLOW` on that read.
-async fn refuse_symlink_at(config_path: &Path) -> Result<(), Error> {
-    let refusal = |io_error| Error::from(ProjectError::new(config_path, ProjectErrorKind::Io(io_error)));
-    match tokio::fs::symlink_metadata(config_path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(refusal(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "ocx.toml path is a symlink",
-        ))),
-        Ok(_) => Ok(()),
-        // NotFound is the create case: the writers publish the file.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(refusal(error)),
-    }
+        })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -233,39 +223,105 @@ mod tests {
             .expect("a lock released mid-wait must be acquired, not reported as Locked");
     }
 
-    /// A symlink at `ocx.toml` is refused rather than followed.
-    ///
-    /// The publish is a rename, so a planted symlink is *replaced* rather than
-    /// written through — the CWE-59 truncation this once guarded is closed by
-    /// construction. What the refusal still buys is the read: every caller
-    /// reads `ocx.toml` immediately after this acquire, and an unrefused
-    /// symlink would hand the mutator an attacker-chosen document to edit and
-    /// then publish back under the project's own name.
+    /// A symlink at `ocx.toml` is followed for the lock key: acquiring through
+    /// the link and through its target contend for one lock.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_symlink_at_ocx_toml_is_refused() {
+    async fn a_symlink_at_ocx_toml_shares_its_targets_lock() {
         let home = tempdir().unwrap();
         let locks_root = home.path().join("locks");
         let dir = tempdir().unwrap();
-        let config_path = dir.path().join("ocx.toml");
-        let victim_path = dir.path().join("victim.toml");
-        std::fs::write(&victim_path, "[victim]\n").expect("write the symlink target");
-        std::os::unix::fs::symlink(&victim_path, &config_path).expect("plant the symlink");
+        let target = dir.path().join("real.toml");
+        std::fs::write(&target, "[tools]\n").unwrap();
+        let link = dir.path().join("ocx.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let err = acquire_project_lock_for_file(&config_path, &locks_root)
+        let _held = acquire_project_lock_for_file(&link, &locks_root)
             .await
-            .expect_err("a symlink at ocx.toml must be refused, not followed");
+            .expect("a symlinked ocx.toml must be lockable");
+        let err = acquire_project_lock_for_file(&target, &locks_root)
+            .await
+            .expect_err("the target shares the link's lock");
 
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Locked)));
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "[tools]\n");
+    }
+
+    /// Two different links to one `ocx.toml` contend for the same lock.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_symlinks_to_one_ocx_toml_contend() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("real.toml");
+        std::fs::write(&target, "[tools]\n").unwrap();
+        let first = dir.path().join("a");
+        let second = dir.path().join("b");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::os::unix::fs::symlink(&target, first.join("ocx.toml")).unwrap();
+        std::os::unix::fs::symlink(&target, second.join("ocx.toml")).unwrap();
+
+        let _held = acquire_project_lock_for_file(&first.join("ocx.toml"), &locks_root)
+            .await
+            .expect("first acquire must succeed");
+        let err = acquire_project_lock_for_file(&second.join("ocx.toml"), &locks_root)
+            .await
+            .expect_err("a second link to the same file must contend");
+
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Locked)));
+    }
+
+    /// A dangling link at `ocx.toml` fails the acquire as `Io` before any lock
+    /// file is created, and the link is left alone.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dangling_symlink_at_ocx_toml_fails_before_any_lock_is_taken() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let link = dir.path().join("ocx.toml");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+        let err = acquire_project_lock_for_file(&link, &locks_root)
+            .await
+            .expect_err("a dangling ocx.toml link must be refused");
+
+        assert!(matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Io(_))));
         assert!(
-            matches!(&err, Error::Project(project_error)
-                if matches!(&project_error.kind, ProjectErrorKind::Io(io_error)
-                    if io_error.to_string().contains("symlink"))),
-            "expected the symlink refusal; got: {err}"
+            lock_files_under(&locks_root).is_empty(),
+            "no lock file may be created for a refused path; found {:?}",
+            lock_files_under(&locks_root)
         );
-        assert_eq!(
-            std::fs::read_to_string(&victim_path).unwrap(),
-            "[victim]\n",
-            "the symlink target must be untouched"
-        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), missing);
+        assert!(!missing.exists());
+    }
+
+    /// A regular `ocx.toml` keys its lock on its own directory and name, so
+    /// holding it blocks a direct `lock_scoped` on that same key.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_regular_ocx_toml_keys_the_lock_on_its_own_directory_and_name() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
+        let dir = tempdir().unwrap();
+        let config_path = write_ocx_toml(dir.path());
+
+        let _held = acquire_project_lock_for_file(&config_path, &locks_root)
+            .await
+            .expect("acquire must succeed");
+
+        let err = ocx_util::fs::lock_scoped(
+            &locks_root,
+            LOCK_SCOPE,
+            dir.path(),
+            "ocx.toml",
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("the key must be the directory plus the file name");
+        assert_eq!(err.cause.kind(), std::io::ErrorKind::TimedOut);
     }
 }

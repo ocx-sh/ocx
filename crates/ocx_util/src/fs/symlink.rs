@@ -169,6 +169,10 @@ fn temp_link_name() -> String {
 
 /// Renames `from` onto `to`, atomically replacing an existing `to`.
 #[cfg(not(windows))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "renames ocx's own freshly staged symlink over its link path"
+)]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
@@ -369,6 +373,7 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use super::*;
     use std::path::Path;

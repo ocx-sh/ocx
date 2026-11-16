@@ -191,6 +191,8 @@ The [downloaded binary][manual] reaches the managed state through `ocx self setu
 
 If the bootstrap fails, for example because the registry is unreachable, the command returns a non-zero exit code and writes nothing.
 
+When a profile is a symlink, setup writes the link's target and leaves the link in place. The profile keeps its permission bits, owner and group. Where a replacement file could not keep the owner or group, OCX writes the existing file in place. A profile that cannot be written, such as one in a read-only directory or behind a dangling link, is skipped and reported with the outcome `skipped_unwritable`. Setup prints the lines to add by hand as a warning and still exits 0.
+
 Besides the flags covered under [Options](#script-options), `ocx self setup` accepts these:
 
 | Flag | Effect |

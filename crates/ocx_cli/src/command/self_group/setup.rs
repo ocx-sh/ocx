@@ -12,7 +12,9 @@ use ocx_exit::ExitCode as OcxExitCode;
 use ocx_project::activate::ActivateMode;
 use ocx_setup as setup;
 use ocx_setup::shell_config::{self, ShellKey, ShellValue};
-use ocx_setup::{ExtraCaCertsOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
+use ocx_setup::{
+    ExtraCaCertsOutcome, ProfileOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, Unwritable, VersionSpec,
+};
 use ocx_util::boolean_string::BooleanString;
 
 use crate::api::data::self_setup::SelfSetupData;
@@ -373,6 +375,11 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
              shells still work, and re-running `ocx self setup` retries"
         ));
     }
+    for (path, profile_outcome) in &outcome.profiles {
+        if let ProfileOutcome::SkippedUnwritable(skipped) = profile_outcome {
+            context.ui().warn(unwritable_profile_warning(path, skipped));
+        }
+    }
     if let Some(path) = &outcome.conflicting_ocx {
         context.ui().warn(format!(
             "another ocx at {} shadows the one ocx self setup just installed",
@@ -408,6 +415,16 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
     }
 }
 
+/// The warning for a profile ocx could not write: the cause, then the text to add by hand.
+fn unwritable_profile_warning(path: &std::path::Path, skipped: &Unwritable) -> String {
+    // `{:?}`, not `Display`: a raw newline in an unvalidated path would forge an advisory line (CWE-117).
+    format!(
+        "could not update {path:?}: {}; add this to it yourself:\n{}",
+        skipped.cause,
+        skipped.text.trim_end()
+    )
+}
+
 /// Decide the exit code: [`OcxExitCode::PolicyBlocked`] (81) for a dirty profile or `[managed]` fence left
 /// untouched, never under `--force` or `--dry-run`.
 fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode {
@@ -424,9 +441,7 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser as _;
-    use ocx_setup::{
-        BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome,
-    };
+    use ocx_setup::{BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, SetupOutcome};
 
     use super::*;
 
@@ -834,6 +849,31 @@ mod tests {
     fn dirty_dry_run_is_success() {
         let base = outcome(vec![(PathBuf::from(".zshrc"), ProfileOutcome::SkippedDirty)]);
         assert!(exit_code_equals(exit_code_for(&base, false, true), 0));
+    }
+
+    /// An unwritable profile is reported, not failed: exit 0.
+    #[test]
+    fn unwritable_profile_is_success() {
+        let base = outcome(vec![(PathBuf::from(".zshrc"), unwritable())]);
+        assert!(exit_code_equals(exit_code_for(&base, false, false), 0));
+    }
+
+    fn unwritable() -> ProfileOutcome {
+        ProfileOutcome::SkippedUnwritable(Unwritable {
+            cause: "permission denied".to_string(),
+            text: "# >>> ocx v1 >>>\nsource ocx\n# <<< ocx v1 <<<\n".to_string(),
+        })
+    }
+
+    #[test]
+    fn unwritable_warning_names_the_path_the_cause_and_the_block() {
+        let ProfileOutcome::SkippedUnwritable(skipped) = unwritable() else {
+            unreachable!()
+        };
+        let warning = unwritable_profile_warning(std::path::Path::new("/home/dev/.zshrc"), &skipped);
+        assert!(warning.contains("/home/dev/.zshrc"));
+        assert!(warning.contains("permission denied"));
+        assert!(warning.contains("# >>> ocx v1 >>>\nsource ocx\n# <<< ocx v1 <<<"));
     }
 
     /// A clean run (completed / no-op profiles) is exit 0.

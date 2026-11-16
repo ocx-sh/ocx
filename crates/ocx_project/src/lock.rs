@@ -2101,46 +2101,23 @@ repository = "ocx.sh/cmake"
             .expect("acquire after release must succeed");
     }
 
-    /// A symlink at `ocx.toml` must cause `acquire_project_lock` to return
-    /// `ProjectErrorKind::Io`, not `Locked`, and must NOT follow the symlink
-    /// to its target.
-    ///
-    /// The publish is a rename, so a planted symlink is replaced rather than
-    /// written through — but every mutator *reads* the config immediately
-    /// after this acquire, and an unrefused symlink would hand it an
-    /// attacker-chosen document to edit and publish back.
+    /// A symlink at `ocx.toml` is followed: the project lock is acquired, the
+    /// link stays a link and the target is untouched by the acquire.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn acquire_project_lock_rejects_symlink_at_ocx_toml() {
-        #[cfg(unix)]
-        use std::os::unix::fs::symlink as make_symlink;
-        #[cfg(not(unix))]
-        fn make_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
-            std::os::windows::fs::symlink_file(target, link)
-        }
-
+    async fn acquire_project_lock_follows_a_symlink_at_ocx_toml() {
         let dir = tempfile::tempdir().expect("tempdir");
-
-        let sensitive_file = dir.path().join("sensitive_file");
+        let target = dir.path().join("real.toml");
         let link_path = dir.path().join("ocx.toml");
-        // Plant a symlink at ocx.toml pointing to a non-existent sensitive target.
-        if make_symlink(&sensitive_file, &link_path).is_err() {
-            // Symlink creation can fail on Windows without elevated privileges or
-            // developer mode. Skip rather than fail on those configurations.
-            return;
-        }
+        std::fs::write(&target, "[tools]\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &link_path).expect("plant link");
 
-        let err = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
+        let _guard = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
-            .expect_err("acquire_project_lock must fail when ocx.toml is a symlink");
+            .expect("a symlinked ocx.toml must be lockable");
 
-        // The symlink_metadata pre-check surfaces InvalidInput → Io, not Locked.
-        assert_kind!(err, ProjectErrorKind::Io(_));
-
-        // The symlink target must NOT have been created or modified.
-        assert!(
-            !sensitive_file.exists(),
-            "symlink target must not be touched; found: {sensitive_file:?}"
-        );
+        assert_eq!(std::fs::read_link(&link_path).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "[tools]\n");
     }
 
     /// While a writer holds the project mutation lock,
@@ -2219,22 +2196,92 @@ repository = "ocx.sh/cmake"
 
     // ── the lock is published under the manifest's mode policy ────────────
 
-    /// A save carries the mode it finds **whole** — group-writable and
-    /// world-writable modes included.
+    /// A symlinked `ocx.lock` keeps its link; the target is rewritten and keeps its mode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_writes_through_a_symlinked_lock_and_keeps_the_link() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let target = real_dir.join("ocx.lock");
+        let link = tmp.path().join("ocx.lock");
+
+        let seed = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
+        };
+        let cfg = stage_sibling_ocx_toml(&link);
+        seed.save(&target, None, tmp.path(), &cfg).await.expect("seed save ok");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let next = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
+        };
+        next.save(&link, None, tmp.path(), &cfg)
+            .await
+            .expect("save through link ok");
+
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(std::fs::read_to_string(&target).unwrap().contains("ninja"));
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o644);
+    }
+
+    /// A dangling `ocx.lock` link is refused as `Io` and left untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_refuses_a_dangling_lock_link() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("missing.lock");
+        let link = tmp.path().join("ocx.lock");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+        let cfg = stage_sibling_ocx_toml(&link);
+
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
+        };
+        let err = lock
+            .save(&link, None, tmp.path(), &cfg)
+            .await
+            .expect_err("dangling link refused");
+
+        assert_kind!(err, ProjectErrorKind::Io(_));
+        assert_eq!(std::fs::read_link(&link).unwrap(), missing);
+        assert!(!missing.exists());
+    }
+
+    /// A fresh `ocx.lock` gets the umask default, as a plain `File::create` would.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_creates_a_fresh_lock_with_the_umask_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let probe = tmp.path().join("probe");
+        std::fs::File::create(&probe).unwrap();
+        let path = tmp.path().join("ocx.lock");
+        let cfg = stage_sibling_ocx_toml(&path);
+
+        let lock = ProjectLock {
+            metadata: sample_metadata(),
+            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
+        };
+        lock.save(&path, None, tmp.path(), &cfg).await.expect("save ok");
+
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&path), mode(&probe));
+    }
+
+    /// A save carries the mode it finds whole, group- and world-writable bits included.
     ///
-    /// This inverts the former Warn #8 contract, which masked the carried mode
-    /// with `0o644`. The cap was applied by `ocx.lock`'s own writer and by
-    /// nothing else: the `ocx.toml` published beside it, in the same directory,
-    /// by the same `MutationGuard` commit, was never capped — so the cap could
-    /// not close anything an attacker able to rewrite one file would not get
-    /// from the other, and it fired only on the saves that happened to occur.
-    /// What it did reliably do is strip the group-write bit in an
-    /// `umask 002` shared-group checkout, which is the bit that lets the next
-    /// developer run `ocx lock` at all.
-    ///
-    /// `0o664` is the discriminating case: it is the mode the old mask would
-    /// silently demote, and reinstating `& 0o644` in
-    /// [`crate::mutate::publish_by_rename`] turns both arms red.
+    /// Capping the mode would strip the group-write bit in an `umask 002` shared
+    /// checkout and stop the next developer running `ocx lock`. `0o664` is the
+    /// discriminating case: a mask applied to the carried mode in
+    /// `ocx_util::fs::replace_user_file` turns both arms red.
     #[cfg(unix)]
     #[tokio::test]
     async fn save_carries_the_mode_it_finds_including_group_and_world_writable() {

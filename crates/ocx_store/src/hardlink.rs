@@ -51,6 +51,7 @@ fn hard_link_or_err(source: &std::path::Path, link: &std::path::Path) -> std::io
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use super::*;
     use std::path::Path;

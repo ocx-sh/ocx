@@ -700,7 +700,7 @@ async fn write_record(path: std::path::PathBuf, record: &HostCapabilityRecord) {
         );
         return;
     }
-    match tokio::task::spawn_blocking(move || ocx_util::fs::write_bytes_atomic(&path, &bytes)).await {
+    match tokio::task::spawn_blocking(move || ocx_util::fs::write_private_file_atomic(&path, &bytes)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::debug!("could not write the host libc record: {error}"),
         Err(join_error) => tracing::debug!("host libc record write did not complete: {join_error}"),
@@ -793,6 +793,7 @@ fn init_cache(capabilities: &HostCapabilities) {
 // doc comment) for reproducible CI results.
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use super::*;
 

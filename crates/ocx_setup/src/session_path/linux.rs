@@ -181,13 +181,13 @@ fn conf_is_current(path: &Path, content: &str) -> bool {
 }
 
 /// Create `environment.d/` and publish `content` into it.
-// `write_bytes_atomic` does not create the parent, so without this a fresh machine's first run fails.
+// `write_private_file_atomic` does not create the parent, so without this a fresh machine's first run fails.
 #[cfg(target_os = "linux")]
 fn write_conf(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    ocx_util::fs::write_bytes_atomic(path, content.as_bytes())
+    ocx_util::fs::write_private_file_atomic(path, content.as_bytes())
 }
 
 /// Subtract `directories` from `ocx.conf`, and delete the file when nothing of ours survives.

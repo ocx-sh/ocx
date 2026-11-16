@@ -258,7 +258,7 @@ mod tests {
     /// `PolicyBlocked` — `[shell]` is not fenced, so there is no dirty state to
     /// report.
     ///
-    /// The fixture has to reach `write_bytes_atomic` to mean anything, so the
+    /// The fixture has to reach `write_private_file_atomic` to mean anything, so the
     /// parent directory exists and is readable (the read arm returns
     /// `NotFound`, the create case) but is not writable. A regular file
     /// standing in for the parent would return `ENOTDIR` from the *read* and

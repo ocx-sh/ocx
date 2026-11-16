@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::AuthError;
 use crate::auth::registry_url::canonicalize_registry;
 
-use ocx_util::fs::LockedFile;
+use ocx_util::fs::{LockedFile, NewFileMode};
 
 /// The helper budget: [`docker_credential::HELPER_TIMEOUT`], or the `__OCX_TESTING_HELPER_TIMEOUT_MS` override.
 ///
@@ -400,17 +400,6 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
             source: std::io::Error::other(e),
         }
     })?;
-    // Re-applied on every acquire, or an externally-relaxed mode keeps exposing credentials.
-    #[cfg(unix)]
-    if path.exists() {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|source| {
-            AuthError::WriteConfigFailed {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-    }
     Ok(ConfigGuard {
         _locked: locked,
         path: path.to_path_buf(),
@@ -451,9 +440,7 @@ impl ConfigGuard {
             path: path.clone(),
             source: std::io::Error::new(ErrorKind::InvalidData, err),
         })?;
-        // Resolved first, or a symlinked `config.json` is replaced by a regular file.
-        let target = std::fs::canonicalize(&path).unwrap_or(path.clone());
-        ocx_util::fs::write_bytes_atomic(&target, &serialized)
+        ocx_util::fs::replace_user_file(&path, &serialized, NewFileMode::Private)
             .map_err(|source| AuthError::WriteConfigFailed { path, source })
     }
 }
@@ -630,6 +617,74 @@ mod tests {
         rt().block_on(store.put("ghcr.io", &cred)).expect("put");
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "config.json must be created with mode 0600");
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).expect("meta").permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dockerconfigstore_put_keeps_the_mode_of_an_existing_config() {
+        let (_dir, path) = fresh_config_path();
+        std::fs::write(&path, "{}").expect("seed config");
+        set_mode(&path, 0o644);
+        let store = DockerCredentialStore::with_path(path.clone(), opts(true));
+        let cred = Credential::basic("u", SecretString::from("p".to_string()));
+        rt().block_on(store.put("ghcr.io", &cred)).expect("put");
+        assert_eq!(mode_of(&path), 0o644);
+        assert!(std::fs::read_to_string(&path).expect("read").contains("ghcr.io"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dockerconfigstore_get_leaves_the_mode_of_an_existing_config_alone() {
+        let (_dir, path) = fresh_config_path();
+        std::fs::write(&path, "{}").expect("seed config");
+        set_mode(&path, 0o644);
+        let store = DockerCredentialStore::with_path(path.clone(), opts(false));
+        rt().block_on(store.get("ghcr.io")).expect("get");
+        assert_eq!(mode_of(&path), 0o644);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dockerconfigstore_put_keeps_a_symlinked_config_a_symlink() {
+        let (dir, path) = fresh_config_path();
+        let target = dir.path().join("real-config.json");
+        std::fs::write(&target, "{}").expect("seed target");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        let store = DockerCredentialStore::with_path(path.clone(), opts(true));
+        let cred = Credential::basic("u", SecretString::from("p".to_string()));
+        rt().block_on(store.put("ghcr.io", &cred)).expect("put");
+        assert!(std::fs::symlink_metadata(&path).expect("meta").file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&path).expect("read_link"), target);
+        assert!(std::fs::read_to_string(&target).expect("read").contains("ghcr.io"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dockerconfigstore_put_through_a_dangling_symlink_fails_and_leaves_the_link() {
+        let (dir, path) = fresh_config_path();
+        let missing = dir.path().join("missing.json");
+        std::os::unix::fs::symlink(&missing, &path).expect("symlink");
+        let store = DockerCredentialStore::with_path(path.clone(), opts(true));
+        let cred = Credential::basic("u", SecretString::from("p".to_string()));
+        let result = rt().block_on(store.put("ghcr.io", &cred));
+        assert!(
+            matches!(result, Err(AuthError::WriteConfigFailed { .. })),
+            "expected WriteConfigFailed, got: {result:?}",
+        );
+        assert_eq!(std::fs::read_link(&path).expect("read_link"), missing);
+        assert!(!missing.exists());
     }
 
     // ─── put: unknown-field preservation ───

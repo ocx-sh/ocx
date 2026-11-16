@@ -2724,6 +2724,7 @@ mod session_path_tests {
 /// directly, because the gate is the only thing standing between a
 /// repository-controlled directory and a live shell's `PATH`.
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod stamp_gate_tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -3171,6 +3172,7 @@ fn plant_active(home: &file_structure::ToolchainHome) {
 
 #[cfg(test)]
 #[cfg(unix)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod bin_mode_entry_tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};

@@ -31,6 +31,10 @@ impl BundleBuilder {
 
     /// Atomically creates the archive at `output`; a directory source lands at
     /// the archive root, a single file under its filename.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "publishes a freshly built archive artifact at the path the caller named"
+    )]
     pub async fn create(self, output: impl AsRef<std::path::Path>) -> Result<()> {
         let output = output.as_ref();
         let temp_path = temp_path_for(output);

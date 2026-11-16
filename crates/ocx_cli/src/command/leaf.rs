@@ -401,7 +401,7 @@ impl Leaf {
             Self::Remove => (1, const { &[OutputMode::report::<data::lock::LockReport>()] }),
             Self::Run => (1, &[Passthrough]),
             Self::SelfActivate => (1, &[ShellStream]),
-            Self::SelfSetup => (1, const { &[OutputMode::report::<data::self_setup::SelfSetupData>()] }),
+            Self::SelfSetup => (2, const { &[OutputMode::report::<data::self_setup::SelfSetupData>()] }),
             Self::SelfUpdate => (
                 1,
                 const {

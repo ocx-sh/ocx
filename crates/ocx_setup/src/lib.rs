@@ -89,7 +89,7 @@ impl SetupOptions {
 }
 
 /// Per-profile result of applying the RC-block state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileOutcome {
     /// A fresh or upgraded managed block was written.
     Completed,
@@ -99,6 +99,17 @@ pub enum ProfileOutcome {
     Migrated,
     /// The managed block was edited by the user and left untouched (no `--force`).
     SkippedDirty,
+    /// The profile could not be written (refused symlink or unwritable target) and was left untouched.
+    SkippedUnwritable(Unwritable),
+}
+
+/// Why a profile was left untouched, and what ocx would have written, for the user to add by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unwritable {
+    /// Human-readable cause (permission denied, read-only filesystem, refused symlink).
+    pub cause: String,
+    /// The managed block for a fenced profile, the whole file content for a dedicated file.
+    pub text: String,
 }
 
 /// True when a run wrote or migrated at least one managed block; feeds the reload hint.
@@ -743,7 +754,15 @@ async fn apply_fence(
     heal_only: bool,
     dry_run: bool,
 ) -> Result<ProfileOutcome, error::Error> {
-    let content = read_to_string_or_empty(path).await?;
+    let content = match read_to_string_or_empty(path).await {
+        Ok(content) => content,
+        Err(err) => {
+            return Ok(ProfileOutcome::SkippedUnwritable(unwritable_or_error(
+                err,
+                &block_text(body)?,
+            )?));
+        }
+    };
     let state = rc_block::classify(&content, body, rc_block::OCX_LABEL);
 
     if state == rc_block::BlockState::Dirty && !force {
@@ -759,8 +778,8 @@ async fn apply_fence(
     if has_legacy {
         let stripped = rc_block::strip_block(&content);
         if let Some(new_content) = rc_block::apply(&stripped, body, force, rc_block::OCX_LABEL)? {
-            if !dry_run {
-                write_profile(path, &new_content).await?;
+            if !dry_run && let Some(skipped) = publish_profile(path, &new_content, &block_text(body)?).await? {
+                return Ok(ProfileOutcome::SkippedUnwritable(skipped));
             }
             return Ok(ProfileOutcome::Migrated);
         }
@@ -770,8 +789,8 @@ async fn apply_fence(
 
     match rc_block::apply(&content, body, force, rc_block::OCX_LABEL)? {
         Some(new_content) => {
-            if !dry_run {
-                write_profile(path, &new_content).await?;
+            if !dry_run && let Some(skipped) = publish_profile(path, &new_content, &block_text(body)?).await? {
+                return Ok(ProfileOutcome::SkippedUnwritable(skipped));
             }
             Ok(ProfileOutcome::Completed)
         }
@@ -790,12 +809,15 @@ async fn rewrite_dedicated(
     if heal_only && !ocx_util::fs::path_exists_lossy(path).await {
         return Ok(ProfileOutcome::NoOp);
     }
-    let content = read_to_string_or_empty(path).await?;
+    let content = match read_to_string_or_empty(path).await {
+        Ok(content) => content,
+        Err(err) => return Ok(ProfileOutcome::SkippedUnwritable(unwritable_or_error(err, body)?)),
+    };
     if content == body {
         return Ok(ProfileOutcome::NoOp);
     }
-    if !dry_run {
-        write_profile(path, body).await?;
+    if !dry_run && let Some(skipped) = publish_profile(path, body, body).await? {
+        return Ok(ProfileOutcome::SkippedUnwritable(skipped));
     }
     Ok(ProfileOutcome::Completed)
 }
@@ -809,6 +831,47 @@ async fn read_to_string_or_empty(path: &Path) -> Result<String, error::Error> {
             path: path.to_path_buf(),
             source,
         }),
+    }
+}
+
+/// Publish `content` to a profile; a write the user's setup refuses comes back as the [`Unwritable`] to
+/// report, any other failure as an error. `by_hand` is what the user would add themselves.
+async fn publish_profile(path: &Path, content: &str, by_hand: &str) -> Result<Option<Unwritable>, error::Error> {
+    match write_profile(path, content).await {
+        Ok(()) => Ok(None),
+        Err(err) => unwritable_or_error(err, by_hand).map(Some),
+    }
+}
+
+/// The [`Unwritable`] to report for an I/O failure on a profile (read or write) the user's setup refuses,
+/// any other failure as is.
+fn unwritable_or_error(err: error::Error, by_hand: &str) -> Result<Unwritable, error::Error> {
+    match err {
+        error::Error::Io { source, path } => match unwritable_cause(&source) {
+            Some(cause) => Ok(Unwritable {
+                cause,
+                text: by_hand.to_string(),
+            }),
+            None => Err(error::Error::Io { path, source }),
+        },
+        other => Err(other),
+    }
+}
+
+/// The managed block for `body`, as it would sit in a profile.
+fn block_text(body: &str) -> Result<String, error::Error> {
+    Ok(rc_block::apply("", body, false, rc_block::OCX_LABEL)?.unwrap_or_else(|| body.to_string()))
+}
+
+/// Why a write failed in a way that leaves the profile for the user to edit, or `None` for a real failure.
+fn unwritable_cause(err: &std::io::Error) -> Option<String> {
+    if let Some(refusal) = ocx_util::fs::user_file_refusal(err) {
+        return Some(refusal.to_string());
+    }
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => Some("permission denied".to_string()),
+        std::io::ErrorKind::ReadOnlyFilesystem => Some("read-only filesystem".to_string()),
+        _ => None,
     }
 }
 
@@ -833,10 +896,12 @@ fn write_profile_blocking(path: &Path, content: &str) -> Result<(), error::Error
         source,
     })?;
 
-    ocx_util::fs::write_bytes_atomic(path, content.as_bytes()).map_err(|source| error::Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    ocx_util::fs::replace_user_file(path, content.as_bytes(), ocx_util::fs::NewFileMode::UmaskDefault).map_err(
+        |source| error::Error::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    )
 }
 
 /// Build a [`HomeEnv`] from the real process environment for profile detection.
@@ -878,6 +943,27 @@ async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the listed kinds and every refusal leave a profile for the user; anything else propagates.
+    #[test]
+    fn unwritable_cause_skips_only_refusals_and_permission_kinds() {
+        use ocx_util::fs::UserFileRefusal;
+        use std::io::{Error, ErrorKind};
+
+        let skipped = [
+            Error::from(ErrorKind::PermissionDenied),
+            Error::from(ErrorKind::ReadOnlyFilesystem),
+            Error::other(UserFileRefusal::DanglingSymlink),
+            Error::other(UserFileRefusal::NotRegularFile),
+            Error::other(UserFileRefusal::ForeignSymlink),
+        ];
+        for err in &skipped {
+            assert!(unwritable_cause(err).is_some(), "{err:?} must skip");
+        }
+        for err in [Error::from(ErrorKind::StorageFull), Error::other("boom")] {
+            assert_eq!(unwritable_cause(&err), None, "{err:?} must propagate");
+        }
+    }
 
     /// `Test-Path` globs `[`/`]` in `OCX_HOME`, so the profile block probes with .NET.
     #[test]
@@ -2031,6 +2117,233 @@ mod tests {
         let outcome = apply_fence(&path, POSIX_BODY, false, false, true).await.unwrap();
         assert_eq!(outcome, ProfileOutcome::Completed);
         assert!(!path.exists(), "dry-run must not create the profile file");
+    }
+
+    // ── user-owned profile publish: symlinks, modes, unwritable targets ──────
+
+    #[cfg(unix)]
+    fn is_unwritable(outcome: &ProfileOutcome) -> bool {
+        matches!(outcome, ProfileOutcome::SkippedUnwritable(_))
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_symlinked_profile_keeps_link_and_target_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-bashrc");
+        std::fs::write(&target, "export A=1\n").unwrap();
+        set_mode(&target, 0o644);
+        let link = dir.path().join(".bashrc");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let outcome = apply_fence(&link, POSIX_BODY, false, false, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::Completed);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target, "the link must survive");
+        assert!(read(&target).contains(POSIX_BODY), "the block lands in the target");
+        assert_eq!(mode_of(&target), 0o644);
+
+        let again = apply_fence(&link, POSIX_BODY, false, false, false).await.unwrap();
+        assert_eq!(again, ProfileOutcome::NoOp);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_keeps_regular_profile_mode() {
+        for mode in [0o644, 0o640, 0o755] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".bashrc");
+            std::fs::write(&path, "export A=1\n").unwrap();
+            set_mode(&path, mode);
+
+            let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
+            assert_eq!(outcome, ProfileOutcome::Completed);
+            assert_eq!(mode_of(&path), mode, "mode {mode:o} must be kept");
+            assert!(read(&path).contains(POSIX_BODY));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_absent_profile_is_created_with_the_umask_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("probe");
+        std::fs::File::create(&probe).unwrap();
+        let path = dir.path().join(".bashrc");
+
+        apply_fence(&path, POSIX_BODY, false, false, false).await.unwrap();
+        assert_eq!(mode_of(&path), mode_of(&probe));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_dangling_symlink_is_skipped_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing");
+        let link = dir.path().join(".bashrc");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let outcome = apply_fence(&link, POSIX_BODY, false, false, false).await.unwrap();
+        assert!(is_unwritable(&outcome), "got {outcome:?}");
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(!target.exists());
+    }
+
+    /// A symlink into a read-only directory; `None` when this process can write there anyway.
+    #[cfg(unix)]
+    fn link_into_read_only_dir(root: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+        let directory = root.join("locked");
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("bashrc");
+        std::fs::write(&target, "export A=1\n").unwrap();
+        let link = root.join(".bashrc");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        set_mode(&directory, 0o555);
+        // The atomic publish creates a sibling temp file, so a writable directory defeats the fixture.
+        if std::fs::File::create(directory.join(".probe")).is_ok() {
+            set_mode(&directory, 0o755);
+            eprintln!("skipped: this process can create files inside a 0o555 directory");
+            return None;
+        }
+        Some((directory, target, link))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_read_only_target_directory_is_skipped_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((directory, target, link)) = link_into_read_only_dir(dir.path()) else {
+            return;
+        };
+        let before = std::fs::read(&target).unwrap();
+
+        let outcome = apply_fence(&link, POSIX_BODY, false, false, false).await;
+        set_mode(&directory, 0o755);
+        let outcome = outcome.unwrap();
+
+        assert!(is_unwritable(&outcome), "got {outcome:?}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_unreadable_profile_is_skipped_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        std::fs::write(&path, "export A=1\n").unwrap();
+        set_mode(&path, 0o000);
+        if std::fs::File::open(&path).is_ok() {
+            eprintln!("skipped: this process can read a 0o000 file");
+            return;
+        }
+
+        let outcome = apply_fence(&path, POSIX_BODY, false, false, false).await;
+        set_mode(&path, 0o644);
+
+        let ProfileOutcome::SkippedUnwritable(skipped) = outcome.unwrap() else {
+            panic!("expected SkippedUnwritable");
+        };
+        assert!(skipped.text.contains(POSIX_BODY));
+        assert_eq!(read(&path), "export A=1\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_skip_carries_the_block_to_add_by_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join(".bashrc");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+
+        let ProfileOutcome::SkippedUnwritable(skipped) =
+            apply_fence(&link, POSIX_BODY, false, false, false).await.unwrap()
+        else {
+            panic!("expected SkippedUnwritable");
+        };
+        assert!(skipped.text.contains("# >>> ocx v1"));
+        assert!(skipped.text.contains(POSIX_BODY));
+        assert!(!skipped.cause.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_dry_run_never_reports_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join(".bashrc");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+
+        let outcome = apply_fence(&link, POSIX_BODY, false, false, true).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::Completed);
+    }
+
+    // Windows reports a directory at the path as access denied, so it is skipped there, not an error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_directory_at_the_profile_path_is_a_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(apply_fence(&path, POSIX_BODY, false, false, false).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_fence_link_to_a_directory_is_a_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a-dir");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join(".bashrc");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(apply_fence(&link, POSIX_BODY, false, false, false).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewrite_dedicated_symlinked_file_keeps_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("managed-ocx.fish");
+        std::fs::write(&target, "stale\n").unwrap();
+        set_mode(&target, 0o644);
+        let link = dir.path().join("ocx.fish");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let body = shims::fish_conf_body();
+
+        let outcome = rewrite_dedicated(&link, body, false, false).await.unwrap();
+        assert_eq!(outcome, ProfileOutcome::Completed);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(read(&target), body);
+        assert_eq!(mode_of(&target), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rewrite_dedicated_dangling_symlink_is_skipped_with_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("ocx.fish");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        let body = shims::fish_conf_body();
+
+        let ProfileOutcome::SkippedUnwritable(skipped) = rewrite_dedicated(&link, body, false, false).await.unwrap()
+        else {
+            panic!("expected SkippedUnwritable");
+        };
+        assert_eq!(skipped.text, body);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
     }
 
     // ── heal-only mode (self update post-swap, Decision 4C) ──────────────────

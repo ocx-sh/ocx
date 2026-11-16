@@ -86,7 +86,7 @@ pub const COMMANDS: &[(&str, u32)] = &[
     ("pull", 1),
     ("remove", 1),
     ("self activate", 1),
-    ("self setup", 1),
+    ("self setup", 2),
     ("self update", 1),
     ("shell", 1),
     ("shell allow", 1),

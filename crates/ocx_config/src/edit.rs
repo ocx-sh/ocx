@@ -12,7 +12,7 @@ use std::time::Duration;
 use toml_edit::DocumentMut;
 
 use crate::loader::MAX_CONFIG_SIZE;
-use ocx_util::fs::{BoundedReadError, lock_scoped, read_bounded, write_bytes_atomic};
+use ocx_util::fs::{BoundedReadError, NewFileMode, lock_scoped, read_bounded, replace_user_file};
 
 /// The `scope` every `config.toml` edit lock is taken under.
 const LOCK_SCOPE: &str = "config-edit";
@@ -256,7 +256,7 @@ where
     if dry_run {
         return Ok(EditOutcome::Written);
     }
-    write_bytes_atomic(path, rendered.as_bytes()).map_err(io)?;
+    replace_user_file(path, rendered.as_bytes(), NewFileMode::UmaskDefault).map_err(io)?;
     Ok(EditOutcome::Written)
 }
 
@@ -503,5 +503,59 @@ completions = true
             "{error:?}"
         );
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "# fence\n");
+    }
+
+    #[cfg(unix)]
+    mod user_file {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        use super::*;
+
+        fn mode_of(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        fn set_mode(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_edit_keeps_a_symlinked_config_a_symlink_and_its_target_mode() {
+            let (dir, locks, config) = home();
+            let target = dir.path().join("dotfiles-config.toml");
+            std::fs::write(&target, HAND_WRITTEN).unwrap();
+            set_mode(&target, 0o644);
+            symlink(&target, &config).unwrap();
+
+            let outcome = edit(&locks, &config, false, set_hook).await.unwrap();
+
+            assert_eq!(outcome, EditOutcome::Written);
+            assert!(std::fs::symlink_metadata(&config).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_link(&config).unwrap(), target);
+            assert!(std::fs::read_to_string(&target).unwrap().contains("hook = true"));
+            assert_eq!(mode_of(&target), 0o644);
+        }
+
+        #[tokio::test]
+        async fn an_edit_keeps_an_existing_mode() {
+            let (_dir, locks, config) = home();
+            std::fs::write(&config, HAND_WRITTEN).unwrap();
+            set_mode(&config, 0o640);
+
+            edit(&locks, &config, false, set_hook).await.unwrap();
+
+            assert_eq!(mode_of(&config), 0o640);
+        }
+
+        #[tokio::test]
+        async fn an_edit_creates_a_missing_config_with_the_umask_default() {
+            let (dir, locks, config) = home();
+            let probe = dir.path().join("probe");
+            std::fs::File::create(&probe).unwrap();
+
+            edit(&locks, &config, false, set_hook).await.unwrap();
+
+            assert_eq!(mode_of(&config), mode_of(&probe));
+        }
     }
 }

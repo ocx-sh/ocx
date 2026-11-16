@@ -58,15 +58,18 @@ enum ProfileOutcomeKind {
     Migrated,
     /// The managed block carried user edits and was left untouched.
     SkippedDirty,
+    /// The profile could not be written and was left untouched.
+    SkippedUnwritable,
 }
 
-impl From<ProfileOutcome> for ProfileOutcomeKind {
-    fn from(outcome: ProfileOutcome) -> Self {
+impl From<&ProfileOutcome> for ProfileOutcomeKind {
+    fn from(outcome: &ProfileOutcome) -> Self {
         match outcome {
             ProfileOutcome::Completed => Self::Completed,
             ProfileOutcome::NoOp => Self::NoOp,
             ProfileOutcome::Migrated => Self::Migrated,
             ProfileOutcome::SkippedDirty => Self::SkippedDirty,
+            ProfileOutcome::SkippedUnwritable(_) => Self::SkippedUnwritable,
         }
     }
 }
@@ -78,6 +81,7 @@ impl std::fmt::Display for ProfileOutcomeKind {
             Self::NoOp => f.write_str("no_op"),
             Self::Migrated => f.write_str("migrated"),
             Self::SkippedDirty => f.write_str("skipped_dirty"),
+            Self::SkippedUnwritable => f.write_str("skipped_unwritable"),
         }
     }
 }
@@ -417,7 +421,7 @@ impl SelfSetupData {
             .iter()
             .map(|(path, profile_outcome)| ProfileEntry {
                 path: path.display().to_string(),
-                outcome: (*profile_outcome).into(),
+                outcome: profile_outcome.into(),
             })
             .collect();
 
@@ -457,18 +461,18 @@ impl SelfSetupData {
 
 /// Reduces the profile outcomes and shim writes to one status: dirty > migrated > completed > no-op.
 fn derive_status(outcome: &SetupOutcome) -> StatusKind {
-    let profile_outcomes = || outcome.profiles.iter().map(|(_, profile_outcome)| *profile_outcome);
+    let profile_outcomes = || outcome.profiles.iter().map(|(_, profile_outcome)| profile_outcome);
 
-    if profile_outcomes().any(|p| p == ProfileOutcome::SkippedDirty)
+    if profile_outcomes().any(|p| *p == ProfileOutcome::SkippedDirty)
         || matches!(outcome.managed_config, ManagedConfigSetupOutcome::Dirty)
     {
         return StatusKind::Skipped;
     }
-    if profile_outcomes().any(|p| p == ProfileOutcome::Migrated) {
+    if profile_outcomes().any(|p| *p == ProfileOutcome::Migrated) {
         return StatusKind::Migrated;
     }
     let wrote_shim = !outcome.shims_written.is_empty();
-    let completed_profile = profile_outcomes().any(|p| p == ProfileOutcome::Completed);
+    let completed_profile = profile_outcomes().any(|p| *p == ProfileOutcome::Completed);
     if wrote_shim || completed_profile {
         return StatusKind::Completed;
     }
@@ -689,6 +693,44 @@ mod tests {
                 {"path": "/home/dev/.zshrc", "outcome": "skipped_dirty"}
             ])
         );
+    }
+
+    fn unwritable() -> ProfileOutcome {
+        ProfileOutcome::SkippedUnwritable(ocx_setup::Unwritable {
+            cause: "permission denied".to_string(),
+            text: "block".to_string(),
+        })
+    }
+
+    /// An unwritable profile is reported by name, and alone it changes nothing: `no_op`, no reload hint.
+    #[test]
+    fn unwritable_profile_serializes_and_counts_like_no_op() {
+        let mut base = outcome();
+        base.profiles = vec![(PathBuf::from("/home/dev/.bashrc"), unwritable())];
+
+        let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+        assert_eq!(
+            value["profiles"],
+            json!([{"path": "/home/dev/.bashrc", "outcome": "skipped_unwritable"}])
+        );
+        assert_eq!(value["status"], json!("no_op"));
+        assert!(value.get("dirty_profiles").is_none());
+        assert_eq!(
+            super::ProfileOutcomeKind::from(&unwritable()).to_string(),
+            "skipped_unwritable"
+        );
+        assert!(!ocx_setup::profiles_changed(&base.profiles));
+    }
+
+    /// Shims written beside an unwritable profile still make the run `completed`.
+    #[test]
+    fn unwritable_profile_with_a_written_shim_is_completed() {
+        let mut base = outcome();
+        base.shims_written = vec![PathBuf::from("/home/dev/.ocx/env.sh")];
+        base.profiles = vec![(PathBuf::from("/home/dev/.bashrc"), unwritable())];
+
+        let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+        assert_eq!(value["status"], json!("completed"));
     }
 
     /// A migration (no dirty profile) drives `status: migrated`.

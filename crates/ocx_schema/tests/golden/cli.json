@@ -13620,7 +13620,7 @@
               "self",
               "setup"
             ],
-            "version": 1,
+            "version": 2,
             "summary": "Create or refresh OCX shell integration",
             "hidden": false,
             "external_subcommands": false,

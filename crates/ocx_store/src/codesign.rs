@@ -44,6 +44,10 @@ struct HardLinkGroups {
 }
 
 /// Re-points each alias at its first name when signing gave that name a new inode, or the alias keeps the unsigned bytes.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "renames a hardlink ocx just staged beside a package file over that file; the package is ocx-extracted"
+)]
 async fn relink_replaced_aliases(groups: &HardLinkGroups) {
     for (inode, alias) in &groups.aliases {
         let first = &groups.first_names[inode];
@@ -267,6 +271,10 @@ async fn try_codesign(args: &[&str], path: &Path) -> bool {
 /// Signs a copy on a fresh inode and renames it back, working around Apple `codesign` failing on some inodes.
 ///
 /// The suffix is appended, not swapped for the extension, or `foo.bar` and `foo.baz` collide.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "renames the re-signed copy back over a Mach-O in an ocx-extracted package"
+)]
 async fn retry_sign_with_copy(args: &[&str], path: &Path) -> std::io::Result<()> {
     let tmp_name = format!(
         "{}.codesign_tmp",
@@ -300,6 +308,7 @@ fn format_process_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use std::io::Write;
     use std::path::PathBuf;

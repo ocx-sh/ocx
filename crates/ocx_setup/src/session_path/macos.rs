@@ -187,7 +187,7 @@ pub fn render_plist(directories: &[PathBuf]) -> Result<String, SessionPathError>
 /// # Errors
 ///
 /// Any I/O failure; the caller maps it to [`SessionPathOutcome::Failed`].
-// Not `write_bytes_atomic`: its 0600 temp file is an agent launchd silently refuses.
+// Not `write_private_file_atomic`: its 0600 temp file is an agent launchd silently refuses.
 // The mode is set before the rename: a chmod after it follows a symlink a same-uid process swapped in.
 #[cfg(unix)]
 pub fn publish_plist(path: &Path, contents: &str) -> std::io::Result<()> {

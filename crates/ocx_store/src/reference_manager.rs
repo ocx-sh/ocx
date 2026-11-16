@@ -327,6 +327,7 @@ async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests move fixtures by raw rename")]
 mod tests {
     use std::path::{Path, PathBuf};
 
