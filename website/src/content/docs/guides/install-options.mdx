@@ -396,7 +396,7 @@ Pin the identity once instead of passing it on every call, as [Trust signers wit
 
 ## Dev builds \{#dev-builds\}
 
-Binaries published to the dev channel by the release workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. A build of the main branch carries `canary` and a build of a pull request carries `pr<N>`, as in `0.3.2-canary+20260528143045` and `0.3.2-pr42+20260528143045`. These are snapshot builds, not stable releases.
+Binaries published to the dev channel by the release workflow carry a `channel: dev` field and a version string with a build-metadata suffix, such as `0.3.2-dev+20260528143045`. A build of the main branch carries `canary` and a build of a pull request carries `pr<N>`, as in `0.3.2-canary+20260528143045` and `0.3.2-pr42+20260528143045`. These are snapshot builds, not stable releases. Canary versions are listed under `ocx.sh/ocx/cli`; pull request builds are not.
 
 To identify whether your installed binary is a dev build, run:
 
