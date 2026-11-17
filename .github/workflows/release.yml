@@ -7,8 +7,12 @@ name: Release
 #              candidates, the docker and sdkgen publishes, and the dispatch that rebuilds the setup.ocx.sh manifest.
 #   candidate  `X.Y.Z-rcN` of the same Cargo.toml version, from refs/heads/main. As a release, but a
 #              GitHub pre-release, an ephemeral index row, the manifest dispatch, and no docker or sdkgen.
-#   dev        a build of the dispatched branch to the dev package: nothing but that package changes
-#              (no git tag, no GitHub release, no announce, no docker, no sdkgen). Old dev builds are pruned.
+#   dev        a build of the dispatched branch, versioned from Cargo.toml, to the dev package: nothing but that package changes
+#              (no git tag, no GitHub release, no announce, no docker, no sdkgen). The pre-release track follows
+#              the ref: `X.Y.Z-canary` from main (canary.yml dispatches it after every green verify-basic),
+#              `X.Y.Z-pr<N>` from a branch with an open pull request, `X.Y.Z-dev` from any other branch.
+#              Pruned after each dev run: `-dev` by age, `-canary` down to the newest CANARY_KEEP, `-pr<N>` once
+#              pull request N is no longer open or the build is past `prune_after_days`.
 #
 #   verify-version -> plan -> cross -> build -> scan -> publish -> github-release -> announce -> post-*
 #                       \-> readiness (release, candidate) ----^         \-> prune-dev | prune
@@ -63,6 +67,8 @@ env:
   PACKAGE_LOGICAL: ocx.sh/ocx/cli
   INDEX_REPO: ocx-sh/index
   INDEX_PACKAGE: ocx/cli
+  # Canary builds of the dev package kept by the prune, newest first.
+  CANARY_KEEP: "3"
   # Whitespace-separated rows of `<asset triple> <OCI platform>`.
   PLATFORMS: |
     x86_64-unknown-linux-musl linux/amd64
@@ -78,8 +84,8 @@ env:
   RELEASE_IDENTITY: ${{ github.server_url }}/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main
 
 concurrency:
-  # A release and a candidate share a group (they write the same package's version tags); a dev build has its own.
-  group: release-${{ inputs.mode == 'dev' && 'dev' || 'release' }}
+  # A release and a candidate share a group (they write the same package's version tags); dev builds queue per ref.
+  group: release-${{ inputs.mode == 'dev' && format('dev-{0}', github.ref) || 'release' }}
   # Only one run waits per group: a newer dispatch replaces a run still waiting. A half-published release is worse
   # than a queued one.
   cancel-in-progress: false
@@ -100,6 +106,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       semver: ${{ steps.plan.outputs.semver }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -111,18 +118,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Setup OCX
-        if: ${{ inputs.mode == 'dev' }}
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
-        with:
-          version: '0.6.2'
-          cache: false
       - name: Plan the build
         id: plan
         env:
           MODE: ${{ inputs.mode }}
           VERSION: ${{ inputs.version }}
           REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
@@ -156,15 +158,28 @@ jobs:
               git_tag="v${VERSION}"
               ;;
             dev)
-              raw="$(ocx exec -g release -- git-cliff --bumped-version)"
-              core="${raw#v}"
-              if [[ -z "$core" ]]; then
-                echo "::error::git-cliff --bumped-version returned empty output; no commits since the last tag"
+              core="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+              if ! [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::the Cargo.toml workspace version '$core' is not X.Y.Z"
                 exit 1
               fi
+              # The track follows the ref. A failed PR lookup fails the run: it never falls back to `dev`.
+              if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+                track=canary
+              else
+                pr="$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$GITHUB_REPOSITORY_OWNER:$GITHUB_REF_NAME" --jq '.[0].number // empty')"
+                if [[ -z "$pr" ]]; then
+                  track=dev
+                elif [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
+                  track="pr$pr"
+                else
+                  echo "::error::pull request number '$pr' is not a number"
+                  exit 1
+                fi
+              fi
               # `+` is not an OCI reference character; the binary embeds the semver form, the package carries `_`.
-              semver="${core}-dev+${ts}"
-              tag="${core}-dev_${ts}"
+              semver="${core}-${track}+${ts}"
+              tag="${core}-${track}_${ts}"
               package="$PACKAGE_DEV"
               git_tag=""
               ;;
@@ -461,9 +476,10 @@ jobs:
           ocx package announce "${flags[@]}" "$INDEX_PACKAGE"
 
   # Dev builds only: the one place `--force` is allowed, because the dev package has no index to mark a tag
-  # ephemeral and its tags are all disposable.
+  # ephemeral and its tags are all disposable. Three rules, one per track: `-dev` by age, `-canary` keeps the
+  # newest CANARY_KEEP, `-pr<N>` goes when pull request N is no longer open or the build is past the age.
   prune-dev:
-    name: Prune old dev builds
+    name: Prune old dev, canary and pull request builds
     # A status function, or the skipped `readiness` (dev mode) behind `publish` skips this job too.
     if: ${{ !cancelled() && inputs.mode == 'dev' && needs.publish.result == 'success' }}
     needs: [plan, publish]
@@ -471,6 +487,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -478,19 +495,28 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
-      - name: Prune dev builds past their age
+      - name: Prune dev, canary and pull request builds
         env:
           PACKAGE: ${{ env.PACKAGE_DEV }}
           DAYS: ${{ inputs.prune_after_days }}
+          KEEP: ${{ env.CANARY_KEEP }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ocx --remote --format json index list "$PACKAGE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
-          python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
+          # No `|| true`: a failed call must abort, because an empty file produced by an error would select every PR build.
+          gh pr list --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
+          {
+            python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt"
+            python3 scripts/release_prune_select.py canary --keep "$KEEP" < "$RUNNER_TEMP/tags.txt"
+            python3 scripts/release_prune_select.py pr --days "$DAYS" --open "$RUNNER_TEMP/open-prs.txt" < "$RUNNER_TEMP/tags.txt"
+          } > "$RUNNER_TEMP/selected.txt"
           mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
           if ((${#selected[@]} == 0)); then
-            echo "No dev build of $PACKAGE is older than $DAYS days."
+            echo "Nothing to prune in $PACKAGE: no stale dev build, no canary beyond $KEEP, no build of a closed pull request."
             exit 0
           fi
           ocx package prune --forge github --force --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE" "${selected[@]}"

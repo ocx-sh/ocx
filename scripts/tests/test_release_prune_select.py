@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import release_prune_select as sel
@@ -203,3 +204,176 @@ def test_a_final_release_is_old_enough_at_exactly_prune_after_days(
     assert sel.select_candidates(tags, cutoff) == (
         ["1.0.0-rc1_20260101000000"] if selected else []
     )
+
+
+# --- canary and pr ---------------------------------------------------------------------------
+
+
+def _stamp(age: timedelta) -> str:
+    return (NOW - age).strftime("%Y%m%d%H%M%S")
+
+
+def test_canary_keeps_the_newest_n_across_version_lines_and_closes_emptied_families() -> (
+    None
+):
+    tags = [
+        "0.6.0-canary",
+        "0.6.0-canary_20260101000000",
+        "0.6.0-canary_20260102000000",
+        "0.7.0-canary",
+        "0.7.0-canary_20260301000000",
+        "0.7.0-canary_20260302000000",
+        "0.7.0-canary_20260303000000",
+    ]
+    assert sel.select_canary(tags, 3) == [
+        "0.6.0-canary",
+        "0.6.0-canary_20260101000000",
+        "0.6.0-canary_20260102000000",
+    ]
+
+
+@pytest.mark.parametrize("keep", [2, 3])
+def test_canary_with_at_most_n_builds_selects_nothing(keep: int) -> None:
+    tags = ["0.7.0-canary", "0.7.0-canary_20260301000000", "0.7.0-canary_20260302000000"]
+    assert sel.select_canary(tags, keep) == []
+
+
+def test_canary_family_without_a_rolling_tag_selects_only_builds() -> None:
+    tags = ["0.6.0-canary_20260101000000", "0.7.0-canary_20260301000000"]
+    assert sel.select_canary(tags, 1) == ["0.6.0-canary_20260101000000"]
+
+
+def test_canary_never_selects_the_rolling_tag_of_a_family_that_keeps_a_build() -> None:
+    tags = ["0.7.0-canary", "0.7.0-canary_20260101000000", "0.7.0-canary_20260301000000"]
+    assert sel.select_canary(tags, 1) == ["0.7.0-canary_20260101000000"]
+
+
+def test_canary_ignores_other_tracks_and_other_kinds_ignore_canary() -> None:
+    other = ["0.6.0-dev_20200101000000", "0.6.0-pr12_20200101000000", "0.6.0-pr12"]
+    assert sel.select_canary(other + ["0.6.0-canary_20260101000000"], 1) == []
+    canary = ["0.6.0-canary_20200101000000", "0.6.0-canary_20200102000000", "0.6.0-canary"]
+    assert sel.select_dev(canary + ["0.6.0-pr12_20200101000000"], NOW) == []
+    assert sel.select_pr(canary, NOW, {12}) == []
+
+
+def test_canary_ignores_a_stamp_that_is_not_a_date() -> None:
+    assert sel.select_canary(["0.6.0-canary_20269999999999"], 1) == []
+
+
+OPEN = {12}
+
+
+def test_pr_closed_goes_whole() -> None:
+    tags = ["0.7.0-pr7", f"0.7.0-pr7_{_stamp(timedelta(hours=1))}", "0.7.0-pr7_20261112000000"]
+    assert sel.select_pr(tags, NOW - timedelta(days=30), OPEN) == sorted(tags)
+
+
+def test_pr_open_with_young_builds_keeps_everything() -> None:
+    tags = ["0.7.0-pr12", "0.7.0-pr12_20261112000000"]
+    assert sel.select_pr(tags, NOW - timedelta(days=30), OPEN) == []
+
+
+def test_pr_open_with_one_old_build_selects_only_that_build() -> None:
+    tags = ["0.7.0-pr12", "0.7.0-pr12_20260101000000", "0.7.0-pr12_20261112000000"]
+    assert sel.select_pr(tags, NOW - timedelta(days=30), OPEN) == [
+        "0.7.0-pr12_20260101000000"
+    ]
+
+
+def test_pr_open_with_every_build_old_goes_whole_with_its_rolling_tag() -> None:
+    tags = ["0.7.0-pr12", "0.7.0-pr12_20260101000000", "0.7.0-pr12_20260102000000"]
+    assert sel.select_pr(tags, NOW - timedelta(days=30), OPEN) == sorted(tags)
+
+
+@pytest.mark.parametrize(("age", "selected"), [(timedelta(days=30), True), (timedelta(days=30) - timedelta(seconds=1), False)])
+def test_pr_build_is_old_enough_at_exactly_days(age: timedelta, selected: bool) -> None:
+    tag = f"0.7.0-pr12_{_stamp(age)}"
+    assert sel.select_pr([tag], NOW - timedelta(days=30), OPEN) == ([tag] if selected else [])
+
+
+def test_pr_orphan_rolling_tag_is_selected_only_for_a_closed_pr() -> None:
+    assert sel.select_pr(["0.7.0-pr7", "0.7.0-pr12"], NOW, OPEN) == ["0.7.0-pr7"]
+
+
+def test_pr_with_no_open_prs_selects_every_pr_build() -> None:
+    tags = ["0.7.0-pr12_20261112000000", "0.7.0-pr12"]
+    assert sel.select_pr(tags, NOW - timedelta(days=30), set()) == sorted(tags)
+
+
+def test_pr_ignores_what_is_not_a_pr_track() -> None:
+    tags = [
+        "0.7.0-pr0_20200101000000",
+        "0.7.0-pr01_20200101000000",
+        "0.7.0-pr0",
+        "0.7.0-pr01",
+        "0.7.0-pr١٢_20200101000000",
+        "0.7.0-pr12_20269999999999",
+        "0.7.0-dev_20200101000000",
+    ]
+    assert sel.select_pr(tags, NOW, set()) == []
+
+
+def _run_args(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    tags: list[str],
+) -> tuple[int, str, str]:
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("".join(f"{t}\n" for t in tags)))
+    code = sel.main(args)
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_new_kinds_write_sorted_newline_terminated_output_or_zero_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    open_file = tmp_path / "open.txt"
+    open_file.write_text("\n12\n\n")
+    tags = ["0.6.0-canary_20260102000000", "0.6.0-canary_20260101000000", "0.6.0-canary"]
+    now = ["--now", NOW.isoformat()]
+    assert _run_args(monkeypatch, capsys, ["canary", "--keep", "1"], tags) == (
+        0,
+        "0.6.0-canary_20260101000000\n",
+        "",
+    )
+    assert _run_args(monkeypatch, capsys, ["canary", "--keep", "5"], tags) == (0, "", "")
+    pr = ["pr", "--days", "30", "--open", str(open_file), *now]
+    assert _run_args(monkeypatch, capsys, pr, ["0.7.0-pr7", "0.7.0-pr7_20260101000000"]) == (
+        0,
+        "0.7.0-pr7\n0.7.0-pr7_20260101000000\n",
+        "",
+    )
+    assert _run_args(monkeypatch, capsys, pr, ["0.7.0-pr12_20261112000000", "latest"]) == (0, "", "")
+
+
+def test_new_kinds_reject_bad_arguments_with_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    garbage = tmp_path / "garbage.txt"
+    garbage.write_text("12\nabc\n")
+    zero = tmp_path / "zero.txt"
+    zero.write_text("0\n")
+    good = tmp_path / "good.txt"
+    good.write_text("")
+    bad = [
+        ["canary"],
+        ["canary", "--keep", "0"],
+        ["canary", "--keep", "-1"],
+        ["pr", "--days", "30"],
+        ["pr", "--days", "30", "--open", str(tmp_path / "missing.txt")],
+        ["pr", "--days", "30", "--open", str(garbage)],
+        ["pr", "--days", "30", "--open", str(zero)],
+        ["pr", "--days", "-1", "--open", str(good)],
+    ]
+    for args in bad:
+        code, out, err = _run_args(monkeypatch, capsys, args, [])
+        assert (code, out) == (64, ""), args
+        assert err.startswith("release_prune_select:") and len(err.splitlines()) == 1, args
+    assert _run_args(monkeypatch, capsys, ["pr", "--days", "30", "--open", str(good)], [])[0] == 0
