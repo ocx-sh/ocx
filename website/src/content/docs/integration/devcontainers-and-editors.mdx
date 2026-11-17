@@ -62,16 +62,33 @@ A package can also publish editor configuration of its own. The [`integrations` 
 
 ## Use OCX in a dev container \{#devcontainer\}
 
-OCX has no dev container feature. Install the binary in the image, pull at creation time and put the toolchain on the shell's `PATH`.
+The [OCX Dev Container Feature][devcontainer-feature] installs OCX in the image and restores your project toolchain. Add one line to `devcontainer.json`:
 
-Start from the `Dockerfile`. [Copy the binary][docker-copy-from] from the official image, which works on any base:
+```json
+{
+  "features": { "ghcr.io/ocx-sh/devcontainer-features/ocx:1": {} }
+}
+```
+
+At image build time the feature installs a checksum-verified static `ocx` binary. It uses POSIX `sh`, so it also works on images without bash. Each feature version pins one OCX version, and a new feature patch version follows every OCX release. The `version` option takes `pinned` (the default), `latest` or an exact `X.Y.Z`.
+
+When the container is created, the feature:
+
+- runs [`ocx pull`][cmd-pull] as the remote user when the project has an `ocx.toml` (options `pull` and `pullGroups`),
+- applies an organisation-managed configuration when `managedConfig` is set,
+- activates the project environment in new interactive shells (option `shellActivation`),
+- adds the VS Code extension `ocx-sh.ocx`.
+
+For a restricted network, `distUrl`, `mirrorUrl` and `caBundle` redirect the downloads and the certificate roots. Further options are `libc`, `ocxHome`, `installDir`, `noUpdateCheck` and `consentPaths`. The [Dev Container Feature documentation][p-integrations-devcontainer] lists every option with examples.
+
+### Without the feature \{#devcontainer-manual\}
+
+When the image cannot use features, for example a plain `Dockerfile` build, [copy the binary][docker-copy-from] from the official image, then pull and wire the shell at creation time:
 
 ```dockerfile
 FROM mcr.microsoft.com/devcontainers/base:ubuntu
 COPY --from=ghcr.io/ocx-sh/ocx:0.9.2-alpine /usr/local/bin/ocx /usr/local/bin/ocx
 ```
-
-Then let `devcontainer.json` pull the lock and wire the shell. The extension id installs the editor integration of the previous section inside the container:
 
 ```json
 {
@@ -81,13 +98,14 @@ Then let `devcontainer.json` pull the lock and wire the shell. The extension id 
 }
 ```
 
-[`ocx pull`][cmd-pull] downloads the default group's digest-pinned packages once; pass `-g all` or `-g <group>` when the container needs group tools. `ocx --offline env --shell=bash` then prints export lines from the lock with no network access, so each new shell opens fast. The `grep` guard keeps a rebuild from appending the line twice. For a zsh login, pass `--shell=zsh` and append the line to `~/.zshrc` instead, since a zsh login never reads `~/.bashrc`. Bake the pull into the image with the [Docker recipe][p-docker-project-toolchain] when the container must start without a registry.
+`ocx --offline env --shell=bash` prints export lines from the lock with no network access, and the `grep` guard keeps a rebuild from appending the line twice. For a zsh login, pass `--shell=zsh` and append to `~/.zshrc` instead. Bake the pull into the image with the [Docker recipe][p-docker-project-toolchain] when the container must start without a registry.
 
 Private packages need credentials in the container. [Authenticate to GHCR and ECR][p-istry-auth-recipes-auth-method] lists the variables. Put them in `remoteEnv` from the host's environment and never in the `Dockerfile`.
 
 {/* external */}
 [devcontainer]: https://containers.dev/
 [vscode-ocx]: https://github.com/ocx-sh/vscode-ocx
+[devcontainer-feature]: https://github.com/ocx-sh/devcontainer-features
 
 {/* commands */}
 [cmd-pull]: ../reference/command-line/commands.md#pull
@@ -102,6 +120,7 @@ Private packages need credentials in the container. [Authenticate to GHCR and EC
 [explanation-integrations]: ../explanation/integrations.md
 
 {/* pages */}
+[p-integrations-devcontainer]: /integrations/devcontainer/
 [p-scripts-and-json]: ./scripts-and-json.mdx
 [p-docker-project-toolchain]: ./docker.mdx#project-toolchain
 [p-istry-auth-recipes-auth-method]: ./registry-auth-recipes.mdx#auth-method
