@@ -1,13 +1,13 @@
 ---
-title: "Dev containers and editors"
-description: "Give a dev container, VS Code or any other editor the pinned toolchain of your project."
+title: "Use OCX in an editor"
+description: "Give VS Code or any other editor the pinned toolchain of your project."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: integration */}
 
 import ShellSession from '@ocx-sh/theme/components/ShellSession.astro';
 
-This page shows how to give an editor and a [dev container][devcontainer] the same pinned toolchain that your shell and your CI use. It covers the VS Code extension, a dev container recipe, and the one query any other editor needs.
+This page shows how to give an editor the same pinned toolchain that your shell and your CI use. It covers the VS Code extension and the one query any other editor needs.
 
 An editor does not source your shell profile, so a tool that works in your terminal can be "not found" in the editor's run configuration. The fix is the same everywhere: give the editor the directory that OCX resolved, and never build that path by hand.
 
@@ -62,50 +62,10 @@ A package can also publish editor configuration of its own. The [`integrations` 
 
 ## Use OCX in a dev container \{#devcontainer\}
 
-The [OCX Dev Container Feature][devcontainer-feature] installs OCX in the image and restores your project toolchain. Add one line to `devcontainer.json`:
-
-```json
-{
-  "features": { "ghcr.io/ocx-sh/devcontainer-features/ocx:1": {} }
-}
-```
-
-At image build time the feature installs a checksum-verified static `ocx` binary. It uses POSIX `sh`, so it also works on images without bash. Each feature version pins one OCX version, and a new feature patch version follows every OCX release. The `version` option takes `pinned` (the default), `latest` or an exact `X.Y.Z`.
-
-When the container is created, the feature:
-
-- runs [`ocx pull`][cmd-pull] as the remote user when the project has an `ocx.toml` (options `pull` and `pullGroups`),
-- applies an organisation-managed configuration when `managedConfig` is set,
-- activates the project environment in new interactive shells (option `shellActivation`),
-- adds the VS Code extension `ocx-sh.ocx`.
-
-For a restricted network, `distUrl`, `mirrorUrl` and `caBundle` redirect the downloads and the certificate roots. Further options are `libc`, `ocxHome`, `installDir`, `noUpdateCheck` and `consentPaths`. The [Dev Container Feature documentation][p-integrations-devcontainer] lists every option with examples.
-
-### Without the feature \{#devcontainer-manual\}
-
-When the image cannot use features, for example a plain `Dockerfile` build, [copy the binary][docker-copy-from] from the official image, then pull and wire the shell at creation time:
-
-```dockerfile
-FROM mcr.microsoft.com/devcontainers/base:ubuntu
-COPY --from=ghcr.io/ocx-sh/ocx:0.9.2-alpine /usr/local/bin/ocx /usr/local/bin/ocx
-```
-
-```json
-{
-  "build": { "dockerfile": "Dockerfile" },
-  "postCreateCommand": "ocx pull && { grep -q 'ocx --offline env' ~/.bashrc || echo 'eval \"$(ocx --offline env --shell=bash)\"' >> ~/.bashrc; }",
-  "customizations": { "vscode": { "extensions": ["ocx-sh.ocx"] } }
-}
-```
-
-`ocx --offline env --shell=bash` prints export lines from the lock with no network access, and the `grep` guard keeps a rebuild from appending the line twice. For a zsh login, pass `--shell=zsh` and append to `~/.zshrc` instead. Bake the pull into the image with the [Docker recipe][p-docker-project-toolchain] when the container must start without a registry.
-
-Private packages need credentials in the container. [Authenticate to GHCR and ECR][p-istry-auth-recipes-auth-method] lists the variables. Put them in `remoteEnv` from the host's environment and never in the `Dockerfile`.
+The [OCX Dev Container Feature][p-integrations-devcontainer] installs OCX in the image and restores the project toolchain when the container is created. It also adds the VS Code extension. Its own documentation covers the options, restricted networks and troubleshooting.
 
 {/* external */}
-[devcontainer]: https://containers.dev/
 [vscode-ocx]: https://github.com/ocx-sh/vscode-ocx
-[devcontainer-feature]: https://github.com/ocx-sh/devcontainer-features
 
 {/* commands */}
 [cmd-pull]: ../reference/command-line/commands.md#pull
@@ -115,12 +75,9 @@ Private packages need credentials in the container. [Authenticate to GHCR and EC
 
 {/* guides */}
 [guide-groups]: ../explanation/project-toolchain.md
-[docker-copy-from]: ./docker.mdx#copy-from
 [explanation-shell-state]: ../explanation/shell-integration.mdx
 [explanation-integrations]: ../explanation/integrations.md
 
 {/* pages */}
 [p-integrations-devcontainer]: /integrations/devcontainer/
 [p-scripts-and-json]: ./scripts-and-json.mdx
-[p-docker-project-toolchain]: ./docker.mdx#project-toolchain
-[p-istry-auth-recipes-auth-method]: ./registry-auth-recipes.mdx#auth-method

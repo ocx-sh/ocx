@@ -135,8 +135,8 @@ tasks:
             --page /guides/work-offline/
             --page /integration/
             --page /integration/bazel/
-            --page /integration/devcontainers-and-editors/
             --page /integration/docker/
+            --page /integration/editors/
             --page /integration/publisher-ci/
             --page /integration/python/
             --page /integration/registry-auth-recipes/

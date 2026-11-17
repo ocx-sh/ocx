@@ -17,7 +17,7 @@ Pick the system you want to connect to OCX, and open the page that shows the sho
 
 ## Connect other tools {#integration-tools}
 
-- [Dev containers and editors][p-devcontainers-and-editors] shares the toolchain with VS Code and a dev container.
+- [Use OCX in an editor][p-editors] shares the toolchain with VS Code and any other editor.
 - [Dev Container Feature][p-integrations-devcontainer] installs OCX and restores the project toolchain with one line in `devcontainer.json`.
 - [Docker][p-docker] covers the official image and baking a toolchain into your own.
 - [Use OCX with Bazel][p-bazel] lists what `rules_ocx` asks of OCX.
@@ -38,7 +38,7 @@ Project documentation lives on separate sites: [rules_ocx (Bazel)][p-integration
 [p-unattended-ci]: ./unattended-ci.mdx
 [p-registry-auth-recipes]: ./registry-auth-recipes.mdx
 [p-publisher-ci]: ./publisher-ci.mdx
-[p-devcontainers-and-editors]: ./devcontainers-and-editors.mdx
+[p-editors]: ./editors.mdx
 [p-docker]: ./docker.mdx
 [p-bazel]: ./bazel.mdx
 [p-python]: ./python.mdx
