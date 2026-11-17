@@ -23,7 +23,7 @@ Inputs: `mode`, `version`, `prune_after_days` (default 30).
 |---|---|---|
 | `release` | `X.Y.Z`, equal to the `Cargo.toml` version; refused when tag `vX.Y.Z` exists | `ghcr.io/ocx-sh/ocx/cli`, then tag `vX.Y.Z`, GitHub Release, announce, docker and sdkgen |
 | `candidate` | `X.Y.Z-rcN`, same `X.Y.Z` as `Cargo.toml` | the same package, as a pre-release that cascades only to its own rolling tag; GitHub pre-release, ephemeral announce |
-| `dev` | ignored | `ghcr.io/ocx-sh/dev/cli` only: no git tag, no GitHub Release, no announce, no docker or sdkgen |
+| `dev` | ignored; `X.Y.Z` is the `Cargo.toml` version | `ghcr.io/ocx-sh/dev/cli` only: no git tag, no GitHub Release, no announce, no docker or sdkgen. The track follows the dispatched ref: `X.Y.Z-canary` from `refs/heads/main`, `X.Y.Z-pr<N>` from a branch with an open pull request, `X.Y.Z-dev` from any other branch |
 
 Jobs, in order: `plan` (guards, channel, version, tag, target package), `readiness` (release and candidate: `readiness-gate.yml` on `github.sha`), `build` (`cross.yml` with `stamp: true`, then `release_assets.py`), `scan` (`scan-binaries.yml`: `--scan`, `--exec`, `--link`), `publish`, `github-release`, `announce`, `prune`, `post`.
 
@@ -32,6 +32,8 @@ Jobs, in order: `plan` (guards, channel, version, tag, target package), `readine
 - **Windows names.** Bazel builds `*-pc-windows-gnullvm`. The archives carry the same name (`TARGETS` in `scripts/release_assets.py`); releases up to v0.6.6 shipped `*-pc-windows-msvc` archives.
 - **No cargo-dist installers.** OCX uses the custom bootstrap at [setup.ocx.sh](https://setup.ocx.sh): it downloads a release archive, runs `ocx self setup`, and hands off to OCX package management.
 - **`backfill.yml`** (dispatch, `refs/heads/main`, environment `release-backfill`) signs and attests the platforms of already published versions that lack either, and never moves a tag. Inputs: `tags` (empty = every version tag), `dry_run`.
+- **`canary.yml`** fires on `workflow_run` of a green `verify-basic` push run on main of this repository and dispatches `release.yml --ref main -f mode=dev`, only while that commit is still the main tip. It holds `actions: write` and checks out nothing.
+- **Dev prune** (`prune-dev`, after every dev run): `-dev` builds by age (`prune_after_days`), `-canary` builds down to the newest `CANARY_KEEP` (3), `-pr<N>` builds once pull request N is no longer open or the build is past `prune_after_days`; a family's rolling tag goes with its last build.
 - **Structural tests.** `.claude/tests/test_workflows.py` pins who may hold `id-token: write` together with a signing step, the main-and-repository guards, the dev-package guard, `--force` on prune only against the dev package, and `github-release` needing `publish`.
 
 ### Linux glibc Floor
