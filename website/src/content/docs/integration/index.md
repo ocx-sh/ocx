@@ -18,6 +18,7 @@ Pick the system you want to connect to OCX, and open the page that shows the sho
 ## Connect other tools {#integration-tools}
 
 - [Dev containers and editors][p-devcontainers-and-editors] shares the toolchain with VS Code and a dev container.
+- [Dev Container Feature][p-integrations-devcontainer] installs OCX and restores the project toolchain with one line in `devcontainer.json`.
 - [Docker][p-docker] covers the official image and baking a toolchain into your own.
 - [Use OCX with Bazel][p-bazel] lists what `rules_ocx` asks of OCX.
 - [Use OCX with Python][p-python] drives OCX from Python and ships a locked Python application.
@@ -29,7 +30,7 @@ Pick the system you want to connect to OCX, and open the page that shows the sho
 
 ## Other integrations {#integration-more}
 
-Project documentation lives on separate sites: [rules_ocx (Bazel)][p-integrations-bazel], [ocx-sdk (Python)][p-integrations-python] and [CMake][p-integrations-cmake].
+Project documentation lives on separate sites: [rules_ocx (Bazel)][p-integrations-bazel], [ocx-sdk (Python)][p-integrations-python] [CMake][p-integrations-cmake] and the [Dev Container Feature][p-integrations-devcontainer].
 
 <!-- pages -->
 [p-github-actions]: ./github-actions.mdx
@@ -46,3 +47,4 @@ Project documentation lives on separate sites: [rules_ocx (Bazel)][p-integration
 [p-integrations-bazel]: /integrations/bazel/
 [p-integrations-python]: /integrations/python/
 [p-integrations-cmake]: /integrations/cmake/
+[p-integrations-devcontainer]: /integrations/devcontainer/

@@ -59,7 +59,7 @@ First-class integrations with the tools and platforms where developers already w
 |---|---|---|
 | Bazel module | In progress | [#12](https://github.com/ocx-sh/ocx/pull/12) |
 | GitHub Actions | In progress | [ocx-sh/setup-ocx](https://github.com/ocx-sh/setup-ocx) |
-| DevContainer features | Planned | — |
+| DevContainer features | Shipped | [Dev Container Feature][p-integrations-devcontainer] |
 | mise backend plugin | Planned | [#34](https://github.com/ocx-sh/ocx/issues/34) |
 | Shims & lazy loading | Shipped | [Deferred packages][explanation-deferred-packages] |
 | Air-gap export/import | Planned | [#25](https://github.com/ocx-sh/ocx/issues/25) |
@@ -82,3 +82,4 @@ Stabilizing the CLI interface and package metadata format for long-term reliabil
 [guide-verify-installs]: ./guides/verify-installs.mdx
 [guide-attest-sbom]: ./publishing/attest-and-sbom.mdx
 [explanation-deferred-packages]: ./explanation/deferred-packages.mdx
+[p-integrations-devcontainer]: /integrations/devcontainer/
