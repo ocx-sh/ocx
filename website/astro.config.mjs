@@ -122,7 +122,7 @@ export default defineConfig({
             page('Proxy and corporate CA', '/integration/proxy-and-ca/'),
             page('Docker', '/integration/docker/'),
             page('Use OCX with Bazel', '/integration/bazel/'),
-            page('Dev containers and editors', '/integration/devcontainers-and-editors/'),
+            page('Use OCX in an editor', '/integration/editors/'),
             page('Read OCX output from a script', '/integration/scripts-and-json/'),
             page('Use OCX with Python', '/integration/python/'),
             page('Publish packages from CI', '/integration/publisher-ci/'),

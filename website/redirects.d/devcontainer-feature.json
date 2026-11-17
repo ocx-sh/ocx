@@ -1,0 +1,8 @@
+{
+  "/docs/integration/devcontainers-and-editors/": {
+    "to": "/docs/integration/editors/",
+    "fragments": {
+      "devcontainer-manual": "/docs/integration/docker/#copy-from"
+    }
+  }
+}
