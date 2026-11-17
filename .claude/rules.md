@@ -59,6 +59,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | A Bazel build that never worked on this host (toolchain pin, `~/.bazelrc`, cache credential) | skill `init-bazel-config`, `task bazel:doctor` — [bazel-quality.md](./rules/bazel-quality.md) is the ruleset, this is the machine |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
+| Testing an unreleased build from another repository or an e2e run (canary, pull request build address) | [workflow-release.md](./rules/workflow-release.md) § Testing an unreleased build |
 | Bazel builds (`BUILD`/`MODULE.bazel`/Starlark) | [bazel-quality.md](./rules/bazel-quality.md) (shareable), skills `bazel-adopt`, `bazel-diagnose` |
 | Writing a flag into `.bazelrc`, a workflow or an rc file | [bazel-quality.md](./rules/bazel-quality.md) § BZL-FLAG-11 — prove it on the pinned binary's **two** help surfaces first; empty output is not a pass |
 | Bazel cache, credentials, `.bazelignore`, the module lockfile | [bazel-quality.md](./rules/bazel-quality.md) (shareable), [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) (`task` is the only entry point), [subsystem-ci.md](./rules/subsystem-ci.md) (which lane may write) |

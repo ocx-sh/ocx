@@ -7,15 +7,16 @@ name: Release
 #              candidates, the docker and sdkgen publishes, and the dispatch that rebuilds the setup.ocx.sh manifest.
 #   candidate  `X.Y.Z-rcN` of the same Cargo.toml version, from refs/heads/main. As a release, but a
 #              GitHub pre-release, an ephemeral index row, the manifest dispatch, and no docker or sdkgen.
-#   dev        a build of the dispatched branch, versioned from Cargo.toml, to the dev package: nothing but that package changes
-#              (no git tag, no GitHub release, no announce, no docker, no sdkgen). The pre-release track follows
-#              the ref: `X.Y.Z-canary` from main (canary.yml dispatches it after every green verify-basic),
-#              `X.Y.Z-pr<N>` from a branch with an open pull request, `X.Y.Z-dev` from any other branch.
-#              Pruned after each dev run: `-dev` by age, `-canary` down to the newest CANARY_KEEP, `-pr<N>` once
-#              pull request N is no longer open or the build is past `prune_after_days`.
+#   dev        a build of the dispatched branch, versioned from Cargo.toml, with no git tag, no GitHub release, no
+#              docker, no sdkgen and no manifest dispatch. The pre-release track follows the ref:
+#              `X.Y.Z-canary` from main (canary.yml dispatches it after every green verify-basic): published to the
+#              release package, announced as an ephemeral index row, pruned down to the newest CANARY_KEEP;
+#              `X.Y.Z-pr<N>` from a branch with an open pull request: dev package, unannounced, with a sticky pull
+#              request comment carrying its address, pruned once pull request N is closed or past `prune_after_days`;
+#              `X.Y.Z-dev` from any other branch: dev package, unannounced, pruned by age.
 #
-#   verify-version -> plan -> cross -> build -> scan -> publish -> github-release -> announce -> post-*
-#                       \-> readiness (release, candidate) ----^         \-> prune-dev | prune
+#   verify-version -> plan -> cross -> build -> scan -> publish -> github-release -> announce -> prune | post-*
+#                       \-> readiness (release, candidate) ----^         \-> prune-dev | comment (pr<N>)
 #
 # Signing identity. Every signature and attestation of the package is made by the `publish` job of this
 # file (never by a called workflow, whose certificate would name the called file), so the certificate
@@ -67,7 +68,7 @@ env:
   PACKAGE_LOGICAL: ocx.sh/ocx/cli
   INDEX_REPO: ocx-sh/index
   INDEX_PACKAGE: ocx/cli
-  # Canary builds of the dev package kept by the prune, newest first.
+  # Canary builds of the release package kept by the prune, newest first.
   CANARY_KEEP: "3"
   # Whitespace-separated rows of `<asset triple> <OCI platform>`.
   PLATFORMS: |
@@ -84,7 +85,8 @@ env:
   RELEASE_IDENTITY: ${{ github.server_url }}/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main
 
 concurrency:
-  # A release and a candidate share a group (they write the same package's version tags); dev builds queue per ref.
+  # A release and a candidate share a group (they write the same package's version tags). A dev run, canary
+  # included, queues per ref: in the release group an automatic canary could evict a waiting release.
   group: release-${{ inputs.mode == 'dev' && format('dev-{0}', github.ref) || 'release' }}
   # Only one run waits per group: a newer dispatch replaces a run still waiting. A half-published release is worse
   # than a queued one.
@@ -112,6 +114,8 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       package: ${{ steps.plan.outputs.package }}
       git_tag: ${{ steps.plan.outputs.git_tag }}
+      track: ${{ steps.plan.outputs.track }}
+      pull_request: ${{ steps.plan.outputs.pull_request }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,6 +137,8 @@ jobs:
           fi
           # Freeze the UTC build stamp once: every platform push below lands on one tag.
           ts="$(date -u +%Y%m%d%H%M%S)"
+          track=""
+          pull_request=""
           case "$MODE" in
             release | candidate)
               if [[ "$MODE" == candidate ]]; then
@@ -164,6 +170,7 @@ jobs:
                 exit 1
               fi
               # The track follows the ref. A failed PR lookup fails the run: it never falls back to `dev`.
+              pr=""
               if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
                 track=canary
               else
@@ -172,6 +179,7 @@ jobs:
                   track=dev
                 elif [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
                   track="pr$pr"
+                  pull_request="$pr"
                 else
                   echo "::error::pull request number '$pr' is not a number"
                   exit 1
@@ -182,6 +190,10 @@ jobs:
               tag="${core}-${track}_${ts}"
               package="$PACKAGE_DEV"
               git_tag=""
+              # Only a canary reaches the release package; the `ocx.sh` environment admits main and `v*` alone.
+              if [[ "$track" == canary ]]; then
+                package="$PACKAGE_RELEASE"
+              fi
               ;;
             *)
               echo "::error::mode '$MODE' is not release, candidate or dev"
@@ -193,6 +205,8 @@ jobs:
             echo "tag=$tag"
             echo "package=$package"
             echo "git_tag=$git_tag"
+            echo "track=$track"
+            echo "pull_request=$pull_request"
           } >> "$GITHUB_OUTPUT"
 
   readiness:
@@ -319,14 +333,14 @@ jobs:
           fi
       - name: Verify every platform against this workflow's identity
         env:
-          MODE: ${{ inputs.mode }}
           PACKAGE: ${{ needs.plan.outputs.package }}
           TAG: ${{ needs.plan.outputs.tag }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ "$MODE" == dev ]]; then
+          # Whatever lands in the release package is verified against the pinned identity, a canary included.
+          if [[ "$PACKAGE" == "$PACKAGE_DEV" ]]; then
             identity="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"
           else
             identity="$RELEASE_IDENTITY"
@@ -379,7 +393,7 @@ jobs:
           ocx package cascade repair --tags-file "$tags_file" "${PACKAGE}:${TAG}"
       # 7 days, not 1: `announce` waits behind the ocx.sh environment, and a late approval or rerun must still find this file.
       - name: Upload the published tags
-        if: ${{ inputs.mode != 'dev' }}
+        if: ${{ inputs.mode != 'dev' || needs.plan.outputs.track == 'canary' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: published-tags
@@ -435,9 +449,14 @@ jobs:
           done
           gh release create "$GIT_TAG" "${args[@]}" "${assets[@]}"
 
+  # A skipped `github-release` passes only for the canary track; a release or a candidate needs it green.
   announce:
     name: Announce
-    if: ${{ inputs.mode != 'dev' }}
+    if: >-
+      ${{ !cancelled()
+      && needs.publish.result == 'success'
+      && (needs.github-release.result == 'success'
+      || (needs.plan.outputs.track == 'canary' && needs.github-release.result == 'skipped')) }}
     needs: [plan, publish, github-release]
     runs-on: ubuntu-latest
     environment: ocx.sh
@@ -471,15 +490,15 @@ jobs:
             exit 1
           fi
           flags=(--tags-file "$TAGS_FILE" --index-repo "$INDEX_REPO")
-          # A candidate's row is removable without review; prune frees it later.
-          [[ "$MODE" == candidate ]] && flags+=(--ephemeral)
+          # Every row but a release's is removable without review; prune frees it later.
+          [[ "$MODE" == release ]] || flags+=(--ephemeral)
           ocx package announce "${flags[@]}" "$INDEX_PACKAGE"
 
-  # Dev builds only: the one place `--force` is allowed, because the dev package has no index to mark a tag
-  # ephemeral and its tags are all disposable. Three rules, one per track: `-dev` by age, `-canary` keeps the
-  # newest CANARY_KEEP, `-pr<N>` goes when pull request N is no longer open or the build is past the age.
+  # Dev mode only: the one place `--force` is allowed, because the dev package has no index to mark a tag
+  # ephemeral and its tags are all disposable. Two rules: `-dev` by age, `-pr<N>` when pull request N is
+  # no longer open or the build is past the age. It runs after every dev run, so a merge sweeps closed pull requests.
   prune-dev:
-    name: Prune old dev, canary and pull request builds
+    name: Prune old dev and pull request builds
     # A status function, or the skipped `readiness` (dev mode) behind `publish` skips this job too.
     if: ${{ !cancelled() && inputs.mode == 'dev' && needs.publish.result == 'success' }}
     needs: [plan, publish]
@@ -495,11 +514,10 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
-      - name: Prune dev, canary and pull request builds
+      - name: Prune dev and pull request builds
         env:
           PACKAGE: ${{ env.PACKAGE_DEV }}
           DAYS: ${{ inputs.prune_after_days }}
-          KEEP: ${{ env.CANARY_KEEP }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
@@ -511,21 +529,25 @@ jobs:
           gh pr list --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
           {
             python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt"
-            python3 scripts/release_prune_select.py canary --keep "$KEEP" < "$RUNNER_TEMP/tags.txt"
             python3 scripts/release_prune_select.py pr --days "$DAYS" --open "$RUNNER_TEMP/open-prs.txt" < "$RUNNER_TEMP/tags.txt"
           } > "$RUNNER_TEMP/selected.txt"
           mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
           if ((${#selected[@]} == 0)); then
-            echo "Nothing to prune in $PACKAGE: no stale dev build, no canary beyond $KEEP, no build of a closed pull request."
+            echo "Nothing to prune in $PACKAGE: no stale dev build, no build of a closed pull request."
             exit 0
           fi
           ocx package prune --forge github --force --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE" "${selected[@]}"
 
-  # Release mode only: the candidates of a version that has shipped, once it is old enough. Their index rows
-  # are ephemeral, so prune needs no `--force`; the announce then drops the rows of the tags that are gone.
+  # The release package's disposable tags: the candidates of a shipped version once old enough (release mode), and
+  # the canary builds beyond CANARY_KEEP (canary track). Their index rows are ephemeral, so prune needs no
+  # `--force`; the announce then drops the rows of the tags that are gone. A status function, or the skipped
+  # `github-release` of a canary run skips this job.
   prune:
-    name: Prune old candidates
-    if: ${{ inputs.mode == 'release' }}
+    name: Prune old candidates and canary builds
+    if: >-
+      ${{ !cancelled()
+      && needs.announce.result == 'success'
+      && (inputs.mode == 'release' || needs.plan.outputs.track == 'canary') }}
     needs: [plan, announce]
     runs-on: ubuntu-latest
     environment: ocx.sh
@@ -539,29 +561,75 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
-      - name: Prune candidates of old releases
+      - name: Prune the stale candidates or canary builds
         id: prune
         env:
+          MODE: ${{ inputs.mode }}
           DAYS: ${{ inputs.prune_after_days }}
+          KEEP: ${{ env.CANARY_KEEP }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ocx --remote --format json index list "$PACKAGE_RELEASE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
-          python3 scripts/release_prune_select.py candidates --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
+          if [[ "$MODE" == release ]]; then
+            python3 scripts/release_prune_select.py candidates --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
+          else
+            python3 scripts/release_prune_select.py canary --keep "$KEEP" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
+          fi
           mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
           if ((${#selected[@]} == 0)); then
-            echo "No candidate of a release older than $DAYS days."
+            echo "Nothing to prune: no candidate of a release older than $DAYS days, no canary beyond $KEEP."
             exit 0
           fi
           ocx package prune --forge github --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE_LOGICAL" "${selected[@]}"
       # Only the announce carries the index token; prune does not need it. It runs after a failed prune too: roots
       # deleted before the failure must lose their rows. The failed prune step still fails the job.
-      - name: Announce the pruned candidates
+      - name: Announce the pruned tags
         if: ${{ !cancelled() && steps.prune.conclusion != 'skipped' }}
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: ocx package announce --refresh --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
+
+  # The one comment of a pull request build, edited in place: its address is what another repository or an e2e run
+  # copies. The marker plus the bot author find it; a marker comment by anyone else is never edited, and a failed
+  # listing fails the job rather than posting a second comment.
+  comment:
+    name: Comment the pull request build
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.pull_request != '' }}
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update the build address
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ needs.plan.outputs.package }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          PULL_REQUEST: ${{ needs.plan.outputs.pull_request }}
+        run: |
+          set -euo pipefail
+          marker='<!-- ocx-pr-build -->'
+          rolling="${PACKAGE}:${TAG%%_*}"
+          body="$RUNNER_TEMP/comment.md"
+          # shellcheck disable=SC2016 # the backticks are Markdown code spans, not command substitutions
+          {
+            printf '%s\n## Pull request build\n\n' "$marker"
+            printf 'Rolling: `%s`\nExact: `%s`\nCommit: `%s`\n\n' "$rolling" "${PACKAGE}:${TAG}" "$GITHUB_SHA"
+            printf '```sh\nocx --remote package exec %s -- ocx version\n```\n\n' "$rolling"
+            printf 'The rolling tag follows the newest build of this pull request; both are removed once the pull request is closed.\n'
+          } > "$body"
+          # A listing that fails aborts here: it never falls through to a second comment.
+          found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("<!-- ocx-pr-build -->"))) | .id')"
+          id="$(sed -n 1p <<< "$found")"
+          if [[ -n "$id" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$body"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" -F body=@"$body"
+          fi
 
   # After the release exists: the container images extract their binaries from the release assets.
   post-docker:
