@@ -913,7 +913,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | — | integration/proxy-and-ca.mdx | how-to | integration | integration | integrations |
 | docker.md | integration/docker.mdx | how-to | integration | integration | integrations |
 | — | integration/bazel.md | how-to | integration | integration | integrations |
-| — | integration/devcontainers-and-editors.mdx | how-to | integration | integration | integrations |
+| — | integration/editors.mdx | how-to | integration | integration | integrations |
 | — | integration/scripts-and-json.mdx | how-to | integration | integration | integrations |
 | — | integration/python.mdx | how-to | integration | integration | integrations |
 | — | integration/publisher-ci.mdx | how-to | integration | integration | integrations |
@@ -1322,7 +1322,7 @@ Order inside each group is the order in the lists below (the inventory table is 
 
 **Publishing** (`publishing`): `publishing/index.md`, `publishing/bundle-anatomy.md`, `publishing/declare-dependencies.mdx`, `publishing/env-surface.mdx`, `publishing/entry-points.md`, `publishing/build-and-push.md`, `publishing/test-locally.md`, `publishing/script-tests.mdx`, `publishing/multi-platform.md`, `publishing/libc-variants.mdx`, `publishing/announce.mdx`, `publishing/announce-from-ci.md`, `publishing/sign-a-release.md`, `publishing/attest-and-sbom.md`, `publishing/promote-packages.md`, `publishing/snapshot-tracks.mdx`, `publishing/maintain-patches.md`, `publishing/repackage-releases.md`, `guides/serve-an-index.md`.
 
-**Integrations** (`integrations`): `integration/index.md`, `integration/github-actions.mdx`, `integration/gitlab-ci.md`, `integration/unattended-ci.mdx`, `integration/registry-auth-recipes.mdx`, `integration/proxy-and-ca.mdx`, `integration/docker.mdx`, `integration/bazel.md`, `integration/devcontainers-and-editors.mdx`, `integration/scripts-and-json.mdx`, `integration/python.mdx`, `integration/publisher-ci.mdx`.
+**Integrations** (`integrations`): `integration/index.md`, `integration/github-actions.mdx`, `integration/gitlab-ci.md`, `integration/unattended-ci.mdx`, `integration/registry-auth-recipes.mdx`, `integration/proxy-and-ca.mdx`, `integration/docker.mdx`, `integration/bazel.md`, `integration/editors.mdx`, `integration/scripts-and-json.mdx`, `integration/python.mdx`, `integration/publisher-ci.mdx`.
 
 **Concepts** (`concepts`): `explanation/storage.md`, `explanation/toolchain-tree.md`, `explanation/versioning.md`, `explanation/dependencies.md`, `explanation/indices.md`, `explanation/local-index.md`, `explanation/public-index.md`, `explanation/project-toolchain.md`, `explanation/configuration.md`, `explanation/environments.md`, `explanation/toolchain-activation.mdx`, `explanation/shell-integration.md`, `explanation/entry-points.mdx`, `explanation/deferred-packages.md`, `explanation/patches.md`, `explanation/integrations.md`, `explanation/execution-records.mdx`, `explanation/signing.md`, `explanation/cosign-parity.md`.
 
