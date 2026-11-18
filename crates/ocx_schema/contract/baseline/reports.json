@@ -302,6 +302,10 @@
         "timestamp": {
           "type": "string",
           "description": "ISO-8601 commit timestamp (author date)."
+        },
+        "branch": {
+          "type": "string",
+          "description": "The branch the binary was built from, when known."
         }
       },
       "required": [
@@ -2313,6 +2317,34 @@
           "description": "The tag exists but resolves to a bare image manifest, so it has no\nper-platform slots at all and every expected platform reads as missing."
         },
         {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "diverged"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "The index the alias holds now."
+            },
+            "source": {
+              "$ref": "#/$defs/PackageVersion",
+              "description": "The build whose entries make up the whole alias."
+            },
+            "source_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "The digest of that build's own index."
+            }
+          },
+          "required": [
+            "type",
+            "digest",
+            "source",
+            "source_digest"
+          ],
+          "description": "An image index whose slots are all right, but which is not the bytes of the\none build it is made of: the same entries in another order, or with other\nindex-level fields. Repair points it at that build's own index."
+        },
+        {
           "x-ocx-unknown-variant": true,
           "type": "object",
           "required": [
@@ -2325,7 +2357,8 @@
                 "enum": [
                   "present",
                   "absent",
-                  "not_an_index"
+                  "not_an_index",
+                  "diverged"
                 ]
               }
             }
@@ -2333,6 +2366,10 @@
         }
       ],
       "description": "What the registry holds at an alias tag, taken as a whole."
+    },
+    "PackageVersion": {
+      "type": "string",
+      "description": "An OCX package version, e.g. `3.28.1`, a rolling `3.28`, `0.5.0-canary` or a variant `debug-3.12.5`."
     },
     "SlotRow": {
       "type": "object",
@@ -2402,10 +2439,6 @@
           "description": "The alias carries more than one entry for this platform. Only the last\none resolves, so a shadowed entry is invisible to every consumer while\nstill being published — including when the surviving one is exactly what\nthe fold expects. One row per shadowed entry, beside the row for the\nentry that wins."
         }
       ]
-    },
-    "PackageVersion": {
-      "type": "string",
-      "description": "An OCX package version, e.g. `3.28.1`, a rolling `3.28`, `0.5.0-canary` or a variant `debug-3.12.5`."
     },
     "IndexFinding": {
       "oneOf": [
@@ -2647,6 +2680,10 @@
           },
           "description": "Every child manifest digest `index` references, deduped. Apply\npreflights each one so a missing child refuses the alias instead of\npublishing a dangling pointer."
         },
+        "copy_of": {
+          "description": "The digest of the build index `index` is a verbatim copy of, when one build\nowns the whole alias. Apply then writes that index's stored bytes, so the\nalias digest equals this one whatever serialiser produced it.",
+          "$ref": "#/$defs/Digest"
+        },
         "reasons": {
           "type": "array",
           "items": {
@@ -2661,7 +2698,7 @@
         "referenced_digests",
         "reasons"
       ],
-      "description": "One alias index to write, recomputed whole.\n\nA repair never patches an alias in place: it rebuilds the entire index from\ncontent the registry already serves and PUTs it, so the write is idempotent\nand a partially-applied run leaves every untouched alias byte-identical."
+      "description": "One alias index to write, recomputed whole.\n\nA repair never patches an alias in place. An alias one build owns is a copy of\nthat build's own index; any other is rebuilt from the entries the registry\nalready serves, keeping what the alias itself carries. Either way the write is\nidempotent and an untouched alias stays byte-identical."
     },
     "RepairOutcome": {
       "type": "object",
@@ -3693,6 +3730,10 @@
         {
           "value": "not_in_index",
           "description": "The registry has it but the index does not list it."
+        },
+        {
+          "value": "shared_version",
+          "description": "The version carrying it also carries a tag outside the selection."
         }
       ]
     },
@@ -4068,7 +4109,7 @@
           "description": "One row per platform manifest `--sign` signed inline, in push order.\n\nEmpty (and omitted) without `--sign`. JSON only; a signing failure also\nreaches a plain caller on stderr. The image index is never listed:\nplatform manifest digests are final once pushed, but the index digest is\nrewritten on every platform merge, so `ocx package sign --tags-file`\nsigns it later."
         },
         "attestation": {
-          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone: a push\nthat lands and an attestation that then fails is a real state — the\nmanifest is immutable and OCI offers no un-push.",
+          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone. A failed\nattestation emits the error document instead of this report, so a printed\nreport carries `succeeded` today; `failed` stays so the schema covers it.",
           "$ref": "#/$defs/AttestationOutcome"
         }
       },
@@ -4282,7 +4323,7 @@
           "description": "Whether the attestation was published."
         },
         "referrer_digest": {
-          "description": "Digest of the published OCI referrer manifest. Absent on failure, and\nunder `--signature-format simplesigning`, which publishes the\n`sha256-<hex>.att` sidecar alone and no referrer.",
+          "description": "Digest of the published OCI referrer manifest. Absent under `--signature-format simplesigning`, which publishes the\n`sha256-<hex>.att` sidecar alone and no referrer.",
           "$ref": "#/$defs/Digest"
         },
         "sidecar_digest": {
@@ -4291,25 +4332,17 @@
         },
         "predicate_type": {
           "type": "string",
-          "description": "The resolved `predicateType` URI written into the Statement. Present\nexactly when `status` is `succeeded`."
+          "description": "The resolved `predicateType` URI written into the Statement."
         },
         "signed": {
           "type": "boolean",
-          "description": "Whether the referrer carries a signature. `false` means the SBOM was\nattached raw because the run had no signing identity available — the\npush still succeeded, and nothing vouches for the document. Present\nexactly when `status` is `succeeded`."
-        },
-        "kind": {
-          "type": "string",
-          "description": "The error document's `error.detail` slug, falling back to its\n`error.kind` category. Present exactly when `status` is `failed`."
-        },
-        "message": {
-          "type": "string",
-          "description": "Human-readable cause, sanitized for the terminal (CWE-150). Present\nexactly when `status` is `failed`."
+          "description": "Whether the referrer carries a signature. `false` means the SBOM was\nattached raw because the run had no signing identity available — the\npush still succeeded, and nothing vouches for the document."
         }
       },
       "required": [
         "status"
       ],
-      "description": "What `--sbom` did after the push landed.\n\nA failure carries the error slug the JSON error document would have used,\nnot a bespoke string, so a script branches on the same vocabulary\neither way."
+      "description": "What `--sbom` did after the push landed. A failed attestation emits the\nerror document instead of this report."
     },
     "AttestationStatus": {
       "description": "Whether the `--sbom` attestation was published.",
@@ -4318,10 +4351,6 @@
         {
           "value": "succeeded",
           "description": "The attestation was published on the pushed manifest."
-        },
-        {
-          "value": "failed",
-          "description": "The push landed and was NOT rolled back; the attestation did not."
         }
       ]
     },
@@ -4457,7 +4486,7 @@
       "description": "The counts and the status a script branches on."
     },
     "ListingStatus": {
-      "description": "Whether every examined candidate was listed.\n\nA refusal beside a listing is a partial failure the caller is told about and\nthe run still exits 0, even when every document refused under `--summary`.\nOnly a zero-match scan exits non-zero (79), and it prints no listing.",
+      "description": "Whether every examined candidate was listed.\n\nA refusal beside a usable entry is a partial failure the caller is told about\nand the run exits 0. When every candidate was refused the report is printed\nand the run exits 79, the same code a scan with no match exits with.",
       "type": "string",
       "x-ocx-enum": [
         {
@@ -8968,7 +8997,7 @@
         "schema_version": {
           "description": "The version of this root's shape; a breaking change increments it.",
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "identifier": {
           "$ref": "#/$defs/PackageRef",
@@ -9029,7 +9058,7 @@
           "description": "One row per platform manifest `--sign` signed inline, in push order.\n\nEmpty (and omitted) without `--sign`. JSON only; a signing failure also\nreaches a plain caller on stderr. The image index is never listed:\nplatform manifest digests are final once pushed, but the index digest is\nrewritten on every platform merge, so `ocx package sign --tags-file`\nsigns it later."
         },
         "attestation": {
-          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone: a push\nthat lands and an attestation that then fails is a real state — the\nmanifest is immutable and OCI offers no un-push.",
+          "description": "Absent unless `--sbom` was passed.\n\nReported separately from `status`, which reports the push alone. A failed\nattestation emits the error document instead of this report, so a printed\nreport carries `succeeded` today; `failed` stays so the schema covers it.",
           "$ref": "#/$defs/AttestationOutcome"
         }
       },
