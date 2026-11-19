@@ -48,6 +48,15 @@ pub enum Error {
         summary = "ocx.toml declares an [update] section, which only config.toml may hold"
     )]
     UpdateSectionInProject(PathBuf),
+    /// `ocx.toml` declared `[telemetry]` (exit 78): export destinations are operator or user
+    /// settings, and a repository must not point a clone's telemetry anywhere.
+    #[error("{}: [telemetry] belongs in config.toml, not in ocx.toml", .0.display())]
+    #[exit(
+        ConfigError,
+        slug = "telemetry_section_in_project",
+        summary = "ocx.toml declares a [telemetry] section, which only config.toml may hold"
+    )]
+    TelemetrySectionInProject(PathBuf),
 }
 
 /// Flatten the index tier's `OciClient` and `File` onto this tier's variants.

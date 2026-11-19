@@ -154,6 +154,13 @@ ocx_announce = [
 ocx_script = ["tests/test_package_test*.py"]
 # `self setup|update|activate`, session PATH, update-check throttle
 ocx_setup = ["tests/test_self_*.py", "tests/test_session_path.py", "tests/test_update_check_throttle.py"]
+# usage export: armed by `[telemetry]`; the OTLP receiver fixture has its own contract module
+ocx_telemetry = [
+    "tests/test_config.py",
+    "tests/test_config_list.py",
+    "tests/test_otlp_fixture.py",
+    "tests/test_telemetry_*.py",
+]
 # dev-dependency-only fixtures: no acceptance subset of its own
 ocx_test_support = "escalate"
 # ecosystem crate `ocx` does not link (ocx-mirror's PEP 751 translation):

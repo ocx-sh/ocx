@@ -351,6 +351,7 @@ pub struct Policy {                           // None = not written; each value 
     pub no_config_refresh: Option<bool>,      // relaxing   OCX_NO_CONFIG_REFRESH (a local =0 wins, env.rs:268-275)
     pub no_update_check: Option<bool>,        // relaxing   OCX_NO_UPDATE_CHECK (same, env.rs:276-280)
     pub config_path: Option<PathBuf>,         // relaxing   OCX_CONFIG
+    // Amended by `adr_otel_telemetry.md` D-20: the row becomes `pub config_path: Option<PathBuf>, // relaxing OCX_CONFIG: the raw value, a path list the reader splits; every entry absolute`.
     pub no_config: Option<bool>,              // relaxing   OCX_NO_CONFIG
     pub index_dir: Option<PathBuf>,           // relaxing   OCX_INDEX
     pub toolchain_dir: Option<PathBuf>,       // relaxing   OCX_TOOLCHAIN_DIR

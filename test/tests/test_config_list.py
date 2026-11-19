@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from src.otlp_fixture import OtlpCollector
 from src.runner import OcxRunner
 
 pytestmark = pytest.mark.command("install", "exec")
@@ -157,6 +158,24 @@ def test_config_flag_loads_after_the_list(ocx: OcxRunner, tmp_path: Path) -> Non
 
     assert "third-config.example" in _output(result), _output(result)
     assert "second-config.example" not in _output(result), _output(result)
+
+
+def test_telemetry_only_file_appended_to_a_single_config_keeps_both_effects(
+    ocx: OcxRunner, tmp_path: Path, otlp_collector: OtlpCollector
+) -> None:
+    user = _config(tmp_path, "user", "user-config.example")
+    telemetry = tmp_path / "telemetry.toml"
+    telemetry.write_text(
+        f'[telemetry]\nenabled = true\nendpoint = "{otlp_collector.endpoint}"\n'
+    )
+
+    _install(ocx, env={"OCX_CONFIG": str(user)})
+    assert otlp_collector.exports == [], "control: the user file alone arms nothing"
+
+    result = _install(ocx, env={"OCX_CONFIG": f"{user}{SEP}{telemetry}"})
+
+    assert "user-config.example" in _output(result), _output(result)
+    assert len(otlp_collector.exports) == 1, otlp_collector.exports
 
 
 def test_config_flag_path_containing_the_separator_is_refused_when_composing_a_child(

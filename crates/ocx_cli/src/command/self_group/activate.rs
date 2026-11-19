@@ -415,6 +415,7 @@ impl SelfActivate {
                 onboarding: false,
                 tolerate_vanished_received_config: false,
             },
+            None,
         )
         .await?;
 
@@ -4396,6 +4397,7 @@ mod global_activate_tests {
                 onboarding: false,
                 tolerate_vanished_received_config: false,
             },
+            None,
         )
         .await
         .expect("a context over an empty ocx home");

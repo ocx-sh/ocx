@@ -63,7 +63,7 @@ Two mechanisms add an extra file *on top of* the discovery chain. They do not re
 
 The specified files layer at the top of the file-tier chain. A missing file is an error, because explicit paths represent deliberate intent, not ambient discovery. Both can coexist, and `--config` loads after the whole `OCX_CONFIG` list.
 
-In a list, a later entry wins over an earlier one and empty entries are skipped. A list holds at most 32 entries, and a longer one is refused with exit 78 before any file is read. The list still loads under [`OCX_NO_CONFIG`][env-no-config]. A `--config` path that contains the list separator is refused with exit 78 (`config_path_contains_separator`) when OCX would hand it to a child.
+In a list, a later entry wins over an earlier one and empty entries are skipped. A list holds at most 32 entries, and a longer one is refused with exit 78 before any file is read. The list still loads under [`OCX_NO_CONFIG`][env-no-config]. A `--config` path that contains the list separator is refused with exit 78 (`config_path_contains_separator`) when OCX would hand it to a child. [Send usage telemetry][guide-telemetry-ci-image] shows a list for a CI image.
 
 To disable an ambient `OCX_CONFIG` for one invocation, set it to the empty string. This helps when a shell profile exports it:
 
@@ -302,6 +302,7 @@ For scripts, CI pipelines and programmatic tools, include the registry in every 
 [env-ocx-no-verify]: ../reference/environment.md#ocx-no-verify
 [arg-config]: ../reference/command-line/index.md#arg-config
 [env-no-config]: ../reference/environment.md#ocx-no-config
+[guide-telemetry-ci-image]: ../guides/telemetry.mdx#telemetry-ci-image
 [cmd-config-setup]: ../reference/command-line/config.md#config-setup
 [cmd-config-test]: ../reference/command-line/config.md#config-test
 [cmd-config-update]: ../reference/command-line/config.md#config-update

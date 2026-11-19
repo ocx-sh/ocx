@@ -101,6 +101,17 @@
         }
       ]
     },
+    "telemetry": {
+      "description": "OpenTelemetry export settings (`[telemetry]`).\n\nDeclared in the system tier it clamps: no lower tier can redirect or disable export.\n\nAbsent → no telemetry is exported (opt-in).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TelemetryConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "toolchain_dir": {
       "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain tree ignores this key, and the directory need not exist yet.",
       "type": [
@@ -759,6 +770,74 @@
           ]
         }
       }
+    },
+    "TelemetryConfig": {
+      "description": "Where and how OpenTelemetry log records are exported.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Turns export on (`true`) or off (`false`). Absent → export stays off.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "description": "Base URL of the OTLP/HTTP collector, an absolute `http` or `https` URL with a host and no\nuser information. `/v1/logs` is appended to its path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "description": "HTTP headers sent with every export, typically an authorization token.\n\nNames must be HTTP tokens other than `host`, `content-length`, `content-type`,\n`transfer-encoding`, `connection`, `keep-alive`, `proxy-connection`, `te`, `trailer` and\n`upgrade`; values must not contain CR, LF or NUL. Values are secrets. A layer that sets\n`endpoint` discards the headers inherited from earlier layers.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/HeaderValue"
+          }
+        },
+        "timeout": {
+          "description": "Export deadline in milliseconds, `1` to `10000`. Defaults to `500`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "protocol": {
+          "description": "Wire protocol. Only `http/protobuf` is supported, which is also the default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service_name": {
+          "description": "Replaces the `service.name` resource attribute. Must not be empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_attributes": {
+          "description": "Extra resource attributes added to every export, keyed by a non-empty attribute name.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "HeaderValue": {
+      "description": "A header value sent with every telemetry export. Always a secret: it never appears in `Debug`\noutput, a log line or an error message.",
+      "type": "string"
     }
   },
   "$id": "https://ocx.sh/schemas/config/v1.json"

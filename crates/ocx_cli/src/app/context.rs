@@ -148,10 +148,16 @@ fn is_not_found(stat: std::io::Result<()>) -> bool {
 }
 
 impl Context {
+    /// Builds the invocation's context.
+    ///
+    /// `telemetry` is the caller's export slot: `None` for a command that never sends. It is filled
+    /// right after the extra CA roots resolve, so an error later in this function still leaves a
+    /// slot the caller can finish. The seam never fills it.
     pub async fn try_init(
         options: &ContextOptions,
         color_config: ColorModeConfig,
         managed_config_gate: ManagedConfigGate,
+        telemetry: Option<&mut Option<ocx_telemetry::Slot>>,
     ) -> anyhow::Result<Context> {
         // Created before the subscriber, or log lines can tear a rendered bar. `in_seam` brings its
         // own scoped subscriber, so it skips every process-global below.
@@ -292,6 +298,22 @@ impl Context {
         } else {
             (config, local_only_config, ExtraRoots::default(), ExtraRoots::default())
         };
+        // Before the next fallible step, so a failure past this point still lets the caller export.
+        let file_structure = file_structure::FileStructure::new();
+        let mut activity_log = None;
+        if !in_seam && let Some(slot) = telemetry {
+            let arming = super::telemetry::arm(
+                config.telemetry.as_ref(),
+                options.offline,
+                file_structure.state.telemetry_installation_id_file(),
+                extra_roots_merged.clone(),
+                &ui,
+            );
+            if arming.records_packages {
+                activity_log = Some(ocx_package_manager::activity::ActivityLog::new());
+            }
+            *slot = Some(arming.slot);
+        }
         let extra_roots_sigstore = sigstore_extra_roots(
             &extra_roots_merged,
             &extra_roots_local,
@@ -320,7 +342,6 @@ impl Context {
                 Some(ocx_index::OciIndex::new(ocx_index::OciIndexConfig { client })),
             )
         };
-        let file_structure = file_structure::FileStructure::new();
         // `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index` (`adr_index_indirection.md`). A redirected
         // home may be read-only, so its locks stay under `$OCX_HOME/locks`.
         let index_store = env_slot
@@ -500,6 +521,10 @@ impl Context {
             )?)
         };
         let manager = manager.with_auto_verify(Some(auto_verify));
+        let manager = match activity_log {
+            Some(log) => manager.with_activity_log(log),
+            None => manager,
+        };
 
         // Pins child spawns to this binary via `OCX_BINARY_PIN`; on failure the child's
         // `${OCX_BINARY_PIN:-ocx}` degrades to a `$PATH` lookup.
@@ -2658,15 +2683,16 @@ mod tests {
         home: &Path,
         online: bool,
     ) -> anyhow::Result<Context> {
-        try_context_with(env, home, online, false).await
+        try_context_with(env, home, online, false, None).await
     }
 
-    /// [`try_context_over_home`] with the gate's vanished-entry tolerance.
+    /// [`try_context_over_home`] with the gate's vanished-entry tolerance and the caller's telemetry slot.
     async fn try_context_with(
         env: &ocx_env::overrides::EnvLock,
         home: &Path,
         online: bool,
         tolerate_vanished_received_config: bool,
+        telemetry: Option<&mut Option<ocx_telemetry::Slot>>,
     ) -> anyhow::Result<Context> {
         use clap::Parser as _;
 
@@ -2686,7 +2712,9 @@ mod tests {
         } else {
             &["ocx", "--offline", "index", "catalog"]
         };
-        let cli = Cli::parse_from(argv);
+        let mut cli = Cli::parse_from(argv);
+        // `run_from` folds the environment in before `try_init`; so does the seam.
+        cli.context.apply_env().expect("the fixture environment is valid");
         Context::try_init(
             &cli.context,
             ocx_console::ColorModeConfig {
@@ -2699,8 +2727,87 @@ mod tests {
                 onboarding: false,
                 tolerate_vanished_received_config,
             },
+            telemetry,
         )
         .await
+    }
+
+    /// A home whose `config.toml` arms export towards a loopback endpoint nothing listens on.
+    fn armed_home() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nenabled = true\nendpoint = \"http://127.0.0.1:4318\"\n",
+        )
+        .unwrap();
+        home
+    }
+
+    /// The slot is filled for a command that sends, and the manager logs packages for it.
+    #[tokio::test]
+    async fn try_init_arms_the_slot_and_logs_packages_for_an_armed_run() {
+        let home = armed_home();
+        let env = ocx_env::overrides::lock();
+        env.hermetic(home.path());
+        let mut slot = None;
+        let context = try_context_with(&env, home.path(), true, false, Some(&mut slot))
+            .await
+            .expect("a context over the fixture home");
+        assert!(slot.is_some(), "an armed run fills the caller's slot");
+        assert!(
+            context.manager().activity_log().is_some(),
+            "an armed run with a destination logs package activity"
+        );
+    }
+
+    /// A failure after the slot is filled still leaves it filled, so the caller exports the failed run.
+    ///
+    /// `OCX_FROZEN` with `OCX_REMOTE` is refused by the exclusivity check, the last fallible step
+    /// of `try_init` that runs well past the slot fill.
+    ///
+    /// Red state: move the `*slot = Some(arming.slot)` fill after `check_frozen_remote_exclusivity`;
+    /// the slot is then `None` here.
+    #[tokio::test]
+    async fn try_init_failing_after_the_slot_fill_leaves_the_slot_filled() {
+        let home = armed_home();
+        let env = ocx_env::overrides::lock();
+        env.hermetic(home.path());
+        env.set(&ocx_env::OCX_FROZEN, "1");
+        env.set(&ocx_env::OCX_REMOTE, "1");
+        let mut slot = None;
+        let result = try_context_with(&env, home.path(), true, false, Some(&mut slot)).await;
+        assert!(result.is_err(), "frozen with remote is refused");
+        assert!(slot.is_some(), "the slot survives a failure after it was filled");
+    }
+
+    /// A run the config does not arm still gets a slot (the decision lives in it) but logs nothing.
+    #[tokio::test]
+    async fn try_init_logs_no_packages_for_an_unarmed_run() {
+        let home = tempfile::tempdir().unwrap();
+        let env = ocx_env::overrides::lock();
+        env.hermetic(home.path());
+        let mut slot = None;
+        let context = try_context_with(&env, home.path(), true, false, Some(&mut slot))
+            .await
+            .expect("a context over the fixture home");
+        assert!(slot.is_some(), "the slot carries the off decision");
+        assert!(
+            context.manager().activity_log().is_none(),
+            "an unarmed run records nothing"
+        );
+    }
+
+    /// A command that never sends passes no slot: nothing is decided and no log is attached, even
+    /// where the config would arm a command that sends.
+    #[tokio::test]
+    async fn try_init_without_a_slot_decides_nothing_and_attaches_no_log() {
+        let home = armed_home();
+        let env = ocx_env::overrides::lock();
+        env.hermetic(home.path());
+        let context = try_context_with(&env, home.path(), true, false, None)
+            .await
+            .expect("a context over the fixture home");
+        assert!(context.manager().activity_log().is_none());
     }
 
     /// A received list loads every entry that exists, in order, and reports the vanished ones; an
@@ -2723,7 +2830,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        let context = try_context_with(&env, home.path(), false, true)
+        let context = try_context_with(&env, home.path(), false, true, None)
             .await
             .expect("a vanished received entry does not fail the run");
         assert_eq!(context.skipped_received_config(), [gone]);

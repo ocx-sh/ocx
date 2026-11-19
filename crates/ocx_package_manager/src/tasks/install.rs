@@ -5,6 +5,7 @@ use std::path::Path;
 
 use tokio::task::JoinSet;
 
+use crate::activity::{Action, PackageActivity, Role};
 use crate::{concurrency::Concurrency, error::PackageError, error::PackageErrorKind};
 use ocx_package::install_info::InstallInfo;
 
@@ -133,7 +134,24 @@ async fn create_install_symlinks(
     candidate: bool,
     select: bool,
 ) -> Result<(), PackageErrorKind> {
-    super::common::wire_selection(mgr.file_structure(), package, info, candidate, select).await?;
+    let outcome = super::common::wire_selection(mgr.file_structure(), package, info, candidate, select).await?;
+    // Not on `candidate` alone: a foreign-platform install writes no candidate link.
+    if outcome.candidate.is_some()
+        && let Some(log) = mgr.activity_log()
+    {
+        // Only marks the action: the fetch, if any, was recorded by the setup entry.
+        log.record(PackageActivity {
+            pinned: info.identifier().clone(),
+            platform: info.platform().cloned(),
+            action: Action::Installed,
+            role: Role::Root,
+            store_hit: true,
+            download_size: 0,
+            resolve: None,
+            download: None,
+            extract: None,
+        });
+    }
     Ok(())
 }
 
@@ -261,6 +279,101 @@ mod link_install_tests {
         let link = f.manager.file_structure().root().join("symlinks").join("pkg");
         assert_occupied(f.manager.link_install(&f.info, &link).await, &link);
         assert!(!link.exists());
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
+    use ocx_package::{install_info::InstallInfo, resolved_package::ResolvedPackage};
+    use ocx_store::file_structure::{FileStructure, PackageDir};
+
+    use crate::{
+        PackageManager,
+        activity::{Action, ActivityLog, PackageActivity, Role},
+    };
+
+    /// A foreign platform is a supported one the host cannot run; `None` only when the host is undeterminable.
+    fn a_foreign_platform() -> Option<ocx_oci::Platform> {
+        ["windows/amd64", "linux/amd64", "darwin/arm64", "linux/arm64"]
+            .into_iter()
+            .map(|spec| spec.parse::<ocx_oci::Platform>().expect("valid platform string"))
+            .find(|platform| !ocx_oci::Platform::host_can_run(Some(platform)))
+    }
+
+    /// A package whose setup entry is already in the log, as `pull` leaves it, ready to be installed.
+    fn pulled_package() -> (
+        tempfile::TempDir,
+        PackageManager,
+        ActivityLog,
+        ocx_oci::PackageRef,
+        InstallInfo,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().join("home"));
+        let tagged = ocx_oci::PackageRef::new_registry("pkg", "example.com")
+            .clone_with_tag("1.0")
+            .clone_with_digest(ocx_oci::Digest::Sha256("a".repeat(64)));
+        let pinned = ocx_oci::PinnedPackageRef::try_from(tagged.clone()).unwrap();
+        let pkg_root = fs.packages.path(&pinned);
+        std::fs::create_dir_all(pkg_root.join("content")).unwrap();
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(tmp.path().join("home").join("index")),
+            }),
+            vec![],
+            ChainMode::Offline,
+        );
+        let log = ActivityLog::new();
+        log.record(PackageActivity {
+            pinned: pinned.clone(),
+            platform: None,
+            action: Action::Pulled,
+            role: Role::Root,
+            store_hit: false,
+            download_size: 0,
+            resolve: None,
+            download: None,
+            extract: None,
+        });
+        let info = InstallInfo::new(
+            pinned,
+            serde_json::from_str(r#"{"type":"bundle","version":1,"env":[]}"#).unwrap(),
+            ResolvedPackage::new(),
+            PackageDir::with_root(pkg_root),
+        );
+        let manager = PackageManager::new(fs, index, None, "example.com").with_activity_log(log.clone());
+        (tmp, manager, log, tagged, info)
+    }
+
+    /// An install for a platform the host cannot run writes no candidate link, so the package stays `Pulled`.
+    #[tokio::test]
+    async fn a_foreign_platform_install_stays_pulled() {
+        let foreign =
+            a_foreign_platform().expect("every supported platform runs on this host, so the test would pass vacuously");
+        let (_tmp, manager, log, tagged, info) = pulled_package();
+
+        super::create_install_symlinks(&manager, &tagged, &info.with_platform(foreign), true, false)
+            .await
+            .expect("the install succeeds");
+
+        assert_eq!(log.recorded(), 1, "no Installed marker for a foreign platform");
+        let drained = log.drain();
+        assert_eq!(drained[0].action, Action::Pulled);
+    }
+
+    /// Control for the test above: the same install for the host's platform is `Installed`.
+    #[tokio::test]
+    async fn a_host_platform_install_is_marked_installed() {
+        let (_tmp, manager, log, tagged, info) = pulled_package();
+
+        super::create_install_symlinks(&manager, &tagged, &info, true, false)
+            .await
+            .expect("the install succeeds");
+
+        let drained = log.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].action, Action::Installed);
     }
 }
 

@@ -472,6 +472,7 @@ target_not_an_index	NotFound	A platform was requested but the reference names a 
 target_not_found	NotFound	The reference resolves to no manifest for the requested platform
 target_not_found	NotFound	The reference resolves to no manifest for the requested platform
 task_panicked	Failure	A package task panicked
+telemetry_section_in_project	ConfigError	ocx.toml declares a [telemetry] section, which only config.toml may hold
 template_ambiguous_dependency_ref	DataError	An interpolation token names an ambiguous dependency
 template_ambiguous_self_env_ref	DataError	An interpolation token names an env var declared more than once
 template_dependency_not_installed	NotFound	An interpolation token names a dependency that is not installed

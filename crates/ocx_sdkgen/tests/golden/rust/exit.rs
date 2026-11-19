@@ -487,6 +487,7 @@ impl ErrorDetail {
             Self::TargetNotAnIndex => Some(ExitCode::NotFound),
             Self::TargetNotFound => Some(ExitCode::NotFound),
             Self::TaskPanicked => Some(ExitCode::Failure),
+            Self::TelemetrySectionInProject => Some(ExitCode::ConfigError),
             Self::TemplateAmbiguousDependencyRef => Some(ExitCode::DataError),
             Self::TemplateAmbiguousSelfEnvRef => Some(ExitCode::DataError),
             Self::TemplateDependencyNotInstalled => Some(ExitCode::NotFound),

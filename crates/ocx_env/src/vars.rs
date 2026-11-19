@@ -67,8 +67,8 @@ crate::env_vars! {
     /// still loads and a system-tier lock survives. Forwarded to child OCX.
     ///
     /// Also drops the `[managed]` snapshot and the `OCX_MANAGED_CONFIG` read. A system-tier policy
-    /// in `/etc/ocx/config.toml` still loads, filtered to its locked sections, and an unreadable
-    /// system file still aborts (exit 78).
+    /// in `/etc/ocx/config.toml` still loads, filtered to its locked sections (`[records]` and
+    /// `[telemetry]` among them), and an unreadable system file still aborts (exit 78).
     ///
     /// Env-only: there is no `--no-config` flag. Hermetic pattern:
     /// `OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml ...`.
@@ -226,6 +226,18 @@ crate::env_vars! {
     /// Needs a sink from `OCX_RECORDS_DIR`, `--records-dir` or `[records] dir`. Locked with the
     /// rest of `[records]` under a system-tier policy.
     pub OCX_RECORDS_NAME: String, Public, propagation = UserInput;
+
+    // ── Telemetry ──
+
+    /// Switch for exporting usage telemetry; unset or empty defers to `[telemetry]` in config.
+    ///
+    /// `1`, `y`, `yes`, `on` and `true` (ASCII case-insensitive) turn it on; `0`, `n`, `no`, `off`
+    /// and `false` are an explicit off. Any other value, a non-UTF-8 one included, is an explicit
+    /// off plus one warning per run naming this variable and never the value, so a typo never
+    /// arms export and never defers to a file that could.
+    ///
+    /// Forwarded to child OCX, so a nested run agrees with its parent.
+    pub OCX_TELEMETRY: TriBool, Public, propagation = UserInput;
 
     // ── Toolchain ──
 
@@ -430,6 +442,17 @@ crate::env_vars! {
     /// Unset or empty exits 74 naming the variable; over 64 KiB exits 65. Stripped from plugin-dispatched
     /// children and from any environment OCX writes; a key held in any other `env://` name is inherited by plugins and launchers.
     pub OCX_SIGNING_KEY: String, Public, secret, propagation = Credential;
+    /// Headers sent with every telemetry export, `name=value[,name=value...]`; values are
+    /// percent-decoded and names trimmed.
+    ///
+    /// Merges over `[telemetry] headers` per name, case-insensitively, except that a name a
+    /// system-locked section sets wins. Sent only to a destination `[telemetry]` names, never to
+    /// one the `OTEL_EXPORTER_OTLP_*` variables name. A malformed value disables the export for the
+    /// run with one warning that names this variable and never the value.
+    ///
+    /// Stripped from plugin-dispatched children and from any environment OCX writes, so a nested
+    /// `ocx` under `ocx exec` does not see it; put a long-lived token in a config file instead.
+    pub OCX_TELEMETRY_HEADERS: String, Public, secret, propagation = Credential;
     /// The API half of the forge credential pair (a forge access token).
     ///
     /// Read by `ocx package announce` and `ocx package claim` to open or update a pull or merge
@@ -535,6 +558,8 @@ crate::env_vars! {
     pub __OCX_TESTING_SHIM_LOST_PUBLISH_RACE: Path, Testing, propagation = UserInput;
     /// Path replacing the system-tier config file.
     pub __OCX_TESTING_SYSTEM_CONFIG: Path, Testing, propagation = UserInput;
+    /// Marks the child re-run of a telemetry unit test that must see the proxy variables its parent set.
+    pub __OCX_TESTING_TELEMETRY_PROXY_CHILD: String, Testing, propagation = UserInput;
     /// Milliseconds before the toolchain lock times out.
     pub __OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS: Integer, Testing, propagation = UserInput;
 
@@ -608,6 +633,58 @@ crate::env_vars! {
     pub SIGSTORE_ID_TOKEN: String, Foreign, secret, propagation = SecretInput;
     /// CircleCI OIDC token.
     pub CIRCLE_OIDC_TOKEN_V2: String, Foreign, secret, propagation = SecretInput;
+
+    // ── Foreign: telemetry ──
+
+    /// Console-do-not-track convention; a truthy value is honoured as an opt-out and turns
+    /// telemetry export off.
+    pub DO_NOT_TRACK: Bool, Foreign, propagation = UserInput;
+    /// OpenTelemetry SDK kill switch; a truthy value is honoured as an opt-out and turns
+    /// telemetry export off.
+    pub OTEL_SDK_DISABLED: Bool, Foreign, propagation = UserInput;
+    /// OpenTelemetry logs exporter selector; honoured only as an opt-out, where `none` turns
+    /// telemetry export off. Every other value is not honoured.
+    pub OTEL_LOGS_EXPORTER: String, Foreign, propagation = UserInput;
+    /// OpenTelemetry service name; honoured as the exported `service.name`, below `[telemetry] service_name`.
+    pub OTEL_SERVICE_NAME: String, Foreign, propagation = UserInput;
+    /// OpenTelemetry resource attributes, percent-decoded `key=value` pairs; honoured, below
+    /// `[telemetry] resource_attributes`. A malformed pair is skipped.
+    pub OTEL_RESOURCE_ATTRIBUTES: String, Foreign, propagation = UserInput;
+    /// OTLP endpoint for every signal; honoured as the export destination when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`
+    /// is unset.
+    pub OTEL_EXPORTER_OTLP_ENDPOINT: String, Foreign, propagation = UserInput;
+    /// OTLP endpoint for logs; honoured as the export destination, used verbatim.
+    pub OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: String, Foreign, propagation = UserInput;
+    /// OTLP export timeout for every signal, in milliseconds; honoured when
+    /// `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` is unset.
+    pub OTEL_EXPORTER_OTLP_TIMEOUT: Integer, Foreign, propagation = UserInput;
+    /// OTLP export timeout for logs, in milliseconds; honoured.
+    pub OTEL_EXPORTER_OTLP_LOGS_TIMEOUT: Integer, Foreign, propagation = UserInput;
+    /// OTLP transport protocol for every signal; honoured when `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`
+    /// is unset, default `http/protobuf`.
+    pub OTEL_EXPORTER_OTLP_PROTOCOL: String, Foreign, propagation = UserInput;
+    /// OTLP transport protocol for logs; honoured, default `http/protobuf`.
+    pub OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: String, Foreign, propagation = UserInput;
+    /// OTLP headers for every signal; honoured only when `OTEL_EXPORTER_OTLP_ENDPOINT` names the
+    /// destination and `OTEL_EXPORTER_OTLP_LOGS_HEADERS` is unset. Never sent to a `[telemetry]` endpoint.
+    // Inherited: a tool under `ocx exec` exporting its own telemetry needs it.
+    pub OTEL_EXPORTER_OTLP_HEADERS: String, Foreign, secret, propagation = SecretInput;
+    /// OTLP headers for logs; honoured when an `OTEL_EXPORTER_OTLP_*` endpoint names the destination.
+    /// Never sent to a `[telemetry]` endpoint.
+    // Inherited: a tool under `ocx exec` exporting its own telemetry needs it.
+    pub OTEL_EXPORTER_OTLP_LOGS_HEADERS: String, Foreign, secret, propagation = SecretInput;
+    /// OTLP compression for every signal; not honoured, the request is never compressed.
+    pub OTEL_EXPORTER_OTLP_COMPRESSION: String, Foreign, reader = Dependency("opentelemetry-otlp"), propagation = UserInput;
+    /// OTLP compression for logs; not honoured, the request is never compressed.
+    pub OTEL_EXPORTER_OTLP_LOGS_COMPRESSION: String, Foreign, reader = Dependency("opentelemetry-otlp"), propagation = UserInput;
+    /// Name of the GitHub Actions job; read as a telemetry attribute.
+    pub GITHUB_JOB: String, Foreign, propagation = UserInput;
+    /// Id of the GitLab pipeline; read as a telemetry attribute.
+    pub CI_PIPELINE_ID: String, Foreign, propagation = UserInput;
+    /// Id of the GitLab job; read as a telemetry attribute.
+    pub CI_JOB_ID: String, Foreign, propagation = UserInput;
+    /// Name of the GitLab job; read as a telemetry attribute.
+    pub CI_JOB_NAME: String, Foreign, propagation = UserInput;
 
     // ── Foreign: home, user and system ──
 

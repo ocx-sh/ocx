@@ -302,6 +302,7 @@ dev = [
     { name = "cryptography" },
     { name = "in-toto-attestation" },
     { name = "jsonschema", extra = ["format-nongpl"] },
+    { name = "opentelemetry-proto" },
     { name = "oras" },
     { name = "packageurl-python" },
     { name = "pexpect" },
@@ -320,6 +321,7 @@ dev = [
     { name = "cryptography", specifier = ">=42" },
     { name = "in-toto-attestation", specifier = ">=0.9.3" },
     { name = "jsonschema", extras = ["format-nongpl"], specifier = ">=4.23" },
+    { name = "opentelemetry-proto", specifier = "==1.45.2" },
     { name = "oras", specifier = ">=0.2.42" },
     { name = "packageurl-python", specifier = ">=0.17.6" },
     { name = "pexpect", specifier = ">=4.9" },
@@ -329,6 +331,18 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rich", specifier = ">=14.0" },
     { name = "ruff", specifier = ">=0.16" },
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "1.45.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/9c/1aa4ce60e9bc72af20dc49c92cc0566825092d92b3d6a277439fb5fb7c01/opentelemetry_proto-1.45.2.tar.gz", hash = "sha256:bd8d23cf770605b0af9b7be2071d26a464fea289d35429abfd2a66226114ad64", size = 46486, upload-time = "2026-10-29T17:29:53.007Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/0d/a0b8f2b9efe2ec1abdf639d3696db9b1563ebeb11d91aac08ba7341e9122/opentelemetry_proto-1.45.2-py3-none-any.whl", hash = "sha256:03a7ca1b43f89fd5b965d5975902bb2515c0c86e2428b456836e9a6149c6235a", size = 72484, upload-time = "2026-10-29T17:29:31.403Z" },
 ]
 
 [[package]]

@@ -89,6 +89,7 @@ site_target(
 exports_files(
     [
         "recordings.taskfile.yml",
+        "src/content/docs/reference/telemetry.md",
         "src/public/schemas/metadata/v1.json",
     ],
     visibility = ["//test:__pkg__"],

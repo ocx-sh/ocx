@@ -124,6 +124,17 @@ impl<V: Clone> Handle<V> {
     }
 }
 
+#[cfg(any(test, feature = "__testing"))]
+impl<V> Handle<V> {
+    /// Tasks currently waiting on this leader's entry; lets a test release the leader only once a waiter has joined.
+    pub fn waiter_count(&self) -> usize {
+        // The group's entry map keeps one receiver of its own; every other receiver is a waiter.
+        self.sender
+            .as_ref()
+            .map_or(0, |sender| sender.receiver_count().saturating_sub(1))
+    }
+}
+
 impl<V> Drop for Handle<V> {
     fn drop(&mut self) {
         if let Some(sender) = self.sender.take() {
@@ -285,6 +296,27 @@ mod tests {
             };
             assert_eq!(value, "result");
         }
+    }
+
+    #[tokio::test]
+    async fn waiter_count_counts_tasks_waiting_on_the_leader() {
+        let g = group(10);
+        let Acquisition::Leader(handle) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("expected Leader");
+        };
+        assert_eq!(handle.waiter_count(), 0);
+
+        let g2 = g.clone();
+        let waiter = tokio::spawn(async move { g2.try_acquire(key("key-a")).await });
+        let other = g.clone();
+        let _unrelated = tokio::spawn(async move { other.try_acquire(key("key-b")).await });
+        while handle.waiter_count() < 1 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(handle.waiter_count(), 1, "only the task on this key counts");
+
+        handle.complete("done".to_owned());
+        waiter.await.unwrap().unwrap();
     }
 
     #[tokio::test]

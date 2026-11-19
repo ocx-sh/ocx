@@ -20,6 +20,7 @@ pub mod records;
 pub mod refresh;
 pub mod registry;
 pub mod shell;
+pub mod telemetry;
 pub mod tls;
 pub mod update;
 
@@ -161,6 +162,13 @@ pub struct Config {
     ///
     /// Absent → no records written (opt-in).
     pub records: Option<records::RecordsOptions>,
+
+    /// OpenTelemetry export settings (`[telemetry]`).
+    ///
+    /// Declared in the system tier it clamps: no lower tier can redirect or disable export.
+    ///
+    /// Absent → no telemetry is exported (opt-in).
+    pub telemetry: Option<telemetry::TelemetryConfig>,
 
     // Reach a home root only through `ToolchainRoot::resolve`; using the field directly skips every refusal.
     /// Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
@@ -340,6 +348,12 @@ impl Config {
             match self.records.as_mut() {
                 Some(self_records) => self_records.merge(other_records),
                 None => self.records = Some(other_records),
+            }
+        }
+        if let Some(other_telemetry) = other.telemetry {
+            match self.telemetry.as_mut() {
+                Some(self_telemetry) => self_telemetry.merge(other_telemetry),
+                None => self.telemetry = Some(other_telemetry),
             }
         }
         // Empty is absent, or `toolchain_dir = ""` in a higher tier erases a lower tier's real value.
@@ -1614,7 +1628,7 @@ mod tests {
     /// must ignore a lower-tier override. Covers all six sections that carry
     /// the `lock_as_system` pattern (`[patches]`, `[managed]`, `[registry]`,
     /// each `[registries.<name>]` entry, each `[mirrors."<host>"]` entry,
-    /// `[records]`) so a newly-added lockable section without merge wiring is
+    /// `[records]`, `[telemetry]`) so a newly-added lockable section without merge wiring is
     /// caught here rather than in scattered per-struct tests.
     #[test]
     fn every_lockable_section_respects_system_lock() {
@@ -1724,6 +1738,22 @@ mod tests {
                 system.system_locked
                     && system.dir == Some(PathBuf::from("/var/log/ocx/records"))
                     && system.required == Some(true)
+            }),
+            ("[telemetry]", || {
+                // Per-block and unconditional: a system-scope [telemetry] pins
+                // the destination and the gate together, so no lower tier can
+                // redirect the export or switch it off.
+                let mut system = telemetry::TelemetryConfig::default();
+                system.enabled = Some(true);
+                system.endpoint = Some("https://collector.corp.example".to_string());
+                system.lock_as_system();
+                let mut lower = telemetry::TelemetryConfig::default();
+                lower.enabled = Some(false);
+                lower.endpoint = Some("https://lower.evil".to_string());
+                system.merge(lower);
+                system.system_locked
+                    && system.enabled == Some(true)
+                    && system.endpoint.as_deref() == Some("https://collector.corp.example")
             }),
             // The root-level pair: locked on `Config` itself. The
             // lower tier switches to the OTHER spelling, so a merge that

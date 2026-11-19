@@ -383,6 +383,8 @@ Three checks ride along with a command: the self update check, the `[managed]` r
 
 **One gate.** `background_check::skip_reason(kill_switch, offline)` returns the first reason a check must not run, or `None`. Order: kill switch, `is_ci()`, offline, stderr not a terminal. A caller logs the reason at debug level. A new check calls this helper and never re-implements the gate. The kill switch is the only per-check input: `OCX_NO_UPDATE_CHECK` for the self check and the drift notice, `OCX_NO_CONFIG_REFRESH` for the managed tick.
 
+**Usage telemetry is not a background check.** The OTLP export of `adr_otel_telemetry.md` runs once, after the command, only when an operator armed it, and it exists to report CI runs, so it never calls `skip_reason`: neither `CI` nor a non-terminal stderr stops it. It keeps the rest of this section's contract: it never fails a command, never writes to stdout, and adds at most its timeout to the run.
+
 **One policy.** `ctx.update_policy()` yields a `ResolvedUpdatePolicy` (`self_policy`, `toolchain`, `interval`), resolved once per invocation by `ocx_config::update`. Precedence per key is env, then the `[update]` section, then the default. The resolver has no error path: an invalid value falls through to the next source, a file value with one warning and an env value at debug level. `toolchain` is never `Apply`. A check reads the policy only after the gate passed, so `ocx config` and `ocx version` print no `[update]` warning. `self_policy == Manual` returns before the probe so the throttle state file is not touched. Never add an `update` field to `ProjectConfig`: `[update]` is a personal `config.toml` setting, and the managed tier and `ocx.toml` must not carry it.
 
 **Hook sites in `App::run`**, after `Context::try_init` and under `!in_seam()`:
@@ -422,6 +424,7 @@ Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule v
 | `OCX_KEY_PASSWORD` | `oci/sign/key_backend.rs::key_password` | Passphrase for a cosign `ENCRYPTED SIGSTORE PRIVATE KEY`; empty is legal, so absent and empty must stay indistinguishable |
 | `OCX_SIGNING_KEY` | `oci/sign/key_backend.rs::PemKeyBackend::open_env`, `trust.rs::compile_key_reference` | The signing key PEM itself, for `--key env://OCX_SIGNING_KEY` — the most sensitive entry here, a raw private key rather than a token |
 | `OCX_ANNOUNCE_GIT_TOKEN` | `forge/credentials.rs::ForgeCredentials::resolve` | The push half of the forge credential pair, presented as the secret of an HTTP Basic pair to `git push`. **Asymmetric against `OCX_ANNOUNCE_TOKEN` below, deliberately:** this one is scrubbed from plugin child environments, its API-half sibling is not, so a plugin-dispatched `ocx-mirror` inherits the API half and not the push half |
+| `OCX_TELEMETRY_HEADERS` | `ocx_telemetry/src/destination.rs` (via `ocx_env::OCX_TELEMETRY_HEADERS.get()`) | Bearer headers for the operator's OTLP collector (`name=value` pairs). `Credential`, never forwarded to child processes, so a nested `ocx` armed only by environment exports without them |
 
 Two variables meet the bar and are **deliberately not** on the list; a third is recorded because its name puts it one underscore from a member. They are here so a reviewer does not read an absence as an oversight, and their declarations in `crates/ocx_env/src/vars.rs` say which are scrubbed (`child = Scrub`):
 

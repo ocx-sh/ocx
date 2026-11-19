@@ -412,6 +412,7 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
             "ocx_announce",
             "ocx_script",
             "ocx_setup",
+            "ocx_telemetry",
             "ocx_env",
         ],
     ),
@@ -430,6 +431,8 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
     ),
     ("ocx_shim", &[]),
     ("ocx_sdkgen", &[]),
+    // The usage export: settings, variables and the guarded resolver, nothing else.
+    ("ocx_telemetry", &["ocx_config", "ocx_env", "ocx_oci", "ocx_util"]),
 ];
 
 /// The `[dev]` half of the same copy.

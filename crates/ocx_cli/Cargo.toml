@@ -86,6 +86,8 @@ ocx_setup.workspace = true
 # The storage tier: the CLI builds a `FileStructure`/`ToolchainStore` directly,
 # so the row is a first-class edge rather than a re-export through `ocx_lib`.
 ocx_store.workspace = true
+# The usage export: the arming gate and the one request an armed run sends.
+ocx_telemetry.workspace = true
 # The trust-policy tier: `package_sign_common.rs` builds a `CompiledPolicy`
 # from the resolved tiers.
 ocx_trust.workspace = true

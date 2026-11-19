@@ -529,6 +529,7 @@ Configuration is invalid or incomplete.
 | `shell_section_in_project` | ocx.toml declares a [shell] section, which only config.toml may hold |
 | `ssrf_forbidden_target` | A registry host resolves to an address outside the trusted set |
 | `system_config_invalid` | The system-wide config file is unusable |
+| `telemetry_section_in_project` | ocx.toml declares a [telemetry] section, which only config.toml may hold |
 | `toolchain_dir_group_or_world_writable` | The toolchain_dir directory is writable by other users |
 | `toolchain_dir_inaccessible` | The toolchain_dir setting names a path that cannot be inspected |
 | `toolchain_dir_inside_global_home` | The toolchain_dir setting resolves inside $OCX_HOME/toolchain |

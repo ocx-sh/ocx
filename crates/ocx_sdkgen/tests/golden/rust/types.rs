@@ -3781,6 +3781,8 @@ pub enum ErrorDetail {
     TargetNotFound,
     /// A package task panicked
     TaskPanicked,
+    /// ocx.toml declares a \[telemetry\] section, which only config.toml may hold
+    TelemetrySectionInProject,
     /// An interpolation token names an ambiguous dependency
     TemplateAmbiguousDependencyRef,
     /// An interpolation token names an env var declared more than once
@@ -4395,6 +4397,7 @@ impl ErrorDetail {
             Self::TargetNotAnIndex => "target_not_an_index",
             Self::TargetNotFound => "target_not_found",
             Self::TaskPanicked => "task_panicked",
+            Self::TelemetrySectionInProject => "telemetry_section_in_project",
             Self::TemplateAmbiguousDependencyRef => "template_ambiguous_dependency_ref",
             Self::TemplateAmbiguousSelfEnvRef => "template_ambiguous_self_env_ref",
             Self::TemplateDependencyNotInstalled => "template_dependency_not_installed",
@@ -4929,6 +4932,7 @@ impl ErrorDetail {
             "target_not_an_index" => Self::TargetNotAnIndex,
             "target_not_found" => Self::TargetNotFound,
             "task_panicked" => Self::TaskPanicked,
+            "telemetry_section_in_project" => Self::TelemetrySectionInProject,
             "template_ambiguous_dependency_ref" => Self::TemplateAmbiguousDependencyRef,
             "template_ambiguous_self_env_ref" => Self::TemplateAmbiguousSelfEnvRef,
             "template_dependency_not_installed" => Self::TemplateDependencyNotInstalled,

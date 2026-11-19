@@ -2469,6 +2469,11 @@
           "exit_code": 1
         },
         {
+          "value": "telemetry_section_in_project",
+          "description": "ocx.toml declares a [telemetry] section, which only config.toml may hold",
+          "exit_code": 78
+        },
+        {
           "value": "template_ambiguous_dependency_ref",
           "description": "An interpolation token names an ambiguous dependency",
           "exit_code": 65

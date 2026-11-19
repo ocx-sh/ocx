@@ -820,6 +820,10 @@ mod firewall_tests {
             "fixed macOS system utilities (`xattr`, `codesign`) during extraction",
         ),
         (
+            "ocx_telemetry/src/client.rs",
+            "test-only re-run of the test binary with proxy variables set on purpose; it launches no package",
+        ),
+        (
             "ocx_test_support/tests/workspace_structure.rs",
             "structural guards running `cargo metadata` and `cargo tree`",
         ),

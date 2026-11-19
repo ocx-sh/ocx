@@ -278,7 +278,7 @@ fn credential_class_is_exactly_the_scrubbed_secrets() {
     let credentials: BTreeSet<_> = keys_with(Propagation::Credential).collect();
     let scrubbed: BTreeSet<_> = credential_keys().collect();
     assert_eq!(credentials, scrubbed);
-    assert_eq!(credentials.len(), 4);
+    assert_eq!(credentials.len(), 5);
 }
 
 #[test]
@@ -301,6 +301,8 @@ fn the_singleton_classes_hold_the_variables_the_adr_names() {
             "CI_JOB_TOKEN",
             "SIGSTORE_ID_TOKEN",
             "CIRCLE_OIDC_TOKEN_V2",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
         ])
     );
 }

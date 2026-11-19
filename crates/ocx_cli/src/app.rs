@@ -37,6 +37,8 @@ pub use refusal::CliRefusal;
 #[cfg(any(test, feature = "__testing"))]
 pub mod seam;
 
+pub mod telemetry;
+
 mod toolchain_drift_check;
 
 pub(crate) mod update_check;
@@ -89,6 +91,7 @@ impl App {
         color_mode: ocx_console::ColorMode,
         color_config: ocx_console::ColorModeConfig,
     ) -> anyhow::Result<ExitCode> {
+        let started = std::time::Instant::now();
         let styles = ocx_console::clap_styles(color_config.stdout);
         // Through `parse`, so a clap failure exits 64 (`EX_USAGE`) rather than clap's 2.
         let matches = match parse(Cli::command().color(color_mode.into()).styles(styles.clone()), &argv) {
@@ -146,61 +149,83 @@ impl App {
             _ => {}
         }
 
-        let context = Context::try_init(
-            &cli.context,
-            color_config,
-            ManagedConfigGate {
-                enforce_required: should_enforce_managed_config_required(&cli.command),
-                onboarding: is_managed_config_onboarding_command(&cli.command),
-                tolerate_vanished_received_config: is_shell_state_command(&cli.command),
-            },
-        )
-        .await
-        .map_err(fail)?;
-        command::deprecated::warn_renamed_flags(&context, &matches);
-        let Some(command) = &cli.command else {
-            unreachable!("None handled in static-command bypass above");
-        };
-        // Every probe reaches the network; the seam never makes a request.
-        let mut notice_rows = Vec::new();
-        let mut pending_update = None;
-        if !in_seam() && should_check_for_update(&cli.command) {
-            match update_check::check_for_update(&context).await {
-                Some(update_check::SelfUpdate::Notice(row)) => notice_rows.push(row),
-                Some(update_check::SelfUpdate::Apply(identifier)) => pending_update = Some(identifier),
-                None => {}
+        // A command that never sends gets no slot, so it neither reads the gate nor logs packages.
+        let mut telemetry: Option<ocx_telemetry::Slot> = None;
+        let mut elapsed = None;
+        let mut activity = None;
+        let sends = telemetry::command_class(cli.command.as_ref()) == telemetry::Class::Send;
+        let result = async {
+            let context = Context::try_init(
+                &cli.context,
+                color_config,
+                ManagedConfigGate {
+                    enforce_required: should_enforce_managed_config_required(&cli.command),
+                    onboarding: is_managed_config_onboarding_command(&cli.command),
+                    tolerate_vanished_received_config: is_shell_state_command(&cli.command),
+                },
+                sends.then_some(&mut telemetry),
+            )
+            .await
+            .map_err(fail)?;
+            command::deprecated::warn_renamed_flags(&context, &matches);
+            let Some(command) = &cli.command else {
+                unreachable!("None handled in static-command bypass above");
+            };
+            // Every probe reaches the network; the seam never makes a request.
+            let mut notice_rows = Vec::new();
+            let mut pending_update = None;
+            if !in_seam() && should_check_for_update(&cli.command) {
+                match update_check::check_for_update(&context).await {
+                    Some(update_check::SelfUpdate::Notice(row)) => notice_rows.push(row),
+                    Some(update_check::SelfUpdate::Apply(identifier)) => pending_update = Some(identifier),
+                    None => {}
+                }
+            }
+            if !in_seam() && should_check_managed_config_refresh(&cli.command) {
+                managed_config_check::check_for_managed_config_refresh(&context).await;
+            }
+            if !in_seam() && should_check_toolchain_drift(command) {
+                notice_rows.extend(toolchain_drift_check::check_for_toolchain_drift(&context).await);
+            }
+            update_notice::print(context.ui(), &notice_rows);
+            // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
+            // so trust policy also covers the unattended install.
+            let pending_update = pending_update
+                .map(|identifier| {
+                    context
+                        .handoff_state()
+                        .map(|handoff| (context.manager().clone(), identifier, handoff))
+                })
+                .transpose()
+                .map_err(|err| fail(err.into()))?;
+
+            // No error document after a report, or stdout carries two JSON documents.
+            let reported = context.api().reported_handle();
+            // `execute` consumes the context; the log is shared with every manager clone, so it also
+            // collects what `apply_pending` installs.
+            activity = context.manager().activity_log().cloned();
+            let executed = command.execute(context).await;
+            // Stops before `apply_pending`, so a slow self update never counts as the command's time.
+            elapsed = Some(started.elapsed());
+            // After the command, on success and failure alike, and never changing its result.
+            if let Some((manager, identifier, handoff)) = pending_update {
+                update_check::apply_pending(&manager, &identifier, &handoff).await;
+            }
+            match executed {
+                Ok(code) => Ok(code),
+                Err(err) if !reported.load(std::sync::atomic::Ordering::Relaxed) => Err(fail(err)),
+                Err(err) => Err(err),
             }
         }
-        if !in_seam() && should_check_managed_config_refresh(&cli.command) {
-            managed_config_check::check_for_managed_config_refresh(&context).await;
+        .await;
+        // After `apply_pending` and the error document, so the export never delays either.
+        if let Some(slot) = telemetry {
+            let name = cli.command.as_ref().map(telemetry::command_name).unwrap_or_default();
+            let outcome = telemetry::command_outcome(name, elapsed.unwrap_or_else(|| started.elapsed()), &result);
+            let packages = activity.map(|log| telemetry::package_records(&log)).unwrap_or_default();
+            Box::pin(slot.finish(outcome, packages)).await;
         }
-        if !in_seam() && should_check_toolchain_drift(command) {
-            notice_rows.extend(toolchain_drift_check::check_for_toolchain_drift(&context).await);
-        }
-        update_notice::print(context.ui(), &notice_rows);
-        // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
-        // so trust policy also covers the unattended install.
-        let pending_update = pending_update
-            .map(|identifier| {
-                context
-                    .handoff_state()
-                    .map(|handoff| (context.manager().clone(), identifier, handoff))
-            })
-            .transpose()
-            .map_err(|err| fail(err.into()))?;
-
-        // No error document after a report, or stdout carries two JSON documents.
-        let reported = context.api().reported_handle();
-        let result = command.execute(context).await;
-        // After the command, on success and failure alike, and never changing its result.
-        if let Some((manager, identifier, handoff)) = pending_update {
-            update_check::apply_pending(&manager, &identifier, &handoff).await;
-        }
-        match result {
-            Ok(code) => Ok(code),
-            Err(err) if !reported.load(std::sync::atomic::Ordering::Relaxed) => Err(fail(err)),
-            Err(err) => Err(err),
-        }
+        result
     }
 }
 
@@ -535,6 +560,31 @@ mod tests {
                 argv.join(" ")
             );
         }
+    }
+
+    // ── Usage telemetry ──────────────────────────────────────────────────────
+
+    /// Exactly one call exports the record, and it sits in `run_from`, after the command and the
+    /// error document, so no path can send twice or send before the outcome is known.
+    ///
+    /// The needle count is asserted non-zero as well: a rewrapped call that stopped matching would
+    /// otherwise leave the guard green while pinning nothing.
+    #[test]
+    fn telemetry_finishes_at_one_site() {
+        let code: String = include_str!("app.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a non-test half")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sites = code.matches(".finish(").count();
+        assert_ne!(
+            sites, 0,
+            "the needle must match the export call, or this guard pins nothing"
+        );
+        assert_eq!(sites, 1, "the usage record is exported from exactly one site");
     }
 
     // ── Exit-code classification ─────────────────────────────────────────────

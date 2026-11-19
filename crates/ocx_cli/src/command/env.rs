@@ -109,6 +109,11 @@ pub struct Env {
 }
 
 impl Env {
+    /// Whether `--shell` is present, bare or valued: the output is then evaluated by the user's shell.
+    pub(crate) fn shell_requested(&self) -> bool {
+        self.shell.is_some()
+    }
+
     /// Materialization for an eager package: `--candidate`/`--current`/`--link` root composed values in
     /// an install link instead of the object store.
     fn materialization(&self) -> Result<Materialization, crate::error::UsageError> {

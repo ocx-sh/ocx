@@ -289,6 +289,16 @@ crate = "ocx_store"
 cases = 356
 
 [[target]]
+label = "//crates/ocx_telemetry:ocx_telemetry_test"
+crate = "ocx_telemetry"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_telemetry:pins"
+crate = "ocx_telemetry"
+cases = 2
+
+[[target]]
 label = "//crates/ocx_test_support:boundary"
 crate = "ocx_test_support"
 cases = 56

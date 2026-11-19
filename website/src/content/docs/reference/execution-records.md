@@ -303,7 +303,11 @@ required = true
 - Exit codes: `required` decides only whether OCX aborts or warns, never which code an abort uses
 - Windows: the sink is probed before the child is spawned and the record written after, so `required = true` can abort after the child has begun work. OCX stops and reaps that child
 
-See [Failure posture in detail][execution-records-explanation-required] and [`[records]`][config-records] in the Configuration reference.
+See [Failure posture in detail][execution-records-explanation-required] for why `required` behaves this way.
+
+The keys are in [`[records]`][config-records].
+
+[Send usage telemetry][guide-telemetry] covers the usage records that join with these.
 
 ## Schema {#execution-records-schema}
 
@@ -351,6 +355,7 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [env-ocx-patch-snapshot]: ./environment.md#ocx-patch-snapshot
 
 <!-- internal -->
+[guide-telemetry]: ../guides/telemetry.mdx
 [execution-records-explanation]: ../explanation/execution-records.mdx
 [execution-records-explanation-frames]: ../explanation/execution-records.mdx#frames
 [records-launcher-frames]: ../explanation/records-launcher-frames.md

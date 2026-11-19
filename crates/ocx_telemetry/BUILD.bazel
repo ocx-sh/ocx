@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
+load("//bazel/release:version.bzl", "OCX_VERSION")
+load("//crates/ocx_test_support:isolated.bzl", "CRATES", "crate_tree")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_telemetry",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    edition = "2024",
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_telemetry"},
+    version = OCX_VERSION,
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "ocx_telemetry_test",
+    aliases = aliases(),
+    crate = ":ocx_telemetry",
+    # `src/**`: export::tests::no_crate_processor_or_transport_is_named reads the crate's own sources.
+    data = glob(
+        [
+            "src/**",
+            "tests/golden/**",
+        ],
+        allow_empty = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_telemetry"},
+    deps = all_crate_deps(normal_dev = True),
+)
+
+# Reads the root manifest, every crate manifest and the lock as data: the
+# manifests ride in each crate's `:tree` and the root one in `workspace_files`.
+rust_test(
+    name = "pins",
+    srcs = ["tests/pins.rs"],
+    aliases = aliases(),
+    data = [
+        "//:Cargo.lock",
+        "//:workspace_files",
+    ] + ["//crates/%s:tree" % crate for crate in CRATES],
+    edition = "2024",
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_telemetry"},
+    version = OCX_VERSION,
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_doc_test(
+    name = "ocx_telemetry_doc_test",
+    crate = ":ocx_telemetry",
+)
+
+crate_tree()

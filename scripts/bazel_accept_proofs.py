@@ -186,7 +186,7 @@ number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
 work order); `bazel_gate_proofs` is now the only place it is written down, and
 `prove_counts` below reads `test/tests/` to check even that."""
 
-SCOPED_ROWS = 23
+SCOPED_ROWS = 24
 """`[crates]` rows of `test/scoped_rows.toml` — one per workspace member but `ocx`."""
 
 SCOPED_ESCALATE_ROWS = 3
@@ -1655,10 +1655,10 @@ def fixture_modules(count: int = ACCEPTANCE_MODULES) -> set[str]:
 
 
 def fixture_rows(modules: set[str]) -> dict[str, str]:
-    """A `[crates]`-shaped table: 23 rows, three of them `escalate`.
+    """A `[crates]`-shaped table: 24 rows, three of them `escalate`.
 
     Globs are two-digit prefixes over the fixture's own three-digit module
-    names, so each of the 20 non-`escalate` rows owns a live decade (or module)
+    names, so each of the 21 non-`escalate` rows owns a live decade (or module)
     and every module is reachable from some row — a dead glob is then a mutation rather
     than this table's normal state, which is the only way `select-glob-dead`
     can be shown red on purpose.
@@ -1709,7 +1709,7 @@ def fixture_crate_of_dir() -> dict[str, str]:
     miss `ocx`, which has no row and selects `//test:all` like the three
     `escalate` rows, `ocx_test_support`, `ocx_python` and `ocx_env`.
     """
-    mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(19)}
+    mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(20)}
     mapping["crates/ocx_cli"] = "ocx"
     mapping["crates/ocx_test_support"] = "ocx_test_support"
     mapping["crates/ocx_python"] = "ocx_python"

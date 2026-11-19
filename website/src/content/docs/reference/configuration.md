@@ -430,6 +430,63 @@ no profile blocks at all.
 - Default: unset (detected on every run)
 - See: [Shell integration](../explanation/shell-integration.mdx)
 
+## `telemetry` {#keys-telemetry}
+
+OpenTelemetry export settings (`[telemetry]`).
+
+Declared in the system tier it clamps: no lower tier can redirect or disable export.
+
+Absent → no telemetry is exported (opt-in).
+
+- Type: `table`
+
+## `telemetry.enabled` {#keys-telemetry-enabled}
+
+Turns export on (`true`) or off (`false`). Absent → export stays off.
+
+- Type: `boolean`
+
+## `telemetry.endpoint` {#keys-telemetry-endpoint}
+
+Base URL of the OTLP/HTTP collector, an absolute `http` or `https` URL with a host and no
+user information. `/v1/logs` is appended to its path.
+
+- Type: `string`
+
+## `telemetry.headers.<name>` {#keys-telemetry-headers}
+
+HTTP headers sent with every export, typically an authorization token.
+
+Names must be HTTP tokens other than `host`, `content-length`, `content-type`, `transfer-encoding`, `connection`, `keep-alive`, `proxy-connection`, `te`, `trailer` and `upgrade`; values must not contain CR, LF or NUL. Values are secrets.
+
+A layer that sets `endpoint` discards the headers inherited from earlier layers.
+
+- Type: `string`
+
+## `telemetry.protocol` {#keys-telemetry-protocol}
+
+Wire protocol. Only `http/protobuf` is supported, which is also the default.
+
+- Type: `string`
+
+## `telemetry.resource_attributes.<name>` {#keys-telemetry-resource-attributes}
+
+Extra resource attributes added to every export, keyed by a non-empty attribute name.
+
+- Type: `string`
+
+## `telemetry.service_name` {#keys-telemetry-service-name}
+
+Replaces the `service.name` resource attribute. Must not be empty.
+
+- Type: `string`
+
+## `telemetry.timeout` {#keys-telemetry-timeout}
+
+Export deadline in milliseconds, `1` to `10000`. Defaults to `500`.
+
+- Type: `integer`
+
 ## `toolchain_dir` {#keys-toolchain_dir}
 
 Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.

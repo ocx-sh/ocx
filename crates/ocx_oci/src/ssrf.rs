@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 
-use hyper_util::client::proxy::matcher::Matcher;
+use hyper_util::client::proxy::matcher::{Intercept, Matcher};
 use url::{Host, Url};
 
 /// Whether `host` carries a plain-HTTP allowance: byte-exact on `host[:port]`.
@@ -214,11 +214,39 @@ pub async fn resolve_and_validate(host: &str, port: u16, trusted: &[String]) -> 
 pub struct GuardedResolver {
     trusted: Arc<Vec<String>>,
     rules: Arc<ProxyRules>,
+    pinned: Option<Arc<PinnedName>>,
+}
+
+/// A name the caller already resolved, and its answer.
+struct PinnedName {
+    name: String,
+    addresses: Vec<SocketAddr>,
 }
 
 impl GuardedResolver {
     pub fn new(trusted: Arc<Vec<String>>, rules: Arc<ProxyRules>) -> Self {
-        Self { trusted, rules }
+        Self {
+            trusted,
+            rules,
+            pinned: None,
+        }
+    }
+
+    /// Answers `name` with `addresses`, without a lookup and without the range floor.
+    ///
+    /// For the operator-configured proxy a caller resolved itself, within its own deadline. The name
+    /// is matched ASCII case-insensitively: hyper asks with the proxy URL's spelling, and a
+    /// case-sensitive match would send a mixed-case proxy host to a lookup on the blocking pool.
+    ///
+    /// `name` must come from operator configuration (the proxy the environment names), never from
+    /// remote data: the pinned answer bypasses the address floor.
+    #[must_use]
+    pub fn with_pinned(mut self, name: &str, addresses: Vec<SocketAddr>) -> Self {
+        self.pinned = Some(Arc::new(PinnedName {
+            name: name.to_owned(),
+            addresses,
+        }));
+        self
     }
 }
 
@@ -226,20 +254,24 @@ impl reqwest::dns::Resolve for GuardedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let trusted = self.trusted.clone();
         let rules = self.rules.clone();
+        let pinned = self.pinned.clone();
         Box::pin(async move {
             // Port 0: reqwest replaces it with the request URL's after resolution.
             let host = name.as_str();
-            let addresses: Vec<SocketAddr> = if rules.is_proxy_host(host) {
-                tokio::net::lookup_host((host, 0))
-                    .await
-                    .map_err(|source| SsrfError::Resolution {
-                        host: host.to_string(),
-                        source,
-                    })?
-                    .collect()
-            } else {
-                resolve_and_validate(host, 0, &trusted).await?
-            };
+            let addresses: Vec<SocketAddr> =
+                if let Some(pinned) = pinned.filter(|pinned| pinned.name.eq_ignore_ascii_case(host)) {
+                    pinned.addresses.clone()
+                } else if rules.is_proxy_host(host) {
+                    tokio::net::lookup_host((host, 0))
+                        .await
+                        .map_err(|source| SsrfError::Resolution {
+                            host: host.to_string(),
+                            source,
+                        })?
+                        .collect()
+                } else {
+                    resolve_and_validate(host, 0, &trusted).await?
+                };
             let addresses: reqwest::dns::Addrs = Box::new(addresses.into_iter());
             Ok(addresses)
         })
@@ -332,6 +364,65 @@ impl ProxyRules {
     #[must_use]
     pub fn is_proxy_host(&self, name: &str) -> bool {
         self.proxy_hosts.iter().any(|proxy| proxy.eq_ignore_ascii_case(name))
+    }
+
+    /// The host and port of the proxy a dial to `host:port` goes through, `None` when no proxy
+    /// intercepts it.
+    ///
+    /// Asks the matcher about the destination itself, so a `NO_PROXY` rule decides here exactly as it
+    /// does for the dial. The port is the one the proxy URL names, else the default hyper-util dials
+    /// for its scheme. A caller that resolves the proxy itself pins this name
+    /// ([`GuardedResolver::with_pinned`]) instead of leaving the lookup to the resolver.
+    #[must_use]
+    pub fn proxy_endpoint(&self, scheme: DialScheme, host: &str, port: u16) -> Option<(String, u16)> {
+        let destination = normalised_destination(scheme, host, port)?
+            .as_str()
+            .parse::<http::Uri>()
+            .ok()?;
+        let intercept = self.matcher.intercept(&destination)?;
+        let uri = intercept.uri();
+        let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+            Some("https") => 443,
+            _ => 80,
+        });
+        Some((uri.host()?.to_ascii_lowercase(), port))
+    }
+
+    /// The proxy a dial to `host:port` goes through, with the credentials split off its URL, `None` when
+    /// no proxy intercepts it.
+    ///
+    /// For a client that dials only that one destination: it builds its own proxy from this answer and
+    /// turns reqwest's OS proxy read off, so the route this process judged is the route the client takes.
+    #[must_use]
+    pub fn proxy_choice(&self, scheme: DialScheme, host: &str, port: u16) -> Option<ProxyChoice> {
+        let destination = normalised_destination(scheme, host, port)?
+            .as_str()
+            .parse::<http::Uri>()
+            .ok()?;
+        self.matcher.intercept(&destination).map(ProxyChoice)
+    }
+}
+
+/// The proxy [`ProxyRules::proxy_choice`] picked. No `Debug`: the credentials are secrets.
+pub struct ProxyChoice(Intercept);
+
+impl ProxyChoice {
+    /// The proxy URL, without credentials.
+    #[must_use]
+    pub fn uri(&self) -> String {
+        self.0.uri().to_string()
+    }
+
+    /// The `Proxy-Authorization` value of a basic-auth proxy.
+    #[must_use]
+    pub fn basic_auth(&self) -> Option<http::HeaderValue> {
+        self.0.basic_auth().cloned()
+    }
+
+    /// The user and password of a proxy whose scheme sends them itself, such as SOCKS.
+    #[must_use]
+    pub fn raw_auth(&self) -> Option<(&str, &str)> {
+        self.0.raw_auth()
     }
 }
 
@@ -963,6 +1054,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_proxy_endpoint_is_the_host_and_port_each_scheme_picks() {
+        let rules = ProxyRules::new(
+            Matcher::builder()
+                .http("http://Proxy.CORP:3128")
+                .https("http://user:pw@secure-proxy.corp")
+                .build(),
+        );
+        assert_eq!(
+            rules.proxy_endpoint(DialScheme::Http, "collector.example", 4318),
+            Some(("proxy.corp".to_owned(), 3128))
+        );
+        assert_eq!(
+            rules.proxy_endpoint(DialScheme::Https, "collector.example", 4318),
+            Some(("secure-proxy.corp".to_owned(), 80)),
+            "a proxy URL without a port takes its own scheme's default"
+        );
+        let direct = ProxyRules::direct();
+        assert_eq!(direct.proxy_endpoint(DialScheme::Http, "collector.example", 4318), None);
+        let http_only = ProxyRules::new(Matcher::builder().http("http://proxy.corp:3128").build());
+        assert_eq!(
+            http_only.proxy_endpoint(DialScheme::Https, "collector.example", 4318),
+            None
+        );
+        let disabled = ProxyRules::new(Matcher::builder().all(PROXY).no("*").build());
+        assert_eq!(
+            disabled.proxy_endpoint(DialScheme::Http, "collector.example", 4318),
+            None
+        );
+    }
+
     // Plan row 6: `NO_PROXY=*` disables every proxy, so there is no proxy host
     // to admit.
     #[test]
@@ -1018,6 +1140,98 @@ mod tests {
             error.to_string().contains("resolves to a forbidden address"),
             "the refusal keeps the SSRF guard's wording, got {error}"
         );
+    }
+
+    // A caller that resolved the proxy itself pins the answer; hyper asks with the proxy URL's own
+    // spelling, so the match ignores ASCII case and no lookup runs (`.invalid` cannot resolve).
+    #[tokio::test]
+    async fn guarded_resolver_answers_a_pinned_proxy_name_in_any_case_without_a_lookup() {
+        use reqwest::dns::Resolve;
+        let answer: SocketAddr = "10.0.0.2:3128".parse().expect("literal");
+        let resolver = GuardedResolver::new(
+            Arc::new(Vec::new()),
+            ProxyRules::proxied_everywhere("http://Proxy.Example.invalid:3128"),
+        )
+        .with_pinned("proxy.example.invalid", vec![answer]);
+        for spelling in [
+            "proxy.example.invalid",
+            "Proxy.Example.Invalid",
+            "PROXY.EXAMPLE.INVALID",
+        ] {
+            let name: reqwest::dns::Name = spelling.parse().expect("valid dns name");
+            let addresses: Vec<SocketAddr> = resolver
+                .resolve(name)
+                .await
+                .unwrap_or_else(|error| panic!("{spelling} must take the pinned answer, got {error}"))
+                .collect();
+            assert_eq!(addresses, [answer], "{spelling}");
+        }
+        // Control: the pin covers its own name only.
+        let other: reqwest::dns::Name = "other.invalid".parse().expect("valid dns name");
+        assert!(resolver.resolve(other).await.is_err(), "another name is not pinned");
+    }
+
+    // The proxy is the one the matcher picks for the real destination, so a `NO_PROXY` rule that
+    // names the destination leaves it direct, and one that names anything else does not.
+    #[test]
+    fn proxy_endpoint_follows_the_destination_not_a_stand_in_name() {
+        let rules = ProxyRules::new(Matcher::builder().all(PROXY).no("collector.example").build());
+        assert_eq!(rules.proxy_endpoint(DialScheme::Https, "collector.example", 4318), None);
+        assert_eq!(
+            rules.proxy_endpoint(DialScheme::Https, "other.example", 4318),
+            Some(("proxy.corp".to_owned(), 3128))
+        );
+        let probe_only = ProxyRules::new(Matcher::builder().all(PROXY).no("ocx-proxy-probe").build());
+        assert_eq!(
+            probe_only.proxy_endpoint(DialScheme::Http, "collector.example", 4318),
+            Some(("proxy.corp".to_owned(), 3128)),
+            "a rule naming only the stand-in host must not hide the proxy"
+        );
+    }
+
+    #[test]
+    fn proxy_choice_follows_the_route_the_rules_judge() {
+        let rules = ProxyRules::new(
+            Matcher::builder()
+                .all("http://user:pa55@proxy.corp:3128")
+                .no("collector.example")
+                .build(),
+        );
+        assert!(
+            rules
+                .proxy_choice(DialScheme::Https, "collector.example", 4318)
+                .is_none()
+        );
+        let choice = rules
+            .proxy_choice(DialScheme::Https, "other.example", 4318)
+            .expect("a proxy intercepts it");
+        assert_eq!(choice.uri(), "http://proxy.corp:3128/");
+        assert!(choice.basic_auth().is_some(), "the credentials are split off the URL");
+        assert!(
+            ProxyRules::direct()
+                .proxy_choice(DialScheme::Http, "collector.example", 4318)
+                .is_none()
+        );
+    }
+
+    // A proxy URL without a port is dialled on its own scheme's default by hyper-util: 80 for every
+    // scheme but https, which is 443. A socks URL is no exception.
+    #[test]
+    fn proxy_endpoint_without_a_port_takes_the_default_hyper_util_dials() {
+        for (proxy, expected) in [
+            ("http://proxy.corp", 80),
+            ("https://proxy.corp", 443),
+            ("socks5://proxy.corp", 80),
+            ("socks5h://proxy.corp", 80),
+            ("socks5h://proxy.corp:9050", 9050),
+        ] {
+            let rules = ProxyRules::new(Matcher::builder().all(proxy).build());
+            assert_eq!(
+                rules.proxy_endpoint(DialScheme::Https, "collector.example", 4318),
+                Some(("proxy.corp".to_owned(), expected)),
+                "{proxy}"
+            );
+        }
     }
 
     // Design: `DialScheme::for_registry` is the ONE site deciding the dial

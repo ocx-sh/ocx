@@ -29,7 +29,7 @@ OCX loads the files from lowest to highest and merges them. It skips missing fil
 
 **Explicit additions.** [`--config FILE`][arg-config] or [`OCX_CONFIG`][env-config]`=/path/a.toml:/path/b.toml` layers extra files on top of the discovered chain. `OCX_CONFIG` is a list separated like `PATH` (`;` on Windows), a later entry wins, and `--config` loads after it. This refines ambient config without rewriting it.
 
-Set both and `--config` sits at the highest file-tier precedence. Every specified file must exist, and a list holds at most 32, or the command exits 78. The list still loads under `OCX_NO_CONFIG`. To disable an ambient `OCX_CONFIG` without unsetting it, set it to the empty string.
+Set both and `--config` sits at the highest file-tier precedence. Every specified file must exist, and a list holds at most 32, or the command exits 78. The list still loads under `OCX_NO_CONFIG`. A [CI image recipe][guide-telemetry-ci-image] shows the list in use. To disable an ambient `OCX_CONFIG` without unsetting it, set it to the empty string.
 
 **Kill switch.** [`OCX_NO_CONFIG`][env-no-config]`=1` skips the discovered chain (system, user, `$OCX_HOME`) but leaves explicit paths intact. Combine it with `--config` for a fully hermetic CI load: `OCX_NO_CONFIG=1 ocx --config ci.toml ...`.
 
@@ -71,6 +71,7 @@ Every key, its type and its default are in the [configuration reference][config-
 [env-ocx-home]: ../reference/environment.md#ocx-home
 [env-config]: ../reference/environment.md#ocx-config
 [env-no-config]: ../reference/environment.md#ocx-no-config
+[guide-telemetry-ci-image]: ./telemetry.mdx#telemetry-ci-image
 [xdg-basedir]: ../reference/environment.md#external-xdg-config-home
 [config-ref]: ../reference/configuration.md
 [config-registry-default]: ../reference/configuration.md#keys-registry-default

@@ -86,14 +86,14 @@ fn user_name() -> Option<String> {
 
 /// The launching process id.
 #[cfg(unix)]
-fn parent_pid() -> Option<u32> {
+pub fn parent_pid() -> Option<u32> {
     Some(std::os::unix::process::parent_id())
 }
 
 /// Omitted: Windows has no `getppid`, and every stand-in (`sysinfo` included) scans the whole process
 /// table on the launch path.
 #[cfg(not(unix))]
-fn parent_pid() -> Option<u32> {
+pub fn parent_pid() -> Option<u32> {
     None
 }
 

@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::task::JoinSet;
 use tracing::info_span;
@@ -21,6 +21,7 @@ use ocx_util::singleflight;
 
 use super::super::PackageManager;
 use super::resolve::NoTransport;
+use crate::activity::{Action, PackageActivity, Role};
 
 /// Unique pinned refs (roots + transitive deps) one `pull_all` may track; past it the
 /// pull aborts with `CapacityExceeded`, hard rather than backpressured.
@@ -73,7 +74,7 @@ impl PackageManager {
         platform: ocx_oci::Platform,
     ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
         let groups = SetupGroups::new();
-        setup_with_tracker(self, package, platform, groups)
+        setup_with_tracker(self, package, platform, groups, Role::Root)
     }
 
     /// Pulls packages in parallel, sharing one singleflight session across them, then re-checks
@@ -118,7 +119,12 @@ impl PackageManager {
             tasks.spawn(async move {
                 // Named, not `_`: dropping it before setup returns lifts the root-pull cap.
                 let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                let result = setup_with_tracker(&mgr, &package, platform, groups).await;
+                let result = setup_with_tracker(&mgr, &package, platform, groups, Role::Root).await;
+                // Also when the package lost the singleflight race to a sibling's dependency path, whose
+                // entry says `Dependency`: the drain reads the root sets, not only the entries.
+                if let (Ok(info), Some(log)) = (&result, mgr.activity_log()) {
+                    log.record_roots([info.identifier().clone()]);
+                }
                 (package, result)
             });
         }
@@ -209,22 +215,28 @@ fn setup_with_tracker<'a>(
     package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
+    role: Role,
 ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
     let package = package.clone();
-    Box::pin(async move { setup_impl(mgr, &package, platform, groups, None).await })
+    Box::pin(async move { setup_impl(mgr, &package, platform, groups, None, role).await })
 }
 
 /// Singleflight-gated core of [`PackageManager::pull`]; `dest_override` is forwarded to [`setup_owned`].
+///
+/// The leader appends one activity entry, as `role`, when its setup succeeds; a waiter appends none.
 async fn setup_impl(
     mgr: &PackageManager,
     package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
+    role: Role,
 ) -> Result<InstallInfo, PackageErrorKind> {
     log::debug!("Pulling package: {}", package);
 
+    let resolve_watch = Stopwatch::start(mgr.activity_log().is_some());
     let resolved = mgr.resolve(package, platform.clone()).await?;
+    let resolve_time = resolve_watch.elapsed();
     let pinned = resolved.pinned.clone();
     log::debug!("Resolved package identifier: {}", &pinned);
 
@@ -261,13 +273,14 @@ async fn setup_impl(
     };
 
     // Fail the handle explicitly: a dropped one tells waiters only "abandoned".
-    let installed = match setup_owned(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
-        Ok(info) => info,
-        Err(e) => {
-            let shared = handle.fail(e);
-            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
-        }
-    };
+    let (installed, outcome) =
+        match setup_owned_outcome(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
+            Ok(done) => done,
+            Err(e) => {
+                let shared = handle.fail(e);
+                return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+            }
+        };
 
     // Written last, on the placed content: a crash before it leaves content `find` re-verifies, never a marker
     // for content that was not verified. Content already in the store gets it too, which no fetch ever writes.
@@ -278,11 +291,76 @@ async fn setup_impl(
         let shared = handle.fail(PackageErrorKind::Internal(error.into()));
         return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
     }
+    if let Some(log) = mgr.activity_log() {
+        log.record(outcome.into_activity(&pinned, &installed, role, resolve_time));
+    }
     handle.complete(installed.clone());
     Ok(installed)
 }
 
+/// A wall-clock timer that costs nothing when no activity log is attached.
+#[derive(Clone, Copy)]
+struct Stopwatch(Option<Instant>);
+
+impl Stopwatch {
+    fn start(enabled: bool) -> Self {
+        Self(enabled.then(Instant::now))
+    }
+
+    fn elapsed(self) -> Option<Duration> {
+        self.0.map(|started| started.elapsed())
+    }
+}
+
+/// What [`setup_owned_outcome`] observed, for the entry its singleflight leader records.
+///
+/// Timings are `None` when no activity log is attached, and the download and extract fields stay
+/// empty for a store hit.
+#[derive(Debug, Clone, Copy, Default)]
+struct SetupOutcome {
+    /// The package was already installed, so nothing was fetched or assembled.
+    store_hit: bool,
+    /// Descriptor sizes of the layers this setup fetched as layer leader that were not in the layer store.
+    download_size: u64,
+    /// Wall time of the whole layer phase, set only when this setup fetched at least one layer.
+    download: Option<Duration>,
+    /// Wall time from layer assembly through the move into the store; excludes dependency setup.
+    extract: Option<Duration>,
+}
+
+impl SetupOutcome {
+    fn store_hit() -> Self {
+        Self {
+            store_hit: true,
+            ..Self::default()
+        }
+    }
+
+    fn into_activity(
+        self,
+        pinned: &ocx_oci::PinnedPackageRef,
+        installed: &InstallInfo,
+        role: Role,
+        resolve: Option<Duration>,
+    ) -> PackageActivity {
+        PackageActivity {
+            pinned: pinned.clone(),
+            platform: installed.platform().cloned(),
+            action: Action::Pulled,
+            role,
+            store_hit: self.store_hit,
+            download_size: self.download_size,
+            resolve,
+            download: self.download,
+            extract: self.extract,
+        }
+    }
+}
+
 /// Downloads, sets up dependencies and places the package; call only while owning the singleflight handle.
+///
+/// Appends one activity entry as a root, without a resolve time, when a log is attached: a caller
+/// that holds the handle itself (`pull_local`) names the package, so no resolve ran.
 ///
 /// `dest_override: Some(path)` places the package at `path` instead of the content-addressed store.
 /// `provided_metadata: Some(_)` is trusted as already validated and skips the registry fetch.
@@ -295,6 +373,32 @@ pub async fn setup_owned(
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
 ) -> Result<InstallInfo, PackageErrorKind> {
+    let (info, outcome) = setup_owned_outcome(
+        mgr,
+        pinned,
+        resolved,
+        platform,
+        groups,
+        dest_override,
+        provided_metadata,
+    )
+    .await?;
+    if let Some(log) = mgr.activity_log() {
+        log.record(outcome.into_activity(pinned, &info, Role::Root, None));
+    }
+    Ok(info)
+}
+
+/// [`setup_owned`] plus what it observed.
+async fn setup_owned_outcome(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedPackageRef,
+    resolved: super::resolve::ResolvedChain,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+    provided_metadata: Option<metadata::Metadata>,
+) -> Result<(InstallInfo, SetupOutcome), PackageErrorKind> {
     // Stamped at this single return boundary so no early return in `setup_owned_impl` skips it;
     // the candidate-symlink gate reads the platform to suppress foreign-platform installs.
     let resolved_platform = resolved.platform.clone();
@@ -313,12 +417,13 @@ pub async fn setup_owned(
         provided_metadata,
     )
     .await
-    .map(|info| {
+    .map(|(info, outcome)| {
         let info = info.with_platform(resolved_platform);
-        match transport_registry {
+        let info = match transport_registry {
             Some(registry) => info.with_transport_registry(registry),
             None => info,
-        }
+        };
+        (info, outcome)
     })
 }
 
@@ -330,7 +435,7 @@ async fn setup_owned_impl(
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
-) -> Result<InstallInfo, PackageErrorKind> {
+) -> Result<(InstallInfo, SetupOutcome), PackageErrorKind> {
     // Only `pull_local` supplies metadata, and it has no registry in the loop.
     let from_registry = provided_metadata.is_none();
 
@@ -349,7 +454,7 @@ async fn setup_owned_impl(
                 &resolved,
             )
             .await?;
-            return Ok(info);
+            return Ok((info, SetupOutcome::store_hit()));
         }
         log::debug!(
             "Package '{}' present in object store but install status not OK, re-pulling.",
@@ -379,7 +484,7 @@ async fn setup_owned_impl(
                 &resolved,
             )
             .await?;
-            return Ok(info);
+            return Ok((info, SetupOutcome::store_hit()));
         }
     }
 
@@ -420,17 +525,25 @@ async fn setup_owned_impl(
 
     let fs = mgr.file_structure();
 
-    let (layer_digests, dependencies) = tokio::join!(
-        extract_layers(
-            mgr,
-            pinned,
-            &resolved.transport_pinned,
-            &manifest,
-            groups.layers.clone()
-        ),
+    let timed = mgr.activity_log().is_some();
+    let (layers, dependencies) = tokio::join!(
+        async {
+            let watch = Stopwatch::start(timed);
+            let phase = extract_layers(
+                mgr,
+                pinned,
+                &resolved.transport_pinned,
+                &manifest,
+                groups.layers.clone(),
+            )
+            .await;
+            (phase, watch.elapsed())
+        },
         setup_dependencies(mgr, &metadata, pinned, platform, groups.clone()),
     );
-    let (layer_digests, dependencies) = (layer_digests?, dependencies?);
+    let (layer_phase, layer_phase_time) = layers;
+    let (layer_phase, dependencies) = (layer_phase?, dependencies?);
+    let layer_digests = layer_phase.digests;
 
     metadata
         .write_json(pkg.metadata())
@@ -458,6 +571,7 @@ async fn setup_owned_impl(
             .map_err(|e| PackageErrorKind::Internal(crate::Error::LayerLayout(e)))?;
         placements.push(placement);
     }
+    let extract_watch = Stopwatch::start(timed);
     ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, &pkg.content())
         .await
         .map_err(|error| PackageErrorKind::Internal(error.into()))?;
@@ -521,7 +635,13 @@ async fn setup_owned_impl(
     .await?;
 
     log::debug!("Pull succeeded for '{}'.", pinned);
-    Ok(install_info)
+    let outcome = SetupOutcome {
+        store_hit: false,
+        download_size: layer_phase.fetched_bytes,
+        download: layer_phase.fetched_any.then_some(layer_phase_time).flatten(),
+        extract: extract_watch.elapsed(),
+    };
+    Ok((install_info, outcome))
 }
 
 /// Acquires the exclusive temp directory for `identifier`, waiting up to `lock_timeout`
@@ -583,7 +703,7 @@ async fn setup_dependencies(
         let platform = platform.clone();
         let groups = groups.clone();
         tasks.spawn(async move {
-            let info = setup_with_tracker(&mgr, &dep_id, platform, groups).await?;
+            let info = setup_with_tracker(&mgr, &dep_id, platform, groups, Role::Dependency).await?;
             Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
         });
     }
@@ -665,7 +785,7 @@ async fn extract_layers(
     transport: &Result<ocx_oci::PinnedOciIdentifier, NoTransport>,
     manifest: &ocx_oci::ImageManifest,
     layer_group: LayerGroup,
-) -> Result<Vec<ocx_oci::Digest>, PackageErrorKind> {
+) -> Result<LayerPhase, PackageErrorKind> {
     let mut parsed = Vec::with_capacity(manifest.layers.len());
     for layer in &manifest.layers {
         let digest: ocx_oci::Digest = layer
@@ -680,7 +800,7 @@ async fn extract_layers(
     // resolves the physical host.
     let dial_guard: Arc<tokio::sync::OnceCell<DialVerdict>> = Arc::new(tokio::sync::OnceCell::new());
 
-    let mut tasks: JoinSet<(usize, Result<ocx_oci::Digest, PackageErrorKind>)> = JoinSet::new();
+    let mut tasks: JoinSet<(usize, Result<LayerExtraction, PackageErrorKind>)> = JoinSet::new();
     for (idx, (layer, digest)) in parsed.into_iter().enumerate() {
         let mgr = mgr.clone();
         let pinned = pinned.clone();
@@ -703,15 +823,48 @@ async fn extract_layers(
     }
 
     let mut results: Vec<Option<ocx_oci::Digest>> = vec![None; tasks.len()];
+    let mut phase = LayerPhase::default();
     while let Some(join_res) = tasks.join_next().await {
         let (idx, task_res) = match join_res {
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(e) => panic!("layer extraction task aborted: {e}"),
             Ok(v) => v,
         };
-        results[idx] = Some(task_res?);
+        let extraction = task_res?;
+        if let Some(bytes) = extraction.fetched_bytes {
+            phase.fetched_any = true;
+            phase.fetched_bytes += bytes;
+        }
+        results[idx] = Some(extraction.digest);
     }
-    Ok(results.into_iter().flatten().collect())
+    phase.digests = results.into_iter().flatten().collect();
+    Ok(phase)
+}
+
+/// What one package's layers came to: the digests in manifest order, and what this package fetched itself.
+#[derive(Debug, Default)]
+struct LayerPhase {
+    digests: Vec<ocx_oci::Digest>,
+    /// Descriptor sizes of the layers this package fetched as layer leader that were not in the layer store.
+    fetched_bytes: u64,
+    /// At least one layer was fetched by this package, which is what makes the phase a download.
+    fetched_any: bool,
+}
+
+/// One layer's digest and, when this task fetched it, the bytes fetched.
+struct LayerExtraction {
+    digest: ocx_oci::Digest,
+    fetched_bytes: Option<u64>,
+}
+
+impl LayerExtraction {
+    /// Already extracted or fetched by another task: nothing came over the wire for this package.
+    fn reused(digest: &ocx_oci::Digest) -> Self {
+        Self {
+            digest: digest.clone(),
+            fetched_bytes: None,
+        }
+    }
 }
 
 /// Memoized SSRF pre-flight for one pull. The whole `Result` is cached, not just `Ok`:
@@ -746,7 +899,7 @@ async fn extract_layer_atomic(
     layer_digest: &ocx_oci::Digest,
     layer_group: LayerGroup,
     dial_guard: &tokio::sync::OnceCell<DialVerdict>,
-) -> Result<ocx_oci::Digest, PackageErrorKind> {
+) -> Result<LayerExtraction, PackageErrorKind> {
     let fs = mgr.file_structure();
     let registry = pinned.registry().to_string();
 
@@ -754,7 +907,7 @@ async fn extract_layer_atomic(
     let handle = match layer_group.try_acquire(key).await.map_err(map_singleflight_error)? {
         singleflight::Acquisition::Resolved(()) => {
             log::debug!("Layer {} already extracted by another task, reusing.", layer_digest);
-            return Ok(layer_digest.clone());
+            return Ok(LayerExtraction::reused(layer_digest));
         }
         singleflight::Acquisition::Leader(handle) => handle,
     };
@@ -764,7 +917,7 @@ async fn extract_layer_atomic(
     if ocx_util::fs::path_exists_lossy(&layer_content).await {
         log::debug!("Layer {} present on disk, skipping fetch.", layer_digest);
         handle.complete(());
-        return Ok(layer_digest.clone());
+        return Ok(LayerExtraction::reused(layer_digest));
     }
 
     let transport = match transport {
@@ -800,9 +953,13 @@ async fn extract_layer_atomic(
     }
 
     match extract_layer_inner(pinned, transport, layer, layer_digest, client, fs).await {
-        Ok(()) => {
+        Ok(pulled) => {
             handle.complete(());
-            Ok(layer_digest.clone())
+            Ok(LayerExtraction {
+                digest: layer_digest.clone(),
+                // A successful pull read exactly the descriptor size (digest-verified).
+                fetched_bytes: pulled.then(|| u64::try_from(layer.size).unwrap_or(0)),
+            })
         }
         Err(e) => {
             let shared = handle.fail(e);
@@ -812,6 +969,8 @@ async fn extract_layer_atomic(
 }
 
 /// Inner extraction implementation — runs only for the leader task.
+///
+/// Returns whether this call pulled the layer; `false` when it found the layer already extracted.
 async fn extract_layer_inner(
     pinned: &ocx_oci::PinnedPackageRef,
     transport: &ocx_oci::PinnedOciIdentifier,
@@ -819,11 +978,11 @@ async fn extract_layer_inner(
     layer_digest: &ocx_oci::Digest,
     client: &ocx_oci::Client,
     fs: &file_structure::FileStructure,
-) -> Result<(), PackageErrorKind> {
+) -> Result<bool, PackageErrorKind> {
     let layer_content = fs.layers.content(pinned.registry(), layer_digest);
     if ocx_util::fs::path_exists_lossy(&layer_content).await {
         log::debug!("Layer {} already present on disk, skipping.", layer_digest);
-        return Ok(());
+        return Ok(false);
     }
 
     let temp_path = fs.temp.layer_path(pinned.registry(), layer_digest);
@@ -850,7 +1009,7 @@ async fn extract_layer_inner(
             "Layer {} installed by another process while waiting for lock, skipping.",
             layer_digest
         );
-        return Ok(());
+        return Ok(false);
     }
 
     // Fetched from the physical `transport`, but storage paths stay keyed on the logical
@@ -869,7 +1028,7 @@ async fn extract_layer_inner(
     super::layer_staging::finalize_layer_dir(fs, pinned.registry(), layer_digest, &temp.dir.dir).await?;
 
     drop(temp);
-    Ok(())
+    Ok(true)
 }
 
 /// Creates `refs/deps/` symlinks in the temp directory; targets are absolute store paths, so they survive the move.
@@ -1608,6 +1767,864 @@ mod tests {
         assert!(
             parents.contains(&Some(*pulling_id)),
             "no info event parented on the batch span; info parents: {parents:?}"
+        );
+    }
+
+    // ── activity log ─────────────────────────────────────────────────────────
+
+    /// An offline manager with `log` attached, over an empty home.
+    fn offline_manager(log: crate::activity::ActivityLog) -> (PackageManager, FileStructure, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::machine_local(&file_structure),
+            })
+            .with_index_namespaces(std::collections::HashSet::from(["ocx.sh".to_string()])),
+            Vec::new(),
+            ChainMode::Offline,
+            file_structure.blobs.clone(),
+        );
+        let manager = PackageManager::new(file_structure.clone(), index, None, "ocx.sh").with_activity_log(log);
+        (manager, file_structure, dir)
+    }
+
+    /// Writes a zero-layer package with `metadata` into the blob store and returns its manifest digest.
+    async fn write_zero_layer_package(file_structure: &FileStructure, metadata: serde_json::Value) -> ocx_oci::Digest {
+        write_package(file_structure, metadata, &[]).await
+    }
+
+    /// Writes a package with `metadata` and manifest `layers` into the blob store (the layers' bytes are not stored).
+    async fn write_package(
+        file_structure: &FileStructure,
+        metadata: serde_json::Value,
+        layers: &[ocx_oci::Descriptor],
+    ) -> ocx_oci::Digest {
+        let config = serde_json::to_vec(&metadata).unwrap();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(&config);
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": ocx_oci::OCI_IMAGE_MEDIA_TYPE,
+            "artifactType": super::MEDIA_TYPE_PACKAGE_V1,
+            "config": {
+                "mediaType": ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1,
+                "digest": config_digest.to_string(),
+                "size": config.len(),
+            },
+            "layers": layers,
+        }))
+        .unwrap();
+        let manifest_digest = ocx_oci::Algorithm::Sha256.hash(&manifest);
+        file_structure
+            .blobs
+            .write_blob("ocx.sh", &manifest_digest, &manifest)
+            .await
+            .unwrap();
+        file_structure
+            .blobs
+            .write_blob("ocx.sh", &config_digest, &config)
+            .await
+            .unwrap();
+        manifest_digest
+    }
+
+    /// An offline manager whose blob store holds a zero-layer package, with `log` attached.
+    async fn zero_layer_package(
+        log: crate::activity::ActivityLog,
+    ) -> (PackageManager, ocx_oci::PackageRef, tempfile::TempDir) {
+        let (manager, file_structure, dir) = offline_manager(log);
+        let digest = write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let package = ocx_oci::PackageRef::new_registry("acme/tool", "ocx.sh").clone_with_digest(digest);
+        (manager, package, dir)
+    }
+
+    /// Waits, bounded, until `waiters` tasks have joined the leader's in-flight entry.
+    async fn wait_for_waiters<V>(handle: &super::singleflight::Handle<V>, waiters: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while handle.waiter_count() < waiters {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the second task never joined the in-flight entry");
+    }
+
+    /// A setup that finds its package set up, or being set up, by another task records nothing.
+    ///
+    /// Asserted on the raw log, which `drain` would collapse per package. The test holds the
+    /// singleflight leader itself, so the second setup is a waiter whatever the scheduling.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn activity_log_records_leaders_only() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, package, _dir) = zero_layer_package(log.clone()).await;
+        let pinned = ocx_oci::PinnedPackageRef::try_from(package.clone()).expect("pinned identifier");
+
+        let info = super::setup_impl(
+            &manager,
+            &package,
+            ocx_oci::Platform::any(),
+            SetupGroups::new(),
+            None,
+            crate::activity::Role::Root,
+        )
+        .await
+        .expect("the leader sets up");
+        assert_eq!(log.recorded(), 1, "the leader records its entry");
+
+        let groups = SetupGroups::new();
+        let super::singleflight::Acquisition::Leader(handle) = groups
+            .packages
+            .try_acquire(pinned.strip_advisory())
+            .await
+            .expect("the key is free")
+        else {
+            panic!("the test must hold the leader");
+        };
+        let waiter = tokio::spawn({
+            let (manager, package, groups) = (manager.clone(), package.clone(), groups.clone());
+            async move {
+                super::setup_impl(
+                    &manager,
+                    &package,
+                    ocx_oci::Platform::any(),
+                    groups,
+                    None,
+                    crate::activity::Role::Root,
+                )
+                .await
+            }
+        });
+        wait_for_waiters(&handle, 1).await;
+        assert!(!waiter.is_finished(), "a waiter cannot finish while the leader is held");
+        handle.complete(info);
+        waiter
+            .await
+            .expect("the waiter task joins")
+            .expect("the waiter reuses the leader's result");
+
+        assert_eq!(log.recorded(), 1, "the waiter must append no entry");
+    }
+
+    /// The first setup of a package fetches it; a second setup in the same store only finds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_setup_records_a_store_hit() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, package, _dir) = zero_layer_package(log.clone()).await;
+
+        let mut store_hits = Vec::new();
+        for _ in 0..2 {
+            super::setup_impl(
+                &manager,
+                &package,
+                ocx_oci::Platform::any(),
+                SetupGroups::new(),
+                None,
+                crate::activity::Role::Root,
+            )
+            .await
+            .expect("the setup succeeds");
+            let entries = log.drain();
+            assert_eq!(entries.len(), 1, "one record per package per run");
+            assert_eq!(entries[0].action, crate::activity::Action::Pulled);
+            store_hits.push(entries[0].store_hit);
+        }
+
+        assert_eq!(store_hits, [false, true]);
+    }
+
+    /// A root with one dependency: the root is `Root`, the dependency `Dependency`, both `Pulled`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_entries_carry_role_dependency() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, file_structure, _dir) = offline_manager(log.clone());
+        let dep_digest =
+            write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let root_metadata = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [],
+            "dependencies": [{ "identifier": format!("ocx.sh/acme/dep:1.0@{dep_digest}") }],
+        });
+        let root_digest = write_zero_layer_package(&file_structure, root_metadata).await;
+        let root = ocx_oci::PackageRef::new_registry("acme/root", "ocx.sh").clone_with_digest(root_digest);
+
+        manager
+            .pull_all(
+                std::slice::from_ref(&root),
+                ocx_oci::Platform::any(),
+                crate::Concurrency::cores(),
+                true,
+            )
+            .await
+            .expect("the pull succeeds");
+        let entries = log.drain();
+
+        let by_repository = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.pinned.repository() == name)
+                .unwrap_or_else(|| panic!("no entry for {name}, drained {entries:?}"))
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(by_repository("acme/root").role, crate::activity::Role::Root);
+        assert_eq!(by_repository("acme/dep").role, crate::activity::Role::Dependency);
+        assert!(entries.iter().all(|e| e.action == crate::activity::Action::Pulled));
+    }
+
+    /// A root that is also its sibling's dependency is a root however the singleflight race went.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_root_that_is_also_a_dependency_stays_root() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, file_structure, _dir) = offline_manager(log.clone());
+        let shared_digest =
+            write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let sibling_metadata = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [],
+            "dependencies": [{ "identifier": format!("ocx.sh/acme/shared:1.0@{shared_digest}") }],
+        });
+        let sibling_digest = write_zero_layer_package(&file_structure, sibling_metadata).await;
+        let roots = [
+            ocx_oci::PackageRef::new_registry("acme/shared", "ocx.sh").clone_with_digest(shared_digest),
+            ocx_oci::PackageRef::new_registry("acme/sibling", "ocx.sh").clone_with_digest(sibling_digest),
+        ];
+
+        manager
+            .pull_all(&roots, ocx_oci::Platform::any(), crate::Concurrency::cores(), true)
+            .await
+            .expect("the pull succeeds");
+        let entries = log.drain();
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries.iter().all(|entry| entry.role == crate::activity::Role::Root),
+            "both packages were named by the command: {entries:?}"
+        );
+    }
+
+    /// `install_all` with a candidate link marks its roots `Installed`; without one they stay `Pulled`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_marks_roots_installed() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, file_structure, _dir) = offline_manager(log.clone());
+        let digest = write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let package = ocx_oci::PackageRef::new_registry("acme/tool", "ocx.sh")
+            .clone_with_tag("1.0")
+            .clone_with_digest(digest);
+
+        manager
+            .install_all(
+                vec![package.clone()],
+                ocx_oci::Platform::any(),
+                false,
+                false,
+                crate::Concurrency::cores(),
+                true,
+            )
+            .await
+            .expect("the pull succeeds");
+        let pulled = log.drain();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(pulled[0].action, crate::activity::Action::Pulled);
+
+        manager
+            .install_all(
+                vec![package],
+                ocx_oci::Platform::any(),
+                true,
+                false,
+                crate::Concurrency::cores(),
+                true,
+            )
+            .await
+            .expect("the install succeeds");
+        let installed = log.drain();
+
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].action, crate::activity::Action::Installed);
+        assert_eq!(installed[0].role, crate::activity::Role::Root);
+    }
+
+    /// A gzipped tar with one file, and its descriptor.
+    fn shared_layer() -> (Vec<u8>, ocx_oci::Descriptor) {
+        layer_with_file("shared.txt", b"shared layer content")
+    }
+
+    /// A gzipped tar holding `content` as `name`, and its descriptor.
+    fn layer_with_file(name: &str, content: &[u8]) -> (Vec<u8>, ocx_oci::Descriptor) {
+        use std::io::Write as _;
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, content).unwrap();
+            builder.finish().unwrap();
+        }
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_bytes).unwrap();
+        let bytes = encoder.finish().unwrap();
+        let descriptor = ocx_oci::Descriptor {
+            media_type: ocx_oci::media_type::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: ocx_oci::Algorithm::Sha256.hash(&bytes).to_string(),
+            size: bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        (bytes, descriptor)
+    }
+
+    /// Two packages referencing one layer fetch it once: only the package that led the layer
+    /// counts its bytes.
+    ///
+    /// Driven at `setup_owned`, the smallest seam that reaches a layer fetch through the stub
+    /// transport; the entries are the ones the manager's log holds when both have returned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shared_layer_counts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            Vec::new(),
+            ChainMode::Default,
+        );
+        let (layer_bytes, layer) = shared_layer();
+        let layer_size = u64::try_from(layer.size).unwrap();
+        let transport_data = StubTransportData::new();
+        transport_data.write().blobs.insert(layer.digest.clone(), layer_bytes);
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(transport_data)));
+        let log = crate::activity::ActivityLog::new();
+        let manager =
+            PackageManager::new(file_structure, index, Some(client), "example.com").with_activity_log(log.clone());
+
+        let platform = ocx_oci::Platform::Specific {
+            os: ocx_oci::OperatingSystem::Linux,
+            arch: ocx_oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        };
+        let groups = SetupGroups::new();
+        let mut setups = Vec::new();
+        for (repository, fill) in [("test/first", "a"), ("test/second", "b")] {
+            let digest = ocx_oci::Digest::Sha256(fill.repeat(64));
+            let pinned = ocx_oci::PinnedPackageRef::try_from(
+                ocx_oci::PackageRef::new_registry(repository, "example.com")
+                    .clone_with_tag("1.0.0")
+                    .clone_with_digest(digest.clone()),
+            )
+            .expect("pinned identifier");
+            let resolved = ResolvedChain {
+                pinned: pinned.clone(),
+                transport_pinned: Ok(
+                    ocx_oci::OciIdentifier::from_parts(repository, "example.com").pinned_at(digest.clone())
+                ),
+                chain: vec![ChainBlob {
+                    identifier: pinned.clone(),
+                    role: ChainRole::Manifest,
+                    media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                    size: 2,
+                }],
+                final_manifest: ocx_oci::ImageManifest {
+                    artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+                    config: ocx_oci::Descriptor {
+                        media_type: ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
+                        digest: digest.to_string(),
+                        size: 2,
+                        urls: None,
+                        artifact_type: None,
+                        annotations: None,
+                    },
+                    layers: vec![layer.clone()],
+                    ..Default::default()
+                },
+                platform: platform.clone(),
+            };
+            setups.push((pinned, resolved));
+        }
+        let (first, second) = (setups.remove(0), setups.remove(0));
+        let (a, b) = tokio::join!(
+            setup_owned(
+                &manager,
+                &first.0,
+                first.1,
+                platform.clone(),
+                groups.clone(),
+                None,
+                Some(bundle_metadata())
+            ),
+            setup_owned(
+                &manager,
+                &second.0,
+                second.1,
+                platform.clone(),
+                groups.clone(),
+                None,
+                Some(bundle_metadata())
+            ),
+        );
+        a.expect("the first package sets up");
+        b.expect("the second package sets up");
+
+        let entries = log.drain();
+        assert_eq!(entries.len(), 2, "one entry per package");
+        assert_eq!(
+            entries.iter().map(|entry| entry.download_size).sum::<u64>(),
+            layer_size,
+            "the shared layer's bytes are counted once, by its leader"
+        );
+        assert_eq!(
+            entries.iter().filter(|entry| entry.download_size == 0).count(),
+            1,
+            "the package that did not lead the layer fetched nothing itself"
+        );
+    }
+
+    /// A pull that fails mid-setup records nothing: no entry and no role for a package that never landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_install_records_nothing() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, file_structure, _dir) = offline_manager(log.clone());
+        let (_, layer) = shared_layer();
+        let digest = write_package(
+            &file_structure,
+            serde_json::to_value(bundle_metadata()).unwrap(),
+            std::slice::from_ref(&layer),
+        )
+        .await;
+        let package = ocx_oci::PackageRef::new_registry("acme/tool", "ocx.sh")
+            .clone_with_tag("1.0")
+            .clone_with_digest(digest);
+
+        let error = manager
+            .install_all(
+                vec![package],
+                ocx_oci::Platform::any(),
+                true,
+                false,
+                crate::Concurrency::cores(),
+                true,
+            )
+            .await
+            .expect_err("the layer is neither cached nor fetchable offline");
+
+        let crate::Error::InstallFailed(failures) = &error else {
+            panic!("expected InstallFailed, got {error:?}");
+        };
+        let [failure] = failures.as_slice() else {
+            panic!("expected one failed package, got {failures:?}");
+        };
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&failure.kind);
+        let mut blocked = false;
+        while let Some(current) = cause {
+            blocked |= matches!(
+                current.downcast_ref::<crate::error::PackageErrorKind>(),
+                Some(crate::error::PackageErrorKind::Internal(crate::Error::OciIndex(
+                    ocx_index::error::Error::PolicyResolutionBlocked { .. }
+                )))
+            );
+            cause = current.source();
+        }
+        assert!(
+            blocked,
+            "the layer must be unobtainable offline (the index refuses its location), got {failure:?}"
+        );
+        assert_eq!(log.recorded(), 0, "a failed setup appends no entry");
+        assert!(log.drain().is_empty());
+    }
+
+    /// Same, when the transport is reached and its blob does not verify.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_setup_whose_layer_fetch_fails_records_nothing() {
+        let log = crate::activity::ActivityLog::new();
+        let (bytes, layer) = shared_layer();
+        let (manager, _dir) = layered_manager(&[(bytes[..bytes.len() / 2].to_vec(), layer.clone())], log.clone());
+
+        let (pinned, resolved) = layered_chain("test/tool", "a", std::slice::from_ref(&layer));
+        let outcome = setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            linux_amd64(),
+            SetupGroups::new(),
+            None,
+            Some(bundle_metadata()),
+        )
+        .await;
+
+        assert!(outcome.is_err(), "a truncated layer must not verify");
+        assert_eq!(log.recorded(), 0, "a failed setup appends no entry");
+    }
+
+    /// The package that waits on a layer another package leads counts no download for it:
+    /// only the layer leader's entry carries the bytes and the download time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_package_waiting_on_a_layer_leader_counts_no_download() {
+        let log = crate::activity::ActivityLog::new();
+        let (bytes, layer) = shared_layer();
+        let (manager, _dir) = layered_manager(&[(bytes, layer.clone())], log.clone());
+        let (pinned, resolved) = layered_chain("test/waiter", "a", std::slice::from_ref(&layer));
+        let layer_digest: ocx_oci::Digest = layer.digest.clone().try_into().expect("layer digest");
+        let layer_content = manager
+            .file_structure()
+            .layers
+            .content(pinned.registry(), &layer_digest);
+
+        let groups = SetupGroups::new();
+        let super::singleflight::Acquisition::Leader(handle) = groups
+            .layers
+            .try_acquire((pinned.registry().to_string(), layer_digest))
+            .await
+            .expect("the key is free")
+        else {
+            panic!("the test must hold the layer leader");
+        };
+        let waiter = tokio::spawn({
+            let (manager, groups) = (manager.clone(), groups.clone());
+            async move {
+                setup_owned(
+                    &manager,
+                    &pinned,
+                    resolved,
+                    linux_amd64(),
+                    groups,
+                    None,
+                    Some(bundle_metadata()),
+                )
+                .await
+            }
+        });
+        wait_for_waiters(&handle, 1).await;
+        assert!(
+            !waiter.is_finished(),
+            "the package cannot finish while its layer is led elsewhere"
+        );
+        // What the layer leader leaves behind when it completes.
+        tokio::fs::create_dir_all(&layer_content).await.unwrap();
+        handle.complete(());
+        waiter
+            .await
+            .expect("the waiter task joins")
+            .expect("the package sets up from the leader's layer");
+
+        let entries = log.drain();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].store_hit);
+        assert_eq!(entries[0].download_size, 0, "the leader's bytes are not the waiter's");
+        assert_eq!(entries[0].download, None, "no layer was fetched by this package");
+        assert!(entries[0].extract.is_some(), "the package was still assembled");
+    }
+
+    // ── timings and downloaded bytes ─────────────────────────────────────────
+
+    fn linux_amd64() -> ocx_oci::Platform {
+        ocx_oci::Platform::Specific {
+            os: ocx_oci::OperatingSystem::Linux,
+            arch: ocx_oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        }
+    }
+
+    /// A manager over a stub transport serving `layers`, with `log` attached.
+    fn layered_manager(
+        layers: &[(Vec<u8>, ocx_oci::Descriptor)],
+        log: crate::activity::ActivityLog,
+    ) -> (PackageManager, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            Vec::new(),
+            ChainMode::Default,
+        );
+        let transport_data = StubTransportData::new();
+        for (bytes, descriptor) in layers {
+            transport_data
+                .write()
+                .blobs
+                .insert(descriptor.digest.clone(), bytes.clone());
+        }
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(transport_data)));
+        let manager = PackageManager::new(
+            FileStructure::with_root(dir.path().to_path_buf()),
+            index,
+            Some(client),
+            "example.com",
+        )
+        .with_activity_log(log);
+        (manager, dir)
+    }
+
+    /// A resolved package named `repository`, identified by `fill` repeated, whose manifest carries `layers`.
+    fn layered_chain(
+        repository: &str,
+        fill: &str,
+        layers: &[ocx_oci::Descriptor],
+    ) -> (ocx_oci::PinnedPackageRef, ResolvedChain) {
+        let digest = ocx_oci::Digest::Sha256(fill.repeat(64));
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, "example.com")
+                .clone_with_tag("1.0.0")
+                .clone_with_digest(digest.clone()),
+        )
+        .expect("pinned identifier");
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: Ok(
+                ocx_oci::OciIdentifier::from_parts(repository, "example.com").pinned_at(digest.clone())
+            ),
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest: ocx_oci::ImageManifest {
+                artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+                config: ocx_oci::Descriptor {
+                    media_type: ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
+                    digest: digest.to_string(),
+                    size: 2,
+                    urls: None,
+                    artifact_type: None,
+                    annotations: None,
+                },
+                layers: layers.to_vec(),
+                ..Default::default()
+            },
+            platform: linux_amd64(),
+        };
+        (pinned, resolved)
+    }
+
+    async fn set_up(
+        manager: &PackageManager,
+        (pinned, resolved): (ocx_oci::PinnedPackageRef, ResolvedChain),
+        groups: SetupGroups,
+    ) -> InstallInfo {
+        setup_owned(
+            manager,
+            &pinned,
+            resolved,
+            linux_amd64(),
+            groups,
+            None,
+            Some(bundle_metadata()),
+        )
+        .await
+        .expect("the package sets up")
+    }
+
+    /// A package fetched once is only found the second time: no layer phase, no assembly, no bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_install_is_a_store_hit_without_download_or_extract() {
+        let log = crate::activity::ActivityLog::new();
+        let (bytes, layer) = shared_layer();
+        let (manager, _dir) = layered_manager(&[(bytes, layer.clone())], log.clone());
+
+        set_up(
+            &manager,
+            layered_chain("test/tool", "a", std::slice::from_ref(&layer)),
+            SetupGroups::new(),
+        )
+        .await;
+        let first = log.drain();
+        set_up(
+            &manager,
+            layered_chain("test/tool", "a", std::slice::from_ref(&layer)),
+            SetupGroups::new(),
+        )
+        .await;
+        let second = log.drain();
+
+        assert_eq!((first.len(), second.len()), (1, 1));
+        assert!(!first[0].store_hit);
+        assert_eq!(first[0].download_size, u64::try_from(layer.size).unwrap());
+        assert!(first[0].download.is_some(), "the first run fetched a layer");
+        assert!(first[0].extract.is_some(), "the first run assembled the package");
+        assert!(second[0].store_hit);
+        assert_eq!(second[0].download_size, 0);
+        assert_eq!(second[0].download, None);
+        assert_eq!(second[0].extract, None);
+    }
+
+    /// The bytes are the descriptor sizes of the layers fetched, summed; the layer phase is a download.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetched_bytes_equal_the_layer_descriptor_sizes() {
+        let log = crate::activity::ActivityLog::new();
+        let (first_bytes, first) = layer_with_file("first.txt", b"the first layer");
+        let (second_bytes, second) = layer_with_file("second.txt", b"a second, longer layer body");
+        let (manager, _dir) = layered_manager(
+            &[(first_bytes, first.clone()), (second_bytes, second.clone())],
+            log.clone(),
+        );
+
+        set_up(
+            &manager,
+            layered_chain("test/tool", "a", &[first.clone(), second.clone()]),
+            SetupGroups::new(),
+        )
+        .await;
+        let entries = log.drain();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].download_size,
+            u64::try_from(first.size + second.size).unwrap()
+        );
+        assert!(entries[0].download.is_some());
+    }
+
+    /// A layer already in the layer store costs no bytes and no download phase, but the package is still assembled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_layer_already_in_the_store_is_not_counted() {
+        let log = crate::activity::ActivityLog::new();
+        let (bytes, layer) = shared_layer();
+        let (manager, _dir) = layered_manager(&[(bytes, layer.clone())], log.clone());
+
+        set_up(
+            &manager,
+            layered_chain("test/first", "a", std::slice::from_ref(&layer)),
+            SetupGroups::new(),
+        )
+        .await;
+        log.drain();
+        set_up(
+            &manager,
+            layered_chain("test/second", "b", std::slice::from_ref(&layer)),
+            SetupGroups::new(),
+        )
+        .await;
+        let entries = log.drain();
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].store_hit);
+        assert_eq!(entries[0].download_size, 0);
+        assert_eq!(entries[0].download, None);
+        assert!(entries[0].extract.is_some());
+    }
+
+    /// The resolve time is on every `setup_impl` entry, store hit or not; no log attached means no timing at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn setup_records_resolve_time_for_fetched_and_cached_packages() {
+        let log = crate::activity::ActivityLog::new();
+        let (manager, package, _dir) = zero_layer_package(log.clone()).await;
+
+        let mut resolves = Vec::new();
+        for _ in 0..2 {
+            super::setup_impl(
+                &manager,
+                &package,
+                ocx_oci::Platform::any(),
+                SetupGroups::new(),
+                None,
+                crate::activity::Role::Root,
+            )
+            .await
+            .expect("the setup succeeds");
+            resolves.push(log.drain()[0].resolve);
+        }
+
+        assert!(resolves.iter().all(Option::is_some), "{resolves:?}");
+    }
+
+    /// The root's extract time starts after its dependencies are set up: a dependency held back for
+    /// `HELD_BACK` (a singleflight leader the root waits on) is inside the root's total, not its extract.
+    ///
+    /// Asserted as an ordering, not a duration: the extract began after the dependency was released, so
+    /// it fits in the time from that release to the end. Extract itself does file I/O whose latency
+    /// varies with the host, so a fixed bound on it flakes under load.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_setup_time_is_not_inside_the_root_extract() {
+        use std::time::{Duration, Instant};
+
+        use ocx_util::singleflight;
+
+        const HELD_BACK: Duration = Duration::from_millis(600);
+
+        let log = crate::activity::ActivityLog::new();
+        let (manager, file_structure, _dir) = offline_manager(log.clone());
+        let dependency_digest =
+            write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let root_digest = write_zero_layer_package(
+            &file_structure,
+            serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "env": [],
+                "dependencies": [{ "identifier": format!("ocx.sh/acme/dep:1.0@{dependency_digest}") }],
+            }),
+        )
+        .await;
+        let dependency = ocx_oci::PackageRef::new_registry("acme/dep", "ocx.sh")
+            .clone_with_tag("1.0")
+            .clone_with_digest(dependency_digest);
+        let root = ocx_oci::PackageRef::new_registry("acme/root", "ocx.sh").clone_with_digest(root_digest);
+
+        // The dependency installed beforehand is the value the held-back leader later hands over.
+        let dependency_info = super::setup_impl(
+            &manager,
+            &dependency,
+            ocx_oci::Platform::any(),
+            SetupGroups::new(),
+            None,
+            crate::activity::Role::Root,
+        )
+        .await
+        .expect("the dependency sets up");
+        log.drain();
+
+        let groups = SetupGroups::new();
+        let held = match groups
+            .packages
+            .try_acquire(dependency_info.identifier().strip_advisory())
+            .await
+            .expect("the group accepts the key")
+        {
+            singleflight::Acquisition::Leader(handle) => handle,
+            singleflight::Acquisition::Resolved(_) => panic!("nothing has set the dependency up in this group"),
+        };
+
+        let started = Instant::now();
+        let root_setup = super::setup_impl(
+            &manager,
+            &root,
+            ocx_oci::Platform::any(),
+            groups,
+            None,
+            crate::activity::Role::Root,
+        );
+        let release = async {
+            tokio::time::sleep(HELD_BACK).await;
+            let released_at = Instant::now();
+            held.complete(dependency_info.clone());
+            released_at
+        };
+        let (root_result, released_at) = tokio::join!(root_setup, release);
+        root_result.expect("the root sets up");
+        let finished_at = Instant::now();
+        let total = finished_at - started;
+        let after_release = finished_at - released_at;
+
+        let entries = log.drain();
+        let root_entry = entries
+            .iter()
+            .find(|entry| entry.pinned.repository() == "acme/root")
+            .unwrap_or_else(|| panic!("no entry for the root: {entries:?}"));
+        let extract = root_entry.extract.expect("the root was assembled");
+        assert!(total >= HELD_BACK, "the root waited for its dependency: {total:?}");
+        assert!(
+            extract <= after_release,
+            "the dependency's {HELD_BACK:?} is not inside the root's extract: {extract:?} \
+             against {after_release:?} between the release and the end"
         );
     }
 }

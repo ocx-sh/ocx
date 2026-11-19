@@ -74,7 +74,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-24 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+25 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
 
 | Crate | Owns |
 |---|---|
@@ -95,6 +95,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 | `ocx_project` [internal] | The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt activation |
 | `ocx_package_manager` [internal] | Resolution, install, environment composition, patches, launch, execution records |
 | `ocx_announce` [internal] | Index publication: announce pipeline, forge drivers, index claim |
+| `ocx_telemetry` [internal] | Usage telemetry: the arming gate, destination selection and one OTLP/HTTP export per command |
 | `ocx_script` [internal] | The Starlark host API for `ocx package test --script` |
 | `ocx_setup` [internal] | Self-install: bootstrap, env shim files, managed RC blocks, profile detection |
 | `ocx_sdkgen` [internal; its CLI is an interface] | Published-document contract: the schema subset `reports`, `errors` and `cli.json` may use, and the lint that holds them to it |

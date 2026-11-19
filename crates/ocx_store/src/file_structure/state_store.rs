@@ -324,6 +324,12 @@ impl StateStore {
         self.root.join("host").join("capabilities.json")
     }
 
+    /// The per-installation random identifier telemetry reports as `service.instance.id`:
+    /// `<state>/telemetry/installation-id`.
+    pub fn telemetry_installation_id_file(&self) -> PathBuf {
+        self.root.join("telemetry").join("installation-id")
+    }
+
     /// Whether `path` was touched within `interval`; absent, unreadable or a zero `interval` mean not throttled. Blocking.
     pub fn is_throttled(path: &Path, interval: Duration) -> bool {
         if interval.is_zero() {
@@ -391,6 +397,15 @@ mod tests {
     use std::time::Duration;
 
     use super::{StateStore, touch_atomic};
+
+    #[test]
+    fn telemetry_installation_id_file_is_under_telemetry() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(
+            store.telemetry_installation_id_file(),
+            PathBuf::from("/ocx/state/telemetry/installation-id")
+        );
+    }
 
     #[test]
     fn root_returns_store_root() {

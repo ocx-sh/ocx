@@ -125,7 +125,10 @@ SUITE = REPO_ROOT / "test"
 #: skipped 144 -> 145: `test_user_file_publish.py` skips on `win32`, which has no umask or POSIX mode to carry.
 #: skipped 145 -> 146: the `--quiet` skipped-profile case in `test_self_setup.py` needs a dangling symlink,
 #: which takes a privilege on `win32`.
-PINNED = {"tests": 3526, "skipped": 146, "xfailed": 4, "parametrized": 224}
+#: -> 3800 / 147 / 2 / 268 with the telemetry acceptance modules: `tests` +274, `parametrized` +44,
+#: `skipped` +1 (the read-only `state` dir case in `test_telemetry_export.py` needs POSIX and a non-root
+#: user); `xfailed` is the live count, which was already below the pin.
+PINNED = {"tests": 3800, "skipped": 147, "xfailed": 2, "parametrized": 268}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not
