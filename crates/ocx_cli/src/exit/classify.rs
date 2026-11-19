@@ -101,7 +101,7 @@ mod tests {
         let toml_err = toml::from_str::<toml::Value>("invalid =[[[").unwrap_err();
         let err = ConfigError::Parse {
             path: PathBuf::from("/bad.toml"),
-            source: Box::new(toml_err),
+            source: Box::new(ocx_config::error::ParseFailure::new(&toml_err, "invalid =[[[")),
         };
         assert_eq!(classify(err), ExitCode::ConfigError);
     }

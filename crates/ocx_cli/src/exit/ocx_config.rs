@@ -405,7 +405,7 @@ mod tests {
                 maximum: 1_048_576,
             },
             ManagedConfigPublishError::InvalidToml {
-                source: toml::from_str::<toml::Value>("= 1").expect_err("a bare `=` is not valid TOML"),
+                source: ocx_config::error::ParseFailure::from_message("a bare `=` is not valid TOML"),
             },
             ManagedConfigPublishError::AmbiguousTrustRoot,
             ManagedConfigPublishError::AmbiguousExtraCaCerts,

@@ -501,6 +501,40 @@ def test_setup_no_modify_path_writes_shims_only(ocx: OcxRunner, tmp_path: Path) 
         assert (ocx_home / shim).is_file(), f"{shim} must still be written with --no-modify-path"
 
 
+def test_setup_config_writer_never_prints_the_broken_line_of_a_malformed_config(
+    ocx: OcxRunner,
+) -> None:
+    """A `config.toml` the writer cannot parse is reported by file and line, never by its content.
+
+    toml_edit's parse error quotes the offending source line, so a token on a broken header line
+    would reach stderr and the `--format json` error document. `OCX_NO_CONFIG=1` lets the run past
+    the loader, so the write path under test is the first to read the file.
+    """
+    token = "ghp_FAKEFAKEFAKEFAKE0000"  # obviously fake; shaped like a token
+    _seed_candidate(ocx)
+    config = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config.write_text(f'[telemetry]\nenabled = true\n[shell token = "{token}"\n', encoding="utf-8")
+    env = {**ocx.env, "OCX_NO_CONFIG": "1"}
+
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", "--offline", "self", "setup", "--no-modify-path"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    # Control: the run reached the writer and refused the file on its parse error.
+    assert result.returncode == 74, result.stderr
+    document = json.loads(result.stdout)
+    assert document["error"]["detail"] == "config_edit_parse", document
+    assert str(config) in document["error"]["message"]
+    assert re.search(r"line \d+", document["error"]["message"]), document["error"]["message"]
+    assert token not in result.stdout, f"token in the error document:\n{result.stdout}"
+    assert token not in result.stderr, f"token on stderr:\n{result.stderr}"
+    assert config.read_text(encoding="utf-8").count(token) == 1, "the file must be left as it was"
+
+
 @pytest.mark.parametrize("truthy", ["1", "true"])
 def test_setup_no_modify_path_via_env_var(ocx: OcxRunner, tmp_path: Path, truthy: str) -> None:
     """A truthy ``OCX_NO_MODIFY_PATH`` env var sets ``--no-modify-path``.

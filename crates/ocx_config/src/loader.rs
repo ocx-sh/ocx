@@ -330,9 +330,11 @@ impl ConfigLoader {
             Err(source) => {
                 // Not benign: WARN even when not `required`, where nothing else would report it.
                 log::warn!(
-                    "managed-config snapshot for '{}' is not a usable config and was not applied; re-sync with \
-                     `ocx config update` ({source})",
-                    resolved.source
+                    "{}",
+                    Self::unusable_snapshot_warning(
+                        &resolved.source,
+                        &crate::error::ParseFailure::new(&source, &payload)
+                    )
                 );
                 return Ok((
                     accumulator,
@@ -831,7 +833,7 @@ impl ConfigLoader {
                 Self::parse_config_stripping_refused_consent(&contents, path.display()).map_err(|source| {
                     Error::Parse {
                         path: path.to_path_buf(),
-                        source: Box::new(source),
+                        source: Box::new(crate::error::ParseFailure::new(&source, &contents)),
                     }
                 })?;
             if let Some(update) = parsed.update.as_mut() {
@@ -934,6 +936,15 @@ impl ConfigLoader {
         if shell.completions.is_some() {
             shell.completions_tier = Some(tier);
         }
+    }
+
+    /// The warning for a snapshot that fails the typed parse; `failure` carries no source line, which
+    /// could hold a token.
+    fn unusable_snapshot_warning(source: &impl std::fmt::Display, failure: &crate::error::ParseFailure) -> String {
+        format!(
+            "managed-config snapshot for '{source}' is not a usable config and was not applied; re-sync with \
+             `ocx config update` ({failure})"
+        )
     }
 
     /// Parse one `config.toml` payload, dropping a refused `[shell.consent]` table rather than
@@ -5754,6 +5765,70 @@ mod tests {
             .expect("a refused consent grant must not take the whole tier down with it");
 
         assert_consent_stripped_and_siblings_survive(&config);
+    }
+
+    /// What `anyhow`'s `{:#}` prints: the `Display` of every link in the `source()` chain.
+    fn full_chain(err: &(dyn std::error::Error + 'static)) -> String {
+        let mut rendered = err.to_string();
+        let mut cause = err.source();
+        while let Some(next) = cause {
+            rendered.push_str(": ");
+            rendered.push_str(&next.to_string());
+            cause = next.source();
+        }
+        rendered
+    }
+
+    #[test]
+    fn unusable_snapshot_warning_omits_the_source_line() {
+        let text = "[registry]\nsecret = Bearer s3cr3t\n";
+        let error = toml::from_str::<Config>(text).expect_err("a bare value is not TOML");
+        let warning = ConfigLoader::unusable_snapshot_warning(
+            &"corp.example/cfg:1",
+            &crate::error::ParseFailure::new(&error, text),
+        );
+        assert!(!warning.contains("s3cr3t") && !warning.contains("Bearer"), "{warning}");
+        assert!(warning.contains("line 2"), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn a_typed_error_never_echoes_the_value() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[registries.\"a.example\"]\ninsecure = \"Bearer s3cr3t\"\n",
+        );
+
+        let err = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("a mistyped key must fail the file");
+
+        for rendered in [full_chain(&err), format!("{err:#}"), format!("{err:?}")] {
+            assert!(!rendered.contains("s3cr3t"), "{rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_error_never_quotes_the_source_line() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[registry]\ndefault = \"x\"\nsecret = Bearer s3cr3t\n",
+        );
+
+        let err = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("a broken line must fail the file");
+
+        for rendered in [full_chain(&err), format!("{err:#}"), format!("{err:?}")] {
+            assert!(!rendered.contains("s3cr3t"), "{rendered}");
+            assert!(!rendered.contains("Bearer"), "{rendered}");
+        }
+        let chain = full_chain(&err);
+        assert!(chain.contains("config.toml"), "{chain}");
+        assert!(chain.contains("line 3"), "{chain}");
     }
 
     /// The discriminator: the strip is narrow. A payload broken for any reason

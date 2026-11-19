@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use toml_edit::DocumentMut;
 
+use crate::error::ParseFailure;
 use crate::loader::MAX_CONFIG_SIZE;
 use ocx_util::fs::{BoundedReadError, NewFileMode, lock_scoped, read_bounded, replace_user_file};
 
@@ -67,9 +68,9 @@ pub enum EditError {
     Parse {
         /// The file that would not parse.
         path: PathBuf,
-        /// The parser's own report.
+        /// The parser's report, position and message only: its own `Display` quotes the source line.
         #[source]
-        source: toml_edit::TomlError,
+        source: Box<ParseFailure>,
     },
     /// The file parses but has a shape the closure cannot edit; it is left as it was.
     #[error("{}: {reason}", path.display())]
@@ -116,7 +117,7 @@ where
     edit_with(locks_root, config_path, dry_run, LOCK_TIMEOUT, move |path, original| {
         let mut document: DocumentMut = original.parse().map_err(|source| EditError::Parse {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(ParseFailure::from_toml_edit(&source, original)),
         })?;
         apply(&mut document).map_err(|reason| EditError::Malformed {
             path: path.to_path_buf(),
@@ -355,6 +356,34 @@ completions = true
             std::fs::read_to_string(&config).unwrap(),
             format!("{HAND_WRITTEN}hook = true\n")
         );
+    }
+
+    /// A parse failure on a line holding a credential names the path and line, never the line.
+    #[tokio::test]
+    async fn parse_failure_never_echoes_the_source_line() {
+        let (_dir, locks, config) = home();
+        std::fs::write(
+            &config,
+            "[registry]\ndefault = \"ghcr.io\"\nauthorization = \"ocxtest-tok-XXXX\" oops\n",
+        )
+        .unwrap();
+
+        let error = edit(&locks, &config, false, set_hook)
+            .await
+            .expect_err("a broken header does not parse");
+
+        let mut chain = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            chain.push_str(&format!(": {cause}"));
+            source = cause.source();
+        }
+        assert!(!chain.contains("ocxtest-tok-XXXX"), "token leaked: {chain}");
+        assert!(!chain.contains("authorization"), "source line leaked: {chain}");
+        assert!(chain.contains(&config.display().to_string()), "path missing: {chain}");
+        assert!(chain.contains("line 3"), "position missing: {chain}");
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("ocxtest-tok-XXXX"), "token leaked in Debug: {debug}");
     }
 
     /// A render over `MAX_CONFIG_SIZE` is refused as 78 before any write —
