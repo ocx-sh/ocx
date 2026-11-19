@@ -12,9 +12,12 @@ version: '3'
 # each `continue-on-error: true` until the mirror side lands.
 
 vars:
-  # The env var wins; the default is the sibling checkout the four worktrees
-  # and CI (`ocx-sh/ocx-mirror` checked out next to this repo) share.
-  MIRROR_DIR: '{{.OCX_MIRROR_DIR | default (printf "%s/../ocx-mirror" .ROOT_DIR)}}'
+  # The task argument, else the environment, else the sibling checkout the four
+  # worktrees and CI (`ocx-sh/ocx-mirror` checked out next to this repo) share.
+  # Keep the caller's name: a task argument overrides the top-level var of its
+  # name but is out of scope while top-level vars are templated, so a var derived
+  # from it is silently ignored (.claude/tests TestSatelliteMirrorDir goes red).
+  OCX_MIRROR_DIR: '{{.OCX_MIRROR_DIR | default (printf "%s/../ocx-mirror" .ROOT_DIR)}}'
   SCRATCH: '{{.ROOT_DIR}}/.tmp/satellite-verify'
   # A `git worktree` of the mirror, created and removed on every run. The
   # live checkout is never written to: the overlay lands in the worktree and
@@ -38,7 +41,7 @@ vars:
 
 tasks:
   verify:
-    desc: Build ocx-mirror (OCX_MIRROR_DIR, default ../ocx-mirror) against this tree in a disposable worktree and refuse operations-tier links (C-018)
+    desc: Build ocx-mirror (OCX_MIRROR_DIR as task argument or environment, default ../ocx-mirror) against this tree in a disposable worktree and refuse operations-tier links (C-018)
     summary: |
       1. `git worktree add` of the mirror's HEAD under .tmp/satellite-verify/
       2. rsync this tree over the worktree's external/ocx (target/, .git,
@@ -122,10 +125,10 @@ tasks:
       # A `cmds:` entry, not a precondition: `--force` skips preconditions
       # and a missing checkout must never read as a pass.
       - >-
-        test -f '{{.MIRROR_DIR}}/Cargo.toml' || {
-          echo "satellite: no ocx-mirror checkout at {{.MIRROR_DIR}} — set OCX_MIRROR_DIR to a checkout of ocx-sh/ocx-mirror" >&2; exit 1; }
+        test -f '{{.OCX_MIRROR_DIR}}/Cargo.toml' || {
+          echo "satellite: no ocx-mirror checkout at {{.OCX_MIRROR_DIR}} — set OCX_MIRROR_DIR to a checkout of ocx-sh/ocx-mirror, as a task argument or in the environment" >&2; exit 1; }
       - mkdir -p '{{.SCRATCH}}'
-      - git -C '{{.MIRROR_DIR}}' worktree add --detach '{{.MIRROR_WORKTREE}}' HEAD
+      - git -C '{{.OCX_MIRROR_DIR}}' worktree add --detach '{{.MIRROR_WORKTREE}}' HEAD
       - mkdir -p '{{.MIRROR_WORKTREE}}/external/ocx'
       - >-
         rsync -a --delete
@@ -143,11 +146,11 @@ tasks:
     # registration to prune: `clean` must still reach the scratch.
     cmds:
       - >-
-        if [ -e '{{.MIRROR_WORKTREE}}' ] && git -C '{{.MIRROR_DIR}}' worktree remove --force '{{.MIRROR_WORKTREE}}'; then
+        if [ -e '{{.MIRROR_WORKTREE}}' ] && git -C '{{.OCX_MIRROR_DIR}}' worktree remove --force '{{.MIRROR_WORKTREE}}'; then
           :;
         else
           rm -rf '{{.MIRROR_WORKTREE}}';
-          [ ! -d '{{.MIRROR_DIR}}' ] || git -C '{{.MIRROR_DIR}}' worktree prune;
+          [ ! -d '{{.OCX_MIRROR_DIR}}' ] || git -C '{{.OCX_MIRROR_DIR}}' worktree prune;
         fi
 
   # The mirror's committed Cargo.lock against its own pinned pointer. `.build`
@@ -165,7 +168,7 @@ tasks:
     cmds:
       - |
         set -eu
-        pinned=$(git -C '{{.MIRROR_DIR}}' ls-tree HEAD external/ocx | awk '$2 == "commit" { print $3 }')
+        pinned=$(git -C '{{.OCX_MIRROR_DIR}}' ls-tree HEAD external/ocx | awk '$2 == "commit" { print $3 }')
         [ -n "$pinned" ] || { echo "satellite: the mirror has no external/ocx pointer at HEAD" >&2; exit 1; }
         pinned_tree=$(git -C '{{.ROOT_DIR}}' rev-parse --verify -q "$pinned^{tree}" || true)
         dirty=$(git -C '{{.ROOT_DIR}}' status --porcelain --untracked-files=no)
