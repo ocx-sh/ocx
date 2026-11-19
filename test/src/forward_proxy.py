@@ -17,8 +17,8 @@ the client never gets to try.
 Every request this fixture accepts must be in the **absolute-form** an
 HTTP-proxy client sends (`GET http://host:port/path HTTP/1.1` — RFC 9112
 §3.2.2), never the **origin-form** a client sends straight to a destination
-(`GET /path HTTP/1.1`): an origin-form request answers 400. Only `GET`/`HEAD`
-are implemented; any other method answers 501.
+(`GET /path HTTP/1.1`): an origin-form request answers 400. Only `GET`/`HEAD`/
+`POST` (body by `Content-Length`) are implemented; any other answers 501.
 """
 
 from __future__ import annotations
@@ -78,8 +78,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._proxy()
 
+    def do_POST(self) -> None:
+        self._proxy()
+
     def _proxy(self) -> None:
-        """Forwards an absolute-form GET/HEAD to its authority (aliased, or
+        """Forwards an absolute-form request to its authority (aliased, or
         dialed as written when unaliased), recording the attempt before
         dialing so a failed upstream connection still leaves evidence.
         """
@@ -109,7 +112,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 forwarded_to=f"{dial_host}:{dial_port}",
             )
         )
+        if self.server.stalled:
+            # Handler threads are daemons `server_close` never joins: without
+            # `release` this thread and its socket outlive the test.
+            self.close_connection = True
+            self.server.release.wait()
+            return
 
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         path_and_query = target.path or "/"
         if target.query:
             path_and_query += "?" + target.query
@@ -127,7 +137,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 connection.putheader(key, value)
             connection.putheader("Host", authority)
             connection.putheader("Connection", "close")
-            connection.endheaders()
+            connection.endheaders(body)
             upstream = connection.getresponse()
         except OSError as exc:
             connection.close()
@@ -165,6 +175,9 @@ class ForwardProxy(http.server.ThreadingHTTPServer):
     def __init__(self, aliases: dict[str, tuple[str, int]]) -> None:
         self.aliases = aliases
         self.requests: list[ProxiedRequest] = []
+        # True: record each request, then never answer until `release` is set.
+        self.stalled = False
+        self.release = threading.Event()
         super().__init__(("127.0.0.1", 0), _Handler)
 
     @property
@@ -203,6 +216,7 @@ def running(aliases: dict[str, tuple[str, int]]) -> Iterator[ForwardProxy]:
             raise RuntimeError("forward proxy fixture did not become reachable")
         yield server
     finally:
+        server.release.set()  # end stalled handlers; nothing else does
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
