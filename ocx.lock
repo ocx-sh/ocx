@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:dfa4ee82a3824310b58b52fb03d7683f1397d6a1eca05018a2c25843c16e9a6d"
+declaration_hash = "sha256:6c900133287ba3c18a9427475f9b3b5ce2f2a1989e017a83e70a3ac754d4ee06"
 generated_by = "ocx 0.6.5"
-generated_at = "2026-11-14T10:35:23Z"
+generated_at = "2026-11-19T20:33:55Z"
 
 [[tool]]
 name = "actionlint"
@@ -313,6 +313,19 @@ repository = "ocx.sh/ocx/cli"
 "linux/arm64" = "sha256:cd7b151b1c7ef8f3d3cac4995273f79c8ba365f39cf60733dec961fd55e4b18c"
 "windows/amd64" = "sha256:6365531e757749f8a23cc3bc5c998d9a50721aca546dfd363bb7be1bc78dff0d"
 "windows/arm64" = "sha256:8fc6efe56134eaad06107f5ced14d05ff8793ff67778fac3f6736b9feb75ff9c"
+
+[[tool]]
+name = "otelcol"
+group = "test"
+repository = "ocx.sh/open-telemetry/otelcol"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:6c4d889e692c1b2cb9a25f3a353cb26e96ea3a7c3d564517090b70ce907adf80"
+"darwin/arm64" = "sha256:92b4f1923654d0bac685c5db78f2ac873a3eacaf12cbefc3ed19b03c864830f0"
+"linux/amd64" = "sha256:c188c72728fcbab568b273ce8b074aa8a53489af342d4a0bb59828b7459869dc"
+"linux/arm64" = "sha256:63a06d02a882b88494d159ecae949959a950e787c744da34187f2aabd2226b1f"
+"windows/amd64" = "sha256:18a95a3d1fddae6e1688250e638bee0b91070707d6605d0d6e3b242f4f1688c8"
+"windows/arm64" = "sha256:1913929a4099f667a830d5ea072337dd728390bd862fbfbe0879f1e25f8f30f9"
 
 [[tool]]
 name = "zot"
