@@ -986,6 +986,32 @@ mod session_tests {
         assert!(planned.removes.is_empty(), "{planned:?}");
     }
 
+    /// A package writes `${installPath}/bin` over a native install path: the ledger and the desired
+    /// set spell one directory with different slashes. Under the Windows rule that is one element, so
+    /// the plan keeps it while it is wanted and retires it once it is not. Only the planner's own
+    /// element rule is pinned here: the in-process fold that decides `sets` is the host's.
+    ///
+    /// Red state: drop the `/` fold from `path_element_norm` and the first plan retires a wanted element.
+    #[test]
+    fn a_mixed_slash_spelling_is_one_element_under_the_windows_rule() {
+        let state = state_with(vec![path_record(r"/x/pkg\bin", composed())]);
+        let current = live_path(&[r"/x/pkg\bin"]);
+        let wanted = [path_entry("/x/pkg/bin")];
+
+        let kept = super::super::with_windows_rule(true, || plan_for(&wanted, &current, &state));
+        assert!(kept.removes.is_empty(), "{kept:?}");
+
+        let retired = super::super::with_windows_rule(true, || plan_for(&[], &current, &state));
+        assert_eq!(removed_elements(&retired), vec![r"/x/pkg\bin"]);
+
+        let exact = super::super::with_windows_rule(false, || plan_for(&wanted, &current, &state));
+        assert_eq!(
+            removed_elements(&exact),
+            vec![r"/x/pkg\bin"],
+            "off Windows `/` and `\\` differ, so the ledger's element is no longer wanted"
+        );
+    }
+
     #[test]
     fn a_composed_element_the_desired_set_still_wants_stays() {
         let state = state_with(vec![path_record("/session/bin", composed())]);
@@ -1579,5 +1605,39 @@ mod wire_tests {
             element_norm("-DFOO=1", &ModifierKind::List),
             element_norm("-Dfoo=1", &ModifierKind::List)
         );
+    }
+
+    #[test]
+    fn slash_direction_is_folded_for_path_kind_under_the_windows_rule() {
+        use super::super::{element_eq_as, element_norm_as};
+        let (mixed, native) = (r"C:\x\pkg/bin", r"C:\x\pkg\bin");
+        assert!(element_eq_as(mixed, native, &ModifierKind::Path, true));
+        assert!(element_eq_as(
+            &format!("\"{mixed}\""),
+            native,
+            &ModifierKind::Path,
+            true
+        ));
+        assert_eq!(
+            element_norm_as(mixed, &ModifierKind::Path, true),
+            element_norm_as(native, &ModifierKind::Path, true)
+        );
+        assert!(!element_eq_as(mixed, native, &ModifierKind::Path, false));
+        assert_ne!(
+            element_norm_as(mixed, &ModifierKind::Path, false),
+            element_norm_as(native, &ModifierKind::Path, false)
+        );
+        assert!(
+            !element_eq_as("-D/a", r"-D\a", &ModifierKind::List, true),
+            "list elements are opaque"
+        );
+        // A constant keeps the case rule and nothing more: no slash fold.
+        assert!(!element_eq_as("a/b", r"a\b", &ModifierKind::Constant, true));
+        assert_ne!(
+            element_norm_as("a/b", &ModifierKind::Constant, true),
+            element_norm_as(r"a\b", &ModifierKind::Constant, true)
+        );
+        assert!(element_eq_as("A/B", "a/b", &ModifierKind::Constant, true));
+        assert!(!element_eq_as("A/B", "a/b", &ModifierKind::Constant, false));
     }
 }

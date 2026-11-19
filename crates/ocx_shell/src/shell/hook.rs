@@ -9,9 +9,9 @@
 
 use std::path::Path;
 
-use super::Shell;
 use super::escape::{elvish_single_quoted, fish_single_quoted, posix_single_quoted, powershell_literal};
 use super::reconcile::WatchSet;
+use super::{Dialect, Shell};
 use ocx_config::shell::GRANT_SIGNALS;
 
 /// The temp-file template the emitted body hands `mktemp` for its stamp.
@@ -89,9 +89,13 @@ const PWSH_HOOK_CALL: &str =
 /// `binary` is the resolved absolute path; a restricted shell (`rbash`) no-ops.
 /// Every "already registered?" probe stays scoped to the namespace it asks about, or the shell runs unhooked for life.
 pub fn registration(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
+    registration_as(Dialect::host(), shell, binary, watch_paths)
+}
+
+fn registration_as(dialect: Dialect, shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
     #[cfg(any(test, feature = "__testing"))]
     inject_latency_fault();
-    let binary = binary.to_string_lossy();
+    let binary = shell.command_word_as(dialect, binary);
     match shell {
         Shell::Bash => Some(bash_registration(&binary, watch_paths)),
         Shell::Zsh => Some(zsh_registration(&binary, watch_paths)),
@@ -107,7 +111,11 @@ pub fn registration(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Opti
 ///
 /// Without it a project entered mid-session is never watched. `None` where the guard has no watch-set term.
 pub fn redefinition(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
-    let binary = binary.to_string_lossy();
+    redefinition_as(Dialect::host(), shell, binary, watch_paths)
+}
+
+fn redefinition_as(dialect: Dialect, shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
+    let binary = shell.command_word_as(dialect, binary);
     match shell {
         Shell::Bash => Some(posix_redefinition(&binary, "bash", watch_paths)),
         Shell::Zsh => Some(posix_redefinition(&binary, "zsh", watch_paths)),
@@ -143,6 +151,10 @@ fn posix_redefinition(binary: &str, shell_name: &str, watch_paths: &WatchSet) ->
 /// [`ocx_env::__OCX_ENV_STOOD_DOWN`]. Elvish has no redefinable gate (its closure sits in a list), so it records the
 /// checkpoint instead, which quiets a pre-upgrade closure until the next `cd`; nushell's hook never runs the reconcile.
 pub fn stand_down(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
+    stand_down_as(Dialect::host(), shell, binary, watch_paths)
+}
+
+fn stand_down_as(dialect: Dialect, shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option<String> {
     let copy = match shell {
         Shell::Bash | Shell::Zsh => "__ocx_stood_down=\"${__OCX_ENV_STATE-}\"".to_owned(),
         Shell::Fish => "set -g __ocx_stood_down \"$__OCX_ENV_STATE\"".to_owned(),
@@ -161,7 +173,7 @@ pub fn stand_down(shell: Shell, binary: &Path, watch_paths: &WatchSet) -> Option
     };
     let tail = match shell {
         Shell::Elvish => checkpoint(shell),
-        _ => redefinition(shell, binary, watch_paths),
+        _ => redefinition_as(dialect, shell, binary, watch_paths),
     };
     Some(match tail {
         Some(tail) => format!("{copy}\n{tail}"),
@@ -243,7 +255,11 @@ pub fn gate_value(pid: u32, pwd: &str, signal: impl Fn(&str) -> Option<String>) 
 /// A latency optimization, never the correctness floor. It must return the binary's own status,
 /// captured before the reconcile, or `ocx add … && next` breaks.
 pub fn wrapper(shell: Shell, binary: &Path) -> Option<String> {
-    let binary = binary.to_string_lossy();
+    wrapper_as(Dialect::host(), shell, binary)
+}
+
+pub(crate) fn wrapper_as(dialect: Dialect, shell: Shell, binary: &Path) -> Option<String> {
+    let binary = shell.command_word_as(dialect, binary);
     match shell {
         Shell::Bash | Shell::Zsh => Some(posix_wrapper(&binary)),
         Shell::Fish => Some(fish_wrapper(&binary)),
@@ -2315,12 +2331,86 @@ mod tests {
         // escape; POSIX and PowerShell single quotes carry it verbatim, and
         // doubling it there would corrupt a Windows path.
         let windows = PathBuf::from(r"C:\Users\u\ocx.exe");
-        let fish = wrapper(Shell::Fish, &windows).unwrap_or_default();
+        let fish = wrapper_as(Dialect::Native, Shell::Fish, &windows).unwrap_or_default();
         assert!(fish.contains(r"'C:\\Users\\u\\ocx.exe'"), "{fish}");
-        let bash = wrapper(Shell::Bash, &windows).unwrap_or_default();
+        let bash = wrapper_as(Dialect::Native, Shell::Bash, &windows).unwrap_or_default();
         assert!(bash.contains(r"'C:\Users\u\ocx.exe'"), "{bash}");
-        let pwsh = wrapper(Shell::PowerShell, &windows).unwrap_or_default();
+        let pwsh = wrapper_as(Dialect::Native, Shell::PowerShell, &windows).unwrap_or_default();
         assert!(pwsh.contains(r"'C:\Users\u\ocx.exe'"), "{pwsh}");
+    }
+
+    const WINDOWS_BINARY: &str = r"C:\Users\x\.ocx\symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe";
+    const MSYS_BINARY: &str = "C:/Users/x/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe";
+    const CONVERTED_ARMS: [Shell; 6] = [
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Ash,
+        Shell::Ksh,
+        Shell::Dash,
+        Shell::Fish,
+    ];
+    const MSYS: Dialect = Dialect::Msys {
+        drive_prefix: super::super::msys::MSYS_DRIVE_PREFIX,
+    };
+    const CYGWIN: Dialect = Dialect::Msys {
+        drive_prefix: super::super::msys::CYGWIN_DRIVE_PREFIX,
+    };
+
+    /// Every emission that names the binary, for one dialect and arm.
+    fn binary_emissions(dialect: Dialect, shell: Shell) -> Vec<String> {
+        let binary = PathBuf::from(WINDOWS_BINARY);
+        [
+            registration_as(dialect, shell, &binary, &watch()),
+            redefinition_as(dialect, shell, &binary, &watch()),
+            wrapper_as(dialect, shell, &binary),
+            stand_down_as(dialect, shell, &binary, &watch()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    #[test]
+    fn msys_posix_emissions_name_the_binary_with_forward_slashes() {
+        for shell in CONVERTED_ARMS {
+            for text in binary_emissions(MSYS, shell) {
+                assert!(text.contains(MSYS_BINARY), "{shell}: {text}");
+                assert!(!text.contains(r"C:\"), "{shell} kept a native binary: {text}");
+                assert!(!text.contains(r"\Users"), "{shell} kept a backslash: {text}");
+            }
+        }
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            assert_eq!(binary_emissions(MSYS, shell).len(), 4, "{shell}");
+        }
+    }
+
+    #[test]
+    fn the_command_word_ignores_the_runtime() {
+        for shell in CONVERTED_ARMS {
+            assert_eq!(
+                binary_emissions(CYGWIN, shell),
+                binary_emissions(MSYS, shell),
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn msys_leaves_non_posix_arms_and_the_native_dialect_untouched() {
+        for shell in Shell::value_variants() {
+            for text in binary_emissions(Dialect::Native, *shell) {
+                assert!(!text.contains(MSYS_BINARY), "{shell}: {text}");
+            }
+            if !CONVERTED_ARMS.contains(shell) {
+                assert_eq!(
+                    binary_emissions(MSYS, *shell),
+                    binary_emissions(Dialect::Native, *shell),
+                    "{shell}"
+                );
+            }
+        }
+        let bash = wrapper_as(Dialect::Native, Shell::Bash, &PathBuf::from(WINDOWS_BINARY)).unwrap_or_default();
+        assert!(bash.contains(&format!("'{WINDOWS_BINARY}'")), "{bash}");
     }
 }
 
@@ -2335,7 +2425,7 @@ mod tests {
 /// emit. Set it where the interpreter does exist and a skip becomes a
 /// failure — because a skip and a pass otherwise carry the same evidence.
 #[cfg(test)]
-fn absence_may_skip(name: &str) -> bool {
+pub(crate) fn absence_may_skip(name: &str) -> bool {
     let Some(raw) = ocx_env::__OCX_TESTING_REQUIRE_LIVE_SHELLS.get() else {
         return true;
     };

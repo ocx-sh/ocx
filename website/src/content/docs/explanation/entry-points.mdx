@@ -199,9 +199,9 @@ PowerShell resolves `pipx` to `pipx.exe` on `$PATH` and runs it directly. There 
 
 The practical rule is that PowerShell users get this for free from the installer. The installer writes `$OCX_HOME/env.ps1` and adds a block to `$PROFILE` that sources it. On every session `env.ps1` runs `Invoke-Expression ((& ocx --global env --shell=pwsh) | Out-String)`, and the resulting `$PATH` entries pick up the `.exe` launchers automatically.
 
-### Git Bash and MSYS2 \{#git-bash\}
+### Git Bash, MSYS2 and Cygwin \{#git-bash\}
 
-On Windows, POSIX-emulation shells (Git Bash, MSYS2, Cygwin) resolve `pipx.exe` directly by its explicit extension. These shells do not consult `PATHEXT`, so the native `.exe` is exactly what they need with no extra `.sh` launcher. The same launcher runs identically from `cmd.exe`, PowerShell, and a Git Bash prompt because none of them route the call through `cmd.exe`.
+On Windows, POSIX runtimes (Git Bash, MSYS2, Cygwin) resolve `pipx.exe` directly by its explicit extension. These shells do not consult `PATHEXT`, so the native `.exe` is exactly what they need with no extra `.sh` launcher. The same launcher runs identically from `cmd.exe`, PowerShell, and a Git Bash prompt because none of them route the call through `cmd.exe`.
 
 :::caution[`ocx` must be resolvable]
 Every launcher delegates to `ocx launcher exec`. If the launcher cannot find `ocx` it exits with code `69` and one of two messages. With no [`OCX_BINARY_PIN`][env-ocx-binary-pin] set and `ocx` off `$PATH`, the message is `ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)`. With `OCX_BINARY_PIN` set to a path that does not exist, it is `ocx-shim: pinned ocx not found: <path> (OCX_BINARY_PIN points at a missing path)`.

@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::profiles::{DedicatedShell, HomeEnv, ProfileKind, ProfileTarget};
+use crate::profiles::{DedicatedShell, HomeEnv, Host, ProfileKind, ProfileTarget, WindowsEnv};
 use ocx_package_manager::PackageManager;
 use ocx_store::file_structure::FileStructure;
 
@@ -20,6 +20,8 @@ pub mod rc_block;
 pub mod session_path;
 pub mod shell_config;
 pub mod shims;
+#[cfg(test)]
+mod tests_live_shell;
 pub mod version_spec;
 
 pub use bootstrap::{BootstrapOutcome, BootstrapStatus};
@@ -36,6 +38,34 @@ const POSIX_BODY: &str = r#"if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
     . "${OCX_HOME:-$HOME/.ocx}/env.sh"
 fi"#;
 
+/// POSIX fence payload on a Windows host — the store is `OCX_HOME`, else `$HOME/.ocx` when it holds
+/// `env.sh`, else the profile's `.ocx`.
+// `$HOME` is not the store under MSYS2 and Cygwin. Never exports `OCX_HOME`: a POSIX-form value
+// would reach a native `ocx.exe` unconverted under Cygwin. Valid under `set -eu`: a missing
+// `cygpath` leaves the store empty, and an empty store is never joined into a path.
+const POSIX_BODY_WINDOWS: &str = r#"if [ -n "${OCX_HOME:-}" ]; then
+    _ocx_home=$OCX_HOME
+elif [ -n "${HOME:-}" ] && [ -f "$HOME/.ocx/env.sh" ]; then
+    _ocx_home=$HOME/.ocx
+elif [ -n "${USERPROFILE:-}" ]; then
+    _ocx_home=$(cygpath -u "$USERPROFILE" 2>/dev/null) || _ocx_home=
+    _ocx_home=${_ocx_home:+$_ocx_home/.ocx}
+else
+    _ocx_home=
+fi
+if [ -n "$_ocx_home" ] && [ -f "$_ocx_home/env.sh" ]; then
+    . "$_ocx_home/env.sh"
+fi
+unset _ocx_home"#;
+
+/// Elvish fence payload on a Windows host — no `HOME` and no external `test`.
+// `path:is-regular` needs its own `use` here, which does not reach the `eval`-ed `env.elv`.
+const ELVISH_BODY_WINDOWS: &str = r#"use path
+var _ocx_home = (if (has-env OCX_HOME) { put $E:OCX_HOME } else { put $E:USERPROFILE/.ocx })
+if (path:is-regular $_ocx_home/env.elv) {
+    eval (slurp < $_ocx_home/env.elv)
+}"#;
+
 /// Elvish fence payload — slurps and evaluates the elvish env shim.
 // Resolves the home without `OCX_HOME`, which `env.elv` sets; concatenation, not `path:join`,
 // whose `use path` import does not reach the `eval`-ed scope.
@@ -50,6 +80,22 @@ if ?(test -f $_ocx_home/env.elv) {
 const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
 $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
 if ([System.IO.File]::Exists($_ocxEnv)) { . $_ocxEnv }"#;
+
+/// The POSIX fence payload for `host`.
+fn posix_body(host: Host) -> &'static str {
+    match host {
+        Host::Unix => POSIX_BODY,
+        Host::Windows => POSIX_BODY_WINDOWS,
+    }
+}
+
+/// The elvish fence payload for `host`.
+fn elvish_body(host: Host) -> &'static str {
+    match host {
+        Host::Unix => ELVISH_BODY,
+        Host::Windows => ELVISH_BODY_WINDOWS,
+    }
+}
 
 /// Options controlling a single `ocx self setup` run.
 #[derive(Debug, Clone, Default)]
@@ -673,13 +719,31 @@ const EXEC_POLICY_ADVISORY: &str =
 /// `Some(overrides)`, including `Some(&[])` (no targets), skips detection; overrides are POSIX fences.
 async fn resolve_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>) -> Vec<ProfileTarget> {
     if overrides.is_some() {
-        return compose_targets(ocx_home, overrides, None);
+        return compose_targets_on(Host::current(), &WindowsEnv::default(), ocx_home, overrides, None);
     }
-    compose_targets(ocx_home, None, profiles::detect_powershell_profile().await)
+    let windows = if Host::current() == Host::Windows {
+        WindowsEnv::from_environment().await
+    } else {
+        WindowsEnv::default()
+    };
+    compose_targets_on(
+        Host::current(),
+        &windows,
+        ocx_home,
+        None,
+        profiles::detect_powershell_profile().await,
+    )
 }
 
-/// [`resolve_targets`] with the PowerShell probe's answer (`None` when no host answered) in hand.
-fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: Option<PathBuf>) -> Vec<ProfileTarget> {
+/// [`resolve_targets`] with the host snapshot and the PowerShell probe's answer (`None` when no host
+/// answered) in hand.
+fn compose_targets_on(
+    host: Host,
+    windows: &WindowsEnv,
+    ocx_home: &Path,
+    overrides: Option<&[PathBuf]>,
+    powershell: Option<PathBuf>,
+) -> Vec<ProfileTarget> {
     if let Some(overrides) = overrides {
         return overrides
             .iter()
@@ -690,7 +754,7 @@ fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: O
             .collect();
     }
 
-    let mut targets = profiles::detect_targets(&home_env_from_environment(ocx_home));
+    let mut targets = profiles::detect_targets_on(host, &home_env_from_environment(ocx_home), windows);
     if let Some(profile) = powershell {
         targets.push(ProfileTarget {
             path: profile,
@@ -705,17 +769,18 @@ fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: O
 /// `heal_only` heals an existing ocx-owned block or file but never introduces one, so an
 /// update respects an original `--no-modify-path` install.
 async fn apply_target(
+    host: Host,
     target: &ProfileTarget,
     force: bool,
     heal_only: bool,
     dry_run: bool,
 ) -> Result<ProfileOutcome, error::Error> {
     match target.kind {
-        ProfileKind::PosixFence => apply_fence(&target.path, POSIX_BODY, force, heal_only, dry_run).await,
-        ProfileKind::ElvishFence => apply_fence(&target.path, ELVISH_BODY, force, heal_only, dry_run).await,
+        ProfileKind::PosixFence => apply_fence(&target.path, posix_body(host), force, heal_only, dry_run).await,
+        ProfileKind::ElvishFence => apply_fence(&target.path, elvish_body(host), force, heal_only, dry_run).await,
         ProfileKind::PowerShellFence => apply_fence(&target.path, POWERSHELL_BODY, force, heal_only, dry_run).await,
         ProfileKind::DedicatedFile(DedicatedShell::Fish) => {
-            rewrite_dedicated(&target.path, shims::fish_conf_body(), heal_only, dry_run).await
+            rewrite_dedicated(&target.path, &shims::fish_conf_body_on(host), heal_only, dry_run).await
         }
         ProfileKind::DedicatedFile(DedicatedShell::Nushell) => {
             rewrite_dedicated(&target.path, shims::nu_autoload_body(), heal_only, dry_run).await
@@ -740,7 +805,14 @@ async fn apply_profile_phase(
 
     let mut profiles = Vec::with_capacity(targets.len());
     for target in targets {
-        let outcome = apply_target(&target, options.force, options.handoff, options.dry_run).await?;
+        let outcome = apply_target(
+            Host::current(),
+            &target,
+            options.force,
+            options.handoff,
+            options.dry_run,
+        )
+        .await?;
         profiles.push((target.path, outcome));
     }
     Ok(profiles)
@@ -943,6 +1015,15 @@ async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`compose_targets_on`] for a unix host, as every unix run composes.
+    fn compose_targets(
+        ocx_home: &Path,
+        overrides: Option<&[PathBuf]>,
+        powershell: Option<PathBuf>,
+    ) -> Vec<ProfileTarget> {
+        compose_targets_on(Host::Unix, &WindowsEnv::default(), ocx_home, overrides, powershell)
+    }
 
     /// Only the listed kinds and every refusal leave a profile for the user; anything else propagates.
     #[test]
@@ -2588,7 +2669,7 @@ mod tests {
             ]
         );
         assert!(
-            read(&drifted).contains(POSIX_BODY),
+            read(&drifted).contains(posix_body(Host::current())),
             "a present-but-drifted block still heals under --handoff"
         );
         assert_eq!(
@@ -2620,7 +2701,10 @@ mod tests {
             "the user's existing content is preserved"
         );
         assert!(written.contains("# >>> ocx v1"), "a first-time setup writes the fence");
-        assert!(written.contains(POSIX_BODY), "…carrying the canonical body");
+        assert!(
+            written.contains(posix_body(Host::current())),
+            "…carrying the canonical body"
+        );
     }
 
     // ── rewrite_dedicated (fish/nushell full-rewrite) ────────────────────────
@@ -3098,5 +3182,407 @@ mod tests {
                 "a refusal must leave config.toml byte-identical"
             );
         }
+    }
+
+    // ── Windows host fences ──────────────────────────────────────────────────
+
+    /// A user's own rc files carry these bytes; a unix run must never rewrite them.
+    #[test]
+    fn unix_fence_bodies_are_byte_identical_to_the_historical_text() {
+        assert_eq!(
+            posix_body(Host::Unix),
+            "if [ -f \"${OCX_HOME:-$HOME/.ocx}/env.sh\" ]; then\n    . \"${OCX_HOME:-$HOME/.ocx}/env.sh\"\nfi"
+        );
+        assert_eq!(
+            elvish_body(Host::Unix),
+            "var _ocx_home = (if (has-env OCX_HOME) { put $E:OCX_HOME } else { put $E:HOME/.ocx })\n\
+             if ?(test -f $_ocx_home/env.elv) {\n    eval (slurp < $_ocx_home/env.elv)\n}"
+        );
+    }
+
+    #[test]
+    fn windows_posix_fence_resolves_the_store_in_three_steps_without_exporting_it() {
+        let body = posix_body(Host::Windows);
+        let positions: Vec<usize> = [
+            r#"[ -n "${OCX_HOME:-}" ]"#,
+            r#"[ -f "$HOME/.ocx/env.sh" ]"#,
+            r#"cygpath -u "$USERPROFILE""#,
+        ]
+        .iter()
+        .map(|step| body.find(step).unwrap_or_else(|| panic!("{step} missing in {body}")))
+        .collect();
+        assert!(positions.is_sorted(), "steps out of order: {body}");
+        assert!(!body.contains("export"), "{body}");
+        assert!(
+            body.ends_with("unset _ocx_home"),
+            "the private variable must not leak into the user's shell"
+        );
+    }
+
+    #[test]
+    fn windows_elvish_fence_needs_no_home_and_no_external_test() {
+        let body = elvish_body(Host::Windows);
+        assert!(
+            body.contains("$E:USERPROFILE/.ocx") && body.contains("path:is-regular"),
+            "{body}"
+        );
+        assert!(!body.contains("test -f") && !body.contains("$E:HOME"), "{body}");
+    }
+
+    /// A block an older ocx wrote is ocx-authored, so a Windows run rewrites it once and then leaves it.
+    #[tokio::test]
+    async fn an_old_fence_heals_to_the_windows_body_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".bashrc");
+        let marker = rc_block::canonical_hash(POSIX_BODY);
+        std::fs::write(
+            &path,
+            format!("export A=1\n# >>> ocx v1 {marker} >>>\n{POSIX_BODY}\n# <<< ocx <<<\n"),
+        )
+        .unwrap();
+        let windows = posix_body(Host::Windows);
+
+        let first = apply_fence(&path, windows, false, false, false).await.unwrap();
+        assert_eq!(first, ProfileOutcome::Completed);
+        let healed = read(&path);
+        assert!(healed.contains(windows) && !healed.contains(POSIX_BODY), "{healed}");
+        assert!(healed.starts_with("export A=1\n"), "user lines stay: {healed}");
+
+        let second = apply_fence(&path, windows, false, false, false).await.unwrap();
+        assert_eq!(second, ProfileOutcome::NoOp);
+        assert_eq!(read(&path), healed);
+    }
+
+    #[tokio::test]
+    async fn an_old_fish_conf_heals_to_the_windows_body_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ocx.fish");
+        std::fs::write(&path, shims::fish_conf_body()).unwrap();
+        let windows = shims::fish_conf_body_on(Host::Windows);
+
+        assert_eq!(
+            rewrite_dedicated(&path, &windows, false, false).await.unwrap(),
+            ProfileOutcome::Completed
+        );
+        assert_eq!(read(&path), windows);
+        assert_eq!(
+            rewrite_dedicated(&path, &windows, false, false).await.unwrap(),
+            ProfileOutcome::NoOp
+        );
+    }
+
+    // ── live: the Windows fence and shim find the store ──────────────────────
+
+    /// How the stand-in `cygpath` behaves.
+    #[cfg(unix)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Cygpath {
+        Absent,
+        Answers,
+        PrintsNothing,
+    }
+
+    /// One run of the Windows fence under `set -eu`, with a stand-in `ocx` at `store`.
+    #[cfg(unix)]
+    struct FenceCase<'a> {
+        store: &'a Path,
+        profile: &'a Path,
+        home: Option<&'a Path>,
+        ocx_home: Option<&'a Path>,
+        userprofile: bool,
+        cygpath: Cygpath,
+        /// Source `env.sh` itself (from the store) instead of the profile fence.
+        direct: bool,
+    }
+
+    #[cfg(unix)]
+    struct FenceRun {
+        store_found: bool,
+        exported_ocx_home: usize,
+        leaked: String,
+        trace: String,
+    }
+
+    /// Source the Windows fence in `shell -eu` with a stand-in `cygpath` and a stand-in `ocx`.
+    #[cfg(unix)]
+    fn run_windows_fence(shell: &str, case: &FenceCase<'_>) -> Option<FenceRun> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin_dir = case.store.join("symlinks/ocx.sh/ocx/cli/current/content/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake_ocx = bin_dir.join("ocx");
+        std::fs::write(&fake_ocx, "#!/bin/sh\necho STORE_FOUND=1\n").unwrap();
+        std::fs::set_permissions(&fake_ocx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shims::write_shims_for(Host::Windows, case.store, false).unwrap();
+
+        let tools = tempfile::tempdir().unwrap();
+        let answer = match case.cygpath {
+            Cygpath::Absent => None,
+            Cygpath::Answers => Some(format!("printf '%s' '{}'", case.profile.display())),
+            Cygpath::PrintsNothing => Some("exit 0".to_string()),
+        };
+        if let Some(answer) = answer {
+            let cygpath = tools.path().join("cygpath");
+            std::fs::write(&cygpath, format!("#!/bin/sh\n{answer}\n")).unwrap();
+            std::fs::set_permissions(&cygpath, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let sourced = if case.direct {
+            format!(". '{}'", case.store.join("env.sh").display())
+        } else {
+            posix_body(Host::Windows).to_string()
+        };
+        let script = format!(
+            "{sourced}\nprintf '%s|%s|%s' \"${{STORE_FOUND:-no}}\" \"$(env | grep -c '^OCX_HOME=')\" \
+             \"${{_ocx_home+h}}${{_ocx_bin+b}}${{_ocx_shell+s}}${{_ocx_interactive+i}}\""
+        );
+        let path = format!("{}:/usr/bin:/bin", tools.path().display());
+        let mut env: Vec<(&str, &std::ffi::OsStr)> = vec![("PATH", path.as_ref())];
+        if case.userprofile {
+            env.push(("USERPROFILE", r"C:\Users\u".as_ref()));
+        }
+        // An absent HOME makes zsh read the real one from passwd, so "no home" is spelled empty.
+        env.push(("HOME", case.home.map_or(std::ffi::OsStr::new(""), Path::as_os_str)));
+        if let Some(ocx_home) = case.ocx_home {
+            env.push(("OCX_HOME", ocx_home.as_os_str()));
+        }
+        // `-x` traces every test and source, so a path under `/` shows up in `stderr`.
+        let ran = tests_live_shell::run(
+            shell,
+            &["-eux".as_ref(), "-c".as_ref(), script.as_ref()],
+            &env,
+            tools.path(),
+        )?;
+        let allowed: Vec<String> = [Some(case.store), Some(case.profile), case.home, case.ocx_home]
+            .into_iter()
+            .flatten()
+            .map(|path| path.display().to_string())
+            .collect();
+        for line in ran.stderr.lines().filter(|line| line.contains("env.sh")) {
+            assert!(
+                allowed.iter().any(|prefix| line.contains(prefix.as_str())),
+                "{shell} sourced a file outside the test directories: {line}"
+            );
+        }
+        let mut fields = ran.stdout.splitn(3, '|');
+        let found = fields.next().expect("marker");
+        let exported = fields.next().expect("count");
+        let leaked = fields.next().expect("leak").to_string();
+        Some(FenceRun {
+            store_found: found == "1",
+            exported_ocx_home: exported.trim().parse().expect("count"),
+            leaked,
+            trace: ran.stderr,
+        })
+    }
+
+    /// Run `case` under `sh`, `bash` and `zsh`, whichever are installed; `sh` always is.
+    #[cfg(unix)]
+    fn for_each_fence_shell(case: &FenceCase<'_>, expect: impl Fn(&str, &FenceRun)) {
+        let mut ran_sh = false;
+        for shell in ["sh", "bash", "zsh"] {
+            if let Some(run) = run_windows_fence(shell, case) {
+                ran_sh |= shell == "sh";
+                expect(shell, &run);
+            }
+        }
+        assert!(ran_sh, "sh must exist on a unix host");
+    }
+
+    #[cfg(unix)]
+    fn assert_nothing_under_root(shell: &str, run: &FenceRun) {
+        for line in run.trace.lines() {
+            assert!(
+                !line.contains(" /env.sh") && !line.contains(" /symlinks") && !line.contains("'/env.sh'"),
+                "{shell} touched a path under `/`: {line}"
+            );
+        }
+        assert_eq!(run.leaked, "", "{shell} leaked a variable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_fence_finds_the_profile_store_through_cygpath_when_home_has_none() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("msys-home");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+
+        for_each_fence_shell(
+            &FenceCase {
+                store: &profile.join(".ocx"),
+                profile: &profile,
+                home: Some(&home),
+                ocx_home: None,
+                userprofile: true,
+                cygpath: Cygpath::Answers,
+                direct: false,
+            },
+            |shell, run| {
+                assert!(run.store_found, "{shell}: the profile store was not found");
+                assert_eq!(run.exported_ocx_home, 0, "{shell}: OCX_HOME must stay private");
+                assert_eq!(run.leaked, "", "{shell} leaked a variable");
+            },
+        );
+    }
+
+    /// A `$HOME/.ocx` directory with no shim in it (a stale MSYS2 or Cygwin home) must not hide the real store.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_home_store_directory_does_not_hide_the_profile_store() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("msys-home");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(home.join(".ocx")).unwrap();
+
+        for_each_fence_shell(
+            &FenceCase {
+                store: &profile.join(".ocx"),
+                profile: &profile,
+                home: Some(&home),
+                ocx_home: None,
+                userprofile: true,
+                cygpath: Cygpath::Answers,
+                direct: false,
+            },
+            |shell, run| assert!(run.store_found, "{shell}: the stale $HOME/.ocx hid the real store"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_fence_prefers_a_home_store_that_holds_the_shim_and_an_explicit_ocx_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let explicit = root.path().join("explicit-store");
+        let profile = root.path().join("profile-without-store");
+
+        for_each_fence_shell(
+            &FenceCase {
+                store: &home.join(".ocx"),
+                profile: &profile,
+                home: Some(&home),
+                ocx_home: None,
+                userprofile: true,
+                cygpath: Cygpath::Answers,
+                direct: false,
+            },
+            |shell, run| assert!(run.store_found, "{shell}: $HOME/.ocx was not used"),
+        );
+        for_each_fence_shell(
+            &FenceCase {
+                store: &explicit,
+                profile: &profile,
+                home: Some(root.path()),
+                ocx_home: Some(&explicit),
+                userprofile: true,
+                cygpath: Cygpath::Absent,
+                direct: false,
+            },
+            |shell, run| assert!(run.store_found, "{shell}: OCX_HOME was not used"),
+        );
+    }
+
+    /// Under `set -eu`, with no way to locate the store: the shell survives, finds nothing, touches nothing under `/`.
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_fence_survives_set_eu_when_the_store_cannot_be_located() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let profile = root.path().join("profile");
+
+        for (cygpath, userprofile) in [
+            (Cygpath::Absent, true),
+            (Cygpath::PrintsNothing, true),
+            (Cygpath::Answers, false),
+        ] {
+            for_each_fence_shell(
+                &FenceCase {
+                    // The store exists, so a wrong join into it would be found.
+                    store: &profile.join(".ocx"),
+                    profile: &profile,
+                    home: Some(&home),
+                    ocx_home: None,
+                    userprofile,
+                    cygpath,
+                    direct: false,
+                },
+                |shell, run| {
+                    assert!(!run.store_found, "{shell}: located a store it cannot have found");
+                    assert_nothing_under_root(shell, run);
+                },
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_fence_survives_set_eu_with_no_home_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        for_each_fence_shell(
+            &FenceCase {
+                store: &root.path().join("profile/.ocx"),
+                profile: &root.path().join("profile"),
+                home: None,
+                ocx_home: None,
+                userprofile: false,
+                cygpath: Cygpath::Absent,
+                direct: false,
+            },
+            |shell, run| {
+                assert!(!run.store_found, "{shell}");
+                assert_nothing_under_root(shell, run);
+            },
+        );
+    }
+
+    /// `env.sh` has its own store lookup; an empty store must never become `/symlinks/...`.
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_env_sh_survives_set_eu_when_the_store_cannot_be_located() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let profile = root.path().join("profile");
+
+        for (cygpath, userprofile) in [
+            (Cygpath::Absent, true),
+            (Cygpath::PrintsNothing, true),
+            (Cygpath::Answers, false),
+        ] {
+            for_each_fence_shell(
+                &FenceCase {
+                    store: &profile.join(".ocx"),
+                    profile: &profile,
+                    home: Some(&home),
+                    ocx_home: None,
+                    userprofile,
+                    cygpath,
+                    direct: true,
+                },
+                |shell, run| {
+                    assert!(!run.store_found, "{shell}");
+                    assert_nothing_under_root(shell, run);
+                },
+            );
+        }
+        for_each_fence_shell(
+            &FenceCase {
+                store: &profile.join(".ocx"),
+                profile: &profile,
+                home: Some(&home),
+                ocx_home: None,
+                userprofile: true,
+                cygpath: Cygpath::Answers,
+                direct: true,
+            },
+            |shell, run| {
+                assert!(
+                    run.store_found,
+                    "{shell}: env.sh did not locate the profile store itself"
+                )
+            },
+        );
     }
 }

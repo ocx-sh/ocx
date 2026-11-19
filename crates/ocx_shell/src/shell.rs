@@ -5,10 +5,49 @@ pub mod coexistence;
 pub mod error;
 pub mod escape;
 pub mod hook;
+mod msys;
 pub mod reconcile;
+mod runtime;
+
+pub use runtime::resolve_host_dialect;
 
 #[cfg(test)]
+mod tests_git_bash;
+#[cfg(test)]
 mod tests_path_parity;
+
+/// How a POSIX shell reads paths (path spelling, not shell syntax). A native Windows `ocx.exe` driving Git Bash,
+/// MSYS2 or Cygwin emits POSIX PATH entries; every other arm and host stays [`Native`](Self::Native).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dialect {
+    Native,
+    /// `drive_prefix` spells the drive root: `C:\x` becomes `<drive_prefix>c/x`.
+    Msys {
+        drive_prefix: &'static str,
+    },
+}
+
+impl Dialect {
+    /// The host decides: a POSIX shell or fish on a Windows host can only be an MSYS2 or Cygwin program.
+    /// The runtime is the one [`resolve_host_dialect`] found; before that, MSYS2.
+    pub(crate) fn host() -> Self {
+        if cfg!(windows) {
+            Self::Msys {
+                drive_prefix: runtime::host_drive_prefix(),
+            }
+        } else {
+            Self::Native
+        }
+    }
+
+    /// The drive prefix when this dialect converts paths to POSIX form.
+    fn drive_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Msys { drive_prefix } => Some(drive_prefix),
+            Self::Native => None,
+        }
+    }
+}
 
 /// List of supported shells for OCX to generate scripts for, ie. profiles or auto-completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +147,39 @@ impl Shell {
         None
     }
 
+    /// The drive prefix when this arm reads PATH in POSIX form under `dialect`: a POSIX shell or fish,
+    /// the only shells that exist on Windows as MSYS2 or Cygwin programs.
+    fn msys_drive_prefix(self, dialect: Dialect) -> Option<&'static str> {
+        self.converts_paths().then(|| dialect.drive_prefix()).flatten()
+    }
+
+    /// Whether this arm is one an MSYS2 or Cygwin runtime can host, so its PATH is POSIX-spelled on Windows.
+    fn converts_paths(self) -> bool {
+        matches!(
+            self,
+            Self::Bash | Self::Zsh | Self::Ash | Self::Ksh | Self::Dash | Self::Fish
+        )
+    }
+
+    /// The binary `path` as the string to embed as a command word (or `[ -x … ]` operand) for the host.
+    ///
+    /// A POSIX arm on a Windows host runs under MSYS2, where `C:\x\ocx.exe` loses its backslashes and
+    /// `C:/x/ocx.exe` executes. Every other arm keeps the native spelling.
+    #[must_use]
+    pub fn command_word(self, binary: &std::path::Path) -> String {
+        self.command_word_as(Dialect::host(), binary)
+    }
+
+    /// [`command_word`](Self::command_word) under an explicit [`Dialect`].
+    pub(crate) fn command_word_as(self, dialect: Dialect, binary: &std::path::Path) -> String {
+        let native = binary.to_string_lossy();
+        if self.msys_drive_prefix(dialect).is_some() {
+            msys::command_word(&native)
+        } else {
+            native.into_owned()
+        }
+    }
+
     /// Returns a shell comment line.
     pub fn comment(self, text: impl AsRef<str>) -> String {
         let text = text.as_ref();
@@ -128,14 +200,26 @@ impl Shell {
     /// which POSIX resolves as the current directory. Returns `None` for an invalid POSIX env-var name,
     /// or for [`Shell::Batch`] when `value` is one `cmd.exe` cannot carry (`batch_cannot_express`).
     pub fn export_path(self, key: impl AsRef<str>, value: impl AsRef<str>) -> Option<String> {
-        let key = key.as_ref();
+        self.export_path_as(Dialect::host(), key.as_ref(), value.as_ref())
+    }
+
+    /// [`export_path`](Self::export_path) under an explicit [`Dialect`]. Under [`Dialect::Msys`] a
+    /// POSIX arm converts the element with `msys::path_element` and returns `None` when MSYS would read
+    /// it as another directory than Windows does (a drive-relative `C:foo`, a `..` segment, a relative path).
+    pub(crate) fn export_path_as(self, dialect: Dialect, key: &str, raw: &str) -> Option<String> {
         if !ocx_env::is_valid_env_key(key) {
             return None;
         }
-        let raw = value.as_ref();
         if raw.is_empty() {
             return Some(self.comment(format!("ocx: {key} path entry is empty, nothing to prepend")));
         }
+        let converted;
+        let raw = if let Some(drive_prefix) = self.msys_drive_prefix(dialect) {
+            converted = msys::path_element(raw, drive_prefix)?;
+            converted.as_str()
+        } else {
+            raw
+        };
         if self == Self::Batch && batch_cannot_express(raw) {
             return None;
         }
@@ -370,7 +454,19 @@ impl Shell {
         value: impl AsRef<str>,
         separator: Option<&str>,
     ) -> Option<String> {
-        let key = key.as_ref();
+        self.remove_list_element_as(Dialect::host(), key.as_ref(), value.as_ref(), separator)
+    }
+
+    /// [`remove_list_element`](Self::remove_list_element) under an explicit [`Dialect`]. Path-kind
+    /// under [`Dialect::Msys`] in a POSIX arm converts the element as [`export_path_as`](Self::export_path_as)
+    /// does and splits on `:`; list-kind is untouched.
+    pub(crate) fn remove_list_element_as(
+        self,
+        dialect: Dialect,
+        key: &str,
+        value: &str,
+        separator: Option<&str>,
+    ) -> Option<String> {
         if !ocx_env::is_valid_env_key(key) || self == Self::Batch {
             return None;
         }
@@ -379,13 +475,25 @@ impl Shell {
         // quotes inside it are part of the option.
         let path_kind = separator.is_none();
         let raw = match separator {
-            None => ocx_util::path::strip_one_quote_pair(value.as_ref()),
-            Some(_) => value.as_ref(),
+            None => ocx_util::path::strip_one_quote_pair(value),
+            Some(_) => value,
         };
         if raw.is_empty() {
             return Some(self.comment(format!("ocx: {key} removal value is empty, nothing to remove")));
         }
-        let raw_separator = separator.unwrap_or(ocx_util::path::PATH_SEPARATOR);
+        let drive_prefix = self.msys_drive_prefix(dialect).filter(|_| path_kind);
+        let converted;
+        let raw = if let Some(drive_prefix) = drive_prefix {
+            converted = msys::path_element(raw, drive_prefix)?;
+            converted.as_str()
+        } else {
+            raw
+        };
+        let raw_separator = if drive_prefix.is_some() {
+            ":"
+        } else {
+            separator.unwrap_or(ocx_util::path::PATH_SEPARATOR)
+        };
         // Escaping is per arm, never one shared escaper: the fish/nushell double-quote escaper leaves
         // `'` untouched, so an element like `/tmp/a';id;'b` from a project `[env]` value would run at
         // every prompt if it reached a single-quoted arm.
@@ -447,8 +555,14 @@ impl Shell {
                 let value = escape::powershell_literal(raw);
                 let comparison = path_element_comparison();
                 let normalisation = path_segment_normalisation();
+                let fold = path_slash_fold();
+                let operand = if fold.is_empty() {
+                    "$__ocx_p".to_owned()
+                } else {
+                    format!("($__ocx_p{fold})")
+                };
                 format!(
-                    "$__ocx_p={value}; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), $__ocx_p, [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
+                    "$__ocx_p={value}; $__ocx_s=[IO.Path]::PathSeparator; $env:{key}=(($env:{key} -split [regex]::Escape($__ocx_s) | Where-Object {{$_ -and -not [String]::Equals(($_{normalisation}), {operand}, [StringComparison]::{comparison})}})) -join $__ocx_s; Remove-Variable __ocx_p,__ocx_s"
                 )
             }
             // PowerShell, list-kind: ordinal (case-sensitive) .NET string methods, so no `-creplace` and
@@ -661,10 +775,18 @@ fn path_element_comparison() -> &'static str {
 /// and (the operand never being stripped) re-prepended one copy per prompt.
 fn path_segment_normalisation() -> &'static str {
     if cfg!(windows) {
-        " -replace '(?s)^\"(.*)\"$','$1'"
+        " -replace '(?s)^\"(.*)\"$','$1' -replace '/','\\'"
     } else {
         ""
     }
+}
+
+/// The slash fold alone, for an operand `remove_list_element` already stripped of its quote pair.
+///
+/// Folds `/` to `\` on Windows only, as [`ocx_util::path::path_element_eq`] does; a second quote strip
+/// would take a second pair off the operand.
+fn path_slash_fold() -> &'static str {
+    if cfg!(windows) { " -replace '/','\\'" } else { "" }
 }
 
 impl std::fmt::Display for Shell {
@@ -1341,7 +1463,7 @@ mod tests {
         // half of the parity claim — unquotes on Windows and nowhere else.
         let comparison = if cfg!(windows) { "OrdinalIgnoreCase" } else { "Ordinal" };
         let normalisation = if cfg!(windows) {
-            r#" -replace '(?s)^"(.*)"$','$1'"#
+            r#" -replace '(?s)^"(.*)"$','$1' -replace '/','\'"#
         } else {
             ""
         };
@@ -1415,6 +1537,11 @@ mod tests {
     #[test]
     fn e3_the_powershell_removal_operand_is_stripped_once_in_rust_not_twice() {
         let normalisation = super::path_segment_normalisation();
+        let operand = if cfg!(windows) {
+            r"($__ocx_p -replace '/','\')"
+        } else {
+            "$__ocx_p"
+        };
         let line = Shell::PowerShell
             .remove_list_element("PATH", "\"/opt/b in\"", None)
             .expect("pwsh path-kind arm");
@@ -1424,8 +1551,8 @@ mod tests {
             "the operand is stripped once, in Rust; got: {line}"
         );
         assert!(
-            line.contains(&format!("[String]::Equals(($_{normalisation}), $__ocx_p, ")),
-            "and the emitted comparison does not strip it again; got: {line}"
+            line.contains(&format!("[String]::Equals(($_{normalisation}), {operand}, ")),
+            "and the emitted comparison folds its slashes but does not strip it again; got: {line}"
         );
     }
 
@@ -2705,11 +2832,10 @@ mod tests {
                 "{shell}"
             );
         }
-        // Path-kind adds the empty-segment collapse and uses the platform
-        // separator; nothing else differs.
-        let separator = sep();
+        // Path-kind adds the empty-segment collapse and splits on `:` on every host: bash on Windows
+        // is an MSYS shell, whose PATH is colon-separated.
         let path = Shell::Bash.remove_list_element("PATH", "/opt/bin", None).unwrap();
-        assert!(path.contains(&format!("__ocx_s='{separator}'")), "{path}");
+        assert!(path.contains("__ocx_s=':'"), "{path}");
         assert!(
             path.contains("__ocx_d=\"$__ocx_s$__ocx_s\";") && path.contains("unset __ocx_d;"),
             "path-kind must collapse ambient empty segments: {path}"
@@ -3486,5 +3612,204 @@ mod tests {
             }
         }
         assert_every_present_parity_arm_ran();
+    }
+
+    const POSIX_ARMS: [Shell; 5] = [Shell::Bash, Shell::Zsh, Shell::Ash, Shell::Ksh, Shell::Dash];
+    /// Every arm that reads PATH in POSIX form on a Windows host.
+    const CONVERTED_ARMS: [Shell; 6] = [
+        Shell::Bash,
+        Shell::Zsh,
+        Shell::Ash,
+        Shell::Ksh,
+        Shell::Dash,
+        Shell::Fish,
+    ];
+    const MSYS: Dialect = Dialect::Msys {
+        drive_prefix: msys::MSYS_DRIVE_PREFIX,
+    };
+    const CYGWIN: Dialect = Dialect::Msys {
+        drive_prefix: msys::CYGWIN_DRIVE_PREFIX,
+    };
+
+    #[test]
+    fn msys_export_path_emits_absolute_colon_free_element_in_every_converted_arm() {
+        for shell in CONVERTED_ARMS {
+            let line = shell.export_path_as(MSYS, "PATH", r"C:\Users\x\bin").unwrap();
+            assert!(line.contains("/c/Users/x/bin"), "{shell:?}: {line}");
+            assert!(!line.contains("C:"), "{shell:?}: {line}");
+            let cygwin = shell.export_path_as(CYGWIN, "PATH", r"C:\Users\x\bin").unwrap();
+            assert!(cygwin.contains("/proc/cygdrive/c/Users/x/bin"), "{shell:?}: {cygwin}");
+            assert!(!cygwin.contains("C:"), "{shell:?}: {cygwin}");
+        }
+        for (dialect, element) in [(MSYS, "/c/Users/x/bin"), (CYGWIN, "/proc/cygdrive/c/Users/x/bin")] {
+            let line = Shell::Fish.export_path_as(dialect, "PATH", r"C:\Users\x\bin").unwrap();
+            assert!(line.contains(&format!("set __ocx_p \"{element}\";")), "{line}");
+        }
+    }
+
+    #[test]
+    fn unc_elements_get_no_drive_prefix_in_either_runtime() {
+        for shell in CONVERTED_ARMS {
+            for dialect in [MSYS, CYGWIN] {
+                let line = shell.export_path_as(dialect, "PATH", r"\\srv\share\x").unwrap();
+                assert!(line.contains("//srv/share/x"), "{shell:?}: {line}");
+                assert!(!line.contains("cygdrive"), "{shell:?}: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn fish_path_kind_removal_names_the_converted_element_in_both_runtimes() {
+        for (dialect, element) in [(MSYS, "/c/Users/x/bin"), (CYGWIN, "/proc/cygdrive/c/Users/x/bin")] {
+            let line = Shell::Fish
+                .remove_list_element_as(dialect, "PATH", r"C:\Users\x\bin", None)
+                .unwrap();
+            assert!(line.contains(&format!("set __ocx_p \"{element}\";")), "{line}");
+        }
+    }
+
+    #[test]
+    fn cygwin_remove_path_kind_names_the_prefixed_element_in_every_posix_arm() {
+        for shell in POSIX_ARMS {
+            let line = shell
+                .remove_list_element_as(CYGWIN, "PATH", r"C:\Users\x\bin", None)
+                .unwrap();
+            assert!(
+                line.contains("__ocx_v='/proc/cygdrive/c/Users/x/bin'; __ocx_s=':';"),
+                "{shell:?}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn msys_remove_path_kind_splits_on_colon_in_every_posix_arm() {
+        for shell in POSIX_ARMS {
+            let line = shell
+                .remove_list_element_as(MSYS, "PATH", r"C:\Users\x\bin", None)
+                .unwrap();
+            assert!(
+                line.contains("__ocx_v='/c/Users/x/bin'; __ocx_s=':';"),
+                "{shell:?}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn msys_refuses_drive_relative_and_stream_elements() {
+        for shell in CONVERTED_ARMS {
+            for bad in [
+                "C:foo",
+                r"C:\a:stream",
+                "rel/dir",
+                "C:",
+                r"\bin",
+                r"C:\a\..\..\Windows",
+                r"\\?\UNC\",
+            ] {
+                assert_eq!(shell.export_path_as(MSYS, "PATH", bad), None, "{shell:?} {bad}");
+                assert_eq!(
+                    shell.remove_list_element_as(MSYS, "PATH", bad, None),
+                    None,
+                    "{shell:?} {bad}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn msys_keeps_a_drive_root_and_a_posix_absolute_element() {
+        for shell in CONVERTED_ARMS {
+            for (input, element) in [
+                (r"C:\", "/c/"),
+                ("C:/", "/c/"),
+                ("/c/x", "/c/x"),
+                ("/usr/bin", "/usr/bin"),
+            ] {
+                let line = shell.export_path_as(MSYS, "PATH", input).unwrap();
+                assert!(
+                    line.contains(&format!("'{element}'")) || line.contains(&format!("\"{element}\"")),
+                    "{shell:?} {input}: {line}"
+                );
+            }
+        }
+    }
+
+    /// The MSYS dialect refuses at emit time only, and only in the arms that convert: the shell-less
+    /// admission rule must not change for PowerShell, elvish and the rest.
+    #[test]
+    fn msys_refusal_is_emit_level_and_stays_in_the_posix_arms() {
+        let unspellable = ["C:foo", "C:", r"\bin", r"C:\a\..\b", "rel/dir"];
+        for value in unspellable {
+            for shell in CONVERTED_ARMS {
+                assert_eq!(shell.export_path_as(MSYS, "PATH", value), None, "{shell:?} {value}");
+            }
+            for shell in [Shell::PowerShell, Shell::Elvish, Shell::Nushell] {
+                assert_eq!(
+                    shell.export_path_as(MSYS, "PATH", value),
+                    shell.export_path_as(Dialect::Native, "PATH", value),
+                    "{shell:?} {value}"
+                );
+            }
+        }
+        assert!(Shell::Bash.export_path_as(Dialect::Native, "PATH", "rel/dir").is_some());
+    }
+
+    /// The public entries are the explicit-dialect twins with the host's dialect.
+    #[test]
+    fn the_public_entries_are_their_twins_under_the_host_dialect() {
+        assert_eq!(matches!(Dialect::host(), Dialect::Msys { .. }), cfg!(windows));
+        let binary = std::path::Path::new(r"C:\Users\x\ocx.exe");
+        for &shell in Shell::value_variants() {
+            let value = r"C:\a\b";
+            assert_eq!(
+                shell.export_path("PATH", value),
+                shell.export_path_as(Dialect::host(), "PATH", value),
+                "{shell:?}"
+            );
+            assert_eq!(
+                shell.remove_list_element("PATH", value, None),
+                shell.remove_list_element_as(Dialect::host(), "PATH", value, None),
+                "{shell:?}"
+            );
+            assert_eq!(
+                shell.command_word(binary),
+                shell.command_word_as(Dialect::host(), binary),
+                "{shell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn msys_command_word_folds_slashes_in_converted_arms_only() {
+        let binary = std::path::Path::new(r"C:\Users\x\ocx.exe");
+        for shell in CONVERTED_ARMS {
+            assert_eq!(shell.command_word_as(MSYS, binary), "C:/Users/x/ocx.exe");
+            assert_eq!(shell.command_word_as(Dialect::Native, binary), r"C:\Users\x\ocx.exe");
+        }
+        assert_eq!(Shell::PowerShell.command_word_as(MSYS, binary), r"C:\Users\x\ocx.exe");
+    }
+
+    #[test]
+    fn msys_native_dialect_and_other_arms_are_unchanged() {
+        for shell in Shell::value_variants() {
+            let native = shell.export_path_as(Dialect::Native, "PATH", r"C:\a\b");
+            if !CONVERTED_ARMS.contains(shell) {
+                assert_eq!(shell.export_path_as(MSYS, "PATH", r"C:\a\b"), native, "{shell:?}");
+                assert_eq!(
+                    shell.remove_list_element_as(MSYS, "PATH", r"C:\a\b", None),
+                    shell.remove_list_element_as(Dialect::Native, "PATH", r"C:\a\b", None),
+                    "{shell:?}"
+                );
+            }
+        }
+        assert_eq!(
+            Shell::Bash.export_path_as(Dialect::Native, "PATH", "/opt/bin"),
+            Shell::Bash.export_path_as(MSYS, "PATH", "/opt/bin"),
+        );
+        // list-kind removal keeps its caller-supplied separator and native value
+        let list = Shell::Bash
+            .remove_list_element_as(MSYS, "CFLAGS", r"C:\a", Some(" "))
+            .unwrap();
+        assert!(list.contains(r"__ocx_v='C:\a'; __ocx_s=' ';"), "{list}");
     }
 }

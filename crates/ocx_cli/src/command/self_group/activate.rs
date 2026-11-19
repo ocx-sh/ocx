@@ -139,6 +139,8 @@ impl SelfActivate {
     /// Every diagnostic rides the first `--reconcile` run, which always fires because no fingerprint is recorded yet.
     async fn run_startup(&self, options: &ContextOptions) -> anyhow::Result<ExitCode> {
         let shell = self.target_shell()?;
+        // Before any emission: a Windows host spells paths for the runtime on `PATH`.
+        ocx_shell::shell::resolve_host_dialect(shell).await;
 
         // `env.sh` sets `OCX_HOME` first, so `FileStructure::new()` resolves the right root.
         let file_structure = FileStructure::new();
@@ -346,6 +348,8 @@ impl SelfActivate {
         received: Received<'_>,
     ) -> anyhow::Result<()> {
         let shell = self.target_shell()?;
+        // Before any emission, stand-down included: a Windows host spells paths for the runtime on `PATH`.
+        ocx_shell::shell::resolve_host_dialect(shell).await;
         let carrier = received.carrier;
 
         // The carrier is untrusted: decoded once, bounded, and never written over when unreadable.
@@ -694,11 +698,13 @@ fn plan_lines(shell: Shell, plan: &Plan) -> Vec<String> {
         Some(value) => shell.export_constant(key, value),
         None => shell.unset(key),
     }));
-    lines.extend(
-        plan.removes
-            .iter()
-            .filter_map(|(key, element, separator)| shell.remove_list_element(key, element, separator.as_deref())),
-    );
+    lines.extend(plan.removes.iter().filter_map(|(key, element, separator)| {
+        let line = shell.remove_list_element(key, element, separator.as_deref());
+        if line.is_none() {
+            log::debug!("skipping removal of {element:?} from {key}: {shell} cannot spell it");
+        }
+        line
+    }));
     lines
 }
 
@@ -708,7 +714,17 @@ fn set_line(shell: Shell, entry: &ocx_package::metadata::env::entry::Entry) -> O
     use ocx_package::metadata::env::modifier::ModifierKind;
 
     match entry.kind {
-        ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
+        ModifierKind::Path => {
+            let line = shell.export_path(&entry.key, &entry.value);
+            if line.is_none() {
+                log::debug!(
+                    "skipping {}: {:?} has no absolute spelling for {shell}",
+                    entry.key,
+                    entry.value
+                );
+            }
+            line
+        }
         ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
         ModifierKind::List => shell.export_list(
             &entry.key,
@@ -1118,7 +1134,14 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
 
 /// The PATH prepend line for an absolute `bin_path`, or `None` when the arm cannot express it.
 fn path_prepend_line(shell: Shell, bin_path: &std::path::Path) -> Option<String> {
-    shell.export_path("PATH", &*bin_path.to_string_lossy())
+    let line = shell.export_path("PATH", &*bin_path.to_string_lossy());
+    if line.is_none() {
+        log::warn!(
+            "skipping PATH prepend: {} has no absolute spelling for {shell}",
+            bin_path.display()
+        );
+    }
+    line
 }
 
 /// Maps a shell to its `clap_complete` backend, or `None` when the shell has no
@@ -1152,8 +1175,12 @@ fn generate_completion_inline(shell: Shell) -> Option<String> {
 /// The probe is a path test, never a name lookup: `command -v`/`type -q`/`Get-Command` would find the `ocx`
 /// wrapper function this stream defines. Only `Batch` and `Nushell`, which host no wrapper, keep the bare name.
 fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
+    format_global_env_eval_for(shell, shell.command_word(binary))
+}
+
+/// [`format_global_env_eval`] over the binary already spelled for the shell ([`Shell::command_word`]).
+fn format_global_env_eval_for(shell: Shell, path: String) -> String {
     let shell_name = shell_name_for_eval(shell);
-    let path = binary.to_string_lossy();
     match shell {
         Shell::Ash | Shell::Ksh | Shell::Dash | Shell::Bash | Shell::Zsh => {
             let quoted = escape::posix_single_quoted(&path);
@@ -1604,6 +1631,37 @@ mod tests {
             "{line:?}"
         );
         assert!(line.contains(&format!("(& {literal} --global env")), "{line:?}");
+    }
+
+    /// On a Windows host the POSIX arms carry the forward-slash binary (`Shell::command_word`); the
+    /// dialect rule itself runs on every host in `ocx_shell`.
+    #[cfg(windows)]
+    #[test]
+    fn global_env_eval_msys_posix_line_has_no_backslash() {
+        let native = Path::new(r"C:\Users\x\.ocx\symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe");
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Ash, Shell::Ksh, Shell::Dash] {
+            let line = super::format_global_env_eval_for(shell, shell.command_word(native));
+            let binary = "C:/Users/x/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe";
+            assert!(!line.contains('\\'), "{line}");
+            assert!(
+                line.contains(&format!("if [ -x '{binary}' ]; then eval \"$('{binary}' --global env")),
+                "{line}"
+            );
+        }
+    }
+
+    /// fish on a Windows host runs under MSYS2 or Cygwin, so its eval line names the forward-slash binary too.
+    #[cfg(windows)]
+    #[test]
+    fn global_env_eval_fish_line_has_no_backslash_on_a_windows_host() {
+        let native = Path::new(r"C:\Users\x\.ocx\symlinks\ocx.sh\ocx\cli\current\content\bin\ocx.exe");
+        let line = super::format_global_env_eval_for(Shell::Fish, Shell::Fish.command_word(native));
+        let binary = "C:/Users/x/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx.exe";
+        assert!(!line.contains('\\'), "{line}");
+        assert!(
+            line.contains(&format!("if test -x '{binary}'; '{binary}' --global env")),
+            "{line}"
+        );
     }
 
     // ── Inline completion generation ────────────────────────────────────────
@@ -2095,7 +2153,7 @@ mod reconcile_tests {
         );
         let binary = ocx_binary_path(&bin_dir());
         assert!(
-            stream.contains(&format!("[ -x '{}' ]", binary.display())),
+            stream.contains(&format!("[ -x '{}' ]", Shell::Bash.command_word(&binary))),
             "the hook must probe-guard the resolved binary (S-029); got: {stream}"
         );
     }
@@ -2124,7 +2182,7 @@ mod reconcile_tests {
         let binary = ocx_binary_path(&bin_dir());
         let stream = startup_stream(Shell::Bash, true).join("\n");
         assert!(
-            stream.contains(&*binary.to_string_lossy()),
+            stream.contains(&Shell::Bash.command_word(&binary)),
             "the emitted hook must name the resolved absolute binary; got: {stream}"
         );
     }
@@ -3348,8 +3406,8 @@ mod bare_ocx_tests {
 
     /// The binary path as `shell` spells it inside its own quoting.
     ///
-    /// `Path::join` produces a `\` on Windows, and fish is the one wrapper arm
-    /// whose escapers double it — both `fish_single_quoted` and
+    /// `Path::join` produces a `\` on Windows. The POSIX arms fold it to `/` through
+    /// [`Shell::command_word`], and fish is the one wrapper arm whose escapers double it — both `fish_single_quoted` and
     /// `fish_double_quoted` do, so the site's quoting context does not matter
     /// here. The doubling is correct: inside fish quotes a literal backslash
     /// must be written `\\` or fish eats it, so the needle has to carry it too.
@@ -3358,10 +3416,10 @@ mod bare_ocx_tests {
     /// Escaper *correctness* is `escape.rs`'s own contract; the guard here
     /// is that an invocation names the absolute binary, never a bare `ocx`.
     fn quoted_binary(shell: Shell, binary: &Path) -> String {
-        let path = binary.to_string_lossy();
+        let path = shell.command_word(binary);
         match shell {
             Shell::Fish => escape::fish_single_quoted(&path),
-            _ => path.into_owned(),
+            _ => path,
         }
     }
 

@@ -347,9 +347,9 @@ jobs:
       - name: Run unit tests
         shell: bash
         env:
-          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper (ocx#524); both
-          # interpreters ship on the image, so a skip is a red.
-          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'pwsh,powershell' || '' }}
+          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper (ocx#524); all
+          # three interpreters ship on the image (Git Bash included, ocx#753), so a skip is a red.
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'bash,pwsh,powershell' || '' }}
         run: task cross:test:run BUNDLE="bundle/unit-tests.tar.gz" SOURCE_ROOT="$GITHUB_WORKSPACE"
       # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
       - name: Publish unit test results

@@ -175,12 +175,18 @@ fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
             entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
         ),
     };
-    line.ok_or_else(|| {
-        format!(
+    line.ok_or_else(|| match entry.kind {
+        ModifierKind::Path => format!(
+            "skipping env var {:?} — {:?} has no absolute spelling for {}",
+            entry.key,
+            entry.value,
+            shell_argument_name(shell)
+        ),
+        _ => format!(
             "skipping list env var {:?} — {} has no case-sensitive unique append",
             entry.key,
             shell_argument_name(shell)
-        )
+        ),
     })
 }
 
@@ -1151,6 +1157,13 @@ mod tests {
         let entry = path_entry("OCXP", &format!("/n/a{separator}b"));
         let note = emit_line(Shell::Bash, &entry).expect_err("must be refused, not emitted");
         assert!(note.contains("path separator"), "{note}");
+    }
+
+    #[test]
+    fn a_path_value_the_shell_cannot_spell_is_refused_with_a_path_message() {
+        let note = emit_line(Shell::Batch, &path_entry("OCXP", "/n/%a")).expect_err("cmd cannot carry `%`");
+        assert!(note.contains("no absolute spelling for"), "{note}");
+        assert!(!note.contains("list env var"), "{note}");
     }
 
     #[test]

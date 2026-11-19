@@ -166,14 +166,16 @@ Behind an intercepting proxy, install the root into the machine certificate stor
 
 ### Supported shells \{#shells\}
 
-[setup.ocx.sh][setup-home] serves a separate installer per shell. Pipe the `sh` and `fish` URLs to their interpreter, and `irm … | iex` for [PowerShell][powershell]. [Nushell][nushell] and [Elvish][elvish] fetch their script themselves, with `nu -c (http get …)` and `elvish -c (e:curl … | slurp)`. The POSIX `sh` installer covers every Bourne-family shell with one script.
+[setup.ocx.sh][setup-home] serves a separate installer per shell. Pipe the `sh` and `fish` URLs to their interpreter, and `irm … | iex` for [PowerShell][powershell]. [Nushell][nushell] and [Elvish][elvish] fetch their script themselves, with `nu -c (http get …)` and `elvish -c (e:curl … | slurp)`. The POSIX `sh` installer covers every Bourne-family shell with one script. On Windows it runs in Git Bash, MSYS2 and Cygwin (`curl -fsSL https://setup.ocx.sh/sh | sh`). It installs the same Windows build as the PowerShell installer. An install from any of them works from the others' shells.
+
+fish exists on Windows only as an MSYS2 or Cygwin package. There the `sh` installer is the route, and the fish installer prints that and exits.
 
 | Shell | Installer URL | OS |
 |---|---|---|
-| POSIX `sh` (bash, zsh, ash, ksh, dash) | [`setup.ocx.sh/sh`][setup-sh] | <PlatformIcons mode="os" platforms={['linux','darwin']} /> |
+| POSIX `sh` (bash, zsh, ash, ksh, dash) | [`setup.ocx.sh/sh`][setup-sh] | <PlatformIcons mode="os" platforms={['linux','darwin','windows']} /> |
 | [PowerShell][powershell] | `setup.ocx.sh/pwsh` | <PlatformIcons mode="os" platforms={['windows','linux','darwin']} /> |
 | [Nushell][nushell] | `setup.ocx.sh/nu` | <PlatformIcons mode="os" platforms={['linux','darwin','windows']} /> |
-| [fish][fish] | `setup.ocx.sh/fish` | <PlatformIcons mode="os" platforms={['linux','darwin']} /> |
+| [fish][fish] | `setup.ocx.sh/fish` | <PlatformIcons mode="os" platforms={['linux','darwin']} /> (on Windows: the `sh` installer) |
 | [Elvish][elvish] | `setup.ocx.sh/elvish` | <PlatformIcons mode="os" platforms={['linux','darwin','windows']} /> |
 
 ## Bare-binary setup {#bare-binary}
@@ -186,7 +188,7 @@ The [downloaded binary][manual] reaches the managed state through `ocx self setu
 
 1. **Bootstraps itself.** It installs `ocx.sh/ocx/cli`, the stable release unless you pass a version, into the content-addressed object store and wires the `current` symlink. The loose binary you downloaded is only needed for this step. Afterwards the managed copy in `~/.ocx/` takes over.
 2. **Writes the env files.** It creates `$OCX_HOME/env.sh`, `env.fish`, `env.ps1`, `env.nu` and `env.elv`. These files are byte-identical across users.
-3. **Injects a source line.** It adds a managed block to each detected shell profile. Re-running setup is safe, because the fence is idempotent.
+3. **Injects a source line.** It adds a managed block to each detected shell profile. Re-running setup is safe, because the fence is idempotent. On Windows it finds PowerShell, the bash and zsh profile files, nushell, elvish and fish, and wires each one it finds. [Shells on Windows][shell-integration-windows] lists the files.
 4. **Registers a session `PATH`.** It writes `$OCX_HOME/toolchain/active/bin` and the OCX installation's `bin` directory behind it into the [session store](#session-path) of your platform.
 
 If the bootstrap fails, for example because the registry is unreachable, the command returns a non-zero exit code and writes nothing.
@@ -441,6 +443,7 @@ The `channel` field reads `"dev"` for dev builds and is absent for stable releas
 [fs-objects]: ../explanation/storage.mdx#stores
 [manual]: ../getting-started/install-ocx.mdx#manual
 [install-ocx]: ../getting-started/install-ocx.mdx
+[shell-integration-windows]: ../explanation/shell-integration.mdx#activation-windows
 
 {/* commands */}
 [cmd-self-setup]: ../reference/command-line/self.md#self-setup

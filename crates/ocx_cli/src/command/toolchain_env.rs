@@ -136,6 +136,10 @@ impl ToolchainEnv {
         let with_packages = self.with.packages(context.default_registry())?;
 
         let shell = resolve_shell_arg(self.shell)?;
+        if let Some(shell) = shell {
+            // Before any emission: a Windows host spells paths for the POSIX runtime it finds on `PATH`.
+            ocx_shell::shell::resolve_host_dialect(shell).await;
+        }
         // Early, so a bare-`--ci` autodetect failure beats the slow entry resolution.
         let ci = resolve_ci_arg(self.ci)?;
         // `--ci` wins over `--shell` at emit, so only a bare `--shell` writes into the running shell.

@@ -1013,7 +1013,7 @@ mod tests {
     /// TODO string.
     fn shipped_code(source: &str) -> String {
         source
-            .split("#[cfg(test)]\nmod tests")
+            .split("#[cfg(test)]\nmod tests {")
             .next()
             .unwrap_or(source)
             .lines()
