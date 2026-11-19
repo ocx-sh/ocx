@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from src.helpers import make_package
+from src.otlp_fixture import serve_collector
 from src.runner import OcxRunner, PackageInfo
 
 # Re-export the real Sigstore stack fixtures (`sigstore` compose profile) so the
@@ -28,6 +29,21 @@ def unique_repo(request: pytest.FixtureRequest) -> str:
     # Strip trailing underscores so any test name maps to a valid repo.
     name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40].rstrip("_")
     return f"t_{short_id}_{name}"
+
+
+@pytest.fixture()
+def otlp_collector(request: pytest.FixtureRequest):
+    """A capture OTLP/HTTP logs collector on a loopback port (`src/otlp_fixture.py`).
+
+    Starts in mode `ok`; set `otlp_collector.mode` at any time, or choose it up
+    front with `@pytest.mark.parametrize("otlp_collector", ["status=503"],
+    indirect=True)`. Teardown wakes every blocked handler and joins the threads,
+    then fails the test if a `/v1/logs` body did not decode as protobuf (set
+    `collector.tolerate_decode_failures = True` to send garbage on purpose).
+    """
+    with serve_collector(getattr(request, "param", "ok")) as collector:
+        yield collector
+    collector.assert_no_decode_failures()
 
 
 @pytest.fixture()

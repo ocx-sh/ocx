@@ -1,0 +1,206 @@
+---
+title: "Send usage telemetry"
+description: "Send one usage record per OCX command to an OpenTelemetry collector and join it with execution records."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: integration */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+Send one usage record per OCX command to an [OpenTelemetry][otel] collector you run, and join it with the launch records OCX already writes.
+
+An operator of a CI fleet wants to know which commands ran, which packages they fetched, how long that took and what failed. [Execution records][execution-records-explanation] answer a different question: which binary started with which package digests. Neither source covers the other's half.
+
+Usage telemetry is the other half. It is off until you arm it and name a collector. It never changes the exit code or stdout of a command, and a dead collector costs at most the timeout. The timeout covers the whole export, including the host and proxy lookups that precede the request, so a stalled lookup adds at most the timeout.
+
+## What is sent {#telemetry-what}
+
+An armed command sends one [OTLP][otlp] request over HTTP at its end. The request holds a resource, one command record and one record per package the command installed, pulled or removed.
+
+The command record carries the command name, its duration, the exit code and, on failure, the error slug. A package record carries the package [purl][purl-spec], what happened to it and how long each phase took. The resource names the host, the process and, in CI, the pipeline run.
+
+The [telemetry reference][telemetry-fields] lists every key with its presence rule. Argv, working directory, user names, environment variables, paths and credentials are never sent.
+
+## Turn it on {#telemetry-on}
+
+Two inputs arm OCX: a switch and a destination. The switch is the [`OCX_TELEMETRY`][env-ocx-telemetry] variable or `enabled = true` in a [`[telemetry]`][config-telemetry] section. The destination is a collector endpoint. With no destination OCX sends nothing and writes no state.
+
+The `OTEL_EXPORTER_OTLP_*` variables name a destination but never arm export on their own.
+
+<ShellSession>
+
+```sh
+export OCX_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example:4318
+```
+
+</ShellSession>
+
+The same setup lives in a config file. Put it in any config tier, or in a file listed in `OCX_CONFIG`:
+
+```toml title="config.toml"
+[telemetry]
+enabled  = true
+endpoint = "https://collector.example:4318"
+timeout  = 500
+
+[telemetry.resource_attributes]
+team = "platform"
+```
+
+OCX appends `/v1/logs` to the endpoint path. A `[telemetry].endpoint` and the `OTEL_EXPORTER_OTLP_*` variables are never mixed: when the section names an endpoint, no `OTEL_EXPORTER_OTLP_*` variable is read. The [destination table][telemetry-destination] shows the full order.
+
+An invalid setting turns export off for that run. OCX prints one warning that names the key but never its value. It does so only when the run asked for export, which means one of these:
+
+- `OCX_TELEMETRY` is truthy.
+- The merged `[telemetry]` section has `enabled = true`.
+- The invalid key is `enabled`.
+
+Otherwise the run is off silently.
+
+A timeout from `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT` must be whole milliseconds from 1 to 10000.
+Otherwise it falls back to 500 ms, with one warning on an armed run.
+
+An `OTEL_SDK_DISABLED` value that is not a recognised boolean is ignored, with one warning on an armed run.
+
+## Turn it off {#telemetry-off}
+
+Any one of these stops export, and each beats every config file and every system lock:
+
+- [`DO_NOT_TRACK`][dnt] set to a true value
+- `OTEL_SDK_DISABLED` set to a true value
+- `OTEL_LOGS_EXPORTER=none`
+- `--offline` or [`OCX_OFFLINE`][env-ocx-offline]
+- `OCX_TELEMETRY=0`
+
+An unrecognized `OCX_TELEMETRY` value also turns export off and prints one warning. A typo never arms export.
+
+A `[telemetry]` section in the system-tier `/etc/ocx/config.toml` locks the whole section, so no lower tier can change it. The opt-outs above still win over a lock.
+
+## Configure a fleet {#telemetry-fleet}
+
+A fleet needs one collector address and one token on every runner. There are two ways to deliver them, and both reuse existing config machinery.
+
+### Managed config {#telemetry-managed}
+
+A [managed configuration][manage-config] payload may carry the whole `[telemetry]` section, `headers` included. Publish it with `ocx config push` as described in the managed-config guide, and every adopting host picks it up.
+
+:::danger
+Anyone who can pull the managed-config artifact can read a token stored in it. Publish a token there only when the registry restricts pull access as tightly as the token itself.
+:::
+
+### A list for a CI image {#telemetry-ci-image}
+
+[`OCX_CONFIG`][env-ocx-config] accepts a list of files, joined with the platform's path separator. Later files win over earlier ones. Append a telemetry-only file to whatever the image already sets, and the existing config stays in place.
+
+<ShellSession>
+
+```sh
+export OCX_CONFIG="$OCX_CONFIG:/etc/ci/telemetry.toml"
+```
+
+</ShellSession>
+
+Use absolute paths. A relative entry resolves against the working directory of each command. A list holds at most 32 entries.
+
+:::caution
+Set a list only once every `ocx` in that environment is at or above this release. An `ocx` below that release reads the list as one path and exits 79 on every command.
+:::
+
+### Headers and endpoints {#telemetry-headers}
+
+A layer that sets `endpoint` drops every header inherited from earlier layers. A later file that moves the endpoint must therefore repeat the headers it needs. Without that, a token meant for one collector never reaches another.
+
+Headers merge per name, ignoring case, and a later layer wins.
+
+OCX refuses a link-local destination, whether you write it as an address or reach it through a name that resolves to one. It also refuses the cloud metadata addresses `fd00:ec2::254` and `100.100.100.200`.
+
+Behind an HTTP proxy the proxy resolves the endpoint name, so only a literal address is refused, never a resolved one.
+
+The refused header-name list is intentionally minimal. It blocks framing, hop-by-hop and transport-set names such as `host` and `user-agent`.
+
+## Keep tokens safe {#telemetry-tokens}
+
+Put a token in a config file where a file permission can protect it, and run `chmod 600` on a file that holds one. The `OCX_TELEMETRY_HEADERS` variable carries tokens too, but it is a credential: OCX removes it from the environment of every child process.
+
+A nested `ocx` armed only by environment therefore exports without that token. Under `ocx exec`, put the token in a config file, which the child still reads.
+
+Headers sent to an `http://` endpoint that is not loopback travel in plaintext, and OCX prints one warning naming the header source. Use `https://` for anything that crosses a network you do not own.
+
+OCX never prints a header value, at any log level, in any warning or in `--format json` output.
+
+## The installation id {#telemetry-installation-id}
+
+`sh.ocx.installation.id` tells hosts apart in the backend. OCX keeps it in `$OCX_HOME/state/telemetry/installation-id`, a random UUID written by the first armed run that has a destination.
+
+To reset it, delete the file. The next armed run with a destination writes a new one. A CI runner with a fresh `OCX_HOME` mints a new id on every run, so the id does not identify such a runner. Use `cicd.pipeline.run.id` there.
+
+## Join with execution records {#telemetry-join}
+
+Usage records say what a command did. [Execution records][execution-records-reference] say what a tool launch used. Both name the same facts in the same words, so one backend can join them.
+
+| Join on | Command record side | Execution record side |
+|---|---|---|
+| Package | `sh.ocx.package`, the purl | `packages[].uri` and `executable["sh.ocx.package"]` |
+| Process | `process.pid`, `process.parent.pid` | `process.pid`, `process.parent` |
+| CI run | `cicd.pipeline.run.id` | none, so the shipper adds it from the job's environment |
+
+Tool launches under `ocx exec` send no usage record. They write an execution record when a [`[records]`][config-records] sink is configured, and a log shipper moves that file to the same backend. Any of these pick the files up:
+
+- the [OpenTelemetry Collector `filelog` receiver][filelog]
+- [Vector][vector]
+- [Fluent Bit][fluent-bit]
+- [Fluentd][fluentd]
+- [Filebeat][filebeat]
+- [Grafana Alloy][alloy]
+- the [Splunk Universal Forwarder][splunk-uf]
+
+Inside one `ocx exec -- ocx package pull ...`, the inner command sends its own record. On Unix its `process.pid` equals the execution record's `process.pid`.
+
+## Commands that send nothing {#telemetry-silent}
+
+The exec family, the per-prompt commands and the static paths never send. A login shell that runs `ocx env --shell` at every start never sends either, so an armed collector is not contacted on each shell start. Without `--shell`, `ocx env` sends.
+
+[Commands that send nothing][telemetry-never-send] lists the full set.
+
+Under `ocx exec --clean` the child starts with an empty environment. Ambient switches and opt-outs do not cross, so `OCX_TELEMETRY` and `DO_NOT_TRACK` set in the parent no longer reach it. A config file that arms export still applies.
+
+## Check what would be sent {#telemetry-dry-run}
+
+Point an armed command at an endpoint nothing listens on, and read the debug output. The export fails quietly and the command finishes normally.
+
+<ShellSession>
+
+```sh
+OCX_TELEMETRY=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9 ocx --log-level debug package install nodejs/node:24
+```
+
+</ShellSession>
+
+The debug lines name the decision, the destination without its query string and the header names. A `telemetry payload` line holds the JSON body that would be sent. No header value ever appears.
+
+[otel]: https://opentelemetry.io/
+[otlp]: https://opentelemetry.io/docs/specs/otlp/
+[purl-spec]: https://github.com/package-url/purl-spec
+[dnt]: https://consoledonottrack.com/
+[filelog]: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/filelogreceiver
+[vector]: https://vector.dev/
+[fluent-bit]: https://fluentbit.io/
+[fluentd]: https://www.fluentd.org/
+[filebeat]: https://www.elastic.co/beats/filebeat
+[alloy]: https://grafana.com/docs/alloy/latest/
+[splunk-uf]: https://docs.splunk.com/Documentation/Forwarder/latest/Forwarder/Abouttheuniversalforwarder
+
+[env-ocx-telemetry]: ../reference/environment.md#ocx-telemetry
+[env-ocx-config]: ../reference/environment.md#ocx-config
+[env-ocx-offline]: ../reference/environment.md#ocx-offline
+
+[config-telemetry]: ../reference/configuration.md#keys-telemetry
+[config-records]: ../reference/configuration.md#keys-records
+
+[telemetry-fields]: ../reference/telemetry.md#fields
+[telemetry-destination]: ../reference/telemetry.md#destination
+[telemetry-never-send]: ../reference/telemetry.md#never-send
+[execution-records-explanation]: ../explanation/execution-records.mdx
+[execution-records-reference]: ../reference/execution-records.md
+[manage-config]: ./manage-config-centrally.mdx

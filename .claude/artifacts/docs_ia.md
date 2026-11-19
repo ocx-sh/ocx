@@ -934,6 +934,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | user-guide/patches.mdx | explanation/patches.mdx | explanation | — | everyday | concepts |
 | — | explanation/integrations.md | explanation | — | explanation | concepts |
 | — | explanation/execution-records.mdx | explanation | — | explanation | concepts |
+| — | guides/telemetry.mdx | how-to | integration | integration | integrations |
 | in-depth/signing.mdx | explanation/signing.mdx | explanation | — | explanation | concepts |
 | in-depth/cosign-parity.mdx | explanation/cosign-parity.mdx | explanation | — | explanation | concepts |
 | in-depth/environments.mdx | explanation/launcher-forwarding.md | explanation | — | explanation | concepts |
@@ -951,6 +952,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | reference/metadata.md | reference/metadata/integrations.md | reference | — | misc | reference |
 | reference/env-composition.md | reference/env-composition.md | reference | — | misc | reference |
 | reference/execution-records.md | reference/execution-records.md | reference | — | misc | reference |
+| — | reference/telemetry.md | reference | — | misc | reference |
 | reference/script-host-api.md | reference/script-host-api.md | reference | — | misc | reference |
 | reference/platforms.md | reference/platforms.md | reference | — | misc | reference |
 | reference/machine-interface.md | reference/machine-interface.md | reference | — | misc | reference |

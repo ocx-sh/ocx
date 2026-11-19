@@ -421,8 +421,8 @@ variable is the first rung of the policy that decides whether anything prints.
 Boolean — skip the discovered config-tier chain; every file `--config` and `OCX_CONFIG` name still loads and a system-tier lock survives. Forwarded to child OCX.
 
 Also drops the `[managed]` snapshot and the `OCX_MANAGED_CONFIG` read. A system-tier policy
-in `/etc/ocx/config.toml` still loads, filtered to its locked sections, and an unreadable
-system file still aborts (exit 78).
+in `/etc/ocx/config.toml` still loads, filtered to its locked sections (`[records]` and
+`[telemetry]` among them), and an unreadable system file still aborts (exit 78).
 
 Env-only: there is no `--no-config` flag. Hermetic pattern:
 `OCX_NO_CONFIG=1 ocx --config /ci/ocx.toml ...`.
@@ -694,6 +694,34 @@ With `OCX_OFFLINE` it is the fully offline path. Ladder after the flag: this var
 - Value: `path`
 - See: [Self-hosted Sigstore](../guides/self-hosted-sigstore.mdx)
 
+## `OCX_TELEMETRY` {#ocx-telemetry}
+
+Switch for exporting usage telemetry; unset or empty defers to `[telemetry]` in config.
+
+`1`, `y`, `yes`, `on` and `true` (ASCII case-insensitive) turn it on; `0`, `n`, `no`, `off`
+and `false` are an explicit off. Any other value, a non-UTF-8 one included, is an explicit
+off plus one warning per run naming this variable and never the value, so a typo never
+arms export and never defers to a file that could.
+
+Forwarded to child OCX, so a nested run agrees with its parent.
+
+- Audience: public
+- Value: `tri_bool`
+
+## `OCX_TELEMETRY_HEADERS` {#ocx-telemetry-headers}
+
+Headers sent with every telemetry export, `name=value[,name=value...]`; values are percent-decoded and names trimmed.
+
+Merges over `[telemetry] headers` per name, case-insensitively, except that a name a system-locked section sets wins. Sent only to a destination `[telemetry]` names, never to one the `OTEL_EXPORTER_OTLP_*` variables name.
+
+A malformed value disables the export for the run with one warning that names this variable and never the value.
+
+Stripped from plugin-dispatched children and from any environment OCX writes, so a nested
+`ocx` under `ocx exec` does not see it; put a long-lived token in a config file instead.
+
+- Audience: public
+- Value: `string`
+
 ## `OCX_TOOLCHAIN_ACTIVATE` {#ocx-toolchain-activate}
 
 Toolchain activation mode (`env` / `bin` / `none`), the weakest tier of the `activate` ladder. Not forwarded, like `OCX_LAZY_MODE`.
@@ -866,6 +894,20 @@ Commit the GitLab pipeline runs on.
 - Audience: foreign
 - Value: `string`
 
+## `CI_JOB_ID` {#external-ci-job-id}
+
+Id of the GitLab job; read as a telemetry attribute.
+
+- Audience: foreign
+- Value: `string`
+
+## `CI_JOB_NAME` {#external-ci-job-name}
+
+Name of the GitLab job; read as a telemetry attribute.
+
+- Audience: foreign
+- Value: `string`
+
 ## `CI_JOB_TOKEN` {#external-ci-job-token}
 
 GitLab CI job token.
@@ -883,6 +925,13 @@ URL of the GitLab CI job.
 ## `CI_PIPELINE_CREATED_AT` {#external-ci-pipeline-created-at}
 
 Creation time of the GitLab pipeline.
+
+- Audience: foreign
+- Value: `string`
+
+## `CI_PIPELINE_ID` {#external-ci-pipeline-id}
+
+Id of the GitLab pipeline; read as a telemetry attribute.
 
 - Audience: foreign
 - Value: `string`
@@ -937,6 +986,13 @@ Docker credential-store directory, read by the credential helper.
 - Value: `path`
 - See: [Authenticate with a private registry](../guides/authenticate.mdx)
 
+## `DO_NOT_TRACK` {#external-do-not-track}
+
+Console-do-not-track convention; a truthy value is honoured as an opt-out and turns telemetry export off.
+
+- Audience: foreign
+- Value: `bool`
+
 ## `GITHUB_ACTIONS` {#external-github-actions}
 
 `true` inside GitHub Actions.
@@ -964,6 +1020,13 @@ File GitHub Actions reads exported variables from.
 
 - Audience: foreign
 - Value: `path`
+
+## `GITHUB_JOB` {#external-github-job}
+
+Name of the GitHub Actions job; read as a telemetry attribute.
+
+- Audience: foreign
+- Value: `string`
 
 ## `GITHUB_PATH` {#external-github-path}
 
@@ -1093,6 +1156,104 @@ Hosts reached without a proxy.
 - Audience: foreign
 - Value: `string`
 - See: [Proxy and corporate CA](../integration/proxy-and-ca.mdx)
+
+## `OTEL_EXPORTER_OTLP_COMPRESSION` {#external-otel-exporter-otlp-compression}
+
+OTLP compression for every signal; not honoured, the request is never compressed.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_ENDPOINT` {#external-otel-exporter-otlp-endpoint}
+
+OTLP endpoint for every signal; honoured as the export destination when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is unset.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_HEADERS` {#external-otel-exporter-otlp-headers}
+
+OTLP headers for every signal; honoured only when `OTEL_EXPORTER_OTLP_ENDPOINT` names the destination and `OTEL_EXPORTER_OTLP_LOGS_HEADERS` is unset. Never sent to a `[telemetry]` endpoint.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_LOGS_COMPRESSION` {#external-otel-exporter-otlp-logs-compression}
+
+OTLP compression for logs; not honoured, the request is never compressed.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` {#external-otel-exporter-otlp-logs-endpoint}
+
+OTLP endpoint for logs; honoured as the export destination, used verbatim.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_LOGS_HEADERS` {#external-otel-exporter-otlp-logs-headers}
+
+OTLP headers for logs; honoured when an `OTEL_EXPORTER_OTLP_*` endpoint names the destination. Never sent to a `[telemetry]` endpoint.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` {#external-otel-exporter-otlp-logs-protocol}
+
+OTLP transport protocol for logs; honoured, default `http/protobuf`.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` {#external-otel-exporter-otlp-logs-timeout}
+
+OTLP export timeout for logs, in milliseconds; honoured.
+
+- Audience: foreign
+- Value: `integer`
+
+## `OTEL_EXPORTER_OTLP_PROTOCOL` {#external-otel-exporter-otlp-protocol}
+
+OTLP transport protocol for every signal; honoured when `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` is unset, default `http/protobuf`.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_EXPORTER_OTLP_TIMEOUT` {#external-otel-exporter-otlp-timeout}
+
+OTLP export timeout for every signal, in milliseconds; honoured when `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` is unset.
+
+- Audience: foreign
+- Value: `integer`
+
+## `OTEL_LOGS_EXPORTER` {#external-otel-logs-exporter}
+
+OpenTelemetry logs exporter selector; honoured only as an opt-out, where `none` turns telemetry export off. Every other value is not honoured.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_RESOURCE_ATTRIBUTES` {#external-otel-resource-attributes}
+
+OpenTelemetry resource attributes, percent-decoded `key=value` pairs; honoured, below `[telemetry] resource_attributes`. A malformed pair is skipped.
+
+- Audience: foreign
+- Value: `string`
+
+## `OTEL_SDK_DISABLED` {#external-otel-sdk-disabled}
+
+OpenTelemetry SDK kill switch; a truthy value is honoured as an opt-out and turns telemetry export off.
+
+- Audience: foreign
+- Value: `bool`
+
+## `OTEL_SERVICE_NAME` {#external-otel-service-name}
+
+OpenTelemetry service name; honoured as the exported `service.name`, below `[telemetry] service_name`.
+
+- Audience: foreign
+- Value: `string`
 
 ## `PATH` {#external-path}
 

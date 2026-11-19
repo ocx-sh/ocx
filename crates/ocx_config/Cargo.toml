@@ -64,6 +64,12 @@ flate2.workspace = true
 futures.workspace = true
 # `geteuid`, for the unix half of the `toolchain_dir` ownership check (C-019).
 libc.workspace = true
+# `[telemetry]` header values are secrets: held as `SecretString`, never printed.
+secrecy.workspace = true
+# Header names and values are validated as HTTP header parts.
+http.workspace = true
+# The export endpoint is a URL.
+url.workspace = true
 log.workspace = true
 # Every config struct that appears in `ocx config test --json` derives a
 # schema; `ScopeSpec`-style hand-written schemas are `ocx_trust`'s, not this

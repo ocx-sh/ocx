@@ -213,7 +213,7 @@
  "crates/ocx_project/src/lazy.rs::dead-pointer": 1,
  "crates/ocx_project/src/lazy.rs::short-label": 1,
  "crates/ocx_project/src/lock.rs::short-label": 4,
- "crates/ocx_project/src/mutate.rs::bare-id-test": 14,
+ "crates/ocx_project/src/mutate.rs::bare-id-test": 13,
  "crates/ocx_project/src/mutate.rs::short-label": 7,
  "crates/ocx_project/src/registry.rs::bare-id-test": 5,
  "crates/ocx_project/src/registry.rs::dead-pointer": 1,

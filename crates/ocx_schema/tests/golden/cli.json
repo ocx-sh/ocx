@@ -14563,6 +14563,15 @@
       "on_invalid": "default"
     },
     {
+      "name": "OCX_TELEMETRY",
+      "value": "tri_bool",
+      "visibility": "public",
+      "summary": " Switch for exporting usage telemetry; unset or empty defers to `[telemetry]` in config.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
       "name": "OCX_LAZY_MODE",
       "value": "choice",
       "choices": [
@@ -14800,6 +14809,15 @@
       "value": "string",
       "visibility": "public",
       "summary": " The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`; any other `env://` name",
+      "secret": true,
+      "propagation": "credential",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OCX_TELEMETRY_HEADERS",
+      "value": "string",
+      "visibility": "public",
+      "summary": " Headers sent with every telemetry export, `name=value[,name=value...]`; values are",
       "secret": true,
       "propagation": "credential",
       "on_invalid": "default"
@@ -15150,6 +15168,177 @@
       "summary": " CircleCI OIDC token.",
       "secret": true,
       "propagation": "secret_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "DO_NOT_TRACK",
+      "value": "bool",
+      "visibility": "foreign",
+      "summary": " Console-do-not-track convention; a truthy value is honoured as an opt-out and turns",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_SDK_DISABLED",
+      "value": "bool",
+      "visibility": "foreign",
+      "summary": " OpenTelemetry SDK kill switch; a truthy value is honoured as an opt-out and turns",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_LOGS_EXPORTER",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OpenTelemetry logs exporter selector; honoured only as an opt-out, where `none` turns",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_SERVICE_NAME",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OpenTelemetry service name; honoured as the exported `service.name`, below `[telemetry] service_name`.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_RESOURCE_ATTRIBUTES",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OpenTelemetry resource attributes, percent-decoded `key=value` pairs; honoured, below",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP endpoint for every signal; honoured as the export destination when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP endpoint for logs; honoured as the export destination, used verbatim.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_TIMEOUT",
+      "value": "integer",
+      "visibility": "foreign",
+      "summary": " OTLP export timeout for every signal, in milliseconds; honoured when",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT",
+      "value": "integer",
+      "visibility": "foreign",
+      "summary": " OTLP export timeout for logs, in milliseconds; honoured.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_PROTOCOL",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP transport protocol for every signal; honoured when `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP transport protocol for logs; honoured, default `http/protobuf`.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_HEADERS",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP headers for every signal; honoured only when `OTEL_EXPORTER_OTLP_ENDPOINT` names the",
+      "secret": true,
+      "propagation": "secret_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP headers for logs; honoured when an `OTEL_EXPORTER_OTLP_*` endpoint names the destination.",
+      "secret": true,
+      "propagation": "secret_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_COMPRESSION",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP compression for every signal; not honoured, the request is never compressed.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " OTLP compression for logs; not honoured, the request is never compressed.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "GITHUB_JOB",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " Name of the GitHub Actions job; read as a telemetry attribute.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "CI_PIPELINE_ID",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " Id of the GitLab pipeline; read as a telemetry attribute.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "CI_JOB_ID",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " Id of the GitLab job; read as a telemetry attribute.",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "CI_JOB_NAME",
+      "value": "string",
+      "visibility": "foreign",
+      "summary": " Name of the GitLab job; read as a telemetry attribute.",
+      "secret": false,
+      "propagation": "user_input",
       "on_invalid": "default"
     },
     {

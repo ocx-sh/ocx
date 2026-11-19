@@ -151,6 +151,8 @@ Adding a key or a section: publish to the existing tag, and hosts on an earlier 
 
 The trust anchor for a managed-config package is the operator's own registry, the same trust boundary [`[mirrors]`][config-mirrors] and [`[patches]`][config-patches] already rely on. OCX verifies the payload by digest, so it rejects a tampered or truncated fetch. It does not verify a publisher signature.
 
+A payload may carry a [`[telemetry]`][config-telemetry] section with `headers`. Anyone who can pull the artifact can read a token stored there, so [Send usage telemetry][guide-telemetry] recommends a token in a local config file instead.
+
 Treat write access to the managed-config registry the way you treat write access to your `[mirrors]` and `[patches]` registries. A compromise there can redirect mirrors, patches and managed config fleet-wide.
 
 One redirection path is closed by construction. The package fetch itself is routed only through mirrors configured in local tiers (system, user, `$OCX_HOME`, `OCX_CONFIG`, `--config`). A payload's own `[mirrors]` entry can never redirect the connection used to fetch its next refresh. That is the same self-hijack the [one-hop `[managed]` strip][config-managed-one-hop] already prevents for the config content itself, applied to the transport too.
@@ -172,6 +174,8 @@ One redirection path is closed by construction. The package fetch itself is rout
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
 [config-patches]: ../reference/configuration.md#keys-patches
 [config-managed]: ../reference/configuration.md#keys-managed
+[config-telemetry]: ../reference/configuration.md#keys-telemetry
+[guide-telemetry]: ./telemetry.mdx
 [config-managed-one-hop]: ../explanation/managed-configuration.md#managed-one-hop
 [config-unknown-keys]: ../explanation/configuration.mdx#merge-rules
 [env-ocx-managed-config]: ../reference/environment.md#ocx-managed-config

@@ -302,6 +302,10 @@ struct RawProjectConfig {
     /// `update = 1` is refused by name too.
     #[serde(default)]
     update: Option<toml::Value>,
+
+    /// `[telemetry]`, declared only to be refused by name, like `update`; any value shape.
+    #[serde(default)]
+    telemetry: Option<toml::Value>,
 }
 
 impl ProjectConfig {
@@ -524,6 +528,11 @@ impl ProjectConfig {
         // A checked-in `self = "apply"` would replace the binary of everyone who clones the repository.
         if raw.update.is_some() {
             return Err(super::Error::UpdateSectionInProject(path));
+        }
+
+        // A checked-in `[telemetry]` would point every clone's export at the repository's collector.
+        if raw.telemetry.is_some() {
+            return Err(super::Error::TelemetrySectionInProject(path));
         }
 
         // Case-folded, not `contains_key`: `[group.Default]` beside the default group
@@ -949,6 +958,22 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    #[test]
+    fn telemetry_section_in_ocx_toml_is_refused_by_name() {
+        let err = ProjectConfig::from_toml_str("[telemetry]\nenabled = true\n")
+            .expect_err("[telemetry] must not parse in ocx.toml");
+        assert!(
+            matches!(err, super::super::Error::TelemetrySectionInProject(_)),
+            "expected TelemetrySectionInProject; got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .ends_with("[telemetry] belongs in config.toml, not in ocx.toml")
+        );
+        let err = ProjectConfig::from_toml_str("telemetry = 1\n").expect_err("telemetry = 1 must not parse");
+        assert!(matches!(err, super::super::Error::TelemetrySectionInProject(_)));
     }
 
     /// `[update]` is a personal `config.toml` setting; an `ocx.toml` refuses it by name so the

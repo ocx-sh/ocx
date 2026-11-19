@@ -85,6 +85,7 @@ ocx_setup = { path = "crates/ocx_setup" }
 ocx_shell = { path = "crates/ocx_shell" }
 ocx_sign = { path = "crates/ocx_sign" }
 ocx_store = { path = "crates/ocx_store" }
+ocx_telemetry = { path = "crates/ocx_telemetry" }
 ocx_test_support = { path = "crates/ocx_test_support" }
 ocx_trust = { path = "crates/ocx_trust" }
 ocx_util = { path = "crates/ocx_util" }
@@ -316,6 +317,19 @@ indicatif = { version = "0.18.6", features = ["tokio"] }
 
 # System info
 sysinfo = "0.39.6"
+
+# Usage export (`ocx_telemetry` only). Exact pins, no default features, no
+# client or runtime features: the crate set is exactly what the exemption lists.
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["logs"] }
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["logs"] }
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry-otlp = { version = "=0.33.1", default-features = false, features = ["http-proto", "logs"] }
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry-http = { version = "=0.33.1", default-features = false }
+# The installation id is a random v4 UUID; nothing else of the crate is used.
+uuid = { version = "1.28", default-features = false, features = ["v4"] }
 
 # Platform
 libc = "0.2"

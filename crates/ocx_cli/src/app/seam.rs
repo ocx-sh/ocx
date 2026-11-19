@@ -733,4 +733,48 @@ mod tests {
             failure.out
         );
     }
+
+    // ── Invariant 6: no telemetry ───────────────────────────────────────────
+
+    /// A run inside the seam leaves the caller's telemetry slot empty and attaches no activity log,
+    /// even where the config arms every other run.
+    ///
+    /// Red state: `Context::try_init` filling the slot without the `in_seam` gate.
+    #[tokio::test]
+    async fn seam_never_arms_telemetry() {
+        use clap::Parser as _;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nenabled = true\nendpoint = \"http://127.0.0.1:4318\"\n",
+        )
+        .expect("write config");
+
+        let lock = ocx_env::overrides::lock();
+        lock.hermetic(home.path());
+        lock.set(&ocx_env::OCX_HOME, home.path().to_str().expect("temp path is utf-8"));
+        let _session = Session::begin(ADMITTED);
+        let cli = Cli::parse_from(["ocx", "status"]);
+        let mut slot = None;
+        let context = super::super::Context::try_init(
+            &cli.context,
+            ocx_console::ColorModeConfig {
+                stdout: false,
+                stderr: false,
+                relayed: false,
+            },
+            super::super::ManagedConfigGate {
+                enforce_required: false,
+                onboarding: false,
+                tolerate_vanished_received_config: false,
+            },
+            Some(&mut slot),
+        )
+        .await
+        .expect("a context over the fixture home");
+
+        assert!(slot.is_none(), "the seam never arms export");
+        assert!(context.manager().activity_log().is_none());
+    }
 }

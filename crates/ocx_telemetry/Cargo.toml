@@ -1,0 +1,49 @@
+[package]
+name = "ocx_telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# `TelemetryConfig`, the merged `[telemetry]` section the gate and the destination read.
+ocx_config.workspace = true
+# Every variable the gate and the destination read is declared there.
+ocx_env.workspace = true
+# `GuardedResolver`, which the export client seeds with the destination host.
+ocx_oci.workspace = true
+# `ExtraRoots`, the CA roots the export client trusts beyond the embedded set.
+ocx_util.workspace = true
+
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry.workspace = true
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry_sdk.workspace = true
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry-otlp.workspace = true
+# OBS-12 exemption and its conditions: .claude/artifacts/adr_otel_telemetry.md
+opentelemetry-http.workspace = true
+
+async-trait.workspace = true
+http.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# The override seam the gate and destination tests drive.
+ocx_env = { workspace = true, features = ["__testing"] }
+# `ProxyRules::direct` and `proxied_everywhere`: the client tests inject their routing instead of reading the environment.
+ocx_oci = { workspace = true, features = ["__testing"] }
+# The pin guard reads every manifest as data.
+toml.workspace = true
+
+[lints]
+workspace = true

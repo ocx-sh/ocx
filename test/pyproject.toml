@@ -100,4 +100,6 @@ dev = [
     "in-toto-attestation>=0.9.3",
     "packageurl-python>=0.17.6",
     "pyyaml>=6.0.3",
+    # Decodes the OTLP logs request the telemetry acceptance tests capture.
+    "opentelemetry-proto==1.45.2",
 ]

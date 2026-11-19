@@ -312,6 +312,7 @@ acceptance_suite(
         "tests/test_state_providers.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
         "tests/test_state_registry_characterization.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
         "tests/test_taplo_project_toolchain.py": ["//:taplo.toml"],
+        "tests/test_telemetry_contract.py": ["//website:src/content/docs/reference/telemetry.md"],
         "tests/test_trampoline_exec.py": ["//crates/ocx_store:shim_blobs"],
     },
     # The schema binary as the two modules that run it read it: an

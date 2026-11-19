@@ -36,6 +36,7 @@ CRATES = [
     "ocx_shim",
     "ocx_sign",
     "ocx_store",
+    "ocx_telemetry",
     "ocx_test_support",
     "ocx_trust",
     "ocx_util",

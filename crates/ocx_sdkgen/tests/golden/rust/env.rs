@@ -311,6 +311,18 @@ pub const PUBLIC: &[EnvVar] = &[
         secret: false,
     },
     EnvVar {
+        name: "OCX_TELEMETRY",
+        value: "tri_bool",
+        summary: "Switch for exporting usage telemetry; unset or empty defers to `[telemetry]` in config.",
+        secret: false,
+    },
+    EnvVar {
+        name: "OCX_TELEMETRY_HEADERS",
+        value: "string",
+        summary: "Headers sent with every telemetry export, `name=value[,name=value...]`; values are",
+        secret: true,
+    },
+    EnvVar {
         name: "OCX_TOOLCHAIN_ACTIVATE",
         value: "choice",
         summary: "Toolchain activation mode (`env` / `bin` / `none`), the weakest tier of the `activate`",

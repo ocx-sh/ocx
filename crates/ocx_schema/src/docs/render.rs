@@ -360,7 +360,7 @@ pub(super) fn pages(model: &DocsModel) -> Result<Vec<Page>, DocsError> {
         &KeysPage {
             path: "reference/project-file.md",
             title: "Project file",
-            intro: "Keys of `ocx.toml`, from the published project schema. An unknown key is a parse error (exit 78), so `config.toml`-only keys such as `[shell]`, `[update]` and `toolchain_dir` are refused here.",
+            intro: "Keys of `ocx.toml`, from the published project schema. An unknown key is a parse error (exit 78), so `config.toml`-only keys such as `[shell]`, `[update]` and `toolchain_dir` are refused here.\n\nA `[telemetry]` table is refused too, with exit 78 (`telemetry_section_in_project`). [Telemetry](../guides/telemetry.mdx) is configured in `config.toml`.",
             prefix: "project",
             overrides: PROJECT_ID_OVERRIDES,
             see: PROJECT_SEE,

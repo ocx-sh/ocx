@@ -190,7 +190,7 @@ fn all_holds_every_declaration_including_test_seams_under_test() {
 
 /// Spelled as literals: a list built from the declarations would agree with itself.
 #[test]
-fn credential_keys_are_exactly_the_four_scrubbed_credentials() {
+fn credential_keys_are_exactly_the_five_scrubbed_credentials() {
     let mut keys: Vec<&str> = credential_keys().collect();
     keys.sort_unstable();
     assert_eq!(
@@ -199,7 +199,8 @@ fn credential_keys_are_exactly_the_four_scrubbed_credentials() {
             "OCX_ANNOUNCE_GIT_TOKEN",
             "OCX_IDENTITY_TOKEN",
             "OCX_KEY_PASSWORD",
-            "OCX_SIGNING_KEY"
+            "OCX_SIGNING_KEY",
+            "OCX_TELEMETRY_HEADERS"
         ]
     );
 }

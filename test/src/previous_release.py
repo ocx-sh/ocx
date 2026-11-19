@@ -34,8 +34,8 @@ class LookupFailure(Exception):
     """The toolchain lookup ran and failed; the message carries why."""
 
 
-def toolchain_binary() -> Path | None:
-    """The `ocx` the project toolchain's `test` group composes onto `PATH`, or None.
+def toolchain_binary(name: str = _NAME) -> Path | None:
+    """The executable `name` (default `ocx`) the project toolchain's `test` group composes onto `PATH`, or None.
 
     Asked of the ocx under test, as the cosign fixture asks for its pinned tool:
     `ocx env` materialises the locked package on a miss, and a failure to do so
@@ -63,7 +63,7 @@ def toolchain_binary() -> Path | None:
         raise LookupFailure(f"`ocx env -g {GROUP}` printed output that is not JSON:\n{head}") from exc
     for entry in report.get("items") or []:
         if entry.get("kind") == "path":
-            candidate = Path(entry["value"]) / _NAME
+            candidate = Path(entry["value"]) / name
             if os.access(candidate, os.X_OK):
                 return candidate
     return None

@@ -345,6 +345,9 @@ impl ConfigLoader {
                 ));
             }
         };
+        if let Some(telemetry) = parsed.telemetry.as_mut() {
+            telemetry.stamp_origin(format!("managed config {}", resolved.source));
+        }
         // One-hop: a remote payload can never redirect or loosen the tier that fetched it.
         if parsed.managed.take().is_some() {
             log::warn!(
@@ -839,6 +842,9 @@ impl ConfigLoader {
             if let Some(update) = parsed.update.as_mut() {
                 update.set_origin(path);
             }
+            if let Some(telemetry) = parsed.telemetry.as_mut() {
+                telemetry.stamp_origin(path.display().to_string());
+            }
             // Only the system file locks; it folds in first, so every lower tier sees its locks.
             if path == Self::system_path().as_path() {
                 Self::apply_system_locks(&mut parsed);
@@ -905,6 +911,10 @@ impl ConfigLoader {
         // Unconditional and per block: `dir`, `name` and `required` clamp together.
         if let Some(records) = parsed.records.as_mut() {
             records.lock_as_system();
+        }
+        // Unconditional and per block: every key clamps together.
+        if let Some(telemetry) = parsed.telemetry.as_mut() {
+            telemetry.lock_as_system();
         }
     }
 
@@ -1098,7 +1108,7 @@ impl ConfigLoader {
         shell.consent_strip_reason = Some(reason);
     }
 
-    /// Fold a project-tier contribution into `accumulator` without its `[shell]`, `[records]` or `[update]`.
+    /// Fold a project-tier contribution into `accumulator` without its `[shell]`, `[records]`, `[update]` or `[telemetry]`.
     ///
     /// Stripped here, not left to `ProjectConfig`'s `deny_unknown_fields`: `[shell]` consent from a
     /// repository would let a clone consent to itself, and `[records]` would let it redirect the
@@ -1120,6 +1130,12 @@ impl ConfigLoader {
             log::warn!(
                 "a project-tier config declared [update]; stripped before merge (update checks are a personal setting \
                  in config.toml, never a repository's to switch on)"
+            );
+        }
+        if project_contribution.telemetry.take().is_some() {
+            log::warn!(
+                "a project-tier config declared [telemetry]; stripped before merge (export destinations are \
+                 operator or user settings in config.toml, never a repository's to set)"
             );
         }
         accumulator.merge(project_contribution);
@@ -1168,6 +1184,7 @@ impl ConfigLoader {
             trust,
             shell,
             records,
+            telemetry,
             toolchain_dir,
             extra_ca_certs,
             extra_ca_certs_pem,
@@ -1177,6 +1194,7 @@ impl ConfigLoader {
         *patches = patches.take().filter(|patches| patches.system_locked);
         *registry = registry.take().filter(|registry| registry.system_locked);
         *records = records.take().filter(|records| records.system_locked);
+        *telemetry = telemetry.take().filter(|telemetry| telemetry.system_locked);
         // Dropped even when locked: the flag skips the snapshot read, so a `required` tier would fail
         // every hermetic invocation.
         *managed = None;
@@ -1799,6 +1817,81 @@ mod tests {
             Some("second.example")
         );
         assert!(loaded.config_tier_paths.ends_with(&[first, second]));
+    }
+
+    #[tokio::test]
+    async fn telemetry_full_section_parses() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "telemetry.toml",
+            "[telemetry]\n\
+             enabled = true\n\
+             endpoint = \"https://collector.example:4318\"\n\
+             timeout = 750\n\
+             protocol = \"http/protobuf\"\n\
+             service_name = \"ci-ocx\"\n\
+             [telemetry.headers]\n\
+             authorization = \"Bearer token\"\n\
+             [telemetry.resource_attributes]\n\
+             team = \"build\"\n",
+        );
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("a full [telemetry] section loads");
+        let telemetry = config.telemetry.expect("the section is present");
+        assert!(telemetry.is_usable());
+        assert_eq!(telemetry.enabled, Some(true));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://collector.example:4318"));
+        assert_eq!(telemetry.timeout, Some(750));
+        assert_eq!(telemetry.protocol.as_deref(), Some("http/protobuf"));
+        assert_eq!(telemetry.service_name.as_deref(), Some("ci-ocx"));
+        assert_eq!(telemetry.header_names().collect::<Vec<_>>(), ["authorization"]);
+        assert_eq!(
+            telemetry
+                .resource_attributes
+                .as_ref()
+                .and_then(|attributes| attributes.get("team"))
+                .map(String::as_str),
+            Some("build")
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_bad_value_names_the_file_it_came_from() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "telemetry-bad.toml",
+            "[telemetry]\ntimeout = 0\n[update]\ninterval = \"2d\"\n",
+        );
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        env.set(&ocx_env::OCX_CONFIG, path.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("a bad key does not fail the file");
+        let telemetry = config.telemetry.expect("the section is present");
+        assert_eq!(telemetry.unusable_key(), Some("timeout"));
+        assert_eq!(telemetry.unusable_origin(), Some(path.display().to_string().as_str()));
+        assert!(config.update.is_some(), "the file's other sections still apply");
     }
 
     /// No managed-config tier exists yet, so `load_with_local_view`'s
@@ -4341,6 +4434,7 @@ mod tests {
             "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
             "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
             "[records]\ndir = \"/var/log/ocx/records\"\nrequired = true\n",
+            "[telemetry]\nenabled = true\nendpoint = \"https://collector.corp.example\"\n",
         ))
         .unwrap();
         // A root-level scalar has to precede every table header, so it is
@@ -4349,6 +4443,10 @@ mod tests {
 
         ConfigLoader::apply_system_locks(&mut config);
 
+        assert!(
+            config.telemetry.unwrap().system_locked,
+            "[telemetry] must lock unconditionally"
+        );
         assert!(
             config.extra_ca_certs_system_locked,
             "extra_ca_certs / extra_ca_certs_pem must lock when the system file sets either key"
@@ -4654,6 +4752,235 @@ mod tests {
             config.toolchain_dir.is_none(),
             "`toolchain_dir` locks nothing either, so the flag prunes it like [shell] (C-016)"
         );
+    }
+
+    #[test]
+    fn retain_keeps_a_locked_telemetry_section() {
+        let mut config: crate::Config =
+            toml::from_str("[telemetry]\nenabled = true\nendpoint = \"https://collector.corp.example\"\n").unwrap();
+        ConfigLoader::apply_system_locks(&mut config);
+        ConfigLoader::retain_system_locked_sections(&mut config);
+        assert!(
+            config.telemetry.is_some_and(|telemetry| telemetry.system_locked),
+            "a locked [telemetry] must survive OCX_NO_CONFIG pruning"
+        );
+    }
+
+    #[test]
+    fn retain_drops_an_unlocked_telemetry_section() {
+        let mut config: crate::Config =
+            toml::from_str("[telemetry]\nenabled = true\nendpoint = \"https://collector.example\"\n").unwrap();
+        ConfigLoader::retain_system_locked_sections(&mut config);
+        assert!(
+            config.telemetry.is_none(),
+            "an unlocked [telemetry] is ambient and pruned"
+        );
+    }
+
+    /// `OCX_NO_CONFIG=1` prunes ambient config, not operator policy: the system `[telemetry]`
+    /// survives and still clamps every other layer.
+    #[tokio::test]
+    async fn no_config_keeps_a_system_locked_telemetry_section_and_ignores_the_user_file() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
+        with_system_config(
+            &env,
+            &dir,
+            "[telemetry]\nenabled = true\nendpoint = \"https://collector.corp.example\"\n",
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nendpoint = \"https://user.example\"\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        })
+        .await
+        .expect("OCX_NO_CONFIG=1 must still succeed");
+
+        let telemetry = config
+            .telemetry
+            .expect("a SYSTEM-locked [telemetry] must survive OCX_NO_CONFIG=1");
+        assert!(telemetry.system_locked);
+        assert_eq!(telemetry.enabled, Some(true));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://collector.corp.example"));
+    }
+
+    /// A system-locked `[telemetry]` clamps the user file too, with `OCX_NO_CONFIG` unset.
+    #[tokio::test]
+    async fn a_system_locked_telemetry_section_survives_a_user_file_that_changes_it() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_CONFIG);
+        with_system_config(
+            &env,
+            &dir,
+            "[telemetry]\nenabled = true\nendpoint = \"https://collector.corp.example\"\n",
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nenabled = false\nendpoint = \"https://user.example\"\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(list_inputs(None)).await.expect("load must succeed");
+
+        let telemetry = config.telemetry.expect("the locked [telemetry] survives");
+        assert!(telemetry.system_locked);
+        assert_eq!(telemetry.enabled, Some(true));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://collector.corp.example"));
+    }
+
+    /// Control for the clamp test above: the same user file with no system lock is read and wins.
+    #[tokio::test]
+    async fn the_same_user_telemetry_file_applies_when_no_system_lock_exists() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_CONFIG);
+        without_system_config(&env);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nenabled = false\nendpoint = \"https://user.example\"\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(list_inputs(None)).await.expect("load must succeed");
+
+        let telemetry = config.telemetry.expect("the user [telemetry] is read");
+        assert!(!telemetry.system_locked);
+        assert_eq!(telemetry.enabled, Some(false));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://user.example"));
+    }
+
+    #[tokio::test]
+    async fn no_config_without_a_system_file_leaves_telemetry_absent() {
+        let env = ocx_env::overrides::lock();
+        let home = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, home.path().to_str().unwrap());
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        env.remove(&ocx_env::OCX_CONFIG);
+        without_system_config(&env);
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[telemetry]\nenabled = true\nendpoint = \"https://user.example\"\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+
+        assert!(config.telemetry.is_none());
+    }
+
+    /// A payload's `[telemetry]` folds above `$OCX_HOME` and below the explicit overlay, headers
+    /// included, with no strip.
+    #[tokio::test]
+    async fn managed_payload_carries_telemetry_with_headers() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        without_system_config(&env);
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\n[telemetry]\ntimeout = 100\nservice_name = \"home\"\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[telemetry]\nenabled = true\nendpoint = \"https://collector.corp.example\"\ntimeout = 200\n\
+             [telemetry.headers]\nauthorization = \"Bearer fleet-token\"\n",
+        );
+
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        };
+        let loaded = ConfigLoader::load_with_local_view(inputs).await.expect("load");
+        let telemetry = loaded.merged.telemetry.expect("the payload's [telemetry] folds");
+        assert_eq!(telemetry.enabled, Some(true));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://collector.corp.example"));
+        assert_eq!(telemetry.timeout, Some(200), "the payload sits above $OCX_HOME");
+        assert_eq!(telemetry.header_names().collect::<Vec<_>>(), ["authorization"]);
+
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(&overlay_dir, "overlay.toml", "[telemetry]\ntimeout = 300\n");
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        })
+        .await
+        .expect("load");
+        let telemetry = loaded.merged.telemetry.expect("still present");
+        assert_eq!(
+            telemetry.timeout,
+            Some(300),
+            "the explicit overlay sits above the payload"
+        );
+        assert_eq!(telemetry.header_names().collect::<Vec<_>>(), ["authorization"]);
+    }
+
+    #[tokio::test]
+    async fn a_locked_telemetry_section_clamps_the_managed_payload() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_HOME, dir.path().to_str().unwrap());
+        env.remove(&ocx_env::OCX_CONFIG);
+        env.remove(&ocx_env::OCX_NO_CONFIG);
+        env.remove(&ocx_env::OCX_MANAGED_CONFIG);
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[telemetry]\nenabled = false\nendpoint = \"https://payload.evil\"\n",
+        );
+        let mut telemetry = crate::telemetry::TelemetryConfig::default();
+        telemetry.enabled = Some(true);
+        telemetry.endpoint = Some("https://collector.corp.example".to_string());
+        telemetry.lock_as_system();
+        let accumulator = crate::Config {
+            telemetry: Some(telemetry),
+            managed: Some(crate::managed::ManagedConfig {
+                source: Some("registry.test/managed-config:v1".to_string()),
+                required: Some(false),
+                ..Default::default()
+            }),
+            ..crate::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, ..) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed against a locked accumulator");
+        let telemetry = folded.telemetry.expect("present");
+        assert_eq!(telemetry.enabled, Some(true));
+        assert_eq!(telemetry.endpoint.as_deref(), Some("https://collector.corp.example"));
     }
 
     /// The filter is lock-driven, not section-driven: the same sections parsed
@@ -5502,6 +5829,27 @@ mod tests {
         assert_eq!(
             merged.update.as_ref().and_then(|update| update.self_policy.clone()),
             Some(Ok(crate::refresh::RefreshPolicy::Manual))
+        );
+        assert_eq!(merged.resolved_default_registry(), Some("ocx.sh"));
+    }
+
+    /// A repository must not point a clone's telemetry export at its own collector.
+    ///
+    /// Red state: delete the `take()` for `telemetry` in [`ConfigLoader::fold_project_tier`].
+    #[test]
+    fn c033_style_project_fold_cannot_contribute_telemetry() {
+        let mut merged: Config =
+            toml::from_str("[telemetry]\nendpoint = \"https://ops.example\"\n").expect("base parses");
+        let project: Config =
+            toml::from_str("[telemetry]\nendpoint = \"https://evil.example\"\n[registry]\ndefault = \"ocx.sh\"\n")
+                .expect("a project-tier contribution parses as a Config");
+        assert!(project.telemetry.is_some(), "the fixture must carry [telemetry]");
+
+        ConfigLoader::fold_project_tier(&mut merged, project);
+
+        assert_eq!(
+            merged.telemetry.as_ref().and_then(|t| t.endpoint.as_deref()),
+            Some("https://ops.example")
         );
         assert_eq!(merged.resolved_default_registry(), Some("ocx.sh"));
     }

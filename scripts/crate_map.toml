@@ -103,6 +103,7 @@ ocx = [
     "ocx_announce",
     "ocx_script",
     "ocx_setup",
+    "ocx_telemetry",
     "ocx_env",
 ]
 # Build-only schema generator (ADR map + C-067).
@@ -111,6 +112,9 @@ ocx_schema = ["ocx", "ocx_oci", "ocx_config", "ocx_package", "ocx_project", "ocx
 ocx_shim = []
 # The published-document contract lint: reads the documents as JSON, links nothing.
 ocx_sdkgen = []
+# The usage export: reads settings and variables, dials through the guarded
+# resolver; no storage or package tier.
+ocx_telemetry = ["ocx_config", "ocx_env", "ocx_oci", "ocx_util"]
 
 # Dev edges (`[dev-dependencies]`) are judged against this section instead.
 # A dev-only edge never legalises a runtime one: a crate whose dev edge is

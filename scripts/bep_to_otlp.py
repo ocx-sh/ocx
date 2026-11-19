@@ -1773,13 +1773,13 @@ def prove_bep_not_persisted() -> int:
 def prove_counts() -> int:
     """The floor has one home, and this asserts it is still that tree's answer."""
     expect(
-        CRATES_RULE_TARGETS == 93,
-        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 93 today",
+        CRATES_RULE_TARGETS == 97,
+        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 97 today",
     )
     print(
-        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 93, imported from "
-        "bazel_gate_proofs (22 rust_library + 42 rust_test + 4 rust_binary + 22 "
-        "rust_doc_test) — "
+        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 97, imported from "
+        "bazel_gate_proofs (23 rust_library + 1 rust_proc_macro + 46 rust_test + 4 rust_binary + "
+        "23 rust_doc_test) — "
         "bazel_gate_proofs.prove_counts is what re-checks the number"
     )
     return 1

@@ -12,6 +12,7 @@ pub mod patch;
 pub mod record;
 
 pub mod activation;
+pub mod activity;
 pub mod composer;
 pub mod concurrency;
 pub mod error;
@@ -542,6 +543,8 @@ pub struct PackageManager {
     /// (install, pull, exec, env, run, patch discovery) inherits it, not just
     /// install/pull.
     auto_verify: Option<AutoVerify>,
+    /// What this command did to packages; `None` records nothing.
+    activity: Option<activity::ActivityLog>,
 }
 
 impl PackageManager {
@@ -568,6 +571,7 @@ impl PackageManager {
             managed_config_client: None,
             index_store: None,
             auto_verify: None,
+            activity: None,
         }
     }
 
@@ -631,6 +635,18 @@ impl PackageManager {
     /// The injected auto-verify configuration, if any.
     pub fn auto_verify(&self) -> Option<&AutoVerify> {
         self.auto_verify.as_ref()
+    }
+
+    /// Attach the log every package set up by this manager (and its clones) is recorded in.
+    #[must_use]
+    pub fn with_activity_log(mut self, log: activity::ActivityLog) -> Self {
+        self.activity = Some(log);
+        self
+    }
+
+    /// The attached activity log, if any.
+    pub fn activity_log(&self) -> Option<&activity::ActivityLog> {
+        self.activity.as_ref()
     }
 
     /// Inject the resolved patch configuration into this manager.
@@ -915,6 +931,7 @@ impl PackageManager {
             // toolchain) that never installs, so the auto-verify hook is never
             // reached; carry the config through unchanged for parity.
             auto_verify: self.auto_verify.clone(),
+            activity: self.activity.clone(),
         }
     }
 

@@ -112,6 +112,11 @@ pub struct ToolchainEnv {
 }
 
 impl ToolchainEnv {
+    /// Whether `--shell` is present, bare or valued: the output is then evaluated by the user's shell.
+    pub(crate) fn shell_requested(&self) -> bool {
+        self.shell.is_some()
+    }
+
     /// The materialization policy for a tool whose `lazy-mode` resolved to `never`; the global tier never installs.
     fn materialization(&self) -> Materialization {
         if self.pull.enabled(true) {
@@ -717,6 +722,7 @@ mod tests {
                 onboarding: false,
                 tolerate_vanished_received_config: false,
             },
+            None,
         )
         .await
         .expect("a context over the fixture home");
