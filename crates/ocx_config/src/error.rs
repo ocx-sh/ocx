@@ -45,6 +45,29 @@ pub enum Error {
         source: Box<toml::de::Error>,
     },
 
+    /// `OCX_CONFIG` names more config files than ocx will load.
+    #[error(
+        "OCX_CONFIG lists {count} config files, more than the limit of {limit}; reduce OCX_CONFIG to at most {limit} entries"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "config_list_too_long",
+        summary = "OCX_CONFIG lists more config files than the limit"
+    )]
+    ConfigListTooLong { count: usize, limit: usize },
+
+    /// A path in the `OCX_CONFIG` list contains the list separator and cannot be carried through it.
+    #[error(
+        "config path contains the OCX_CONFIG list separator: {}; give --config a path without the separator, or move the file",
+        path.display()
+    )]
+    #[exit(
+        ConfigError,
+        slug = "config_path_contains_separator",
+        summary = "A config path contains the OCX_CONFIG list separator"
+    )]
+    ConfigPathContainsSeparator { path: PathBuf },
+
     /// An explicit config file (`--config`/`OCX_CONFIG` or `--project`/`OCX_PROJECT`) does not exist.
     #[error("{} file not found: {} ({})", tier.label(), path.display(), tier.hint())]
     #[exit(

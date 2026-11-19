@@ -287,8 +287,19 @@ fn validate_separator(kind: ValueKind, separator: Option<&str>) -> Result<(), ()
 
 /// Every value goes through the parser of the variable it replaces; a refusal there refuses the payload.
 fn validate_policy(policy: &Policy) -> Result<(), UnreadableReason> {
+    // The raw `OCX_CONFIG` value: a path list, so each entry must be absolute and the count stays capped.
+    if let Some(list) = &policy.config_path {
+        let entries: Vec<_> = std::env::split_paths(list)
+            .filter(|entry| !entry.as_os_str().is_empty())
+            .collect();
+        if entries.is_empty()
+            || entries.len() > crate::loader::MAX_CONFIG_LIST_ENTRIES
+            || entries.iter().any(|entry| !entry.is_absolute())
+        {
+            return Err(invalid("policy.config_path"));
+        }
+    }
     let paths = [
-        ("policy.config_path", &policy.config_path),
         ("policy.index_dir", &policy.index_dir),
         ("policy.toolchain_dir", &policy.toolchain_dir),
         ("policy.patch_snapshot_path", &policy.patch_snapshot_path),

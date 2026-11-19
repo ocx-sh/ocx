@@ -286,6 +286,22 @@ mod tests {
         );
     }
 
+    /// The `OCX_CONFIG` list refusals are an operator config mistake: 78, each under its own slug.
+    #[test]
+    fn config_list_refusals_classify_as_config_error_with_their_slugs() {
+        use crate::exit::tests::assert_detail;
+
+        let too_long = ocx_config::error::Error::ConfigListTooLong { count: 33, limit: 32 };
+        assert_eq!(too_long.classify(), Some(ExitCode::ConfigError));
+        assert_detail(&too_long, "config_list_too_long");
+
+        let separator = ocx_config::error::Error::ConfigPathContainsSeparator {
+            path: PathBuf::from("/etc/ocx/a:b.toml"),
+        };
+        assert_eq!(separator.classify(), Some(ExitCode::ConfigError));
+        assert_detail(&separator, "config_path_contains_separator");
+    }
+
     // ── moved from ocx_config::loader with the impl ──
 
     /// A separator disagreement between two contributors to one key is exit

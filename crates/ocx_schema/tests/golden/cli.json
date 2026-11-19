@@ -14390,9 +14390,9 @@
     },
     {
       "name": "OCX_CONFIG",
-      "value": "path",
+      "value": "path_list",
       "visibility": "public",
-      "summary": " Path to an explicit configuration file. Mirrors `--config`.",
+      "summary": " Paths to explicit configuration files, separated like `PATH` (`:` on Unix, `;` on Windows).",
       "flag": "--config",
       "secret": false,
       "propagation": "user_input",
@@ -14402,7 +14402,7 @@
       "name": "OCX_NO_CONFIG",
       "value": "bool",
       "visibility": "public",
-      "summary": " Boolean — skip the discovered config-tier chain; explicit `--config` / `OCX_CONFIG`",
+      "summary": " Boolean — skip the discovered config-tier chain; every file `--config` and `OCX_CONFIG` name",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"

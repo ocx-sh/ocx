@@ -98,8 +98,8 @@ fn no_consent_flag_is_a_narrowing_input() {
     let mut input = inputs(&flags, None, &ambient);
     input.no_consent_flag = true;
     assert!(input.env_slot().0.narrowing.no_consent);
-    assert!(input.to_write(WriteMode::Inherit).narrowing.no_consent);
-    assert!(input.to_write(WriteMode::Clean).narrowing.no_consent);
+    assert!(input.to_write(WriteMode::Inherit).unwrap().narrowing.no_consent);
+    assert!(input.to_write(WriteMode::Clean).unwrap().narrowing.no_consent);
 }
 
 #[test]
@@ -261,7 +261,9 @@ fn inherit_writes_flags_and_received_and_never_ambient() {
         index: Some(PathBuf::from("/flag-index")),
         ..RootFlags::default()
     };
-    let written = inputs(&flags, Some(&received), &ambient).to_write(WriteMode::Inherit);
+    let written = inputs(&flags, Some(&received), &ambient)
+        .to_write(WriteMode::Inherit)
+        .unwrap();
     assert!(written.narrowing.offline && written.narrowing.frozen);
     assert_eq!(written.home, Some(PathBuf::from("/received-home")));
     assert_eq!(written.policy.no_verify, Some(true), "a received no_verify passes on");
@@ -277,7 +279,9 @@ fn inherit_writes_flags_and_received_and_never_ambient() {
 #[test]
 fn only_the_five_root_flags_and_no_consent_reach_the_child() {
     let flags = RootFlags::default();
-    let written = inputs(&flags, None, &PolicyLayer::default()).to_write(WriteMode::Inherit);
+    let written = inputs(&flags, None, &PolicyLayer::default())
+        .to_write(WriteMode::Inherit)
+        .unwrap();
     assert_eq!(written, PolicyLayer::default());
     assert_eq!(written.policy.no_verify, None, "--no-verify is never written");
 }
@@ -303,7 +307,7 @@ fn clean_equals_the_env_slot() {
         ..RootFlags::default()
     };
     let input = inputs(&flags, Some(&received), &ambient);
-    assert_eq!(input.to_write(WriteMode::Clean), input.env_slot().0);
+    assert_eq!(input.to_write(WriteMode::Clean).unwrap(), input.env_slot().0);
 }
 
 #[test]
@@ -318,8 +322,8 @@ fn a_local_no_verify_zero_over_a_received_true_writes_false_under_clean() {
     });
     let flags = RootFlags::default();
     let input = inputs(&flags, Some(&received), &ambient);
-    assert_eq!(input.to_write(WriteMode::Clean).policy.no_verify, Some(false));
-    assert_eq!(input.to_write(WriteMode::Inherit).policy.no_verify, Some(true));
+    assert_eq!(input.to_write(WriteMode::Clean).unwrap().policy.no_verify, Some(false));
+    assert_eq!(input.to_write(WriteMode::Inherit).unwrap().policy.no_verify, Some(true));
 }
 
 #[test]
@@ -362,4 +366,30 @@ fn from_ambient_treats_an_unparsable_boolean_as_unset() {
     let layer = PolicyLayer::from_ambient();
     assert_eq!(layer.policy.no_verify, None);
     assert!(!layer.narrowing.offline);
+}
+
+#[test]
+fn config_flag_with_separator_is_not_forwarded() {
+    let ambient = PolicyLayer::default();
+    let joined = std::env::join_paths([std::env::temp_dir().join("a.toml"), std::env::temp_dir().join("b.toml")])
+        .expect("paths without the separator");
+    // The raw joined value is what a child would re-split, so it is exactly what must be refused.
+    let flags = RootFlags {
+        config: Some(PathBuf::from(&joined)),
+        ..RootFlags::default()
+    };
+    for mode in [WriteMode::Inherit, WriteMode::Clean] {
+        let err = inputs(&flags, None, &ambient)
+            .to_write(mode)
+            .expect_err("a list-shaped --config must not be forwarded");
+        assert!(
+            matches!(err, crate::error::Error::ConfigPathContainsSeparator { .. }),
+            "got: {err:?}"
+        );
+    }
+    let whole = RootFlags {
+        config: Some(std::env::temp_dir().join("single.toml")),
+        ..RootFlags::default()
+    };
+    assert!(inputs(&whole, None, &ambient).to_write(WriteMode::Inherit).is_ok());
 }

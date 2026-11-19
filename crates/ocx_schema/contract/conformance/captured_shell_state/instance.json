@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ocx_home": "/home/conformance/.ocx",
   "ocx_home_present": true,
   "shell_integration_installed": false,

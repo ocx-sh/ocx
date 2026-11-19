@@ -247,7 +247,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         context.inherited(),
         &ChildEnvInputs {
             mode,
-            written: context.written_policy(mode.write_mode()),
+            written: context.written_policy(mode.write_mode())?,
             binary_pin: context.binary_pin(),
             composed: &composition.entries,
             composed_owner: Owner::Inherited,

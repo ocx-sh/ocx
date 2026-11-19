@@ -86,6 +86,20 @@ pointer = "/$defs/Path/properties/value"
 reason = "reworded to name ${self.installPath} as the token and ${installPath} as its alias; the grammar is unchanged"
 
 [[break]]
+document = "reports"
+subjects = ["ShellStateReport", "VerboseShellState"]
+rule = "doc"
+pointer = "/$defs/Note/oneOf/11"
+reason = "reworded for the OCX_CONFIG list: one note per vanished entry of the received list; the note and its path field mean what they did"
+
+[[break]]
+document = "reports"
+subjects = ["ShellStateReport", "VerboseShellState"]
+rule = "doc"
+pointer = "/$defs/Note/oneOf/11/properties/path"
+reason = "reworded for the OCX_CONFIG list: one note per vanished entry of the received list; the note and its path field mean what they did"
+
+[[break]]
 document = "errors"
 subjects = ["*"]
 rule = "doc"
@@ -245,3 +259,17 @@ subjects = ["self setup"]
 rule = "semantic"
 pointer = "/root/commands/21/commands/1/args/7"
 reason = "a shell profile that cannot be written is reported as skipped_unwritable and the command exits 0 instead of failing with exit 74"
+
+[[break]]
+document = "reports"
+subjects = ["ShellStateReport", "VerboseShellState"]
+rule = "B02"
+pointer = "/$defs/PolicyReport/properties/config_path"
+reason = "policy.config_path (one path or null) is replaced by policy.config_paths (an array of every config file a parent named); read the array"
+
+[[break]]
+document = "cli"
+subjects = ["*"]
+rule = "G14"
+pointer = "/env/5"
+reason = "OCX_CONFIG is now a path list (platform path-list separator) instead of one path; a value holding the separator is split into several files"

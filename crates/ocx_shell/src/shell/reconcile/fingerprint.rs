@@ -180,9 +180,9 @@ fn watch_paths_in(
                 paths.extend(ocx_config::loader::ConfigLoader::user_path());
                 paths.extend(ocx_config::loader::ConfigLoader::home_path());
             }
-            if let Some(explicit) = ocx_env::OCX_CONFIG.get() {
-                paths.push(PathBuf::from(explicit));
-            }
+            // The loader's own split, so the watch set is the set it reads: a non-UTF-8 value or an
+            // over-long list loads nothing (the run is refused), so it watches nothing either.
+            paths.extend(ocx_config::loader::ConfigLoader::config_list_entries(None).unwrap_or_default());
         }
     }
 
@@ -638,6 +638,47 @@ mod watch_path_tests {
         assert!(
             !derived.contains(&explicit),
             "re-derivation structurally cannot see --config - that is why the list is recorded"
+        );
+    }
+
+    #[test]
+    fn fingerprint_watches_every_ocx_config_entry() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("a.toml");
+        let second = dir.path().join("b.toml");
+        std::fs::write(&first, "a").expect("write fixture");
+        std::fs::write(&second, "b").expect("write fixture");
+        let list = std::env::join_paths([&first, &second]).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().expect("utf-8 tempdir"));
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
+
+        let paths = watch_paths(&file_structure, None, None, None);
+
+        assert!(paths.contains(&first) && paths.contains(&second), "got: {paths:?}");
+        let before = fingerprint(&paths, None, None, None);
+        std::fs::write(&second, "b edited, longer").expect("edit the second entry");
+        assert_ne!(
+            before,
+            fingerprint(&paths, None, None, None),
+            "editing the second entry must expire a cached verdict"
+        );
+    }
+
+    #[test]
+    fn fingerprint_splits_ocx_config_with_the_loaders_rules() {
+        let env = ocx_env::overrides::lock();
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
+        let too_long =
+            std::env::join_paths((0..=ocx_config::loader::MAX_CONFIG_LIST_ENTRIES).map(|i| format!("/x/{i}.toml")))
+                .expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, too_long.to_str().expect("utf-8"));
+
+        let paths = watch_paths(&file_structure, None, None, None);
+
+        assert!(
+            !paths.iter().any(|path| path.starts_with("/x")),
+            "an over-long list is refused by the loader, so none of it is watched; got: {paths:?}"
         );
     }
 

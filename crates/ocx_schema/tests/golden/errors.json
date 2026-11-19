@@ -564,8 +564,18 @@
           "exit_code": 74
         },
         {
+          "value": "config_list_too_long",
+          "description": "OCX_CONFIG lists more config files than the limit",
+          "exit_code": 78
+        },
+        {
           "value": "config_parse",
           "description": "A config file does not parse",
+          "exit_code": 78
+        },
+        {
+          "value": "config_path_contains_separator",
+          "description": "A config path contains the OCX_CONFIG list separator",
           "exit_code": 78
         },
         {

@@ -130,12 +130,8 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         }
         None => None,
     };
-    // The path `Context` skipped because its file is gone; a `--config` or `OCX_CONFIG` that won skipped nothing.
-    if let Some(path) = context.skipped_received_config() {
-        notes.push(Note::ReceivedConfigMissing {
-            path: path.to_path_buf(),
-        });
-    }
+    // The entries `Context` skipped because their files are gone; a `--config` or `OCX_CONFIG` that won skipped nothing.
+    notes.extend(received_config_missing_notes(context.skipped_received_config()));
     let hook_active = hook.enabled != Some(false);
     let (env_state, env_state_notes) = EnvStateReport::from_inherited(&inherited, hook_active);
     notes.extend(env_state_notes);
@@ -531,6 +527,13 @@ async fn watch_set(paths: &[PathBuf]) -> Vec<WatchMember> {
     members
 }
 
+/// One note per vanished received config entry, so a list of two gone files reports both.
+fn received_config_missing_notes(vanished: &[PathBuf]) -> impl Iterator<Item = Note> + '_ {
+    vanished
+        .iter()
+        .map(|path| Note::ReceivedConfigMissing { path: path.clone() })
+}
+
 #[cfg(test)]
 mod tests {
     use ocx_config::exec_state::{ExecState, HeaderView, Truncation, UnreadableReason};
@@ -538,6 +541,14 @@ mod tests {
     use ocx_shell::shell::coexistence::{Observation, Tool};
 
     use super::*;
+
+    #[test]
+    fn two_vanished_received_entries_yield_two_missing_notes() {
+        let vanished = [PathBuf::from("/gone/a.toml"), PathBuf::from("/gone/b.toml")];
+        let notes: Vec<Note> = received_config_missing_notes(&vanished).collect();
+        assert_eq!(notes.len(), 2);
+        assert!(matches!(&notes[1], Note::ReceivedConfigMissing { path } if path == &vanished[1]));
+    }
 
     /// A POSIX-spelled fixture, as this platform actually spells an absolute
     /// path.

@@ -505,9 +505,11 @@ mod tests {
                 "AttestationReport",
                 "PushReport",
                 "SbomListingReport",
+                "ShellStateReport",
                 "SignatureReport",
                 "SweepReport<AttestationReport>",
                 "SweepReport<SignatureReport>",
+                "VerboseShellState",
                 "VerificationReport",
             ]
         );

@@ -3015,8 +3015,12 @@ pub enum ErrorDetail {
     ConfigFileTooLarge,
     /// Reading a config file failed
     ConfigIo,
+    /// OCX_CONFIG lists more config files than the limit
+    ConfigListTooLong,
     /// A config file does not parse
     ConfigParse,
+    /// A config path contains the OCX_CONFIG list separator
+    ConfigPathContainsSeparator,
     /// The credential helper failed to supply credentials
     CredentialHelperFailed,
     /// The credential helper answered with invalid JSON
@@ -4010,7 +4014,9 @@ impl ErrorDetail {
             Self::ConfigFileNotFound => "config_file_not_found",
             Self::ConfigFileTooLarge => "config_file_too_large",
             Self::ConfigIo => "config_io",
+            Self::ConfigListTooLong => "config_list_too_long",
             Self::ConfigParse => "config_parse",
+            Self::ConfigPathContainsSeparator => "config_path_contains_separator",
             Self::CredentialHelperFailed => "credential_helper_failed",
             Self::CredentialHelperInvalidJson => "credential_helper_invalid_json",
             Self::CredentialHelperNotInstalled => "credential_helper_not_installed",
@@ -4542,7 +4548,9 @@ impl ErrorDetail {
             "config_file_not_found" => Self::ConfigFileNotFound,
             "config_file_too_large" => Self::ConfigFileTooLarge,
             "config_io" => Self::ConfigIo,
+            "config_list_too_long" => Self::ConfigListTooLong,
             "config_parse" => Self::ConfigParse,
+            "config_path_contains_separator" => Self::ConfigPathContainsSeparator,
             "credential_helper_failed" => Self::CredentialHelperFailed,
             "credential_helper_invalid_json" => Self::CredentialHelperInvalidJson,
             "credential_helper_not_installed" => Self::CredentialHelperNotInstalled,
@@ -6760,10 +6768,10 @@ pub enum Note {
         /// The pinned path.
         path: String,
     },
-    /// The inherited state names a `config_path` whose file no longer exists, so this report was
-    /// built without it.
+    /// A config file the parent ocx recorded in its received `OCX_CONFIG` list no longer exists, so
+    /// this report was built without it.
     ReceivedConfigMissing {
-        /// The config path the parent ocx recorded.
+        /// The vanished entry's path, as the parent ocx recorded it.
         path: String,
     },
     /// A variant this SDK was not generated for: the whole object, as sent.
@@ -7642,9 +7650,10 @@ pub struct PolicyReport {
     /// `OCX_NO_UPDATE_CHECK`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_update_check: Option<bool>,
-    /// `OCX_CONFIG`.
+    /// The config files the parent named, in order: `OCX_CONFIG`'s list and/or `--config`. Omitted
+    /// when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_path: Option<AbsolutePath>,
+    pub config_paths: Option<Vec<AbsolutePath>>,
     /// `OCX_NO_CONFIG`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_config: Option<bool>,
@@ -7692,7 +7701,7 @@ impl Unknowns for PolicyReport {
         field(pointer, out, "no_project", &self.no_project);
         field(pointer, out, "no_config_refresh", &self.no_config_refresh);
         field(pointer, out, "no_update_check", &self.no_update_check);
-        field(pointer, out, "config_path", &self.config_path);
+        field(pointer, out, "config_paths", &self.config_paths);
         field(pointer, out, "no_config", &self.no_config);
         field(pointer, out, "index_dir", &self.index_dir);
         field(pointer, out, "toolchain_dir", &self.toolchain_dir);

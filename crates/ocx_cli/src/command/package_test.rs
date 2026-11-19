@@ -328,7 +328,7 @@ impl PackageTest {
             context.inherited(),
             &ChildEnvInputs {
                 mode,
-                written: context.written_policy(mode.write_mode()),
+                written: context.written_policy(mode.write_mode())?,
                 binary_pin: context.binary_pin(),
                 composed: &entries,
                 composed_owner: Owner::Inherited,

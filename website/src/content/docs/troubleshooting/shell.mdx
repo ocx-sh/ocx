@@ -25,7 +25,11 @@ When it is not active, it says *why*, plus the one line that says what to do abo
 
 A consent stamp is missing, or a stamp is present but the lock outgrew it. The hook is disabled, and the report names the config tier that decided that. Another is a [yield to direnv or mise](#coexistence) naming the live signal it saw. It can also be a state reduced to a marker because it went over the size cap, or an `ocx.lock` that will not parse.
 
-The report can also carry notes. A `received_config_missing` note means the config file a parent OCX passed down no longer exists, so the report was built without it. The note appears only when that path was actually skipped, so a `--config` flag or an `OCX_CONFIG` variable that overrode it leaves no note. In `--format json` it is `{"type":"received_config_missing","path":"…"}`. Restore the file or run from a clean shell.
+The report can also carry notes. A `received_config_missing` note means a config file in the `OCX_CONFIG` list a parent OCX passed down no longer exists.
+
+The report was built without it. The report carries one note per vanished entry, so two missing files give two notes, and the entries that still exist load in order.
+
+The note appears only when an entry was actually skipped. A `--config` flag or an `OCX_CONFIG` variable set in the current environment, even an empty one, replaces the passed-down list and leaves no note. In `--format json` it is `{"type":"received_config_missing","path":"…"}`. Restore the file or run from a clean shell.
 
 <ShellSession title="Show the shell state" collapsed>
 

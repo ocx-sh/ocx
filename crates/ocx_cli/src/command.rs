@@ -2,6 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 use std::ffi::OsString;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::ExitCode;
 
 use clap::Subcommand;
@@ -452,36 +454,53 @@ pub enum Command {
     External(Vec<OsString>),
 }
 
+/// Builds a command's future in a frame of its own and boxes it.
+///
+/// A debug build gives each match arm of [`Command::execute`] its own stack slot for the future it
+/// creates, so building them in place sums every command's future into a poll frame that stays live
+/// for the whole command (1.4 MiB, past a 2 MiB test thread). Built here, the frame is gone before
+/// the first poll and only the box stays. Inlined, the slots come back, so keep `#[inline(never)]`.
+#[inline(never)]
+fn boxed<'a, F>(build: impl FnOnce() -> F) -> Pin<Box<dyn Future<Output = anyhow::Result<ExitCode>> + 'a>>
+where
+    F: Future<Output = anyhow::Result<ExitCode>> + 'a,
+{
+    Box::pin(build())
+}
+
 impl Command {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            Command::Env(env) => env.execute(context).await,
-            Command::Add(add) => add.execute(context).await,
-            Command::Clean(clean) => clean.execute(context).await,
-            Command::Config(config_group) => config_group.execute(context).await,
-            Command::Direnv(direnv) => direnv.execute(context).await,
-            Command::Index(index) => index.execute(context).await,
-            Command::About(about) => about.execute(context).await,
-            Command::Init(init) => init.execute(context).await,
-            Command::Lock(lock) => lock.execute(context).await,
-            Command::Login(login) => login.execute(context).await,
-            Command::Logout(logout) => logout.execute(context).await,
-            Command::Update(update) => update.execute(context).await,
-            Command::Upgrade(upgrade) => upgrade.execute(context).await,
-            Command::Launcher(launcher) => launcher.execute(context).await,
-            Command::Package(package) => package.execute(context).await,
-            Command::Patch(patch_group) => patch_group.execute(context).await,
-            Command::Pull(pull) => pull.execute(context).await,
-            Command::Remove(remove) => remove.execute(context).await,
-            Command::Exec(exec) => exec.execute(context).await,
+            Command::Env(env) => boxed(move || env.execute(context)).await,
+            Command::Add(add) => boxed(move || add.execute(context)).await,
+            Command::Clean(clean) => boxed(move || clean.execute(context)).await,
+            Command::Config(config_group) => boxed(move || config_group.execute(context)).await,
+            Command::Direnv(direnv) => boxed(move || direnv.execute(context)).await,
+            Command::Index(index) => boxed(move || index.execute(context)).await,
+            Command::About(about) => boxed(move || about.execute(context)).await,
+            Command::Init(init) => boxed(move || init.execute(context)).await,
+            Command::Lock(lock) => boxed(move || lock.execute(context)).await,
+            Command::Login(login) => boxed(move || login.execute(context)).await,
+            Command::Logout(logout) => boxed(move || logout.execute(context)).await,
+            Command::Update(update) => boxed(move || update.execute(context)).await,
+            Command::Upgrade(upgrade) => boxed(move || upgrade.execute(context)).await,
+            Command::Launcher(launcher) => boxed(move || launcher.execute(context)).await,
+            Command::Package(package) => boxed(move || package.execute(context)).await,
+            Command::Patch(patch_group) => boxed(move || patch_group.execute(context)).await,
+            Command::Pull(pull) => boxed(move || pull.execute(context)).await,
+            Command::Remove(remove) => boxed(move || remove.execute(context)).await,
+            Command::Exec(exec) => boxed(move || exec.execute(context)).await,
             Command::DeprecatedRun(exec) => {
-                deprecated::warn_renamed(&context, &deprecated::RUN);
-                exec.execute(context).await
+                boxed(move || {
+                    deprecated::warn_renamed(&context, &deprecated::RUN);
+                    exec.execute(context)
+                })
+                .await
             }
-            Command::Shell(shell) => shell.execute(context).await,
-            Command::Self_(group) => group.execute(context).await,
-            Command::Status(status) => status.execute(context).await,
-            Command::Inspect(inspect) => inspect.execute(context).await,
+            Command::Shell(shell) => boxed(move || shell.execute(context)).await,
+            Command::Self_(group) => boxed(move || group.execute(context)).await,
+            Command::Status(status) => boxed(move || status.execute(context)).await,
+            Command::Inspect(inspect) => boxed(move || inspect.execute(context)).await,
             Command::Version(_) => unreachable!("Version is handled in the static-command bypass in App::run"),
             Command::External(_) => {
                 unreachable!("Command::External must be handled in App::run before reaching execute()")
@@ -589,5 +608,24 @@ mod tests {
             !help.contains("refresh it from the registry"),
             "three of the five index subcommands contact no registry; got: {help}"
         );
+    }
+
+    /// The size of the future `fut` returns, read off its type so no value has to be built.
+    fn future_size<A, B, F>(_: impl FnOnce(A, B) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    /// The `Command::execute` future is the largest state any arm holds across its await, so it
+    /// stays under 16 KiB only while every arm's own future is boxed (a command's future alone is
+    /// up to 1.4 MiB in a debug build, past a 2 MiB test thread's budget once polled).
+    ///
+    /// Red state: drop the `boxed` call from an arm whose command future exceeds the bound. An
+    /// unboxed arm whose future fits under the bound does not red this test, because the bound
+    /// measures the whole enum's future, not each arm.
+    #[test]
+    fn execute_future_stays_boxed() {
+        const BOUND: usize = 16 * 1024;
+        let size = future_size(super::Command::execute);
+        assert!(size < BOUND, "`Command::execute` future is {size} bytes, bound {BOUND}");
     }
 }

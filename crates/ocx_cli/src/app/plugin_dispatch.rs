@@ -120,7 +120,7 @@ fn build_plugin_command(
     let inherited = Inherited::from_process_env();
     let written = super::context::with_policy_inputs(&opts.root_flags(), false, &inherited, |inputs| {
         inputs.to_write(WriteMode::Inherit)
-    });
+    })?;
     let child = project(
         &inherited,
         &Spawn {

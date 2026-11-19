@@ -202,11 +202,12 @@ pub enum Note {
         /// The pinned path.
         path: PathBuf,
     },
-    /// The inherited state names a `config_path` whose file no longer exists, so this report was built without it.
+    /// A config file the parent ocx recorded in its received `OCX_CONFIG` list no longer exists, so this report was built without it.
     ///
+    /// The list is checked entry by entry and each vanished entry is its own finding; the entries that still exist load in order.
     /// An ordinary command treats a missing config path as an error; the report is a finding instead.
     ReceivedConfigMissing {
-        /// The config path the parent ocx recorded.
+        /// The vanished entry's path, as the parent ocx recorded it.
         path: PathBuf,
     },
 }
@@ -1051,7 +1052,7 @@ fn push_fix(theme: &Theme, out: &mut Vec<String>, fix: &str) {
 }
 
 impl Printable for ShellStateReport {
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
     const ROOT: &'static str = "ShellStateReport";
 
     /// The answer only ([`Detail::Answer`]).
@@ -1068,7 +1069,7 @@ impl Printable for ShellStateReport {
 pub struct VerboseShellState(pub ShellStateReport);
 
 impl Printable for VerboseShellState {
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
     const ROOT: &'static str = "VerboseShellState";
 
     fn print_plain(&self, data: &DataInterface) {
@@ -1192,10 +1193,10 @@ pub struct PolicyReport {
     /// `OCX_NO_UPDATE_CHECK`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_update_check: Option<bool>,
-    /// `OCX_CONFIG`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<AbsolutePath>")]
-    pub config_path: Option<PathBuf>,
+    /// The config files the parent named, in order: `OCX_CONFIG`'s list and/or `--config`. Omitted when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(with = "Vec<AbsolutePath>")]
+    pub config_paths: Vec<PathBuf>,
     /// `OCX_NO_CONFIG`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_config: Option<bool>,
@@ -1264,12 +1265,20 @@ impl PolicyReport {
             default_registry,
             insecure_registries,
         } = policy.clone();
+        // The wire carries one path list; the report names each entry (empty entries are dropped as the loader drops them).
+        let config_paths = config_path
+            .map(|list| {
+                std::env::split_paths(&list)
+                    .filter(|entry| !entry.as_os_str().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             remote,
             no_project,
             no_config_refresh,
             no_update_check,
-            config_path,
+            config_paths,
             no_config,
             index_dir,
             toolchain_dir,
@@ -1295,7 +1304,18 @@ impl PolicyReport {
             ("no_project", flag(self.no_project)),
             ("no_config_refresh", flag(self.no_config_refresh)),
             ("no_update_check", flag(self.no_update_check)),
-            ("config_path", path(&self.config_path)),
+            // The wire field's name, which `relaxing_policy` matches; the value is the whole list.
+            (
+                "config_path",
+                (!self.config_paths.is_empty()).then(|| {
+                    let paths: Vec<_> = self
+                        .config_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect();
+                    paths.join(", ")
+                }),
+            ),
             ("no_config", flag(self.no_config)),
             ("index_dir", path(&self.index_dir)),
             ("toolchain_dir", path(&self.toolchain_dir)),
@@ -4018,7 +4038,7 @@ mod tests {
             no_project: Some(true),
             no_config_refresh: Some(true),
             no_update_check: Some(true),
-            config_path: Some(PathBuf::from("/c")),
+            config_paths: vec![PathBuf::from("/c")],
             no_config: Some(true),
             index_dir: Some(PathBuf::from("/i")),
             toolchain_dir: Some(PathBuf::from("/t")),
@@ -4039,6 +4059,22 @@ mod tests {
                 assert!(set.contains(&name), "`{name}` ({class:?}) is missing from the report");
             }
         }
+    }
+
+    /// A received `OCX_CONFIG` list reports one `config_paths` entry per file, in order; none set omits the key.
+    #[test]
+    fn config_paths_lists_each_received_entry_and_is_omitted_when_empty() {
+        let list = std::env::join_paths(["/a/one.toml", "", "/b/two.toml"]).expect("joins");
+        let policy = PolicyReport::from_wire(&Policy {
+            config_path: Some(PathBuf::from(list)),
+            ..Policy::default()
+        });
+        let json = serde_json::to_value(&policy).expect("serializes");
+        assert_eq!(json["config_paths"], serde_json::json!(["/a/one.toml", "/b/two.toml"]));
+        assert!(json.get("config_path").is_none());
+
+        let none = serde_json::to_value(PolicyReport::from_wire(&Policy::default())).expect("serializes");
+        assert!(none.get("config_paths").is_none(), "an empty list is omitted: {none}");
     }
 
     #[test]

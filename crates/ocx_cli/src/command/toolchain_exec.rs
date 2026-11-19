@@ -255,7 +255,7 @@ impl ToolchainExec {
         // Written for the child, from what the root flags and the received state say. Two command flags no
         // root flag carries are added: the records sink, which a launcher's re-entry cannot re-derive, and a
         // refused consent, which `--consent` never clears downward.
-        let mut written = context.written_policy(mode.write_mode()).clone();
+        let mut written = context.written_policy(mode.write_mode())?.clone();
         let sink = records.forwarded();
         written.policy.records_name = sink.dir.as_ref().and(sink.name);
         written.policy.records_dir = sink.dir;
