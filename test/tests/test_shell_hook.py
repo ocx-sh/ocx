@@ -31,6 +31,7 @@ W7: direnv byte-stability (kept, written Phase 2)
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +41,12 @@ import pytest
 
 from src.helpers import bash_executable, make_package
 from src.runner import OcxRunner
-from src.shell_eval import run_after_sourcing
+from src.shell_eval import (
+    PATH_HELPERS,
+    git_bash_env,
+    require_dirs_on_path,
+    run_after_sourcing,
+)
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -595,10 +601,6 @@ def test_top_level_shell_hook_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="windows: ocx emits native C:\\ paths into the sourced bash PATH, which MSYS bash splits at the drive colon",
-)
 def test_global_env_sh_activation_replaces_departed_hook(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -653,11 +655,29 @@ def test_global_env_sh_activation_replaces_departed_hook(
     # Source the output in a subshell → gtool bin dir on PATH.
     # Block A1 fix: use run_after_sourcing (temp-file + dot-operator) instead of
     # eval "..." to handle paths with spaces, $, ", !, and \ correctly.
+
+    # Directory presence, not `command -v gtool`: the fixture tool is a `.bat` on Windows.
+    report = _run(
+        ocx, empty, "--format", "json", "--global", "env",
+        extra_env={"OCX_NO_PROJECT": "1"},
+    )
+    assert report.returncode == EXIT_SUCCESS, f"--format json --global env must succeed:\n{report.stderr}"
+    path_dirs = [item["value"] for item in json.loads(report.stdout)["items"] if item["key"] == "PATH"]
+    assert path_dirs, f"the composed env must carry a PATH entry; got:\n{report.stdout}"
+    bash = bash_executable()
+    assert bash is not None, "bash is required (Git for Windows' bash on Windows)"
+    # The tool is a `.bat` on Windows, so `command -v` finds it only elsewhere.
+    find_tool = "" if sys.platform == "win32" else 'command -v gtool || echo "NOT_FOUND"\n'
     check_result = run_after_sourcing(
         env_result.stdout,
-        'command -v gtool || echo "NOT_FOUND"',
+        PATH_HELPERS + require_dirs_on_path(path_dirs) + "\n" + find_tool + "true",
         cwd=empty,
-        env=dict(ocx.env),
+        env=git_bash_env(dict(ocx.env), bash),
+        shell=bash,
+    )
+    assert check_result.returncode == EXIT_SUCCESS, (
+        f"after sourcing --global env --shell=sh output, the gtool directory must be on PATH; "
+        f"stdout:\n{check_result.stdout}\nstderr:\n{check_result.stderr}"
     )
     assert "NOT_FOUND" not in check_result.stdout, (
         f"after sourcing --global env --shell=sh output, gtool must be on PATH; "

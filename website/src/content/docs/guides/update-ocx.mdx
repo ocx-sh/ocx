@@ -156,8 +156,8 @@ Then remove the managed activation that [`ocx self setup`][cmd-self-setup] added
 
 - **bash / zsh / sh / dash / ksh**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from `~/.profile`, `~/.bash_profile`, `~/.bashrc`, `~/.zprofile` and `~/.zshrc` (whichever exist)
 - **fish**: delete `~/.config/fish/conf.d/ocx.fish`
-- **Nushell**: delete `~/.local/share/nushell/vendor/autoload/ocx.nu`
-- **Elvish**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from `~/.config/elvish/rc.elv`
+- **Nushell**: delete `~/.local/share/nushell/vendor/autoload/ocx.nu` (on Windows `%APPDATA%\nushell\vendor\autoload\ocx.nu`)
+- **Elvish**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from `~/.config/elvish/rc.elv` (on Windows `%AppData%\elvish\rc.elv`)
 - **PowerShell**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from your `$PROFILE`
 - **every platform**: also remove the session-level `PATH` registration, with one location each and the exact commands, in [Removing the session PATH by hand][cmd-self-setup-session-path-removal]
 

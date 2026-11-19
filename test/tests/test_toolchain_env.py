@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re as _re_te
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,11 +31,22 @@ from uuid import uuid4
 
 import pytest
 
+from src import shell_matrix as matrix
 from src.helpers import bash_executable, make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner
-from src.shell_eval import run_after_sourcing
-from src.toolchain_fixtures import locked_project, resolved_toolchain_home, run_in
+from src.shell_eval import (
+    PATH_HELPERS,
+    git_bash_env,
+    require_dirs_on_path,
+    run_after_sourcing,
+)
+from src.toolchain_fixtures import (
+    locked_project,
+    resolved_toolchain_bin,
+    resolved_toolchain_home,
+    run_in,
+)
 
 pytestmark = pytest.mark.command("toolchain_env")
 
@@ -730,10 +742,6 @@ def test_env_shell_bash_explicit_emits_export_lines(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="windows: ocx emits native C:\\ paths into the sourced bash PATH, which MSYS bash splits at the drive colon",
-)
 def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -816,11 +824,21 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
     # assert the no-entrypoint binary is resolvable on the resulting PATH.
     # Block A1 fix: use run_after_sourcing (temp-file + dot-operator) instead of
     # eval "..." to handle paths with spaces, $, ", !, and \ correctly.
+
+    # Directory presence, not a bare-name run: the fixture tool is a `.bat` on Windows.
+    report = _run(ocx, tmp_path, "--format", "json", "--global", "env")
+    assert report.returncode == EXIT_SUCCESS, f"--format json --global env must succeed:\n{report.stderr}"
+    path_dirs = [item["value"] for item in json.loads(report.stdout)["items"] if item["key"] == "PATH"]
+    assert path_dirs, f"the composed env must carry a PATH entry; got:\n{report.stdout}"
+    bash = bash_executable()
+    assert bash is not None, "bash is required (Git for Windows' bash on Windows)"
+    run_tool = "" if sys.platform == "win32" else f"command -v {bin_name} && {bin_name}\n"
     shell_result = run_after_sourcing(
         env_result.stdout,
-        f"command -v {bin_name} && {bin_name}",
+        PATH_HELPERS + require_dirs_on_path(path_dirs) + "\n" + run_tool + "true",
         cwd=tmp_path,
-        env=dict(ocx.env),
+        env=git_bash_env(dict(ocx.env), bash),
+        shell=bash,
     )
     assert shell_result.returncode == EXIT_SUCCESS, (
         f"no-entrypoint binary '{bin_name}' must be on PATH after eval of "
@@ -828,11 +846,12 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
         f"rc={shell_result.returncode}\n"
         f"stdout:\n{shell_result.stdout}\nstderr:\n{shell_result.stderr}"
     )
-    assert pkg.marker in shell_result.stdout, (
-        f"no-entrypoint binary '{bin_name}' must run and print its marker "
-        f"(proving the correct content/bin/ was on PATH, not a stale version); "
-        f"marker={pkg.marker!r}\nstdout:\n{shell_result.stdout!r}"
-    )
+    if sys.platform != "win32":
+        assert pkg.marker in shell_result.stdout, (
+            f"no-entrypoint binary '{bin_name}' must run and print its marker "
+            f"(proving the correct content/bin/ was on PATH, not a stale version); "
+            f"marker={pkg.marker!r}\nstdout:\n{shell_result.stdout!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2176,3 +2195,138 @@ def test_global_env_with_composes_like_global_exec(ocx: OcxRunner, tmp_path: Pat
         f"env={with_env} exec={exec_dirs}"
     )
     assert _real_dirs(with_env)[-1] == _real_dirs(baseline)[-1], "the global toolchain's directory must lead PATH"
+
+
+# ---------------------------------------------------------------------------
+# Live bash sessions: assertions run inside bash, in the form bash reports paths,
+# with `cygpath -u` (PATH_HELPERS) converting the expected directory under Git Bash.
+# ---------------------------------------------------------------------------
+
+_SESSION_TIMEOUT = 120
+
+
+def _bash_session(
+    ocx: OcxRunner, tmp_path: Path, body: str, *, cwd: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``body`` as a script in a real bash, by absolute path, bounded by a timeout."""
+    bash = bash_executable()
+    assert bash is not None, "bash is required (Git for Windows' bash on Windows); none was found"
+    env = git_bash_env(dict(ocx.env), bash)
+    env["OCX_BIN"] = str(ocx.binary)
+    env.update(extra_env or {})
+    script = tmp_path / f"session-{uuid4().hex[:8]}.sh"
+    script.write_text(PATH_HELPERS + body, encoding="utf-8", newline="\n")
+    return subprocess.run(
+        [bash, "--norc", script.as_posix()],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=_SESSION_TIMEOUT,
+    )
+
+
+@pytest.mark.smoke
+def test_bash_activation_stream_sources_cleanly(ocx: OcxRunner, tmp_path: Path) -> None:
+    """The ``self activate --shell=bash`` stream evaluates in a real bash without noise.
+
+    The flags are the ones ``env.sh`` passes. After the evaluation: nothing on
+    stderr, ``ocx`` is a shell function that runs the binary, every ``PATH``
+    segment the stream added is absolute as bash sees it (never a bare drive
+    letter such as ``C``, never a backslash path), and the directory holding the
+    binary under test is on ``PATH``.
+    """
+    # The stream names the installed binary (`ocx self setup` puts it there); seed it.
+    installed = Path(ocx.env["OCX_HOME"]) / "symlinks" / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin"
+    installed.mkdir(parents=True)
+    shutil.copy2(ocx.binary, installed / ocx.binary.name)
+    body = f"""\
+__before="$PATH"
+__stream="$("$OCX_BIN" self activate --shell=bash --no-completion --interactive 2>/dev/null)"
+printf '@@stream_rc@@%s\\n' "$?"
+eval "$__stream"
+printf '@@ocx_kind@@%s\\n' "$(type -t ocx)"
+ocx version >/dev/null
+printf '@@ocx_rc@@%s\\n' "$?"
+__bad=""
+__IFS="$IFS"
+IFS=:
+for __seg in $PATH; do
+    case ":$__before:" in
+        *":$__seg:"*) ;;
+        *) case "$__seg" in /*) ;; *) __bad="$__bad[$__seg]" ;; esac ;;
+    esac
+    case "$__seg" in
+        [A-Za-z]|\\\\*) __bad="$__bad[$__seg]" ;;
+    esac
+done
+IFS="$__IFS"
+printf '@@bad@@%s\\n' "$__bad"
+if _has_dir {matrix.quote("bash", str(installed))}; then __on=yes; else __on=no; fi
+printf '@@bindir@@%s\\n' "$__on"
+"""
+    result = _bash_session(ocx, tmp_path, body, cwd=tmp_path)
+    probes = matrix.probes(result.stdout)
+    detail = f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert probes.get("stream_rc") == "0", f"`ocx self activate --shell=bash` must succeed\n{detail}"
+    assert result.stderr == "", f"evaluating the stream must print nothing on stderr\n{detail}"
+    assert probes.get("ocx_kind") == "function", f"`ocx` must be a shell function after the stream\n{detail}"
+    assert probes.get("ocx_rc") == "0", f"`ocx version` through the function must exit 0\n{detail}"
+    assert probes.get("bad") == "", f"the stream added a non-absolute or drive-colon PATH segment\n{detail}"
+    assert probes.get("bindir") == "yes", f"the directory holding the installed ocx must be on PATH after the stream\n{detail}"
+
+
+def test_bash_project_toolchain_path_round_trip(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Entering a project puts its tool directory on ``PATH``; leaving restores ``PATH`` exactly.
+
+    One bash session runs the reconcile step the per-prompt hook runs: outside
+    (baseline), inside the project (directory present), outside again
+    (directory gone, ``PATH`` byte-identical to the baseline, so segment order
+    is preserved). Presence is read by directory, not ``command -v``, because
+    the fixture tools are ``.bat`` files on Windows.
+    """
+    project = locked_project(ocx, tmp_path, label="gb")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    tool_dir = str(resolved_toolchain_bin(ocx, project.directory))
+    quoted = matrix.quote("bash", tool_dir)
+
+    body = "\n".join(
+        [
+            matrix.header("bash", ocx.binary),
+            matrix.cd_to("bash", outside),
+            matrix.prompt("bash"),
+            '__baseline="$PATH"',
+            "if _has_dir " + quoted + "; then __pre=yes; else __pre=no; fi",
+            matrix.cd_to("bash", project.directory),
+            matrix.prompt("bash"),
+            '__first="$PATH"',
+            matrix.prompt("bash"),
+            'if [ "$PATH" = "$__first" ]; then __stable=yes; else __stable=no; fi',
+            "if _has_dir " + quoted + "; then __in=yes; else __in=no; fi",
+            matrix.cd_to("bash", outside),
+            matrix.prompt("bash"),
+            "if _has_dir " + quoted + "; then __out=yes; else __out=no; fi",
+            'if [ "$PATH" = "$__baseline" ]; then __same=yes; else __same=no; fi',
+            matrix.probe("bash", "pre", "__pre"),
+            matrix.probe("bash", "out", "__out"),
+            matrix.probe("bash", "same", "__same"),
+            matrix.probe("bash", "inside", "__in"),
+            matrix.probe("bash", "stable", "__stable"),
+        ]
+    )
+    result = _bash_session(
+        ocx, tmp_path, body, cwd=outside, extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"}
+    )
+    probes = matrix.probes(result.stdout)
+    detail = (
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        f"\ntool dir (native): {tool_dir}"
+    )
+    assert result.returncode == EXIT_SUCCESS, f"the bash session must exit 0\n{detail}"
+    assert probes.get("pre") == "no", f"the tool directory must not be on PATH before entering\n{detail}"
+    assert probes.get("inside") == "yes", f"entering the project must put its tool directory on PATH\n{detail}"
+    assert probes.get("stable") == "yes", f"a second prompt inside the project must not change PATH\n{detail}"
+    assert probes.get("out") == "no", f"leaving the project must remove its tool directory from PATH\n{detail}"
+    assert probes.get("same") == "yes", f"leaving must restore PATH to the pre-entry value, order included\n{detail}"

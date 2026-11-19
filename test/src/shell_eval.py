@@ -19,12 +19,13 @@ This module provides ``run_after_sourcing`` as the single entry point so all
 three affected test files share the same implementation.
 """
 
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from src.shell_matrix import shell_which
+from src.shell_matrix import quote, shell_which
 
 
 def run_after_sourcing(
@@ -92,8 +93,45 @@ def run_after_sourcing(
             env=env, check=False,
         )
     finally:
-        import os
         try:
             os.unlink(env_file)
         except OSError:
             pass
+
+
+# Bash helpers for asserting where a directory sits on ``$PATH`` as bash reports it.
+# ``_u`` turns a native path into the form bash holds (``cygpath -u`` under Git Bash,
+# the identity elsewhere); ``_phys`` resolves symlinks; ``_has_dir`` is true when a
+# ``$PATH`` segment is the same directory. The conversion runs inside the session so
+# no Python mirror of it can agree with the code under test by construction.
+PATH_HELPERS = r"""
+_u() { if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
+_phys() { (cd "$1" 2>/dev/null && pwd -P); }
+_has_dir() {
+    local want seg
+    want="$(_phys "$(_u "$1")")"
+    [ -n "$want" ] || return 1
+    local IFS=:
+    for seg in $PATH; do
+        [ -n "$seg" ] && [ "$(_phys "$seg")" = "$want" ] && return 0
+    done
+    return 1
+}
+"""
+
+
+def require_dirs_on_path(dirs: list[str]) -> str:
+    """Script lines that exit 1 naming the first of ``dirs`` missing from ``$PATH``."""
+    return "\n".join(
+        f"_has_dir {quote("bash", d)} || {{ echo \"NOT_ON_PATH: \"{quote("bash", d)} >&2; exit 1; }}" for d in dirs
+    )
+
+
+def git_bash_env(env: dict[str, str], bash: str) -> dict[str, str]:
+    """``env`` with Git for Windows' ``usr/bin`` (``cygpath``, coreutils) on ``PATH``; unchanged elsewhere."""
+    if sys.platform != "win32":
+        return env
+    root = Path(bash).resolve().parent
+    candidates = [root, root.parent / "usr" / "bin", root / "usr" / "bin"]
+    extra = [str(c) for c in candidates if (c / "cygpath.exe").is_file()]
+    return {**env, "PATH": os.pathsep.join([*extra, env.get("PATH", "")])}

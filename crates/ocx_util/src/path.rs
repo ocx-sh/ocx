@@ -13,16 +13,41 @@ pub const PATH_SEPARATOR: &str = ";";
 #[cfg(not(target_os = "windows"))]
 pub const PATH_SEPARATOR: &str = ":";
 
-/// Whether a `PATH` segment names `value`: exact on Unix, ASCII-case-insensitive on Windows.
+/// Whether two `PATH` elements name the same entry under the Windows rule (`windows`) or byte-exact.
+///
+/// The Windows rule folds ASCII case and treats `/` and `\` as one character: package metadata writes
+/// `${installPath}/bin` over a native install path, and the MSYS runtime hands the entry back all-backslash.
+/// Non-ASCII bytes compare exactly. The caller picks `windows`, so the rule is testable on any host.
+pub fn path_element_eq(left: &OsStr, right: &OsStr, windows: bool) -> bool {
+    if !windows {
+        return left == right;
+    }
+    let (left, right) = (left.as_encoded_bytes(), right.as_encoded_bytes());
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| fold_byte(*a) == fold_byte(*b))
+}
+
+/// The hashable form of [`path_element_eq`]'s equivalence class: equal under it iff equal here.
+pub fn path_element_norm(value: &str, windows: bool) -> String {
+    if windows {
+        value
+            .chars()
+            .map(|c| if c == '/' { '\\' } else { c.to_ascii_lowercase() })
+            .collect()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn fold_byte(byte: u8) -> u8 {
+    if byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() }
+}
+
+/// Whether a `PATH` segment names `value`: the host rule of [`path_element_eq`].
 ///
 /// Must match every `Shell::export_path` / `remove_list_element` arm, or emitted and in-process `PATH`s diverge.
 fn same_element(segment: &OsStr, value: &OsStr) -> bool {
     // Host rule, not the shell's: the process env and `$GITHUB_PATH` follow it even under MSYS.
-    if cfg!(windows) {
-        segment.eq_ignore_ascii_case(value)
-    } else {
-        segment == value
-    }
+    path_element_eq(segment, value, cfg!(windows))
 }
 
 /// Strip one — and only one — surrounding pair of `"` from a `PATH` element.
@@ -126,7 +151,7 @@ pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::PATH_SEPARATOR as SEP;
-    use super::{move_to_front, remove_segment};
+    use super::{move_to_front, path_element_eq, path_element_norm, remove_segment};
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
 
@@ -484,5 +509,47 @@ mod tests {
             format!("/a{SEP}b{SEP}/x")
         };
         assert_eq!(super::join_segments(&segments), OsString::from(expected));
+    }
+
+    #[test]
+    fn slash_fold_table_under_the_windows_rule() {
+        let eq = |a: &str, b: &str| path_element_eq(OsStr::new(a), OsStr::new(b), true);
+        assert!(eq(r"C:\x\pkg/bin", r"C:\x\pkg\bin"));
+        assert!(eq("C:/x/pkg/bin", r"C:\x\pkg\bin"));
+        assert!(eq(r"C:\X\Pkg/BIN", r"c:\x\pkg\bin"));
+        assert!(!eq(r"C:\x\pkg\bin", r"C:\x\pkg\bin2"));
+        assert!(
+            !eq(r"C:\x\pkg\bin", r"C:\x\pkg\bin\"),
+            "a trailing separator is not folded away"
+        );
+        // Quotes are stripped by the callers, not here.
+        assert!(!eq("\"C:/x\"", "C:/x"));
+        assert_eq!(
+            path_element_norm("C:/X/Bin", true),
+            path_element_norm(r"c:\x\BIN", true)
+        );
+    }
+
+    #[test]
+    fn slash_fold_is_absent_off_windows() {
+        assert!(!path_element_eq(OsStr::new("a/b"), OsStr::new(r"a\b"), false));
+        assert!(!path_element_eq(OsStr::new("a/B"), OsStr::new("a/b"), false));
+        assert!(path_element_eq(OsStr::new("a/b"), OsStr::new("a/b"), false));
+        assert_eq!(path_element_norm("a/B", false), "a/B");
+    }
+
+    /// Only meaningful where `;`/`\` splitting is the host's: the windows rule is the host rule there.
+    #[cfg(windows)]
+    #[test]
+    fn slash_difference_neither_duplicates_nor_survives_removal() {
+        let existing = OsString::from(r"C:\x\pkg\bin;C:\keep");
+        assert_eq!(
+            move_to_front(&existing, OsStr::new("C:\\x\\pkg/bin")),
+            OsString::from("C:\\x\\pkg/bin;C:\\keep")
+        );
+        assert_eq!(
+            remove_segment(&existing, OsStr::new("C:\\x\\pkg/bin")),
+            OsString::from(r"C:\keep")
+        );
     }
 }

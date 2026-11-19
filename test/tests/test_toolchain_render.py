@@ -52,7 +52,12 @@ from uuid import uuid4
 import pytest
 
 from src.assertions import assert_symlink_exists
-from src.helpers import make_package, push_managed_config, write_ocx_toml
+from src.helpers import (
+    make_package,
+    posix_shell_path,
+    push_managed_config,
+    write_ocx_toml,
+)
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
     ACTIVE_LINK,
@@ -2228,7 +2233,7 @@ def test_a_project_copied_to_a_new_path_does_not_expose_the_sources_trampolines(
     """
     project = locked_project(ocx, tmp_path)
     exposed, _ = _path_segments(ocx, project.directory)
-    assert str(path_facing_bin(project.home)) in exposed, (
+    assert posix_shell_path(path_facing_bin(project.home)) in exposed, (
         f"the control: the source project is exposed before anything is copied; "
         f"segments {exposed}"
     )
@@ -2261,7 +2266,7 @@ def test_a_project_copied_to_a_new_path_does_not_expose_the_sources_trampolines(
     )
 
     segments, _ = _path_segments(ocx, moved)
-    assert str(path_facing_bin(toolchain_home(moved))) not in segments, (
+    assert posix_shell_path(path_facing_bin(toolchain_home(moved))) not in segments, (
         f"row 9 — a copied tree is withheld until a render runs for its own "
         f"path, even with a stamp sitting under its own key; segments {segments}"
     )
@@ -2356,7 +2361,7 @@ def test_a_home_restored_at_the_same_absolute_path_passes_the_gate(
     )
 
     segments, _ = _path_segments(ocx, project.directory)
-    assert str(path_facing_bin(home)) in segments, (
+    assert posix_shell_path(path_facing_bin(home)) in segments, (
         f"row 11 — inode churn alone must not withhold a restored tree; "
         f"segments {segments}"
     )
@@ -2723,7 +2728,7 @@ def test_a_repointed_active_withholds_the_project_from_the_prompt(
     """
     project = locked_project(ocx, tmp_path)
     exposed, _ = _path_segments(ocx, project.directory)
-    assert str(path_facing_bin(project.home)) in exposed, (
+    assert posix_shell_path(path_facing_bin(project.home)) in exposed, (
         f"the control: a correct `active` exposes the project; segments {exposed}"
     )
 
@@ -2732,7 +2737,7 @@ def test_a_repointed_active_withholds_the_project_from_the_prompt(
     make_link(f"{SHELLS_DIR}/other", active_link(project.home))
 
     segments, emitted = _path_segments(ocx, project.directory)
-    assert str(path_facing_bin(project.home)) not in segments, (
+    assert posix_shell_path(path_facing_bin(project.home)) not in segments, (
         f"row 30 — a repointed `active` withholds the project; segments {segments}"
     )
     assert read_link(active_link(project.home)) == active_target(project.home, "other"), (

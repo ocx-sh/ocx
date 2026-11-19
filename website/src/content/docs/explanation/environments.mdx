@@ -194,6 +194,8 @@ Every later shell re-sources the block with `ocx` possibly absent, and the direc
 
 All ten supported shells (bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell and Windows `cmd`) emit idempotent move-to-front output. The `cmd` form rebuilds `PATH` with `%VAR:search=%` substring deletion. It uses no `FOR /F` and no delayed expansion, so `!`-bearing paths stay intact. It matches segments case-insensitively, the way Windows `PATH` lookup does. Elvish needs the `str:` module (0.16+) and nushell the auto-list `PATH` conversion (0.101+).
 
+bash, zsh and fish also run under Git Bash, MSYS2 and Cygwin on Windows. There the `PATH` entries are written in the runtime's own spelling and `ocx` is called as `C:/…/ocx.exe`. Git Bash and MSYS2 read `/c/Users/…` (lowercase drive letter). Cygwin reads `/proc/cygdrive/c/Users/…`. The values of ordinary variables stay in native Windows form, because native tools read them. A POSIX shell on a Windows host gets the right form without any environment variable to set. busybox-w32 and a Windows `ocx.exe` driven from WSL are not supported. The [Shells on Windows section][shell-integration-windows] lists the limits.
+
 ### Layered `ocx exec` \{#strict-isolation-exec\}
 
 `ocx exec` reads exactly two files, `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the packages those files declare and no more. A package that is not in `ocx.toml` is not in the child environment, whatever is installed globally or on the parent shell's `PATH`.
@@ -366,3 +368,4 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 [in-depth-shell-integration]: ./shell-integration.mdx
 [config-project-env]: ../guides/project-toolchain.mdx#project-env
 [launcher-forwarding]: ./launcher-forwarding.md
+[shell-integration-windows]: ./shell-integration.mdx#activation-windows

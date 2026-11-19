@@ -813,8 +813,14 @@ mod firewall_tests {
             "ocx_setup/src/session_path/macos.rs",
             "`launchctl` and a test-only merge script",
         ),
+        ("ocx_setup/src/tests_live_shell.rs", "test-only live-shell harness"),
         ("ocx_shell/src/shell.rs", "test-only live-shell harness"),
         ("ocx_shell/src/shell/hook.rs", "test-only live-shell harness"),
+        ("ocx_shell/src/shell/tests_git_bash.rs", "test-only live-shell harness"),
+        (
+            "ocx_shell/src/shell/tests_path_parity.rs",
+            "test-only live-shell harness",
+        ),
         (
             "ocx_store/src/codesign.rs",
             "fixed macOS system utilities (`xattr`, `codesign`) during extraction",

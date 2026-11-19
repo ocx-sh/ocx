@@ -48,6 +48,8 @@ impl DirenvExport {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Always bash: direnv evaluates `.envrc` in bash and translates to the interactive shell itself.
         let shell = shell::Shell::Bash;
+        // Before any emission: a Windows host spells paths for the POSIX runtime it finds on `PATH`.
+        ocx_shell::shell::resolve_host_dialect(shell).await;
 
         // Argv faults fail loudly (64) before any filesystem work: an `.envrc` typo must be seen.
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;

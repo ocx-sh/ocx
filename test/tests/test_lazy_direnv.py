@@ -32,6 +32,7 @@ from src.helpers import (
     assert_shim_dir_absent,
     assert_shim_dir_exists,
     make_package,
+    posix_shell_path,
     write_ocx_toml,
 )
 from src.shell_eval import run_after_sourcing
@@ -288,7 +289,7 @@ def test_direnv_export_pull_retry_keeps_every_root_in_request_order(
         f"byte-identical\npartial:\n{partial.stdout}\nwarm:\n{warm.stdout}"
     )
     for shim_bin in (first_bin, last_bin):
-        assert str(shim_bin) in partial.stdout, (
+        assert posix_shell_path(shim_bin) in partial.stdout, (
             f"the deferred tool's shim `bin/` {shim_bin} must survive the retry; got:\n{partial.stdout}"
         )
     # The package's `${installPath}/bin` entry keeps its forward slash on Windows.
