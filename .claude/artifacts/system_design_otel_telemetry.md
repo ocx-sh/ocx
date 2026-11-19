@@ -153,7 +153,7 @@ Scope: name `ocx`, version = `service.version`. Never present anywhere: `telemet
 |---|---|---|---|---|
 | `sh.ocx.package` | string | always | execution records | `pkg:oci` purl, plain text, as `record::purl::package_url` renders it |
 | `sh.ocx.package.action` | string | always | OCX | `installed`, `pulled`, `removed` |
-| `sh.ocx.role` | string | always | execution records | `root`, `dependency` (`removed` is always `root`) |
+| `sh.ocx.role` | string | always | execution records | `root`, `dependency`, `companion` (`removed` is always `root`) |
 | `sh.ocx.package.store_hit` | bool | `installed`, `pulled` | OCX | true when the package was already in the store |
 | `sh.ocx.package.download.size` | int, bytes | when `store_hit` is false | OCX | layer bytes this package fetched; 0 when none |
 | `sh.ocx.package.resolve.duration` | double, s | `installed`, `pulled` | OCX | time in `PackageManager::resolve` |
@@ -326,7 +326,7 @@ Each contract lists its location, the contract, and the test that pins it. "Unit
 
 ### C-024 Package-manager activity log
 - Location: `crates/ocx_package_manager/src/activity.rs`. `ActivityLog` is `Clone` and shared by every manager clone; `PackageManager::with_activity_log(log)`; a manager without one appends nothing.
-- Entry: pinned identifier, platform, action (`Installed | Pulled | Removed`), role (`Root | Dependency`), store hit, download size, optional resolve/download/extract durations.
+- Entry: pinned identifier, platform, action (`Installed | Pulled | Removed`), role (`Root | Dependency | Companion`), store hit, download size, optional resolve/download/extract durations.
 - Appended by every `setup_impl` leader on completion (success only), never by a waiter; `install_all(candidate = true)` marks its roots `Installed`; `uninstall_all` appends `Removed` per removed candidate with `UninstallResult.pinned` (requested registry/repository/tag + the candidate target's digest).
 - Each `_all` entry point records its root set apart from the setup entries; the drain takes `role` from the union of root sets, so a root that lost the singleflight race to its own dependency path is still `root`, and when several operations touched one digest it keeps the performance fields of the entry that fetched (R-15). Drained once; one entry per `registry/repository@digest`, `installed` over `pulled`.
 - A `removed` entry carries the platform when the store records it for that package, else none (its purl then omits `arch`, R-14).

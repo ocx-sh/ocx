@@ -23,6 +23,7 @@ use ocx_util::singleflight;
 use super::super::{PackageManager, error::PackageError, error::PackageErrorKind};
 use super::install::finalize_indexed_errors;
 use super::resolve::descriptor_source_key;
+use crate::activity::Role;
 use crate::{concurrency, concurrency::Concurrency};
 
 // ── Safety limits ─────────────────────────────────────────────────────────────
@@ -288,6 +289,8 @@ impl PackageManager {
 
     /// Installs a companion into the object store at its patch-tier pin, never touching the local index.
     ///
+    /// A pull it runs is recorded in the activity log as a companion, never as a root.
+    ///
     /// Never calls `discover_and_install_patches_with_mode`, or discovery recurses into companions.
     pub async fn install_companion(
         &self,
@@ -331,7 +334,8 @@ impl PackageManager {
         // Both paths pull through this, or even a `tag@digest` pull writes a dispatch object into the index.
         let store_only = self.read_only_view();
         if let Some(digest) = pin {
-            return store_only.pull(&companion_id.clone_with_digest(digest), platform).await;
+            let pinned = companion_id.clone_with_digest(digest);
+            return super::pull::pull_as(&store_only, &pinned, platform, Role::Companion).await;
         }
         if self.patch_snapshot().is_some() {
             return Err(PackageErrorKind::NotFound);
@@ -354,9 +358,8 @@ impl PackageManager {
             .map_err(|error| PackageErrorKind::Internal(error.into()))?
             .ok_or(PackageErrorKind::NotFound)?;
 
-        let installed = store_only
-            .pull(&companion_id.clone_with_digest(top_digest.clone()), platform)
-            .await?;
+        let pinned = companion_id.clone_with_digest(top_digest.clone());
+        let installed = super::pull::pull_as(&store_only, &pinned, platform, Role::Companion).await?;
 
         // Only once materialized, or the pin composes as "not installed".
         PatchTagMap::write_tag(
