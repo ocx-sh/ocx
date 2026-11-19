@@ -73,8 +73,7 @@ impl PackageManager {
         package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
-        let groups = SetupGroups::new();
-        setup_with_tracker(self, package, platform, groups, Role::Root)
+        pull_as(self, package, platform, Role::Root)
     }
 
     /// Pulls packages in parallel, sharing one singleflight session across them, then re-checks
@@ -208,6 +207,16 @@ async fn is_installed(mgr: &PackageManager, pinned: &ocx_oci::PinnedPackageRef) 
     matches!(mgr.find_plain(pinned).await, Ok(Some(_)))
         && ocx_package::install_status::check_install_status(&mgr.file_structure().packages.install_status(pinned))
             .await
+}
+
+/// [`PackageManager::pull`], recording its activity entry as `role`.
+pub(super) fn pull_as<'a>(
+    mgr: &'a PackageManager,
+    package: &ocx_oci::PackageRef,
+    platform: ocx_oci::Platform,
+    role: Role,
+) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
+    setup_with_tracker(mgr, package, platform, SetupGroups::new(), role)
 }
 
 fn setup_with_tracker<'a>(

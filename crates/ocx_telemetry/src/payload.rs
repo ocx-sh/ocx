@@ -64,6 +64,8 @@ pub enum PackageRole {
     Root,
     /// Pulled in by a root.
     Dependency,
+    /// Pulled as a patch companion of a root.
+    Companion,
 }
 
 /// One package record's inputs.
@@ -73,7 +75,7 @@ pub struct PackageRecordInput {
     pub purl: String,
     /// What happened.
     pub action: PackageAction,
-    /// Root or dependency.
+    /// Root, dependency or companion.
     pub role: PackageRole,
     /// The package was already in the store.
     pub store_hit: bool,
@@ -243,6 +245,7 @@ fn package_record(input: &PackageRecordInput) -> Value {
     let role = match input.role {
         PackageRole::Root => "root",
         PackageRole::Dependency => "dependency",
+        PackageRole::Companion => "companion",
     };
     let mut attributes = Map::new();
     attributes.insert(keys::PACKAGE.to_owned(), input.purl.as_str().into());
@@ -485,6 +488,23 @@ mod tests {
         );
         let doc = document(&base_outcome(), &[removed]);
         assert_eq!(doc["records"][1]["attributes"]["sh.ocx.package.action"], "removed");
+    }
+
+    #[test]
+    fn each_role_has_its_execution_record_spelling() {
+        let roles = [
+            (PackageRole::Root, "root"),
+            (PackageRole::Dependency, "dependency"),
+            (PackageRole::Companion, "companion"),
+        ];
+        for (role, wire) in roles {
+            let input = PackageRecordInput {
+                role,
+                ..package(PackageAction::Pulled)
+            };
+            let doc = document(&base_outcome(), &[input]);
+            assert_eq!(doc["records"][1]["attributes"]["sh.ocx.role"], wire);
+        }
     }
 
     #[test]

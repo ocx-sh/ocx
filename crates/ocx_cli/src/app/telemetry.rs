@@ -182,6 +182,7 @@ fn package_record(activity: PackageActivity) -> Option<PackageRecordInput> {
     let role = match activity.role {
         Role::Root => PackageRole::Root,
         Role::Dependency => PackageRole::Dependency,
+        Role::Companion => PackageRole::Companion,
     };
     // A store hit and a removal fetched nothing, so they carry no size rather than a zero.
     let fetched = !activity.store_hit && action != PackageAction::Removed;
@@ -447,6 +448,23 @@ mod tests {
         assert_eq!(record.resolve, Some(Duration::from_millis(5)));
         assert_eq!(record.download, Some(Duration::from_millis(40)));
         assert_eq!(record.extract, Some(Duration::from_millis(7)));
+    }
+
+    #[test]
+    fn every_role_maps_to_its_record_role() {
+        let roles = [
+            (Role::Root, PackageRole::Root),
+            (Role::Dependency, PackageRole::Dependency),
+            (Role::Companion, PackageRole::Companion),
+        ];
+        for (role, expected) in roles {
+            let mut entry = activity("ocx/cmake", Action::Pulled, false);
+            entry.role = role;
+
+            let record = package_record(entry).expect("a record");
+
+            assert_eq!(record.role, expected);
+        }
     }
 
     #[test]

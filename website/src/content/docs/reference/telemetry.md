@@ -50,12 +50,14 @@ Event name `sh.ocx.package`. One per package the command installed, pulled or re
 |---|---|---|---|---|
 | `sh.ocx.package` | string | always | execution records | the `pkg:oci` purl, as plain text |
 | `sh.ocx.package.action` | string | always | OCX | `installed`, `pulled`, `removed` |
-| `sh.ocx.role` | string | always | execution records | `root`, `dependency` (`removed` is always `root`) |
+| `sh.ocx.role` | string | always | execution records | `root`, `dependency`, `companion` (`removed` is always `root`) |
 | `sh.ocx.package.store_hit` | bool | `installed`, `pulled` | OCX | true when the package was already in the store |
 | `sh.ocx.package.download.size` | int, bytes | when `store_hit` is false | OCX | layer bytes this package fetched, 0 when none |
 | `sh.ocx.package.resolve.duration` | double, s | `installed`, `pulled` | OCX | time spent resolving the package |
 | `sh.ocx.package.download.duration` | double, s | when this package fetched at least one layer | OCX | layer phase wall time: fetch, decompress and unpack as one stream |
 | `sh.ocx.package.extract.duration` | double, s | when `store_hit` is false | OCX | assembly into the store |
+
+A `companion` is a [patch companion][patches-how] the command pulled alongside a package. A companion that is also a root or a dependency reports that role instead.
 
 Every record has severity INFO, its event name set, no body and one shared timestamp.
 
@@ -211,3 +213,4 @@ See [Send usage telemetry][guide-telemetry] for the settings that arm export.
 [guide-telemetry]: ../guides/telemetry.mdx
 [guide-telemetry-installation-id]: ../guides/telemetry.mdx#telemetry-installation-id
 [execution-records-reference]: ./execution-records.md
+[patches-how]: ../explanation/patches.mdx#patches-how

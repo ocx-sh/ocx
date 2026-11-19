@@ -25,7 +25,7 @@ import pytest
 from src.helpers import make_package
 from src.otlp_fixture import OtlpCollector
 from src.runner import OcxRunner, PackageInfo
-from src.telemetry_helpers import armed, package_with_dependency
+from src.telemetry_helpers import armed, package_with_dependency, write_config
 
 pytestmark = pytest.mark.command(
     "install", "package_pull", "uninstall", "pull", "env", "update", "about", "exec"
@@ -105,6 +105,49 @@ def test_install_reports_root_and_dependency_records(
     leaf = by_role(records, "dependency")
     assert leaf["sh.ocx.package.action"] == "pulled"
     assert top["sh.ocx.package"] != leaf["sh.ocx.package"]
+
+
+def test_install_reports_a_patch_companion_with_the_companion_role(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, otlp_collector: OtlpCollector
+) -> None:
+    companion = make_package(
+        ocx,
+        f"{unique_repo}_companion",
+        "1.0.0",
+        tmp_path,
+        bins=[],
+        env=[
+            {
+                "key": "CORP_CA",
+                "type": "constant",
+                "value": "corp-ca",
+                "visibility": "public",
+            }
+        ],
+        platform="any",
+    )
+    base = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path)
+    descriptor = tmp_path / "descriptor.json"
+    descriptor.write_text(
+        json.dumps(
+            {"version": 1, "rules": [{"match": "*", "packages": [companion.fq]}]}
+        )
+    )
+    write_config(
+        ocx,
+        f'[patches]\nregistry = "{ocx.registry}/p_{unique_repo}"\nrequired = true\n',
+    )
+    ocx.plain("patch", "publish", "--descriptor", str(descriptor), base.fq)
+
+    _, export = run_armed(ocx, otlp_collector, "package", "install", base.short)
+
+    records = package_records(export)
+    assert sorted(r["sh.ocx.role"] for r in records) == ["companion", "root"], records
+    assert base.repo in by_role(records, "root")["sh.ocx.package"]
+    patch = by_role(records, "companion")
+    assert companion.repo in patch["sh.ocx.package"]
+    assert patch["sh.ocx.package.action"] == "pulled"
+    assert patch["sh.ocx.package.store_hit"] is False
 
 
 def test_reinstall_reports_store_hit_without_fetch_fields(

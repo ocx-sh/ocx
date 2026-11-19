@@ -30,6 +30,19 @@ pub enum Role {
     Root,
     /// Pulled in by a root.
     Dependency,
+    /// Pulled as a patch companion of a root.
+    Companion,
+}
+
+impl Role {
+    /// The strongest of several roles one digest held in a run wins its record.
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Root => 2,
+            Self::Dependency => 1,
+            Self::Companion => 0,
+        }
+    }
 }
 
 /// One package's part in a command.
@@ -41,7 +54,7 @@ pub struct PackageActivity {
     pub platform: Option<Platform>,
     /// What happened.
     pub action: Action,
-    /// Root or dependency.
+    /// Root, dependency or companion.
     pub role: Role,
     /// The package was already in the store.
     pub store_hit: bool,
@@ -91,13 +104,13 @@ impl ActivityLog {
 
     /// Takes every entry and empties the log, one record per `registry/repository@digest`.
     ///
-    /// The role is `Root` when the digest is in the union of the recorded root sets or any of its
-    /// entries says so; `Installed` wins over `Pulled`; the performance fields come from the entry
-    /// that fetched (the first with `store_hit` false, else the first recorded), so an entry that
-    /// only marks an action must carry `store_hit: true`. A `Removed` entry is its own record: an
-    /// install and a removal of one digest in one run stay two records. The result is ordered by
-    /// identifier string, removals after the other record of the same digest, because arrival order
-    /// is a race between concurrent setups.
+    /// The role is `Root` when the digest is in the union of the recorded root sets, else the
+    /// strongest its entries say (`Root`, then `Dependency`, then `Companion`); `Installed` wins
+    /// over `Pulled`; the performance fields come from the entry that fetched (the first with
+    /// `store_hit` false, else the first recorded), so an entry that only marks an action must carry
+    /// `store_hit: true`. A `Removed` entry is its own record: an install and a removal of one digest
+    /// in one run stay two records. The result is ordered by identifier string, removals after the
+    /// other record of the same digest, because arrival order is a race between concurrent setups.
     pub fn drain(&self) -> Vec<PackageActivity> {
         let State { entries, roots } = std::mem::take(&mut *self.lock());
         let roots: HashSet<PinnedPackageRef> = roots.iter().map(PinnedPackageRef::strip_advisory).collect();
@@ -130,9 +143,15 @@ fn merge(group: &[PackageActivity], named_as_root: bool) -> Option<PackageActivi
     if group.iter().any(|e| e.action == Action::Installed) {
         record.action = Action::Installed;
     }
-    if named_as_root || group.iter().any(|e| e.role == Role::Root) {
-        record.role = Role::Root;
-    }
+    record.role = if named_as_root {
+        Role::Root
+    } else {
+        group
+            .iter()
+            .map(|e| e.role)
+            .max_by_key(|role| role.precedence())
+            .unwrap_or(record.role)
+    };
     if record.platform.is_none() {
         record.platform = group.iter().find_map(|e| e.platform.clone());
     }
@@ -188,6 +207,40 @@ mod tests {
 
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].role, Role::Root);
+    }
+
+    /// One digest recorded under several roles reports the strongest: root, then dependency, then
+    /// companion, whichever entry fetched.
+    #[test]
+    fn a_companion_yields_to_a_dependency_and_to_a_root() {
+        let log = ActivityLog::new();
+        let patch = pinned("acme/patch", None, "a");
+        let shared = pinned("acme/shared", None, "b");
+        let tool = pinned("acme/tool", None, "c");
+        let named = pinned("acme/named", None, "d");
+        log.record(entry(patch, Action::Pulled, Role::Companion, false));
+        log.record(entry(shared.clone(), Action::Pulled, Role::Companion, false));
+        log.record(entry(shared, Action::Pulled, Role::Dependency, true));
+        log.record(entry(tool.clone(), Action::Pulled, Role::Companion, false));
+        log.record(entry(tool, Action::Pulled, Role::Root, true));
+        log.record(entry(named.clone(), Action::Pulled, Role::Companion, false));
+        log.record_roots([named]);
+
+        let roles: Vec<(String, Role)> = log
+            .drain()
+            .iter()
+            .map(|e| (e.pinned.repository().to_string(), e.role))
+            .collect();
+
+        assert_eq!(
+            roles,
+            [
+                ("acme/named".to_string(), Role::Root),
+                ("acme/patch".to_string(), Role::Companion),
+                ("acme/shared".to_string(), Role::Dependency),
+                ("acme/tool".to_string(), Role::Root),
+            ]
+        );
     }
 
     /// The store hit says nothing about the cost; the entry that fetched does.
