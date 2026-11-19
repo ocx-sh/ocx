@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from src.forward_proxy import ForwardProxy
 from src.otlp_fixture import LOGS_PATH, REDIRECT_TARGET, OtlpCollector, closed_port
 from src.runner import OcxRunner, PackageInfo
 from src.telemetry_helpers import write_config
@@ -141,6 +142,94 @@ def test_dead_collector_never_changes_outcome(
         assert len(otlp_collector.requests) >= 1, (
             "control: the export never reached the collector"
         )
+
+
+# --- through an HTTP proxy -------------------------------------------
+
+# The proxy is named `localhost`, so the client resolves and pins its name inside
+# the deadline. Windows refuses `::1` only after about 2 s and the IPv4 attempt
+# starts 300 ms in, so a 300 ms export would end before it reached the proxy.
+PROXIED_TIMEOUT_MS = 2000
+
+
+def _carried(proxy: ForwardProxy, collector: OtlpCollector) -> list[tuple[str, str]]:
+    """`(method, absolute URI)` of each request `proxy` took for `collector`."""
+    authority = f"127.0.0.1:{collector.port}"
+    return [
+        (r.method, r.absolute_uri)
+        for r in proxy.requests
+        if r.forwarded_to == authority
+    ]
+
+
+def test_export_goes_through_the_http_proxy(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    otlp_collector: OtlpCollector,
+    forward_proxy: ForwardProxy,
+) -> None:
+    """With `HTTP_PROXY` set, the one export travels through the proxy to the collector."""
+    ocx.run(
+        "package",
+        "install",
+        published_package.short,
+        env_overrides=_armed(
+            otlp_collector.endpoint,
+            HTTP_PROXY=forward_proxy.url,
+            OTEL_EXPORTER_OTLP_TIMEOUT=str(PROXIED_TIMEOUT_MS),
+        ),
+    )
+
+    # The collector alone would also pass with the proxy bypassed.
+    assert _carried(forward_proxy, otlp_collector) == [
+        ("POST", otlp_collector.url(LOGS_PATH))
+    ], forward_proxy.requests
+    (export,) = otlp_collector.exports
+    assert export["records"], "the relayed export carries no record"
+
+
+def test_stalled_proxy_never_changes_outcome(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    otlp_collector: OtlpCollector,
+    forward_proxy: ForwardProxy,
+) -> None:
+    """A proxy that takes the export and never answers costs at most the export timeout.
+
+    Exit code and stdout match the unarmed run under the same proxy.
+    """
+    pkg = published_package
+    args = ("package", "install", pkg.short)
+    proxied = {"HTTP_PROXY": forward_proxy.url}
+    # Warm the store so both runs do the same work.
+    ocx.run("package", "pull", pkg.short)
+
+    unarmed, unarmed_s = _timed(ocx, *args, env_overrides=proxied)
+    assert forward_proxy.requests == [], "the warm install must not need the proxy"
+
+    forward_proxy.stalled = True
+    armed, armed_s = _timed(
+        ocx,
+        *args,
+        check=False,
+        env_overrides=_armed(
+            otlp_collector.endpoint,
+            **proxied,
+            OTEL_EXPORTER_OTLP_TIMEOUT=str(PROXIED_TIMEOUT_MS),
+        ),
+        log_level="debug",
+    )
+
+    assert armed.returncode == unarmed.returncode
+    assert armed.stdout == unarmed.stdout
+    bound = unarmed_s + PROXIED_TIMEOUT_MS / 1000 + EPSILON_S
+    assert armed_s <= bound, f"armed run took {armed_s:.2f}s, bound {bound:.2f}s"
+    # Controls: the export reached the proxy and went no further, and ended as a timeout.
+    assert _carried(forward_proxy, otlp_collector) == [
+        ("POST", otlp_collector.url(LOGS_PATH))
+    ], forward_proxy.requests
+    assert otlp_collector.requests == []
+    assert "telemetry: export failed: timeout" in armed.stderr, armed.stderr
 
 
 @pytest.mark.parametrize("otlp_collector", ["status=503"], indirect=True)

@@ -86,7 +86,7 @@ def _configure_index_source_without_trust(
 def test_the_fixture_refuses_origin_form_and_relays_an_aliased_get_status(
     forward_proxy: forward_proxy_mod.ForwardProxy,
 ) -> None:
-    """An origin-form request refuses with 400, an unimplemented method (POST)
+    """An origin-form request refuses with 400, an unimplemented method (PUT)
     answers 501 via the base handler's default, and an aliased absolute-form
     GET reaches the real registry and relays its upstream status.
     """
@@ -99,7 +99,7 @@ def test_the_fixture_refuses_origin_form_and_relays_an_aliased_get_status(
 
     unimplemented_method = http.client.HTTPConnection(host, port, timeout=5)
     unimplemented_method.request(
-        "POST", f"http://{forward_proxy_mod.PHANTOM_REGISTRY}/x"
+        "PUT", f"http://{forward_proxy_mod.PHANTOM_REGISTRY}/x"
     )
     assert unimplemented_method.getresponse().status == 501
     unimplemented_method.close()
