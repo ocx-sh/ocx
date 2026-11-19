@@ -16,6 +16,15 @@ name: Shell Activation (Deep)
 #   the built-in Windows PowerShell 5.1, the built-in PowerShell 7, AND the
 #   ocx-installed PowerShell 7 ("Core") — the user-facing dogfood path. That gate
 #   now also drives one non-interactive apply/revert reconcile cycle (S-045).
+#   More legs run `test/manual/test-windows-git-bash-activation.sh` (ocx#753) and its fish
+#   twin `test-windows-fish-activation.fish`: Git for Windows bash, zsh and fish from the
+#   preinstalled MSYS2 (`pacman -S zsh fish`), and bash, zsh and fish from a Cygwin install.
+#   Native nushell and elvish (installed with `ocx package env`) source the shim `ocx self
+#   setup` wrote and run `ocx version`, and one `ocx self setup` run asserts the profile files
+#   of every shell it found. The POSIX-shell legs assert a silent stderr, a PATH with absolute POSIX segments and none of `C:\`,
+#   one clean run of the prompt hook, that `env.sh` alone re-activates a reset PATH, one reconcile
+#   apply/revert, and that the PATH a native `cmd.exe` child sees holds the bin directory and no
+#   rootless segment the runner's own PATH did not already carry.
 #
 # cmd/batch PATH idempotency is covered separately by the `live_batch_*` unit test
 # on the windows-latest unit leg of `deep-repo.yml`.
@@ -155,3 +164,143 @@ jobs:
           $pwshCmd = (Get-Command pwsh).Source
           Write-Host "ocx-resolved pwsh: $pwshCmd"
           & $pwshCmd -NoProfile -File .\test\manual\test-windows-activation.ps1 -OcxBin $ocx
+      # Git for Windows bash: `shell: bash` on windows-latest. Never
+      # C:\Windows\System32\bash.exe, which is WSL.
+      - name: Activation gate - Git Bash
+        shell: bash
+        run: bash test/manual/test-windows-git-bash-activation.sh ./ocx-x86_64-pc-windows-msvc.exe
+      # MSYS2 ships on the image at C:\msys64 but not on PATH, and has no zsh or fish.
+      - name: Install zsh and fish (MSYS2)
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -Sy --noconfirm --needed zsh fish
+      # `-f` skips every zsh startup file; /usr/bin goes first on PATH explicitly so
+      # uname, mkdir, cp, mktemp and rm resolve without a login profile.
+      - name: Activation gate - MSYS2 zsh
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\msys64\usr\bin;' + $env:PATH
+          C:\msys64\usr\bin\zsh.exe -f test/manual/test-windows-git-bash-activation.sh ./ocx-x86_64-pc-windows-msvc.exe
+      # fish has no Windows build of its own; this is the MSYS2 package. `--no-config` skips
+      # config.fish and conf.d, so nothing but the script shapes the session.
+      - name: Activation gate - MSYS2 fish
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\msys64\usr\bin;' + $env:PATH
+          C:\msys64\usr\bin\fish.exe --no-config test/manual/test-windows-fish-activation.fish ./ocx-x86_64-pc-windows-msvc.exe
+      # Pinned install dir and no PATH edit: the steps below put C:\cygwin\bin first themselves,
+      # so Git Bash and MSYS2 steps never see a Cygwin tool. `.gitattributes` makes every text
+      # file LF on checkout, so the scripts reach Cygwin without a CR.
+      - name: Install Cygwin
+        uses: cygwin/cygwin-install-action@5a1b0cd107181fa6bb6bf3f90d500f4fb3132f18 # v7.0.0
+        with:
+          packages: zsh,fish
+          install-dir: C:\cygwin
+          add-to-path: false
+      # Cygwin converts no argument, so the script and the binary are passed in mixed form
+      # (`D:/a/...`), which Cygwin accepts anywhere a path is expected.
+      - name: Activation gate - Cygwin bash
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\cygwin\bin;' + $env:PATH
+          $script = (Resolve-Path test/manual/test-windows-git-bash-activation.sh).Path -replace '\\', '/'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path -replace '\\', '/'
+          C:\cygwin\bin\bash.exe $script $ocx
+      - name: Activation gate - Cygwin zsh
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\cygwin\bin;' + $env:PATH
+          $script = (Resolve-Path test/manual/test-windows-git-bash-activation.sh).Path -replace '\\', '/'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path -replace '\\', '/'
+          C:\cygwin\bin\zsh.exe -f $script $ocx
+      - name: Activation gate - Cygwin fish
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\cygwin\bin;' + $env:PATH
+          $script = (Resolve-Path test/manual/test-windows-fish-activation.fish).Path -replace '\\', '/'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path -replace '\\', '/'
+          C:\cygwin\bin\fish.exe --no-config $script $ocx
+      # nushell and elvish are native Windows programs: no POSIX layer, no HOME. They come from
+      # the same registry the macOS leg uses; the scripts seed their own OCX_HOME.
+      - name: Activation gate - native nushell
+        if: ${{ !cancelled() && hashFiles('ocx-x86_64-pc-windows-msvc.exe') != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path
+          $env:OCX_HOME = "$env:RUNNER_TEMP\ocx-shells"
+          & $ocx --remote package env nushell/nushell --shell=powershell | Out-String | Invoke-Expression
+          if ($LASTEXITCODE -ne 0) { throw "ocx package env nushell/nushell failed ($LASTEXITCODE)" }
+          Write-Host "ocx-resolved nu: $((Get-Command nu).Source)"
+          nu --no-config-file test/manual/test-windows-nu-activation.nu $ocx
+      - name: Activation gate - native elvish
+        if: ${{ !cancelled() && hashFiles('ocx-x86_64-pc-windows-msvc.exe') != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path
+          $env:OCX_HOME = "$env:RUNNER_TEMP\ocx-shells"
+          & $ocx --remote package env elvish/elvish --shell=powershell | Out-String | Invoke-Expression
+          if ($LASTEXITCODE -ne 0) { throw "ocx package env elvish/elvish failed ($LASTEXITCODE)" }
+          Write-Host "ocx-resolved elvish: $((Get-Command elvish).Source)"
+          elvish test/manual/test-windows-elvish-activation.elv $ocx
+      # One real `ocx self setup`, with nushell, elvish and fish on PATH, writes the profile of each.
+      # No flag keeps setup from also writing the user PATH in the registry (--no-modify-path would
+      # drop every profile), which the ephemeral runner tolerates. HOME, USERPROFILE and APPDATA are
+      # pinned to three different throwaway directories and the XDG variables are removed, so each
+      # expected path below follows from one rule and a red run prints what it was derived from.
+      - name: ocx self setup wires every shell
+        if: ${{ !cancelled() && hashFiles('ocx-x86_64-pc-windows-msvc.exe') != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ocx = (Resolve-Path ./ocx-x86_64-pc-windows-msvc.exe).Path
+          $env:OCX_HOME = "$env:RUNNER_TEMP\ocx-shells"
+          & $ocx --remote package env nushell/nushell elvish/elvish --shell=powershell | Out-String | Invoke-Expression
+          if ($LASTEXITCODE -ne 0) { throw "ocx package env failed ($LASTEXITCODE)" }
+          # fish.exe from the MSYS2 install above.
+          $env:PATH = $env:PATH + ';C:\msys64\usr\bin'
+          $root = Join-Path $env:RUNNER_TEMP 'ocx-setup-all'
+          $env:OCX_HOME = Join-Path $root 'store'
+          $env:HOME = Join-Path $root 'home'
+          $env:USERPROFILE = Join-Path $root 'profile'
+          # Native nushell asks Windows for the roaming folder, which expands %USERPROFILE% and must exist:
+          # an APPDATA outside the profile gives nushell no data directory at all.
+          $env:APPDATA = Join-Path $env:USERPROFILE 'AppData\Roaming'
+          foreach ($v in 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'ZDOTDIR', 'SHELL') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
+          $bin = Join-Path $env:OCX_HOME 'symlinks/ocx.sh/ocx/cli/current/content/bin'
+          New-Item -ItemType Directory -Force $bin, $env:HOME, $env:USERPROFILE, $env:APPDATA | Out-Null
+          Copy-Item $ocx (Join-Path $bin 'ocx.exe')
+          # Setup reads the shells it wires from PATH: print what it can see.
+          foreach ($exe in 'nu.exe', 'elvish.exe', 'fish.exe') { Write-Host ("{0,-11} {1}" -f $exe, (Get-Command $exe -ErrorAction SilentlyContinue).Source) }
+          Write-Host "HOME        $env:HOME"
+          Write-Host "USERPROFILE $env:USERPROFILE"
+          Write-Host "APPDATA     $env:APPDATA"
+          Write-Host "OCX_HOME    $env:OCX_HOME"
+          & (Join-Path $bin 'ocx.exe') --offline self setup
+          if ($LASTEXITCODE -ne 0) { throw "ocx self setup failed ($LASTEXITCODE)" }
+          # The POSIX family goes under HOME and, as it differs, under USERPROFILE too; nushell and
+          # elvish follow APPDATA with no XDG variable set; fish follows HOME/.config.
+          $expected = @(
+            (Join-Path $env:OCX_HOME 'env.sh'),
+            (Join-Path $env:OCX_HOME 'env.fish'),
+            (Join-Path $env:OCX_HOME 'env.nu'),
+            (Join-Path $env:OCX_HOME 'env.elv'),
+            (Join-Path $env:OCX_HOME 'env.ps1')
+          )
+          foreach ($dir in $env:HOME, $env:USERPROFILE) {
+            foreach ($name in '.profile', '.bashrc', '.zprofile', '.zshrc') { $expected += Join-Path $dir $name }
+          }
+          $expected += Join-Path $env:HOME '.config/fish/conf.d/ocx.fish'
+          # Native nushell names its own data directory: the autoload file only loads from there.
+          $nuData = (& nu.exe -c '$nu.data-dir' | Out-String).Trim()
+          $derived = Join-Path $env:APPDATA 'nushell'
+          Write-Host "nushell data-dir  $nuData"
+          Write-Host "derived (APPDATA) $derived"
+          if (($nuData -replace '/', '\').TrimEnd('\') -ine ($derived -replace '/', '\').TrimEnd('\')) {
+            throw "nushell reports its data directory as '$nuData', but setup derived '$derived'"
+          }
+          $expected += Join-Path $env:APPDATA 'nushell/vendor/autoload/ocx.nu'
+          $expected += Join-Path $env:APPDATA 'elvish/rc.elv'
+          $missing = @($expected | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+          $expected | ForEach-Object { Write-Host ("{0,-7} {1}" -f $(if ($missing -contains $_) { 'MISSING' } else { 'ok' }), $_) }
+          if ($missing.Count -gt 0) { throw "ocx self setup did not write $($missing.Count) expected file(s)" }

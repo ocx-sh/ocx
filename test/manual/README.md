@@ -18,6 +18,7 @@ test/manual/
 ├── PATCHES.md                ← patch tier: companions, descriptors, freeze/sync
 ├── INTEGRATIONS.md         ← `integrations`: what it prints, with real output
 ├── SHIMS.md                  ← lazy loading: shim trees, first-use materialize, clean/re-add
+├── test-windows-git-bash-activation.sh ← bash/zsh activation gate for Git Bash and MSYS2 (also runs on Linux)
 ├── packages/                 ← source trees, one per package shape
 ├── projects/                 ← toolchain-tier demo projects (ocx.toml + generated lock)
 ├── scripts/
@@ -38,6 +39,22 @@ test/manual/
 └── adversarial/
     └── README.md             ← test-implementer vs loophole-searcher process
 ```
+
+`test-windows-git-bash-activation.sh` is the bash/zsh counterpart of `test-windows-activation.ps1`: run
+`bash test/manual/test-windows-git-bash-activation.sh <ocx-binary>` (or `zsh -f ...`, which skips every
+startup file) and it activates a throwaway `OCX_HOME` after clearing inherited `OCX_*` session and project
+variables. It asserts:
+
+1. the activation stream (`self activate --interactive`, the flags `env.sh` passes) writes nothing to stderr;
+2. `ocx` is a shell function and `ocx version` exits 0;
+3. every `PATH` segment the stream added is absolute, and none is a bare drive letter or starts with a backslash;
+4. the seeded bin directory is on `PATH`;
+5. the registered prompt hook (`__ocx_prompt_hook`) runs once with status 0 and an empty stderr;
+6. `env.sh`, sourced on a reset `PATH` and without session state, puts the bin directory back on `PATH`;
+7. one reconcile apply and revert of a project variable, each with an empty stderr;
+8. on Windows only: `PATH` as a native child (`cmd.exe`) sees contains the bin directory as `cygpath -w` writes it, case-insensitively, and has no rootless segment that the PATH before activation did not already carry. Elsewhere it prints one `[skip]` line.
+
+It never touches your real home or rc files; `shell-activation-deep.yml` runs it on Windows.
 
 `announce-e2e/` is the one rig here that does **not** point at
 `localhost:5000`. It drives the real `ocx-sh/index`, the real publisher repo

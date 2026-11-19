@@ -5,6 +5,7 @@ import functools
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -28,6 +29,27 @@ from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+
+
+def msys_path(text: str) -> str:
+    """Spell a native Windows path the way the MSYS layer of Git Bash does.
+
+    Backslashes become `/`, a leading `X:` drive becomes `/x` and a `\\?\\`
+    prefix is dropped — the same conversion as `list_element` in
+    `crates/ocx_shell/src/shell/msys.rs`. Pure: it does not look at the host.
+    """
+    text = text.removeprefix("\\\\?\\").replace("\\", "/")
+    return re.sub(r"^([A-Za-z]):(?=/|$)", lambda m: "/" + m.group(1).lower(), text)
+
+
+def posix_shell_path(path: str | os.PathLike[str]) -> str:
+    """The spelling a POSIX shell emission uses for `path` on this host.
+
+    A POSIX shell on Windows is an MSYS shell (Git Bash), so `ocx` emits MSYS
+    form there; everywhere else the path is unchanged.
+    """
+    text = os.fspath(path)
+    return msys_path(text) if sys.platform == "win32" else text
 
 
 def env_key(name: str) -> str:

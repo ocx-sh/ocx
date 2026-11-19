@@ -61,6 +61,7 @@ thiserror.workspace = true
 # feature out of the normal build.
 ocx_env = { workspace = true, features = ["__testing"] }
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

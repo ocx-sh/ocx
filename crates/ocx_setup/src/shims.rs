@@ -6,9 +6,11 @@
 //! Bodies are byte-identical across users: each shim resolves `OCX_HOME` at
 //! runtime, never at install time.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::profiles::Host;
 use ocx_util::fs::write_private_file_atomic;
 
 /// `$OCX_HOME/env.sh` — POSIX (sh/bash/zsh) shim.
@@ -183,7 +185,14 @@ pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.items? | default 
 // `list` must agree byte for byte with `Shell::export_list` and a removal with `Shell::remove_list_element`: a null separator selects path-kind.
 // No `else` arm after `constant`: an unknown type applies nothing instead of clobbering the caller's value.
 // No `get --optional`: it postdates Nushell 0.101.0 and its parse error voids the whole autoload.
-pub const NU_PLAN_APPLY: &str = r#"if ($_ocx_plan.v? | default 0) == 1 { for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = $_ocx_e.key; let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { if $_ocx_r.1 == null { hide-env -i $_ocx_r.0 } else { load-env {($_ocx_r.0): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = $_ocx_r.0; if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } }"#;
+pub const NU_PLAN_APPLY: &str = concat!(
+    r#"if ($_ocx_plan.v? | default 0) == 1 { "#,
+    // A native Windows nu spells `PATH` as `Path`: an exact-name miss reads an empty value and `load-env` then replaces the whole variable.
+    // Folds by equal length plus `str contains --ignore-case`: `str downcase` warns on nu 0.114+ and `str lowercase` is absent before it.
+    // Reads no shim variable: the acceptance matrix runs this line with only `$_ocx_plan` bound, and an unbound name voids it.
+    r#"let _ocx_fold = ($nu.os-info.name == 'windows'); let _ocx_res = {|k| if $k in ($env | columns) or not $_ocx_fold { $k } else { $env | columns | where {|c| ($c | str length) == ($k | str length) and ($c | str contains --ignore-case $k) } | get 0? | default $k } }; "#,
+    r#"for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = (do $_ocx_res $_ocx_e.key); let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if $_ocx_r.1 == null { hide-env -i $_ocx_k } else { load-env {($_ocx_k): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } }"#,
+);
 
 /// `$OCX_HOME/env.nu` — Nushell shim, applying the reconcile plan as data because Nushell has
 /// no string `eval` and `source` needs a parse-time-constant path.
@@ -194,18 +203,21 @@ pub const ENV_NU: &str = r#"# Managed by ocx installer - do not edit.
 # never duplicates a PATH entry. An exported guard would leak into child shells
 # (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
-$env.OCX_HOME = ($env.OCX_HOME? | default ($env.HOME | path join '.ocx'))
+# A native Windows nushell has no HOME and names the binary `ocx.exe`.
+let _ocx_windows = ($nu.os-info.name == 'windows')
+let _ocx_exe = (if $_ocx_windows { 'ocx.exe' } else { 'ocx' })
+$env.OCX_HOME = ($env.OCX_HOME? | default ((if $_ocx_windows { $env.USERPROFILE } else { $env.HOME }) | path join '.ocx'))
 
 let _ocx_bin = ($env.OCX_HOME | path join 'symlinks/ocx.sh/ocx/cli/current/content/bin')
-if (($_ocx_bin | path join 'ocx') | path exists) {
+if (($_ocx_bin | path join $_ocx_exe) | path exists) {
     # ocx bin on PATH, move-to-front. $env.PATH is a list at startup; normalize to
     # segments, drop only ocx's own prior entry, prepend, and store as a
     # separator-joined string so the plan apply below operates uniformly on
     # string-valued path vars.
     $env.PATH = ([$_ocx_bin] ++ ($env.PATH | (if ($in | describe) == 'string' { split row (char esep) } else { $in }) | where {|p| $p != "" and $p != $_ocx_bin }) | str join (char esep))
     try {
-        let _ocx_plan = (^($_ocx_bin | path join 'ocx') --offline --format json self activate --reconcile --shell=nushell --shell-pid $nu.pid | from json)
-        if ($_ocx_plan.v? | default 0) == 1 { for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = $_ocx_e.key; let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { if $_ocx_r.1 == null { hide-env -i $_ocx_r.0 } else { load-env {($_ocx_r.0): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = $_ocx_r.0; if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } }
+        let _ocx_plan = (^($_ocx_bin | path join $_ocx_exe) --offline --format json self activate --reconcile --shell=nushell --shell-pid $nu.pid | from json)
+        if ($_ocx_plan.v? | default 0) == 1 { let _ocx_fold = ($nu.os-info.name == 'windows'); let _ocx_res = {|k| if $k in ($env | columns) or not $_ocx_fold { $k } else { $env | columns | where {|c| ($c | str length) == ($k | str length) and ($c | str contains --ignore-case $k) } | get 0? | default $k } }; for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = (do $_ocx_res $_ocx_e.key); let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if $_ocx_r.1 == null { hide-env -i $_ocx_k } else { load-env {($_ocx_k): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } }
     } catch { }
     # Per-prompt hook. APPENDED onto the existing list and assigned back, never a
     # bare assignment and never a wholesale `$env.config.hooks = { ... }`:
@@ -242,7 +254,7 @@ if (($_ocx_bin | path join 'ocx') | path exists) {
     try {
         $env.config.hooks = ($env.config.hooks? | default {})
         let _ocx_pre = ($env.config.hooks.pre_prompt? | default [])
-        $env.config.hooks.pre_prompt = (((if ($_ocx_pre | describe | str starts-with 'list') { $_ocx_pre } else { [$_ocx_pre] }) | where {|h| not (($h | describe) == 'closure' and (view source $h | str contains '__ocx_prompt_hook')) }) ++ [{|| let __ocx_prompt_hook = 1; let _ocx_state = ($env.__OCX_ENV_STATE? | default ""); let _ocx_stood = ($env.__OCX_ENV_STOOD_DOWN? | default ""); let _ocx_gate = ([$nu.pid $env.PWD ($env.DIRENV_DIR? | default "") ($env.MISE_SHELL? | default "") ($env.__MISE_ORIG_PATH? | default "") ($env.OCX_CONSENT_PATHS? | default "") ($env.OCX_CONSENT_NAMESPACES? | default "")] | str join " "); if (($_ocx_stood == "") or ($_ocx_state != $_ocx_stood)) and (($_ocx_state == "") or (($env.__OCX_ENV_PWD? | default "") != $_ocx_gate)) { try { let _ocx_plan = (^($_ocx_bin | path join 'ocx') --offline --format json self activate --reconcile --shell=nushell --shell-pid $nu.pid | from json); if ($_ocx_plan.v? | default 0) == 1 { for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = $_ocx_e.key; let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { if $_ocx_r.1 == null { hide-env -i $_ocx_r.0 } else { load-env {($_ocx_r.0): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = $_ocx_r.0; if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } } } catch { } } }])
+        $env.config.hooks.pre_prompt = (((if ($_ocx_pre | describe | str starts-with 'list') { $_ocx_pre } else { [$_ocx_pre] }) | where {|h| not (($h | describe) == 'closure' and (view source $h | str contains '__ocx_prompt_hook')) }) ++ [{|| let __ocx_prompt_hook = 1; let _ocx_state = ($env.__OCX_ENV_STATE? | default ""); let _ocx_stood = ($env.__OCX_ENV_STOOD_DOWN? | default ""); let _ocx_gate = ([$nu.pid $env.PWD ($env.DIRENV_DIR? | default "") ($env.MISE_SHELL? | default "") ($env.__MISE_ORIG_PATH? | default "") ($env.OCX_CONSENT_PATHS? | default "") ($env.OCX_CONSENT_NAMESPACES? | default "")] | str join " "); if (($_ocx_stood == "") or ($_ocx_state != $_ocx_stood)) and (($_ocx_state == "") or (($env.__OCX_ENV_PWD? | default "") != $_ocx_gate)) { try { let _ocx_plan = (^($_ocx_bin | path join $_ocx_exe) --offline --format json self activate --reconcile --shell=nushell --shell-pid $nu.pid | from json); if ($_ocx_plan.v? | default 0) == 1 { let _ocx_fold = ($nu.os-info.name == 'windows'); let _ocx_res = {|k| if $k in ($env | columns) or not $_ocx_fold { $k } else { $env | columns | where {|c| ($c | str length) == ($k | str length) and ($c | str contains --ignore-case $k) } | get 0? | default $k } }; for _ocx_e in ($_ocx_plan.sets? | default []) { let _ocx_k = (do $_ocx_res $_ocx_e.key); let _ocx_c = (if ($_ocx_k in ($env | columns)) { $env | get $_ocx_k } else { "" }); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_e.type == "path" { let _ocx_v = ($_ocx_e.value | split row (char esep)); load-env {($_ocx_k): ($_ocx_v ++ ($_ocx_cur | split row (char esep) | where {|p| $p != "" and not ($p in $_ocx_v) }) | where {|p| $p != "" } | str join (char esep))} } else if $_ocx_e.type == "list" { let _ocx_s = ($_ocx_e.separator? | default " "); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): (($_ocx_l | str replace $_ocx_s "") + $_ocx_e.value)} } else if $_ocx_e.type == "constant" { load-env {($_ocx_k): $_ocx_e.value} } }; for _ocx_r in ($_ocx_plan.restores? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if $_ocx_r.1 == null { hide-env -i $_ocx_k } else { load-env {($_ocx_k): $_ocx_r.1} } }; for _ocx_r in ($_ocx_plan.removes? | default []) { let _ocx_k = (do $_ocx_res $_ocx_r.0); if ($_ocx_k in ($env | columns)) { let _ocx_c = ($env | get $_ocx_k); let _ocx_cur = (if ($_ocx_c | describe) == "string" { $_ocx_c } else { $_ocx_c | str join (char esep) }); if $_ocx_r.2 == null { load-env {($_ocx_k): ($_ocx_cur | split row (char esep) | where {|p| $p != $_ocx_r.1 and $p != "" } | str join (char esep))} } else { let _ocx_s = $_ocx_r.2; let _ocx_p = ($_ocx_s + $_ocx_r.1 + $_ocx_s); mut _ocx_l = (if $_ocx_cur == "" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_k): ($_ocx_l | split row $_ocx_s | skip 1 | drop 1 | str join $_ocx_s)} } } } } } catch { } } }])
     } catch { }
 }
 "#;
@@ -253,17 +265,26 @@ pub const ENV_ELV: &str = r#"# Managed by ocx installer - do not edit.
 # re-sourcing never duplicates a PATH entry. An exported guard would leak into
 # child shells (e.g. VS Code Remote terminals) and wrongly suppress activation.
 
+use path
+use platform
+
+# A native Windows elvish has no HOME and no external `test`, and names the binary `ocx.exe`.
+var _ocx_windows = $platform:is-windows
 if (not (has-env OCX_HOME)) {
-    set-env OCX_HOME $E:HOME/.ocx
+    set-env OCX_HOME (if $_ocx_windows { put $E:USERPROFILE } else { put $E:HOME })/.ocx
 }
 
-var _ocx_bin = $E:OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx
+var _ocx_bin = $E:OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/(if $_ocx_windows { put ocx.exe } else { put ocx })
 # Interactivity, stated rather than probed: this shim redirects the binary's
 # stderr, and elvish has no in-language isatty. `test -t 0` is the same kind of
 # external path test the binary check below uses, and stdin is the descriptor
 # nothing here redirects. `?(...)` turns a non-zero exit into a falsey value.
+# On Windows, which has no `test`, rc.elv is read only by an interactive elvish.
+# The null device is `NUL` there, where `/dev/null` does not exist.
+var _ocx_null = (if $_ocx_windows { put NUL } else { put /dev/null })
 var _ocx_interactive = '--no-interactive'
-if ?(test -t 0) { set _ocx_interactive = '--interactive' }
+if (or $_ocx_windows ?(test -t 0)) { set _ocx_interactive = '--interactive' }
+var _ocx_present = (if $_ocx_windows { path:is-regular $_ocx_bin } else { put ?(test -x $_ocx_bin) })
 # PATH + global toolchain env run in their OWN eval unit, kept apart from the
 # completion below. Elvish compiles an eval unit as a whole, so coupling the two
 # lets a completion that fails to compile void the PATH prepend too: the
@@ -272,15 +293,15 @@ if ?(test -t 0) { set _ocx_interactive = '--interactive' }
 # TTY). A non-TTY interactive shell has no edit:, so the completion unit raises a
 # compile error - and if PATH shared that unit it would be lost with it. Keeping
 # them separate makes PATH activation independent of completion succeeding.
-if ?(test -x $_ocx_bin) {
-    eval ($_ocx_bin self activate --shell=elvish --no-completion $_ocx_interactive 2>/dev/null | slurp)
+if $_ocx_present {
+    eval ($_ocx_bin self activate --shell=elvish --no-completion $_ocx_interactive 2>$_ocx_null | slurp)
     # Shell completions: best-effort, isolated. try/catch swallows the compile
     # error raised when edit: is absent (a non-TTY interactive shell), so a failed
     # completion can never disturb the PATH activation above. Sourced via
     # `ocx shell completion --if-enabled` - the same generator, and the same
     # policy consultation, the POSIX shim uses.
     try {
-        eval ($_ocx_bin shell completion --shell=elvish --if-enabled $_ocx_interactive 2>/dev/null | slurp)
+        eval ($_ocx_bin shell completion --shell=elvish --if-enabled $_ocx_interactive 2>$_ocx_null | slurp)
     } catch _ { }
 }
 "#;
@@ -298,14 +319,102 @@ end
 // A valid witness only while `write_shims` writes every shim on every platform.
 pub const WITNESS_SHIM: &str = "env.sh";
 
-/// The five `(filename, body)` shims written into `$OCX_HOME`.
-const SHIMS: [(&str, &str); 5] = [
-    (WITNESS_SHIM, ENV_SH),
-    ("env.fish", ENV_FISH),
-    ("env.ps1", ENV_PS1),
-    ("env.nu", ENV_NU),
-    ("env.elv", ENV_ELV),
-];
+// The Windows store lookup, kept in a private shell variable. An exported POSIX-form `OCX_HOME`
+// would reach the native `ocx.exe` unconverted under Cygwin. `$HOME/.ocx` comes before the profile's
+// store because Git Bash's `HOME` is the profile and MSYS2's and Cygwin's is not.
+const SH_STORE_UNIX: &str = r#"# OCX_HOME env-var-with-fallback. Assigns and exports only when unset or empty.
+: "${OCX_HOME:=$HOME/.ocx}"
+export OCX_HOME
+
+_ocx_bin="$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx""#;
+
+// Every step tests for the shim, not the directory: a stale MSYS2 or Cygwin `$HOME/.ocx` must not
+// hide the real store. An empty result of any step must never reach a path join, and the text
+// stays valid under `set -eu` (`|| _ocx_home=` absorbs a missing or failing `cygpath`).
+const SH_STORE_WINDOWS: &str = r#"# Windows store lookup: OCX_HOME, else $HOME/.ocx when it holds the shim, else the profile's .ocx.
+# Held in a private variable, never exported: a POSIX-form OCX_HOME would reach the native
+# ocx.exe unconverted under Cygwin.
+if [ -n "${OCX_HOME:-}" ]; then
+    _ocx_home=$OCX_HOME
+elif [ -n "${HOME:-}" ] && [ -f "$HOME/.ocx/env.sh" ]; then
+    _ocx_home=$HOME/.ocx
+elif [ -n "${USERPROFILE:-}" ]; then
+    _ocx_home=$(cygpath -u "$USERPROFILE" 2>/dev/null) || _ocx_home=
+    _ocx_home=${_ocx_home:+$_ocx_home/.ocx}
+else
+    _ocx_home=
+fi
+
+_ocx_bin=
+if [ -n "$_ocx_home" ]; then
+    _ocx_bin="$_ocx_home/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx"
+fi"#;
+
+const FISH_STORE_UNIX: &str = r#"if not set -q OCX_HOME
+    set -gx OCX_HOME "$HOME/.ocx"
+end
+
+set -l _ocx_bin "$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx""#;
+
+const FISH_RESOLVE_WINDOWS: &str = r#"set -l _ocx_home
+if test -n "$OCX_HOME"
+    set _ocx_home $OCX_HOME
+else if test -n "$HOME"; and test -f "$HOME/.ocx/env.fish"
+    set _ocx_home "$HOME/.ocx"
+else if test -n "$USERPROFILE"; and command -q cygpath
+    set _ocx_home (cygpath -u "$USERPROFILE" 2>/dev/null)
+    test -n "$_ocx_home"; and set _ocx_home "$_ocx_home/.ocx"
+end
+"#;
+
+const FISH_BIN_WINDOWS: &str = r#"set -l _ocx_bin
+test -n "$_ocx_home"; and set _ocx_bin "$_ocx_home/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx""#;
+
+const FISH_CONF_STORE_UNIX: &str =
+    r#"set -l _ocx_env (string join '' (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx) '/env.fish')"#;
+
+const FISH_CONF_ENV_WINDOWS: &str = r#"set -l _ocx_env
+test -n "$_ocx_home"; and set _ocx_env "$_ocx_home/env.fish""#;
+
+/// `text` with the one `from` span swapped for `to`; a missing span is a bug the tests catch.
+fn swap(text: &'static str, from: &str, to: &str) -> String {
+    text.replacen(from, to, 1)
+}
+
+/// `env.sh` as written on `host`.
+fn env_sh(host: Host) -> Cow<'static, str> {
+    match host {
+        Host::Unix => Cow::Borrowed(ENV_SH),
+        Host::Windows => Cow::Owned(swap(ENV_SH, SH_STORE_UNIX, SH_STORE_WINDOWS).replacen(
+            "unset _ocx_bin ",
+            "unset _ocx_home _ocx_bin ",
+            1,
+        )),
+    }
+}
+
+/// `env.fish` as written on `host`.
+fn env_fish(host: Host) -> Cow<'static, str> {
+    match host {
+        Host::Unix => Cow::Borrowed(ENV_FISH),
+        Host::Windows => Cow::Owned(swap(
+            ENV_FISH,
+            FISH_STORE_UNIX,
+            &format!("{FISH_RESOLVE_WINDOWS}\n{FISH_BIN_WINDOWS}"),
+        )),
+    }
+}
+
+/// The five `(filename, body)` shims `ocx self setup` writes into `$OCX_HOME` on `host`.
+pub fn shims_for(host: Host) -> [(&'static str, Cow<'static, str>); 5] {
+    [
+        (WITNESS_SHIM, env_sh(host)),
+        ("env.fish", env_fish(host)),
+        ("env.ps1", Cow::Borrowed(ENV_PS1)),
+        ("env.nu", Cow::Borrowed(ENV_NU)),
+        ("env.elv", Cow::Borrowed(ENV_ELV)),
+    ]
+}
 
 /// The Nushell vendor-autoload body: the full [`ENV_NU`] activation, since `source`
 /// cannot take the runtime `$OCX_HOME/env.nu` path.
@@ -314,7 +423,7 @@ pub fn nu_autoload_body() -> &'static str {
     ENV_NU
 }
 
-/// The fish `conf.d/ocx.fish` body that sources `$OCX_HOME/env.fish` at startup.
+/// The fish `conf.d/ocx.fish` body that sources `$OCX_HOME/env.fish` at startup, on a unix host.
 ///
 /// The orchestrator writes this to
 /// `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/ocx.fish`.
@@ -323,7 +432,20 @@ pub fn fish_conf_body() -> &'static str {
     FISH_CONF
 }
 
-/// Write all five `env.*` shims into `ocx_home`, atomically, skipping any already current.
+/// The fish `conf.d/ocx.fish` body for `host`.
+#[must_use]
+pub fn fish_conf_body_on(host: Host) -> Cow<'static, str> {
+    match host {
+        Host::Unix => Cow::Borrowed(FISH_CONF),
+        Host::Windows => Cow::Owned(swap(
+            FISH_CONF,
+            FISH_CONF_STORE_UNIX,
+            &format!("{FISH_RESOLVE_WINDOWS}{FISH_CONF_ENV_WINDOWS}"),
+        )),
+    }
+}
+
+/// Write all five `env.*` shims into `ocx_home` for the host this process runs on.
 ///
 /// Returns the paths (re)written, or with `dry_run` the would-write set.
 ///
@@ -332,6 +454,16 @@ pub fn fish_conf_body() -> &'static str {
 /// Returns [`Error::Io`] if the directory cannot be created or a shim cannot be
 /// read or written.
 pub fn write_shims(ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error> {
+    write_shims_for(Host::current(), ocx_home, dry_run)
+}
+
+/// [`write_shims`] for an explicit `host`.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if the directory cannot be created or a shim cannot be
+/// read or written.
+pub fn write_shims_for(host: Host, ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error> {
     if !dry_run {
         std::fs::create_dir_all(ocx_home).map_err(|source| Error::Io {
             path: ocx_home.to_path_buf(),
@@ -340,9 +472,9 @@ pub fn write_shims(ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error
     }
 
     let mut written = Vec::new();
-    for (name, body) in SHIMS {
+    for (name, body) in shims_for(host) {
         let target = ocx_home.join(name);
-        if !needs_write(&target, body)? {
+        if !needs_write(&target, &body)? {
             continue;
         }
         if !dry_run {
@@ -380,6 +512,15 @@ fn needs_write(target: &Path, body: &str) -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five `(filename, body)` shims written into `$OCX_HOME` on a unix host.
+    const SHIMS: [(&str, &str); 5] = [
+        (WITNESS_SHIM, ENV_SH),
+        ("env.fish", ENV_FISH),
+        ("env.ps1", ENV_PS1),
+        ("env.nu", ENV_NU),
+        ("env.elv", ENV_ELV),
+    ];
 
     /// `Test-Path` globs `[`/`]` in `OCX_HOME`, so the PowerShell shim probes with .NET.
     #[test]
@@ -423,7 +564,9 @@ mod tests {
             "env.nu must fall back to a computed OCX_HOME at runtime"
         );
         assert!(
-            ENV_ELV.contains("(not (has-env OCX_HOME))") && ENV_ELV.contains("set-env OCX_HOME $E:HOME/.ocx"),
+            ENV_ELV.contains("(not (has-env OCX_HOME))")
+                && ENV_ELV
+                    .contains("set-env OCX_HOME (if $_ocx_windows { put $E:USERPROFILE } else { put $E:HOME })/.ocx"),
             "env.elv must fall back to $HOME/.ocx at runtime"
         );
     }
@@ -511,9 +654,12 @@ mod tests {
             SHIMS.len(),
             "all five shims must be written on a fresh home"
         );
-        for (name, body) in SHIMS {
+        for (name, body) in shims_for(Host::current()) {
             let on_disk = std::fs::read_to_string(home.path().join(name)).unwrap();
-            assert_eq!(on_disk, body, "{name} on disk must equal the canonical const body");
+            assert_eq!(
+                on_disk, body,
+                "{name} on disk must equal the canonical body for this host"
+            );
         }
     }
 
@@ -560,7 +706,11 @@ mod tests {
             "only the drifted shim is rewritten"
         );
         let restored = std::fs::read_to_string(home.path().join("env.sh")).unwrap();
-        assert_eq!(restored, ENV_SH, "the drifted shim is restored to canonical bytes");
+        assert_eq!(
+            restored,
+            env_sh(Host::current()),
+            "the drifted shim is restored to canonical bytes"
+        );
     }
 
     /// `dry_run` writes no byte: it reports the would-write set without touching
@@ -749,7 +899,7 @@ mod tests {
             "a plan of another version, or none, must apply nothing"
         );
         assert!(
-            NU_PLAN_APPLY.contains("hide-env -i $_ocx_r.0"),
+            NU_PLAN_APPLY.contains("hide-env -i $_ocx_k"),
             "a restore-to-unset must hide the variable, tolerating one already absent"
         );
         assert!(
@@ -779,7 +929,7 @@ mod tests {
             "`$_ocx_bin` names the bin directory; the call joins the executable name itself"
         );
         assert_eq!(
-            ENV_NU.matches("^($_ocx_bin | path join 'ocx')").count(),
+            ENV_NU.matches("^($_ocx_bin | path join $_ocx_exe)").count(),
             2,
             "both calls must name the resolved binary, never a bare `ocx` a user could shadow"
         );
@@ -894,13 +1044,25 @@ mod tests {
                 NU_ENV_APPLY_LOOP,
                 "$_ocx_e.key in ($env | columns)",
             ),
-            ("NU_PLAN_APPLY", NU_PLAN_APPLY, "$_ocx_k in ($env | columns)"),
+            ("NU_PLAN_APPLY", NU_PLAN_APPLY, "$k in ($env | columns)"),
         ] {
             assert!(
                 body.contains(needle),
                 "{name} must read an existing value via the flag-free `key in ($env | columns)` form"
             );
         }
+    }
+
+    /// The plan applier folds env-name case only on Windows, where names are case-insensitive.
+    #[test]
+    fn nu_plan_apply_folds_key_case_only_under_the_windows_flag() {
+        assert!(NU_PLAN_APPLY.contains("let _ocx_fold = ($nu.os-info.name == 'windows')"));
+        assert!(NU_PLAN_APPLY.contains("or not $_ocx_fold { $k }"));
+        assert!(NU_PLAN_APPLY.contains("str contains --ignore-case $k"));
+        assert!(
+            !NU_PLAN_APPLY.contains("str downcase"),
+            "`str downcase` is deprecated since nu 0.114 and warns at parse"
+        );
     }
 
     /// The plan applier dispatches on `path`, `list` and `constant` and applies nothing for any other type.
@@ -1084,7 +1246,7 @@ mod tests {
 
         let elvish = code_only(ENV_ELV);
         assert!(
-            elvish.contains("if ?(test -t 0) { set _ocx_interactive = '--interactive' }")
+            elvish.contains("if (or $_ocx_windows ?(test -t 0)) { set _ocx_interactive = '--interactive' }")
                 && elvish.contains("--shell=elvish --no-completion $_ocx_interactive"),
             "env.elv must probe stdin with `test -t 0` and pass the answer through"
         );
@@ -1274,8 +1436,8 @@ mod tests {
     // | `env.sh`    |        715 |  ×1.5  |     950 |      235 |
     // | `env.fish`  |        406 |  ×1.5  |     600 |      194 |
     // | `env.ps1`   |        940 |  ×1.5  |    1250 |      310 |
-    // | `env.nu`    |       5406 | ×1.00  |    5450 |       44 |
-    // | `env.elv`   |        479 |  ×1.5  |     550 |       71 |
+    // | `env.nu`    |       6378 | ×1.00  |    6400 |       22 |
+    // | `env.elv`   |        861 | ×1.00  |     875 |       14 |
     // | fish loader |        153 |  ×1.5  |     250 |       97 |
     //
     // The four eval-capable bodies grew when each shim began stating its own
@@ -1310,12 +1472,12 @@ mod tests {
     // prompt hook), so raising the constant is a deliberate act in the commit
     // that grows the body, with the new measurement written into this table:
     // 2900 -> 5450 when the shim began applying the plan in-shell, 5450 -> 5550 for
-    // the exact-match path arm. Measured at 5545.
+    // the exact-match path arm, 5550 -> 5750 for the Windows lookup (`env.elv` 550 -> 875), 5750 -> 6400 for the case-folded env key. Measured at 6378.
     const CEILING_ENV_SH: usize = 950;
     const CEILING_ENV_FISH: usize = 600;
     const CEILING_ENV_PS1: usize = 1250;
-    const CEILING_ENV_NU: usize = 5550;
-    const CEILING_ENV_ELV: usize = 550;
+    const CEILING_ENV_NU: usize = 6400;
+    const CEILING_ENV_ELV: usize = 875;
     const CEILING_FISH_CONF: usize = 250;
 
     /// The smallest inlined-reconciler-shaped body a ceiling has to refuse.
@@ -1418,5 +1580,223 @@ mod tests {
             ENV_ELV.contains("try {") && ENV_ELV.contains("} catch"),
             "the completion eval must be wrapped in try/catch so its failure cannot break PATH"
         );
+    }
+
+    // ── Windows host variants ────────────────────────────────────────────────
+
+    fn windows_shim(name: &str) -> String {
+        shims_for(Host::Windows)
+            .into_iter()
+            .find(|(shim, _)| *shim == name)
+            .map(|(_, body)| body.into_owned())
+            .expect("shim name")
+    }
+
+    fn sha256_hex(text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// The unix texts are pinned, so a host-selection bug cannot rewrite them unseen.
+    #[test]
+    fn the_unix_shim_texts_are_pinned_and_only_two_differ_on_windows() {
+        for (name, text, pinned) in [
+            (
+                "env.sh",
+                ENV_SH,
+                "bbf355dfb3e3bc2d2ca41a392057b77c66d9164fda99619c4f249dd67c0f4ac5",
+            ),
+            (
+                "env.fish",
+                ENV_FISH,
+                "6963fe46263a51ba0c41f37465b134fe7ab2894cfa534fc62465400e2967418f",
+            ),
+            (
+                "conf.d/ocx.fish",
+                FISH_CONF,
+                "4fab028f6763ee9eddd5ac3aebc04c1962bd319d3437a7a726067d419da2b418",
+            ),
+        ] {
+            assert_eq!(sha256_hex(text), pinned, "{name} changed on a unix host");
+        }
+        for ((name, unix), (_, windows)) in SHIMS.into_iter().zip(shims_for(Host::Windows)) {
+            let on_unix = shims_for(Host::Unix)
+                .into_iter()
+                .find(|(shim, _)| *shim == name)
+                .expect("unix shim")
+                .1;
+            assert_eq!(on_unix, unix, "{name} on a unix host is the constant");
+            assert_eq!(windows != unix, matches!(name, "env.sh" | "env.fish"), "{name}");
+        }
+        assert_eq!(fish_conf_body_on(Host::Unix), FISH_CONF);
+        assert_ne!(fish_conf_body_on(Host::Windows), FISH_CONF);
+    }
+
+    /// `steps` appear in `text` in this order, so a reordered lookup reds.
+    fn assert_in_order(name: &str, text: &str, steps: &[&str]) {
+        let mut from = 0;
+        for step in steps {
+            let at = text[from..]
+                .find(step)
+                .unwrap_or_else(|| panic!("{name}: `{step}` missing or out of order in\n{text}"));
+            from += at + step.len();
+        }
+    }
+
+    /// OCX_HOME, then `$HOME/.ocx` when it holds the shim, then the profile's store; never an exported `OCX_HOME`.
+    #[test]
+    fn windows_posix_and_fish_text_resolve_the_store_in_three_steps() {
+        let sh = windows_shim("env.sh");
+        let fish = windows_shim("env.fish");
+        let conf = fish_conf_body_on(Host::Windows).into_owned();
+        let sh_steps = [
+            r#"[ -n "${OCX_HOME:-}" ]"#,
+            r#"[ -f "$HOME/.ocx/env.sh" ]"#,
+            r#"cygpath -u "$USERPROFILE""#,
+        ];
+        let fish_steps = [
+            r#"test -n "$OCX_HOME""#,
+            r#"test -f "$HOME/.ocx/env.fish""#,
+            r#"cygpath -u "$USERPROFILE""#,
+        ];
+        assert_in_order("env.sh", &sh, &sh_steps);
+        assert_in_order("env.fish", &fish, &fish_steps);
+        assert_in_order("conf.d/ocx.fish", &conf, &fish_steps);
+        for (name, text) in [("env.sh", &sh), ("env.fish", &fish), ("conf.d/ocx.fish", &conf)] {
+            assert!(!text.contains("export OCX_HOME"), "{name}");
+            assert!(!text.contains("set -gx OCX_HOME"), "{name}");
+            assert!(!text.contains("OCX_HOME:="), "{name}");
+        }
+        assert_in_order(
+            "env.sh",
+            &sh,
+            &[r#"[ -n "$_ocx_home" ]"#, r#"_ocx_bin="$_ocx_home/symlinks/"#],
+        );
+        assert!(sh.contains("unset _ocx_home _ocx_bin"));
+        assert_in_order(
+            "env.fish",
+            &fish,
+            &[r#"test -n "$_ocx_home""#, r#"set _ocx_bin "$_ocx_home/symlinks/"#],
+        );
+        assert_in_order(
+            "conf.d/ocx.fish",
+            &conf,
+            &[r#"test -n "$_ocx_home""#, r#"set _ocx_env "$_ocx_home/env.fish""#],
+        );
+        assert!(conf.contains(r#"source "$_ocx_env""#));
+    }
+
+    /// The Windows variants stay pure dispatchers, like the unix bodies they replace.
+    #[test]
+    fn windows_variants_stay_dispatchers_under_their_ceilings() {
+        const CEILING_ENV_SH_WINDOWS: usize = 1250;
+        const CEILING_ENV_FISH_WINDOWS: usize = 950;
+        const CEILING_FISH_CONF_WINDOWS: usize = 600;
+        let conf = fish_conf_body_on(Host::Windows).into_owned();
+        for (name, body, ceiling) in [
+            ("env.sh", windows_shim("env.sh"), CEILING_ENV_SH_WINDOWS),
+            ("env.fish", windows_shim("env.fish"), CEILING_ENV_FISH_WINDOWS),
+            ("conf.d/ocx.fish", conf, CEILING_FISH_CONF_WINDOWS),
+        ] {
+            let code = code_only(&body);
+            assert!(code.len() <= ceiling, "{name} is {} bytes", code.len());
+            assert!(ceiling - code.len() < INLINED_LOGIC_FLOOR, "{name} ceiling is loose");
+            let lowered = code.to_ascii_lowercase();
+            for token in BUSINESS_LOGIC_TOKENS {
+                assert!(!lowered.contains(&token.to_ascii_lowercase()), "{name}: {token}");
+            }
+            assert!(!code.contains("--hook") && !code.contains("--completion"), "{name}");
+        }
+    }
+
+    /// Nushell and elvish run `ocx.exe` and read the profile on Windows, and neither relies on `HOME` there.
+    #[test]
+    fn nushell_and_elvish_shims_handle_a_native_windows_host() {
+        assert!(ENV_NU.contains("$nu.os-info.name == 'windows'"));
+        assert!(ENV_NU.contains("'ocx.exe'") && ENV_NU.contains("$env.USERPROFILE"));
+        assert!(ENV_NU.contains("(($_ocx_bin | path join $_ocx_exe) | path exists)"));
+
+        assert!(ENV_ELV.contains("$platform:is-windows"));
+        assert!(ENV_ELV.contains("2>$_ocx_null") && !ENV_ELV.contains("2>/dev/null"));
+        assert!(
+            !ENV_ELV.contains("use os"),
+            "`os:` needs elvish 0.20, the documented floor is 0.16"
+        );
+        assert!(ENV_ELV.contains("put ocx.exe") && ENV_ELV.contains("$E:USERPROFILE"));
+        assert!(ENV_ELV.contains("path:is-regular $_ocx_bin"));
+        let code = code_only(ENV_ELV);
+        assert!(
+            code.contains("(or $_ocx_windows ?(test -t 0))"),
+            "the external `test` is never reached on Windows: `or` short-circuits"
+        );
+    }
+
+    // ── live: the nushell and elvish shims on this (unix) host ───────────────
+
+    /// A store holding `env.nu`/`env.elv` and a stand-in `ocx` that prints `plan`.
+    #[cfg(unix)]
+    fn stub_store(root: &Path, plan: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let store = root.join("store");
+        let bin_dir = store.join("symlinks/ocx.sh/ocx/cli/current/content/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let ocx = bin_dir.join("ocx");
+        std::fs::write(&ocx, format!("#!/bin/sh\nprintf '%s\\n' '{plan}'\n")).unwrap();
+        std::fs::set_permissions(&ocx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_shims_for(Host::Unix, &store, false).unwrap();
+        store
+    }
+
+    /// Run `interpreter args…` with the process `PATH` (so it resolves), `HOME` and `OCX_HOME` set.
+    #[cfg(unix)]
+    fn run_with_store(interpreter: &str, args: &[&str], root: &Path, store: &Path) -> Option<String> {
+        let path = ocx_env::PATH.get_raw().unwrap_or_default();
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+        crate::tests_live_shell::run(
+            interpreter,
+            &args,
+            &[
+                ("PATH", path.as_os_str()),
+                ("HOME", root.as_os_str()),
+                ("OCX_HOME", store.as_os_str()),
+            ],
+            root,
+        )
+        .map(|ran| ran.stdout)
+    }
+
+    /// The unix branch of `env.nu` resolves the store's `ocx` and applies the reconcile plan it prints.
+    #[cfg(unix)]
+    #[test]
+    fn env_nu_runs_the_stub_ocx_under_a_live_nushell() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = r#"{"v":1,"sets":[{"key":"STORE_FOUND","type":"constant","value":"1"}]}"#;
+        let store = stub_store(root.path(), plan);
+        let command = format!(
+            "source '{}'; print ($env.STORE_FOUND? | default 'no')",
+            store.join("env.nu").display()
+        );
+        if let Some(out) = run_with_store("nu", &["--no-config-file", "-c", &command], root.path(), &store) {
+            assert_eq!(out.trim(), "1", "the nushell shim did not run the stub ocx: {out}");
+        }
+    }
+
+    /// The unix branch of `env.elv` resolves the store's `ocx` and evaluates the stream it prints.
+    #[cfg(unix)]
+    #[test]
+    fn env_elv_runs_the_stub_ocx_under_a_live_elvish() {
+        let root = tempfile::tempdir().unwrap();
+        let store = stub_store(root.path(), "set-env STORE_FOUND 1");
+        let command = format!(
+            "eval (slurp < '{}'); echo (if (has-env STORE_FOUND) {{ get-env STORE_FOUND }} else {{ put no }})",
+            store.join("env.elv").display()
+        );
+        if let Some(out) = run_with_store("elvish", &["-c", &command], root.path(), &store) {
+            assert_eq!(out.trim(), "1", "the elvish shim did not run the stub ocx: {out}");
+        }
     }
 }

@@ -29,7 +29,7 @@ from uuid import uuid4
 import pytest
 
 from src import OcxRunner, PackageInfo
-from src.helpers import make_package
+from src.helpers import make_package, posix_shell_path
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,13 @@ class ShellRecipe:
     readback: str
     # pwsh and nu join `PATH` with the native separator, `;` on Windows; the POSIX shells use `:`.
     sep: str = ":"
+    # bash, zsh, dash, ksh and fish run under Git Bash on Windows, where `ocx` emits MSYS-spelled paths (`/c/x`).
+    # Cygwin spells a drive `/proc/cygdrive/c/x`, which `posix_shell_path` does not model.
+    msys: bool = False
+
+    def shell_path(self, path: str) -> str:
+        """``path`` as this recipe's shell sees a ``PATH`` entry on this host."""
+        return posix_shell_path(path) if self.msys else path
 
     def script(self, exports: str, seed_path: str, *, twice: bool) -> str:
         body = exports + ("\n" + exports if twice else "")
@@ -74,6 +81,7 @@ def _posix(ocx_shell: str, interpreter: str) -> ShellRecipe:
         argv=(interpreter, "-c"),
         seed=lambda p: f'export PATH="{p}"',
         readback='printf "%s" "$PATH"',
+        msys=True,
     )
 
 
@@ -88,6 +96,7 @@ RECIPES: dict[str, ShellRecipe] = {
         argv=("fish", "-c"),
         seed=lambda p: f'set -gx PATH (string split : "{p}")',
         readback="string join : $PATH",
+        msys=True,
     ),
     "pwsh": ShellRecipe(
         ocx_shell="pwsh",
@@ -176,6 +185,7 @@ def test_shell_emit_is_idempotent(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
     bin_dir = _bin_dir(ocx, pkg)
+    bin_dir = recipe.shell_path(bin_dir)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
     seed = f"/a/bin{recipe.sep}/b/bin"  # bin dir absent initially
@@ -200,6 +210,7 @@ def test_shell_emit_moves_present_dir_to_front(
     pkg = published_package
     ocx.plain("package", "install", pkg.short)
     bin_dir = _bin_dir(ocx, pkg)
+    bin_dir = recipe.shell_path(bin_dir)
     exports = _exports(ocx, pkg, recipe.ocx_shell)
 
     seed = f"/a/bin{recipe.sep}{bin_dir}{recipe.sep}/b/bin"  # dir present in the middle
@@ -300,10 +311,10 @@ def test_direnv_export_is_idempotent(ocx: OcxRunner, tmp_path: Path):
     # the idempotency half green.
     home = project / ".ocx" / "toolchain"
     packages_root = Path(ocx.env["OCX_HOME"]) / "packages"
-    assert any(seg.startswith(str(home)) for seg in tool_dirs), (
+    assert any(seg.startswith(posix_shell_path(home)) for seg in tool_dirs), (
         f"C-065: `ocx direnv export` must emit paths under {home}; got {tool_dirs!r}"
     )
-    assert not any(seg.startswith(str(packages_root)) for seg in tool_dirs), (
+    assert not any(seg.startswith(posix_shell_path(packages_root)) for seg in tool_dirs), (
         f"C-065: no emitted package path may keep the digest spelling; got {tool_dirs!r}"
     )
 

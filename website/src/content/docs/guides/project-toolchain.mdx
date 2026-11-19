@@ -394,7 +394,7 @@ The session is pinned to this project: it keeps the project's consented groups, 
 
 A project's binaries should land on `PATH`, and its packages' variables be set, the moment you `cd` into the project, and both should go again when you `cd` back out. That should need no separate `eval` step and no leak into whatever else the shell does afterward.
 
-In bash, zsh, fish, PowerShell and elvish, this rides the same per-prompt hook the [global toolchain][global-shell] uses. `cd` into a project OCX has consent to activate, and its locked binaries land on `PATH` at the very next prompt and the variables its packages declare are set. No `.envrc` and no `direnv allow` are needed. `cd` back out and both revert.
+In bash, zsh, fish, PowerShell and elvish, this rides the same per-prompt hook the [global toolchain][global-shell] uses. `cd` into a project OCX has consent to activate, and its locked binaries land on `PATH` at the very next prompt and the variables its packages declare are set. No `.envrc` and no `direnv allow` are needed. `cd` back out and both revert. On Windows the hook runs in PowerShell, nushell and elvish, and in bash, zsh and fish under Git Bash, MSYS2 and Cygwin. [Shells on Windows][in-depth-shell-integration-windows] lists what `ocx self setup` wires.
 
 A project nested inside another one is a *switch* and not a stack. Only the nearest `ocx.toml` is in effect, so `cd` into the inner project and the outer one's binaries leave `PATH` and its variables are unset until you come back. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested]. The same [`OCX_NO_HOOK`][env-ocx-no-hook] and `ocx self setup --no-hook` switch turns the hook off.
 
@@ -451,6 +451,7 @@ The strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-
 [in-depth-storage-toolchain]: ../explanation/toolchain-tree.mdx#toolchain-location
 [in-depth-shell-integration]: ../explanation/shell-integration.mdx
 [in-depth-shell-integration-consent]: ../explanation/shell-integration.mdx#consent
+[in-depth-shell-integration-windows]: ../explanation/shell-integration.mdx#activation-windows
 [in-depth-shell-integration-nested]: ../explanation/shell-integration.mdx#activation-nested-projects
 [in-depth-project]: ../explanation/project-toolchain.md
 [in-depth-configuration-kill-switch]: ../explanation/configuration.mdx#kill-switch

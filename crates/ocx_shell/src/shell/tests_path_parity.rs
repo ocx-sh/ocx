@@ -116,3 +116,112 @@ fn remove_segment_strips_one_quote_pair_from_the_operand_as_the_emit_does() {
         "the emitted half must carry the same normalisation"
     );
 }
+
+/// The in-process comparison folds `/` into `\` exactly where the emitted PowerShell arms do: the
+/// emit carries the slash fold on Windows and nowhere else.
+///
+/// Red state: drop the fold from one arm, or from `path_element_eq`.
+#[test]
+fn slash_fold_is_emitted_exactly_where_the_in_process_compare_folds() {
+    use crate::shell::Shell;
+    let folds = |line: &str| line.contains("-replace '/','\\'");
+    let export = Shell::PowerShell.export_path("PATH", "/opt/bin").unwrap();
+    let remove = Shell::PowerShell.remove_list_element("PATH", "/opt/bin", None).unwrap();
+    assert_eq!(folds(&export), cfg!(windows), "export arm: {export}");
+    assert_eq!(folds(&remove), cfg!(windows), "remove arm: {remove}");
+    // Host spelling: off Windows `split_paths` would tear a drive letter at its `:`.
+    let (stored, wanted) = if cfg!(windows) {
+        (r"C:\a\b", r"C:\a/b")
+    } else {
+        (r"/a\b", "/a/b")
+    };
+    assert_eq!(
+        rm(&join(&[stored, "/keep"]), wanted) == *"/keep",
+        cfg!(windows),
+        "in-process removal folds slashes on Windows only"
+    );
+}
+
+/// A POSIX shell sourcing the MSYS-form emit for a Windows-form input ends up with the `/c/...`
+/// element first and no relative element anywhere in `PATH`.
+///
+/// Red state: emit the native `C:\...` value under `Dialect::Msys`; bash then splits it at `:`.
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "test-only live-shell harness sourcing a generated export line in a real shell"
+)]
+fn msys_dialect_line_puts_the_converted_element_first_in_live_bash() {
+    use crate::shell::{Dialect, Shell};
+    use std::process::Command;
+
+    let line = Shell::Bash
+        .export_path_as(
+            Dialect::Msys {
+                drive_prefix: crate::shell::msys::MSYS_DRIVE_PREFIX,
+            },
+            "PATH",
+            r"C:\Users\x\bin",
+        )
+        .unwrap();
+    let script = format!("export PATH=/usr/bin:/bin; {line}; printf '%s' \"$PATH\"");
+    // Never `bash` from PATH: on Windows that can be the WSL launcher.
+    let Some(bash) = crate::shell::tests_git_bash::find_bash() else {
+        crate::shell::tests_git_bash::bash_absent("the MSYS-dialect live PATH check");
+        return;
+    };
+    let output = Command::new(bash).args(["-c", &script]).output().expect("spawn bash");
+    assert!(output.status.success(), "bash failed on:\n{script}");
+    let path = String::from_utf8_lossy(&output.stdout).into_owned();
+    let elements: Vec<&str> = path.split(':').collect();
+    assert_eq!(elements.first(), Some(&"/c/Users/x/bin"), "PATH: {path}");
+    assert!(
+        elements.iter().all(|e| e.starts_with('/')),
+        "relative element in {path}"
+    );
+}
+
+/// fish reads the MSYS-form element for each runtime's drive prefix: it leads `$PATH` and no element is relative.
+///
+/// Red state: leave fish out of the converted arms; fish then keeps `C:\Users\x\bin` as a relative element.
+#[cfg(unix)]
+#[test]
+#[expect(
+    clippy::disallowed_types,
+    reason = "test-only live-shell harness sourcing a generated export line in a real shell"
+)]
+fn msys_dialect_line_puts_the_converted_element_first_in_live_fish() {
+    use crate::shell::{Dialect, Shell};
+    use std::process::Command;
+
+    for (drive_prefix, expected) in [
+        (crate::shell::msys::MSYS_DRIVE_PREFIX, "/c/Users/x/bin"),
+        (crate::shell::msys::CYGWIN_DRIVE_PREFIX, "/proc/cygdrive/c/Users/x/bin"),
+    ] {
+        let line = Shell::Fish
+            .export_path_as(Dialect::Msys { drive_prefix }, "PATH", r"C:\Users\x\bin")
+            .unwrap();
+        let script = format!("set -gx PATH /usr/bin /bin; {line}; string join : $PATH");
+        let output = match Command::new("fish").args(["-c", &script]).output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                assert!(
+                    crate::shell::hook::absence_may_skip("fish"),
+                    "fish is absent, so the MSYS-dialect live PATH check proved nothing (__OCX_TESTING_REQUIRE_LIVE_SHELLS names it); install it"
+                );
+                eprintln!("# ocx: UNPROVEN — fish is not found, so the MSYS-dialect live PATH check asserted nothing");
+                return;
+            }
+            Err(error) => panic!("failed to spawn fish: {error}"),
+        };
+        assert!(output.status.success(), "fish failed on:\n{script}");
+        let path = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+        let elements: Vec<&str> = path.split(':').collect();
+        assert_eq!(elements.first(), Some(&expected), "PATH: {path}");
+        assert!(
+            elements.iter().all(|e| e.starts_with('/')),
+            "relative element in {path}"
+        );
+    }
+}

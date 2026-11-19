@@ -93,11 +93,13 @@ pytestmark = pytest.mark.command("toolchain_env")
 # multiply the runtime by nine to re-observe one PATH string.
 SHELL = "bash"
 
-# ocx emits `C:\` paths joined with ':' into bash code, and a bash PATH is an MSYS colon
-# list that splits at the drive colon, so no session below can read a PATH back on Windows.
+# Git Bash is a working shell for ocx activation (see the live bash tests in
+# test_toolchain_env.py), but this module's harness is not Windows-shaped: it splits and
+# joins PATH with `os.pathsep` (`;` on Windows, where bash holds `:`-lists), builds the child
+# PATH from the POSIX `matrix.BASE_PATH`, and runs `.bat` fixture tools by bare name.
 _WINDOWS_NO_BASH = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="windows: ocx emits native C:\\ paths into the bash PATH, which MSYS bash splits at the drive colon",
+    reason="windows: this harness joins PATH with os.pathsep and a POSIX BASE_PATH and runs .bat fixtures by name",
 )
 
 # Every shell session is bounded (RUL-110). The regression this guards is a
