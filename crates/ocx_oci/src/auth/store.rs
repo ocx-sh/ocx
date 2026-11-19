@@ -42,6 +42,9 @@ fn helper_timeout() -> Duration {
     docker_credential::HELPER_TIMEOUT
 }
 
+/// How long an operation waits for another holder of `config.json.lock` before failing.
+const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Serialises access to `config.json` until dropped.
 struct ConfigGuard {
     /// Held on the `config.json.lock` sidecar, never the data file (see [`acquire_config_guard`]).
@@ -119,16 +122,13 @@ pub struct DockerCredentialStore {
     config_path: PathBuf,
     allow_plaintext_put: bool,
     detect_default_native_store: bool,
+    lock_timeout: Duration,
 }
 
 impl DockerCredentialStore {
     pub fn new(opts: StoreOptions) -> Result<Self, AuthError> {
         let config_path = resolve_config_path()?;
-        Ok(Self {
-            config_path,
-            allow_plaintext_put: opts.allow_plaintext_put,
-            detect_default_native_store: opts.detect_default_native_store,
-        })
+        Ok(Self::with_path(config_path, opts))
     }
 
     /// Store over an explicit `config.json` path.
@@ -137,6 +137,7 @@ impl DockerCredentialStore {
             config_path,
             allow_plaintext_put: opts.allow_plaintext_put,
             detect_default_native_store: opts.detect_default_native_store,
+            lock_timeout: CONFIG_LOCK_TIMEOUT,
         }
     }
 
@@ -200,8 +201,9 @@ impl CredentialStore for DockerCredentialStore {
     async fn get(&self, registry: &str) -> Result<Option<Credential>, AuthError> {
         let canonical = canonicalize_registry(registry);
         let path = self.config_path.clone();
+        let lock_timeout = self.lock_timeout;
         let blocking = tokio::task::spawn_blocking(move || -> Result<Option<Credential>, AuthError> {
-            let mut guard = acquire_config_guard(&path)?;
+            let mut guard = acquire_config_guard(&path, lock_timeout)?;
             let config = guard.read()?;
             let resolution = resolve_helper(&config, &canonical, false);
             match resolution {
@@ -234,10 +236,11 @@ impl CredentialStore for DockerCredentialStore {
         let path = self.config_path.clone();
         let allow_plaintext = self.allow_plaintext_put;
         let detect_default_native_store = self.detect_default_native_store;
+        let lock_timeout = self.lock_timeout;
         let cred_copy = clone_credential(cred);
 
         let blocking = tokio::task::spawn_blocking(move || -> Result<(), AuthError> {
-            let mut guard = acquire_config_guard(&path)?;
+            let mut guard = acquire_config_guard(&path, lock_timeout)?;
             let mut config = guard.read()?;
 
             let mut detected_helper: Option<String> = None;
@@ -299,9 +302,10 @@ impl CredentialStore for DockerCredentialStore {
     async fn delete(&self, registry: &str) -> Result<(), AuthError> {
         let canonical = canonicalize_registry(registry);
         let path = self.config_path.clone();
+        let lock_timeout = self.lock_timeout;
 
         let blocking = tokio::task::spawn_blocking(move || -> Result<(), AuthError> {
-            let mut guard = acquire_config_guard(&path)?;
+            let mut guard = acquire_config_guard(&path, lock_timeout)?;
             let mut config = guard.read()?;
 
             let helper = config
@@ -390,11 +394,11 @@ fn clone_credential(cred: &Credential) -> Credential {
 /// Takes the `config.json.lock` sidecar lock (blocking) and returns a guard over the data file.
 ///
 /// A sidecar, not the data file: on Windows a `LockFileEx` lock denies the rename `ConfigGuard::write` publishes by.
-fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
+fn acquire_config_guard(path: &Path, timeout: Duration) -> Result<ConfigGuard, AuthError> {
     let mut lock_name = path.as_os_str().to_os_string();
     lock_name.push(".lock");
     let lock_path = std::path::PathBuf::from(lock_name);
-    let locked = LockedFile::open_exclusive_blocking_with_timeout(&lock_path, Duration::from_secs(5)).map_err(|e| {
+    let locked = LockedFile::open_exclusive_blocking_with_timeout(&lock_path, timeout).map_err(|e| {
         AuthError::WriteConfigFailed {
             path: lock_path.clone(),
             source: std::io::Error::other(e),
@@ -442,6 +446,15 @@ impl ConfigGuard {
         })?;
         ocx_util::fs::replace_user_file(&path, &serialized, NewFileMode::Private)
             .map_err(|source| AuthError::WriteConfigFailed { path, source })
+    }
+}
+
+#[cfg(test)]
+impl DockerCredentialStore {
+    /// Wait up to `timeout` for `config.json.lock` instead of [`CONFIG_LOCK_TIMEOUT`].
+    fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 }
 
@@ -736,14 +749,21 @@ mod tests {
     #[test]
     fn dockerconfigstore_put_writes_under_exclusive_flock() {
         let (_dir, path) = fresh_config_path();
-        let store = std::sync::Arc::new(DockerCredentialStore::with_path(path.clone(), opts(true)));
+        // The last writer waits out nine fsync-bound writes, which host I/O load stretches past CONFIG_LOCK_TIMEOUT;
+        // the lock release is the signal, and this bound only stops a deadlock from hanging the run.
+        let store = std::sync::Arc::new(
+            DockerCredentialStore::with_path(path.clone(), opts(true)).with_lock_timeout(Duration::from_secs(600)),
+        );
         let runtime = std::sync::Arc::new(rt());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
         let mut handles = vec![];
         for i in 0..10 {
             let s = store.clone();
             let r = runtime.clone();
+            let barrier = barrier.clone();
             handles.push(std::thread::spawn(move || {
                 let cred = Credential::basic(format!("u{i}"), SecretString::from(format!("p{i}")));
+                barrier.wait();
                 r.block_on(s.put(&format!("reg{i}.example"), &cred))
             }));
         }
@@ -751,7 +771,14 @@ mod tests {
             h.join().expect("join").expect("put result ok");
         }
         let raw = std::fs::read_to_string(&path).expect("read");
-        let _: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON after 10 concurrent puts");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON after 10 concurrent puts");
+        // Each put publishes by rename, so the JSON is valid even unlocked; a lost update is what the lock prevents.
+        for i in 0..10 {
+            assert!(
+                json.pointer(&format!("/auths/reg{i}.example/auth")).is_some(),
+                "reg{i}.example lost to a concurrent put: {raw}",
+            );
+        }
     }
 
     /// Regression — an unlocked reader that opened `config.json` before a write
