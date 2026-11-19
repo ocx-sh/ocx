@@ -147,9 +147,9 @@ pub enum ManagedConfigPersistError {
         summary = "The fetched managed-config payload is not valid TOML"
     )]
     InvalidToml {
-        /// The underlying TOML parse failure.
+        /// The parse failure without the source line (the payload may hold credentials).
         #[source]
-        source: toml::de::Error,
+        source: crate::error::ParseFailure,
     },
 
     /// Writing the atomic snapshot file failed.
@@ -403,8 +403,10 @@ pub async fn persist_managed_config(
 ) -> Result<ManagedConfigSnapshot, ManagedConfigPersistError> {
     let text = fetched.config_text;
 
-    let mut table: toml::Table =
-        toml::from_str(&text).map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
+    let invalid = |source: toml::de::Error| ManagedConfigPersistError::InvalidToml {
+        source: crate::error::ParseFailure::new(&source, &text),
+    };
+    let mut table: toml::Table = toml::from_str(&text).map_err(invalid)?;
     // Before the typed parse: `[update]` is personal, and a shape this ocx cannot read must not
     // refuse the rest of a payload written for a newer one.
     let stripped_update = table.remove("update").is_some();
@@ -429,7 +431,7 @@ pub async fn persist_managed_config(
     } else {
         toml::from_str(&text)
     }
-    .map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
+    .map_err(invalid)?;
 
     // Before the write, or every later `try_init` fails closed on this snapshot.
     if let Some(pem) = parsed.extra_ca_certs_pem.clone() {
@@ -1094,6 +1096,28 @@ mod tests {
             assert!(!snapshot.config.contains("update"), "{}", snapshot.config);
             assert!(snapshot.config.contains("corp.example.com"), "{}", snapshot.config);
         }
+    }
+
+    #[tokio::test]
+    async fn parse_error_never_quotes_the_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ManagedConfigPaths::new(dir.path());
+
+        let err = persist_managed_config(&paths, &identifier(), fetched("[registry]\nsecret = Bearer s3cr3t\n"))
+            .await
+            .expect_err("a broken line must fail persist");
+
+        let mut chain = err.to_string();
+        let mut cause = std::error::Error::source(&err);
+        while let Some(next) = cause {
+            chain.push_str(&format!(": {next}"));
+            cause = next.source();
+        }
+        for rendered in [chain.clone(), format!("{err:?}")] {
+            assert!(!rendered.contains("s3cr3t"), "{rendered}");
+            assert!(!rendered.contains("Bearer"), "{rendered}");
+        }
+        assert!(chain.contains("line 2"), "{chain}");
     }
 
     /// An invalid-TOML payload fails persist and leaves the existing snapshot

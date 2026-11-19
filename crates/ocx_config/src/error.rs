@@ -31,6 +31,101 @@ impl ConfigSource {
     }
 }
 
+/// A TOML parse failure reduced to position and message, never the source line.
+///
+/// Stored instead of the raw `toml::de::Error` because that type's `Display` quotes the offending
+/// line, and a config line can hold a credential (`headers`); the error chain is printed whole.
+/// The quoted value serde puts in a type or variant error (`invalid type: string "…"`,
+/// ``unknown variant `…` ``) is replaced by `…`.
+#[derive(Debug)]
+pub struct ParseFailure {
+    position: Option<(usize, usize)>,
+    message: String,
+}
+
+impl ParseFailure {
+    /// `text` is the document `error` came from; without a span (a value-level failure) no position is kept.
+    pub fn new(error: &toml::de::Error, text: &str) -> Self {
+        Self {
+            position: error.span().and_then(|span| position_of(text, span.start)),
+            message: without_quoted_values(error.message()),
+        }
+    }
+
+    /// [`Self::new`] for a `toml_edit` syntax error, whose `Display` also quotes the source line.
+    /// Its message is built from the parser's expected tokens and holds no source value, so it is kept whole.
+    pub fn from_toml_edit(error: &toml_edit::TomlError, text: &str) -> Self {
+        Self {
+            position: error.span().and_then(|span| position_of(text, span.start)),
+            message: error.message().to_owned(),
+        }
+    }
+}
+
+/// The 1-based line and column of byte `offset` in `text`.
+fn position_of(text: &str, offset: usize) -> Option<(usize, usize)> {
+    let before = text.get(..offset)?;
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |tail| tail.chars().count()) + 1;
+    Some((line, column))
+}
+
+/// Replaces every double-quoted span (Debug-escaped, as serde prints a string) and the name in an
+/// "unknown variant" error with `…`, so a value read into the wrong type is never echoed.
+fn without_quoted_values(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars();
+    let mut in_variant = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                out.push_str("\"…\"");
+                while let Some(next) = chars.next() {
+                    match next {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '`' if message.starts_with("unknown variant") && !in_variant => {
+                in_variant = true;
+                out.push_str("`…`");
+                for next in chars.by_ref() {
+                    if next == '`' {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+impl ParseFailure {
+    /// A failure with no document position, from an error whose own `Display` would not be safe to print.
+    pub fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            position: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ParseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.position {
+            Some((line, column)) => write!(f, "line {line}, column {column}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for ParseFailure {}
+
 /// Errors that can occur during configuration parsing and validation.
 #[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 #[exit(family = "ConfigError")]
@@ -40,9 +135,9 @@ pub enum Error {
     #[exit(ConfigError, slug = "config_parse", summary = "A config file does not parse")]
     Parse {
         path: PathBuf,
-        // Boxed: inline, `toml::de::Error` pushes this enum past clippy's `result_large_err` limit on Windows.
+        // Boxed to keep this enum under clippy's `result_large_err` limit on Windows.
         #[source]
-        source: Box<toml::de::Error>,
+        source: Box<ParseFailure>,
     },
 
     /// `OCX_CONFIG` names more config files than ocx will load.
@@ -181,10 +276,10 @@ mod tests {
         // outer Display (e.g. `anyhow::Error`'s `{:#}`) would print the
         // underlying `toml::de::Error` twice.
         let toml_err = toml::from_str::<toml::Value>("not valid [[").unwrap_err();
-        let marker = toml_err.to_string();
+        let marker = ParseFailure::new(&toml_err, "not valid [[").to_string();
         let err = Error::Parse {
             path: PathBuf::from("/bad.toml"),
-            source: Box::new(toml_err),
+            source: Box::new(ParseFailure::new(&toml_err, "not valid [[")),
         };
         let rendered = render_chain(&err as &(dyn std::error::Error + 'static));
         let count = rendered.matches(marker.as_str()).count();
@@ -214,5 +309,61 @@ mod tests {
         assert!(text.contains("/etc/ocx/config.toml"), "{text}");
         assert!(text.contains("edit or remove this file"), "{text}");
         assert!(!text.contains("--config"), "{text}");
+    }
+
+    #[test]
+    fn quoted_values_are_replaced_in_a_serde_message() {
+        assert_eq!(
+            without_quoted_values("invalid type: string \"Bearer \\\"x\\\" y\", expected a boolean"),
+            "invalid type: string \"…\", expected a boolean"
+        );
+        assert_eq!(
+            without_quoted_values("unknown variant `Bearer x`, expected `a` or `b`"),
+            "unknown variant `…`, expected `a` or `b`"
+        );
+        assert_eq!(without_quoted_values("expected `=`"), "expected `=`");
+    }
+
+    /// toml_edit's expected-token hint may name `"`; it is kept, and the source line still is not.
+    #[test]
+    fn a_toml_edit_hint_naming_a_quote_survives_and_no_source_value_does() {
+        let text = "key = \"ocxtest-tok-XXXX\nnext = 1\n";
+        let error = text.parse::<toml_edit::DocumentMut>().unwrap_err();
+        assert!(
+            error.message().contains("`\"`"),
+            "premise: hint names a quote: {}",
+            error.message()
+        );
+
+        let rendered = ParseFailure::from_toml_edit(&error, text).to_string();
+
+        assert!(rendered.contains(error.message()), "hint truncated: {rendered}");
+        assert!(!rendered.contains("ocxtest-tok-XXXX"), "token leaked: {rendered}");
+    }
+
+    /// Whatever the syntax error, the canary on the broken line is in neither rendering and the line is.
+    #[test]
+    fn no_toml_edit_syntax_error_echoes_the_broken_line() {
+        let documents = [
+            ("duplicate key", "a = 1\na = \"ocxtest-tok-XXXX\"\n"),
+            ("bad escape", "a = \"ocxtest-tok-XXXX \\q\"\n"),
+            ("bad number", "a = 12ocxtest-tok-XXXX\n"),
+            ("bad date", "a = 2024-13-45T00:00:00Z ocxtest-tok-XXXX\n"),
+            ("unclosed table header", "ok = 1\n[ocxtest-tok-XXXX\n"),
+        ];
+        for (label, text) in documents {
+            let error = text.parse::<toml_edit::DocumentMut>().unwrap_err();
+            let failure = ParseFailure::from_toml_edit(&error, text);
+            for rendered in [failure.to_string(), format!("{failure:?}")] {
+                assert!(
+                    !rendered.contains("ocxtest-tok-XXXX"),
+                    "{label}: canary leaked: {rendered}"
+                );
+            }
+            assert!(
+                failure.to_string().contains("line "),
+                "{label}: no line number: {failure}"
+            );
+        }
     }
 }

@@ -37,10 +37,12 @@ pub fn preview_managed_config(
     let text = validate_managed_config_payload(bytes)?;
 
     let mut unknown_keys: Vec<String> = Vec::new();
-    let deserializer =
-        toml::Deserializer::parse(text).map_err(|source| ManagedConfigPublishError::InvalidToml { source })?;
-    let candidate: Config = serde_ignored::deserialize(deserializer, |path| unknown_keys.push(dotted_path(&path)))
-        .map_err(|source| ManagedConfigPublishError::InvalidToml { source })?;
+    let invalid = |source: toml::de::Error| ManagedConfigPublishError::InvalidToml {
+        source: ocx_config::error::ParseFailure::new(&source, text),
+    };
+    let deserializer = toml::Deserializer::parse(text).map_err(invalid)?;
+    let candidate: Config =
+        serde_ignored::deserialize(deserializer, |path| unknown_keys.push(dotted_path(&path))).map_err(invalid)?;
     unknown_keys.sort_unstable();
     unknown_keys.dedup();
 

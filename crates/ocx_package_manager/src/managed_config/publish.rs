@@ -65,7 +65,7 @@ pub enum ManagedConfigPublishError {
     )]
     InvalidToml {
         #[source]
-        source: toml::de::Error,
+        source: ocx_config::error::ParseFailure,
     },
 
     /// A consumer strips a published `[managed]` section anyway.
@@ -267,8 +267,6 @@ fn names_a_path(key: &ocx_trust::KeyMatcher) -> bool {
 /// [`ManagedConfigPublishError::ManagedConfigKeyByPath`],
 /// [`ManagedConfigPublishError::InvalidTrustPolicy`].
 pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConfigPublishError> {
-    use serde::de::Error as _;
-
     let actual = bytes.len() as u64;
     let maximum = ocx_config::managed_config::MAX_MANAGED_CONFIG_BYTES;
     if actual > maximum {
@@ -276,10 +274,11 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     }
 
     let text = std::str::from_utf8(bytes).map_err(|utf8_error| ManagedConfigPublishError::InvalidToml {
-        source: toml::de::Error::custom(utf8_error),
+        source: ocx_config::error::ParseFailure::from_message(utf8_error.to_string()),
     })?;
-    let parsed: ocx_config::Config =
-        toml::from_str(text).map_err(|source| ManagedConfigPublishError::InvalidToml { source })?;
+    let parsed: ocx_config::Config = toml::from_str(text).map_err(|source| ManagedConfigPublishError::InvalidToml {
+        source: ocx_config::error::ParseFailure::new(&source, text),
+    })?;
 
     if parsed.managed.is_some() {
         return Err(ManagedConfigPublishError::ContainsManagedSection);
@@ -339,12 +338,10 @@ pub fn declared_extra_ca_certs_pem(text: &str) -> Option<String> {
 /// # Errors
 /// [`ManagedConfigPublishError::InvalidToml`] when the payload is not TOML.
 pub fn inline_extra_ca_certs(text: &str, pem: &str) -> Result<String, ManagedConfigPublishError> {
-    use serde::de::Error as _;
-
     let mut document =
         text.parse::<toml_edit::DocumentMut>()
             .map_err(|error| ManagedConfigPublishError::InvalidToml {
-                source: toml::de::Error::custom(error),
+                source: ocx_config::error::ParseFailure::from_message(error.message()),
             })?;
     if document.remove("extra_ca_certs").is_none() {
         return Ok(text.to_string());
@@ -373,12 +370,10 @@ fn guard_inlined_payload_size(bytes: &[u8]) -> Result<(), ManagedConfigPublishEr
 ///
 /// [`ManagedConfigPublishError::InvalidToml`] when the payload is not TOML.
 pub fn inline_trusted_root(text: &str, json: &str) -> Result<String, ManagedConfigPublishError> {
-    use serde::de::Error as _;
-
     let mut document =
         text.parse::<toml_edit::DocumentMut>()
             .map_err(|error| ManagedConfigPublishError::InvalidToml {
-                source: toml::de::Error::custom(error),
+                source: ocx_config::error::ParseFailure::from_message(error.message()),
             })?;
     let Some(sigstore) = document
         .get_mut("trust")
@@ -661,6 +656,25 @@ mod tests {
     fn validate_rejects_invalid_toml() {
         let err = validate_managed_config_payload(b"not = [valid").expect_err("invalid TOML must be rejected");
         assert!(matches!(err, ManagedConfigPublishError::InvalidToml { .. }));
+    }
+
+    #[test]
+    fn invalid_toml_error_never_quotes_the_source_line() {
+        let err = validate_managed_config_payload(b"[registry]\nsecret = Bearer s3cr3t\n")
+            .expect_err("a broken line must be rejected");
+        for rendered in [format!("{err:#}"), format!("{err:?}")] {
+            assert!(
+                !rendered.contains("s3cr3t") && !rendered.contains("Bearer"),
+                "{rendered}"
+            );
+        }
+        let mut chain = err.to_string();
+        let mut cause = std::error::Error::source(&err);
+        while let Some(next) = cause {
+            chain.push_str(&format!(": {next}"));
+            cause = next.source();
+        }
+        assert!(chain.contains("line 2"), "{chain}");
     }
 
     #[test]
