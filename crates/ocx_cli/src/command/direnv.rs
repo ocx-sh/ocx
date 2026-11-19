@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use super::boxed;
+
 /// [direnv](https://direnv.net) integration for the project toolchain.
 ///
 /// Bare `ocx direnv` is shorthand for `ocx direnv init` — the once-per-project
@@ -57,9 +59,12 @@ impl Direnv {
 
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match &self.command {
-            Some(DirenvCommand::Init(init)) => init.execute(context).await,
-            Some(DirenvCommand::Export(export)) => export.execute(context).await,
-            None => super::direnv_init::DirenvInit::default().execute(context).await,
+            Some(DirenvCommand::Init(init)) => boxed(move || init.execute(context)).await,
+            Some(DirenvCommand::Export(export)) => boxed(move || export.execute(context)).await,
+            None => {
+                let init = super::direnv_init::DirenvInit::default();
+                boxed(|| init.execute(context)).await
+            }
         }
     }
 }

@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use super::boxed;
 use crate::app::CliRefusal;
 use crate::options;
 
@@ -56,8 +57,8 @@ pub struct ShellArgs {
 impl ShellArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match &self.command {
-            Some(command) => command.execute(context).await,
-            None => self.open(context).await,
+            Some(command) => boxed(move || command.execute(context)).await,
+            None => boxed(move || self.open(context)).await,
         }
     }
 
@@ -219,12 +220,12 @@ pub enum Shell {
 impl Shell {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            Shell::Allow(allow) => allow.execute(context).await,
+            Shell::Allow(allow) => boxed(move || allow.execute(context)).await,
             Shell::Completion(_) => {
                 unreachable!("shell completion is handled in the static-command bypass in App::run")
             }
-            Shell::Revoke(revoke) => revoke.execute(context).await,
-            Shell::State(state) => state.execute(context).await,
+            Shell::Revoke(revoke) => boxed(move || revoke.execute(context)).await,
+            Shell::State(state) => boxed(move || state.execute(context)).await,
         }
     }
 }

@@ -10,6 +10,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 pub mod exec;
 pub mod shim;
 
@@ -43,8 +45,8 @@ pub enum Launcher {
 impl Launcher {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            Launcher::Exec(exec) => exec.execute(context).await,
-            Launcher::Shim(shim) => shim.execute(context).await,
+            Launcher::Exec(exec) => boxed(move || exec.execute(context)).await,
+            Launcher::Shim(shim) => boxed(move || shim.execute(context)).await,
         }
     }
 }

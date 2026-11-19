@@ -10,6 +10,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 /// Manage the corporate managed-configuration tier (`[managed]`).
 ///
 /// Decoupled from `ocx self update`: this tier tracks an operator-published
@@ -108,10 +110,10 @@ pub enum ConfigGroup {
 impl ConfigGroup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            ConfigGroup::Setup(args) => args.execute(context).await,
-            ConfigGroup::Update(args) => args.execute(context).await,
-            ConfigGroup::Test(args) => args.execute(context).await,
-            ConfigGroup::Push(args) => args.execute(context).await,
+            ConfigGroup::Setup(args) => boxed(move || args.execute(context)).await,
+            ConfigGroup::Update(args) => boxed(move || args.execute(context)).await,
+            ConfigGroup::Test(args) => boxed(move || args.execute(context)).await,
+            ConfigGroup::Push(args) => boxed(move || args.execute(context)).await,
         }
     }
 }

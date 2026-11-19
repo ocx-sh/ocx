@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 /// The `ocx package` commands.
 ///
 /// These commands operate on OCI identifiers directly and never consult
@@ -481,38 +483,44 @@ pub enum Package {
 impl Package {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            Package::Announce(announce) => announce.execute(context).await,
-            Package::Attest(attest) => attest.execute(context).await,
-            Package::Cascade(cascade) => cascade.execute(context).await,
-            Package::Claim(claim) => claim.execute(context).await,
-            Package::Copy(copy) => copy.execute(context).await,
-            Package::Create(create) => create.execute(context).await,
-            Package::Description(description) => description.execute(context).await,
+            Package::Announce(announce) => boxed(move || announce.execute(context)).await,
+            Package::Attest(attest) => boxed(move || attest.execute(context)).await,
+            Package::Cascade(cascade) => boxed(move || cascade.execute(context)).await,
+            Package::Claim(claim) => boxed(move || claim.execute(context)).await,
+            Package::Copy(copy) => boxed(move || copy.execute(context)).await,
+            Package::Create(create) => boxed(move || create.execute(context)).await,
+            Package::Description(description) => boxed(move || description.execute(context)).await,
             Package::DeprecatedDescribe(push) => {
-                super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_DESCRIBE);
-                push.execute(context).await
+                boxed(move || {
+                    super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_DESCRIBE);
+                    push.execute(context)
+                })
+                .await
             }
             Package::DeprecatedInfo(pull) => {
-                super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_INFO);
-                pull.execute(context).await
+                boxed(move || {
+                    super::deprecated::warn_renamed(&context, &super::deprecated::PACKAGE_INFO);
+                    pull.execute(context)
+                })
+                .await
             }
-            Package::Deps(deps) => deps.execute(context).await,
-            Package::Env(env) => env.execute(context).await,
-            Package::Inspect(inspect) => inspect.execute(context).await,
-            Package::Install(install) => install.execute(context).await,
-            Package::Prune(prune) => prune.execute(context).await,
-            Package::Pull(pull) => pull.execute(context).await,
-            Package::Push(deploy) => deploy.execute(context).await,
-            Package::Receipt(receipt) => receipt.execute(context).await,
-            Package::Sbom(sbom) => sbom.execute(context).await,
-            Package::Select(select) => select.execute(context).await,
-            Package::Deselect(deselect) => deselect.execute(context).await,
-            Package::Sign(sign) => sign.execute(context).await,
-            Package::Test(test) => test.execute(context).await,
-            Package::Verify(verify) => verify.execute(context).await,
-            Package::Exec(exec) => exec.execute(context).await,
-            Package::Uninstall(uninstall) => uninstall.execute(context).await,
-            Package::Which(which) => which.execute(context).await,
+            Package::Deps(deps) => boxed(move || deps.execute(context)).await,
+            Package::Env(env) => boxed(move || env.execute(context)).await,
+            Package::Inspect(inspect) => boxed(move || inspect.execute(context)).await,
+            Package::Install(install) => boxed(move || install.execute(context)).await,
+            Package::Prune(prune) => boxed(move || prune.execute(context)).await,
+            Package::Pull(pull) => boxed(move || pull.execute(context)).await,
+            Package::Push(deploy) => boxed(move || deploy.execute(context)).await,
+            Package::Receipt(receipt) => boxed(move || receipt.execute(context)).await,
+            Package::Sbom(sbom) => boxed(move || sbom.execute(context)).await,
+            Package::Select(select) => boxed(move || select.execute(context)).await,
+            Package::Deselect(deselect) => boxed(move || deselect.execute(context)).await,
+            Package::Sign(sign) => boxed(move || sign.execute(context)).await,
+            Package::Test(test) => boxed(move || test.execute(context)).await,
+            Package::Verify(verify) => boxed(move || verify.execute(context)).await,
+            Package::Exec(exec) => boxed(move || exec.execute(context)).await,
+            Package::Uninstall(uninstall) => boxed(move || uninstall.execute(context)).await,
+            Package::Which(which) => boxed(move || which.execute(context)).await,
         }
     }
 }

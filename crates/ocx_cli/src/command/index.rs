@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 #[derive(Subcommand)]
 pub enum Index {
     /// List available repositories in the registry
@@ -127,11 +129,11 @@ pub enum Index {
 impl Index {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            Index::Catalog(catalog) => catalog.execute(context).await,
-            Index::List(list) => list.execute(context).await,
-            Index::Update(update) => update.execute(context).await,
-            Index::Sync(sync) => sync.execute(context).await,
-            Index::Regenerate(regenerate) => regenerate.execute(context).await,
+            Index::Catalog(catalog) => boxed(move || catalog.execute(context)).await,
+            Index::List(list) => boxed(move || list.execute(context)).await,
+            Index::Update(update) => boxed(move || update.execute(context)).await,
+            Index::Sync(sync) => boxed(move || sync.execute(context)).await,
+            Index::Regenerate(regenerate) => boxed(move || regenerate.execute(context)).await,
         }
     }
 }
