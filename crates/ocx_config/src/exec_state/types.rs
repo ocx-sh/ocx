@@ -24,8 +24,8 @@ pub const MAX_HEADER: usize = 2_048;
 pub const MAX_INFLATED: usize = 256 * 1024;
 /// Applied + identity + replay records.
 pub const MAX_RECORDS: usize = 4_096;
-/// Tiers a session cache may hold.
-pub const MAX_RECORDED_TIERS: usize = 8;
+/// Tiers a session cache may hold: 3 discovered candidates, a full `OCX_CONFIG` list and `--config`.
+pub const MAX_RECORDED_TIERS: usize = 3 + crate::loader::MAX_CONFIG_LIST_ENTRIES + 1;
 /// Inherited scopes; the encoder drops the oldest above it.
 pub const MAX_INHERITED_SCOPES: usize = 16;
 
@@ -155,7 +155,7 @@ pub struct Policy {
     /// Relaxing, `OCX_NO_UPDATE_CHECK`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_update_check: Option<bool>,
-    /// Relaxing, `OCX_CONFIG`.
+    /// Relaxing, `OCX_CONFIG`: the raw value, a path list the reader splits; every entry absolute.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_path: Option<PathBuf>,
     /// Relaxing, `OCX_NO_CONFIG`.

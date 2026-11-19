@@ -96,7 +96,7 @@ impl LauncherShim {
             context.inherited(),
             &ChildEnvInputs {
                 mode: ExecMode::Layer,
-                written: context.written_policy(ExecMode::Layer.write_mode()),
+                written: context.written_policy(ExecMode::Layer.write_mode())?,
                 binary_pin: context.binary_pin(),
                 composed: &entries,
                 composed_owner: Owner::Inherited,

@@ -53,16 +53,18 @@ crate::env_vars! {
     ///
     /// Digest-addressed reads still consult the local index first. `--remote` takes precedence.
     pub OCX_REMOTE: Bool, Public, propagation = UserInput;
-    /// Path to an explicit configuration file. Mirrors `--config`.
+    /// Paths to explicit configuration files, separated like `PATH` (`:` on Unix, `;` on Windows).
+    /// Mirrors `--config`, which takes one path.
     ///
-    /// Layers on top of the discovered chain (system, user, `$OCX_HOME/config.toml`) at the highest
-    /// file-tier precedence. With `--config` both load and the flag wins on conflicting scalars.
+    /// Each file layers on the discovered chain and the managed tier in list order, a later file
+    /// winning on conflicting scalars; `--config` loads after the whole list. At most 32 files.
     ///
-    /// A missing file is an error naming the path; empty is unset. Combine with `OCX_NO_CONFIG` for
-    /// a hermetic load.
-    pub OCX_CONFIG: Path, Public, propagation = UserInput;
-    /// Boolean — skip the discovered config-tier chain; explicit `--config` / `OCX_CONFIG`
-    /// paths still load and a system-tier lock survives. Forwarded to child OCX.
+    /// A missing file is an error naming it; an empty value is unset and empty entries are skipped.
+    /// A path containing the separator cannot be listed. With `OCX_NO_CONFIG` the listed files
+    /// still load.
+    pub OCX_CONFIG: PathList, Public, propagation = UserInput;
+    /// Boolean — skip the discovered config-tier chain; every file `--config` and `OCX_CONFIG` name
+    /// still loads and a system-tier lock survives. Forwarded to child OCX.
     ///
     /// Also drops the `[managed]` snapshot and the `OCX_MANAGED_CONFIG` read. A system-tier policy
     /// in `/etc/ocx/config.toml` still loads, filtered to its locked sections, and an unreadable

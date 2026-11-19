@@ -49,8 +49,8 @@ pub struct Context {
     global: bool,
     /// The resolution policy an execution record states about this invocation.
     recorded_config: RecordedConfig,
-    /// The received `config_path` that was skipped because its file had vanished (`ocx shell state` only).
-    skipped_received_config: Option<PathBuf>,
+    /// The received `OCX_CONFIG` entries skipped because their files had vanished (`ocx shell state` only).
+    skipped_received_config: Vec<PathBuf>,
     /// The `toolchain_dir` root, already past every refusal; `None` for the in-project default.
     toolchain_root: Option<ocx_config::ToolchainRoot>,
     concurrency: ocx_package_manager::Concurrency,
@@ -116,6 +116,26 @@ pub struct ManagedConfigGate {
     /// `config_path` whose file has vanished is skipped (the report carries a note) instead of failing
     /// as a missing `--config` would (exit 79).
     pub tolerate_vanished_received_config: bool,
+}
+
+/// Splits a received `OCX_CONFIG` list into the entries to load, rejoined as a list, and the entries
+/// whose files are gone. Empty entries are dropped as the loader drops them.
+async fn without_vanished_entries(list: &Path) -> anyhow::Result<(Option<std::ffi::OsString>, Vec<PathBuf>)> {
+    let mut kept = Vec::new();
+    let mut vanished = Vec::new();
+    for entry in std::env::split_paths(list).filter(|entry| !entry.as_os_str().is_empty()) {
+        if received_config_is_missing(&entry).await {
+            vanished.push(entry);
+        } else {
+            kept.push(entry);
+        }
+    }
+    let kept = if kept.is_empty() {
+        None
+    } else {
+        Some(std::env::join_paths(kept)?)
+    };
+    Ok((kept, vanished))
 }
 
 /// Whether the file is gone (`NotFound`); any other stat failure (permissions, I/O) is not "missing".
@@ -196,27 +216,24 @@ impl Context {
         let cwd = ocx_env::current_dir()?;
         // `--config` ▸ an explicitly set `OCX_CONFIG` (which the loader reads itself) ▸ the path the parent
         // ocx passed down, which joins only when neither is set.
-        let mut skipped_received_config = None;
-        let explicit_config = if ocx_env::OCX_CONFIG.get_raw().is_some() {
-            options.config.clone()
+        let mut skipped_received_config = Vec::new();
+        let received_config_list = if ocx_env::OCX_CONFIG.get_raw().is_some() || options.config.is_some() {
+            None
         } else {
-            let received = env_slot.policy.config_path.clone();
-            match received {
-                // Only a path the parent handed down is tolerated; an explicit `--config` still fails (79).
-                Some(path)
-                    if managed_config_gate.tolerate_vanished_received_config
-                        && options.config.is_none()
-                        && received_config_is_missing(&path).await =>
-                {
-                    skipped_received_config = Some(path);
-                    None
+            match env_slot.policy.config_path.as_deref() {
+                // Only entries the parent handed down are tolerated; an explicit `--config` still fails (79).
+                Some(list) if managed_config_gate.tolerate_vanished_received_config => {
+                    let (kept, vanished) = without_vanished_entries(list).await?;
+                    skipped_received_config = vanished;
+                    kept
                 }
-                other => other,
+                other => other.map(|list| list.as_os_str().to_owned()),
             }
         };
         let loaded_config = ConfigLoader::load_with_local_view(ConfigInputs {
-            explicit_path: explicit_config.as_deref(),
+            explicit_path: options.config.as_deref(),
             explicit_project_path: options.project.as_deref(),
+            received_config_list: received_config_list.as_deref(),
             cwd: Some(&cwd),
         })
         .await?;
@@ -880,20 +897,31 @@ impl Context {
     }
 
     /// What this process writes into a child's policy for `mode`, computed once per mode.
-    pub fn written_policy(&self, mode: WriteMode) -> &PolicyLayer {
+    ///
+    /// # Errors
+    /// A `--config` the child's `OCX_CONFIG` list split would not return whole; the refusal is
+    /// not cached, and recomputing it costs the same check.
+    pub fn written_policy(&self, mode: WriteMode) -> Result<&PolicyLayer, ocx_config::error::Error> {
         let slot = match mode {
             WriteMode::Inherit => &self.written_policy[0],
             WriteMode::Clean => &self.written_policy[1],
         };
-        slot.get_or_init(|| self.with_policy_inputs(|inputs| inputs.to_write(mode)))
+        if let Some(layer) = slot.get() {
+            return Ok(layer);
+        }
+        let layer = self.with_policy_inputs(|inputs| inputs.to_write(mode))?;
+        Ok(slot.get_or_init(|| layer))
     }
 
     /// What `ocx self update`'s hand-off child inherits: the received state and the policy this process writes.
-    pub fn handoff_state(&self) -> ocx_package_manager::HandoffState {
-        ocx_package_manager::HandoffState {
+    ///
+    /// # Errors
+    /// As [`Self::written_policy`].
+    pub fn handoff_state(&self) -> Result<ocx_package_manager::HandoffState, ocx_config::error::Error> {
+        Ok(ocx_package_manager::HandoffState {
             inherited: self.inherited().clone(),
-            written: self.written_policy(WriteMode::Inherit).clone(),
-        }
+            written: self.written_policy(WriteMode::Inherit)?.clone(),
+        })
     }
 
     /// The `OCX_BINARY_PIN` value for this process's children, memoised at init.
@@ -918,9 +946,9 @@ impl Context {
         &self.recorded_config
     }
 
-    /// The received `config_path` whose file had vanished and was therefore not loaded.
-    pub fn skipped_received_config(&self) -> Option<&Path> {
-        self.skipped_received_config.as_deref()
+    /// The received `OCX_CONFIG` entries whose files had vanished and were therefore not loaded.
+    pub fn skipped_received_config(&self) -> &[PathBuf] {
+        &self.skipped_received_config
     }
 
     /// Whether tag resolution may only consult the local index (`--frozen` / `OCX_FROZEN`).
@@ -2630,6 +2658,16 @@ mod tests {
         home: &Path,
         online: bool,
     ) -> anyhow::Result<Context> {
+        try_context_with(env, home, online, false).await
+    }
+
+    /// [`try_context_over_home`] with the gate's vanished-entry tolerance.
+    async fn try_context_with(
+        env: &ocx_env::overrides::EnvLock,
+        home: &Path,
+        online: bool,
+        tolerate_vanished_received_config: bool,
+    ) -> anyhow::Result<Context> {
         use clap::Parser as _;
 
         use crate::app::{Cli, ManagedConfigGate};
@@ -2659,10 +2697,55 @@ mod tests {
             ManagedConfigGate {
                 enforce_required: false,
                 onboarding: false,
-                tolerate_vanished_received_config: false,
+                tolerate_vanished_received_config,
             },
         )
         .await
+    }
+
+    /// A received list loads every entry that exists, in order, and reports the vanished ones; an
+    /// explicit `--config` or ambient `OCX_CONFIG` is never filtered (covered by the loader).
+    #[tokio::test]
+    async fn try_init_skips_only_the_vanished_entries_of_a_received_list() {
+        let home = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let kept = files.path().join("kept.toml");
+        std::fs::write(&kept, "[registry]\ndefault = \"kept.example\"\n").unwrap();
+        let gone = files.path().join("gone.toml");
+        let list = std::env::join_paths([&gone, &kept]).unwrap();
+
+        let env = ocx_env::overrides::lock();
+        env.hermetic(home.path());
+        env.set(
+            &ocx_env::__OCX_ENV_STATE,
+            received_state(ocx_config::exec_state::Policy {
+                config_path: Some(PathBuf::from(list)),
+                ..Default::default()
+            }),
+        );
+        let context = try_context_with(&env, home.path(), false, true)
+            .await
+            .expect("a vanished received entry does not fail the run");
+        assert_eq!(context.skipped_received_config(), [gone]);
+        assert_eq!(context.config().resolved_default_registry(), Some("kept.example"));
+    }
+
+    /// The received list's entries are filtered one by one, empty entries are not reported, and a
+    /// list with nothing left yields no list at all.
+    #[tokio::test]
+    async fn without_vanished_entries_splits_the_list_per_entry() {
+        let files = tempfile::tempdir().unwrap();
+        let present = files.path().join("present.toml");
+        std::fs::write(&present, "").unwrap();
+        let gone = files.path().join("gone.toml");
+
+        let list = std::env::join_paths([&present, Path::new(""), &gone]).unwrap();
+        let (kept, vanished) = without_vanished_entries(Path::new(&list)).await.unwrap();
+        assert_eq!(kept, Some(present.clone().into_os_string()));
+        assert_eq!(vanished, std::slice::from_ref(&gone));
+
+        let (kept, vanished) = without_vanished_entries(Path::new(&gone)).await.unwrap();
+        assert_eq!((kept, vanished), (None, vec![gone]));
     }
 
     /// The `__OCX_ENV_STATE` a parent ocx hands down with `policy`.

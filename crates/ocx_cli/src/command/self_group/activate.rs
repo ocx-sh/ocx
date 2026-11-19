@@ -981,6 +981,7 @@ pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<Shell
     let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
         explicit_path: options.config.as_deref(),
         explicit_project_path: options.project.as_deref(),
+        received_config_list: None,
         cwd: cwd.as_deref(),
     })
     .await;

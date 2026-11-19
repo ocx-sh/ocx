@@ -157,7 +157,7 @@ impl Exec {
         // Written for the child from the root flags and the received state; the records sink is the one
         // command flag added, because a launcher re-entry cannot re-derive it and would record elsewhere
         // or nowhere, losing the entrypoint pair's inner half.
-        let mut written = context.written_policy(mode.write_mode()).clone();
+        let mut written = context.written_policy(mode.write_mode())?.clone();
         let sink = records.forwarded();
         written.policy.records_name = sink.dir.as_ref().and(sink.name);
         written.policy.records_dir = sink.dir;

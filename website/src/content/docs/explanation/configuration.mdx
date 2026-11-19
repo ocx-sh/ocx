@@ -59,9 +59,11 @@ The system and user tiers live under OS-specific locations that do not travel wi
 Two mechanisms add an extra file *on top of* the discovery chain. They do not replace it. This supports the common "refine ambient config with a targeted override" case:
 
 - **`--config FILE`** is a CLI flag, passed before the subcommand. It suits one-off overrides.
-- **`OCX_CONFIG=/path/to/file.toml`** is an environment variable. It suits CI and Docker, where env vars are more practical than flags.
+- **`OCX_CONFIG=/path/to/file.toml`** is an environment variable. It suits CI and Docker, where env vars are more practical than flags. It holds a list of files, separated like `PATH`: `:` on Unix, `;` on Windows.
 
-The specified file layers at the top of the file-tier chain. A missing file is an error, because explicit paths represent deliberate intent, not ambient discovery. Both can coexist, and `--config` layers on top of `OCX_CONFIG`.
+The specified files layer at the top of the file-tier chain. A missing file is an error, because explicit paths represent deliberate intent, not ambient discovery. Both can coexist, and `--config` loads after the whole `OCX_CONFIG` list.
+
+In a list, a later entry wins over an earlier one and empty entries are skipped. A list holds at most 32 entries, and a longer one is refused with exit 78 before any file is read. The list still loads under [`OCX_NO_CONFIG`][env-no-config]. A `--config` path that contains the list separator is refused with exit 78 (`config_path_contains_separator`) when OCX would hand it to a child.
 
 To disable an ambient `OCX_CONFIG` for one invocation, set it to the empty string. This helps when a shell profile exports it:
 
@@ -113,8 +115,8 @@ The full stack runs from compiled defaults at the bottom to CLI flags at the top
 | 3 | User config | Discovered tier |
 | 4 | OCX home config, `$OCX_HOME/config.toml` | Discovered tier |
 | 5 | [`[managed]`](#managed) cached payload | Local and identity-gated, see [Where it sits in the chain][managed-position] |
-| 6 | `OCX_CONFIG` | Layered on top of the discovered chain and the managed payload |
-| 7 | `--config FILE` | Layered on top of `OCX_CONFIG` |
+| 6 | `OCX_CONFIG` | Each listed file layers on top of the discovered chain and the managed payload, in list order |
+| 7 | `--config FILE` | Loads after the whole `OCX_CONFIG` list |
 | 8 | Environment variables (`OCX_*`) | Win over any config file, except the five ladder variables below |
 | 9 (highest) | CLI flags | Per-invocation, always win |
 
@@ -299,6 +301,7 @@ For scripts, CI pipelines and programmatic tools, include the registry in every 
 [env-ocx-no-consent]: ../reference/environment.md#ocx-no-consent
 [env-ocx-no-verify]: ../reference/environment.md#ocx-no-verify
 [arg-config]: ../reference/command-line/index.md#arg-config
+[env-no-config]: ../reference/environment.md#ocx-no-config
 [cmd-config-setup]: ../reference/command-line/config.md#config-setup
 [cmd-config-test]: ../reference/command-line/config.md#config-test
 [cmd-config-update]: ../reference/command-line/config.md#config-update

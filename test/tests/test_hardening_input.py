@@ -224,7 +224,7 @@ def test_an_inflate_bomb_inside_the_length_cap_is_refused(ocx: OcxRunner) -> Non
             _state(
                 session={
                     **exec_state.default_state()["session"],
-                    "tiers": [f"/t{i}" for i in range(9)],
+                    "tiers": [f"/t{i}" for i in range(37)],  # MAX_RECORDED_TIERS (36) + 1
                 }
             ),
             "tier_limit",

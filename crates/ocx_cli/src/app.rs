@@ -180,8 +180,14 @@ impl App {
         update_notice::print(context.ui(), &notice_rows);
         // Captured before `execute` consumes the context: this manager carries `with_auto_verify`,
         // so trust policy also covers the unattended install.
-        let pending_update =
-            pending_update.map(|identifier| (context.manager().clone(), identifier, context.handoff_state()));
+        let pending_update = pending_update
+            .map(|identifier| {
+                context
+                    .handoff_state()
+                    .map(|handoff| (context.manager().clone(), identifier, handoff))
+            })
+            .transpose()
+            .map_err(|err| fail(err.into()))?;
 
         // No error document after a report, or stdout carries two JSON documents.
         let reported = context.api().reported_handle();

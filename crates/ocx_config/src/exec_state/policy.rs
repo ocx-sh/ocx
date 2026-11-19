@@ -3,14 +3,16 @@
 
 //! Policy precedence in a child: what a process reads and what it writes into a child's state.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::types::{Narrowing, Policy};
+use crate::error::{Error, Result};
 
 /// The five root flags that may reach child policy, by construction nothing else can.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootFlags {
-    /// `--config` -> `policy.config_path`.
+    /// `--config` -> `policy.config_path`, which is read as a path list; a path the child would
+    /// split in two is refused, never forwarded.
     pub config: Option<PathBuf>,
     /// `--remote` -> `policy.remote`.
     pub remote: bool,
@@ -351,8 +353,17 @@ impl PolicyInputs<'_> {
     /// `Inherit` writes the root flags, `--no-consent` and the received state; ambient values reach
     /// that child through its inherited environment. `Clean` drops the environment, so the state
     /// carries what this process resolved: the [`PolicyInputs::env_slot`] result.
-    pub fn to_write(&self, mode: WriteMode) -> PolicyLayer {
-        match mode {
+    ///
+    /// # Errors
+    /// [`Error::ConfigPathContainsSeparator`] when `--config` is a path the child's list split would
+    /// not return whole, in either mode.
+    pub fn to_write(&self, mode: WriteMode) -> Result<PolicyLayer> {
+        if let Some(config) = &self.flags.config
+            && !survives_list_split(config)
+        {
+            return Err(Error::ConfigPathContainsSeparator { path: config.clone() });
+        }
+        Ok(match mode {
             WriteMode::Clean => self.env_slot().0,
             WriteMode::Inherit => {
                 let mut layer = self.received_or_default();
@@ -370,8 +381,15 @@ impl PolicyInputs<'_> {
                 }
                 layer
             }
-        }
+        })
     }
+}
+
+/// Whether a child reading `path` as the `OCX_CONFIG` list gets back exactly `path`; the policy
+/// value is written raw, so a path holding the separator would load as several files.
+fn survives_list_split(path: &Path) -> bool {
+    let mut entries = std::env::split_paths(path);
+    entries.next().is_some_and(|entry| entry == path) && entries.next().is_none()
 }
 
 #[cfg(test)]

@@ -300,7 +300,7 @@ fn more_than_max_records_is_a_record_limit() {
 }
 
 #[test]
-fn nine_tiers_are_a_tier_limit() {
+fn one_tier_past_the_bound_is_a_tier_limit() {
     let mut state = ExecState::default();
     state.session.tiers = (0..=MAX_RECORDED_TIERS).map(|n| abs(&format!("t{n}"))).collect();
     assert_eq!(reason(decoded(&value_of(&state))), UnreadableReason::TierLimit);
@@ -326,6 +326,47 @@ fn a_relative_policy_path_is_invalid() {
     let mut state = ExecState::default();
     state.policy.config_path = Some(PathBuf::from("relative/config.toml"));
     assert_eq!(invalid_field(&state), "policy.config_path");
+}
+
+fn config_list(entries: &[PathBuf]) -> PathBuf {
+    PathBuf::from(std::env::join_paths(entries).expect("entries without the separator"))
+}
+
+fn absolute_entries(count: usize) -> Vec<PathBuf> {
+    (0..count)
+        .map(|n| std::env::temp_dir().join(format!("config-{n}.toml")))
+        .collect()
+}
+
+#[test]
+fn a_relative_entry_in_the_config_list_names_policy_config_path() {
+    let mut entries = absolute_entries(1);
+    entries.push(PathBuf::from("relative/second.toml"));
+    let mut state = ExecState::default();
+    state.policy.config_path = Some(config_list(&entries));
+    assert_eq!(invalid_field(&state), "policy.config_path");
+}
+
+#[test]
+fn a_config_list_over_the_cap_is_invalid() {
+    let mut state = ExecState::default();
+    state.policy.config_path = Some(config_list(&absolute_entries(
+        crate::loader::MAX_CONFIG_LIST_ENTRIES + 1,
+    )));
+    assert_eq!(invalid_field(&state), "policy.config_path");
+}
+
+#[test]
+fn an_all_absolute_config_list_decodes() {
+    for count in [1, crate::loader::MAX_CONFIG_LIST_ENTRIES] {
+        let mut state = ExecState::default();
+        state.policy.config_path = Some(config_list(&absolute_entries(count)));
+        let read = readable(decoded(&value_of(&state)));
+        assert_eq!(
+            read.policy.config_path, state.policy.config_path,
+            "{count} absolute entries"
+        );
+    }
 }
 
 /// EC-REC-006: a record whose key is not a valid variable name never enters the state.

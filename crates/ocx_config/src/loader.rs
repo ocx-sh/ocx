@@ -15,6 +15,10 @@ use crate::{Config, error::ConfigSource, error::Error, error::Result};
 /// Upper bound for a single config file.
 pub const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 
+/// Most files an `OCX_CONFIG` list may name. The prompt hook records every config tier path, and the
+/// state decoder refuses more than `MAX_RECORDED_TIERS`, so a longer list makes every prompt's state unreadable.
+pub const MAX_CONFIG_LIST_ENTRIES: usize = 32;
+
 /// The project file's name, shared by the CWD walk and `--project <directory>`, or `--project .`
 /// and a bare walk would answer differently for the same directory.
 const PROJECT_FILE_NAME: &str = "ocx.toml";
@@ -27,6 +31,8 @@ pub struct ConfigInputs<'a> {
     pub explicit_project_path: Option<&'a Path>,
     /// CWD for the project-tier walk. Pass `None` to disable the walk.
     pub cwd: Option<&'a Path>,
+    /// The received `OCX_CONFIG` value from a parent's exec state, loaded in the `OCX_CONFIG` slot.
+    pub received_config_list: Option<&'a std::ffi::OsStr>,
 }
 
 /// Result of [`ConfigLoader::load_with_local_view`]: the fully merged config and its views.
@@ -73,7 +79,9 @@ impl ConfigLoader {
     /// Top-level entry: discover, load, and merge.
     ///
     /// Precedence, lowest first: compiled-in defaults; system, user and `$OCX_HOME`; the
-    /// identity-gated managed snapshot; `OCX_CONFIG` if non-empty; [`ConfigInputs::explicit_path`].
+    /// identity-gated managed snapshot; the `OCX_CONFIG` files, a path list read left to right (the
+    /// parent's list in [`ConfigInputs::received_config_list`] when `OCX_CONFIG` is unset); then
+    /// [`ConfigInputs::explicit_path`].
     /// `OCX_NO_CONFIG=1` skips the user, `$OCX_HOME` and managed tiers and cuts the system tier to
     /// its locked sections.
     ///
@@ -90,11 +98,7 @@ impl ConfigLoader {
     /// Same as [`Self::load`].
     pub async fn load_with_local_view(inputs: ConfigInputs<'_>) -> Result<LoadedConfig> {
         let no_config = Self::no_config();
-        let raw_env_config_file = ocx_env::OCX_CONFIG.get_raw().and_then(|value| value.into_string().ok());
-        if raw_env_config_file.as_deref() == Some("") {
-            log::debug!("OCX_CONFIG is set to empty string — skipped via escape hatch");
-        }
-        let env_config_file = raw_env_config_file.filter(|s| !s.is_empty());
+        let env_config_files = Self::config_list_entries(inputs.received_config_list)?;
 
         // First, so a missing `--project` or `OCX_PROJECT` fails before anything else is read.
         let _project_path = Self::project_path(inputs.cwd, inputs.explicit_project_path).await?;
@@ -105,10 +109,7 @@ impl ConfigLoader {
         } else {
             Self::discover_paths().await?
         };
-        let mut explicit_paths: Vec<PathBuf> = Vec::new();
-        if let Some(env_path) = env_config_file {
-            explicit_paths.push(PathBuf::from(env_path));
-        }
+        let mut explicit_paths: Vec<PathBuf> = env_config_files;
         if let Some(explicit) = inputs.explicit_path {
             explicit_paths.push(explicit.to_path_buf());
         }
@@ -174,6 +175,43 @@ impl ConfigLoader {
             extra_ca_certs_tier,
             extra_ca_certs_tier_local,
         })
+    }
+
+    /// The `OCX_CONFIG` slot's files, in load order. An ambient `OCX_CONFIG` (even empty, the escape
+    /// hatch) beats `received`, the list a parent ocx passed down; a value that is not UTF-8 is
+    /// ignored. Counted before any file is read, so a refused list touches no disk.
+    ///
+    /// # Errors
+    /// [`Error::ConfigListTooLong`] when the list has more than [`MAX_CONFIG_LIST_ENTRIES`] entries.
+    pub fn config_list_entries(received: Option<&std::ffi::OsStr>) -> Result<Vec<PathBuf>> {
+        let value = match ocx_env::OCX_CONFIG.get_raw() {
+            Some(raw) => match raw.into_string() {
+                Ok(text) => std::ffi::OsString::from(text),
+                Err(_) => {
+                    log::debug!("OCX_CONFIG is not valid UTF-8 — ignored");
+                    return Ok(Vec::new());
+                }
+            },
+            None => match received {
+                Some(list) => list.to_os_string(),
+                None => return Ok(Vec::new()),
+            },
+        };
+        let entries: Vec<PathBuf> = std::env::split_paths(&value)
+            .filter(|entry| !entry.as_os_str().is_empty())
+            .collect();
+        if entries.is_empty() && !value.is_empty() {
+            log::debug!("OCX_CONFIG holds only empty entries — skipped");
+        } else if value.is_empty() {
+            log::debug!("OCX_CONFIG is set to empty string — skipped via escape hatch");
+        }
+        if entries.len() > MAX_CONFIG_LIST_ENTRIES {
+            return Err(Error::ConfigListTooLong {
+                count: entries.len(),
+                limit: MAX_CONFIG_LIST_ENTRIES,
+            });
+        }
+        Ok(entries)
     }
 
     /// The compiled-in base tier: routes `ocx.sh` through
@@ -1451,6 +1489,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -1474,6 +1513,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&path),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -1502,6 +1542,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -1524,6 +1565,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -1542,6 +1584,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&nonexistent),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let result = ConfigLoader::load(inputs).await;
@@ -1564,6 +1607,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("OCX_CONFIG should succeed");
@@ -1571,6 +1615,179 @@ mod tests {
             config.registry.as_ref().and_then(|r| r.default.as_deref()),
             Some("ci.example")
         );
+    }
+
+    #[tokio::test]
+    async fn ocx_config_list_later_entry_wins() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let first = write_config(&dir, "a.toml", "[registry]\ndefault = \"first.example\"");
+        let second = write_config(&dir, "b.toml", "[registry]\ndefault = \"second.example\"");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        let list = std::env::join_paths([&first, &second]).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().unwrap());
+        let inputs = ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: None,
+            cwd: None,
+        };
+        let config = ConfigLoader::load(inputs)
+            .await
+            .expect("a two-entry OCX_CONFIG list should load");
+        assert_eq!(
+            config.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("second.example"),
+            "the later entry of the list wins a scalar both set"
+        );
+    }
+
+    fn list_inputs<'a>(received: Option<&'a std::ffi::OsStr>) -> ConfigInputs<'a> {
+        ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            received_config_list: received,
+            cwd: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ocx_config_empty_entries_are_skipped() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let only = write_config(&dir, "a.toml", "[registry]\ndefault = \"only.example\"");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let list = format!("{sep}{}{sep}{sep}", only.display());
+        env.set(&ocx_env::OCX_CONFIG, &list);
+        let config = ConfigLoader::load(list_inputs(None))
+            .await
+            .expect("empty list entries are skipped");
+        assert_eq!(
+            config.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("only.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn ocx_config_list_over_cap_is_refused() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        // None of these exist: a read would surface FileNotFound, not the cap error.
+        let paths: Vec<PathBuf> = (0..=MAX_CONFIG_LIST_ENTRIES)
+            .map(|n| dir.path().join(format!("missing-{n}.toml")))
+            .collect();
+        let list = std::env::join_paths(&paths).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().unwrap());
+        let err = ConfigLoader::load(list_inputs(None))
+            .await
+            .expect_err("one entry past the cap is refused");
+        assert!(
+            matches!(
+                err,
+                Error::ConfigListTooLong { count, limit }
+                    if count == MAX_CONFIG_LIST_ENTRIES + 1 && limit == MAX_CONFIG_LIST_ENTRIES
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ocx_config_list_at_the_cap_loads() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        let paths: Vec<PathBuf> = (0..MAX_CONFIG_LIST_ENTRIES)
+            .map(|n| {
+                write_config(
+                    &dir,
+                    &format!("c{n}.toml"),
+                    &format!("[registry]\ndefault = \"c{n}.example\""),
+                )
+            })
+            .collect();
+        let list = std::env::join_paths(&paths).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().unwrap());
+        let config = ConfigLoader::load(list_inputs(None))
+            .await
+            .expect("exactly the cap loads");
+        assert_eq!(
+            config.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some(format!("c{}.example", MAX_CONFIG_LIST_ENTRIES - 1).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn ocx_config_list_loads_under_no_config() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let first = write_config(&dir, "a.toml", "[registry]\ndefault = \"first.example\"");
+        let second = write_config(&dir, "b.toml", "[registry]\ndefault = \"second.example\"");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        let list = std::env::join_paths([&first, &second]).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().unwrap());
+        let loaded = ConfigLoader::load_with_local_view(list_inputs(None))
+            .await
+            .expect("every entry loads under OCX_NO_CONFIG");
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("second.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn ocx_config_tier_paths_list_every_entry() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let first = write_config(&dir, "a.toml", "[registry]\ndefault = \"first.example\"");
+        let second = write_config(&dir, "b.toml", "[registry]\ndefault = \"second.example\"");
+        let flag = write_config(&dir, "c.toml", "[registry]\ndefault = \"flag.example\"");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        let list = std::env::join_paths([&first, &second]).expect("paths without the separator");
+        env.set(&ocx_env::OCX_CONFIG, list.to_str().unwrap());
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: Some(&flag),
+            ..list_inputs(None)
+        })
+        .await
+        .expect("list plus --config loads");
+        let tail: Vec<&PathBuf> = loaded.config_tier_paths.iter().rev().take(3).collect();
+        assert_eq!(
+            tail,
+            vec![&flag, &second, &first],
+            "list entries in order, then --config"
+        );
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("flag.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn received_list_loads_in_the_ocx_config_slot() {
+        let env = ocx_env::overrides::lock();
+        let dir = TempDir::new().unwrap();
+        let first = write_config(&dir, "a.toml", "[registry]\ndefault = \"first.example\"");
+        let second = write_config(&dir, "b.toml", "[registry]\ndefault = \"second.example\"");
+        env.set(&ocx_env::OCX_NO_CONFIG, "1");
+        without_system_config(&env);
+        env.remove(&ocx_env::OCX_CONFIG);
+        let list = std::env::join_paths([&first, &second]).expect("paths without the separator");
+        let loaded = ConfigLoader::load_with_local_view(list_inputs(Some(&list)))
+            .await
+            .expect("a received list loads");
+        assert_eq!(
+            loaded.merged.registry.as_ref().and_then(|r| r.default.as_deref()),
+            Some("second.example")
+        );
+        assert!(loaded.config_tier_paths.ends_with(&[first, second]));
     }
 
     /// No managed-config tier exists yet, so `load_with_local_view`'s
@@ -1587,6 +1804,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -1617,6 +1835,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&explicit_file),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -1652,6 +1871,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1670,6 +1890,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1701,6 +1922,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1724,6 +1946,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1750,6 +1973,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1786,6 +2010,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs).await.expect("load should succeed");
@@ -1880,6 +2105,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -2109,6 +2335,7 @@ mod tests {
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -2134,6 +2361,7 @@ mod tests {
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -2159,6 +2387,7 @@ mod tests {
         let error = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -2178,6 +2407,7 @@ mod tests {
         ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -3396,6 +3626,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3428,6 +3659,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&overlay),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3468,6 +3700,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3513,6 +3746,7 @@ mod tests {
             let inputs = ConfigInputs {
                 explicit_path: None,
                 explicit_project_path: None,
+                received_config_list: None,
                 cwd: None,
             };
             let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3542,6 +3776,7 @@ mod tests {
             let inputs = ConfigInputs {
                 explicit_path: None,
                 explicit_project_path: None,
+                received_config_list: None,
                 cwd: None,
             };
             let loaded = ConfigLoader::load_with_local_view(inputs).await;
@@ -3575,6 +3810,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -3610,6 +3846,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -3652,6 +3889,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3695,6 +3933,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&overlay),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3747,6 +3986,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&overlay),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3795,6 +4035,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: Some(&overlay),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let loaded = ConfigLoader::load_with_local_view(inputs)
@@ -3833,6 +4074,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -3863,6 +4105,7 @@ mod tests {
         let inputs = ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         };
         let config = ConfigLoader::load(inputs)
@@ -4191,6 +4434,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -4230,6 +4474,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: Some(&caller),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -4264,6 +4509,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -4299,6 +4545,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -4336,6 +4583,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5099,6 +5347,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5127,6 +5376,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: Some(&overlay),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5163,6 +5413,7 @@ mod tests {
             ConfigLoader::load_with_local_view(ConfigInputs {
                 explicit_path: None,
                 explicit_project_path: None,
+                received_config_list: None,
                 cwd: None,
             })
             .await
@@ -5850,6 +6101,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5899,6 +6151,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5930,6 +6183,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -5983,6 +6237,7 @@ mod tests {
             ConfigLoader::load_with_local_view(ConfigInputs {
                 explicit_path: None,
                 explicit_project_path: None,
+                received_config_list: None,
                 cwd: None,
             })
             .await
@@ -6094,6 +6349,7 @@ mod tests {
             ConfigLoader::load_with_local_view(ConfigInputs {
                 explicit_path: None,
                 explicit_project_path: None,
+                received_config_list: None,
                 cwd: None,
             })
             .await
@@ -6182,6 +6438,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6269,6 +6526,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: Some(relative.as_path()),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6291,6 +6549,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6342,6 +6601,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: Some(explicit.as_path()),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6380,6 +6640,7 @@ mod tests {
         let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6560,6 +6821,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6614,6 +6876,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6658,6 +6921,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: None,
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await
@@ -6702,6 +6966,7 @@ mod tests {
         let config = ConfigLoader::load(ConfigInputs {
             explicit_path: Some(&explicit),
             explicit_project_path: None,
+            received_config_list: None,
             cwd: None,
         })
         .await

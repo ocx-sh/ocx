@@ -17,7 +17,9 @@ Default `auto`: color only on a terminal. An explicit `--color` outranks `NO_COL
 
 Path to the OCX configuration file.
 
-Can also be set via the `OCX_CONFIG` environment variable. The file must exist, or the command exits 79.
+Takes one path. The `OCX_CONFIG` environment variable takes a list of paths separated like `PATH` (`:` on Unix, `;` on Windows); this flag loads after every file in that list.
+
+A path that contains the separator is refused, because a child OCX process would read it as a list (exit 78). The file must exist, or the command exits 79.
 
 To disable config discovery entirely, set `OCX_NO_CONFIG=1`.
 

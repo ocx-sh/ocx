@@ -467,7 +467,9 @@ Configuration is invalid or incomplete.
 | `ci_missing_env` | A CI environment variable the export needs is not set |
 | `config_edit_too_large` | The config file being edited exceeds the allowed size |
 | `config_file_too_large` | A config file exceeds the allowed size |
+| `config_list_too_long` | OCX_CONFIG lists more config files than the limit |
 | `config_parse` | A config file does not parse |
+| `config_path_contains_separator` | A config path contains the OCX_CONFIG list separator |
 | `credential_helper_not_on_path` | The configured credential helper is not on PATH |
 | `credential_helper_unsafe_path` | The credential helper resolves to an unsafe path |
 | `envrc_exists` | An .envrc already exists and --force was not given |

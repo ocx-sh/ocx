@@ -67,7 +67,9 @@ config_edit_too_large	ConfigError	The config file being edited exceeds the allow
 config_file_not_found	NotFound	An explicitly named config or project file does not exist
 config_file_too_large	ConfigError	A config file exceeds the allowed size
 config_io	IoError	Reading a config file failed
+config_list_too_long	ConfigError	OCX_CONFIG lists more config files than the limit
 config_parse	ConfigError	A config file does not parse
+config_path_contains_separator	ConfigError	A config path contains the OCX_CONFIG list separator
 credential_helper_failed	AuthError	The credential helper failed to supply credentials
 credential_helper_invalid_json	DataError	The credential helper answered with invalid JSON
 credential_helper_not_installed	PolicyBlocked	The credential helper is not installed, and an OCX started by a credential helper never downloads

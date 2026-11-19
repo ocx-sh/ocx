@@ -5629,9 +5629,12 @@
           "type": "boolean",
           "description": "`OCX_NO_UPDATE_CHECK`."
         },
-        "config_path": {
-          "description": "`OCX_CONFIG`.",
-          "$ref": "#/$defs/AbsolutePath"
+        "config_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AbsolutePath"
+          },
+          "description": "The config files the parent named, in order: `OCX_CONFIG`'s list and/or `--config`. Omitted when none."
         },
         "no_config": {
           "type": "boolean",
@@ -6637,14 +6640,14 @@
             },
             "path": {
               "type": "string",
-              "description": "The config path the parent ocx recorded."
+              "description": "The vanished entry's path, as the parent ocx recorded it."
             }
           },
           "required": [
             "type",
             "path"
           ],
-          "description": "The inherited state names a `config_path` whose file no longer exists, so this report was built without it.\n\nAn ordinary command treats a missing config path as an error; the report is a finding instead."
+          "description": "A config file the parent ocx recorded in its received `OCX_CONFIG` list no longer exists, so this report was built without it.\n\nThe list is checked entry by entry and each vanished entry is its own finding; the entries that still exist load in order.\nAn ordinary command treats a missing config path as an error; the report is a finding instead."
         },
         {
           "x-ocx-unknown-variant": true,
@@ -9306,7 +9309,7 @@
         "schema_version": {
           "description": "The version of this root's shape; a breaking change increments it.",
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "ocx_home": {
           "$ref": "#/$defs/AbsolutePath",
@@ -9445,7 +9448,7 @@
         "schema_version": {
           "description": "The version of this root's shape; a breaking change increments it.",
           "type": "integer",
-          "const": 1
+          "const": 2
         },
         "ocx_home": {
           "$ref": "#/$defs/AbsolutePath",

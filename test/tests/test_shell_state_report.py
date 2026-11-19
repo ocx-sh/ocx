@@ -192,7 +192,7 @@ def test_a_readable_state_reports_every_field(ocx: OcxRunner) -> None:
     assert "token" not in json.dumps(env_state), "the session token is not published"
     assert env_state["policy"]["remote"] is False
     assert env_state["policy"]["no_verify"] is True
-    assert env_state["policy"]["config_path"] == str(config_path)
+    assert env_state["policy"]["config_paths"] == [str(config_path)]
     assert {"type": "received_config_missing", "path": str(config_path)} in report[
         "notes"
     ]

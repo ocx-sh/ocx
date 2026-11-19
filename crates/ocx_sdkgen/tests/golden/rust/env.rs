@@ -72,8 +72,8 @@ pub const PUBLIC: &[EnvVar] = &[
     },
     EnvVar {
         name: "OCX_CONFIG",
-        value: "path",
-        summary: "Path to an explicit configuration file. Mirrors `--config`.",
+        value: "path_list",
+        summary: "Paths to explicit configuration files, separated like `PATH` (`:` on Unix, `;` on Windows).",
         secret: false,
     },
     EnvVar {
@@ -199,7 +199,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_NO_CONFIG",
         value: "bool",
-        summary: "Boolean — skip the discovered config-tier chain; explicit `--config` / `OCX_CONFIG`",
+        summary: "Boolean — skip the discovered config-tier chain; every file `--config` and `OCX_CONFIG` name",
         secret: false,
     },
     EnvVar {

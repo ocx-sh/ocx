@@ -13,6 +13,7 @@ tag; any other code means the registry was consulted.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -497,3 +498,105 @@ def test_received_no_project_ends_the_project_walk_in_the_child(
     assert "no ocx.toml found" in result.stderr, (
         f"a received no_project must end the walk at the CWD; stderr={result.stderr!r}"
     )
+
+
+def _config_pair(tmp_path: Path) -> tuple[Path, Path]:
+    first = tmp_path / "first.toml"
+    first.write_text('[registry]\ndefault = "first-list.example"\n')
+    second = tmp_path / "second.toml"
+    second.write_text('[registry]\ndefault = "second-list.example"\n')
+    return first, second
+
+
+def _state_report(
+    ocx: OcxRunner, state: str, *, drop: tuple[str, ...] = ("OCX_DEFAULT_REGISTRY",)
+) -> dict:
+    reported = _run(
+        ocx,
+        "--offline",
+        "--format",
+        "json",
+        "shell",
+        "state",
+        env={"__OCX_ENV_STATE": state},
+        drop=drop,
+    )
+    assert reported.returncode == 0, f"stderr={reported.stderr!r}"
+    return json.loads(reported.stdout)
+
+
+def test_config_list_round_trips_through_exec_clean_as_config_paths(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A two-entry ``OCX_CONFIG`` list reaches a child launched by ``ocx exec --clean`` as ``policy.config_paths``, in order."""
+    first, second = _config_pair(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "ocx.toml").write_text("[tools]\n")
+    ocx.run("--project", str(project), "lock", "--no-pull")
+
+    result = _run(
+        ocx,
+        "--project",
+        str(project),
+        "exec",
+        "--clean",
+        "--",
+        str(ocx.binary),
+        "--offline",
+        "--format",
+        "json",
+        "shell",
+        "state",
+        env={"OCX_CONFIG": f"{first}{os.pathsep}{second}"},
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    policy = json.loads(result.stdout)["env_state"]["policy"]
+    assert policy["config_paths"] == [str(first), str(second)], policy
+
+
+def test_received_config_list_with_a_vanished_entry_skips_it_and_notes_once(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A received list entry deleted since the parent ran is skipped with one note; the others still load."""
+    first, second = _config_pair(tmp_path)
+    list_state = _policy_state(config_path=f"{first}{os.pathsep}{second}")
+
+    control = _state_report(ocx, list_state)
+    assert control["env_state"]["policy"]["config_paths"] == [str(first), str(second)]
+    assert not [n for n in control["notes"] if n["type"] == "received_config_missing"]
+
+    second.unlink()
+    report = _state_report(ocx, list_state)
+
+    missing = [n for n in report["notes"] if n["type"] == "received_config_missing"]
+    assert [n["path"] for n in missing] == [str(second)], report["notes"]
+
+    assert report["env_state"]["status"] == "readable", report["env_state"]
+    assert str(first) in report["env_state"]["policy"]["config_paths"], report
+
+
+def test_received_config_list_with_a_relative_entry_names_the_field_as_unreadable(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A relative entry in a received list makes the payload unreadable, naming ``policy.config_path``."""
+    first, _ = _config_pair(tmp_path)
+    state = _policy_state(config_path=f"{first}{os.pathsep}relative/second.toml")
+
+    result = _run(
+        ocx,
+        "--offline",
+        "package",
+        "install",
+        UNINDEXED,
+        env={"__OCX_ENV_STATE": state},
+    )
+    warnings = _state_warnings(result.stderr)
+    assert len(warnings) == 1, f"exactly one warning expected; stderr={result.stderr!r}"
+    assert "policy.config_path" in warnings[0], warnings
+    assert "incompatible" not in warnings[0], warnings
+
+    notes = _state_report(ocx, state)["notes"]
+    unreadable = [n for n in notes if n.get("type") == "env_state_unreadable"]
+    assert unreadable and unreadable[0].get("field") == "policy.config_path", notes
