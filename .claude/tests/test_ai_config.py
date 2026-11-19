@@ -1133,6 +1133,45 @@ class TestTaskfileLint:
         )
 
 
+class TestSatelliteMirrorDir:
+    """`OCX_MIRROR_DIR` reaches the satellite tasks as a task argument and from the environment.
+
+    go-task templates a Taskfile's top-level `vars:` before `NAME=value` arguments are
+    in scope, so a top-level var derived from one only ever saw the environment. Read
+    off `task --dry`: `.worktree:add`'s one `git -C '<dir>' worktree add` line must
+    name the expected checkout, and no other candidate may appear anywhere in the
+    run, so no internal task falls back to a different one.
+    """
+
+    @pytest.mark.parametrize("spelling", ["argument", "environment", "both", "neither"])
+    @pytest.mark.parametrize("task_name", ["satellite:verify", "satellite:contract"])
+    def test_the_mirror_checkout_follows_the_spelling(self, tmp_path: Path, task_name: str, spelling: str) -> None:
+        task = shutil.which("task")
+        if task is None:
+            pytest.fail("`task` (go-task) is not on PATH — run under `ocx exec --` or `task claude:tests`")
+        candidates = {
+            "argument": str(tmp_path / "from-argument"),
+            "environment": str(tmp_path / "from-environment"),
+            "neither": f"{ROOT}/../ocx-mirror",
+        }
+        argv = [task, "--dry", task_name]
+        env = {k: v for k, v in os.environ.items() if k != "OCX_MIRROR_DIR"}
+        if spelling in ("argument", "both"):
+            argv.append(f"OCX_MIRROR_DIR={candidates['argument']}")
+        if spelling in ("environment", "both"):
+            env["OCX_MIRROR_DIR"] = candidates["environment"]
+        # The task argument wins over the environment, which wins over the default.
+        expected = candidates["argument" if spelling == "both" else spelling]
+        run = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, encoding="utf-8", check=False)
+        rendered = run.stdout + run.stderr
+        assert run.returncode == 0, f"`task --dry {task_name}` failed: {rendered[-400:]}"
+        adds = [line for line in rendered.splitlines() if "worktree add --detach" in line]
+        assert len(adds) == 1, f"`task --dry {task_name}` rendered {len(adds)} `worktree add` lines, expected 1"
+        assert f"git -C '{expected}' worktree add" in adds[0], f"{spelling}: expected {expected}, got {adds[0]}"
+        stray = [path for path in candidates.values() if path != expected and path in rendered]
+        assert not stray, f"{spelling}: `task --dry {task_name}` also names {stray}"
+
+
 # ---------------------------------------------------------------------------
 # AI config overhaul — Phase 1 invariants
 # ---------------------------------------------------------------------------
