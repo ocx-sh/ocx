@@ -13,6 +13,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use ocx_index::{Jurisdiction, OcxIndex};
 use ocx_package::cascade::{gather, graph};
 
+use super::boxed;
 use crate::options;
 
 /// Packages audited at once; kept narrow because it multiplies `gather`'s own 64-wide fan-out.
@@ -29,8 +30,8 @@ pub enum CascadeGroup {
 impl CascadeGroup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            CascadeGroup::Check(check) => check.execute(context).await,
-            CascadeGroup::Repair(repair) => repair.execute(context).await,
+            CascadeGroup::Check(check) => boxed(move || check.execute(context)).await,
+            CascadeGroup::Repair(repair) => boxed(move || repair.execute(context)).await,
         }
     }
 }

@@ -9,6 +9,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 /// Dispatcher for `ocx package description`.
 #[derive(Subcommand)]
 pub enum DescriptionGroup {
@@ -19,8 +21,8 @@ pub enum DescriptionGroup {
 impl DescriptionGroup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            DescriptionGroup::Push(push) => push.execute(context).await,
-            DescriptionGroup::Pull(pull) => pull.execute(context).await,
+            DescriptionGroup::Push(push) => boxed(move || push.execute(context)).await,
+            DescriptionGroup::Pull(pull) => boxed(move || pull.execute(context)).await,
         }
     }
 }

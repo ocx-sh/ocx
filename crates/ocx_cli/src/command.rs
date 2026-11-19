@@ -456,10 +456,11 @@ pub enum Command {
 
 /// Builds a command's future in a frame of its own and boxes it.
 ///
-/// A debug build gives each match arm of [`Command::execute`] its own stack slot for the future it
-/// creates, so building them in place sums every command's future into a poll frame that stays live
-/// for the whole command (1.4 MiB, past a 2 MiB test thread). Built here, the frame is gone before
-/// the first poll and only the box stays. Inlined, the slots come back, so keep `#[inline(never)]`.
+/// A debug build gives each match arm of a dispatcher ([`Command::execute`] and every command
+/// group's `execute`) its own stack slot for the future it creates, so building them in place sums
+/// every command's future into a poll frame that stays live for the whole command (1.4 MiB, past a
+/// 2 MiB test thread). Built here, the frame is gone before the first poll and only the box stays.
+/// Inlined, the slots come back, so keep `#[inline(never)]`.
 #[inline(never)]
 fn boxed<'a, F>(build: impl FnOnce() -> F) -> Pin<Box<dyn Future<Output = anyhow::Result<ExitCode>> + 'a>>
 where
@@ -615,17 +616,70 @@ mod tests {
         std::mem::size_of::<F>()
     }
 
-    /// The `Command::execute` future is the largest state any arm holds across its await, so it
-    /// stays under 16 KiB only while every arm's own future is boxed (a command's future alone is
-    /// up to 1.4 MiB in a debug build, past a 2 MiB test thread's budget once polled).
+    /// Every command group's clap path, the root `ocx` included.
+    fn group_paths(command: &clap::Command, path: String, groups: &mut std::collections::BTreeSet<String>) {
+        if command.has_subcommands() {
+            groups.insert(path.clone());
+        }
+        for subcommand in command.get_subcommands() {
+            group_paths(subcommand, format!("{path} {}", subcommand.get_name()), groups);
+        }
+    }
+
+    /// A dispatcher whose arms are all boxed holds its `Context` and one box across the await, so its
+    /// future stays within `SLACK` bytes of a `Context`. An arm built in place holds its whole command
+    /// future instead, which carries a `Context` of its own (every command future is over twice a
+    /// `Context` in a debug build), and the debug poll frame sums those futures across arms (1.4 MiB
+    /// at the top level, past a 2 MiB test thread).
     ///
-    /// Red state: drop the `boxed` call from an arm whose command future exceeds the bound. An
-    /// unboxed arm whose future fits under the bound does not red this test, because the bound
-    /// measures the whole enum's future, not each arm.
+    /// Red state: drop the `boxed` call from any arm of any dispatcher below, or add a command group
+    /// without a row.
     #[test]
     fn execute_future_stays_boxed() {
-        const BOUND: usize = 16 * 1024;
-        let size = future_size(super::Command::execute);
-        assert!(size < BOUND, "`Command::execute` future is {size} bytes, bound {BOUND}");
+        use super::*;
+        const SLACK: usize = 256;
+        let bound = std::mem::size_of::<crate::app::Context>() + SLACK;
+        let dispatchers = [
+            ("ocx", "Command", future_size(Command::execute)),
+            ("ocx config", "ConfigGroup", future_size(config::ConfigGroup::execute)),
+            ("ocx direnv", "Direnv", future_size(direnv::Direnv::execute)),
+            ("ocx index", "Index", future_size(index::Index::execute)),
+            ("ocx launcher", "Launcher", future_size(launcher::Launcher::execute)),
+            ("ocx package", "Package", future_size(package::Package::execute)),
+            (
+                "ocx package cascade",
+                "CascadeGroup",
+                future_size(package_cascade::CascadeGroup::execute),
+            ),
+            (
+                "ocx package description",
+                "DescriptionGroup",
+                future_size(package_description::DescriptionGroup::execute),
+            ),
+            ("ocx patch", "PatchGroup", future_size(patch::PatchGroup::execute)),
+            ("ocx self", "SelfGroup", future_size(self_group::SelfGroup::execute)),
+            ("ocx shell", "ShellArgs", future_size(shell::ShellArgs::execute)),
+            ("ocx shell", "Shell", future_size(shell::Shell::execute)),
+        ];
+
+        let mut groups = std::collections::BTreeSet::new();
+        group_paths(
+            &Command::augment_subcommands(clap::Command::new("ocx")),
+            "ocx".to_owned(),
+            &mut groups,
+        );
+        let covered: std::collections::BTreeSet<String> =
+            dispatchers.iter().map(|(path, _, _)| (*path).to_owned()).collect();
+        assert_eq!(groups, covered, "every command group's dispatcher needs a row here");
+
+        let over_bound: Vec<String> = dispatchers
+            .iter()
+            .filter(|(_, _, size)| *size > bound)
+            .map(|(_, dispatcher, size)| format!("`{dispatcher}::execute` future is {size} bytes"))
+            .collect();
+        assert!(
+            over_bound.is_empty(),
+            "a dispatcher builds an arm's future in place, bound {bound} bytes: {over_bound:#?}"
+        );
     }
 }

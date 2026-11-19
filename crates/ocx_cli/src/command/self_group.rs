@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 pub mod activate;
 pub mod setup;
 pub mod update;
@@ -176,8 +178,8 @@ impl SelfGroup {
                     "SelfGroup::Activate is always dispatched via app.rs::App::run before Context::try_init — see should_check_for_update bypass list"
                 )
             }
-            SelfGroup::Setup(setup) => setup.execute(context).await,
-            SelfGroup::Update(update) => update.execute(context).await,
+            SelfGroup::Setup(setup) => boxed(move || setup.execute(context)).await,
+            SelfGroup::Update(update) => boxed(move || update.execute(context)).await,
         }
     }
 }

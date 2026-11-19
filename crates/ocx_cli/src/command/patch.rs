@@ -7,6 +7,8 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+use super::boxed;
+
 /// Manage patch overlays for a project.
 ///
 /// Commands here read or write `patches.snapshot.json`, which pins companion
@@ -99,11 +101,11 @@ pub enum PatchGroup {
 impl PatchGroup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
-            PatchGroup::Freeze(args) => args.execute(context).await,
-            PatchGroup::Sync(args) => args.execute(context).await,
-            PatchGroup::Publish(args) => args.execute(context).await,
-            PatchGroup::Test(args) => args.execute(context).await,
-            PatchGroup::Why(args) => args.execute(context).await,
+            PatchGroup::Freeze(args) => boxed(move || args.execute(context)).await,
+            PatchGroup::Sync(args) => boxed(move || args.execute(context)).await,
+            PatchGroup::Publish(args) => boxed(move || args.execute(context)).await,
+            PatchGroup::Test(args) => boxed(move || args.execute(context)).await,
+            PatchGroup::Why(args) => boxed(move || args.execute(context)).await,
         }
     }
 }
