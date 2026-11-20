@@ -1,0 +1,48 @@
+name: Canary
+
+# Publishes a canary build of main after every green verify-basic push run: it dispatches `release.yml` in dev
+# mode on main, where the plan step derives the `-canary` track from the ref.
+#
+# `workflow_run` is the trigger on purpose. It checks out no code and runs none from the triggering run, so the
+# trigger's fork-code risk does not apply; the job only dispatches `release.yml` on main.
+on: # zizmor: ignore[dangerous-triggers] dispatches release.yml on main and checks out no code
+  workflow_run:
+    workflows: ["verify-basic"]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch the canary build
+    # `branches: [main]` alone also matches a fork pull request whose head branch is called `main`.
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # `workflow_dispatch` takes a ref, not a SHA: without the tip check a canary could build a commit whose own
+      # verify-basic is still running or red.
+      - name: Dispatch release.yml in dev mode on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          tip="$(gh api "repos/$GH_REPO/commits/main" --jq .sha)"
+          if [[ "$tip" != "$HEAD_SHA" ]]; then
+            echo "main moved to $tip since $HEAD_SHA was verified; that commit's own run dispatches."
+            exit 0
+          fi
+          gh workflow run release.yml --ref main -f mode=dev

@@ -63,6 +63,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -3722,7 +3723,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=repo, check=True, capture_output=True, encoding="utf-8")
 
 
-def _run_plan(script: str, tmp: Path, **env: str) -> tuple[int, dict[str, str]]:
+def _run_plan(script: str, tmp: Path, cargo_version: str = "0.10.0", **env: str) -> tuple[int, dict[str, str]]:
     """Run the `plan` step in a repository that holds the tag `v0.9.0`; return exit code and `GITHUB_OUTPUT`."""
     repo = tmp / "repo"
     if not repo.exists():
@@ -3730,14 +3731,28 @@ def _run_plan(script: str, tmp: Path, **env: str) -> tuple[int, dict[str, str]]:
         _git(repo, "init", "-q")
         _git(repo, "commit", "-q", "--allow-empty", "-m", "x")
         _git(repo, "tag", "v0.9.0")
+        (repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{cargo_version}"\n', encoding="utf-8")
         (tmp / "bin").mkdir()
         cliff = tmp / "bin" / "git-cliff"
-        cliff.write_text("#!/bin/sh\necho v0.10.0\n", encoding="utf-8")
+        cliff.write_text("#!/bin/sh\nexit 64\n", encoding="utf-8")  # a dev plan takes its version from Cargo.toml, never git-cliff
         cliff.chmod(0o755)
         # The step reaches git-cliff through the pinned toolchain: this `ocx` accepts only that spelling.
         ocx = tmp / "bin" / "ocx"
         ocx.write_text('#!/bin/sh\n[ "$1 $2 $3 $4" = "exec -g release --" ] || exit 64\nshift 4\nexec "$@"\n', encoding="utf-8")
         ocx.chmod(0o755)
+        # The dev arm asks for the open pull request of the branch; any other query shape is refused (exit 64), so a
+        # lookup that drops the owner-qualified `head=` cannot pass.
+        gh = tmp / "bin" / "gh"
+        gh.write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >> "$HOME/gh.calls"\n'
+            '[ "$1 $2 $3 $4" = "api -X GET repos/$GITHUB_REPOSITORY/pulls" ] || exit 64\n'
+            '[ "$5 $6 $7 $8" = "-f state=open -f head=$GITHUB_REPOSITORY_OWNER:$GITHUB_REF_NAME" ] || exit 64\n'
+            '[ "${STUB_GH_EXIT:-0}" = 0 ] || exit "$STUB_GH_EXIT"\n'
+            'echo "${STUB_PR:-}"\n',
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
     output = tmp / "out"
     output.write_text("", encoding="utf-8")
     (tmp / "plan.sh").write_text(script, encoding="utf-8")
@@ -3747,6 +3762,10 @@ def _run_plan(script: str, tmp: Path, **env: str) -> tuple[int, dict[str, str]]:
         **_release_env(),
         "GITHUB_OUTPUT": str(output),
         "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_NAME": "main",
+        "GITHUB_REPOSITORY": "ocx-sh/ocx",
+        "GITHUB_REPOSITORY_OWNER": "ocx-sh",
+        "GH_TOKEN": "t",
         "REPOSITORY_ID_ACTUAL": _release_env()["REPOSITORY_ID"],
         **env,
     }
@@ -3755,19 +3774,49 @@ def _run_plan(script: str, tmp: Path, **env: str) -> tuple[int, dict[str, str]]:
     return done.returncode, {k: v for k, _, v in pairs}
 
 
-def test_the_plan_step_plans_a_release_a_candidate_and_a_dev_build(tmp_path: Path) -> None:
+def test_the_plan_step_plans_a_release_a_candidate_and_a_dev_build_on_its_track(tmp_path: Path) -> None:
     script = _plan_script(_documents())
+    release, dev = "ghcr.io/ocx-sh/ocx/cli", "ghcr.io/ocx-sh/dev/cli"
     code, out = _run_plan(script, tmp_path, MODE="release", VERSION="0.10.0")
     assert code == 0 and re.fullmatch(r"0\.10\.0_\d{14}", out["tag"]), (code, out)
-    assert (out["semver"], out["git_tag"], out["package"]) == ("0.10.0", "v0.10.0", "ghcr.io/ocx-sh/ocx/cli")
+    assert (out["semver"], out["git_tag"], out["package"]) == ("0.10.0", "v0.10.0", release)
+    assert (out["track"], out["pull_request"]) == ("", ""), out
     code, out = _run_plan(script, tmp_path, MODE="candidate", VERSION="0.10.0-rc1")
     assert code == 0 and re.fullmatch(r"0\.10\.0-rc1_\d{14}", out["tag"]), (code, out)
-    assert out["package"] == "ghcr.io/ocx-sh/ocx/cli" and out["git_tag"] == "v0.10.0-rc1"
-    code, out = _run_plan(script, tmp_path, MODE="dev", VERSION="", GITHUB_REF="refs/heads/feature")
+    assert out["package"] == release and out["git_tag"] == "v0.10.0-rc1"
+    assert (out["track"], out["pull_request"]) == ("", ""), out
+    code, out = _run_plan(script, tmp_path, MODE="dev", VERSION="")
+    assert code == 0 and re.fullmatch(r"0\.10\.0-canary_\d{14}", out["tag"]), (code, out)
+    assert re.fullmatch(r"0\.10\.0-canary\+\d{14}", out["semver"]) and out["git_tag"] == "", out
+    assert (out["package"], out["track"], out["pull_request"]) == (release, "canary", ""), out
+    assert not (tmp_path / "gh.calls").exists(), "a run on main asked GitHub for a pull request"
+    feature = {"MODE": "dev", "VERSION": "", "GITHUB_REF": "refs/heads/feature", "GITHUB_REF_NAME": "feature"}
+    code, out = _run_plan(script, tmp_path, STUB_PR="12", **feature)
+    assert code == 0 and re.fullmatch(r"0\.10\.0-pr12_\d{14}", out["tag"]), (code, out)
+    assert re.fullmatch(r"0\.10\.0-pr12\+\d{14}", out["semver"]) and out["git_tag"] == "", out
+    assert (out["package"], out["track"], out["pull_request"]) == (dev, "pr12", "12"), out
+    code, out = _run_plan(script, tmp_path, **feature)
     assert code == 0 and re.fullmatch(r"0\.10\.0-dev_\d{14}", out["tag"]), (code, out)
     assert re.fullmatch(r"0\.10\.0-dev\+\d{14}", out["semver"]) and out["git_tag"] == "", out
-    assert out["package"] == "ghcr.io/ocx-sh/dev/cli", out
+    assert (out["package"], out["track"], out["pull_request"]) == (dev, "dev", ""), out
+    code, out = _run_plan(script, tmp_path / "other", cargo_version="0.11.0", MODE="dev", VERSION="")
+    assert code == 0 and re.fullmatch(r"0\.11\.0-canary_\d{14}", out["tag"]), (code, out)
 
+
+_CANARY_OVERRIDE = 'if [[ "$track" == canary ]]; then'
+
+
+def test_widening_the_canary_override_to_every_dev_build_puts_a_pull_request_build_in_the_release_package(tmp_path: Path) -> None:
+    script = _plan_script(_documents())
+    assert _CANARY_OVERRIDE in script, f"mutation did not land: {_CANARY_OVERRIDE!r} is not in the plan step"
+    feature = {"MODE": "dev", "VERSION": "", "GITHUB_REF": "refs/heads/feature", "GITHUB_REF_NAME": "feature", "STUB_PR": "12"}
+    _, real = _run_plan(script, tmp_path / "real", **feature)
+    _, widened = _run_plan(script.replace(_CANARY_OVERRIDE, 'if [[ -n "$track" ]]; then', 1), tmp_path / "widened", **feature)
+    assert real["package"] == "ghcr.io/ocx-sh/dev/cli" and widened["package"] == "ghcr.io/ocx-sh/ocx/cli", (real, widened)
+
+
+_PR_LOOKUP = """pr="$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$GITHUB_REPOSITORY_OWNER:$GITHUB_REF_NAME" --jq '.[0].number // empty')\""""
+_ON_FEATURE = {"MODE": "dev", "VERSION": "", "GITHUB_REF": "refs/heads/feature", "GITHUB_REF_NAME": "feature"}
 
 _PLAN_REFUSALS = {
     "a-wrong-ref": ('[[ "$GITHUB_REF" != "refs/heads/main" ]]', "false", {"MODE": "release", "VERSION": "0.10.0", "GITHUB_REF": "refs/heads/feature"}),
@@ -3776,6 +3825,10 @@ _PLAN_REFUSALS = {
     "a-release-with-a-prerelease": ('! [[ "$VERSION" =~ $shape ]]', "false", {"MODE": "release", "VERSION": "0.10.0-rc1"}),
     "a-candidate-without-a-number": ('! [[ "$VERSION" =~ $shape ]]', "false", {"MODE": "candidate", "VERSION": "0.10.0-rc"}),
     "an-existing-tag": ('git rev-parse --quiet --verify "refs/tags/v${VERSION}" >/dev/null', "false", {"MODE": "release", "VERSION": "0.9.0"}),
+    "a-failed-pull-request-lookup": (_PR_LOOKUP, _PR_LOOKUP + " || true", {**_ON_FEATURE, "STUB_GH_EXIT": "1"}),
+    "a-non-numeric-pull-request": ('[[ "$pr" =~ ^[1-9][0-9]*$ ]]', "true", {**_ON_FEATURE, "STUB_PR": "12abc"}),
+    "a-zero-pull-request": ('[[ "$pr" =~ ^[1-9][0-9]*$ ]]', "true", {**_ON_FEATURE, "STUB_PR": "0"}),
+    "an-unparseable-cargo-version": ('! [[ "$core" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]', "false", {"MODE": "dev", "VERSION": "", "cargo_version": "0.11"}),
     "an-unknown-mode": ("echo \"::error::mode '$MODE' is not release, candidate or dev\"\n    exit 1", "semver=x tag=x package=x git_tag=x", {"MODE": "publish", "VERSION": "0.10.0"}),
 }
 
@@ -3791,18 +3844,21 @@ def test_the_plan_step_refuses_what_it_guards_and_a_deleted_guard_lets_it_throug
     assert code == 0, f"deleting the {case} guard still refused: the test cannot tell the guard from another failure"
 
 
-def _eval_if(expression: object, mode: str, results: dict[str, str] | None = None) -> bool:
-    """A job `if:` over `inputs.mode` and `needs.<job>.result`, the only contexts release.yml's use."""
+def _eval_if(expression: object, mode: str, results: dict[str, str] | None = None, outputs: dict[str, str] | None = None) -> bool:
+    """A job `if:` over `inputs.mode`, `needs.<job>.result` and `needs.plan.outputs.<name>`, the only contexts release.yml's use."""
     body = re.fullmatch(r"\$\{\{(.*)\}\}", str(expression).strip(), re.S)
     text = " ".join((body.group(1) if body else str(expression)).split())
     text = text.replace("!cancelled()", "True").replace("&&", " and ").replace("||", " or ")
     text = re.sub(r"!(?!=)", " not ", text)
+    text = re.sub(r"needs\.plan\.outputs\.(\w+)", r"OUT['\1']", text)
     text = re.sub(r"needs\.([\w-]+)\.result", r"RES['\1']", text).replace("inputs.mode", "MODE")
-    return bool(eval(text, {"__builtins__": {}}, {"MODE": mode, "RES": results or {}, "true": True, "false": False}))  # noqa: S307 - the expression is a workflow file in this repo
+    scope = {"MODE": mode, "RES": results or {}, "OUT": {"track": "", "pull_request": "", **(outputs or {})}, "true": True, "false": False}
+    return bool(eval(text, {"__builtins__": {}}, scope))  # noqa: S307 - the expression is a workflow file in this repo
 
 
-_RELEASE_ONLY = ("prune", "post-docker", "post-sdkgen")
-_NEVER_ON_DEV = ("github-release", "announce", "post-setup-dist", *_RELEASE_ONLY)
+_RELEASE_ONLY = ("post-docker", "post-sdkgen")
+_NEVER_ON_DEV = ("github-release", "post-setup-dist", *_RELEASE_ONLY)
+_CANARY_PACKAGE_OVERRIDE = re.compile(r'\n\s*if \[\[ "\$track" == canary \]\]; then\n\s*package="\$PACKAGE_RELEASE"\n\s*fi')
 
 
 def _dev_isolation_findings(documents: list[tuple[str, dict]]) -> list[str]:
@@ -3827,8 +3883,11 @@ def _dev_isolation_findings(documents: list[tuple[str, dict]]) -> list[str]:
         if name == "prune-dev" and re.search(r"PACKAGE_RELEASE|PACKAGE_LOGICAL|ocx\.sh/ocx", text):
             findings.append("`prune-dev` names the release package")
     dev_arm = re.search(r"\n\s+dev\)\n(.*?);;", _plan_script(documents), re.S)
-    if not dev_arm or '"$PACKAGE_DEV"' not in dev_arm.group(1) or "PACKAGE_RELEASE" in dev_arm.group(1):
-        findings.append("the dev arm of `plan` does not choose PACKAGE_DEV alone")
+    rest = _CANARY_PACKAGE_OVERRIDE.sub("", dev_arm.group(1)) if dev_arm else ""
+    if not dev_arm or not _CANARY_PACKAGE_OVERRIDE.search(dev_arm.group(1)):
+        findings.append("the dev arm of `plan` has no release-package override for the canary track alone")
+    if '"$PACKAGE_DEV"' not in rest or "PACKAGE_RELEASE" in rest:
+        findings.append("the dev arm of `plan` does not choose PACKAGE_DEV outside the canary override")
     return findings
 
 
@@ -3843,10 +3902,63 @@ def test_a_dev_build_touches_nothing_but_the_dev_package() -> None:
         pytest.param("  github-release:\n    name: GitHub release\n    if: ${{ inputs.mode != 'dev' }}", "  github-release:\n    name: GitHub release\n    if: ${{ true }}", id="github-release-runs-on-dev"),
         pytest.param("    name: Docker images\n    if: ${{ inputs.mode == 'release' }}", "    name: Docker images\n    if: ${{ inputs.mode != 'dev' }}", id="docker-runs-for-a-candidate"),
         pytest.param('              package="$PACKAGE_DEV"', '              package="$PACKAGE_RELEASE"', id="dev-arm-picks-the-release-package"),
+        pytest.param(_CANARY_OVERRIDE, 'if true; then', id="canary-override-widened-to-every-dev-build"),
     ],
 )
 def test_the_dev_isolation_sweep_reds_each_way_a_dev_build_could_reach_the_release_package(old: str, new: str) -> None:
     assert _dev_isolation_findings(_mutated("release.yml", old, new))
+
+
+_GATE_RESULTS = {"plan": "success", "publish": "success", "github-release": "success", "announce": "success"}
+#: (job, mode, track, result overrides, runs?) over the real `if:` of `announce` and `prune`.
+_GATE_CASES = [
+    *[("announce", mode, "", {}, True) for mode in ("release", "candidate")],
+    *[("announce", mode, "", {"github-release": result}, False) for mode in ("release", "candidate") for result in ("skipped", "failure", "cancelled")],
+    *[("announce", mode, "", {"publish": result}, False) for mode in ("release", "candidate") for result in ("failure", "cancelled", "skipped")],
+    ("announce", "dev", "canary", {"github-release": "skipped"}, True),
+    ("announce", "dev", "canary", {"github-release": "failure"}, False),
+    ("announce", "dev", "canary", {"github-release": "cancelled"}, False),
+    ("announce", "dev", "canary", {"github-release": "skipped", "publish": "failure"}, False),
+    ("announce", "dev", "pr12", {"github-release": "skipped"}, False),
+    ("announce", "dev", "dev", {"github-release": "skipped"}, False),
+    ("prune", "release", "", {}, True),
+    ("prune", "candidate", "", {}, False),
+    *[("prune", "release", "", {"announce": result}, False) for result in ("failure", "cancelled", "skipped")],
+    ("prune", "dev", "canary", {}, True),
+    *[("prune", "dev", "canary", {"announce": result}, False) for result in ("failure", "cancelled", "skipped")],
+    ("prune", "dev", "pr12", {}, False),
+    ("prune", "dev", "dev", {}, False),
+]
+
+
+def _gate_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    """`announce` and `prune` read the result of what they need; only the canary track may pass a skipped `github-release`."""
+    jobs = dict(documents)["release.yml"]["jobs"]
+    findings = [f"`{name}` has no status function in its `if:`" for name in ("announce", "prune") if "!cancelled()" not in str(jobs[name].get("if"))]
+    for name, mode, track, overrides, expected in _GATE_CASES:
+        got = _eval_if(jobs[name]["if"], mode, {**_GATE_RESULTS, **overrides}, {"track": track})
+        if got is not expected:
+            findings.append(f"`{name}` in {mode} mode, track {track!r}, with {overrides}: runs={got}, expected {expected}")
+    return findings
+
+
+def test_announce_and_prune_wait_for_a_green_release_and_only_the_canary_track_skips_it() -> None:
+    assert _gate_findings(_documents()) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param("needs.plan.outputs.track == 'canary' && needs.github-release.result == 'skipped'", "needs.github-release.result == 'skipped'", id="announce-drops-the-track-condition"),
+        pytest.param("needs.plan.outputs.track == 'canary' && needs.github-release.result == 'skipped'", "needs.plan.outputs.track != '' && needs.github-release.result == 'skipped'", id="announce-passes-every-dev-track"),
+        pytest.param("      && needs.publish.result == 'success'\n      && (needs.github-release.result", "      && (needs.github-release.result", id="announce-drops-the-publish-result"),
+        pytest.param("(needs.github-release.result == 'success'\n      ||", "(true\n      ||", id="announce-lets-a-failed-release-through"),
+        pytest.param("|| needs.plan.outputs.track == 'canary') }}", "|| true) }}", id="prune-drops-the-track-condition"),
+        pytest.param("      && needs.announce.result == 'success'\n", "", id="prune-drops-the-announce-result"),
+    ],
+)
+def test_the_gate_sweep_reds_each_way_a_release_step_could_run_without_its_ancestor(old: str, new: str) -> None:
+    assert _gate_findings(_mutated("release.yml", old, new))
 
 
 def _force_findings(documents: list[tuple[str, dict]]) -> list[str]:
@@ -3934,8 +4046,8 @@ def _release_tool_findings(documents: list[tuple[str, dict]]) -> list[str]:
         runs = "\n".join(line for line in _job_runs(job).splitlines() if "echo" not in line)
         cliff_calls += runs.count("git-cliff")
         findings += [f"{where} runs git-cliff outside `ocx exec -g release --`" for _ in _UNPINNED_CLIFF.finditer(runs)]
-    if cliff_calls < 2:
-        findings.append(f"{cliff_calls} git-cliff calls found, expected 2 (the reader stopped matching)")
+    if cliff_calls < 1:
+        findings.append(f"{cliff_calls} git-cliff calls found, expected 1 (the reader stopped matching)")
     return findings
 
 
@@ -4024,6 +4136,7 @@ def test_a_release_and_a_candidate_share_one_concurrency_group_and_a_dev_build_h
     group = str(dict(_documents())["release.yml"]["concurrency"]["group"])
     assert "inputs.mode == 'dev'" in group, f"release.yml concurrency group {group!r} does not separate dev from release/candidate"
     assert "inputs.mode }}" not in group, f"release.yml concurrency group {group!r} is keyed by the raw mode"
+    assert "github.ref" in group, f"release.yml concurrency group {group!r} does not queue dev builds per ref"
 
 
 def _cross_targets() -> list[str]:
@@ -4428,17 +4541,17 @@ def test_a_release_and_a_candidate_verify_against_the_literal_main_identity() ->
     [
         pytest.param("release.yml@refs/heads/main\n", "release.yml@refs/heads/dev\n", id="identity-names-another-ref"),
         pytest.param('identity="$RELEASE_IDENTITY"', 'identity="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"', id="verify-trusts-the-run-ref"),
-        pytest.param("          TAG: ${{ needs.plan.outputs.tag }}\n          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}\n          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: |\n          set -euo pipefail\n          if [[", "          TAG: ${{ needs.plan.outputs.tag }}\n          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}\n          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: |\n          set -euo pipefail\n          echo ${{ github.ref }}\n          if [[", id="an-expression-in-run"),
+        pytest.param("          set -euo pipefail\n          # Whatever lands in the release package", "          set -euo pipefail\n          echo ${{ github.ref }}\n          # Whatever lands in the release package", id="an-expression-in-run"),
     ],
 )
 def test_the_identity_sweep_reds_a_moved_literal_a_run_derived_identity_and_an_interpolated_run(old: str, new: str) -> None:
     assert _identity_findings(_mutated("release.yml", old, new))
 
 
-def _run_verify_step(tmp: Path, steps: list[dict], mode: str) -> list[str]:
+def _run_verify_step(tmp: Path, steps: list[dict], package: str) -> list[str]:
     """Run the verify step with a recording `ocx`, from a feature-branch run; the certificate identities it asked for."""
     script = _step_run(steps[_step_index(steps, "package verify")])
-    (tmp / "bin").mkdir(exist_ok=True)
+    (tmp / "bin").mkdir(parents=True, exist_ok=True)
     stub = tmp / "bin" / "ocx"
     stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\n', encoding="utf-8")
     stub.chmod(0o755)
@@ -4453,8 +4566,7 @@ def _run_verify_step(tmp: Path, steps: list[dict], mode: str) -> list[str]:
             "STUB_LOG": str(log),
             **_release_env(),
             "RELEASE_IDENTITY": identity,
-            "MODE": mode,
-            "PACKAGE": "ghcr.io/x/y",
+            "PACKAGE": package,
             "TAG": "1.0.0_1",
             "GITHUB_SERVER_URL": "https://github.com",
             "GITHUB_WORKFLOW_REF": "ocx-sh/ocx/.github/workflows/release.yml@refs/heads/feature",
@@ -4468,23 +4580,31 @@ def _run_verify_step(tmp: Path, steps: list[dict], mode: str) -> list[str]:
     return sorted({m.group(1) for line in lines if (m := re.search(r"--certificate-identity (\S+)", line))})
 
 
+_MAIN_IDENTITY = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"
+
+
 @pytest.mark.parametrize(
-    ("mode", "identity"),
+    ("package", "identity"),
     [
-        ("release", "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"),
-        ("candidate", "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"),
-        ("dev", "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/feature"),
+        pytest.param("ghcr.io/ocx-sh/ocx/cli", _MAIN_IDENTITY, id="release-package-keeps-the-pin-on-a-branch-run"),
+        pytest.param("ghcr.io/ocx-sh/dev/cli", "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/feature", id="dev-package-takes-the-run-ref"),
     ],
 )
-def test_the_verify_step_pins_main_for_a_release_and_a_candidate_and_the_run_ref_for_a_dev_build(tmp_path: Path, mode: str, identity: str) -> None:
-    assert _run_verify_step(tmp_path, _publish_steps(_documents()), mode) == [identity]
+def test_the_verify_step_pins_main_for_the_release_package_and_the_run_ref_for_the_dev_package(tmp_path: Path, package: str, identity: str) -> None:
+    assert _run_verify_step(tmp_path, _publish_steps(_documents()), package) == [identity]
 
 
-def test_the_verify_step_run_trusting_the_run_ref_reds_the_pin(tmp_path: Path) -> None:
-    documents = _mutated("release.yml", 'identity="$RELEASE_IDENTITY"', 'identity="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"')
-    assert _run_verify_step(tmp_path, _publish_steps(documents), "release") != [
-        "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"
-    ]
+@pytest.mark.parametrize(
+    ("old", "new", "package"),
+    [
+        pytest.param('identity="$RELEASE_IDENTITY"', 'identity="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"', "ghcr.io/ocx-sh/ocx/cli", id="release-package-trusts-the-run-ref"),
+        pytest.param('[[ "$PACKAGE" == "$PACKAGE_DEV" ]]', '[[ "$PACKAGE" != "$PACKAGE" ]]', "ghcr.io/ocx-sh/dev/cli", id="dev-package-pinned-to-main"),
+    ],
+)
+def test_the_verify_step_mutations_red_the_identity_choice(tmp_path: Path, old: str, new: str, package: str) -> None:
+    real = _run_verify_step(tmp_path / "real", _publish_steps(_documents()), package)
+    mutated = _run_verify_step(tmp_path / "mutated", _publish_steps(_mutated("release.yml", old, new)), package)
+    assert mutated != real
 
 
 def test_the_asset_sweep_reds_an_archive_v066_shipped_that_the_build_no_longer_writes() -> None:
@@ -4660,9 +4780,480 @@ def test_release_jobs_behind_a_skippable_ancestor_carry_a_status_function() -> N
     offenders = []
     for name, job in jobs.items():
         condition = str(job.get("if", ""))
-        runs_in_dev = "inputs.mode != 'release'" in condition or "dev" in condition
+        runs_in_dev = any(word in condition for word in ("inputs.mode != 'release'", "dev", "track", "pull_request"))
         runs_in_dev = runs_in_dev and "!= 'dev'" not in condition
         if "readiness" in needs(name) and runs_in_dev:
             if "!cancelled()" not in condition or "needs." not in condition:
                 offenders.append(name)
     assert offenders == [], f"jobs behind a skipped `readiness` without a status function: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# release.yml `prune-dev`: the real last step, with a stub `ocx` and `gh` and the real selector.
+# ---------------------------------------------------------------------------
+
+_OPEN_PRS_WRITE = '> "$RUNNER_TEMP/open-prs.txt"'
+
+
+def _prune_script(documents: list[tuple[str, dict]]) -> str:
+    return str(dict(documents)["release.yml"]["jobs"]["prune-dev"]["steps"][-1]["run"])
+
+
+def _run_prune(
+    script: str, tmp: Path, tags: list[str], open_prs: str = "", gh_exit: int = 0, env: dict[str, str] | None = None
+) -> tuple[int, list[str] | None]:
+    """Run a prune step; the exit code and the argv of `ocx package prune` (None when it was never called).
+
+    The packages the step listed go to `list.log` beside `tmp`'s other files.
+    """
+    (tmp / "bin").mkdir(parents=True)
+    (tmp / "runner").mkdir()
+    listing = tmp / "listing.json"
+    listing.write_text(json.dumps({"items": [{"tags": tags}]}), encoding="utf-8")
+    log = tmp / "prune.log"
+    ocx = tmp / "bin" / "ocx"
+    ocx.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  "--remote --format json index list "*) echo "$6" >> "$STUB_LIST_LOG"; cat "$STUB_LISTING" ;;\n'
+        '  "package prune "*) echo "$*" >> "$STUB_PRUNE_LOG" ;;\n'
+        "  *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh = tmp / "bin" / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        '[ "$1 $2" = "pr list" ] && [ -n "$GH_REPO" ] && [ -n "$GH_TOKEN" ] || exit 64\n'
+        '[ "$STUB_GH_EXIT" = 0 ] || exit "$STUB_GH_EXIT"\n'
+        'for n in $STUB_OPEN; do echo "$n"; done\n',
+        encoding="utf-8",
+    )
+    ocx.chmod(0o755)
+    gh.chmod(0o755)
+    (tmp / "prune.sh").write_text(script, encoding="utf-8")
+    done = subprocess.run(
+        ["bash", str(tmp / "prune.sh")],
+        cwd=ROOT,
+        env={
+            "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+            "HOME": str(tmp),
+            "RUNNER_TEMP": str(tmp / "runner"),
+            "PACKAGE": "ghcr.io/ocx-sh/dev/cli",
+            "DAYS": "30",
+            "KEEP": "3",
+            "GH_REPO": "ocx-sh/ocx",
+            "GH_TOKEN": "t",
+            "STUB_LISTING": str(listing),
+            "STUB_LIST_LOG": str(tmp / "list.log"),
+            "STUB_PRUNE_LOG": str(log),
+            "STUB_OPEN": open_prs,
+            "STUB_GH_EXIT": str(gh_exit),
+            **(env or {}),
+        },
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return done.returncode, (log.read_text(encoding="utf-8").splitlines() if log.exists() else None)
+
+
+# One stamp per process: a listing and the assertion on it are built on either side of a subprocess run, and a
+# stamp read twice differs once the clock crosses a second.
+_RECENT = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y%m%d%H%M%S")
+
+
+def _recent() -> str:
+    return _RECENT
+
+
+def _dev_package_listing() -> list[str]:
+    recent = _recent()
+    return [
+        "0.10.0-dev", f"0.10.0-dev_{recent}", "0.10.0-dev_20200101000000",
+        "0.9.0-canary", "0.10.0-canary",
+        "0.9.0-canary_20260101000000", "0.10.0-canary_20260102000000", "0.10.0-canary_20260103000000",
+        "0.10.0-canary_20260104000000", "0.10.0-canary_20260105000000",
+        "0.10.0-pr7", f"0.10.0-pr7_{recent}", "0.10.0-pr9", f"0.10.0-pr9_{recent}",
+        "0.10.0", "latest",
+    ]
+
+
+def test_the_dev_prune_hands_prune_exactly_the_stale_dev_and_the_closed_pull_request_builds_and_no_canary(tmp_path: Path) -> None:
+    code, lines = _run_prune(_prune_script(_documents()), tmp_path, _dev_package_listing(), open_prs="9")
+    recent = _recent()
+    assert code == 0 and lines is not None and len(lines) == 1, (code, lines)
+    argv = lines[0].split()
+    assert argv[:3] == ["package", "prune", "--forge"] and "--force" in argv, argv
+    package = argv.index("ghcr.io/ocx-sh/dev/cli")
+    assert set(argv[package + 1 :]) == {"0.10.0-dev_20200101000000", f"0.10.0-pr7_{recent}", "0.10.0-pr7"}, argv
+    assert not any("canary" in word for word in argv), f"the dev prune selected a canary tag: {argv}"
+
+
+def test_the_dev_prune_calls_prune_for_nothing_when_nothing_is_stale_whatever_canary_tags_are_listed(tmp_path: Path) -> None:
+    tags = ["0.10.0-dev", f"0.10.0-dev_{_recent()}", "0.10.0-pr9", f"0.10.0-pr9_{_recent()}", *_CANARY_LISTING]
+    code, lines = _run_prune(_prune_script(_documents()), tmp_path, tags, open_prs="9")
+    assert (code, lines) == (0, None)
+
+
+def test_a_failed_open_pull_request_listing_aborts_the_prune_before_it_deletes_anything(tmp_path: Path) -> None:
+    script = _prune_script(_documents())
+    code, lines = _run_prune(script, tmp_path / "real", _dev_package_listing(), open_prs="9", gh_exit=1)
+    assert code != 0 and lines is None, (code, lines)
+    # Swallowing the failure leaves an empty list, which reads as "no pull request is open": every PR build goes.
+    assert _OPEN_PRS_WRITE in script, f"mutation did not land: {_OPEN_PRS_WRITE!r} is not in the prune step"
+    code, lines = _run_prune(script.replace(_OPEN_PRS_WRITE, _OPEN_PRS_WRITE + " || true", 1), tmp_path / "mutated", _dev_package_listing(), open_prs="9", gh_exit=1)
+    assert code == 0 and lines is not None and f"0.10.0-pr9_{_recent()}" in lines[0].split(), (code, lines)
+
+
+# ---------------------------------------------------------------------------
+# release.yml `prune` (release package): the real step, canary track and release mode.
+# ---------------------------------------------------------------------------
+
+_CANARY_LISTING = [
+    "0.9.0-canary", "0.10.0-canary",
+    "0.9.0-canary_20260101000000", "0.10.0-canary_20260102000000", "0.10.0-canary_20260103000000",
+    "0.10.0-canary_20260104000000", "0.10.0-canary_20260105000000",
+]
+_OLD_CANDIDATES = ["0.9.0_20200102000000", "0.9.0-rc1_20200101000000", "0.9.0-rc1", "0.10.0-rc1_20200101000000", "0.10.0-rc1"]
+_RELEASE_LISTING = ["0.9.0", "latest", *_OLD_CANDIDATES, *_CANARY_LISTING]
+
+
+def _release_prune_script(documents: list[tuple[str, dict]]) -> str:
+    return str(next(s for s in dict(documents)["release.yml"]["jobs"]["prune"]["steps"] if s.get("id") == "prune")["run"])
+
+
+def _release_prune_env(mode: str) -> dict[str, str]:
+    return {**_release_env(), "MODE": mode, "KEEP": _release_env()["CANARY_KEEP"]}
+
+
+def _prune_argv(lines: list[str] | None) -> tuple[list[str], list[str]]:
+    """`(flags, tags)` of the one `ocx package prune` call, split at the logical package."""
+    assert lines is not None and len(lines) == 1, lines
+    argv = lines[0].split()
+    package = argv.index("ocx.sh/ocx/cli")
+    return argv[:package], argv[package + 1 :]
+
+
+def test_the_canary_run_prunes_exactly_the_surplus_canary_builds_of_the_release_package_without_force(tmp_path: Path) -> None:
+    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, _RELEASE_LISTING, env=_release_prune_env("dev"))
+    assert code == 0, code
+    flags, tags = _prune_argv(lines)
+    assert flags[:3] == ["package", "prune", "--forge"] and "--force" not in flags, flags
+    assert set(tags) == {"0.9.0-canary_20260101000000", "0.9.0-canary", "0.10.0-canary_20260102000000"}, tags
+    assert (tmp_path / "list.log").read_text(encoding="utf-8").split() == ["ghcr.io/ocx-sh/ocx/cli"]
+
+
+def test_the_release_run_still_prunes_only_the_candidates_of_a_shipped_version(tmp_path: Path) -> None:
+    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, _RELEASE_LISTING, env=_release_prune_env("release"))
+    assert code == 0, code
+    flags, tags = _prune_argv(lines)
+    assert "--force" not in flags and set(tags) == {"0.9.0-rc1_20200101000000", "0.9.0-rc1"}, (flags, tags)
+
+
+def test_the_canary_run_calls_prune_for_nothing_when_no_canary_is_beyond_the_keep_count(tmp_path: Path) -> None:
+    listing = ["0.10.0-canary", *_CANARY_LISTING[-3:], *_OLD_CANDIDATES]
+    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, listing, env=_release_prune_env("dev"))
+    assert (code, lines) == (0, None)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param('if [[ "$MODE" == release ]]; then', 'if [[ "$MODE" == candidate ]]; then', id="release-run-selects-canaries"),
+        pytest.param('ocx package prune --forge github --tags-file', 'ocx package prune --forge github --force --tags-file', id="release-package-prune-forces"),
+    ],
+)
+def test_the_release_prune_mutations_change_what_the_step_hands_prune(tmp_path: Path, old: str, new: str) -> None:
+    script = _release_prune_script(_documents())
+    assert old in script, f"mutation did not land: {old!r} is not in the prune step"
+    for mode in ("dev", "release"):
+        real = _run_prune(script, tmp_path / f"real-{mode}", _RELEASE_LISTING, env=_release_prune_env(mode))
+        mutated = _run_prune(script.replace(old, new, 1), tmp_path / f"mutated-{mode}", _RELEASE_LISTING, env=_release_prune_env(mode))
+        if real != mutated:
+            return
+    pytest.fail("neither mode noticed the mutation")
+
+
+# ---------------------------------------------------------------------------
+# release.yml `announce`: the real step with a stub `ocx`; `--ephemeral` for everything but a release.
+# ---------------------------------------------------------------------------
+
+_EPHEMERAL_RULE = '[[ "$MODE" == release ]] || flags+=(--ephemeral)'
+
+
+def _run_announce(tmp: Path, script: str, mode: str) -> list[str]:
+    """Run the announce step; the argv `ocx package announce` received."""
+    (tmp / "bin").mkdir(parents=True)
+    stub = tmp / "bin" / "ocx"
+    stub.write_text('#!/bin/sh\necho "$*" >> "$STUB_LOG"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    tags = tmp / "tags.txt"
+    tags.write_text("1.0.0\n", encoding="utf-8")
+    (tmp / "announce.sh").write_text(script, encoding="utf-8")
+    done = subprocess.run(
+        ["bash", str(tmp / "announce.sh")],
+        env={
+            "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+            "STUB_LOG": str(tmp / "argv.log"),
+            **_release_env(),
+            "MODE": mode,
+            "TAGS_FILE": str(tags),
+            "OCX_ANNOUNCE_TOKEN": "t",
+        },
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    return (tmp / "argv.log").read_text(encoding="utf-8").split()
+
+
+def _announce_script(documents: list[tuple[str, dict]]) -> str:
+    return _step_run(next(s for s in dict(documents)["release.yml"]["jobs"]["announce"]["steps"] if "package announce" in str(s.get("run"))))
+
+
+@pytest.mark.parametrize(("mode", "ephemeral"), [("dev", True), ("candidate", True), ("release", False)])
+def test_announce_marks_every_row_ephemeral_except_a_releases(tmp_path: Path, mode: str, ephemeral: bool) -> None:
+    argv = _run_announce(tmp_path, _announce_script(_documents()), mode)
+    assert ("--ephemeral" in argv) is ephemeral, argv
+
+
+@pytest.mark.parametrize(
+    ("replacement", "mode"),
+    [
+        pytest.param('[[ "$MODE" == candidate ]] && flags+=(--ephemeral)', "dev", id="a-canary-announces-durable"),
+        pytest.param("flags+=(--ephemeral)", "release", id="a-release-announces-ephemeral"),
+    ],
+)
+def test_the_announce_mutations_flip_the_ephemeral_flag(tmp_path: Path, replacement: str, mode: str) -> None:
+    script = _announce_script(_documents())
+    assert _EPHEMERAL_RULE in script, f"mutation did not land: {_EPHEMERAL_RULE!r} is not in the announce step"
+    real = _run_announce(tmp_path / "real", script, mode)
+    mutated = _run_announce(tmp_path / "mutated", script.replace(_EPHEMERAL_RULE, replacement, 1), mode)
+    assert ("--ephemeral" in real) is not ("--ephemeral" in mutated)
+
+
+# ---------------------------------------------------------------------------
+# release.yml `comment`: the sticky pull request comment, the real step with a stub `gh`.
+# ---------------------------------------------------------------------------
+
+_MARKER = "<!-- ocx-pr-build -->"
+_BOT = "github-actions[bot]"
+
+
+def _comment_script(documents: list[tuple[str, dict]]) -> str:
+    return _step_run(dict(documents)["release.yml"]["jobs"]["comment"]["steps"][0])
+
+
+def _run_comment(tmp: Path, script: str, comments: list[dict], list_exit: int = 0) -> tuple[int, list[str], str]:
+    """Run the comment step; the exit code, the `gh` calls (listing included) and the body last written."""
+    (tmp / "bin").mkdir(parents=True)
+    (tmp / "runner").mkdir()
+    listing = tmp / "comments.json"
+    listing.write_text(json.dumps(comments), encoding="utf-8")
+    gh = tmp / "bin" / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "api --paginate" ]; then\n'
+        '  echo "LIST $3" >> "$STUB_GH_LOG"\n'
+        '  [ "$STUB_LIST_EXIT" = 0 ] || exit "$STUB_LIST_EXIT"\n'
+        '  while [ "$#" -gt 0 ]; do [ "$1" = --jq ] && { jq -r "$2" "$STUB_COMMENTS"; exit 0; }; shift; done\n'
+        "  exit 64\n"
+        "fi\n"
+        '[ "$1 $2 $5" = "api -X -F" ] || exit 64\n'
+        'echo "$3 $4" >> "$STUB_GH_LOG"\n'
+        'cat "${6#body=@}" > "$STUB_BODY"\n',
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    (tmp / "comment.sh").write_text(script, encoding="utf-8")
+    done = subprocess.run(
+        ["bash", str(tmp / "comment.sh")],
+        env={
+            "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp / "runner"),
+            "GITHUB_REPOSITORY": "ocx-sh/ocx",
+            "GITHUB_SHA": "abc123def",
+            "GH_TOKEN": "t",
+            "PACKAGE": "ghcr.io/ocx-sh/dev/cli",
+            "TAG": "0.10.0-pr12_20261117000000",
+            "PULL_REQUEST": "12",
+            "STUB_COMMENTS": str(listing),
+            "STUB_LIST_EXIT": str(list_exit),
+            "STUB_GH_LOG": str(tmp / "gh.log"),
+            "STUB_BODY": str(tmp / "body.md"),
+        },
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    calls = (tmp / "gh.log").read_text(encoding="utf-8").splitlines() if (tmp / "gh.log").exists() else []
+    body = (tmp / "body.md").read_text(encoding="utf-8") if (tmp / "body.md").exists() else ""
+    return done.returncode, calls, body
+
+
+def _writes(calls: list[str]) -> list[str]:
+    return [call for call in calls if not call.startswith("LIST ")]
+
+
+_POST = "POST repos/ocx-sh/ocx/issues/12/comments"
+_OWN = {"id": 42, "user": {"login": _BOT}, "body": f"{_MARKER}\nold"}
+_FOREIGN_MARKER = {"id": 7, "user": {"login": "someone"}, "body": f"{_MARKER}\nforged"}
+_BOT_WITHOUT_MARKER = {"id": 8, "user": {"login": _BOT}, "body": "a different bot comment"}
+
+
+def test_a_first_pull_request_build_posts_one_comment_with_both_addresses_and_the_marker_first(tmp_path: Path) -> None:
+    code, calls, body = _run_comment(tmp_path, _comment_script(_documents()), [])
+    assert code == 0 and _writes(calls) == [_POST], (code, calls)
+    assert body.splitlines()[0] == _MARKER, body
+    assert "`ghcr.io/ocx-sh/dev/cli:0.10.0-pr12`" in body and "`ghcr.io/ocx-sh/dev/cli:0.10.0-pr12_20261117000000`" in body, body
+    assert "abc123def" in body and "ocx --remote package exec ghcr.io/ocx-sh/dev/cli:0.10.0-pr12 -- ocx version" in body, body
+
+
+def test_a_later_build_edits_the_bots_marker_comment_in_place(tmp_path: Path) -> None:
+    code, calls, _ = _run_comment(tmp_path, _comment_script(_documents()), [_FOREIGN_MARKER, _OWN, _BOT_WITHOUT_MARKER])
+    assert code == 0 and _writes(calls) == ["PATCH repos/ocx-sh/ocx/issues/comments/42"], (code, calls)
+
+
+def test_a_marker_comment_by_anyone_else_is_ignored_and_never_edited(tmp_path: Path) -> None:
+    code, calls, _ = _run_comment(tmp_path, _comment_script(_documents()), [_FOREIGN_MARKER, _BOT_WITHOUT_MARKER])
+    assert code == 0 and _writes(calls) == [_POST], (code, calls)
+
+
+def test_a_failed_listing_fails_the_step_and_writes_nothing(tmp_path: Path) -> None:
+    code, calls, _ = _run_comment(tmp_path, _comment_script(_documents()), [_OWN], list_exit=1)
+    assert code != 0 and calls == ["LIST repos/ocx-sh/ocx/issues/12/comments"], (code, calls)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "comments", "list_exit", "different"),
+    [
+        pytest.param('.user.login == "github-actions[bot]" and ', "", [_FOREIGN_MARKER], 0, "edited a foreign comment", id="author-filter-dropped"),
+        pytest.param("| .id')\"", "| .id')\" || true", [_OWN], 1, "fell through to a write", id="listing-failure-swallowed"),
+        pytest.param('startswith("<!-- ocx-pr-build -->")', 'startswith("")', [_BOT_WITHOUT_MARKER], 0, "edited an unmarked comment", id="marker-filter-dropped"),
+    ],
+)
+def test_the_comment_mutations_change_what_the_step_writes(tmp_path: Path, old: str, new: str, comments: list[dict], list_exit: int, different: str) -> None:
+    script = _comment_script(_documents())
+    assert old in script, f"mutation did not land: {old!r} is not in the comment step"
+    real = _run_comment(tmp_path / "real", script, comments, list_exit)
+    mutated = _run_comment(tmp_path / "mutated", script.replace(old, new, 1), comments, list_exit)
+    assert real[:2] != mutated[:2], f"the mutation that {different} left the step unchanged"
+
+
+def _comment_job_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    document = dict(documents)["release.yml"]
+    jobs = document["jobs"]
+    job = jobs["comment"]
+    findings = []
+    if job.get("permissions") != {"pull-requests": "write"}:
+        findings.append(f"comment permissions are {job.get('permissions')!r}, expected only pull-requests: write")
+    findings += [f"`{name}` holds pull-requests: write" for name, other in jobs.items() if name != "comment" and (other.get("permissions") or {}).get("pull-requests") == "write"]
+    if (document.get("permissions") or {}).get("pull-requests") == "write":
+        findings.append("the workflow level grants pull-requests: write")
+    steps = job.get("steps") or []
+    if len(steps) != 1 or "run" not in steps[0]:
+        findings.append("comment is not one `run:` step")
+    findings += [f"comment has a `uses:` step: {step['uses']}" for step in steps if "uses" in step]
+    findings += ["comment interpolates an expression into a `run:`" for step in steps if "${{" in str(step.get("run", ""))]
+    if not job.get("timeout-minutes"):
+        findings.append("comment has no timeout-minutes")
+    if _needs(job) != ["plan", "publish"]:
+        findings.append(f"comment needs {_needs(job)}")
+    for mode, track, pull_request, publish, expected in (
+        ("dev", "pr12", "12", "success", True),
+        ("dev", "pr12", "12", "failure", False),
+        ("dev", "pr12", "12", "cancelled", False),
+        ("dev", "dev", "", "success", False),
+        ("dev", "canary", "", "success", False),
+        ("release", "", "", "success", False),
+    ):
+        got = _eval_if(job["if"], mode, {"publish": publish}, {"track": track, "pull_request": pull_request})
+        if got is not expected:
+            findings.append(f"comment in {mode} mode, track {track!r}, publish {publish}: runs={got}, expected {expected}")
+    return findings
+
+
+def test_the_comment_job_holds_pull_requests_write_alone_and_runs_only_for_a_published_pull_request_build() -> None:
+    assert _comment_job_findings(_documents()) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param("    permissions:\n      pull-requests: write\n", "    permissions:\n      contents: read\n      pull-requests: write\n", id="comment-gains-contents"),
+        pytest.param("      contents: read\n      pull-requests: read\n    outputs:", "      contents: read\n      pull-requests: write\n    outputs:", id="plan-gains-pull-requests-write"),
+        pytest.param("    timeout-minutes: 5\n    permissions:\n      pull-requests: write", "    permissions:\n      pull-requests: write", id="comment-loses-its-timeout"),
+        pytest.param(" && needs.plan.outputs.pull_request != '' }}", " }}", id="comment-runs-without-a-pull-request"),
+        pytest.param("    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.pull_request != '' }}", "    if: ${{ needs.plan.outputs.pull_request != '' }}", id="comment-runs-after-a-failed-publish"),
+    ],
+)
+def test_the_comment_job_sweep_reds_a_wider_grant_a_missing_timeout_and_a_loose_condition(old: str, new: str) -> None:
+    assert _comment_job_findings(_mutated("release.yml", old, new))
+
+
+# ---------------------------------------------------------------------------
+# canary.yml: what may dispatch a canary build, and what it may dispatch.
+# ---------------------------------------------------------------------------
+
+_CANARY_GUARDS = (
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_repository.full_name == github.repository",
+)
+_CANARY_DISPATCH = "gh workflow run release.yml --ref main -f mode=dev"
+
+
+def _canary_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    document = dict(documents)["canary.yml"]
+    triggers = document.get("on", document.get(True))
+    findings = []
+    if not isinstance(triggers, dict) or set(triggers) != {"workflow_run"}:
+        return [f"canary.yml triggers are {triggers!r}, expected exactly workflow_run"]
+    run = triggers["workflow_run"]
+    for key, expected in (("workflows", ["verify-basic"]), ("types", ["completed"]), ("branches", ["main"])):
+        if run.get(key) != expected:
+            findings.append(f"workflow_run.{key} is {run.get(key)!r}, expected {expected!r}")
+    if document.get("permissions") != {}:
+        findings.append(f"top-level permissions are {document.get('permissions')!r}, expected {{}}")
+    if list(document["jobs"]) != ["dispatch"]:
+        return [*findings, f"canary.yml jobs are {list(document['jobs'])}, expected [dispatch]"]
+    job = document["jobs"]["dispatch"]
+    if job.get("permissions") != {"actions": "write", "contents": "read"}:
+        findings.append(f"the dispatch job permissions are {job.get('permissions')!r}")
+    condition = str(job.get("if"))
+    findings += [f"the dispatch job `if:` lacks `{guard}`" for guard in _CANARY_GUARDS if guard not in condition]
+    steps = job.get("steps") or []
+    findings += [f"a step uses {step['uses']}: the job runs no code but its own script" for step in steps if "uses" in step]
+    findings += ["a `run:` interpolates an expression" for step in steps if "${{" in str(step.get("run", ""))]
+    runs = _job_runs(job)
+    if '"$tip" != "$HEAD_SHA"' not in runs:
+        findings.append("the run body does not compare the main tip with the verified SHA")
+    dispatches = [line.strip() for line in runs.splitlines() if "gh workflow run" in line]
+    if dispatches != [_CANARY_DISPATCH]:
+        findings.append(f"the run body dispatches {dispatches!r}, expected exactly {_CANARY_DISPATCH!r}")
+    return findings
+
+
+def test_the_canary_workflow_dispatches_dev_on_main_only_after_a_green_verified_push_to_main_of_this_repository() -> None:
+    assert _canary_findings(_documents()) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param(_CANARY_GUARDS[0], "true", id="no-success-check"),
+        pytest.param(_CANARY_GUARDS[1], "true", id="no-push-check"),
+        pytest.param(_CANARY_GUARDS[2], "true", id="no-repository-check"),
+        pytest.param('if [[ "$tip" != "$HEAD_SHA" ]]; then', "if false; then", id="no-tip-check"),
+        pytest.param("-f mode=dev", "-f mode=release", id="dispatches-another-mode"),
+        pytest.param("      contents: read\n    steps:", "      contents: write\n    steps:", id="job-holds-contents-write"),
+        pytest.param("permissions: {}\n", "permissions:\n  contents: read\n", id="top-level-permissions-widen"),
+        pytest.param("    branches: [main]\n", "    branches: [main, dev]\n", id="watches-another-branch"),
+        pytest.param("      - name: Dispatch release.yml in dev mode on main\n", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n      - name: Dispatch release.yml in dev mode on main\n", id="a-uses-step"),
+        pytest.param("HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n        run: |\n          set -euo pipefail\n", "HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n        run: |\n          set -euo pipefail\n          echo ${{ github.event.workflow_run.head_branch }}\n", id="an-expression-in-run"),
+    ],
+)
+def test_the_canary_sweep_reds_each_guard_and_each_widening_it_pins(old: str, new: str) -> None:
+    assert _canary_findings(_mutated("canary.yml", old, new))
