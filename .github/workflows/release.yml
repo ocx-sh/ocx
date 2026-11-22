@@ -10,13 +10,15 @@ name: Release
 #   dev        a build of the dispatched branch, versioned from Cargo.toml, with no git tag, no GitHub release, no
 #              docker, no sdkgen and no manifest dispatch. The pre-release track follows the ref:
 #              `X.Y.Z-canary` from main (canary.yml dispatches it after every green verify-basic): published to the
-#              release package, announced as an ephemeral index row, pruned down to the newest CANARY_KEEP;
+#              release package, announced as an ephemeral index row;
 #              `X.Y.Z-pr<N>` from a branch with an open pull request: dev package, unannounced, with a sticky pull
-#              request comment carrying its address, pruned once pull request N is closed or past `prune_after_days`;
-#              `X.Y.Z-dev` from any other branch: dev package, unannounced, pruned by age.
+#              request comment carrying its address;
+#              `X.Y.Z-dev` from any other branch: dev package, unannounced.
+#              None of the dev tracks is pruned here: `prune.yml` (daily, and by dispatch) prunes the dev, pull
+#              request and canary builds, so cleanup never waits on a later build succeeding.
 #
-#   verify-version -> plan -> cross -> build -> scan -> publish -> github-release -> announce -> prune | post-*
-#                       \-> readiness (release, candidate) ----^         \-> prune-dev | comment (pr<N>)
+#   verify-version -> plan -> cross -> build -> scan -> publish -> github-release -> announce -> prune (release) | post-*
+#                       \-> readiness (release, candidate) ----^         \-> comment (pr<N>)
 #
 # Signing identity. Every signature and attestation of the package is made by the `publish` job of this
 # file (never by a called workflow, whose certificate would name the called file), so the certificate
@@ -53,7 +55,7 @@ on:
         default: ''
       prune_after_days:
         description: >-
-          Age in days before a dev build (dev mode) or a candidate of a released version (release mode) is pruned.
+          Age in days before a candidate of a released version (release mode) is pruned.
         required: false
         type: number
         default: 30
@@ -68,8 +70,6 @@ env:
   PACKAGE_LOGICAL: ocx.sh/ocx/cli
   INDEX_REPO: ocx-sh/index
   INDEX_PACKAGE: ocx/cli
-  # Canary builds of the release package kept by the prune, newest first.
-  CANARY_KEEP: "3"
   # Whitespace-separated rows of `<asset triple> <OCI platform>`.
   PLATFORMS: |
     x86_64-unknown-linux-musl linux/amd64
@@ -494,60 +494,11 @@ jobs:
           [[ "$MODE" == release ]] || flags+=(--ephemeral)
           ocx package announce "${flags[@]}" "$INDEX_PACKAGE"
 
-  # Dev mode only: the one place `--force` is allowed, because the dev package has no index to mark a tag
-  # ephemeral and its tags are all disposable. Two rules: `-dev` by age, `-pr<N>` when pull request N is
-  # no longer open or the build is past the age. It runs after every dev run, so a merge sweeps closed pull requests.
-  prune-dev:
-    name: Prune old dev and pull request builds
-    # A status function, or the skipped `readiness` (dev mode) behind `publish` skips this job too.
-    if: ${{ !cancelled() && inputs.mode == 'dev' && needs.publish.result == 'success' }}
-    needs: [plan, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install the release ocx
-        uses: ./.github/actions/release-ocx
-      - name: Prune dev and pull request builds
-        env:
-          PACKAGE: ${{ env.PACKAGE_DEV }}
-          DAYS: ${{ inputs.prune_after_days }}
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
-          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          ocx --remote --format json index list "$PACKAGE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
-          # No `|| true`: a failed call must abort, because an empty file produced by an error would select every PR build.
-          gh pr list --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
-          {
-            python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt"
-            python3 scripts/release_prune_select.py pr --days "$DAYS" --open "$RUNNER_TEMP/open-prs.txt" < "$RUNNER_TEMP/tags.txt"
-          } > "$RUNNER_TEMP/selected.txt"
-          mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
-          if ((${#selected[@]} == 0)); then
-            echo "Nothing to prune in $PACKAGE: no stale dev build, no build of a closed pull request."
-            exit 0
-          fi
-          ocx package prune --forge github --force --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE" "${selected[@]}"
-
-  # The release package's disposable tags: the candidates of a shipped version once old enough (release mode), and
-  # the canary builds beyond CANARY_KEEP (canary track). Their index rows are ephemeral, so prune needs no
-  # `--force`; the announce then drops the rows of the tags that are gone. A status function, or the skipped
-  # `github-release` of a canary run skips this job.
+  # Release mode only: the candidates of a version that has shipped, once it is old enough. Their index rows
+  # are ephemeral, so prune needs no `--force`; the announce then drops the rows of the tags that are gone.
   prune:
-    name: Prune old candidates and canary builds
-    if: >-
-      ${{ !cancelled()
-      && needs.announce.result == 'success'
-      && (inputs.mode == 'release' || needs.plan.outputs.track == 'canary') }}
+    name: Prune old candidates
+    if: ${{ inputs.mode == 'release' }}
     needs: [plan, announce]
     runs-on: ubuntu-latest
     environment: ocx.sh
@@ -561,31 +512,25 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
-      - name: Prune the stale candidates or canary builds
+      - name: Prune candidates of old releases
         id: prune
         env:
-          MODE: ${{ inputs.mode }}
           DAYS: ${{ inputs.prune_after_days }}
-          KEEP: ${{ env.CANARY_KEEP }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           ocx --remote --format json index list "$PACKAGE_RELEASE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
-          if [[ "$MODE" == release ]]; then
-            python3 scripts/release_prune_select.py candidates --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
-          else
-            python3 scripts/release_prune_select.py canary --keep "$KEEP" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
-          fi
+          python3 scripts/release_prune_select.py candidates --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
           mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
           if ((${#selected[@]} == 0)); then
-            echo "Nothing to prune: no candidate of a release older than $DAYS days, no canary beyond $KEEP."
+            echo "No candidate of a release older than $DAYS days."
             exit 0
           fi
           ocx package prune --forge github --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE_LOGICAL" "${selected[@]}"
       # Only the announce carries the index token; prune does not need it. It runs after a failed prune too: roots
       # deleted before the failure must lose their rows. The failed prune step still fails the job.
-      - name: Announce the pruned tags
+      - name: Announce the pruned candidates
         if: ${{ !cancelled() && steps.prune.conclusion != 'skipped' }}
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}

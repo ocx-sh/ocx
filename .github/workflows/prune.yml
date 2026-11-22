@@ -1,0 +1,187 @@
+name: Prune
+
+# Removes the disposable builds `release.yml` leaves behind, on a clock of its own: the dev package's `-dev` builds
+# (by age) and `-pr<N>` builds (once pull request N is no longer open, or past the age), and the canary builds of
+# the release package beyond `CANARY_KEEP`. Cleanup is scheduled, never a tail of a build, so a closed pull
+# request or a failed publish does not leave its builds waiting for some later build to succeed.
+#
+# A schedule has no inputs, so it prunes at the default age of 30 days; a dispatch may pass `prune_after_days`.
+# Candidates of a released version are pruned by `release.yml` in release mode, not here.
+#
+# The `canary` job announces its selection first, with `--ephemeral --tags-file`, then prunes. A canary whose own
+# announce failed is in the registry but not in the index, and `ocx package prune` refuses the whole run (exit 75)
+# while one selected tag is unlisted; the announce heals that. Prune itself never announces.
+#
+# Repository values live in the one `env:` block, so a copy of this file differs only there.
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      prune_after_days:
+        description: >-
+          Age in days before a dev build or a pull request build is pruned.
+        required: false
+        type: number
+        default: 30
+
+permissions: {}
+
+env:
+  REPOSITORY_ID: "1171751668"
+  PACKAGE_RELEASE: ghcr.io/ocx-sh/ocx/cli
+  PACKAGE_DEV: ghcr.io/ocx-sh/dev/cli
+  # The package as the index and its users name it; the physical home is `PACKAGE_RELEASE`.
+  PACKAGE_LOGICAL: ocx.sh/ocx/cli
+  INDEX_REPO: ocx-sh/index
+  INDEX_PACKAGE: ocx/cli
+  # Canary builds of the release package kept by the prune, newest first.
+  CANARY_KEEP: "3"
+  # The published ocx that drives the prune; it needs `package prune --forge` and `package announce --ephemeral`
+  # (verified present at tag v0.6.8).
+  OCX_VERSION: '0.6.8'
+
+concurrency:
+  group: prune
+  cancel-in-progress: false
+
+jobs:
+  # The one place `--force` is allowed, because the dev package has no index to mark a tag ephemeral and its
+  # tags are all disposable.
+  dev:
+    name: Prune dev and pull request builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    steps:
+      - name: Guard the ref and the repository
+        env:
+          REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::prune runs only from refs/heads/main (this run is $GITHUB_REF)"
+            exit 1
+          fi
+          if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
+            echo "::error::this workflow prunes only the repository it was written for (id $REPOSITORY_ID)"
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: ${{ env.OCX_VERSION }}
+          cache: false
+      - name: Prune dev and pull request builds
+        env:
+          PACKAGE: ${{ env.PACKAGE_DEV }}
+          # Not `inputs.prune_after_days || '30'`: a dispatched 0 is falsy and would become 30.
+          DAYS: ${{ github.event_name == 'schedule' && '30' || inputs.prune_after_days }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ocx --remote --format json index list "$PACKAGE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
+          # No `|| true`: a failed call must abort, because an empty file produced by an error would select every PR build.
+          gh pr list --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-prs.txt"
+          {
+            python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt"
+            python3 scripts/release_prune_select.py pr --days "$DAYS" --open "$RUNNER_TEMP/open-prs.txt" < "$RUNNER_TEMP/tags.txt"
+          } > "$RUNNER_TEMP/selected.txt"
+          mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
+          if ((${#selected[@]} == 0)); then
+            echo "Nothing to prune in $PACKAGE: no stale dev build, no build of a closed pull request."
+            exit 0
+          fi
+          ocx package prune --forge github --force --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE" "${selected[@]}"
+
+  # The release package's canary builds beyond CANARY_KEEP. Their index rows are ephemeral, so prune needs no
+  # `--force`; the closing announce drops the rows of the tags that are gone.
+  canary:
+    name: Prune canary builds
+    runs-on: ubuntu-latest
+    environment: ocx.sh
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Guard the ref and the repository
+        env:
+          REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::prune runs only from refs/heads/main (this run is $GITHUB_REF)"
+            exit 1
+          fi
+          if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
+            echo "::error::this workflow prunes only the repository it was written for (id $REPOSITORY_ID)"
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: ${{ env.OCX_VERSION }}
+          cache: false
+      - name: Select the canary builds beyond the keep count
+        id: select
+        env:
+          KEEP: ${{ env.CANARY_KEEP }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ocx --remote --format json index list "$PACKAGE_RELEASE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
+          python3 scripts/release_prune_select.py canary --keep "$KEEP" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
+          if grep -q . "$RUNNER_TEMP/selected.txt"; then
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to prune: no canary beyond $KEEP."
+          fi
+      # A canary whose own announce failed is in the registry but not in the index, and prune refuses the whole run
+      # (exit 75) while one selected tag is unlisted. `--tags-file` adds only the named tags and `--ephemeral`
+      # marks only the rows it adds.
+      - name: Announce the selected tags
+        if: ${{ steps.select.outputs.any == 'true' }}
+        env:
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$OCX_ANNOUNCE_TOKEN" ]]; then
+            echo "::error::OCX_ANNOUNCE_TOKEN is not available to the ocx.sh environment"
+            exit 1
+          fi
+          ocx package announce --ephemeral --tags-file "$RUNNER_TEMP/selected.txt" --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
+      - name: Prune the selected canary builds
+        id: prune
+        if: ${{ steps.select.outputs.any == 'true' }}
+        env:
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt")
+          ocx package prune --forge github --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE_LOGICAL" "${selected[@]}"
+      # Only the announce carries the index token; prune does not need it. It runs after a failed prune too: roots
+      # deleted before the failure must lose their rows. The failed prune step still fails the job.
+      - name: Announce the pruned tags
+        if: ${{ !cancelled() && steps.prune.conclusion != 'skipped' }}
+        env:
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+        run: ocx package announce --refresh --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"

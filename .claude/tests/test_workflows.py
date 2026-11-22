@@ -3873,15 +3873,11 @@ def _dev_isolation_findings(documents: list[tuple[str, dict]]) -> list[str]:
     for name in _RELEASE_ONLY:
         if _eval_if(jobs[name].get("if", "true"), "candidate"):
             findings.append(f"`{name}` runs for a candidate")
-    for mode in ("release", "candidate"):
-        if _eval_if(jobs["prune-dev"]["if"], mode, {"publish": "success"}):
-            findings.append(f"`prune-dev` runs in {mode} mode")
-    if not _eval_if(jobs["prune-dev"]["if"], "dev", {"publish": "success"}):
-        findings.append("`prune-dev` never runs in dev mode")
-    for name, job in jobs.items():
-        text = _job_runs(job) + str(job.get("env", ""))
-        if name == "prune-dev" and re.search(r"PACKAGE_RELEASE|PACKAGE_LOGICAL|ocx\.sh/ocx", text):
-            findings.append("`prune-dev` names the release package")
+    if "prune-dev" in jobs:
+        findings.append("`prune-dev` is back in release.yml: prune.yml prunes the dev builds")
+    dev_prune = dict(documents)["prune.yml"]["jobs"]["dev"]
+    if re.search(r"PACKAGE_RELEASE|PACKAGE_LOGICAL|ocx\.sh/ocx", _job_runs(dev_prune) + str(dev_prune)):
+        findings.append("`prune.yml:dev` names the release package")
     dev_arm = re.search(r"\n\s+dev\)\n(.*?);;", _plan_script(documents), re.S)
     rest = _CANARY_PACKAGE_OVERRIDE.sub("", dev_arm.group(1)) if dev_arm else ""
     if not dev_arm or not _CANARY_PACKAGE_OVERRIDE.search(dev_arm.group(1)):
@@ -3909,8 +3905,13 @@ def test_the_dev_isolation_sweep_reds_each_way_a_dev_build_could_reach_the_relea
     assert _dev_isolation_findings(_mutated("release.yml", old, new))
 
 
+def test_the_dev_isolation_sweep_reds_a_prune_dev_job_in_release_yml_and_a_dev_prune_of_the_release_package() -> None:
+    assert _dev_isolation_findings(_mutated("release.yml", "  comment:\n    name: Comment the pull request build\n", "  prune-dev:\n    name: Prune\n  comment:\n    name: Comment the pull request build\n"))
+    assert _dev_isolation_findings(_mutated("prune.yml", "PACKAGE: ${{ env.PACKAGE_DEV }}", "PACKAGE: ${{ env.PACKAGE_RELEASE }}"))
+
+
 _GATE_RESULTS = {"plan": "success", "publish": "success", "github-release": "success", "announce": "success"}
-#: (job, mode, track, result overrides, runs?) over the real `if:` of `announce` and `prune`.
+#: (job, mode, track, result overrides, runs?) over the real `if:` of `announce` and `prune` (release mode only; prune.yml owns the rest).
 _GATE_CASES = [
     *[("announce", mode, "", {}, True) for mode in ("release", "candidate")],
     *[("announce", mode, "", {"github-release": result}, False) for mode in ("release", "candidate") for result in ("skipped", "failure", "cancelled")],
@@ -3923,18 +3924,16 @@ _GATE_CASES = [
     ("announce", "dev", "dev", {"github-release": "skipped"}, False),
     ("prune", "release", "", {}, True),
     ("prune", "candidate", "", {}, False),
-    *[("prune", "release", "", {"announce": result}, False) for result in ("failure", "cancelled", "skipped")],
-    ("prune", "dev", "canary", {}, True),
-    *[("prune", "dev", "canary", {"announce": result}, False) for result in ("failure", "cancelled", "skipped")],
+    ("prune", "dev", "canary", {}, False),
     ("prune", "dev", "pr12", {}, False),
     ("prune", "dev", "dev", {}, False),
 ]
 
 
 def _gate_findings(documents: list[tuple[str, dict]]) -> list[str]:
-    """`announce` and `prune` read the result of what they need; only the canary track may pass a skipped `github-release`."""
+    """`announce` reads the result of what it needs and only the canary track may pass a skipped `github-release`; `prune` is release mode alone."""
     jobs = dict(documents)["release.yml"]["jobs"]
-    findings = [f"`{name}` has no status function in its `if:`" for name in ("announce", "prune") if "!cancelled()" not in str(jobs[name].get("if"))]
+    findings = [f"`{name}` has no status function in its `if:`" for name in ("announce",) if "!cancelled()" not in str(jobs[name].get("if"))]
     for name, mode, track, overrides, expected in _GATE_CASES:
         got = _eval_if(jobs[name]["if"], mode, {**_GATE_RESULTS, **overrides}, {"track": track})
         if got is not expected:
@@ -3953,8 +3952,8 @@ def test_announce_and_prune_wait_for_a_green_release_and_only_the_canary_track_s
         pytest.param("needs.plan.outputs.track == 'canary' && needs.github-release.result == 'skipped'", "needs.plan.outputs.track != '' && needs.github-release.result == 'skipped'", id="announce-passes-every-dev-track"),
         pytest.param("      && needs.publish.result == 'success'\n      && (needs.github-release.result", "      && (needs.github-release.result", id="announce-drops-the-publish-result"),
         pytest.param("(needs.github-release.result == 'success'\n      ||", "(true\n      ||", id="announce-lets-a-failed-release-through"),
-        pytest.param("|| needs.plan.outputs.track == 'canary') }}", "|| true) }}", id="prune-drops-the-track-condition"),
-        pytest.param("      && needs.announce.result == 'success'\n", "", id="prune-drops-the-announce-result"),
+        pytest.param("    name: Prune old candidates\n    if: ${{ inputs.mode == 'release' }}", "    name: Prune old candidates\n    if: ${{ inputs.mode != 'dev' }}", id="prune-runs-for-a-candidate"),
+        pytest.param("    name: Prune old candidates\n    if: ${{ inputs.mode == 'release' }}", "    name: Prune old candidates\n    if: ${{ needs.plan.outputs.track == 'canary' || inputs.mode == 'release' }}", id="prune-runs-for-the-canary-track"),
     ],
 )
 def test_the_gate_sweep_reds_each_way_a_release_step_could_run_without_its_ancestor(old: str, new: str) -> None:
@@ -3967,7 +3966,7 @@ def _force_findings(documents: list[tuple[str, dict]]) -> list[str]:
         for line in _job_runs(job).splitlines():
             if "package prune" in line and re.search(r"--force\b", line):
                 forced.append(where)
-                if where != "release.yml:prune-dev":
+                if where != "prune.yml:dev":
                     findings.append(f"{where} prunes with --force")
                 elif '"$PACKAGE"' not in line or str(job["steps"][-1]["env"]["PACKAGE"]) != "${{ env.PACKAGE_DEV }}":
                     findings.append(f"{where} forces a prune of something other than PACKAGE_DEV")
@@ -3981,14 +3980,15 @@ def test_only_the_dev_prune_forces_and_only_on_the_dev_package() -> None:
 
 
 @pytest.mark.parametrize(
-    ("old", "new"),
+    ("name", "old", "new"),
     [
-        pytest.param("ocx package prune --forge github --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", "ocx package prune --forge github --force --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", id="release-prune-forces"),
-        pytest.param("PACKAGE: ${{ env.PACKAGE_DEV }}", "PACKAGE: ${{ needs.plan.outputs.package }}", id="dev-prune-package-is-not-pinned-to-dev"),
+        pytest.param("release.yml", "ocx package prune --forge github --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", "ocx package prune --forge github --force --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", id="release-prune-forces"),
+        pytest.param("prune.yml", "ocx package prune --forge github --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", "ocx package prune --forge github --force --tags-file \"$RUNNER_TEMP/pruned.txt\" \"$PACKAGE_LOGICAL\"", id="canary-prune-forces"),
+        pytest.param("prune.yml", "PACKAGE: ${{ env.PACKAGE_DEV }}", "PACKAGE: ${{ env.PACKAGE_RELEASE }}", id="dev-prune-package-is-not-pinned-to-dev"),
     ],
 )
-def test_the_force_sweep_reds_a_forced_release_prune_and_an_unpinned_dev_prune(old: str, new: str) -> None:
-    assert _force_findings(_mutated("release.yml", old, new))
+def test_the_force_sweep_reds_a_forced_release_prune_a_forced_canary_prune_and_an_unpinned_dev_prune(name: str, old: str, new: str) -> None:
+    assert _force_findings(_mutated(name, old, new))
 
 
 _TAG_WRITERS = re.compile(r"\bgh release create\b|\bgit tag\b|\bgit push\b")
@@ -4710,42 +4710,70 @@ def test_the_announce_token_is_scoped_to_the_announce_step() -> None:
     assert _announce_token_findings(_documents()) == []
 
 
-def test_the_announce_token_sweep_reds_a_prune_step_that_carries_it() -> None:
-    old = '          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: |\n          set -euo pipefail\n          ocx --remote --format json index list'
-    new = old.replace("        run:", "          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}\n        run:", 1)
-    assert _announce_token_findings(_mutated("release.yml", old, new))
+_PRUNE_JOBS = ("release.yml:prune", "prune.yml:canary")
+_LIST_STEP_TAIL = '          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: |\n          set -euo pipefail\n          ocx --remote --format json index list'
 
 
-def test_the_announce_token_sweep_reds_an_announce_step_that_carries_a_registry_credential() -> None:
+@pytest.mark.parametrize("name", ["release.yml", "prune.yml"])
+def test_the_announce_token_sweep_reds_a_prune_step_that_carries_it(name: str) -> None:
+    new = _LIST_STEP_TAIL.replace("        run:", "          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}\n        run:", 1)
+    assert _announce_token_findings(_mutated(name, _LIST_STEP_TAIL, new))
+
+
+def test_the_announce_token_sweep_reds_the_canary_prune_step_that_carries_it() -> None:
+    old = "        id: prune\n        if: ${{ steps.select.outputs.any == 'true' }}\n        env:\n"
+    assert _announce_token_findings(_mutated("prune.yml", old, old + "          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}\n"))
+
+
+@pytest.mark.parametrize("name", ["release.yml", "prune.yml"])
+def test_the_announce_token_sweep_reds_an_announce_step_that_carries_a_registry_credential(name: str) -> None:
     old = "          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}\n        run: ocx package announce --refresh"
     new = "          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n" + old
-    assert _announce_token_findings(_mutated("release.yml", old, new))
+    assert _announce_token_findings(_mutated(name, old, new))
 
 
-def _prune_job_steps(documents: list[tuple[str, dict]]) -> tuple[dict, dict]:
-    job = next(j for where, _, j in _jobs(documents) if where == "release.yml:prune")
-    steps = job["steps"]
+def test_the_ephemeral_announce_step_never_holds_a_registry_credential() -> None:
+    old = "        if: ${{ steps.select.outputs.any == 'true' }}\n        env:\n          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}\n"
+    assert _announce_token_findings(_mutated("prune.yml", old, old + "          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"))
+
+
+def _reconciliation_findings(documents: list[tuple[str, dict]], where: str) -> list[str]:
+    """The closing `--refresh` announce only removes rows, runs after a failed prune, and the prune step is never `continue-on-error`."""
+    steps = next(j for w, _, j in _jobs(documents) if w == where)["steps"]
     prune = next(s for s in steps if s.get("id") == "prune")
-    announce = next(s for s in steps if "package announce" in str(s.get("run")))
-    return prune, announce
-
-
-def test_the_prune_reconciliation_only_removes_rows_and_never_adds_registry_tags() -> None:
-    """`--tags-from-registry` would turn an abandoned partial publish into a durable row (adr_snapshot_lifecycle)."""
-    _, announce = _prune_job_steps(_documents())
-    run = str(announce["run"])
-    assert re.search(r"(?<!\S)--refresh(?!\S)", run)
-    assert "--tags-from-registry" not in run
-
-
-def test_the_prune_reconciliation_runs_after_a_failed_prune_and_the_job_still_fails() -> None:
-    """A prune that deleted some roots before failing must still drop their rows; the failure itself stays visible."""
-    prune, announce = _prune_job_steps(_documents())
+    announce = next((s for s in steps if "--refresh" in str(s.get("run"))), None)
+    if announce is None:
+        return [f"{where}: no `--refresh` announce step"]
+    findings = []
+    if "--tags-from-registry" in str(announce["run"]):
+        findings.append(f"{where}: the reconciliation adds registry tags")
     condition = str(announce.get("if"))
-    assert "!cancelled()" in condition
-    assert "steps.prune.conclusion != 'skipped'" in condition
-    assert "outputs.pruned" not in condition
-    assert not prune.get("continue-on-error"), "continue-on-error would mask a failed prune"
+    if "!cancelled()" not in condition or "steps.prune.conclusion != 'skipped'" not in condition or "outputs.pruned" in condition:
+        findings.append(f"{where}: the reconciliation does not run after a failed prune ({condition})")
+    if prune.get("continue-on-error"):
+        findings.append(f"{where}: continue-on-error would mask a failed prune")
+    return findings
+
+
+@pytest.mark.parametrize("where", _PRUNE_JOBS)
+def test_the_prune_reconciliation_only_removes_rows_runs_after_a_failed_prune_and_the_job_still_fails(where: str) -> None:
+    """`--tags-from-registry` would turn an abandoned partial publish into a durable row (adr_snapshot_lifecycle)."""
+    assert _reconciliation_findings(_documents(), where) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new"),
+    [
+        pytest.param("release.yml", "package announce --refresh --index-repo", "package announce --tags-from-registry --refresh --index-repo", id="release-adds-registry-tags"),
+        pytest.param("prune.yml", "package announce --refresh --index-repo", "package announce --tags-from-registry --refresh --index-repo", id="canary-adds-registry-tags"),
+        pytest.param("release.yml", " && steps.prune.conclusion != 'skipped'", "", id="release-reconciliation-skips-after-a-failed-prune"),
+        pytest.param("prune.yml", " && steps.prune.conclusion != 'skipped'", "", id="canary-reconciliation-skips-after-a-failed-prune"),
+        pytest.param("prune.yml", "      - name: Prune the selected canary builds\n        id: prune\n", "      - name: Prune the selected canary builds\n        id: prune\n        continue-on-error: true\n", id="canary-prune-masks-a-failure"),
+    ],
+)
+def test_the_reconciliation_sweep_reds_registry_tags_a_skipped_run_and_a_masked_prune(name: str, old: str, new: str) -> None:
+    where = "release.yml:prune" if name == "release.yml" else "prune.yml:canary"
+    assert _reconciliation_findings(_mutated(name, old, new), where)
 
 
 def test_the_stamped_release_build_neither_reads_nor_writes_the_remote_cache() -> None:
@@ -4789,14 +4817,14 @@ def test_release_jobs_behind_a_skippable_ancestor_carry_a_status_function() -> N
 
 
 # ---------------------------------------------------------------------------
-# release.yml `prune-dev`: the real last step, with a stub `ocx` and `gh` and the real selector.
+# prune.yml `dev`: the real last step, with a stub `ocx` and `gh` and the real selector.
 # ---------------------------------------------------------------------------
 
 _OPEN_PRS_WRITE = '> "$RUNNER_TEMP/open-prs.txt"'
 
 
 def _prune_script(documents: list[tuple[str, dict]]) -> str:
-    return str(dict(documents)["release.yml"]["jobs"]["prune-dev"]["steps"][-1]["run"])
+    return str(dict(documents)["prune.yml"]["jobs"]["dev"]["steps"][-1]["run"])
 
 
 def _run_prune(
@@ -4923,10 +4951,6 @@ def _release_prune_script(documents: list[tuple[str, dict]]) -> str:
     return str(next(s for s in dict(documents)["release.yml"]["jobs"]["prune"]["steps"] if s.get("id") == "prune")["run"])
 
 
-def _release_prune_env(mode: str) -> dict[str, str]:
-    return {**_release_env(), "MODE": mode, "KEEP": _release_env()["CANARY_KEEP"]}
-
-
 def _prune_argv(lines: list[str] | None) -> tuple[list[str], list[str]]:
     """`(flags, tags)` of the one `ocx package prune` call, split at the logical package."""
     assert lines is not None and len(lines) == 1, lines
@@ -4935,44 +4959,215 @@ def _prune_argv(lines: list[str] | None) -> tuple[list[str], list[str]]:
     return argv[:package], argv[package + 1 :]
 
 
-def test_the_canary_run_prunes_exactly_the_surplus_canary_builds_of_the_release_package_without_force(tmp_path: Path) -> None:
-    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, _RELEASE_LISTING, env=_release_prune_env("dev"))
-    assert code == 0, code
-    flags, tags = _prune_argv(lines)
-    assert flags[:3] == ["package", "prune", "--forge"] and "--force" not in flags, flags
-    assert set(tags) == {"0.9.0-canary_20260101000000", "0.9.0-canary", "0.10.0-canary_20260102000000"}, tags
-    assert (tmp_path / "list.log").read_text(encoding="utf-8").split() == ["ghcr.io/ocx-sh/ocx/cli"]
-
-
-def test_the_release_run_still_prunes_only_the_candidates_of_a_shipped_version(tmp_path: Path) -> None:
-    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, _RELEASE_LISTING, env=_release_prune_env("release"))
+def test_the_release_run_prunes_only_the_candidates_of_a_shipped_version_and_never_a_canary(tmp_path: Path) -> None:
+    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, _RELEASE_LISTING, env=_release_env())
     assert code == 0, code
     flags, tags = _prune_argv(lines)
     assert "--force" not in flags and set(tags) == {"0.9.0-rc1_20200101000000", "0.9.0-rc1"}, (flags, tags)
-
-
-def test_the_canary_run_calls_prune_for_nothing_when_no_canary_is_beyond_the_keep_count(tmp_path: Path) -> None:
-    listing = ["0.10.0-canary", *_CANARY_LISTING[-3:], *_OLD_CANDIDATES]
-    code, lines = _run_prune(_release_prune_script(_documents()), tmp_path, listing, env=_release_prune_env("dev"))
-    assert (code, lines) == (0, None)
+    assert not any("canary" in tag for tag in tags), tags
 
 
 @pytest.mark.parametrize(
     ("old", "new"),
     [
-        pytest.param('if [[ "$MODE" == release ]]; then', 'if [[ "$MODE" == candidate ]]; then', id="release-run-selects-canaries"),
-        pytest.param('ocx package prune --forge github --tags-file', 'ocx package prune --forge github --force --tags-file', id="release-package-prune-forces"),
+        pytest.param('release_prune_select.py candidates --days "$DAYS"', "release_prune_select.py canary --keep 3", id="release-run-selects-canaries"),
+        pytest.param("ocx package prune --forge github --tags-file", "ocx package prune --forge github --force --tags-file", id="release-package-prune-forces"),
     ],
 )
 def test_the_release_prune_mutations_change_what_the_step_hands_prune(tmp_path: Path, old: str, new: str) -> None:
     script = _release_prune_script(_documents())
     assert old in script, f"mutation did not land: {old!r} is not in the prune step"
-    for mode in ("dev", "release"):
-        real = _run_prune(script, tmp_path / f"real-{mode}", _RELEASE_LISTING, env=_release_prune_env(mode))
-        mutated = _run_prune(script.replace(old, new, 1), tmp_path / f"mutated-{mode}", _RELEASE_LISTING, env=_release_prune_env(mode))
-        if real != mutated:
-            return
-    pytest.fail("neither mode noticed the mutation")
+    real = _run_prune(script, tmp_path / "real", _RELEASE_LISTING, env=_release_env())
+    mutated = _run_prune(script.replace(old, new, 1), tmp_path / "mutated", _RELEASE_LISTING, env=_release_env())
+    assert real != mutated
+
+
+def test_release_yml_has_no_prune_dev_job_and_its_prune_never_selects_canary_tags() -> None:
+    jobs = dict(_documents())["release.yml"]["jobs"]
+    assert "prune-dev" not in jobs
+    assert "canary" not in _job_runs(jobs["prune"]) and "CANARY_KEEP" not in str(jobs["prune"])
+    assert "CANARY_KEEP" not in _release_env()
+
+
+# ---------------------------------------------------------------------------
+# prune.yml `canary`: select, announce the selection, prune, reconcile; every step against stubs.
+# ---------------------------------------------------------------------------
+
+_CANARY_SELECTED = {"0.9.0-canary_20260101000000", "0.9.0-canary", "0.10.0-canary_20260102000000"}
+_CANARY_STUB = """#!/bin/sh
+case "$*" in
+  "--remote --format json index list "*) cat "$STUB_LISTING"; exit 0 ;;
+  "package announce "*|"package prune "*) ;;
+  *) exit 64 ;;
+esac
+file=
+prev=
+for a in "$@"; do
+  [ "$prev" = --tags-file ] && file=$a
+  prev=$a
+done
+if [ "$2" = announce ] && [ -n "$file" ]; then
+  printf '%s :: %s\\n' "$*" "$(tr '\\n' ' ' < "$file")" >> "$STUB_LOG"
+else
+  echo "$*" >> "$STUB_LOG"
+fi
+"""
+
+
+def _prune_env() -> dict[str, str]:
+    return {k: str(v) for k, v in _load(WORKFLOW_DIR / "prune.yml")["env"].items()}
+
+
+def _run_canary(tmp: Path, tags: list[str], documents: list[tuple[str, dict]] | None = None) -> list[str]:
+    """Run the `canary` job's steps in order; every `ocx package` call, an announce with its tags file appended after ` :: `.
+
+    A step runs when its `if:` allows: `steps.select.outputs.any` is the select step's own output, and the
+    closing announce follows whether `prune` ran.
+    """
+    steps = dict(documents or _documents())["prune.yml"]["jobs"]["canary"]["steps"]
+    (tmp / "bin").mkdir(parents=True)
+    (tmp / "runner").mkdir()
+    (tmp / "listing.json").write_text(json.dumps({"items": [{"tags": tags}]}), encoding="utf-8")
+    ocx = tmp / "bin" / "ocx"
+    ocx.write_text(_CANARY_STUB, encoding="utf-8")
+    ocx.chmod(0o755)
+    output, log = tmp / "output", tmp / "calls.log"
+    output.touch()
+    env = {
+        **_prune_env(),
+        "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+        "HOME": str(tmp),
+        "RUNNER_TEMP": str(tmp / "runner"),
+        "GITHUB_OUTPUT": str(output),
+        "KEEP": _prune_env()["CANARY_KEEP"],
+        "OCX_ANNOUNCE_TOKEN": "t",
+        "STUB_LISTING": str(tmp / "listing.json"),
+        "STUB_LOG": str(log),
+    }
+    ran: set[str] = set()
+    for step in steps:
+        if "package" not in str(step.get("run")) and step.get("id") != "select":
+            continue
+        condition = str(step.get("if", ""))
+        if "steps.select.outputs.any" in condition and "any=true" not in output.read_text(encoding="utf-8"):
+            continue
+        if "steps.prune.conclusion" in condition and "prune" not in ran:
+            continue
+        done = subprocess.run(["bash", "-c", str(step["run"])], cwd=ROOT, env=env, capture_output=True, encoding="utf-8", check=False)
+        assert done.returncode == 0, (step.get("name"), done.stderr)
+        ran.add(str(step.get("id")))
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _canary_prune_findings(calls: list[str]) -> list[str]:
+    """Announce the selection ephemerally from a tags file, then prune exactly it without `--force`, then reconcile."""
+    if len(calls) != 3:
+        return [f"expected announce, prune, reconcile; got {calls}"]
+    findings = []
+    head, _, listed = calls[0].partition(" :: ")
+    words = head.split()
+    if words[:2] != ["package", "announce"] or "--ephemeral" not in words or "--tags-file" not in words:
+        findings.append(f"the first call is not an ephemeral announce of a tags file: {calls[0]}")
+    if set(listed.split()) != _CANARY_SELECTED:
+        findings.append(f"the announced tags are {sorted(listed.split())}")
+    prune = calls[1].split()
+    if prune[:2] != ["package", "prune"] or "--force" in prune or set(prune[prune.index("ocx.sh/ocx/cli") + 1 :]) != _CANARY_SELECTED:
+        findings.append(f"the second call is not a plain prune of the selected tags: {calls[1]}")
+    if not calls[2].startswith("package announce --refresh") or "--ephemeral" in calls[2]:
+        findings.append(f"the last call is not the refresh announce: {calls[2]}")
+    return findings
+
+
+def test_the_canary_job_announces_the_selection_ephemerally_before_it_prunes_exactly_that_selection_without_force(tmp_path: Path) -> None:
+    assert _canary_prune_findings(_run_canary(tmp_path, _RELEASE_LISTING)) == []
+
+
+def test_the_canary_job_calls_neither_announce_nor_prune_when_no_canary_is_beyond_the_keep_count(tmp_path: Path) -> None:
+    assert _run_canary(tmp_path, ["0.10.0-canary", *_CANARY_LISTING[-3:], *_OLD_CANDIDATES]) == []
+
+
+def _canary_with_prune_before_announce() -> list[tuple[str, dict]]:
+    documents = _documents()
+    steps = dict(documents)["prune.yml"]["jobs"]["canary"]["steps"]
+    first = next(i for i, s in enumerate(steps) if s.get("name") == "Announce the selected tags")
+    second = next(i for i, s in enumerate(steps) if s.get("id") == "prune")
+    steps[first], steps[second] = steps[second], steps[first]
+    return documents
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        pytest.param("ocx package announce --ephemeral --tags-file", "ocx package announce --tags-file", id="announce-drops-ephemeral"),
+        pytest.param('--ephemeral --tags-file "$RUNNER_TEMP/selected.txt"', "--ephemeral --tags-from-registry", id="announce-swaps-in-tags-from-registry"),
+        pytest.param("ocx package prune --forge github --tags-file", "ocx package prune --forge github --force --tags-file", id="prune-forces"),
+        pytest.param("release_prune_select.py canary --keep", "release_prune_select.py candidates --days", id="select-picks-candidates"),
+    ],
+)
+def test_the_canary_mutations_change_what_the_steps_call(tmp_path: Path, old: str, new: str) -> None:
+    assert _canary_prune_findings(_run_canary(tmp_path, _RELEASE_LISTING, _mutated("prune.yml", old, new)))
+
+
+def test_the_canary_mutation_that_prunes_before_it_announces_changes_the_order_of_the_calls(tmp_path: Path) -> None:
+    assert _canary_prune_findings(_run_canary(tmp_path, _RELEASE_LISTING, _canary_with_prune_before_announce()))
+
+
+# ---------------------------------------------------------------------------
+# prune.yml: entry, guards and grants
+# ---------------------------------------------------------------------------
+
+
+def _prune_workflow_findings(documents: list[tuple[str, dict]]) -> list[str]:
+    document = dict(documents)["prune.yml"]
+    findings = []
+    triggers = document.get("on") or document.get(True)
+    if set(triggers) != {"schedule", "workflow_dispatch"}:
+        findings.append(f"prune.yml triggers on {sorted(triggers)}")
+    elif set(triggers["workflow_dispatch"]["inputs"]) != {"prune_after_days"}:
+        findings.append(f"prune.yml inputs are {sorted(triggers['workflow_dispatch']['inputs'])}")
+    if document.get("permissions") != {}:
+        findings.append("prune.yml has no top-level `permissions: {}`")
+    if str(document["env"].get("REPOSITORY_ID")) != "1171751668":
+        findings.append("prune.yml does not pin the repository id in its env block")
+    if set(document["jobs"]) != {"dev", "canary"}:
+        findings.append(f"prune.yml jobs are {sorted(document['jobs'])}")
+    for name, job in document["jobs"].items():
+        first = (job.get("steps") or [{}])[0]
+        if '"$GITHUB_REF" != "refs/heads/main"' not in str(first.get("run")) or "REPOSITORY_ID_ACTUAL" not in str(first.get("env")):
+            findings.append(f"prune.yml:{name} does not start with the ref and repository guard")
+        if not job.get("timeout-minutes"):
+            findings.append(f"prune.yml:{name} has no timeout-minutes")
+    jobs = document["jobs"]
+    if jobs["canary"].get("environment") != "ocx.sh":
+        findings.append("prune.yml:canary does not run in the `ocx.sh` environment")
+    if jobs["dev"].get("environment") or "OCX_ANNOUNCE_TOKEN" in str(jobs["dev"]):
+        findings.append("prune.yml:dev has an environment or the announce token")
+    discord = dict(documents)["notify-discord.yml"]
+    if "Prune" not in (discord.get("on") or discord.get(True))["workflow_run"]["workflows"]:
+        findings.append("notify-discord.yml does not watch `Prune`")
+    return findings
+
+
+def test_prune_yml_is_a_schedule_and_a_dispatch_with_the_guards_the_grants_and_the_environment_pinned() -> None:
+    assert _prune_workflow_findings(_documents()) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new"),
+    [
+        pytest.param("prune.yml", "  workflow_dispatch:\n", "  push:\n    branches: [main]\n  workflow_dispatch:\n", id="prune-on-push"),
+        pytest.param("prune.yml", "      prune_after_days:\n", "      other_days:\n", id="prune-renames-its-input"),
+        pytest.param("prune.yml", "permissions: {}\n", "permissions:\n  contents: read\n", id="prune-grants-by-default"),
+        pytest.param("prune.yml", 'REPOSITORY_ID: "1171751668"', 'REPOSITORY_ID: "1"', id="prune-pins-another-repository"),
+        pytest.param("prune.yml", '"$GITHUB_REF" != "refs/heads/main"', '"$GITHUB_REF" != ""', id="prune-guard-drops-the-ref"),
+        pytest.param("prune.yml", "    environment: ocx.sh\n", "", id="canary-without-its-environment"),
+        pytest.param("prune.yml", "    name: Prune dev and pull request builds\n", "    name: Prune dev and pull request builds\n    environment: ocx.sh\n", id="dev-gains-an-environment"),
+        pytest.param("prune.yml", "    name: Prune canary builds\n    runs-on: ubuntu-latest\n    environment: ocx.sh\n    timeout-minutes: 30\n", "    name: Prune canary builds\n    runs-on: ubuntu-latest\n    environment: ocx.sh\n", id="canary-without-a-timeout"),
+        pytest.param("notify-discord.yml", '      - "Prune"\n', "", id="discord-stops-watching-prune"),
+    ],
+)
+def test_the_prune_entry_sweep_reds_a_push_trigger_a_renamed_input_a_default_grant_a_wrong_repository_a_dropped_guard_and_a_wider_job(name: str, old: str, new: str) -> None:
+    assert _prune_workflow_findings(_mutated(name, old, new))
 
 
 # ---------------------------------------------------------------------------
