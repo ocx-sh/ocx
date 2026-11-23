@@ -208,6 +208,10 @@ pub enum ClientError {
     #[error(transparent)]
     #[exit(delegate)]
     Digest(#[from] crate::digest::error::DigestError),
+    /// The credential for a registry could not be resolved.
+    #[error(transparent)]
+    #[exit(delegate)]
+    Credential(#[from] crate::auth::AuthError),
     /// An internal library error (e.g. codesign, archive processing).
     #[error("{0}")]
     // `None` lets the chain walker reach the wrapped source; a `Some` would exit a hostile-layer `SymlinkEscape` as 1, not 65.

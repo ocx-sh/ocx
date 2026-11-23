@@ -25,7 +25,7 @@ Four ways to run them differ in what credential you have, and therefore in how t
 | GitLab, split credential pair | [`OCX_ANNOUNCE_GIT_TOKEN`][env-ocx-announce-git-token] (+ [`OCX_ANNOUNCE_GIT_USERNAME`][env-ocx-announce-git-username]) for the push, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] for the reads | `git` | The owner of `OCX_ANNOUNCE_GIT_TOKEN`, since it makes the push | git 2.31.0 |
 
 One variable, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token], serves both forges, and the token it holds follows the forge the run
-targets. Writing locally with `--output` needs none.
+targets. Writing locally with `--output` needs none. `OCX_ANNOUNCE_TOKEN` also accepts a [secret reference][env-secret-references], such as `file://<path>`, in place of the token.
 
 | Index forge | Token | Required scope |
 |---|---|---|
@@ -307,6 +307,7 @@ For a failing run, see [troubleshooting][announcing-troubleshooting] on the anno
 
 <!-- environment -->
 [env-ocx-announce-token]: ../reference/environment.md#ocx-announce-token
+[env-secret-references]: ../reference/environment.md#secret-references
 [env-ocx-announce-git-token]: ../reference/environment.md#ocx-announce-git-token
 [env-ocx-announce-git-username]: ../reference/environment.md#ocx-announce-git-username
 

@@ -14907,6 +14907,7 @@
       "visibility": "public",
       "summary": " Absolute path to the running `ocx`, set on every spawn so a child OCX runs the",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "binary_pin",
       "on_invalid": "default"
     },
@@ -14916,6 +14917,7 @@
       "visibility": "public",
       "summary": " The OCX data root — `$OCX_HOME`, else `~/.ocx`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "setup_written",
       "on_invalid": "default"
     },
@@ -14926,6 +14928,7 @@
       "summary": " Boolean — disables network access when truthy. Mirrors `--offline`.",
       "flag": "--offline",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "error"
     },
@@ -14936,6 +14939,7 @@
       "summary": " Boolean — a tag-only reference missing from the local index errors instead of",
       "flag": "--frozen",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "error"
     },
@@ -14946,6 +14950,7 @@
       "summary": " Boolean — uses the remote index by default when truthy. Mirrors `--remote`.",
       "flag": "--remote",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -14956,6 +14961,7 @@
       "summary": " Paths to explicit configuration files, separated like `PATH` (`:` on Unix, `;` on Windows).",
       "flag": "--config",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -14965,6 +14971,7 @@
       "visibility": "public",
       "summary": " Boolean — skip the discovered config-tier chain; every file `--config` and `OCX_CONFIG` name",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -14975,6 +14982,7 @@
       "summary": " Path to an explicit project `ocx.toml`. Mirrors `--project`.",
       "flag": "--project",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -14984,6 +14992,7 @@
       "visibility": "public",
       "summary": " Boolean — skip the CWD walk and `OCX_PROJECT`; explicit `--project` paths still load.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -14993,6 +15002,7 @@
       "visibility": "public",
       "summary": " Path at which the CWD walk for a project `ocx.toml` stops; relative values join onto the",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15002,6 +15012,7 @@
       "visibility": "public",
       "summary": " Boolean — commands that stamp shell-activation consent as a side effect write none;",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "error"
     },
@@ -15011,6 +15022,7 @@
       "visibility": "public",
       "summary": " Withdrawn — no longer read; pass `--global` instead.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15021,6 +15033,7 @@
       "summary": " Path to the local index directory. Mirrors `--index`.",
       "flag": "--index",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15031,6 +15044,7 @@
       "summary": " Directories searched, read-only, for the blobs a command needs before it contacts a registry.",
       "flag": "--blob-dir",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15041,6 +15055,7 @@
       "summary": " Directory where blobs fetched from a registry are kept for later runs. Mirrors",
       "flag": "--blob-cache-dir",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15050,6 +15065,7 @@
       "visibility": "public",
       "summary": " The registry a bare identifier resolves under; outranks `[registry] default`, else",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15059,6 +15075,7 @@
       "visibility": "public",
       "summary": " Comma-separated `host[:port]` authorities that may be dialled over plain HTTP.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15068,6 +15085,7 @@
       "visibility": "public",
       "summary": " Boolean — allow a tag resolving to a yanked index entry. Forwarded to child OCX.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15077,6 +15095,7 @@
       "visibility": "public",
       "summary": " Path to the patch snapshot file `ocx patch freeze` writes, whose pinned digests win over live tag lookups.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15086,6 +15105,7 @@
       "visibility": "public",
       "summary": " JSON object mapping an upstream host to a mirror string or `{\"registry\"?, \"index\"?}`,",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15095,6 +15115,7 @@
       "visibility": "public",
       "summary": " JSON object encoding the resolved `[patches]` config; forwarded only when configured.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15104,6 +15125,7 @@
       "visibility": "public",
       "summary": " Boolean — `ocx self setup` modifies no shell profile. Mirrors `--no-modify-path`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15113,6 +15135,7 @@
       "visibility": "public",
       "summary": " OCI reference overriding `[managed].source` for this invocation only; empty is unset,",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15122,6 +15145,7 @@
       "visibility": "public",
       "summary": " Boolean — kill switch for the managed-config background refresh; `ocx config update` still works.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15131,6 +15155,7 @@
       "visibility": "public",
       "summary": " Directory execution records are written to; absent or empty turns recording off.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15140,6 +15165,7 @@
       "visibility": "public",
       "summary": " Filename template for each execution record; forwarded alongside `OCX_RECORDS_DIR`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15149,6 +15175,7 @@
       "visibility": "public",
       "summary": " Switch for exporting usage telemetry; unset or empty defers to `[telemetry]` in config.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15162,6 +15189,7 @@
       "visibility": "public",
       "summary": " Lazy materialization mode (`never` / `always`), the weakest tier of the `lazy-mode` ladder.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15175,6 +15203,7 @@
       "visibility": "public",
       "summary": " Lazy materialization report (`silent` / `progress`); not forwarded, like `OCX_LAZY_MODE`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15189,6 +15218,7 @@
       "visibility": "public",
       "summary": " Toolchain activation mode (`env` / `bin` / `none`), the weakest tier of the `activate`",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15198,6 +15228,7 @@
       "visibility": "public",
       "summary": " Boolean — composed paths pin to digest roots; the weakest tier of the `pinned` ladder.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15207,6 +15238,7 @@
       "visibility": "public",
       "summary": " Root under which project toolchain homes render — the env tier of `toolchain_dir`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15216,6 +15248,7 @@
       "visibility": "public",
       "summary": " Boolean — skip the policy-gated auto-verify on install/pull; `--no-verify` wins. Forwarded to child OCX.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "error"
     },
@@ -15225,6 +15258,7 @@
       "visibility": "public",
       "summary": " Project directories (separated like `PATH`) the per-prompt shell hook may activate in",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15234,6 +15268,7 @@
       "visibility": "public",
       "summary": " Comma-separated OCI namespaces; a project whose whole lock names sources inside them",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15243,6 +15278,7 @@
       "visibility": "public",
       "summary": " Boolean — `ocx self activate` skips the shell-completion block.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15252,6 +15288,7 @@
       "visibility": "public",
       "summary": " Boolean — disables the per-prompt shell hook; `ocx self activate` still runs at shell start.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15262,6 +15299,7 @@
       "summary": " Log level, as `--log-level` accepts it; the flag wins. Defaults to `info`.",
       "flag": "--log-level",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15271,6 +15309,7 @@
       "visibility": "public",
       "summary": " Log level for console messages only; outranks `OCX_LOG_LEVEL` there.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15281,6 +15320,7 @@
       "summary": " Boolean — suppresses the stdout report and the transfer progress bars.",
       "flag": "--quiet",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15291,6 +15331,7 @@
       "summary": " Maximum number of root packages pulled in parallel.",
       "flag": "--jobs",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15300,6 +15341,7 @@
       "visibility": "public",
       "summary": " Boolean — kill switch for the background self-update and toolchain drift checks; forwarded to child OCX.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15309,6 +15351,7 @@
       "visibility": "public",
       "summary": " Throttle interval of the background update checks, `\\d+[smhd]?` (bare digits = seconds).",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15323,6 +15366,7 @@
       "visibility": "public",
       "summary": " `RefreshPolicy` wire value for OCX's own update check; beats `[update] self`. Not forwarded.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15337,6 +15381,7 @@
       "visibility": "public",
       "summary": " `RefreshPolicy` wire value for the toolchain drift check; beats `[update] toolchain`. Not forwarded.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15346,6 +15391,7 @@
       "visibility": "public",
       "summary": " Boolean — skip ad-hoc code signing of macOS binaries after installation.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15355,6 +15401,7 @@
       "visibility": "public",
       "summary": " Extra CA roots — a path or inline PEM (contains `-----BEGIN`); empty is unset.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15364,6 +15411,7 @@
       "visibility": "public",
       "summary": " Path (bare or `file://`) to a Sigstore trusted-root JSON document, or a directory holding",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15373,6 +15421,7 @@
       "visibility": "public",
       "summary": " OIDC bearer token for keyless signing, below `--identity-token-file`/`-stdin`.",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "credential",
       "on_invalid": "default"
     },
@@ -15382,6 +15431,7 @@
       "visibility": "public",
       "summary": " Password for an encrypted signing key; never a flag, since `argv` is visible host-wide.",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "credential",
       "on_invalid": "default"
     },
@@ -15389,8 +15439,9 @@
       "name": "OCX_SIGNING_KEY",
       "value": "string",
       "visibility": "public",
-      "summary": " The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`; any other `env://` name",
+      "summary": " The signing key PEM itself, never a path, for `--key env://OCX_SIGNING_KEY`.",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "credential",
       "on_invalid": "default"
     },
@@ -15400,6 +15451,7 @@
       "visibility": "public",
       "summary": " Headers sent with every telemetry export, `name=value[,name=value...]`; values are",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "credential",
       "on_invalid": "default"
     },
@@ -15409,6 +15461,7 @@
       "visibility": "public",
       "summary": " The API half of the forge credential pair (a forge access token).",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15418,6 +15471,7 @@
       "visibility": "public",
       "summary": " The push-only forge credential (the secret half of `git push`'s Basic pair).",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "credential",
       "on_invalid": "default"
     },
@@ -15427,6 +15481,7 @@
       "visibility": "public",
       "summary": " The user half of the git write transport's Basic pair, default `gitlab-ci-token`;",
       "secret": false,
+      "accepts_reference": true,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15442,6 +15497,7 @@
       "visibility": "public",
       "summary": " Authentication type for one registry.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15451,6 +15507,7 @@
       "visibility": "public",
       "summary": " User name for one registry; `<REGISTRY>` is the registry slug.",
       "secret": false,
+      "accepts_reference": true,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15460,6 +15517,7 @@
       "visibility": "public",
       "summary": " Registry token for one registry; `<REGISTRY>` is the registry slug.",
       "secret": true,
+      "accepts_reference": true,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15469,6 +15527,7 @@
       "visibility": "plumbing",
       "summary": " The execution state: what OCX last applied to the shell, and the policy a parent OCX passed down.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "state",
       "on_invalid": "default"
     },
@@ -15478,6 +15537,7 @@
       "visibility": "plumbing",
       "summary": " Elvish only: the recording shell's pid and `$pwd`, so the hook re-runs on a directory change.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "hook_local",
       "on_invalid": "default"
     },
@@ -15487,6 +15547,7 @@
       "visibility": "plumbing",
       "summary": " A hook-local copy of a stood-down `__OCX_ENV_STATE`, never transported.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "hook_local",
       "on_invalid": "default"
     },
@@ -15496,6 +15557,7 @@
       "visibility": "plumbing",
       "summary": " Set by OCX on every credential helper it starts until 0.7; an OCX running under it never downloads.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "hook_local",
       "on_invalid": "default"
     },
@@ -15505,6 +15567,7 @@
       "visibility": "foreign",
       "summary": " Set by most CI providers. When truthy, the background update check and the managed-config",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15514,6 +15577,7 @@
       "visibility": "foreign",
       "summary": " Disables colour output when set to any non-empty value.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15523,6 +15587,7 @@
       "visibility": "foreign",
       "summary": " `0` disables colour output.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15532,6 +15597,7 @@
       "visibility": "foreign",
       "summary": " Non-`0` forces colour output.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15541,6 +15607,7 @@
       "visibility": "foreign",
       "summary": " The terminal type.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15550,6 +15617,7 @@
       "visibility": "foreign",
       "summary": " Log filter of the tracing subscriber.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15559,6 +15627,7 @@
       "visibility": "foreign",
       "summary": " `true` inside GitHub Actions.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15568,6 +15637,7 @@
       "visibility": "foreign",
       "summary": " File GitHub Actions reads exported variables from.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15577,6 +15647,7 @@
       "visibility": "foreign",
       "summary": " File GitHub Actions reads `PATH` additions from.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15586,6 +15657,7 @@
       "visibility": "foreign",
       "summary": " Commit the workflow runs on.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15595,6 +15667,7 @@
       "visibility": "foreign",
       "summary": " GitHub server URL.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15604,6 +15677,7 @@
       "visibility": "foreign",
       "summary": " `owner/repo` of the workflow.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15613,6 +15687,7 @@
       "visibility": "foreign",
       "summary": " Workflow run id.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15622,6 +15697,7 @@
       "visibility": "foreign",
       "summary": " Login of the user that triggered the workflow.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15631,6 +15707,7 @@
       "visibility": "foreign",
       "summary": " Numeric id of the user that triggered the workflow.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15640,6 +15717,7 @@
       "visibility": "foreign",
       "summary": " URL the runner serves OIDC tokens from.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15649,6 +15727,7 @@
       "visibility": "foreign",
       "summary": " Bearer token for `ACTIONS_ID_TOKEN_REQUEST_URL`.",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15658,6 +15737,7 @@
       "visibility": "foreign",
       "summary": " `true` inside GitLab CI.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15667,6 +15747,7 @@
       "visibility": "foreign",
       "summary": " GitLab CI job token.",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15676,6 +15757,7 @@
       "visibility": "foreign",
       "summary": " URL of the GitLab CI job.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15685,6 +15767,7 @@
       "visibility": "foreign",
       "summary": " `group/project` path of the GitLab project.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15694,6 +15777,7 @@
       "visibility": "foreign",
       "summary": " URL of the GitLab project.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15703,6 +15787,7 @@
       "visibility": "foreign",
       "summary": " Commit the GitLab pipeline runs on.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15712,6 +15797,7 @@
       "visibility": "foreign",
       "summary": " Creation time of the GitLab pipeline.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15721,6 +15807,7 @@
       "visibility": "foreign",
       "summary": " Login of the GitLab user that started the job.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15730,6 +15817,7 @@
       "visibility": "foreign",
       "summary": " Numeric id of the GitLab user that started the job.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15739,6 +15827,7 @@
       "visibility": "foreign",
       "summary": " OIDC token for keyless signing, from any provider.",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15748,6 +15837,7 @@
       "visibility": "foreign",
       "summary": " CircleCI OIDC token.",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15757,6 +15847,7 @@
       "visibility": "foreign",
       "summary": " Console-do-not-track convention; a truthy value is honoured as an opt-out and turns",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15766,6 +15857,7 @@
       "visibility": "foreign",
       "summary": " OpenTelemetry SDK kill switch; a truthy value is honoured as an opt-out and turns",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15775,6 +15867,7 @@
       "visibility": "foreign",
       "summary": " OpenTelemetry logs exporter selector; honoured only as an opt-out, where `none` turns",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15784,6 +15877,7 @@
       "visibility": "foreign",
       "summary": " OpenTelemetry service name; honoured as the exported `service.name`, below `[telemetry] service_name`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15793,6 +15887,7 @@
       "visibility": "foreign",
       "summary": " OpenTelemetry resource attributes, percent-decoded `key=value` pairs; honoured, below",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15802,6 +15897,7 @@
       "visibility": "foreign",
       "summary": " OTLP endpoint for every signal; honoured as the export destination when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15811,6 +15907,7 @@
       "visibility": "foreign",
       "summary": " OTLP endpoint for logs; honoured as the export destination, used verbatim.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15820,6 +15917,7 @@
       "visibility": "foreign",
       "summary": " OTLP export timeout for every signal, in milliseconds; honoured when",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15829,6 +15927,7 @@
       "visibility": "foreign",
       "summary": " OTLP export timeout for logs, in milliseconds; honoured.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15838,6 +15937,7 @@
       "visibility": "foreign",
       "summary": " OTLP transport protocol for every signal; honoured when `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15847,6 +15947,7 @@
       "visibility": "foreign",
       "summary": " OTLP transport protocol for logs; honoured, default `http/protobuf`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15856,6 +15957,7 @@
       "visibility": "foreign",
       "summary": " OTLP headers for every signal; honoured only when `OTEL_EXPORTER_OTLP_ENDPOINT` names the",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15865,6 +15967,7 @@
       "visibility": "foreign",
       "summary": " OTLP headers for logs; honoured when an `OTEL_EXPORTER_OTLP_*` endpoint names the destination.",
       "secret": true,
+      "accepts_reference": false,
       "propagation": "secret_input",
       "on_invalid": "default"
     },
@@ -15874,6 +15977,7 @@
       "visibility": "foreign",
       "summary": " OTLP compression for every signal; not honoured, the request is never compressed.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15883,6 +15987,7 @@
       "visibility": "foreign",
       "summary": " OTLP compression for logs; not honoured, the request is never compressed.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15892,6 +15997,7 @@
       "visibility": "foreign",
       "summary": " Name of the GitHub Actions job; read as a telemetry attribute.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15901,6 +16007,7 @@
       "visibility": "foreign",
       "summary": " Id of the GitLab pipeline; read as a telemetry attribute.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15910,6 +16017,7 @@
       "visibility": "foreign",
       "summary": " Id of the GitLab job; read as a telemetry attribute.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15919,6 +16027,7 @@
       "visibility": "foreign",
       "summary": " Name of the GitLab job; read as a telemetry attribute.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15928,6 +16037,7 @@
       "visibility": "foreign",
       "summary": " The user's home directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15937,6 +16047,7 @@
       "visibility": "foreign",
       "summary": " The user's home directory on Windows.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15946,6 +16057,7 @@
       "visibility": "foreign",
       "summary": " Drive of the Windows home directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15955,6 +16067,7 @@
       "visibility": "foreign",
       "summary": " Path of the Windows home directory below `HOMEDRIVE`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15964,6 +16077,7 @@
       "visibility": "foreign",
       "summary": " Windows system root, upper-case spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15973,6 +16087,7 @@
       "visibility": "foreign",
       "summary": " Windows system root.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15982,6 +16097,7 @@
       "visibility": "foreign",
       "summary": " Windows program files directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -15991,6 +16107,7 @@
       "visibility": "foreign",
       "summary": " Windows 32-bit program files directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16000,6 +16117,7 @@
       "visibility": "foreign",
       "summary": " Windows program data directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16009,6 +16127,7 @@
       "visibility": "foreign",
       "summary": " Windows roaming application data directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16018,6 +16137,7 @@
       "visibility": "foreign",
       "summary": " Directory zsh reads its startup files from.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16027,6 +16147,7 @@
       "visibility": "foreign",
       "summary": " XDG configuration directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16036,6 +16157,7 @@
       "visibility": "foreign",
       "summary": " XDG data directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16045,6 +16167,7 @@
       "visibility": "foreign",
       "summary": " The user's login shell.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16054,6 +16177,7 @@
       "visibility": "foreign",
       "summary": " Windows command interpreter; bare `ocx shell` runs it when the shell to open is `cmd`.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16063,6 +16187,7 @@
       "visibility": "foreign",
       "summary": " Executable search path.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16072,6 +16197,7 @@
       "visibility": "foreign",
       "summary": " Windows user name.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16081,6 +16207,7 @@
       "visibility": "foreign",
       "summary": " POSIX user name.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16090,6 +16217,7 @@
       "visibility": "foreign",
       "summary": " POSIX login name.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16099,6 +16227,7 @@
       "visibility": "foreign",
       "summary": " Fixed timestamp for reproducible builds, in seconds since the epoch.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16108,6 +16237,7 @@
       "visibility": "foreign",
       "summary": " Docker credential-store directory, read by the credential helper.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16117,6 +16247,7 @@
       "visibility": "foreign",
       "summary": " Set by direnv inside an allowed directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16126,6 +16257,7 @@
       "visibility": "foreign",
       "summary": " Set by mise's shell activation.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16135,6 +16267,7 @@
       "visibility": "foreign",
       "summary": " `PATH` before mise's activation changed it.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16144,6 +16277,7 @@
       "visibility": "foreign",
       "summary": " HTTP proxy URL.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16153,6 +16287,7 @@
       "visibility": "foreign",
       "summary": " HTTP proxy URL, lower-case spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16162,6 +16297,7 @@
       "visibility": "foreign",
       "summary": " HTTPS proxy URL.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16171,6 +16307,7 @@
       "visibility": "foreign",
       "summary": " HTTPS proxy URL, lower-case spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16180,6 +16317,7 @@
       "visibility": "foreign",
       "summary": " Proxy URL for every scheme.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16189,6 +16327,7 @@
       "visibility": "foreign",
       "summary": " Proxy URL for every scheme, lower-case spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16198,6 +16337,7 @@
       "visibility": "foreign",
       "summary": " Hosts reached without a proxy.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16207,6 +16347,7 @@
       "visibility": "foreign",
       "summary": " Hosts reached without a proxy, lower-case spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16216,6 +16357,7 @@
       "visibility": "foreign",
       "summary": " CA bundle git uses.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16225,6 +16367,7 @@
       "visibility": "foreign",
       "summary": " CA directory git uses.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16234,6 +16377,7 @@
       "visibility": "foreign",
       "summary": " CA bundle OpenSSL-style clients use.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16243,6 +16387,7 @@
       "visibility": "foreign",
       "summary": " CA directory OpenSSL-style clients use.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16252,6 +16397,7 @@
       "visibility": "foreign",
       "summary": " Temporary directory.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16261,6 +16407,7 @@
       "visibility": "foreign",
       "summary": " Temporary directory on Windows.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     },
@@ -16270,6 +16417,7 @@
       "visibility": "foreign",
       "summary": " Temporary directory on Windows, alternate spelling.",
       "secret": false,
+      "accepts_reference": false,
       "propagation": "user_input",
       "on_invalid": "default"
     }

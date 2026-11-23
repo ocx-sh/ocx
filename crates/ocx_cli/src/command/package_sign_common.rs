@@ -168,10 +168,11 @@ pub(super) async fn resolve_override_token(
         return Ok(Some(Zeroizing::new(buf.trim().to_string())));
     }
     // Credential exemption: never passed down to a child ocx. See subsystem-cli.md.
-    if let Some(token) = ocx_env::OCX_IDENTITY_TOKEN.get() {
-        return Ok(Some(Zeroizing::new(token.into_inner())));
-    }
-    Ok(None)
+    // A `file://` reference reads a file, which must not stall the runtime.
+    let from_env = tokio::task::spawn_blocking(|| ocx_env::OCX_IDENTITY_TOKEN.get())
+        .await
+        .context("identity-token read task panicked")??;
+    Ok(from_env.map(|token| Zeroizing::new(token.into_inner())))
 }
 
 /// The largest `--identity-token-file` read; an OIDC token is a few KiB, and 64 KiB matches
@@ -943,6 +944,48 @@ mod tests {
             }
             other => panic!("expected OidcPreCheckFailed, got {other:?}"),
         }
+    }
+
+    /// An unresolvable `OCX_IDENTITY_TOKEN` reference fails; it is neither unset nor a
+    /// fall-through to the ambient token that is also present.
+    #[tokio::test]
+    async fn an_unresolvable_identity_token_reference_fails_instead_of_reading_as_unset() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        env.set(
+            ocx_env::OCX_IDENTITY_TOKEN.declaration(),
+            format!("file://{}", dir.path().join("absent").display()),
+        );
+        env.set(ocx_env::SIGSTORE_ID_TOKEN.declaration(), "ambient-token");
+        let id = test_identifier();
+        let err = resolve_override_token(None, false, &id)
+            .await
+            .expect_err("an unresolvable reference must fail, not fall through");
+        let reference = err
+            .downcast_ref::<ocx_env::ReferenceError>()
+            .expect("ReferenceError in chain");
+        assert!(reference.to_string().contains("OCX_IDENTITY_TOKEN"), "{reference}");
+    }
+
+    /// A readable reference yields the token; unset yields `None`.
+    #[tokio::test]
+    async fn an_identity_token_file_reference_resolves_and_unset_falls_through() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("tok");
+        std::fs::write(&path, "tok123\n").expect("write");
+        let id = test_identifier();
+        env.remove(ocx_env::OCX_IDENTITY_TOKEN.declaration());
+        assert!(resolve_override_token(None, false, &id).await.expect("unset").is_none());
+        env.set(
+            ocx_env::OCX_IDENTITY_TOKEN.declaration(),
+            format!("file://{}", path.display()),
+        );
+        let token = resolve_override_token(None, false, &id)
+            .await
+            .expect("readable")
+            .expect("set");
+        assert_eq!(token.as_str(), "tok123");
     }
 
     // ── endpoint pair resolution ────────────────────────────────────────

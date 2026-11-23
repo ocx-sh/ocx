@@ -14,8 +14,9 @@ Give OCX credentials for a registry that needs a login, so that installs, pulls 
 
 OCX looks for credentials per registry, so different registries can use different credentials. It tries each method in order and the first one that succeeds wins:
 
-1. [Environment variables](#authentication-environment-variables)
-2. [Docker credentials](#authentication-docker-credentials)
+1. [`OCX_AUTH_<HOST>_*` environment variables](#authentication-environment-variables), each as a literal, `file://`, `env://` or `plain://` value.
+2. [Docker config and credential helpers](#authentication-docker-credentials), kept for compatibility.
+3. Anonymous access.
 
 ## Environment variables \{#authentication-environment-variables\}
 
@@ -65,6 +66,46 @@ OCX normalizes the registry name in the variable by replacing every non-alphanum
 :::
 
 If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is ignored. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variable.
+
+### Read a token from a file \{#authentication-token-file\}
+
+A batch job can keep the token in a file instead of the environment. Make the file readable only by the job's user.
+
+<Tabs>
+
+<TabItem label={"POSIX"}>
+
+<ShellSession>
+
+```sh
+chmod 600 /run/secrets/registry-token
+export OCX_AUTH_docker_io_TYPE=bearer
+export OCX_AUTH_docker_io_TOKEN="file:///run/secrets/registry-token"
+```
+
+</ShellSession>
+
+</TabItem>
+
+<TabItem label={"Windows"}>
+
+<ShellSession>
+
+```powershell
+icacls "\\fileserver\secrets\registry-token" /inheritance:r /grant:r "$($env:USERNAME):R"
+$env:OCX_AUTH_docker_io_TYPE = "bearer"
+$env:OCX_AUTH_docker_io_TOKEN = "file://\\fileserver\secrets\registry-token"
+```
+
+</ShellSession>
+
+</TabItem>
+
+</Tabs>
+
+OCX reads the file when it needs the token and removes trailing line breaks. The file is UTF-8 text: a leading UTF-8 byte-order mark is ignored and a UTF-16 file is refused. A missing or unreadable file fails the command. OCX never falls back to anonymous access.
+
+The same forms work for `USER`. A reference resolves in one step and does not chain. The [secret references][env-secret-references] entry lists all four forms and the size limit.
 
 ## Docker credentials \{#authentication-docker-credentials\}
 
@@ -123,6 +164,7 @@ Remove credentials with [`ocx logout`][cmd-logout]. Logout exits 0 when the regi
 [env-auth-token]: ../reference/environment.md#ocx-auth-registry-token
 [env-docker-config]: ../reference/environment.md#external-docker-config
 [env-ref]: ../reference/environment.md
+[env-secret-references]: ../reference/environment.md#secret-references
 [ecr-helper]: https://github.com/awslabs/amazon-ecr-credential-helper
 [guide-project-toolchain]: ./project-toolchain.mdx
 [in-depth-storage-stores]: ../explanation/storage.mdx#stores

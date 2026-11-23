@@ -17,6 +17,22 @@ A boolean variable reads these spellings in any case.
 - Strict: [`OCX_OFFLINE`](#ocx-offline), [`OCX_FROZEN`](#ocx-frozen), [`OCX_NO_CONSENT`](#ocx-no-consent) and [`OCX_NO_VERIFY`](#ocx-no-verify) exit 78 naming the variable on any other value.
 - Lenient: every other boolean variable logs a warning and uses its default.
 
+## Secret references {#secret-references}
+
+A secret variable, and a few user-name variables, accept a reference in place of the value.
+
+| Form | Reads |
+| --- | --- |
+| literal | The value as written |
+| `file://<path>` | The file's contents |
+| `env://<NAME>` | The value of the variable `NAME` |
+| `plain://<text>` | The text after the prefix, taken literally |
+
+- Resolution: one step. A reference never chains, so a target that is itself a reference is read literally.
+- File size: at most 64 KiB, with trailing CR and LF characters removed.
+- Failure: a reference that cannot be resolved fails the command, never an anonymous request. The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run with one warning, and the exit code is unchanged.
+- Targets: an `env://` target is an ordinary variable. Children inherit it even when the variable carrying the reference is withheld, and a nested `ocx` resolves the reference against its own environment.
+
 ## `OCX_ALLOW_YANKED` {#ocx-allow-yanked}
 
 Boolean — allow a tag resolving to a yanked index entry. Forwarded to child OCX.
@@ -42,6 +58,7 @@ children and from any environment OCX writes, unlike the API half.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Announce from CI](../publishing/announce-from-ci.md)
 
 ## `OCX_ANNOUNCE_GIT_USERNAME` {#ocx-announce-git-username}
@@ -52,6 +69,7 @@ Not a credential, so plugins inherit it from the ambient environment.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Announce from CI](../publishing/announce-from-ci.md)
 
 ## `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
@@ -67,6 +85,7 @@ write through the API.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Announce from CI](../publishing/announce-from-ci.md)
 
 ## `OCX_AUTH_<REGISTRY>_TOKEN` {#ocx-auth-registry-token}
@@ -77,6 +96,7 @@ The bearer token, or the password for `basic`; ignored unless the type is `beare
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Authenticate with a private registry](../guides/authenticate.mdx)
 
 ## `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
@@ -101,6 +121,7 @@ Read for the `basic` type only; ignored for any other type.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Authenticate with a private registry](../guides/authenticate.mdx)
 
 ## `OCX_BINARY_PIN` {#ocx-binary-pin}
@@ -282,6 +303,7 @@ A short-lived JWT (typically under 10 minutes): fetch a fresh one just before si
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Sign a release](../publishing/sign-a-release.mdx)
 
 ## `OCX_INDEX` {#ocx-index}
@@ -343,6 +365,7 @@ generate key pairs.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Sign a release](../publishing/sign-a-release.mdx)
 
 ## `OCX_LAZY_MODE` {#ocx-lazy-mode}
@@ -692,17 +715,17 @@ install.
 
 ## `OCX_SIGNING_KEY` {#ocx-signing-key}
 
-The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`; any other `env://` name works but is not scrubbed from plugins.
+The signing key PEM itself, never a path, for `--key env://OCX_SIGNING_KEY`.
 
-Holds the PEM, never a path: a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` envelope when
-signing, an SPKI public key when a `[[trust.policy]]` signer names it. For runners with no
-writable disk.
+A cosign `ENCRYPTED SIGSTORE PRIVATE KEY` envelope when signing, an SPKI public key for a `[[trust.policy]]` signer. For runners with no writable disk.
 
-Unset or empty exits 74 naming the variable; over 64 KiB exits 65. Stripped from plugin-dispatched
-children and from any environment OCX writes; a key held in any other `env://` name is inherited by plugins and launchers.
+Read literally as an `env://` target; a file key is `--key file://<path>`. Unset or empty exits 74 naming the variable; over 64 KiB exits 65.
+
+Stripped from plugin-dispatched children and written environments; a key in any other `env://` name is inherited.
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 - See: [Sign a release](../publishing/sign-a-release.mdx)
 
 ## `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
@@ -748,6 +771,7 @@ Stripped from plugin-dispatched children and from any environment OCX writes, so
 
 - Audience: public
 - Value: `string`
+- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)
 
 ## `OCX_TOOLCHAIN_ACTIVATE` {#ocx-toolchain-activate}
 

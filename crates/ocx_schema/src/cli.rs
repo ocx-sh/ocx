@@ -168,6 +168,8 @@ pub struct EnvSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
     pub secret: bool,
+    /// The value may be a `file://`, `env://` or `plain://` reference.
+    pub accepts_reference: bool,
     /// How the variable reaches a child process: `user_input`, `secret_input`, `setup_written`, `state`,
     /// `binary_pin`, `hook_local` or `credential`.
     pub propagation: String,
@@ -546,6 +548,7 @@ fn env_spec(var: &EnvVar, sources: &Sources) -> EnvSpec {
             .find(|(flagged, _)| std::ptr::eq(*flagged, var))
             .map(|(_, flag)| (*flag).to_owned()),
         secret: var.secret,
+        accepts_reference: var.accepts_reference,
         propagation: match var.propagation {
             Propagation::UserInput => "user_input",
             Propagation::SecretInput => "secret_input",
@@ -1370,6 +1373,7 @@ mod tests {
         on_invalid: OnInvalid::Default,
         visibility: Visibility::Public,
         secret: false,
+        accepts_reference: false,
         propagation: ocx_env::Propagation::UserInput,
         reader: Reader::Ocx,
     };
@@ -1392,6 +1396,24 @@ mod tests {
         assert_eq!(cli.env[0].on_invalid, "error");
         assert_eq!(cli.env[0].summary, "An example switch.");
         assert_ne!(json(two_options(), &lenient), json(two_options(), &strict));
+    }
+
+    #[test]
+    fn accepts_reference_reaches_the_export() {
+        static REFERENCING: EnvVar = EnvVar {
+            accepts_reference: true,
+            ..LENIENT
+        };
+        let plain = Sources {
+            env: vec![&LENIENT],
+            ..no_sources()
+        };
+        let referencing = Sources {
+            env: vec![&REFERENCING],
+            ..no_sources()
+        };
+        assert!(!export(two_options(), &plain).env[0].accepts_reference);
+        assert!(export(two_options(), &referencing).env[0].accepts_reference);
     }
 
     #[test]

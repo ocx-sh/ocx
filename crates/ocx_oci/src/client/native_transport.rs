@@ -49,12 +49,12 @@ impl NativeTransport {
         self.push_retry_backoff
     }
 
-    async fn auth_for(&self, image: &crate::native::Reference) -> crate::native::Auth {
-        self.auth.get_or_fallback(image.registry()).await
+    async fn auth_for(&self, image: &crate::native::Reference) -> Result<crate::native::Auth> {
+        Ok(self.auth.get_or_fallback(image.registry()).await?)
     }
 
     async fn authenticate(&self, image: &crate::native::Reference, operation: crate::RegistryOperation) -> Result<()> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         self.client
             .auth(image, &auth, operation)
             .await
@@ -390,7 +390,7 @@ impl OciTransport for NativeTransport {
         chunk_size: usize,
         last: Option<String>,
     ) -> Result<Vec<String>> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         let response = self
             .client
             .list_tags(image, &auth, Some(chunk_size), last.as_deref())
@@ -405,7 +405,7 @@ impl OciTransport for NativeTransport {
         chunk_size: usize,
         last: Option<String>,
     ) -> Result<Vec<String>> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         let response = self
             .client
             .catalog(image, &auth, Some(chunk_size), last.as_deref())
@@ -415,7 +415,7 @@ impl OciTransport for NativeTransport {
     }
 
     async fn fetch_manifest_digest(&self, image: &crate::native::Reference) -> Result<String> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         self.client
             .fetch_manifest_digest(image, &auth)
             .await
@@ -427,7 +427,7 @@ impl OciTransport for NativeTransport {
         image: &crate::native::Reference,
         accepted_media_types: &[&str],
     ) -> Result<(Vec<u8>, String)> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         let (data, digest) = self
             .client
             .pull_manifest_raw(image, &auth, accepted_media_types)
@@ -597,12 +597,12 @@ impl OciTransport for NativeTransport {
     }
 
     async fn delete_manifest(&self, image: &crate::native::Reference) -> Result<super::DeleteOutcome> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         delete_outcome_or_error(self.client.delete_manifest(image, &auth).await, image)
     }
 
     async fn probe_manifest(&self, image: &crate::native::Reference) -> Result<super::ManifestPresence> {
-        let auth = self.auth_for(image).await;
+        let auth = self.auth_for(image).await?;
         let answer = self
             .client
             .pull_manifest_raw(image, &auth, crate::media_type::ACCEPTED_MANIFEST_MEDIA_TYPES)
@@ -1215,6 +1215,77 @@ mod tests {
         assert!(
             !chain.contains("insecure = true"),
             "the plain-HTTP hint is the wrong remedy for a refused certificate: {chain}"
+        );
+    }
+
+    /// An unresolvable `OCX_AUTH_*` reference stops every call that needs credentials before it dials: the
+    /// listener below is bound, so a request would be a connection waiting to be accepted.
+    #[tokio::test]
+    async fn an_unresolvable_reference_is_a_credential_error_and_sends_no_request() {
+        use ocx_util::prelude::*;
+
+        let env = ocx_env::overrides::lock();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let address = listener.local_addr().expect("address").to_string();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set_raw(
+            format!("OCX_AUTH_{}_TOKEN", address.to_slug()),
+            format!("file://{}", dir.path().join("missing-token").display()),
+        );
+        let transport = NativeTransport::new(
+            crate::native::Client::new(super::super::builder::ClientBuilder::new().config()),
+            auth::Auth::default(),
+        );
+        let image: crate::native::Reference = format!("{address}/test/blob:latest").parse().expect("reference");
+
+        let outcomes = [
+            (
+                "ensure_auth",
+                OciTransport::ensure_auth(&transport, &image, crate::RegistryOperation::Pull)
+                    .await
+                    .err(),
+            ),
+            (
+                "list_tags",
+                OciTransport::list_tags(&transport, &image, 10, None).await.err(),
+            ),
+            (
+                "catalog",
+                OciTransport::catalog(&transport, &image, 10, None).await.err(),
+            ),
+            (
+                "fetch_manifest_digest",
+                OciTransport::fetch_manifest_digest(&transport, &image).await.err(),
+            ),
+            (
+                "pull_manifest_raw",
+                OciTransport::pull_manifest_raw(&transport, &image, &[]).await.err(),
+            ),
+            (
+                "delete_manifest",
+                OciTransport::delete_manifest(&transport, &image).await.err(),
+            ),
+            (
+                "probe_manifest",
+                OciTransport::probe_manifest(&transport, &image).await.err(),
+            ),
+        ];
+        for (call, error) in outcomes {
+            assert!(
+                matches!(
+                    error,
+                    Some(ClientError::Credential(auth::AuthError::Reference(
+                        ocx_env::ReferenceError::FileUnreadable { .. }
+                    )))
+                ),
+                "{call} must fail with the reference error, got {error:?}"
+            );
+        }
+        let dialled = listener.accept();
+        assert!(
+            matches!(&dialled, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "no connection may reach the registry, got {dialled:?}"
         );
     }
 

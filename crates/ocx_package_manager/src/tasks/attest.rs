@@ -87,7 +87,8 @@ impl PackageManager {
             .require_client()
             .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
 
-        let signer = super::sign::build_signer(opts.key.as_ref(), opts.rekor_upload, &opts.rekor_url)
+        let signer = super::sign::build_signer(opts.key.clone(), opts.rekor_upload, opts.rekor_url.clone())
+            .await
             .map_err(|kind| map_attest_error(package.clone(), SignError::new(package.clone(), kind)))?;
         let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
         let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);

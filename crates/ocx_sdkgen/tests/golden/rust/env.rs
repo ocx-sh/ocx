@@ -313,7 +313,7 @@ pub const PUBLIC: &[EnvVar] = &[
     EnvVar {
         name: "OCX_SIGNING_KEY",
         value: "string",
-        summary: "The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`; any other `env://` name",
+        summary: "The signing key PEM itself, never a path, for `--key env://OCX_SIGNING_KEY`.",
         secret: true,
     },
     EnvVar {

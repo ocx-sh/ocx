@@ -296,6 +296,11 @@ pub enum SignErrorKind {
     )]
     KeyBackend(#[from] KeyBackendError),
 
+    /// A secret variable the signing run reads is a reference that cannot be resolved.
+    #[error(transparent)]
+    #[exit(delegate)]
+    Reference(#[from] ocx_env::ReferenceError),
+
     /// A `--key` reference could not be parsed. Exit 64.
     #[error(transparent)]
     #[exit(
@@ -343,6 +348,7 @@ fn key_backend_row(error: &SignErrorKind, rows: [Row; 4]) -> Pick<'_> {
         KeyBackendError::Io(_) => Pick::row(rows[1]),
         KeyBackendError::MalformedKey { .. } => Pick::row(rows[2]),
         KeyBackendError::Unsupported { .. } => Pick::row(rows[3]),
+        KeyBackendError::Reference(reference) => Pick::delegate(reference),
     }
 }
 

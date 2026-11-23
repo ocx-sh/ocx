@@ -285,6 +285,7 @@ Input data is malformed or fails verification.
 | `root_references_unwritten_object` | The announce would commit a root that references an object it does not carry |
 | `root_repository_mismatch` | A derived root document points at another repository |
 | `sbom_media_type_unsupported` | An unsigned SBOM referrer declares a media type outside the SBOM set |
+| `secret_reference_malformed` | A file referenced by an OCX secret variable is too large or not UTF-8 |
 | `selection_ambiguous` | The selection matches more than one package |
 | `separator_edged_list_value` | A package list value starts or ends with its separator |
 | `shard_collision` | Two digests share one blob directory |
@@ -399,6 +400,7 @@ A filesystem read or write failed.
 | `record_serialize_failed` | Serializing an execution record failed |
 | `record_write_failed` | Writing an execution record failed |
 | `same_filesystem_check_failed` | Probing whether two paths share a filesystem failed |
+| `secret_reference_unreadable` | A file:// or env:// reference in an OCX secret variable has nothing to read |
 | `setup_io` | Reading or writing a setup file failed |
 | `symlink_walk_io` | Inspecting a destination path component failed |
 | `trust_root_unreadable` | A trust root file named by the operator could not be read |
@@ -414,6 +416,7 @@ A transient failure; the same command may succeed on retry.
 | --- | --- |
 | `config_edit_locked` | Another process holds the lock on the config file being edited |
 | `credential_helper_timeout` | The credential helper did not answer in time |
+| `credential_lookup_aborted` | The registry credential lookup was cancelled before it finished |
 | `forge_non_fast_forward` | The push was not a fast-forward; another writer moved the branch |
 | `forge_stale_lease` | The branch moved since it was read |
 | `forge_transient` | The forge answered with a status a retry may clear |
@@ -528,6 +531,7 @@ Configuration is invalid or incomplete.
 | `rendered_config_too_large` | Persisting the extra CA bundle would exceed the config size limit |
 | `reserved_group_name` | ocx.toml declares a reserved group name |
 | `retired_env` | A retired OCX environment variable is set |
+| `secret_reference_invalid` | An OCX secret variable holds a file:// or env:// reference the grammar refuses |
 | `session_path_not_absolute` | A session PATH entry is not an absolute path |
 | `session_path_not_utf8` | A session PATH entry is not valid UTF-8 |
 | `session_path_unencodable` | A session PATH entry contains a character the host format cannot store |

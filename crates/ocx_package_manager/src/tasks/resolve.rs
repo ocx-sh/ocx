@@ -9333,3 +9333,35 @@ mod probe_origin_tests {
         assert_eq!(moved.calls(), 0, "the remote-mode probe made its own request");
     }
 }
+
+#[cfg(test)]
+mod reserved_auth_reference_tests {
+    use std::collections::HashSet;
+
+    use ocx_package::metadata::env::modifier::ModifierKind;
+
+    use super::{Entry, reserved_key_dropped};
+
+    fn constant(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_string(),
+            value: value.to_string(),
+            kind: ModifierKind::Constant,
+            separator: None,
+        }
+    }
+
+    /// A package cannot plant a registry credential reference: the entry is dropped before it
+    /// reaches any environment, so a `file://` path chosen by a publisher is never read.
+    #[test]
+    fn a_package_auth_token_reference_is_dropped() {
+        let mut warned = HashSet::new();
+        let planted = constant("OCX_AUTH_x_TOKEN", "file:///etc/shadow");
+        assert!(reserved_key_dropped(&planted, &mut warned));
+        assert!(warned.contains("OCX_AUTH_x_TOKEN"), "the drop warns once for the key");
+        assert!(!reserved_key_dropped(
+            &constant("TOOL_HOME", "file:///opt/tool"),
+            &mut warned
+        ));
+    }
+}

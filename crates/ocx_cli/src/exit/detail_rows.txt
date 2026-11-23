@@ -78,6 +78,7 @@ credential_helper_not_installed	PolicyBlocked	The credential helper is not insta
 credential_helper_not_on_path	ConfigError	The configured credential helper is not on PATH
 credential_helper_timeout	TempFail	The credential helper did not answer in time
 credential_helper_unsafe_path	ConfigError	The credential helper resolves to an unsafe path
+credential_lookup_aborted	TempFail	The registry credential lookup was cancelled before it finished
 credential_store_write	IoError	Writing the credential store failed
 declared_binary_not_executable	DataError	A declared binary is not executable
 decompression_cap_exceeded	DataError	A layer decompressed past the size cap
@@ -442,6 +443,9 @@ root_references_unwritten_object	DataError	The announce would commit a root that
 root_repository_mismatch	DataError	A derived root document points at another repository
 same_filesystem_check_failed	IoError	Probing whether two paths share a filesystem failed
 sbom_media_type_unsupported	DataError	An unsigned SBOM referrer declares a media type outside the SBOM set
+secret_reference_invalid	ConfigError	An OCX secret variable holds a file:// or env:// reference the grammar refuses
+secret_reference_malformed	DataError	A file referenced by an OCX secret variable is too large or not UTF-8
+secret_reference_unreadable	IoError	A file:// or env:// reference in an OCX secret variable has nothing to read
 selection_ambiguous	DataError	The selection matches more than one package
 self_fork_refused	UsageError	The fork namespace is the upstream's own
 separator_edged_list_value	DataError	A package list value starts or ends with its separator

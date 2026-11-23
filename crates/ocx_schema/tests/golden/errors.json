@@ -619,6 +619,11 @@
           "exit_code": 78
         },
         {
+          "value": "credential_lookup_aborted",
+          "description": "The registry credential lookup was cancelled before it finished",
+          "exit_code": 75
+        },
+        {
           "value": "credential_store_write",
           "description": "Writing the credential store failed",
           "exit_code": 74
@@ -2307,6 +2312,21 @@
           "value": "sbom_media_type_unsupported",
           "description": "An unsigned SBOM referrer declares a media type outside the SBOM set",
           "exit_code": 65
+        },
+        {
+          "value": "secret_reference_invalid",
+          "description": "An OCX secret variable holds a file:// or env:// reference the grammar refuses",
+          "exit_code": 78
+        },
+        {
+          "value": "secret_reference_malformed",
+          "description": "A file referenced by an OCX secret variable is too large or not UTF-8",
+          "exit_code": 65
+        },
+        {
+          "value": "secret_reference_unreadable",
+          "description": "A file:// or env:// reference in an OCX secret variable has nothing to read",
+          "exit_code": 74
         },
         {
           "value": "selection_ambiguous",

@@ -68,7 +68,8 @@ impl PackageManager {
             .require_client()
             .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
 
-        let signer = build_signer(opts.key.as_ref(), opts.rekor_upload, &opts.rekor_url)
+        let signer = build_signer(opts.key.clone(), opts.rekor_upload, opts.rekor_url.clone())
+            .await
             .map_err(|kind| map_sign_error(package.clone(), SignError::new(package.clone(), kind)))?;
         let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
         let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
@@ -223,11 +224,28 @@ impl PackageManager {
 
 /// Build the signer the options select: keyless by default, key mode under `--key`.
 ///
+/// Key mode reads the key file and the `OCX_KEY_PASSWORD` reference (possibly a file), so it runs on the
+/// blocking pool rather than the async runtime.
+///
 /// # Errors
 ///
-/// The key backend's error when the key cannot be read or decrypted, and
+/// The key backend's error when the key cannot be read or decrypted (an unresolvable password reference
+/// included, never read as the empty password), and
 /// [`SignErrorKind::UnsupportedKeyBackend`](ocx_sign::sign::SignErrorKind) for a scheme with no implementation.
-pub(super) fn build_signer(
+pub(super) async fn build_signer(
+    key: Option<ocx_trust::key_ref::KeyRef>,
+    rekor_upload: bool,
+    rekor_url: Url,
+) -> Result<Box<dyn Signer>, ocx_sign::sign::SignErrorKind> {
+    match tokio::task::spawn_blocking(move || build_signer_blocking(key.as_ref(), rekor_upload, &rekor_url)).await {
+        Ok(built) => built,
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        // `into_panic` panics on a cancelled join (runtime shutdown); report it instead.
+        Err(join) => Err(ocx_sign::sign::SignErrorKind::Internal(Box::new(join))),
+    }
+}
+
+fn build_signer_blocking(
     key: Option<&ocx_trust::key_ref::KeyRef>,
     rekor_upload: bool,
     rekor_url: &Url,
@@ -413,7 +431,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::sweep_test_support::{TAGS, expected_resolutions, manifest_reads, sweep_identifier, sweep_manager};
-    use super::{SignOptions, SweptOutcome};
+    use super::{SignOptions, SweptOutcome, build_signer};
 
     fn sign_options() -> SignOptions {
         SignOptions {
@@ -479,5 +497,25 @@ mod tests {
             "one manifest resolution per swept tag, each for that tag — the sweep's answer \
              is the pipeline's",
         );
+    }
+
+    /// An unresolvable `OCX_KEY_PASSWORD` reference fails signer construction; it is never the empty password.
+    #[test]
+    fn an_unresolvable_key_password_reference_fails_the_signer() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(
+            ocx_env::OCX_KEY_PASSWORD.declaration(),
+            format!("file://{}", dir.path().join("absent").display()),
+        );
+        env.set(ocx_env::OCX_SIGNING_KEY.declaration(), "not a pem");
+        let key = ocx_trust::key_ref::KeyRef::parse("env://OCX_SIGNING_KEY").expect("key ref");
+        let url = url::Url::parse("http://127.0.0.1:3000").expect("url");
+        let runtime = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+        let error = runtime
+            .block_on(build_signer(Some(key), false, url))
+            .err()
+            .expect("an unreadable password reference must fail the signer");
+        assert!(error.to_string().contains("OCX_KEY_PASSWORD"), "{error}");
     }
 }

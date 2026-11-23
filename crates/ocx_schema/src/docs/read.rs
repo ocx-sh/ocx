@@ -184,6 +184,7 @@ fn env_vars() -> Vec<EnvVarEntry> {
                     .iter()
                     .find(|(flagged, _)| std::ptr::eq(*flagged, var))
                     .map(|(_, flag)| (*flag).to_owned()),
+                accepts_reference: var.accepts_reference,
             }
         })
         .collect()

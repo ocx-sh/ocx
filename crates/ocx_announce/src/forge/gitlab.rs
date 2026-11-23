@@ -1701,7 +1701,7 @@ mod tests {
     const CI_VARIABLES: [&ocx_env::EnvVar; 6] = [
         ocx_env::OCX_ANNOUNCE_TOKEN.declaration(),
         ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(),
-        &ocx_env::OCX_ANNOUNCE_GIT_USERNAME,
+        ocx_env::OCX_ANNOUNCE_GIT_USERNAME.declaration(),
         &ocx_env::GITLAB_CI,
         ocx_env::CI_JOB_TOKEN.declaration(),
         &ocx_env::CI_PROJECT_PATH,
@@ -1958,23 +1958,25 @@ mod tests {
         env.set(&ocx_env::GITLAB_CI, "true");
         env.set(ocx_env::CI_JOB_TOKEN.declaration(), JOB_TOKEN);
         match shape {
-            CredentialShape::BothHalves => ForgeCredentials::resolve(WriteTransport::Git),
+            CredentialShape::BothHalves => {
+                ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference")
+            }
             CredentialShape::ApiHalfOnly => {
                 env.set(
                     ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(),
                     "glpat-a-separate-push-token",
                 );
-                ForgeCredentials::resolve(WriteTransport::Git)
+                ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference")
             }
             CredentialShape::PushHalfUnderApi => {
                 env.set(ocx_env::OCX_ANNOUNCE_TOKEN.declaration(), "glpat-notarealpat");
                 env.set(ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(), JOB_TOKEN);
-                ForgeCredentials::resolve(WriteTransport::Api)
+                ForgeCredentials::resolve(WriteTransport::Api).expect("the fixture holds no reference")
             }
             CredentialShape::PushHalfOnly => {
                 env.set(ocx_env::OCX_ANNOUNCE_TOKEN.declaration(), "glpat-notarealpat");
                 env.set(ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration(), JOB_TOKEN);
-                ForgeCredentials::resolve(WriteTransport::Git)
+                ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference")
             }
         }
     }

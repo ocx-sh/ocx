@@ -258,16 +258,7 @@ impl PackagePrune {
             .repository()
             .split_once('/')
             .ok_or_else(|| UsageError::new("a GitHub package is named owner/package"))?;
-        // Refused before any request: an empty bearer header would only earn the forge's 401 and a confusing hint.
-        let token = secret_of(ocx_oci::auth::Auth::new().get_or_fallback(registry).await).ok_or_else(|| {
-            prune::PruneError::DeleteDenied {
-                repository: repository.to_string(),
-                tag: label.to_owned(),
-                source: ocx_oci::client::error::ClientError::Authentication(Box::new(std::io::Error::other(format!(
-                    "no credential is configured for {registry}, which the GitHub packages API needs; run `ocx login {registry}`"
-                )))),
-            }
-        })?;
+        let token = registry_token(registry, &repository.to_string(), label).await?;
         let http = build_forge_http_client(FORGE_TIMEOUT, context.extra_roots_merged())?;
         Ok(GithubPackagesDeleter::new(
             client,
@@ -322,6 +313,27 @@ fn vouched(registry: &str, trusted: &[String]) -> bool {
         .any(|entry| entry == host || entry == authority)
 }
 
+/// The secret ocx resolves for `registry`, refused before any request: an empty bearer header would only earn the
+/// forge's 401 and a confusing hint.
+///
+/// A reference in `OCX_AUTH_*` that cannot be resolved ends here with its own error, never the "no credential" one.
+async fn registry_token(registry: &str, repository: &str, label: &str) -> anyhow::Result<String> {
+    let auth = ocx_oci::auth::Auth::new()
+        .get_or_fallback(registry)
+        .await
+        .map_err(ocx_oci::client::error::ClientError::Credential)?;
+    secret_of(auth).ok_or_else(|| {
+        prune::PruneError::DeleteDenied {
+            repository: repository.to_owned(),
+            tag: label.to_owned(),
+            source: ocx_oci::client::error::ClientError::Authentication(Box::new(std::io::Error::other(format!(
+                "no credential is configured for {registry}, which the GitHub packages API needs; run `ocx login {registry}`"
+            )))),
+        }
+        .into()
+    })
+}
+
 /// The secret of a resolved credential, or `None` for anonymous access or an empty secret.
 fn secret_of(auth: ocx_oci::native::Auth) -> Option<String> {
     match auth {
@@ -368,6 +380,37 @@ mod tests {
             .get_many::<String>("tags")
             .map(|tags| tags.cloned().collect())
             .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_reference_fails_the_prune_with_its_own_error() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_raw(
+            "OCX_AUTH_ghcr_io_TOKEN",
+            format!("file://{}", dir.path().join("missing-token").display()),
+        );
+
+        let error = super::registry_token("ghcr.io", "ghcr.io/acme/tool", "1.0")
+            .await
+            .expect_err("an unreadable token file is not a missing credential");
+
+        let credential = error
+            .downcast_ref::<ocx_oci::client::error::ClientError>()
+            .expect("the reference error travels as a credential error");
+        assert!(
+            matches!(
+                credential,
+                ocx_oci::client::error::ClientError::Credential(ocx_oci::auth::AuthError::Reference(
+                    ocx_env::ReferenceError::FileUnreadable { .. }
+                ))
+            ),
+            "got {credential:?}"
+        );
+        assert!(
+            !format!("{error:#}").contains("no credential is configured"),
+            "the reference's error must not read as a missing credential: {error:#}"
+        );
     }
 
     #[test]

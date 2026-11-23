@@ -792,6 +792,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
         | ClientError::Digest(_)
+        | ClientError::Credential(_)
         | ClientError::ReferrersUnsupported { .. }
         | ClientError::DeleteUnsupported { .. }
         | ClientError::DeleteNeedsTag(_)

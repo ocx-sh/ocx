@@ -20,6 +20,10 @@ ocx_exit.workspace = true
 # `EnvLock::isolate_project_home` and exists only under `__testing`.
 tempfile = { workspace = true, optional = true }
 
+# `O_NONBLOCK` for the reference reader's open.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # `cfg(test)` compiles `overrides` without the feature.
 tempfile.workspace = true

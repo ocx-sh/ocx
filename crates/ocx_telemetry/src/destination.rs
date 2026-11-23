@@ -200,7 +200,10 @@ fn from_section(section: &TelemetryConfig, endpoint: &str) -> Result<Destination
             .ok_or("telemetry sends nothing: [telemetry] headers has a name or value that cannot be sent")?;
         put(&mut merged, name, value);
     }
-    if let Some(variable) = ocx_env::OCX_TELEMETRY_HEADERS.get() {
+    if let Some(variable) = ocx_env::OCX_TELEMETRY_HEADERS
+        .get()
+        .map_err(|error| format!("telemetry is off: {error}"))?
+    {
         let parsed = headers::parse(variable.expose()).ok_or_else(|| {
             format!(
                 "telemetry is off: {} is malformed",
@@ -272,7 +275,10 @@ fn from_otel(endpoint: &str, source: OtelSource, warnings: &mut Vec<String>) -> 
 
     let headers_var = otel_headers_var(source);
     let mut merged = Vec::new();
-    if let Some(variable) = headers_var.get() {
+    if let Some(variable) = headers_var
+        .get()
+        .map_err(|error| format!("telemetry is off: {error}"))?
+    {
         let parsed = headers::parse(variable.expose()).ok_or_else(|| {
             format!(
                 "telemetry sends nothing: {} is malformed",
@@ -298,7 +304,7 @@ fn from_otel(endpoint: &str, source: OtelSource, warnings: &mut Vec<String>) -> 
 /// the endpoint is the generic one and no logs-specific headers are set.
 fn otel_headers_var(source: OtelSource) -> &'static ocx_env::SecretVar {
     match source {
-        OtelSource::Generic if ocx_env::OTEL_EXPORTER_OTLP_LOGS_HEADERS.get().is_none() => {
+        OtelSource::Generic if !ocx_env::OTEL_EXPORTER_OTLP_LOGS_HEADERS.is_set() => {
             &ocx_env::OTEL_EXPORTER_OTLP_HEADERS
         }
         OtelSource::Logs | OtelSource::Generic => &ocx_env::OTEL_EXPORTER_OTLP_LOGS_HEADERS,
@@ -335,7 +341,7 @@ fn otel_timeout(warnings: &mut Vec<String>) -> Duration {
 /// `OTEL_EXPORTER_OTLP_HEADERS` is read only when the generic endpoint names the destination and no
 /// logs headers are set; anywhere else it is ignored, and the operator is told once.
 fn warn_unused_generic_headers(source: OtelSource, warnings: &mut Vec<String>) {
-    if ocx_env::OTEL_EXPORTER_OTLP_HEADERS.get().is_some()
+    if ocx_env::OTEL_EXPORTER_OTLP_HEADERS.is_set()
         && !std::ptr::eq(otel_headers_var(source), &ocx_env::OTEL_EXPORTER_OTLP_HEADERS)
     {
         warnings.push(format!(
@@ -350,7 +356,7 @@ fn warn_unused_generic_headers(source: OtelSource, warnings: &mut Vec<String>) {
 /// `OTEL_EXPORTER_OTLP_*` endpoint wins they are not sent, and the operator is told once.
 fn warn_unused_ocx_headers(section: Option<&TelemetryConfig>, warnings: &mut Vec<String>) {
     let in_section = section.is_some_and(|section| section.header_names().next().is_some());
-    if in_section || ocx_env::OCX_TELEMETRY_HEADERS.get().is_some() {
+    if in_section || ocx_env::OCX_TELEMETRY_HEADERS.is_set() {
         warnings.push(format!(
             "telemetry headers from [telemetry] and {} are not sent to a destination named by OTEL_EXPORTER_OTLP_* variables; set a [telemetry] endpoint to send them, or remove them",
             ocx_env::OCX_TELEMETRY_HEADERS.declaration().name
@@ -508,5 +514,80 @@ mod tests {
                 .is_some();
             assert_eq!(got, warns, "{endpoint} {route:?} {resolved:?}");
         }
+    }
+
+    fn section_with_endpoint() -> TelemetryConfig {
+        let mut section = TelemetryConfig::default();
+        section.endpoint = Some("https://collector.example:4318".to_owned());
+        section
+    }
+
+    /// An unresolvable `OCX_TELEMETRY_HEADERS` reference turns export off with exactly one warning
+    /// that names the variable and the reference, and none of the referenced content.
+    #[test]
+    fn an_unresolvable_headers_reference_turns_export_off_with_one_warning() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sentinel = "sentinel-header-content";
+        // Larger than the cap, so the read is refused while the file does hold the sentinel.
+        let oversize = dir.path().join("oversize");
+        std::fs::write(
+            &oversize,
+            format!("x-ocx={sentinel}{}", "a".repeat(ocx_env::MAX_REFERENCED_SECRET_BYTES)),
+        )
+        .expect("write");
+        let missing = dir.path().join("absent");
+        let section = section_with_endpoint();
+
+        for path in [oversize, missing] {
+            env.set(
+                ocx_env::OCX_TELEMETRY_HEADERS.declaration(),
+                format!("file://{}", path.display()),
+            );
+            let (destination, warnings) = select(Some(&section));
+            assert!(destination.is_none(), "no destination for {}", path.display());
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            let warning = &warnings[0];
+            assert!(warning.starts_with("telemetry is off: "), "{warning}");
+            assert!(warning.contains("OCX_TELEMETRY_HEADERS"), "{warning}");
+            assert!(warning.contains(&*path.to_string_lossy()), "{warning}");
+            assert!(!warning.contains(sentinel), "{warning}");
+        }
+    }
+
+    /// A readable reference supplies the headers.
+    #[test]
+    fn a_headers_file_reference_supplies_the_headers() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("headers");
+        std::fs::write(&path, "x-ocx=from-file\n").expect("write");
+        env.set(
+            ocx_env::OCX_TELEMETRY_HEADERS.declaration(),
+            format!("file://{}", path.display()),
+        );
+        let (destination, warnings) = select(Some(&section_with_endpoint()));
+        let destination = destination.expect("a readable reference resolves");
+        assert!(warnings.iter().all(|w| !w.contains("is off")), "{warnings:?}");
+        assert_eq!(destination.headers.len(), 1);
+        assert_eq!(destination.headers[0].0, "x-ocx");
+    }
+
+    /// A destination named by `OTEL_EXPORTER_OTLP_*` never reads `OCX_TELEMETRY_HEADERS`: its
+    /// presence is checked, so an unreadable reference there is not an error.
+    #[test]
+    fn presence_check_of_unused_ocx_headers_reads_no_file() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.remove(ocx_env::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT.declaration());
+        env.set(&ocx_env::OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector.example:4318");
+        env.set(
+            ocx_env::OCX_TELEMETRY_HEADERS.declaration(),
+            format!("file://{}", dir.path().join("absent").display()),
+        );
+        let (destination, warnings) = select(None);
+        assert!(destination.is_some(), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("are not sent")), "{warnings:?}");
+        assert!(warnings.iter().all(|w| !w.contains("telemetry is off")), "{warnings:?}");
     }
 }

@@ -83,6 +83,20 @@ pub enum AuthError {
         #[source]
         source: Box<crate::client::error::ClientError>,
     },
+    /// An `OCX_AUTH_*` value is a `file://` or `env://` reference that cannot be resolved.
+    #[error(transparent)]
+    #[exit(delegate)]
+    Reference(#[from] ocx_env::ReferenceError),
+    /// The blocking task reading the `OCX_AUTH_*` variables was cancelled, which only a runtime shutdown does.
+    ///
+    /// Never answered as anonymous: the variables were not read, so no credential was judged absent.
+    #[error("reading the OCX_AUTH_* variables was cancelled")]
+    #[exit(
+        TempFail,
+        slug = "credential_lookup_aborted",
+        summary = "The registry credential lookup was cancelled before it finished"
+    )]
+    LookupAborted(#[source] tokio::task::JoinError),
 }
 
 /// Picks the helper row for [`AuthError::Helper`] from the foreign failure it wraps.

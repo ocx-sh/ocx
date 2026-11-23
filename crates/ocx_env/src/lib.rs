@@ -6,16 +6,18 @@
 //! A declaration is a `static` emitted by [`env_vars!`]; a read is a method on it. Names that come from
 //! data rather than from code read through [`dynamic`].
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 #[cfg(any(test, feature = "__testing"))]
 pub mod overrides;
+mod reference;
 mod retired;
 #[cfg(test)]
 mod tests;
 mod vars;
 
+pub use reference::{MAX_REFERENCED_SECRET_BYTES, ReferenceError, SecretReference};
 pub use retired::{Change, REMOVAL_RELEASE, RETIRED, Release, Replacement, Retired, Status, retired_hits};
 pub use vars::*;
 
@@ -31,6 +33,8 @@ pub struct EnvVar {
     pub visibility: Visibility,
     /// Never formatted and never named with its value; read only through [`SecretVar`].
     pub secret: bool,
+    /// The value may be `file://<path>`, `env://<NAME>` or `plain://<text>`; read only through [`SecretVar`] or [`ReferenceVar`].
+    pub accepts_reference: bool,
     /// How the variable reaches a child process.
     pub propagation: Propagation,
     pub reader: Reader,
@@ -125,7 +129,7 @@ impl std::fmt::Display for InvalidEnv {
 impl std::error::Error for InvalidEnv {}
 
 impl EnvVar {
-    /// The value; unset, empty or not UTF-8 is `None`. A `secret` declaration answers `None`: read it through [`SecretVar`].
+    /// The value; unset, empty or not UTF-8 is `None`. A `secret` or reference-capable declaration answers `None`: read it through [`SecretVar`] or [`ReferenceVar`].
     pub fn get(&'static self) -> Option<String> {
         self.get_os().and_then(|value| value.into_string().ok())
     }
@@ -137,7 +141,7 @@ impl EnvVar {
 
     /// The value verbatim, empty included, for a reader that validates it itself (PEM, odd path bytes).
     pub fn get_raw(&'static self) -> Option<OsString> {
-        if self.secret {
+        if self.secret || self.accepts_reference {
             return None;
         }
         self.value()
@@ -145,7 +149,7 @@ impl EnvVar {
 
     /// The value of the pattern's name with its `{SLOT}` replaced by `slot`; unset or empty is `None`.
     pub fn get_slot(&'static self, slot: &str) -> Option<String> {
-        if self.secret {
+        if self.secret || self.accepts_reference {
             return None;
         }
         self.slot_value(slot)
@@ -189,11 +193,78 @@ impl EnvVar {
         lookup(self, retired::table())
     }
 
+    /// The pattern's name with its `{SLOT}` replaced by `slot`.
+    fn slot_name(&self, slot: &str) -> Option<String> {
+        let (open, close) = (self.name.find('{')?, self.name.find('}')?);
+        Some(format!(
+            "{}{slot}{}",
+            self.name.get(..open)?,
+            self.name.get(close + 1..)?
+        ))
+    }
+
     /// The non-empty UTF-8 value of the pattern's name for `slot`, regardless of `secret`.
     fn slot_value(&self, slot: &str) -> Option<String> {
-        let (open, close) = (self.name.find('{')?, self.name.find('}')?);
-        let name = format!("{}{slot}{}", self.name.get(..open)?, self.name.get(close + 1..)?);
-        read_named(&name).filter(|value| !value.is_empty())
+        read_named(&self.slot_name(slot)?).filter(|value| !value.is_empty())
+    }
+
+    /// The value, resolved when the declaration accepts a reference; unset, empty or not UTF-8 is `None`.
+    fn resolved_value(&'static self) -> Result<Option<String>, ReferenceError> {
+        self.resolve(self.name, self.value())
+    }
+
+    /// [`EnvVar::resolved_value`] for the pattern's name filled with `slot`.
+    fn resolved_slot(&self, slot: &str) -> Result<Option<String>, ReferenceError> {
+        let Some(name) = self.slot_name(slot) else {
+            return Ok(None);
+        };
+        let raw = named_raw(&name);
+        self.resolve(&name, raw)
+    }
+
+    /// `raw` as the value of the variable called `carrier`.
+    fn resolve(&self, carrier: &str, raw: Option<OsString>) -> Result<Option<String>, ReferenceError> {
+        match RawValue::read(raw) {
+            RawValue::Unset => Ok(None),
+            RawValue::Text(text) if !self.accepts_reference => Ok(Some(text)),
+            RawValue::Text(text) => Ok(reference::resolve(carrier, text)?.filter(|value| !value.is_empty())),
+            RawValue::NotUnicode(raw) if self.refuses(&raw) => Err(ReferenceError::ValueNotUnicode {
+                variable: carrier.to_owned(),
+            }),
+            RawValue::NotUnicode(_) => Ok(None),
+        }
+    }
+
+    /// Whether the reader would answer `Some` or an error for `raw`; resolves nothing, so it opens no file.
+    fn is_set_raw(&self, raw: Option<OsString>) -> bool {
+        match RawValue::read(raw) {
+            RawValue::Unset => false,
+            RawValue::Text(_) => true,
+            RawValue::NotUnicode(raw) => self.refuses(&raw),
+        }
+    }
+
+    /// Whether a value that is not Unicode is a reference the reader must refuse rather than read as unset.
+    fn refuses(&self, raw: &OsStr) -> bool {
+        self.accepts_reference && reference::begins_with_prefix(&raw.to_string_lossy())
+    }
+}
+
+/// A raw value as the readers see it, before any reference resolves.
+enum RawValue {
+    /// Unset or empty.
+    Unset,
+    Text(String),
+    NotUnicode(OsString),
+}
+
+impl RawValue {
+    fn read(raw: Option<OsString>) -> Self {
+        match raw {
+            Some(value) if value.is_empty() => Self::Unset,
+            Some(value) => value.into_string().map_or_else(Self::NotUnicode, Self::Text),
+            None => Self::Unset,
+        }
     }
 }
 
@@ -211,15 +282,80 @@ impl SecretVar {
         &self.0
     }
 
-    /// The value; unset or empty is `None`.
-    pub fn get(&'static self) -> Option<Sensitive> {
-        let value = self.0.value()?.into_string().ok()?;
-        (!value.is_empty()).then_some(Sensitive(value))
+    /// The value, with a `file://`, `env://` or `plain://` reference resolved when the declaration accepts one;
+    /// unset, empty or not UTF-8 is `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReferenceError`] when the value is a reference that cannot be resolved.
+    pub fn get(&'static self) -> Result<Option<Sensitive>, ReferenceError> {
+        Ok(self.0.resolved_value()?.map(Sensitive))
     }
 
-    /// The value of the pattern's name with its `{SLOT}` replaced by `slot`; unset or empty is `None`.
-    pub fn get_slot(&'static self, slot: &str) -> Option<Sensitive> {
-        self.0.slot_value(slot).map(Sensitive)
+    /// [`SecretVar::get`] for the pattern's name with its `{SLOT}` replaced by `slot`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReferenceError`] when the value is a reference that cannot be resolved.
+    pub fn get_slot(&'static self, slot: &str) -> Result<Option<Sensitive>, ReferenceError> {
+        Ok(self.0.resolved_slot(slot)?.map(Sensitive))
+    }
+
+    /// Whether the raw value is non-empty; resolves nothing, so it opens no file.
+    pub fn is_set(&'static self) -> bool {
+        self.0.is_set_raw(self.0.value())
+    }
+
+    /// [`SecretVar::is_set`] for the pattern's name with its `{SLOT}` replaced by `slot`.
+    pub fn is_set_slot(&'static self, slot: &str) -> bool {
+        self.0
+            .slot_name(slot)
+            .is_some_and(|name| self.0.is_set_raw(named_raw(&name)))
+    }
+}
+
+/// A non-secret declaration that accepts a reference: its value reads as a plain `String`, resolved.
+#[derive(Debug)]
+pub struct ReferenceVar(EnvVar);
+
+impl ReferenceVar {
+    pub const fn new(var: EnvVar) -> Self {
+        Self(var)
+    }
+
+    /// The declaration's metadata. Its own readers answer `None`.
+    pub const fn declaration(&'static self) -> &'static EnvVar {
+        &self.0
+    }
+
+    /// The value, with a reference resolved; unset, empty or not UTF-8 is `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReferenceError`] when the value is a reference that cannot be resolved.
+    pub fn get(&'static self) -> Result<Option<String>, ReferenceError> {
+        self.0.resolved_value()
+    }
+
+    /// [`ReferenceVar::get`] for the pattern's name with its `{SLOT}` replaced by `slot`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReferenceError`] when the value is a reference that cannot be resolved.
+    pub fn get_slot(&'static self, slot: &str) -> Result<Option<String>, ReferenceError> {
+        self.0.resolved_slot(slot)
+    }
+
+    /// Whether the raw value is non-empty; resolves nothing, so it opens no file.
+    pub fn is_set(&'static self) -> bool {
+        self.0.is_set_raw(self.0.value())
+    }
+
+    /// [`ReferenceVar::is_set`] for the pattern's name with its `{SLOT}` replaced by `slot`.
+    pub fn is_set_slot(&'static self, slot: &str) -> bool {
+        self.0
+            .slot_name(slot)
+            .is_some_and(|name| self.0.is_set_raw(named_raw(&name)))
     }
 }
 
@@ -256,8 +392,8 @@ impl std::fmt::Debug for Sensitive {
 
 /// Reads a variable whose name comes from data, not code. Verbatim, empty included; not UTF-8 is `None`.
 ///
-/// A declared secret's name answers `None`, so a credential never reads as a plain `String`: use
-/// [`dynamic_secret`]. There is no `&str`-taking read for a declared name:
+/// A declared secret's or reference-capable name answers `None`, so a credential never reads as a plain
+/// `String` and a reference never skips resolution: use [`dynamic_secret`]. There is no `&str`-taking read for a declared name:
 ///
 /// ```compile_fail
 /// let _ = ocx_env::var("OCX_HOME");
@@ -271,16 +407,16 @@ impl std::fmt::Debug for Sensitive {
 /// let _ = ocx_env::string("OCX_LOG_LEVEL", String::new());
 /// ```
 pub fn dynamic(name: &str) -> Option<String> {
-    if is_declared_secret(name) {
+    if is_declared_sensitive(name) {
         return None;
     }
     read_named(name)
 }
 
-/// Whether `name` is a `secret` declaration's, or fills a secret pattern's slot.
+/// Whether `name` is a `secret` or reference-capable declaration's, or fills such a pattern's slot.
 ///
 /// ASCII-case-insensitive, as Windows resolves names: there `ocx_signing_key` reads `OCX_SIGNING_KEY`.
-fn is_declared_secret(name: &str) -> bool {
+fn is_declared_sensitive(name: &str) -> bool {
     let fits = |declared: &str| match (declared.find('{'), declared.find('}')) {
         (Some(open), Some(close)) => {
             let (prefix, suffix) = (&declared[..open], &declared[close + 1..]);
@@ -294,15 +430,20 @@ fn is_declared_secret(name: &str) -> bool {
         }
         _ => declared.eq_ignore_ascii_case(name),
     };
-    all().any(|var| var.secret && fits(var.name))
+    all().any(|var| (var.secret || var.accepts_reference) && fits(var.name))
 }
 
 /// The value of `name`, unrefused; a name no environment block can hold is `None`.
 fn read_named(name: &str) -> Option<String> {
+    named_raw(name)?.into_string().ok()
+}
+
+/// [`raw`] for a name an environment can hold; verbatim.
+fn named_raw(name: &str) -> Option<OsString> {
     if name.is_empty() || name.contains(['=', '\0']) {
         return None;
     }
-    raw(name)?.into_string().ok()
+    raw(name)
 }
 
 /// [`dynamic`] for a name whose value may be a credential, declared secrets included.
@@ -466,7 +607,8 @@ pub fn is_reserved_ocx_key(key: &str) -> bool {
 /// }
 /// ```
 ///
-/// Attributes follow the visibility in any order: `secret`, `on_invalid = Default|Error`,
+/// Attributes follow the visibility in any order: `secret`, `reference` (a non-secret that accepts a
+/// reference; read through `ReferenceVar`), `on_invalid = Default|Error`,
 /// `propagation = <Class>`, `reader = Ocx|Dependency("crate")`. A `Testing` entry is compiled only under
 /// `cfg(any(test, feature = "__testing"))`, resolved in the invoking crate, which must declare that feature.
 #[macro_export]
@@ -476,6 +618,11 @@ macro_rules! env_vars {
         [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | secret $($rest:tt)*) => {
         $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
             [true] [$on_invalid] [$propagation] [$($reader)*] | $($rest)*);
+    };
+    (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
+        [false] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | reference $($rest:tt)*) => {
+        $crate::env_vars!(@entry $cfg [$($doc)*] $name [$($pattern)?] [$($value)*] $vis
+            [reference] [$on_invalid] [$propagation] [$($reader)*] | $($rest)*);
     };
     (@entry $cfg:tt [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
         [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] | on_invalid = $set:ident $($rest:tt)*) => {
@@ -515,6 +662,14 @@ macro_rules! env_vars {
             $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [true] [$on_invalid] [$propagation] [$($reader)*]),
         );
     };
+    (@entry [$($cfg:tt)*] [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
+        [reference] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*] |) => {
+        $(#[doc = $doc])*
+        #[cfg($($cfg)*)]
+        pub static $name: $crate::ReferenceVar = $crate::ReferenceVar::new(
+            $crate::env_vars!(@var [$($doc)*] $name [$($pattern)?] [$($value)*] $vis [reference] [$on_invalid] [$propagation] [$($reader)*]),
+        );
+    };
     (@var [$($doc:literal)*] $name:ident [$($pattern:literal)?] [$($value:tt)*] $vis:ident
         [$secret:ident] [$on_invalid:ident] [$propagation:ident] [$($reader:tt)*]) => {
         $crate::EnvVar {
@@ -523,11 +678,21 @@ macro_rules! env_vars {
             value: $crate::EnvValue::$($value)*,
             on_invalid: $crate::OnInvalid::$on_invalid,
             visibility: $crate::Visibility::$vis,
-            secret: $secret,
+            secret: $crate::env_vars!(@secret $secret),
+            accepts_reference: $crate::env_vars!(@accepts $secret $vis),
             propagation: $crate::Propagation::$propagation,
             reader: $crate::Reader::$($reader)*,
         }
     };
+    (@secret true) => { true };
+    (@secret $other:ident) => { false };
+    // Per visibility, no wildcard: a new `Visibility` must decide here. `Foreign` is never interpreted.
+    (@accepts true Public) => { true };
+    (@accepts true Plumbing) => { true };
+    (@accepts true Testing) => { true };
+    (@accepts true Foreign) => { false };
+    (@accepts reference $vis:ident) => { true };
+    (@accepts false $vis:ident) => { false };
     (@name $name:ident) => { stringify!($name) };
     (@name $name:ident $pattern:literal) => { $pattern };
     (@doc) => { "" };

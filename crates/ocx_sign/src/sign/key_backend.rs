@@ -61,6 +61,9 @@ pub enum KeyBackendError {
         /// The backend named by the key reference.
         scheme: Scheme,
     },
+    /// `OCX_KEY_PASSWORD` is a reference that cannot be resolved; classified as the reference error is.
+    #[error(transparent)]
+    Reference(#[from] ocx_env::ReferenceError),
 }
 
 /// The environment variable holding the password for an encrypted private key, as the registry declares it.
@@ -68,13 +71,16 @@ pub const OCX_KEY_PASSWORD: &str = ocx_env::OCX_KEY_PASSWORD.declaration().name;
 
 /// The password guarding an encrypted private key, from [`OCX_KEY_PASSWORD`].
 ///
-/// Unset reads as the empty password, a legal cosign key, never an error. Never a flag: `argv` is host-visible.
-#[must_use]
-pub fn key_password() -> String {
-    ocx_env::OCX_KEY_PASSWORD
-        .get()
+/// Unset reads as the empty password, a legal cosign key. Never a flag: `argv` is host-visible.
+///
+/// # Errors
+///
+/// [`ocx_env::ReferenceError`] when the variable is a reference that cannot be resolved: never read as the empty password.
+pub fn key_password() -> Result<String, ocx_env::ReferenceError> {
+    Ok(ocx_env::OCX_KEY_PASSWORD
+        .get()?
         .map(ocx_env::Sensitive::into_inner)
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// A key pair decrypted by `sigstore` from a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM (P-256).
@@ -104,7 +110,7 @@ impl PemKeyBackend {
     /// [`KeyBackendError::Io`] when the file cannot be read, and whatever [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
     pub fn open(path: &std::path::Path) -> Result<Self, KeyBackendError> {
         let pem = read_key_pem(path)?;
-        Self::from_encrypted_pem(&pem, key_password().as_bytes(), KeyBackendKind::File)
+        Self::from_encrypted_pem(&pem, key_password()?.as_bytes(), KeyBackendKind::File)
     }
 
     /// Decrypt the PEM held **in** the environment variable `name` (`--key env://NAME`), never a path.
@@ -123,7 +129,7 @@ impl PemKeyBackend {
                 reason: error.to_string(),
             },
         })?;
-        Self::from_encrypted_pem(pem.as_bytes(), key_password().as_bytes(), KeyBackendKind::Env)
+        Self::from_encrypted_pem(pem.as_bytes(), key_password()?.as_bytes(), KeyBackendKind::Env)
     }
 }
 
@@ -297,11 +303,38 @@ mod tests {
     fn the_key_password_is_the_variable_verbatim_or_empty() {
         let env = ocx_env::overrides::lock();
         env.remove(ocx_env::OCX_KEY_PASSWORD.declaration());
-        assert_eq!(key_password(), "");
+        assert_eq!(key_password().expect("a literal never fails"), "");
         env.set(ocx_env::OCX_KEY_PASSWORD.declaration(), "");
-        assert_eq!(key_password(), "");
+        assert_eq!(key_password().expect("a literal never fails"), "");
         env.set(ocx_env::OCX_KEY_PASSWORD.declaration(), " hunter2 ");
-        assert_eq!(key_password(), " hunter2 ");
+        assert_eq!(key_password().expect("a literal never fails"), " hunter2 ");
+    }
+
+    /// An unresolvable reference is an error, never the empty password.
+    #[test]
+    fn an_unresolvable_key_password_reference_is_an_error_not_the_empty_password() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(
+            ocx_env::OCX_KEY_PASSWORD.declaration(),
+            format!("file://{}", dir.path().join("absent").display()),
+        );
+        let error = key_password().expect_err("an unreadable reference must not become an empty password");
+        assert!(error.to_string().contains("OCX_KEY_PASSWORD"), "{error}");
+    }
+
+    /// A readable reference yields the file content, trailing line ending stripped.
+    #[test]
+    fn a_key_password_file_reference_yields_the_file_content() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pw");
+        std::fs::write(&path, "hunter2\n").expect("write");
+        env.set(
+            ocx_env::OCX_KEY_PASSWORD.declaration(),
+            format!("file://{}", path.display()),
+        );
+        assert_eq!(key_password().expect("readable"), "hunter2");
     }
 
     /// The key the key-mode golden fixtures were signed with. `include_str!`

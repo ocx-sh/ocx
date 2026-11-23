@@ -11,7 +11,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use ocx_env::{EnvVar, InvalidEnv, SecretVar, Sensitive};
+use ocx_env::{EnvVar, InvalidEnv, ReferenceError, ReferenceVar, SecretVar, Sensitive};
 
 use crate::env::Env;
 use crate::exec_state::{Inherited, Narrowing};
@@ -31,12 +31,20 @@ fn pin_ocx_env() {
     let _: &'static str = ocx_env::OCX_FROZEN.declaration().name;
     let _: fn(&'static EnvVar, &str) -> Option<String> = EnvVar::get_slot;
     let _: fn(&str) -> Option<String> = ocx_env::dynamic;
-    let _: fn(&'static SecretVar) -> Option<Sensitive> = SecretVar::get;
-    let _: fn(&'static SecretVar, &str) -> Option<Sensitive> = SecretVar::get_slot;
+    let _: fn(&'static SecretVar) -> Result<Option<Sensitive>, ReferenceError> = SecretVar::get;
+    let _: fn(&'static SecretVar, &str) -> Result<Option<Sensitive>, ReferenceError> = SecretVar::get_slot;
+    let _: fn(&'static SecretVar) -> bool = SecretVar::is_set;
+    let _: fn(&'static SecretVar, &str) -> bool = SecretVar::is_set_slot;
+    let _: fn(&'static ReferenceVar) -> Result<Option<String>, ReferenceError> = ReferenceVar::get;
+    let _: fn(&'static ReferenceVar) -> bool = ReferenceVar::is_set;
+    let _: fn(&'static ReferenceVar, &str) -> bool = ReferenceVar::is_set_slot;
+    let _: fn(&'static str) -> ocx_env::SecretReference<'static> = ocx_env::SecretReference::parse;
+    let _: usize = ocx_env::MAX_REFERENCED_SECRET_BYTES;
+    let _: fn(&'static ReferenceVar, &str) -> Result<Option<String>, ReferenceError> = ReferenceVar::get_slot;
     let _: fn(&Sensitive) -> &str = Sensitive::expose;
     let _: &'static SecretVar = &ocx_env::OCX_ANNOUNCE_TOKEN;
     let _: &'static SecretVar = &ocx_env::OCX_AUTH_TOKEN;
-    let _: &'static EnvVar = &ocx_env::OCX_AUTH_USER;
+    let _: &'static ReferenceVar = &ocx_env::OCX_AUTH_USER;
     let _: &'static EnvVar = &ocx_env::OCX_OFFLINE;
     let _: &'static EnvVar = &ocx_env::OCX_FROZEN;
 }
