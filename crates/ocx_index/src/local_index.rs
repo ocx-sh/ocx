@@ -26,6 +26,10 @@ pub use config::Config;
 /// bound (`adr_servable_index_snapshot.md`); a test hardcoding `64` there stays green when this moves.
 pub const TAG_REFRESH_CONCURRENCY: usize = 64;
 
+/// Bounded concurrency for the per-package refresh fan-out. Nested inside [`TAG_REFRESH_CONCURRENCY`],
+/// it caps a run at 512 in-flight requests, since the fan-out is over the flattened set, not per registry.
+pub const PACKAGE_REFRESH_CONCURRENCY: usize = 8;
+
 /// An OCX-authored root document for a plain OCI registry (`adr_index_indirection.md#a2`).
 ///
 /// Carries each tag's `observed` stamp, which the read-only wire
@@ -710,6 +714,177 @@ impl LocalIndex {
     }
 }
 
+impl LocalIndex {
+    /// Provenance an import gives `registry`: `SourceKind::Published` when configuration names an index for
+    /// it, else `SourceKind::Derived`. Reads no source, so it holds offline.
+    pub fn source_kind_for_import(&self, registry: &str) -> SourceKind {
+        if self.is_index_namespace(registry) {
+            SourceKind::Published
+        } else {
+            SourceKind::Derived
+        }
+    }
+
+    /// Writes the pins `plan` adopts for `identifier` into the local index, reading each tag's dispatch object
+    /// from `source`; returns one outcome per planned tag.
+    ///
+    /// Only `plan.added` and `plan.replaced` write. A tag in `plan.unchanged` or `plan.conflict` is reported
+    /// and never written; no row is ever deleted. An existing root keeps its `repository`; a new root gets
+    /// `oci://<registry>/<repository>`, never the export's pointer. A published root's bytes must match
+    /// `source`'s catalog entry.
+    ///
+    /// # Errors
+    ///
+    /// [`super::error::Error::ExportRootMismatch`] when the root disagrees with the catalog; a tag `source`
+    /// cannot serve; commit failures.
+    pub async fn import_tags(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        source: &super::Index,
+        kind: SourceKind,
+        plan: &TagPlan,
+    ) -> Result<Vec<TagOutcome>> {
+        let writes: Vec<&PlannedTag> = plan.added.iter().chain(&plan.replaced).collect();
+        if !writes.is_empty() {
+            match kind {
+                SourceKind::Published => self.import_published(identifier, source, &writes).await?,
+                SourceKind::Derived => self.import_derived(identifier, source, &writes).await?,
+            }
+        }
+
+        let outcome = |planned: &PlannedTag, status| TagOutcome {
+            tag: planned.tag.clone(),
+            digest: planned.digest.clone(),
+            status,
+            home_digest: planned.home_digest.clone(),
+        };
+        let mut outcomes = Vec::new();
+        outcomes.extend(plan.added.iter().map(|p| outcome(p, TagStatus::Added)));
+        outcomes.extend(plan.replaced.iter().map(|p| outcome(p, TagStatus::Replaced)));
+        outcomes.extend(plan.unchanged.iter().map(|p| outcome(p, TagStatus::Unchanged)));
+        outcomes.extend(plan.conflict.iter().map(|p| outcome(p, TagStatus::Conflict)));
+        Ok(outcomes)
+    }
+
+    /// Stages each planned tag's dispatch object from `source`; a tag the source cannot serve, or serves
+    /// under another digest than planned, is an error. Returns the digest each tag resolved to.
+    async fn stage_planned_dispatch(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        source: &super::Index,
+        writes: &[&PlannedTag],
+    ) -> Result<Vec<(String, ocx_oci::Digest)>> {
+        let mut staged = Vec::with_capacity(writes.len());
+        for planned in writes {
+            let tagged = identifier.clone_with_tag(&planned.tag);
+            let Some((_, digest, _)) = self.persist_dispatch(source, &tagged).await? else {
+                return Err(super::error::Error::RemoteManifestNotFound(tagged.to_string()));
+            };
+            if digest != planned.digest {
+                return Err(super::error::Error::WalkedDigestMismatch {
+                    requested: planned.digest.clone(),
+                    answered: digest,
+                });
+            }
+            staged.push((planned.tag.clone(), digest));
+        }
+        Ok(staged)
+    }
+
+    /// Published import: the export's root must hash to its catalog entry; its bytes then merge tag by tag
+    /// under the identity pointer, so a first-sight root never adopts the exporting machine's `repository`.
+    async fn import_published(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        source: &super::Index,
+        writes: &[&PlannedTag],
+    ) -> Result<()> {
+        let Some((bytes, _)) = source.fetch_root_document(identifier).await? else {
+            return Err(super::error::Error::RemoteManifestNotFound(identifier.to_string()));
+        };
+        let actual = IndexStore::root_catalog_entry(&bytes);
+        let listed = source.fetch_catalog_entry(identifier).await?;
+        if listed.as_deref() != Some(actual.as_str()) {
+            return Err(super::error::Error::ExportRootMismatch {
+                repository: identifier.repository().to_owned(),
+                expected: listed.unwrap_or_else(|| "no catalog entry".to_owned()),
+                actual,
+            });
+        }
+
+        // Always rewritten: the merge keeps a committed pointer, and takes this one only when none is usable.
+        let mut root: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if let Some(object) = root.as_object_mut() {
+            object.insert(
+                "repository".to_owned(),
+                serde_json::Value::String(format!("oci://{}/{}", identifier.registry(), identifier.repository())),
+            );
+            // An export is untrusted input: who may sign a package is never taken from it.
+            object.remove("publishers");
+        }
+        let rewritten = serde_json::to_vec(&root)?;
+
+        let staged = self.stage_planned_dispatch(identifier, source, writes).await?;
+        let tags: Vec<&str> = staged.iter().map(|(tag, _)| tag.as_str()).collect();
+        self.commit_and_sweep_published_root(identifier, &rewritten, RootScope::Tags(&tags))
+            .await
+    }
+
+    /// Derived import: stages the objects, then upserts the planned pins into the derived root.
+    async fn import_derived(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        source: &super::Index,
+        writes: &[&PlannedTag],
+    ) -> Result<()> {
+        let staged = self.stage_planned_dispatch(identifier, source, writes).await?;
+        let pins = self.commit_root_tags(identifier, &staged).await?;
+        self.sweep_dispatch_orphans(identifier, &pins).await;
+        Ok(())
+    }
+}
+
+/// One tag of an import, with the digest the export pins it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedTag {
+    pub tag: String,
+    pub digest: ocx_oci::Digest,
+    /// What the home pins the tag to now; set on a tag the home pins to another digest.
+    pub home_digest: Option<ocx_oci::Digest>,
+}
+
+/// Per-tag decisions for one package: what an import may write and what it only reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagPlan {
+    /// Not in the home.
+    pub added: Vec<PlannedTag>,
+    /// Pinned elsewhere in the home, and the package was named on the command line.
+    pub replaced: Vec<PlannedTag>,
+    /// Already pinned to the export's digest.
+    pub unchanged: Vec<PlannedTag>,
+    /// Pinned elsewhere in the home, and the package was not named: the home keeps its pin.
+    pub conflict: Vec<PlannedTag>,
+}
+
+/// What an import or export did with one tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagStatus {
+    Added,
+    Unchanged,
+    Replaced,
+    Conflict,
+}
+
+/// The result for one planned tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagOutcome {
+    pub tag: String,
+    pub digest: ocx_oci::Digest,
+    pub status: TagStatus,
+    /// The digest moved from (`Replaced`) or kept (`Conflict`).
+    pub home_digest: Option<ocx_oci::Digest>,
+}
+
 #[cfg(test)]
 impl LocalIndex {
     /// Seed `bytes` as `identifier`'s committed root, with the catalog entry
@@ -1122,7 +1297,7 @@ mod tests {
     }
 
     /// The inner factor of the ceiling `ocx index sync` states (C-024: ≤ 512
-    /// in-flight requests, `INDEX_REFRESH_CONCURRENCY` × this constant).
+    /// in-flight requests, `PACKAGE_REFRESH_CONCURRENCY` × this constant).
     ///
     /// The CLI asserts the product of the two constants; that leaves the
     /// constant's **call sites** unguarded, and they are what make the ceiling
@@ -4735,5 +4910,310 @@ mod tests {
             crate::error::Error::File(file) => file.cause.kind(),
             other => panic!("expected File, got {other:?}"),
         }
+    }
+
+    // ── Import: pin the tags a plan adopts ────────────────────────────────
+
+    /// An export read through the index seam: tag → leaf char, optionally served as a published root whose
+    /// `repository` is the exporting machine's pointer, never this home's.
+    #[derive(Clone)]
+    struct ExportSource {
+        tags: Vec<(&'static str, char)>,
+        published: bool,
+        catalog: Option<String>,
+        publishers: bool,
+    }
+
+    impl ExportSource {
+        fn new(tags: &[(&'static str, char)], published: bool) -> Self {
+            Self {
+                tags: tags.to_vec(),
+                published,
+                catalog: None,
+                publishers: false,
+            }
+        }
+
+        fn root_bytes(&self) -> Vec<u8> {
+            let rows = self
+                .tags
+                .iter()
+                .map(|(tag, leaf)| format!(r#""{tag}":{{"content":"{}"}}"#, content_for(*leaf)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let publishers = if self.publishers {
+                r#""publishers":[{"export":true}],"#
+            } else {
+                ""
+            };
+            format!(r#"{{{publishers}"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{{rows}}}}}"#).into_bytes()
+        }
+
+        fn leaf_of(&self, id: &ocx_oci::PackageRef) -> Option<char> {
+            let tag = id.tag()?;
+            self.tags.iter().find(|(t, _)| *t == tag).map(|(_, leaf)| *leaf)
+        }
+
+        fn into_index(self) -> super::super::Index {
+            super::super::Index::from_impl(self)
+        }
+    }
+
+    #[async_trait]
+    impl super::super::index_impl::IndexImpl for ExportSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
+            Ok(Some(self.tags.iter().map(|(tag, _)| (*tag).to_owned()).collect()))
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &ocx_oci::PackageRef,
+            _: IndexOperation,
+        ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, m)| (d, m)))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            id: &ocx_oci::PackageRef,
+            _: IndexOperation,
+        ) -> Result<Option<ocx_oci::Digest>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, _)| d))
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            id: &ocx_oci::PackageRef,
+        ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
+            let Some(leaf) = self.leaf_of(id) else {
+                return Ok(None);
+            };
+            let (bytes, digest) = object_for(leaf);
+            let manifest = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, digest, manifest)))
+        }
+        async fn fetch_root_document(
+            &self,
+            _: &ocx_oci::PackageRef,
+        ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
+            if !self.published {
+                return Ok(None);
+            }
+            let bytes = self.root_bytes();
+            let root = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, root)))
+        }
+        async fn fetch_catalog_entry(&self, _: &ocx_oci::PackageRef) -> Result<Option<String>> {
+            if !self.published {
+                return Ok(None);
+            }
+            Ok(Some(
+                self.catalog
+                    .clone()
+                    .unwrap_or_else(|| IndexStore::root_catalog_entry(&self.root_bytes())),
+            ))
+        }
+        fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn planned(tag: &str, leaf: char, home: Option<char>) -> PlannedTag {
+        PlannedTag {
+            tag: tag.to_owned(),
+            digest: content_for(leaf),
+            home_digest: home.map(content_for),
+        }
+    }
+
+    fn pinned_content(dir: &TempDir, tag: &str) -> Option<String> {
+        read_root_value(dir)["tags"][tag]["content"].as_str().map(str::to_owned)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_tags_writes_added_and_replaced_only() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(&index, &[("1", 'a', false), ("3", 'e', false)]).await;
+        let source = ExportSource::new(&[("1", 'c'), ("2", 'b'), ("3", 'd')], true).into_index();
+        let plan = TagPlan {
+            added: vec![planned("2", 'b', None)],
+            replaced: vec![planned("1", 'c', Some('a'))],
+            conflict: vec![planned("3", 'd', Some('e'))],
+            ..TagPlan::default()
+        };
+
+        let outcomes = index
+            .import_tags(&repo_id(), &source, SourceKind::Published, &plan)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            pinned_content(&dir, "1"),
+            Some(content_for('c').to_string()),
+            "replaced moves"
+        );
+        assert_eq!(
+            pinned_content(&dir, "2"),
+            Some(content_for('b').to_string()),
+            "added is written"
+        );
+        assert_eq!(
+            pinned_content(&dir, "3"),
+            Some(content_for('e').to_string()),
+            "conflict keeps the home pin"
+        );
+        let status = |tag: &str| outcomes.iter().find(|o| o.tag == tag).map(|o| o.status);
+        assert_eq!(status("1"), Some(TagStatus::Replaced));
+        assert_eq!(status("2"), Some(TagStatus::Added));
+        assert_eq!(status("3"), Some(TagStatus::Conflict));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conflict_keeps_home_pin() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(&index, &[("1", 'a', false)]).await;
+        let before = std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap();
+        let source = ExportSource::new(&[("1", 'd')], true).into_index();
+        let plan = TagPlan {
+            conflict: vec![planned("1", 'd', Some('a'))],
+            ..TagPlan::default()
+        };
+
+        let outcomes = index
+            .import_tags(&repo_id(), &source, SourceKind::Published, &plan)
+            .await
+            .unwrap();
+
+        let after = std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap();
+        assert_eq!(before, after, "a conflict writes nothing");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, TagStatus::Conflict);
+        assert_eq!(
+            outcomes[0].home_digest,
+            Some(content_for('a')),
+            "the digest kept is reported"
+        );
+    }
+
+    #[test]
+    fn unconfigured_registry_imports_derived() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir).with_index_namespaces(HashSet::from(["configured.test".to_owned()]));
+
+        assert_eq!(index.source_kind_for_import("configured.test"), SourceKind::Published);
+        assert_eq!(
+            index.source_kind_for_import("other.test"),
+            SourceKind::Derived,
+            "a registry no configured index serves is Derived, as it resolves"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_root_gets_identity_pointer() {
+        for kind in [SourceKind::Published, SourceKind::Derived] {
+            let dir = TempDir::new().unwrap();
+            let index = make_index(&dir);
+            let source = ExportSource::new(&[("1", 'b')], kind == SourceKind::Published).into_index();
+            let plan = TagPlan {
+                added: vec![planned("1", 'b', None)],
+                ..TagPlan::default()
+            };
+
+            index.import_tags(&repo_id(), &source, kind, &plan).await.unwrap();
+
+            assert_eq!(
+                read_root_value(&dir)["repository"],
+                format!("oci://{REGISTRY}/{REPO}"),
+                "{kind:?}: a first-sight root names this registry, never the export's pointer"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_never_adopts_the_export_publishers() {
+        let plan = TagPlan {
+            added: vec![planned("1", 'b', None)],
+            ..TagPlan::default()
+        };
+        let mut export = ExportSource::new(&[("1", 'b')], true);
+        export.publishers = true;
+
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        index
+            .import_tags(&repo_id(), &export.into_index(), SourceKind::Published, &plan)
+            .await
+            .unwrap();
+        assert!(
+            read_root_value(&dir).get("publishers").is_none(),
+            "a first-sight root carries no publishers from the export"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let home = root_with_rows(&[("2", 'c', false)])
+            .replace(r#"{"repository""#, r#"{"publishers":[{"home":true}],"repository""#);
+        index.seed_root_document(&repo_id(), home.as_bytes()).await.unwrap();
+        let mut export = ExportSource::new(&[("1", 'b')], true);
+        export.publishers = true;
+        index
+            .import_tags(&repo_id(), &export.into_index(), SourceKind::Published, &plan)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_root_value(&dir)["publishers"],
+            serde_json::json!([{"home": true}]),
+            "the home's publishers survive, never the export's"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_never_deletes() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        seed_rows(&index, &[("1", 'a', false), ("2", 'b', false)]).await;
+        let source = ExportSource::new(&[("3", 'c')], true).into_index();
+        let plan = TagPlan {
+            added: vec![planned("3", 'c', None)],
+            ..TagPlan::default()
+        };
+
+        index
+            .import_tags(&repo_id(), &source, SourceKind::Published, &plan)
+            .await
+            .unwrap();
+
+        let bytes = std::fs::read(store(&dir).root_document_path(REGISTRY, REPO)).unwrap();
+        assert_eq!(merged_tag_names(&bytes), ["1", "2", "3"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn catalog_mismatch_is_export_root_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let mut export = ExportSource::new(&[("1", 'b')], true);
+        export.catalog = Some(format!("sha256:{}", "0".repeat(64)));
+        let plan = TagPlan {
+            added: vec![planned("1", 'b', None)],
+            ..TagPlan::default()
+        };
+
+        let result = index
+            .import_tags(&repo_id(), &export.into_index(), SourceKind::Published, &plan)
+            .await;
+
+        assert!(
+            matches!(result, Err(crate::error::Error::ExportRootMismatch { .. })),
+            "a root that disagrees with its catalog entry is refused: {result:?}"
+        );
+        assert!(
+            !store(&dir).root_document_path(REGISTRY, REPO).is_file(),
+            "nothing is committed from a mismatching root"
+        );
     }
 }

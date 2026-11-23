@@ -33,6 +33,22 @@ use super::signer_rounds::{
 use super::verify::VerifyOptions;
 use ocx_sign::verify::VerifyContentMode;
 
+/// Where verification reads a subject's referrers from.
+#[derive(Debug, Clone, Default)]
+pub enum ReferrerSource {
+    /// The registry's listing first, then any exported markers.
+    #[default]
+    Registry,
+    /// Markers and blobs the lookup holds, and never the registry (import).
+    LookupOnly(Arc<ocx_oci::blob_lookup::BlobLookup>),
+}
+
+/// The `artifactType`s a signature referrer declares; a lookup-only listing keeps nothing else.
+pub(super) const SIGNATURE_ARTIFACT_TYPES: [&str; 2] = [
+    ocx_oci::referrer::media_types::SIGSTORE_BUNDLE_V03,
+    ocx_oci::referrer::media_types::COSIGN_SIG_ARTIFACT_TYPE,
+];
+
 /// Auto-verify configuration, present on a [`PackageManager`] only when a trust policy is configured.
 #[derive(Clone)]
 pub struct AutoVerify {
@@ -67,6 +83,12 @@ pub struct AutoVerify {
     warned: Arc<AtomicBool>,
     /// Whether each logical repository declares publishers, memoized per batch for the origin gate.
     declarations: Arc<Mutex<HashMap<DeclarationKey, Arc<OnceCell<bool>>>>>,
+    /// Where referrers come from; [`ReferrerSource::Registry`] unless an import narrows it.
+    referrer_source: ReferrerSource,
+    /// One lookup-only overlay client per logical registry, built on first use.
+    overlay_clients: Arc<Mutex<HashMap<String, ocx_oci::Client>>>,
+    /// Signatures a [`ReferrerSource::LookupOnly`] verify accepted, as `(registry, subject, referrer)`.
+    accepted: Arc<Mutex<Vec<(String, ocx_oci::Digest, ocx_oci::Digest)>>>,
 }
 
 /// `(registry, repository, committed_only)`: a digest request reads the committed root alone, a tag request the effective list.
@@ -118,7 +140,24 @@ impl AutoVerify {
             local_trust_root: Arc::new(OnceCell::new()),
             warned: Arc::new(AtomicBool::new(false)),
             declarations: Arc::new(Mutex::new(HashMap::new())),
+            referrer_source: ReferrerSource::default(),
+            overlay_clients: Arc::new(Mutex::new(HashMap::new())),
+            accepted: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// The referrer digests a lookup-only verify accepted for `subject` on `registry`: the referrer manifest, or
+    /// its layer blob for a simplesigning signature.
+    pub(crate) fn accepted_referrers(&self, registry: &str, subject: &ocx_oci::Digest) -> Vec<ocx_oci::Digest> {
+        self.accepted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(accepted_registry, accepted_subject, _)| {
+                accepted_registry == registry && accepted_subject == subject
+            })
+            .map(|(_, _, referrer)| referrer.clone())
+            .collect()
     }
 
     /// Whether `logical` declares publishers, read once per batch: every `find` consults it, and a declaration
@@ -169,6 +208,81 @@ impl AutoVerify {
             });
         }
         Ok(())
+    }
+
+    /// Reads referrers from `source` instead of the registry.
+    ///
+    /// [`ReferrerSource::LookupOnly`] also forces `offline`: the trust root then comes from pinned or cached
+    /// material, and neither Rekor nor TUF is dialled.
+    #[must_use]
+    pub fn with_referrer_source(mut self, source: ReferrerSource) -> Self {
+        if matches!(source, ReferrerSource::LookupOnly(_)) {
+            self.offline = true;
+        }
+        self.referrer_source = source;
+        self
+    }
+
+    /// The client a verify round reads through for `registry`: the registry client, or under
+    /// [`ReferrerSource::LookupOnly`] an overlay that answers from the lookup alone, built once per logical registry.
+    fn client_for(&self, home_blobs: &std::path::Path, registry: &str) -> ocx_oci::Client {
+        let ReferrerSource::LookupOnly(lookup) = &self.referrer_source else {
+            return self.registry_client.clone();
+        };
+        self.overlay_clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(registry.to_owned())
+            .or_insert_with(|| {
+                self.registry_client.clone().with_blob_overlay(
+                    ocx_oci::client::OverlayMode::LookupOnly,
+                    home_blobs.to_path_buf(),
+                    Arc::clone(lookup),
+                    registry,
+                    SIGNATURE_ARTIFACT_TYPES
+                        .iter()
+                        .map(|&declared| declared.to_owned())
+                        .collect(),
+                )
+            })
+            .clone()
+    }
+
+    /// Under [`ReferrerSource::LookupOnly`], an empty verdict for a subject whose exported listing is not marked
+    /// complete reads "referrers were not exported", not "unsigned": the export may simply have left them out.
+    async fn name_unexported(
+        &self,
+        kind: PackageErrorKind,
+        home_blobs: &std::path::Path,
+        resolved: &ocx_oci::PackageRef,
+    ) -> PackageErrorKind {
+        let ReferrerSource::LookupOnly(lookup) = &self.referrer_source else {
+            return kind;
+        };
+        let empty = matches!(
+            &kind,
+            PackageErrorKind::Internal(crate::Error::Verify(error))
+                if matches!(error.kind, VerifyErrorKind::NoSignaturesFound | VerifyErrorKind::NoSignaturesOnIndex)
+        );
+        if !empty {
+            return kind;
+        }
+        // Without a pinned digest the subject cannot be matched to a listing, so the listing counts as incomplete.
+        let listing = ocx_oci::blob_lookup::transport::LookupTransport::lookup_only(
+            home_blobs.to_path_buf(),
+            Arc::clone(lookup),
+            resolved.registry(),
+            Vec::new(),
+        );
+        let complete = match resolved.digest() {
+            Some(subject) => listing.listing_complete(&subject).await,
+            None => false,
+        };
+        if complete {
+            kind
+        } else {
+            verify_kind(resolved, VerifyErrorKind::NoSignaturesNotExported)
+        }
     }
 
     /// Override the `OCX_NO_VERIFY`-derived opt-out with a `--verify` / `--no-verify` flag, which wins.
@@ -475,9 +589,11 @@ impl PackageManager {
         trust_root: &TrustRoot,
         transparency: Transparency,
     ) -> Result<(), PackageErrorKind> {
+        let home_blobs = self.file_structure().blobs.root();
+        let client = auto_verify.client_for(home_blobs, resolved.registry());
         let options = VerifyOptions {
             policies,
-            client: &auto_verify.registry_client,
+            client: &client,
             trust_root,
             rekor_url: &auto_verify.rekor_url,
             offline: auto_verify.offline,
@@ -493,10 +609,25 @@ impl PackageManager {
             report_all: false,
             transparency,
         };
-        self.verify_one(resolved, None, options)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.kind)
+        match self.verify_one(resolved, None, options).await {
+            Ok(report) => {
+                if matches!(auto_verify.referrer_source, ReferrerSource::LookupOnly(_)) {
+                    auto_verify
+                        .accepted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .extend(report.signatures.into_iter().map(|signature| {
+                            (
+                                resolved.registry().to_owned(),
+                                signature.subject_digest,
+                                signature.referrer_digest,
+                            )
+                        }));
+                }
+                Ok(())
+            }
+            Err(error) => Err(auto_verify.name_unexported(error.kind, home_blobs, resolved).await),
+        }
     }
 }
 
@@ -828,6 +959,9 @@ mod tests {
         trusted_root: Option<std::path::PathBuf>,
         /// The source routes the name, so a materializing resolve records a routing pointer.
         routes: bool,
+        referrer_source: ReferrerSource,
+        /// Replaces the index built from the golden source, for a scenario that must hold index reads.
+        index: Option<ocx_index::Index>,
     }
 
     impl GoldenScenario {
@@ -841,6 +975,8 @@ mod tests {
                 offline: true,
                 trusted_root: None,
                 routes: false,
+                referrer_source: ReferrerSource::default(),
+                index: None,
             }
         }
     }
@@ -857,17 +993,19 @@ mod tests {
 
         let (subject, _) = golden_subject();
         let file_structure = FileStructure::with_root(root.to_path_buf());
-        let index = Index::from_chained(
-            LocalIndex::new(LocalConfig {
-                index_store: ocx_index::IndexStore::machine_local(&file_structure),
-            }),
-            vec![Index::from_impl(GoldenSubjectIndex {
-                digest: subject,
-                declared: scenario.declared,
-                routes: scenario.routes,
-            })],
-            ChainMode::Default,
-        );
+        let index = scenario.index.unwrap_or_else(|| {
+            Index::from_chained(
+                LocalIndex::new(LocalConfig {
+                    index_store: ocx_index::IndexStore::machine_local(&file_structure),
+                }),
+                vec![Index::from_impl(GoldenSubjectIndex {
+                    digest: subject,
+                    declared: scenario.declared,
+                    routes: scenario.routes,
+                })],
+                ChainMode::Default,
+            )
+        });
         let config = match scenario.signatures {
             Some(value) => {
                 let mut config: Config =
@@ -896,7 +1034,8 @@ mod tests {
             sigstore_trust: None,
             home_trusted_root: None,
             user_opted_out: scenario.user_opted_out,
-        });
+        })
+        .with_referrer_source(scenario.referrer_source);
         PackageManager::new(file_structure, index, None, REGISTRY).with_auto_verify(Some(auto_verify))
     }
 
@@ -1020,6 +1159,242 @@ mod tests {
             3,
             "report_all must pull both referrer manifests, got: {:?}",
             reporting.read().calls,
+        );
+    }
+
+    // ── lookup-only verification ─────────────────────────────────────────────
+
+    /// A source that fails the test on any call: what a frozen import index must never reach.
+    #[derive(Clone)]
+    struct PanickingSource;
+
+    #[async_trait::async_trait]
+    impl ocx_index::IndexImpl for PanickingSource {
+        async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
+            panic!("the verify path reached an index source: list_repositories")
+        }
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
+            panic!("the verify path reached an index source: list_tags")
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &ocx_oci::PackageRef,
+            _: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
+            panic!("the verify path reached an index source: fetch_manifest")
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &ocx_oci::PackageRef,
+            _: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<ocx_oci::Digest>> {
+            panic!("the verify path reached an index source: fetch_manifest_digest")
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
+            panic!("the verify path reached an index source: fetch_blob")
+        }
+        fn source_kind(&self) -> ocx_index::SourceKind {
+            ocx_index::SourceKind::Derived
+        }
+        fn box_clone(&self) -> Box<dyn ocx_index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Writes `bytes` as the blob `digest` of the logical registry under `root`.
+    fn put_blob(root: &std::path::Path, digest: &ocx_oci::Digest, bytes: &[u8]) {
+        let dir = ocx_oci::blob_lookup::blob_dir_path(root, REGISTRY, digest);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("data"), bytes).unwrap();
+    }
+
+    /// Copies what `data` serves into a blob directory the way an export lays it out: every manifest and blob, and
+    /// a marker per listed referrer of `subject` when `with_referrers`.
+    fn export_to(data: &StubTransportData, root: &std::path::Path, subject: &ocx_oci::Digest, with_referrers: bool) {
+        let inner = data.read();
+        let digest_of = |text: &str| ocx_oci::Digest::try_from(text).expect("a digest");
+        for (bytes, digest) in inner.manifests.values() {
+            put_blob(root, &digest_of(digest), bytes);
+        }
+        for (digest, bytes) in &inner.blobs {
+            put_blob(root, &digest_of(digest), bytes);
+        }
+        if with_referrers {
+            for listed in inner.referrers.values().flatten() {
+                ocx_oci::blob_lookup::markers::write_marker(root, REGISTRY, subject, &digest_of(&listed.digest))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn golden_scenario_over(
+        trusted_root: std::path::PathBuf,
+        lookup: &std::path::Path,
+        offline: bool,
+    ) -> GoldenScenario {
+        GoldenScenario {
+            operator_policies: vec![golden_operator_policy()],
+            trusted_root: Some(trusted_root),
+            offline,
+            referrer_source: ReferrerSource::LookupOnly(Arc::new(ocx_oci::blob_lookup::BlobLookup::new(
+                vec![lookup.to_path_buf()],
+                None,
+            ))),
+            ..GoldenScenario::new(None)
+        }
+    }
+
+    fn golden_operator_policy() -> TrustPolicy {
+        TrustPolicy {
+            scope: Some(ocx_trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
+            builder: None,
+            signers: vec![ocx_trust::SignerSpec::Key(ocx_trust::KeyMatcher {
+                key: None,
+                key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+            })],
+            system_locked: false,
+        }
+    }
+
+    fn trusted_root_in(root: &std::path::Path) -> std::path::PathBuf {
+        let path = root.join("trusted_root.json");
+        std::fs::write(&path, GOLDEN_TRUSTED_ROOT).unwrap();
+        path
+    }
+
+    fn verify_kind_of(error: PackageErrorKind) -> VerifyErrorKind {
+        match error {
+            PackageErrorKind::Internal(crate::Error::Verify(error)) => error.kind,
+            other => panic!("expected a verify error, got {other:?}"),
+        }
+    }
+
+    /// The signature is read from the directory alone: the registry client behind the overlay is seeded with the
+    /// same signatures and is never touched, listing included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_only_never_lists_live() {
+        let (subject, target) = golden_subject();
+        let root = TempDir::new().unwrap();
+        let lookup = TempDir::new().unwrap();
+        let live = golden_transport_data(&subject);
+        export_to(&live, lookup.path(), &subject, true);
+
+        // `offline: false` here: a lookup-only source forces it, or the trust root fetch would dial.
+        let scenario = golden_scenario_over(trusted_root_in(root.path()), lookup.path(), false);
+        golden_manager(root.path(), live.clone(), scenario)
+            .maybe_auto_verify(&target)
+            .await
+            .expect("the exported signature verifies");
+
+        assert!(
+            live.read().calls.is_empty(),
+            "a lookup-only verify must not touch the registry client, got: {:?}",
+            live.read().calls
+        );
+    }
+
+    /// Without `.complete` an empty listing says the referrers were not exported; with it the subject is plainly
+    /// unsigned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incomplete_listing_named() {
+        let (subject, target) = golden_subject();
+        let root = TempDir::new().unwrap();
+        let lookup = TempDir::new().unwrap();
+        let live = golden_transport_data(&subject);
+        export_to(&live, lookup.path(), &subject, false);
+        let manager = golden_manager(
+            root.path(),
+            live,
+            golden_scenario_over(trusted_root_in(root.path()), lookup.path(), true),
+        );
+
+        let incomplete = manager.maybe_auto_verify(&target).await.expect_err("nothing is listed");
+        assert!(
+            matches!(verify_kind_of(incomplete), VerifyErrorKind::NoSignaturesNotExported),
+            "an unmarked listing must name the export"
+        );
+
+        ocx_oci::blob_lookup::markers::write_complete(lookup.path(), REGISTRY, &subject).unwrap();
+        let complete = manager.maybe_auto_verify(&target).await.expect_err("still unsigned");
+        assert!(
+            matches!(verify_kind_of(complete), VerifyErrorKind::NoSignaturesFound),
+            "a complete listing that is empty is plainly unsigned"
+        );
+    }
+
+    /// Markers naming other artifact types are dropped before the per-root cap counts them, so a crowd of SBOM
+    /// markers cannot push the signatures out of the listing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn markers_filtered_before_cap() {
+        let (subject, target) = golden_subject();
+        let root = TempDir::new().unwrap();
+        let lookup = TempDir::new().unwrap();
+        let live = golden_transport_data(&subject);
+        export_to(&live, lookup.path(), &subject, true);
+        for nonce in 0..(ocx_oci::blob_lookup::MAX_REFERRERS_PER_SUBJECT + 10) {
+            let sbom = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "artifactType": "application/vnd.cyclonedx+json",
+                "config": {"mediaType": "application/vnd.oci.empty.v1+json", "digest": ocx_oci::Algorithm::Sha256.hash(b"{}").to_string(), "size": 2},
+                "layers": [],
+                "subject": {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": subject.to_string(), "size": 1},
+                "annotations": {"nonce": nonce.to_string()},
+            }))
+            .unwrap();
+            let digest = ocx_oci::Algorithm::Sha256.hash(&sbom);
+            put_blob(lookup.path(), &digest, &sbom);
+            ocx_oci::blob_lookup::markers::write_marker(lookup.path(), REGISTRY, &subject, &digest).unwrap();
+        }
+
+        golden_manager(
+            root.path(),
+            live,
+            golden_scenario_over(trusted_root_in(root.path()), lookup.path(), true),
+        )
+        .maybe_auto_verify(&target)
+        .await
+        .expect("the signatures are listed behind the SBOM markers");
+    }
+
+    /// The overlay covers every registry read of verify; the index reads are not its to cover. Over an offline index
+    /// on a source that fails on any call, a lookup-only verify never reaches the source.
+    ///
+    /// The verdict is an error, not success: the subject manifest is resolved through the index, which an offline
+    /// chain cannot answer for a bare digest. A frozen chain does not hold the reads at all: it walks the source for
+    /// a digest it lacks, which is why an import must not rely on `Frozen` for verify.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verify_index_reads_held_when_offline() {
+        let (subject, target) = golden_subject();
+        let root = TempDir::new().unwrap();
+        let lookup = TempDir::new().unwrap();
+        let live = golden_transport_data(&subject);
+        export_to(&live, lookup.path(), &subject, true);
+
+        let file_structure = FileStructure::with_root(root.path().to_path_buf());
+        let index = ocx_index::Index::from_chained(
+            ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+                index_store: ocx_index::IndexStore::machine_local(&file_structure),
+            }),
+            vec![ocx_index::Index::from_impl(PanickingSource)],
+            ocx_index::ChainMode::Offline,
+        );
+        let scenario = GoldenScenario {
+            index: Some(index),
+            ..golden_scenario_over(trusted_root_in(root.path()), lookup.path(), true)
+        };
+
+        let outcome = golden_manager(root.path(), live.clone(), scenario)
+            .maybe_auto_verify(&target)
+            .await;
+
+        assert!(
+            outcome.is_err(),
+            "an offline index cannot resolve the subject by digest"
+        );
+        assert!(
+            live.read().calls.is_empty(),
+            "the registry client is never touched either"
         );
     }
 

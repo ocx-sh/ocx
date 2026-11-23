@@ -12,8 +12,10 @@ pub mod config_test;
 pub mod config_update;
 pub mod deps;
 pub mod env;
+pub mod export;
 /// Report vocabulary shared by `package claim` and `package announce`; no `Printable`, so no root in `visit_report_roots`.
 pub mod forge_report;
+pub mod import;
 pub mod index;
 pub mod install;
 pub mod lock;

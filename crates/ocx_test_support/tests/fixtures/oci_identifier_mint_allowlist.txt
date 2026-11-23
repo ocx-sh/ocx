@@ -34,9 +34,11 @@ ocx_cli/src/command/package_prune.rs execute 1
 ocx_package_manager/src/tasks/patch_publish.rs push_patch_descriptor 1
 
 # Locations that are not packages: the managed-config artifact and the patch
-# descriptor are fetched from the registry their config names.
+# descriptor are fetched from the registry their config names, and an export
+# copies a snapshot-pinned descriptor from that same registry.
 ocx_config/src/managed.rs resolve_target 1
 ocx_config/src/managed.rs snapshot_matches_source 1
 ocx_setup/src/lib.rs apply_managed_config 1
 ocx_package_manager/src/patch/persistence.rs fetch_patch_descriptor_blobs 1
 ocx_package_manager/src/patch/persistence.rs probe_patch_descriptor_digest 1
+ocx_package_manager/src/tasks/export.rs export_descriptor 1

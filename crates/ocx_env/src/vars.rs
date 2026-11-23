@@ -124,6 +124,24 @@ crate::env_vars! {
     /// Under `--remote` or `OCX_REMOTE`, tag- and catalog-addressed lookups bypass it, while
     /// digest-addressed lookups still consult it first.
     pub OCX_INDEX: Path, Public, propagation = UserInput;
+    /// Directories searched, read-only, for the blobs a command needs before it contacts a registry.
+    /// Mirrors `--blob-dir`, which is repeatable.
+    ///
+    /// A list in the platform path-list syntax: `:` on Unix, `;` on Windows. Empty entries are
+    /// skipped, an empty value is unset, and a list of more than 32 entries is refused (exit 78). A directory that is missing
+    /// here is skipped with one warning on first use. Every blob is checked against its digest, so a
+    /// directory cannot change what a digest means.
+    ///
+    /// A `--blob-dir` flag replaces the whole list, and the list replaces `[blobs] dirs`. Forwarded,
+    /// so a launcher re-entry reads the same directories.
+    pub OCX_BLOB_DIR: PathList, Public, propagation = UserInput;
+    /// Directory where blobs fetched from a registry are kept for later runs. Mirrors
+    /// `--blob-cache-dir`.
+    ///
+    /// Writable, unlike `OCX_BLOB_DIR`; OCX never writes into a blob directory. An empty value is
+    /// unset. `--blob-cache-dir` takes precedence, and this variable outranks `[blobs] cache_dir`.
+    /// Forwarded, so a launcher re-entry fills the same cache.
+    pub OCX_BLOB_CACHE_DIR: Path, Public, propagation = UserInput;
     /// The registry a bare identifier resolves under; outranks `[registry] default`, else
     /// `ocx.sh`. Empty is unset.
     ///

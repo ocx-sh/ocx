@@ -12,12 +12,28 @@ use std::path::Path;
 use tokio::task::JoinSet;
 
 use crate::{error, error::PackageError, error::PackageErrorKind};
+use ocx_oci::blob_lookup::LookupError;
 use ocx_oci::{self, media_type::MEDIA_TYPE_PACKAGE_METADATA_V1, media_type::media_type_select};
 use ocx_package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage};
 use ocx_store::{file_structure, file_structure::PackageStore, reference_manager::ReferenceManager};
 
 use ocx_util::fs::LockedFile;
 use ocx_util::prelude::SerdeExt;
+
+/// A blob directory two digests share is an unusable export layout (65), not a disk failure. `dir` is always the
+/// export root; the colliding shard is named in the message. Every other lookup failure keeps its classification.
+pub(super) fn lookup_error(dir: &Path, error: LookupError) -> error::Error {
+    match error {
+        LookupError::ShardCollision { path, existing, digest } => error::Error::ExportDirInvalid {
+            dir: dir.to_path_buf(),
+            reason: format!(
+                "'{}' already holds the content of '{existing}', not '{digest}'",
+                path.display()
+            ),
+        },
+        other => ocx_index::error::Error::from(other).into(),
+    }
+}
 
 /// Finds a package in the object store without index resolution; `None` if absent.
 ///
@@ -553,7 +569,8 @@ type GatheredClosureNode = (
     Vec<ClosureEdge>,
 );
 
-/// A [`GatheredClosureNode`] tagged with its spawn slot and the edge's declared identity.
+/// A [`GatheredClosureNode`] tagged with its spawn slot, the edge's declared identity and whether a
+/// source supplied the node's manifest.
 type SlottedClosureNode = (
     usize,
     ocx_oci::PinnedPackageRef,
@@ -561,6 +578,7 @@ type SlottedClosureNode = (
     ocx_oci::Digest,
     metadata::ValidMetadata,
     Vec<ClosureEdge>,
+    bool,
 );
 
 /// Stages `pinned`'s raw manifest bytes into the blob store when not already local, without ref-linking.
@@ -606,15 +624,40 @@ pub async fn walk_closure_nodes(
     root_config_digest: ocx_oci::Digest,
     platform: &ocx_oci::Platform,
 ) -> Result<Vec<ClosureNode>, PackageErrorKind> {
+    walk_closure_nodes_with_origins(
+        fs,
+        index,
+        offline,
+        root_pinned,
+        root_metadata,
+        root_config_digest,
+        platform,
+    )
+    .await
+    .map(|(nodes, _)| nodes)
+}
+
+/// [`walk_closure_nodes`] plus the resolved nodes whose manifest this walk read from a source: the walk
+/// leaves a home copy behind, so a later pull would otherwise see a home hit and record no origin.
+pub(super) async fn walk_closure_nodes_with_origins(
+    fs: &file_structure::FileStructure,
+    index: &ocx_index::Index,
+    offline: bool,
+    root_pinned: &ocx_oci::PinnedPackageRef,
+    root_metadata: &metadata::ValidMetadata,
+    root_config_digest: ocx_oci::Digest,
+    platform: &ocx_oci::Platform,
+) -> Result<(Vec<ClosureNode>, HashSet<ocx_oci::PinnedPackageRef>), PackageErrorKind> {
     let frontier = closure_edges_from_metadata(root_metadata);
-    let (gathered, resolved_identity) = gather_closure_nodes(fs, index, offline, frontier, platform).await?;
-    Ok(fold_effective_visibility(
+    let (gathered, resolved_identity, network) = gather_closure_nodes(fs, index, offline, frontier, platform).await?;
+    let nodes = fold_effective_visibility(
         root_pinned,
         root_metadata,
         root_config_digest,
         gathered,
         &resolved_identity,
-    ))
+    );
+    Ok((nodes, network))
 }
 
 /// Per-gather invariants shared by every spawned fetch.
@@ -636,6 +679,7 @@ async fn gather_closure_nodes(
     (
         Vec<GatheredClosureNode>,
         HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
+        HashSet<ocx_oci::PinnedPackageRef>,
     ),
     PackageErrorKind,
 > {
@@ -663,9 +707,17 @@ async fn gather_closure_nodes(
         let platform = context.platform.clone();
         tasks.spawn(async move {
             let declared = edge.identifier.clone();
-            let (resolved_pinned, config_digest, metadata, edges) =
+            let (resolved_pinned, config_digest, metadata, edges, from_network) =
                 fetch_closure_node(&fs, &index, offline, &declared, &platform).await?;
-            Ok((slot, declared, resolved_pinned, config_digest, metadata, edges))
+            Ok((
+                slot,
+                declared,
+                resolved_pinned,
+                config_digest,
+                metadata,
+                edges,
+                from_network,
+            ))
         });
     }
 
@@ -697,9 +749,13 @@ async fn gather_closure_nodes(
     let mut resolved_identity: HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef> = HashMap::new();
     // Two declared edges can resolve to one digest; without this dedup claims double-count downstream.
     let mut resolved_seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
+    let mut network: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     while let Some(joined) = tasks.join_next().await {
-        let (slot, declared, resolved_pinned, config_digest, metadata, edges) =
+        let (slot, declared, resolved_pinned, config_digest, metadata, edges, from_network) =
             joined.map_err(|_| PackageErrorKind::TaskPanicked)??;
+        if from_network {
+            network.insert(resolved_pinned.strip_advisory());
+        }
         resolved_identity.insert(declared.strip_advisory(), resolved_pinned.strip_advisory());
 
         for child_edge in &edges {
@@ -720,7 +776,7 @@ async fn gather_closure_nodes(
         admit(&mut tasks, &context, &mut pending);
     }
 
-    Ok((slots.into_iter().flatten().collect(), resolved_identity))
+    Ok((slots.into_iter().flatten().collect(), resolved_identity, network))
 }
 
 /// Fetches one closure node; a dep pinned to an image index resolves to its platform-selected child.
@@ -736,10 +792,13 @@ async fn fetch_closure_node(
         ocx_oci::Digest,
         metadata::ValidMetadata,
         Vec<ClosureEdge>,
+        bool,
     ),
     PackageErrorKind,
 > {
     let dep_identifier = dep_pinned.as_identifier().clone();
+    // Probed before the read that fetches the manifest, which leaves a home copy behind.
+    let dep_origin = super::resolve::probe_manifest_origin(index, &dep_identifier, offline).await;
     let manifest = match index
         .fetch_manifest(&dep_identifier, ocx_index::IndexOperation::Resolve)
         .await
@@ -749,6 +808,7 @@ async fn fetch_closure_node(
         None => return Err(closure_fetch_miss(offline)),
     };
 
+    let mut from_network = dep_origin == ocx_index::BlobOrigin::Network;
     let (resolved_pinned, image) = match manifest {
         ocx_oci::Manifest::Image(img) => (dep_pinned.clone(), img),
         ocx_oci::Manifest::ImageIndex(_) => {
@@ -774,6 +834,8 @@ async fn fetch_closure_node(
             };
             let child_pinned =
                 ocx_oci::PinnedPackageRef::try_from(selected.clone()).map_err(|_| PackageErrorKind::DigestMissing)?;
+            from_network = super::resolve::probe_manifest_origin(index, &selected, offline).await
+                == ocx_index::BlobOrigin::Network;
             let image = match index
                 .fetch_manifest(&selected, ocx_index::IndexOperation::Resolve)
                 .await
@@ -791,7 +853,7 @@ async fn fetch_closure_node(
     let config_digest = config_blob_digest(&image)?;
     let metadata = load_config_metadata(index, &resolved_pinned, &image).await?;
     let edges = closure_edges_from_metadata(&metadata);
-    Ok((resolved_pinned, config_digest, metadata, edges))
+    Ok((resolved_pinned, config_digest, metadata, edges, from_network))
 }
 
 /// The digest of an image manifest's config descriptor, the OCX metadata blob.
@@ -1431,6 +1493,7 @@ mod tests {
             ],
             final_manifest: ocx_oci::ImageManifest::default(),
             platform: ocx_oci::Platform::any(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         let content_path = tempdir.path().join("pkg-content");
@@ -1585,6 +1648,7 @@ mod tests {
             ],
             final_manifest: ocx_oci::ImageManifest::default(),
             platform: ocx_oci::Platform::any(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         let content_path = tempdir.path().join("pkg-content");
@@ -1672,7 +1736,7 @@ mod tests {
     /// at all.
     #[tokio::test(flavor = "multi_thread")]
     async fn staged_published_dispatch_object_yields_a_child_leaf_retention_edge() {
-        use ocx_store::file_structure::cas_shard_path;
+        use ocx_oci::cas_path::cas_shard_path;
 
         let staged = stage_published_index_chain().await;
         let blobs = &staged.file_structure.blobs;
@@ -1772,6 +1836,7 @@ mod tests {
             }],
             final_manifest: ocx_oci::ImageManifest::default(),
             platform: ocx_oci::Platform::any(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         let err = super::stage_chain_blobs(&fs, &index, &resolved)
@@ -1853,6 +1918,7 @@ mod tests {
             }],
             final_manifest: ocx_oci::ImageManifest::default(),
             platform: ocx_oci::Platform::any(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         let content_path = tempdir.path().join("pkg-content");

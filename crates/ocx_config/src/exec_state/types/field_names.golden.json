@@ -1,6 +1,8 @@
 [
   "allow_yanked",
   "applied",
+  "blob_cache_dir",
+  "blob_dir",
   "config_path",
   "default_registry",
   "digest",

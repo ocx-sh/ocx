@@ -25,13 +25,27 @@ pub const SOURCE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct IndexStore {
     root: PathBuf,
     locks_root: PathBuf,
+    /// Reads refuse a symlink leaf: set for an untrusted export tree, left off for the home, where a user may
+    /// link an index file in.
+    refuse_links: bool,
 }
 
 impl IndexStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let locks_root = root.join("locks");
-        Self { root, locks_root }
+        Self {
+            root,
+            locks_root,
+            refuse_links: false,
+        }
+    }
+
+    /// Makes every document read refuse a symlink leaf, for a tree the caller does not trust.
+    #[must_use]
+    pub fn refusing_links(mut self) -> Self {
+        self.refuse_links = true;
+        self
     }
 
     /// Redirect the lock root away from the `root/locks` default.
@@ -140,10 +154,8 @@ impl IndexStore {
 
     /// Read `target` and verify it against `digest`; `None` when absent.
     async fn read_verified_object(&self, target: PathBuf, digest: &Digest) -> Result<Option<Vec<u8>>> {
-        let bytes = match tokio::fs::read(&target).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(super::error::file_error(&target, e)),
+        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+            return Ok(None);
         };
 
         let computed = digest.algorithm().hash(&bytes);
@@ -381,10 +393,8 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        let bytes = match tokio::fs::read(&target).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(super::error::file_error(&target, e)),
+        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+            return Ok(None);
         };
         let root: crate::IndexRoot = serde_json::from_slice(&bytes).map_err(|cause| {
             ocx_store::file_structure::error::Error::MalformedRootDocument {
@@ -402,10 +412,8 @@ impl IndexStore {
     pub async fn read_source_catalog(&self, source: &str) -> Result<Option<CatalogIndex>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_catalog_path(source);
-        let bytes = match tokio::fs::read(&target).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(super::error::file_error(&target, e)),
+        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+            return Ok(None);
         };
         let document: CatalogDocument = serde_json::from_slice(&bytes)?;
         Ok(Some(document.into_packages()?))
@@ -421,10 +429,8 @@ impl IndexStore {
     pub async fn read_source_config(&self, source: &str) -> Result<Option<IndexFormatConfig>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_config_path(source);
-        let bytes = match tokio::fs::read(&target).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(super::error::file_error(&target, e)),
+        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+            return Ok(None);
         };
         let config = serde_json::from_slice(&bytes).map_err(|cause| crate::error::Error::MalformedIndexDocument {
             url: target.display().to_string(),
@@ -471,11 +477,7 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        match tokio::fs::read(&target).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(super::error::file_error(&target, e)),
-        }
+        read_index_document(&target, self.refuse_links).await
     }
 
     /// Tempfile + atomic-rename publish; survives a process crash, not power loss (the parent
@@ -514,6 +516,10 @@ impl IndexStore {
     /// Not a `DirWalker`: a listing inside its `classify` hook would read each directory twice, once
     /// blocking a worker thread.
     pub async fn list_wire_repositories(&self, source: &str) -> Result<Vec<String>> {
+        self.list_wire_repositories_capped(source, MAX_WIRE_REPOSITORIES).await
+    }
+
+    async fn list_wire_repositories_capped(&self, source: &str, cap: usize) -> Result<Vec<String>> {
         use std::collections::VecDeque;
 
         use ocx_util::fs::path_exists_lossy;
@@ -569,6 +575,15 @@ impl IndexStore {
                     segments.push(utf8_wire_name(component.as_os_str(), &dir)?.to_string());
                 }
                 segments.push(utf8_wire_name(stem, &path)?.to_string());
+                if repos.len() >= cap {
+                    return Err(super::error::file_error(
+                        &root,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("more than {cap} repositories"),
+                        ),
+                    ));
+                }
                 repos.push(segments.join("/"));
             }
         }
@@ -595,6 +610,30 @@ impl IndexStore {
             original: catalog.clone(),
             catalog,
         })
+    }
+}
+
+/// Ceiling on repositories one source lists; a larger tree is refused, never truncated, because
+/// [`crate::regenerate_catalog`] replaces the catalog from the list.
+const MAX_WIRE_REPOSITORIES: usize = 1 << 20;
+
+/// Reads one index document under the index-document cap, refusing a non-regular file (and a symlink when `refuse_links`); `Ok(None)` when absent.
+///
+/// A refusal is an I/O error of kind `InvalidInput`, so a caller reading an untrusted tree can tell it from a
+/// disk failure.
+async fn read_index_document(target: &Path, refuse_links: bool) -> Result<Option<Vec<u8>>> {
+    use ocx_util::fs::BoundedReadError;
+
+    let cap = ocx_oci::client::MAX_INDEX_DOCUMENT_BYTES as u64;
+    let read = if refuse_links {
+        ocx_util::fs::read_bounded_no_follow_async(target, cap).await
+    } else {
+        ocx_util::fs::read_bounded_async(target, cap).await
+    };
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(super::error::file_error(target, error.into_io_error())),
     }
 }
 
@@ -2527,15 +2566,17 @@ mod wire_grammar_tests {
             }
         }
 
+        // The update path, plus the export writer: an export directory is a servable index, so it needs
+        // its own `config.json`. A read or regenerate path stays forbidden.
         assert_eq!(
             call_sites.len(),
-            1,
-            "config.json must have exactly one writer (C-022/C-023); found {call_sites:#?}"
+            2,
+            "config.json must have exactly two writers, the update path and the export writer (C-022/C-023); found {call_sites:#?}"
         );
         assert!(
-            call_sites[0].ends_with("::commit_published_root"),
-            "the one config.json writer must be the update path, not a read or regenerate path; found {}",
-            call_sites[0]
+            call_sites.iter().any(|site| site.ends_with("::commit_published_root"))
+                && call_sites.iter().any(|site| site.ends_with("::write_export_index")),
+            "the config.json writers must be the update path and the export writer, not a read or regenerate path; found {call_sites:#?}"
         );
         // Naming the path is the prerequisite for writing it, so the bound is on
         // who may name it — stricter than sniffing for a write verb, which a
@@ -2635,5 +2676,47 @@ mod wire_grammar_tests {
             .list_wire_repositories("ocx.sh")
             .await
             .expect_err("a non-UTF-8 directory component must be reported, never transliterated to U+FFFD");
+    }
+
+    #[tokio::test]
+    async fn repository_listing_past_the_cap_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let packages = s.wire_source_dir("ocx.sh").join("p");
+        std::fs::create_dir_all(&packages).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(packages.join(format!("{name}.json")), b"{}").unwrap();
+        }
+        assert_eq!(s.list_wire_repositories_capped("ocx.sh", 3).await.unwrap().len(), 3);
+        let error = s
+            .list_wire_repositories_capped("ocx.sh", 2)
+            .await
+            .expect_err("three exceed two");
+        assert!(error.to_string().contains("more than 2 repositories") || format!("{error:?}").contains("more than 2"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refusing_links_store_will_not_read_a_symlinked_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        let s = store(&dir.path().join("index"));
+        let catalog = s.source_catalog_path("ocx.sh");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &catalog).unwrap();
+
+        let error = s
+            .clone()
+            .refusing_links()
+            .read_source_catalog("ocx.sh")
+            .await
+            .expect_err("a link leaf is refused");
+        assert!(format!("{error:?}").contains("InvalidInput"), "{error:?}");
+        // The home store still follows: the refusal is the export reader's only.
+        assert!(!matches!(
+            s.read_source_catalog("ocx.sh").await,
+            Err(ref e) if format!("{e:?}").contains("InvalidInput")
+        ));
     }
 }

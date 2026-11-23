@@ -5,7 +5,6 @@
   "crates/ocx_announce/src/forge/git_push_options.rs::unreachable_pub": 2,
   "crates/ocx_announce/src/forge/git_stderr.rs::unreachable_pub": 4,
   "crates/ocx_announce/src/forge/git_workspace.rs::unreachable_pub": 29,
-  "crates/ocx_announce/src/forge/http.rs::unreachable_pub": 1,
   "crates/ocx_announce/src/forge/identity.rs::unreachable_pub": 4,
   "crates/ocx_announce/src/forge/poll.rs::unreachable_pub": 6,
   "crates/ocx_cli/src/app/managed_config_check.rs::unreachable_pub": 1,

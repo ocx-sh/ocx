@@ -73,6 +73,10 @@ Anything the copy is missing fails closed instead of reaching the network. `--of
 [Storage][in-depth-storage]: the object store and how `packages/` is assembled from it.
 :::
 
+## Move packages by export \{#offline-export\}
+
+When the offline machine has neither the packages nor a mirror, write them to a directory on a connected machine and carry it over. [`ocx package export`][cmd-package-export] and [`ocx package import`][cmd-package-import] do this, and `--blob-dir` reads an export in place. See [Move packages between machines][guide-export-import].
+
 ## Refreshing the index
 
 `ocx index update <package>` syncs the local index for a specific package:
@@ -95,6 +99,9 @@ A package identified as `ocx.sh/<namespace>/<package>` resolves through [index.o
 :::
 
 [index-ocx-sh]: https://index.ocx.sh
+[guide-export-import]: ./export-and-import.mdx
+[cmd-package-export]: ../reference/command-line/package-publishing.md#package-export
+[cmd-package-import]: ../reference/command-line/package-consuming.md#package-import
 [cmd-package-install]: ../reference/command-line/package-consuming.md#package-install
 [cmd-index-update]: ../reference/command-line/index-commands.md#index-update
 [cmd-index-sync]: ../reference/command-line/index-commands.md#index-sync

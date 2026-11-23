@@ -1,0 +1,219 @@
+---
+title: "Move packages between machines"
+description: "Export packages to a directory and import them on a machine with no network access."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: everyday */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+{/* doc-example: no-run, the commands need registry access, an export directory and a project, none of which a docs test has */}
+
+Copy packages from a connected machine to one with no registry access, and keep them verified, using an export directory.
+
+## Export a package \{#export-package\}
+
+An offline machine cannot download packages, and a copied home cannot be re-verified because it keeps no compressed layer archives. A registry mirror solves this only where one exists.
+
+[`ocx package export`][cmd-package-export] writes the packages and everything needed to verify them into one directory. The directory uses the same layout as the home, so no translation step sits between export and import.
+
+<ShellSession>
+
+```sh
+ocx package export -o ./export registry.example.com/team/tool:1.2 registry.example.com/team/other:3
+```
+
+</ShellSession>
+
+Export resolves each tag the way a pull does, so you need no `ocx index update` first. Under [`--offline`][arg-offline] a tag the home does not pin fails with exit code 81. Signature referrers travel with their packages; under `--offline`, an export that cannot list a package's referrers completely also fails with exit code 81 and names `--no-referrers`, which skips them.
+
+The export holds the image index, the manifests, the configs and the layer archives of every platform, plus the dependency closure of each. Add [`--platform`][cmd-package-export] to keep only some platforms, repeated as needed.
+
+<ShellSession>
+
+```sh
+ocx package export -o ./export -p linux/amd64 -p linux/arm64 registry.example.com/team/tool:1.2
+```
+
+</ShellSession>
+
+Exporting again into the same directory adds to it. A platform you leave out the first time arrives with the second run. A digest identifier needs exactly one `--platform`.
+
+Signatures, SBOMs and attestations travel by default, so a [trust policy](#export-trust) can verify the import offline. Pass `--no-referrers` to leave them out.
+
+An export reveals more than the package contents. Read [Trust an export](#export-trust) before you hand one to someone else.
+
+## Import on an offline machine \{#export-import\}
+
+The offline machine needs the packages in its home, with the same digest checks a download gets. [`ocx package import`][cmd-package-import] never contacts a network. It reads the export, verifies every blob by digest and assembles the packages.
+
+<ShellSession>
+
+```sh
+ocx package import ./export
+ocx --offline package exec registry.example.com/team/tool:1.2 -- tool --version
+```
+
+</ShellSession>
+
+Without names, import takes every package and tag the export lists. Naming packages narrows the set.
+
+<ShellSession>
+
+```sh
+ocx package import ./export registry.example.com/team/tool
+ocx package import ./export -p linux/amd64 registry.example.com/team/tool:1.2
+```
+
+</ShellSession>
+
+Import selects the host platform unless you pass `--platform`. A platform the export holds no blobs for fails with exit code 79, and the message names it.
+
+Content lands first and pins land last. A package whose content or signature check failed gets no pin, and every other package still commits. A changed byte in the export fails with exit code 65, even with the network blocked.
+
+Package import installs nothing. It creates no candidate symlink and no garbage-collection root, so a later [`ocx clean`][cmd-clean] collects the imported packages. Delete the export afterwards and the tools still run offline, until a clean removes them.
+
+Import takes the export root, not `index/` or `blobs/` inside it. A directory without an `ocx-export.json` marker fails with `export_dir_invalid`, exit code 65.
+
+## Export and import a project \{#export-project\}
+
+A project pins its tools in `ocx.lock`. Moving them tag by tag would lose the exact digests, so the root commands read the lock instead.
+
+<ShellSession>
+
+```sh
+ocx export -o ./export
+ocx import ./export
+```
+
+</ShellSession>
+
+[`ocx export`][cmd-export] writes every package the lock pins, for every group and every locked platform. Pass `-g` to choose groups and `-p` to filter platforms. Import takes the same flags, but without them it reads only the default group and the host platform, so pass `-g` and `-p` to match what you exported. [`ocx import`][cmd-import] pulls the lock entries of the default group for the host platform from the export, offline, and registers the project the way [`ocx pull`][cmd-pull] does.
+
+Both commands read the project selected by `--project <PATH>`, or the [global toolchain][guide-global] under `--global`. A project export holds no `index/` directory, because lock resolution needs no index. Package import refuses it and names `ocx import` as the route.
+
+A project whose tools arrived only through an import holds no record that a registry served them. A namespace grant therefore needs an explicit [`ocx shell allow`][cmd-shell-allow].
+
+## Use an export in place \{#export-in-place\}
+
+Copying an export into the home costs disk space and time. Point OCX at the export instead, and it reads blobs from there.
+
+<ShellSession>
+
+```sh
+ocx --offline --index ./export/index --blob-dir ./export/blobs package pull registry.example.com/team/tool:1.2
+```
+
+</ShellSession>
+
+[`--blob-dir`][arg-blob-dir] adds a read-only blob directory and repeats for more. Every digest-addressed read walks one order: the home, each blob directory in list order, the blob cache, then the network. [`--offline`][arg-offline] stops before the network.
+
+Every blob is hashed on every read. A bad copy in one directory never blocks a good copy in a later one. If no source holds a clean copy and a blob directory held a bad one, the read fails with exit code 65.
+
+The index never chains. A tag resolves only from the local index, so pass `--index ./export/index` to resolve tags from the export. A blob directory alone never answers a tag.
+
+Set the directories once instead of per command:
+
+- [`OCX_BLOB_DIR`][env-blob-dir] holds a list of paths, separated the way `PATH` is on your platform. A list of more than 32 entries is refused with exit code 78.
+- [`[blobs] dirs`][cfg-blobs-dirs] in any `config.toml` tier holds the same list. A path in the managed tier must be absolute.
+
+A `--blob-dir` that does not exist fails with exit code 79, because you typed it. One from the variable or from config logs a warning and is skipped, so an unmounted CI volume does not break unrelated commands.
+
+[`ocx package copy`][cmd-package-copy] reads from the same lookup. This copies a package to another registry from an export, with no source registry reachable:
+
+<ShellSession>
+
+```sh
+ocx --blob-dir ./export/blobs package copy registry.example.com/team/tool@sha256:<digest> -p linux/amd64 -i mirror.example.com/team/tool:1.2
+```
+
+</ShellSession>
+
+## Share a blob cache in CI \{#export-cache\}
+
+A CI job downloads every layer archive again, because the home keeps no archives. Each run pays for the same bytes.
+
+A blob cache is the one writable lookup root. After a network fetch, OCX writes every blob it fetched, layer archives included, into the cache. The next job reads them from there before it dials the registry.
+
+<ShellSession>
+
+```sh
+OCX_BLOB_CACHE_DIR=/var/cache/ocx-blobs ocx package pull registry.example.com/team/tool:1.2
+```
+
+</ShellSession>
+
+Choose the cache with [`--blob-cache-dir`][arg-blob-cache-dir], [`OCX_BLOB_CACHE_DIR`][env-blob-cache-dir] or [`[blobs] cache_dir`][cfg-blobs-cache-dir]. The flag wins over the variable, and the variable wins over config. A missing directory is created on the first write.
+
+Restore the directory between jobs with your CI system's cache. A cache is also a valid blob directory, so `--blob-dir` reads it on another machine.
+
+A hit in a blob directory is not copied into the cache. Several jobs may write one cache at once, and no lock is needed, because every writer of a digest writes the same bytes.
+
+Nothing prunes a cache. [`ocx clean`][cmd-clean] never walks it, and it grows until you delete it. Eviction, network file systems and multi-user permissions are tracked in [ocx-sh/ocx#760][issue-cache-limits].
+
+:::caution
+A cache holds copies of registry content. Do not share one across a trust boundary that the private content would not cross.
+:::
+
+Deleting a cache is always safe. Every entry is a copy of registry content, and a corrupt entry counts as a miss and is replaced.
+
+## What an import pins \{#export-pins\}
+
+A tag is a mutable pointer, and moving a local pin silently would change what a build resolves. Import therefore moves a pin only when you name the package.
+
+Each exported tag is compared with the home:
+
+| Home state for the tag | Package not named | Package named |
+|---|---|---|
+| No pin | `added` | `added` |
+| Pinned to the same digest | `unchanged` | `unchanged` |
+| Pinned to another digest | `conflict`: the home pin stays and no content is materialized | `replaced`: the pin moves after the content landed |
+
+A `conflict` is a report row and a warning, and import still exits 0. A rolling tag such as `tool:3` differs on every routine re-import, so a non-zero exit would fail them all.
+
+A script that needs the exported digest has two options. Name the package, or read the `tags` array of the `--format json` report, which carries `home_digest` on `conflict` and `replaced` rows.
+
+An import from a stale export never rolls a home back, because an unnamed package only gains pins. The first pin of a new package never takes its routing from the export.
+
+## Trust an export \{#export-trust\}
+
+An export is data from whoever wrote it. Digests bind the content, but nothing binds who chose the tags.
+
+Import trusts the exporter as an index source for the tags it adds, the way a configured index source is trusted. For an export from a party you do not trust, declare a [`[[trust.policy]]`][config-trust] for its registries. Every imported package then has to verify.
+
+Verification at import reads the signature, the subject manifest and the referrer blobs from the home and the lookup, never from a network. A keyless signature needs a local trust root and a pinned Rekor key, or the import fails with exit code 81. See [Trust signers with a policy][guide-pin-signer] and [Verify what you install][guide-verify].
+
+An export made with `--no-referrers` carries no signatures. A package that a policy covers then fails with exit code 79, and the message says whether the referrers were not exported.
+
+An export also discloses internal registry host names and repository paths, in `ocx-export.json` and under `index/`. Review the directory before you send it outside your organization.
+
+For machines that share one registry mirror, [Use a corporate mirror][guide-mirror] may serve better than moving files. See [Work offline][guide-offline] for the other ways to run without a network.
+
+[cmd-package-export]: ../reference/command-line/package-publishing.md#package-export
+[cmd-package-import]: ../reference/command-line/package-consuming.md#package-import
+[cmd-package-copy]: ../reference/command-line/package-publishing.md#package-copy
+[cmd-export]: ../reference/command-line/commands.md#export
+[cmd-import]: ../reference/command-line/commands.md#import
+[cmd-pull]: ../reference/command-line/commands.md#pull
+[cmd-clean]: ../reference/command-line/commands.md#clean
+[cmd-shell-allow]: ../reference/command-line/shell.md#shell-allow
+[arg-offline]: ../reference/command-line/index.md#arg-offline
+[arg-blob-dir]: ../reference/command-line/index.md#arg-blob-dir
+[arg-blob-cache-dir]: ../reference/command-line/index.md#arg-blob-cache-dir
+
+[env-blob-dir]: ../reference/environment.md#ocx-blob-dir
+[env-blob-cache-dir]: ../reference/environment.md#ocx-blob-cache-dir
+
+[cfg-blobs-dirs]: ../reference/configuration.md#keys-blobs-dirs
+[cfg-blobs-cache-dir]: ../reference/configuration.md#keys-blobs-cache-dir
+[config-trust]: ../reference/configuration.md#keys-trust-policy
+
+[guide-global]: ./global-toolchain.mdx
+[guide-pin-signer]: ./pin-signer-identity.mdx
+[guide-verify]: ./verify-installs.mdx
+[guide-mirror]: ./corporate-mirror.mdx
+[guide-offline]: ./work-offline.mdx
+
+[issue-cache-limits]: https://github.com/ocx-sh/ocx/issues/760
+
+{/* doc-example: end no-run */}

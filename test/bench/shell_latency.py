@@ -2699,8 +2699,7 @@ def _write_wall_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> 
         key = f"{WALL_TOOL_ENV_PREFIX}{index}"
         digest = _publish_tool(ocx_home, registry, _tool_metadata(key))
         declarations.append(f'"t{index}" = "{WALL_TOOL_NAMESPACE}/t{index}@{digest}"')
-        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/t{index}")
-        packages.append((marker.parents[2], key))
+        packages.append((digest, f"{registry}/{org}/t{index}", key))
 
     entries = "\n".join(
         f'P{index} = {{ type = "path", value = "bin{index}" }}' for index in range(1, WALL_PROJECT_ENTRIES + 1)
@@ -2709,8 +2708,10 @@ def _write_wall_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> 
     locked = matrix.run_lock(ocx, project, dict(env))
     if locked.returncode != 0:
         raise RuntimeError(f"`ocx lock` failed in the wall arena ({locked.returncode})\n{locked.stderr}")
-    for package, key in packages:
-        _materialize_tool(package, key)
+    for digest, origin, key in packages:
+        # After the lock: its offline pull rebuilds the package directory and, with no network read, records no origin.
+        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=origin)
+        _materialize_tool(marker.parents[2], key)
 
 
 def _write_global_toolchain(ocx_home: Path) -> None:
@@ -2985,18 +2986,13 @@ def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> d
     declarations: list[str] = []
     names: list[str] = []
     keys: list[str] = []
-    packages: list[Path] = []
+    digests: list[str] = []
     for index in range(1, WALL_PROJECT_TOOLS + 1):
         name = f"b{index}"
         key = f"{BIN_TOOL_ENV_PREFIX}{index}"
         metadata = _tool_metadata(key, binaries=[name])
         digest = _publish_tool(ocx_home, registry, metadata)
-        # `record_origin` for the package directory it derives, exactly as the
-        # global tier uses it: the store layout is mirrored once, in
-        # `shell_matrix`, and a second spelling here is how a correct-looking
-        # package lands where the binary does not look.
-        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/{name}")
-        packages.append(marker.parents[2])
+        digests.append(digest)
         declarations.append(f'{name} = "{WALL_TOOL_NAMESPACE}/{name}@{digest}"')
         names.append(name)
         keys.append(key)
@@ -3015,7 +3011,14 @@ def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> d
         raise RuntimeError(f"`ocx lock` failed in the bin arena ({locked.returncode})\n{locked.stderr}")
 
     payloads = {}
-    for name, key, package in zip(names, keys, packages, strict=True):
+    for name, key, digest in zip(names, keys, digests, strict=True):
+        # `record_origin` for the package directory it derives, exactly as the
+        # global tier uses it: the store layout is mirrored once, in
+        # `shell_matrix`, and a second spelling here is how a correct-looking
+        # package lands where the binary does not look. Written after the lock,
+        # whose offline pull rebuilds the directory and records no origin.
+        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/{name}")
+        package = marker.parents[2]
         _materialize_tool(package, key, binaries=[name])
         payloads[name] = package / "content" / "bin" / name
     return {"names": names, "payloads": payloads}

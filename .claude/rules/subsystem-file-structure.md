@@ -38,7 +38,7 @@ Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL
 | `symlink_store.rs` | Install symlinks (candidate/current) | `SymlinkStore`, `SymlinkKind` |
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
 | `state_store.rs` | Persistent + ephemeral runtime state per subsystem (update-check throttle, managed-config, OCI Referrers capability cache, offline-verify trust-root cache) — named per-subsystem accessors, no generic `StateKey`; also the toolchain **render stamps** (C-003) | `StateStore`, `RenderStamp`, `RenderStampScope`, `RenderStampTarget`, `BinEntryStamp` |
-| `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
+| `cas_path.rs` | `CasTier` enum, digest-file IO, shard validation (sharding itself is `ocx_oci::cas_path::cas_shard_path`) | `is_valid_cas_path()`, `write_digest_file()` |
 | `ocx_index/src/local_index/store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
 | `shim_store.rs` | Generated shim directories — the on-disk form of a **deferred** tool | `ShimStore`, `ShimDir` |
 | `shim_bin_store.rs` | Flat CAS for the embedded Windows `ocx-shim` executable blob | `ShimBinStore` |
@@ -311,9 +311,9 @@ pub(crate) fn repository_path(repository: &str) -> PathBuf {
 }
 ```
 
-### Digest Sharding (`cas_path.rs`)
+### Digest Sharding (`ocx_oci::cas_path`)
 
-`cas_shard_path(digest)` produce `{algorithm}/{hex[0..2]}/{hex[2..32]}` — 2-level shard, 32 hex chars total in path. Full digest NOT recoverable from path alone; written to sibling `digest` file by `write_digest_file()`.
+`ocx_oci::cas_path::cas_shard_path(digest)` produce `{algorithm}/{hex[0..2]}/{hex[2..32]}` — 2-level shard, 32 hex chars total in path. Full digest NOT recoverable from path alone; written to sibling `digest` file by `write_digest_file()`.
 
 `CAS_SHARD_DEPTH = 3` (algorithm + prefix + suffix). Store walkers set `max_depth` to `1 + CAS_SHARD_DEPTH` (extra 1 = registry slug level).
 

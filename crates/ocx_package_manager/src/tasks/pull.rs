@@ -47,6 +47,9 @@ type LayerGroup = singleflight::Group<(String, ocx_oci::Digest), ()>;
 pub struct SetupGroups {
     packages: SetupGroup,
     layers: LayerGroup,
+    /// Packages whose leaf manifest the credential prefetch read from a source. That read leaves a home copy,
+    /// so the pull's own resolve sees a home hit; keyed by digest, the record applies to that package only.
+    network_leaves: Arc<std::collections::HashSet<ocx_oci::PinnedPackageRef>>,
 }
 
 impl SetupGroups {
@@ -54,7 +57,13 @@ impl SetupGroups {
         Self {
             packages: SetupGroup::new(MAX_NODES, PACKAGE_SETUP_TIMEOUT),
             layers: LayerGroup::new(MAX_NODES, LAYER_SETUP_TIMEOUT),
+            network_leaves: Arc::default(),
         }
+    }
+
+    fn with_network_leaves(mut self, leaves: std::collections::HashSet<ocx_oci::PinnedPackageRef>) -> Self {
+        self.network_leaves = Arc::new(leaves);
+        self
     }
 }
 
@@ -98,14 +107,18 @@ impl PackageManager {
         // The batch's only trace in non-TTY log output.
         tracing::info!(parent: &outer, count, "pulling");
 
-        let mut unresolved = prefetch_credentials(self, packages, &platform).await;
+        let mut prefetched = prefetch_credentials(self, packages, &platform).await;
 
-        let shared_groups = SetupGroups::new();
+        let network_leaves = prefetched
+            .iter_mut()
+            .flat_map(|p| std::mem::take(&mut p.network_leaves))
+            .collect();
+        let shared_groups = SetupGroups::new().with_network_leaves(network_leaves);
         let semaphore = concurrency.semaphore();
         let mut tasks = JoinSet::new();
         for (slot, package) in packages.iter().enumerate() {
             // The prefetch already met this root's failure; dialling it again would only repeat it.
-            if let Some(kind) = unresolved[slot].take() {
+            if let Some(kind) = prefetched[slot].error.take() {
                 let package = package.clone();
                 tasks.spawn(async move { (package, Err(kind)) });
                 continue;
@@ -118,7 +131,7 @@ impl PackageManager {
             tasks.spawn(async move {
                 // Named, not `_`: dropping it before setup returns lifts the root-pull cap.
                 let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                let result = setup_with_tracker(&mgr, &package, platform, groups, Role::Root).await;
+                let result = setup_impl(&mgr, &package, platform, groups, None, Role::Root).await;
                 // Also when the package lost the singleflight race to a sibling's dependency path, whose
                 // entry says `Dependency`: the drain reads the root sets, not only the entries.
                 if let (Ok(info), Some(log)) = (&result, mgr.activity_log()) {
@@ -153,14 +166,32 @@ async fn prefetch_credentials(
     mgr: &PackageManager,
     packages: &[ocx_oci::PackageRef],
     platform: &ocx_oci::Platform,
-) -> Vec<Option<PackageErrorKind>> {
+) -> Vec<Prefetched> {
     if mgr.is_offline() {
-        return packages.iter().map(|_| None).collect();
+        return packages.iter().map(|_| Prefetched::default()).collect();
     }
-    let walks = packages
-        .iter()
-        .map(|package| async move { walk_uninstalled_closure(mgr, package, platform).await.err() });
+    let walks = packages.iter().map(|package| async move {
+        match walk_uninstalled_closure(mgr, package, platform).await {
+            Ok(network_leaves) => Prefetched {
+                error: None,
+                network_leaves,
+            },
+            Err(kind) => Prefetched {
+                error: Some(kind),
+                network_leaves: Default::default(),
+            },
+        }
+    });
     futures::future::join_all(walks).await
+}
+
+/// What the credential prefetch learned about one root.
+#[derive(Default)]
+struct Prefetched {
+    /// The root's own resolution failure.
+    error: Option<PackageErrorKind>,
+    /// The root's leaf and every dependency whose manifest the prefetch read from a source.
+    network_leaves: std::collections::HashSet<ocx_oci::PinnedPackageRef>,
 }
 
 /// # Errors
@@ -170,36 +201,50 @@ async fn walk_uninstalled_closure(
     mgr: &PackageManager,
     package: &ocx_oci::PackageRef,
     platform: &ocx_oci::Platform,
-) -> Result<(), PackageErrorKind> {
+) -> Result<std::collections::HashSet<ocx_oci::PinnedPackageRef>, PackageErrorKind> {
     // A digest-pinned root answers from the store without resolving, which would reach the network.
     if let Ok(pinned) = ocx_oci::PinnedPackageRef::try_from(package.clone())
         && is_installed(mgr, &pinned).await
     {
-        return Ok(());
+        return Ok(Default::default());
     }
     let resolved = mgr.resolve(package, platform.clone()).await?;
-    if is_installed(mgr, &resolved.pinned).await {
-        return Ok(());
+    let mut network_leaves = std::collections::HashSet::new();
+    if resolved.leaf_origin == ocx_index::BlobOrigin::Network {
+        network_leaves.insert(resolved.pinned.strip_advisory());
     }
-    if let Err(error) = walk_closure(mgr, &resolved, platform).await {
-        log::debug!(
+    if is_installed(mgr, &resolved.pinned).await {
+        return Ok(network_leaves);
+    }
+    match walk_closure(mgr, &resolved, platform).await {
+        Ok(deps) => network_leaves.extend(deps),
+        Err(error) => log::debug!(
             "Credential prefetch for '{package}' stopped early: {chain}",
             chain = ocx_util::error::render_chain(&error)
-        );
+        ),
     }
-    Ok(())
+    Ok(network_leaves)
 }
 
 async fn walk_closure(
     mgr: &PackageManager,
     resolved: &super::resolve::ResolvedChain,
     platform: &ocx_oci::Platform,
-) -> Result<(), PackageErrorKind> {
+) -> Result<std::collections::HashSet<ocx_oci::PinnedPackageRef>, PackageErrorKind> {
     let (fs, index) = (mgr.file_structure(), mgr.index());
     let metadata = super::common::load_config_metadata(index, &resolved.pinned, &resolved.final_manifest).await?;
     let config_digest = super::common::config_blob_digest(&resolved.final_manifest)?;
-    super::common::walk_closure_nodes(fs, index, false, &resolved.pinned, &metadata, config_digest, platform).await?;
-    Ok(())
+    let (_, network) = super::common::walk_closure_nodes_with_origins(
+        fs,
+        index,
+        false,
+        &resolved.pinned,
+        &metadata,
+        config_digest,
+        platform,
+    )
+    .await?;
+    Ok(network)
 }
 
 /// A probe failure reads as "not installed": the pull itself will meet and report it.
@@ -244,7 +289,10 @@ async fn setup_impl(
     log::debug!("Pulling package: {}", package);
 
     let resolve_watch = Stopwatch::start(mgr.activity_log().is_some());
-    let resolved = mgr.resolve(package, platform.clone()).await?;
+    let mut resolved = mgr.resolve(package, platform.clone()).await?;
+    if groups.network_leaves.contains(&resolved.pinned.strip_advisory()) {
+        resolved.leaf_origin = ocx_index::BlobOrigin::Network;
+    }
     let resolve_time = resolve_watch.elapsed();
     let pinned = resolved.pinned.clone();
     log::debug!("Resolved package identifier: {}", &pinned);
@@ -520,7 +568,8 @@ async fn setup_owned_impl(
 
     // `consent::verified_sources` trusts this record, so `pull_local` must never write one,
     // or unverified content passes as verified.
-    if from_registry {
+    // A home, blob-directory or cache hit proves nothing about the registry, so it mints no origin.
+    if from_registry && resolved.leaf_origin == ocx_index::BlobOrigin::Network {
         // `pinned`, not the transport address, or consent pins to routing (`adr_lock_records_physical_address.md`).
         file_structure::record_origin(&pkg, pinned.as_identifier())
             .await
@@ -929,10 +978,38 @@ async fn extract_layer_atomic(
         return Ok(LayerExtraction::reused(layer_digest));
     }
 
+    // After the home, before any client is required: a blob directory or the cache serves an offline pull.
+    let mut miss = None;
+    if !mgr.blob_lookup().is_empty() {
+        match extract_layer_from_lookup(mgr, pinned, layer, layer_digest).await {
+            Ok(LookupOutcome::Extracted) => {
+                handle.complete(());
+                return Ok(LayerExtraction::reused(layer_digest));
+            }
+            Ok(LookupOutcome::Miss(found)) => miss = Some(found),
+            Err(e) => {
+                let shared = handle.fail(e);
+                return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+            }
+        }
+    }
+
+    if mgr
+        .client()
+        .is_some_and(|c| c.blob_overlay_mode() == Some(ocx_oci::client::OverlayMode::LookupOnly))
+    {
+        let kind = end_of_sources(miss, |_| export_lacks_layer(mgr, pinned, layer_digest));
+        let shared = handle.fail(kind);
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+    }
+
     let transport = match transport {
         Ok(transport) => transport,
         Err(absent) => {
-            let shared = handle.fail(PackageErrorKind::Internal(absent.missing_layer(pinned, layer_digest)));
+            let kind = end_of_sources(miss, |_| {
+                PackageErrorKind::Internal(absent.missing_layer(pinned, layer_digest))
+            });
+            let shared = handle.fail(kind);
             return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
         }
     };
@@ -940,7 +1017,14 @@ async fn extract_layer_atomic(
     let client = match mgr.require_client() {
         Ok(c) => c,
         Err(e) => {
-            let kind = PackageErrorKind::Internal(e);
+            let kind = end_of_sources(miss, |discarded| {
+                if discarded > 0 {
+                    log::warn!(
+                        "{discarded} cached blob(s) failed verification and were discarded; the pull is offline"
+                    );
+                }
+                PackageErrorKind::Internal(e)
+            });
             let shared = handle.fail(kind);
             return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
         }
@@ -971,10 +1055,182 @@ async fn extract_layer_atomic(
             })
         }
         Err(e) => {
-            let shared = handle.fail(e);
+            // A refused or failed network step must not hide the bad copy that made it necessary.
+            let kind = end_of_sources(miss, |_| e);
+            let shared = handle.fail(kind);
             Err(map_singleflight_error(singleflight::Error::Failed(shared)))
         }
     }
+}
+
+/// What the blob directories and the cache came to for one layer.
+enum LookupOutcome {
+    /// The layer is in `layers/`, extracted from a verified local copy.
+    Extracted,
+    Miss(LookupMiss),
+}
+
+/// Why the lookup did not serve a layer.
+struct LookupMiss {
+    /// A blob directory held a copy that failed verification; the verdict stays 65 whatever follows.
+    bad_copy: Option<ocx_oci::blob_lookup::LookupError>,
+    /// Cache entries removed after failing verification.
+    discarded: usize,
+}
+
+/// The error for a layer no source served: a remembered bad directory copy beats `otherwise`.
+fn end_of_sources(miss: Option<LookupMiss>, otherwise: impl FnOnce(usize) -> PackageErrorKind) -> PackageErrorKind {
+    match miss {
+        Some(LookupMiss {
+            bad_copy: Some(bad), ..
+        }) => PackageErrorKind::Internal(ocx_index::error::Error::from(bad).into()),
+        Some(LookupMiss { discarded, .. }) => otherwise(discarded),
+        None => otherwise(0),
+    }
+}
+
+/// An import's lookup is its export directory, so a layer nothing holds is missing from the export.
+fn export_lacks_layer(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedPackageRef,
+    layer_digest: &ocx_oci::Digest,
+) -> PackageErrorKind {
+    let dir = mgr
+        .blob_lookup()
+        .dirs()
+        .first()
+        .map_or_else(std::path::PathBuf::new, |blobs| {
+            blobs.parent().unwrap_or(blobs).to_path_buf()
+        });
+    PackageErrorKind::Internal(crate::Error::ExportNotFound {
+        dir,
+        what: format!("layer {layer_digest} of {pinned}"),
+    })
+}
+
+/// Names the serving origin the way the debug log reports it.
+fn origin_label(origin: ocx_oci::blob_lookup::LookupOrigin) -> String {
+    match origin {
+        ocx_oci::blob_lookup::LookupOrigin::Dir(position) => format!("dir[{position}]"),
+        ocx_oci::blob_lookup::LookupOrigin::Cache => "cache".to_string(),
+    }
+}
+
+/// Removes what a failed extraction left, so the next source starts in an empty output directory.
+async fn reset_layer_output(output_dir: &std::path::Path) -> Result<(), PackageErrorKind> {
+    match tokio::fs::remove_dir_all(output_dir.join("content")).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PackageErrorKind::Internal(
+            ocx_oci::client::error::ClientError::internal(error).into(),
+        )),
+    }
+}
+
+/// Offers the layer's blob-directory and cache copies in lookup order and extracts the first that verifies.
+///
+/// A bad directory copy is remembered and the walk goes on; a bad cache entry is removed and is only a miss.
+async fn extract_layer_from_lookup(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedPackageRef,
+    layer: &ocx_oci::Descriptor,
+    layer_digest: &ocx_oci::Digest,
+) -> Result<LookupOutcome, PackageErrorKind> {
+    let lookup_error = |error: ocx_oci::blob_lookup::LookupError| {
+        PackageErrorKind::Internal(ocx_index::error::Error::from(error).into())
+    };
+    let fs = mgr.file_structure();
+    let mut walk = mgr.blob_lookup().walk(pinned.registry(), layer_digest);
+    let Some(mut stream) = walk.next_source().await.map_err(lookup_error)? else {
+        return Ok(LookupOutcome::Miss(lookup_miss(&walk)));
+    };
+
+    // Extraction never dials, so an offline manager borrows a client that has no transport built yet.
+    let offline_client;
+    let client = match mgr.client() {
+        Some(client) => client,
+        None => {
+            offline_client = ocx_oci::ClientBuilder::new().build();
+            &offline_client
+        }
+    };
+
+    let temp_path = fs.temp.layer_path(pinned.registry(), layer_digest);
+    let temp = match fs
+        .temp
+        .try_acquire(&temp_path)
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?
+    {
+        Some(r) => r,
+        None => fs
+            .temp
+            .acquire_with_timeout(&temp_path, client.lock_timeout())
+            .await
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?,
+    };
+
+    let layer_content = fs.layers.content(pinned.registry(), layer_digest);
+    if ocx_util::fs::path_exists_lossy(&layer_content).await {
+        return Ok(LookupOutcome::Extracted);
+    }
+
+    loop {
+        let origin = stream.origin;
+        reset_layer_output(&temp.dir.dir).await?;
+        match client.extract_layer_from_stream(stream, layer, &temp.dir.dir).await {
+            Ok(()) => {
+                log::debug!("Layer {} served from {}", layer_digest, origin_label(origin));
+                finish_layer(fs, pinned, layer_digest, &temp.dir.dir).await?;
+                drop(temp);
+                return Ok(LookupOutcome::Extracted);
+            }
+            // A copy that decompresses past the cap is as unusable as a wrong one: try the next source.
+            Err(
+                ocx_oci::client::error::ClientError::DigestMismatch { .. }
+                | ocx_oci::client::error::ClientError::DecompressionCapExceeded { .. },
+            ) => walk.reject(origin).await,
+            Err(other) => return Err(other.into()),
+        }
+        match walk.next_source().await.map_err(lookup_error)? {
+            Some(next) => stream = next,
+            None => break,
+        }
+    }
+    reset_layer_output(&temp.dir.dir).await?;
+    Ok(LookupOutcome::Miss(lookup_miss(&walk)))
+}
+
+fn lookup_miss(walk: &ocx_oci::blob_lookup::LookupWalk<'_>) -> LookupMiss {
+    match walk.exhausted() {
+        Ok(end) => LookupMiss {
+            bad_copy: None,
+            discarded: end.discarded_cache_entries,
+        },
+        Err(bad) => LookupMiss {
+            bad_copy: Some(bad),
+            discarded: 0,
+        },
+    }
+}
+
+/// Signs, marks and publishes an extracted layer directory into `layers/`.
+async fn finish_layer(
+    fs: &file_structure::FileStructure,
+    pinned: &ocx_oci::PinnedPackageRef,
+    layer_digest: &ocx_oci::Digest,
+    output_dir: &std::path::Path,
+) -> Result<(), PackageErrorKind> {
+    // Signed before anything reads `content/`: nothing may link an unsigned Mach-O out of the layer store.
+    ocx_store::codesign::sign_extracted_content(&output_dir.join("content"))
+        .await
+        .map_err(ocx_oci::client::error::ClientError::internal)?;
+
+    file_structure::write_digest_file(&output_dir.join(file_structure::DIGEST_FILENAME), layer_digest)
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    super::layer_staging::finalize_layer_dir(fs, pinned.registry(), layer_digest, output_dir).await?;
+    Ok(())
 }
 
 /// Inner extraction implementation — runs only for the leader task.
@@ -1023,18 +1279,11 @@ async fn extract_layer_inner(
 
     // Fetched from the physical `transport`, but storage paths stay keyed on the logical
     // `pinned` (`adr_index_indirection.md`).
-    client.pull_layer(transport, layer, &temp.dir.dir).await?;
+    client
+        .pull_layer(transport, layer, &temp.dir.dir, Some(pinned.registry()))
+        .await?;
 
-    // Signed before anything reads `content/`: nothing may link an unsigned Mach-O out of the layer store.
-    ocx_store::codesign::sign_extracted_content(&temp.dir.dir.join("content"))
-        .await
-        .map_err(ocx_oci::client::error::ClientError::internal)?;
-
-    file_structure::write_digest_file(&temp.dir.dir.join(file_structure::DIGEST_FILENAME), layer_digest)
-        .await
-        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
-
-    super::layer_staging::finalize_layer_dir(fs, pinned.registry(), layer_digest, &temp.dir.dir).await?;
+    finish_layer(fs, pinned, layer_digest, &temp.dir.dir).await?;
 
     drop(temp);
     Ok(true)
@@ -1181,6 +1430,7 @@ mod tests {
             }],
             final_manifest,
             platform: platform.clone(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         setup_owned(
@@ -1560,6 +1810,7 @@ mod tests {
             }],
             final_manifest,
             platform: platform.clone(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
 
         let outcome = setup_owned(
@@ -2154,6 +2405,7 @@ mod tests {
                     ..Default::default()
                 },
                 platform: platform.clone(),
+                leaf_origin: ocx_index::BlobOrigin::Network,
             };
             setups.push((pinned, resolved));
         }
@@ -2410,6 +2662,7 @@ mod tests {
                 ..Default::default()
             },
             platform: linux_amd64(),
+            leaf_origin: ocx_index::BlobOrigin::Network,
         };
         (pinned, resolved)
     }
@@ -2635,5 +2888,477 @@ mod tests {
             "the dependency's {HELD_BACK:?} is not inside the root's extract: {extract:?} \
              against {after_release:?} between the release and the end"
         );
+    }
+
+    // ── layers served from blob directories and the cache ────────────────────
+
+    const LOGICAL: &str = "example.com";
+
+    fn plain_pinned() -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("test/lookup", LOGICAL)
+                .clone_with_digest(ocx_oci::Digest::Sha256("c".repeat(64))),
+        )
+        .expect("pinned identifier")
+    }
+
+    fn manifest_of(layer: &ocx_oci::Descriptor) -> ocx_oci::ImageManifest {
+        ocx_oci::ImageManifest {
+            layers: vec![layer.clone()],
+            ..Default::default()
+        }
+    }
+
+    /// Writes `bytes` as the blob `layer` names under the lookup root `root`.
+    fn plant(root: &std::path::Path, layer: &ocx_oci::Descriptor, bytes: &[u8]) {
+        let digest = ocx_oci::Digest::try_from(layer.digest.as_str()).unwrap();
+        let path = ocx_oci::blob_lookup::blob_data_path(root, LOGICAL, &digest);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn tampered(bytes: &[u8]) -> Vec<u8> {
+        vec![7u8; bytes.len()]
+    }
+
+    /// A manager over a fresh home with `lookup` attached; `client` is `None` for an offline pull.
+    fn lookup_manager(
+        home: &std::path::Path,
+        lookup: ocx_oci::blob_lookup::BlobLookup,
+        client: Option<ocx_oci::Client>,
+    ) -> PackageManager {
+        let file_structure = FileStructure::with_root(home.to_path_buf());
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::machine_local(&file_structure),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+            file_structure.blobs.clone(),
+        );
+        PackageManager::new(file_structure, index, client, LOGICAL).with_blob_lookup(Arc::new(lookup))
+    }
+
+    fn lookup_of(dirs: &[&std::path::Path], cache: Option<&std::path::Path>) -> ocx_oci::blob_lookup::BlobLookup {
+        ocx_oci::blob_lookup::BlobLookup::new(
+            dirs.iter().map(|dir| dir.to_path_buf()).collect(),
+            cache.map(|root| ocx_oci::blob_lookup::BlobCacheDir::at(root.to_path_buf())),
+        )
+    }
+
+    async fn pull_layer_of(
+        manager: &PackageManager,
+        layer: &ocx_oci::Descriptor,
+    ) -> Result<super::LayerPhase, PackageErrorKind> {
+        let transport = Ok(ocx_oci::OciIdentifier::from_parts("test/lookup", LOGICAL)
+            .pinned_at(ocx_oci::Digest::Sha256("c".repeat(64))));
+        extract_layers(
+            manager,
+            &plain_pinned(),
+            &transport,
+            &manifest_of(layer),
+            SetupGroups::new().layers,
+        )
+        .await
+    }
+
+    fn layer_is_extracted(manager: &PackageManager, layer: &ocx_oci::Descriptor) -> bool {
+        let digest = ocx_oci::Digest::try_from(layer.digest.as_str()).unwrap();
+        manager.file_structure().layers.content(LOGICAL, &digest).exists()
+    }
+
+    /// The exit code of the first classified cause in the chain; the layer failure travels inside a shared error.
+    fn exit_code(error: &PackageErrorKind) -> Option<ocx_exit::ExitCode> {
+        use ocx_exit::ClassifyExitCode as _;
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+        while let Some(current) = cause {
+            if let Some(kind) = current.downcast_ref::<PackageErrorKind>() {
+                let code = match kind {
+                    PackageErrorKind::Internal(inner) => inner.classify(),
+                    other => other.classify(),
+                };
+                if code.is_some() {
+                    return code;
+                }
+            }
+            if let Some(inner) = current.downcast_ref::<crate::Error>()
+                && let Some(code) = inner.classify()
+            {
+                return Some(code);
+            }
+            cause = current.source();
+        }
+        None
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blob_directory_serves_an_offline_pull() {
+        let (bytes, layer) = shared_layer();
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), &layer, &bytes);
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[dir.path()], None), None);
+
+        let phase = pull_layer_of(&manager, &layer)
+            .await
+            .expect("the directory copy serves");
+
+        assert!(layer_is_extracted(&manager, &layer));
+        assert!(!phase.fetched_any, "a local copy is not a download");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_directory_copy_does_not_stop_a_later_source() {
+        let (bytes, layer) = shared_layer();
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        plant(first.path(), &layer, &tampered(&bytes));
+        plant(second.path(), &layer, &bytes);
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[first.path(), second.path()], None), None);
+
+        pull_layer_of(&manager, &layer)
+            .await
+            .expect("the second directory holds a clean copy");
+
+        assert!(layer_is_extracted(&manager, &layer));
+        assert!(
+            std::fs::read(ocx_oci::blob_lookup::blob_data_path(
+                first.path(),
+                LOGICAL,
+                &ocx_oci::Digest::try_from(layer.digest.as_str()).unwrap()
+            ))
+            .unwrap()
+                == tampered(&bytes),
+            "a blob directory is never written"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_directory_copy_with_nothing_else_is_65_offline() {
+        let (bytes, layer) = shared_layer();
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), &layer, &tampered(&bytes));
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[dir.path()], None), None);
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("only a bad copy exists");
+
+        assert_eq!(exit_code(&error), Some(ocx_exit::ExitCode::DataError), "{error}");
+        assert!(!layer_is_extracted(&manager, &layer));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_directory_copy_stays_65_when_the_network_fails() {
+        let (bytes, layer) = shared_layer();
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), &layer, &tampered(&bytes));
+        let home = tempfile::tempdir().unwrap();
+        // The stub serves no blob, so the network step fails after the directory copy was refused.
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
+        let manager = lookup_manager(home.path(), lookup_of(&[dir.path()], None), Some(client));
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("nothing serves a clean copy");
+
+        assert_eq!(exit_code(&error), Some(ocx_exit::ExitCode::DataError), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nothing_anywhere_offline_is_81() {
+        let (_, layer) = shared_layer();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[dir.path()], None), None);
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("no source holds the layer");
+
+        assert_eq!(exit_code(&error), Some(ocx_exit::ExitCode::PolicyBlocked), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_cache_entry_is_removed_and_offline_is_81() {
+        let (bytes, layer) = shared_layer();
+        let cache = tempfile::tempdir().unwrap();
+        plant(cache.path(), &layer, &tampered(&bytes));
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[], Some(cache.path())), None);
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("the cache copy is bad");
+
+        assert_eq!(
+            exit_code(&error),
+            Some(ocx_exit::ExitCode::PolicyBlocked),
+            "a cache-only mismatch is a miss, never 65: {error}"
+        );
+        let digest = ocx_oci::Digest::try_from(layer.digest.as_str()).unwrap();
+        assert!(
+            !ocx_oci::blob_lookup::blob_data_path(cache.path(), LOGICAL, &digest).exists(),
+            "the bad cache entry is deleted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn layer_absent_from_an_export_is_79() {
+        let (_, layer) = shared_layer();
+        let export = tempfile::tempdir().unwrap();
+        let blobs = export.path().join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lookup = Arc::new(lookup_of(&[&blobs], None));
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())))
+            .with_blob_overlay(
+                ocx_oci::client::OverlayMode::LookupOnly,
+                home.path().join("blobs"),
+                lookup.clone(),
+                LOGICAL,
+                Vec::new(),
+            );
+        let manager = lookup_manager(home.path(), (*lookup).clone(), Some(client));
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("the export lacks the layer");
+
+        assert_eq!(exit_code(&error), Some(ocx_exit::ExitCode::NotFound), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_directory_copy_in_an_export_stays_65() {
+        let (bytes, layer) = shared_layer();
+        let export = tempfile::tempdir().unwrap();
+        let blobs = export.path().join("blobs");
+        plant(&blobs, &layer, &tampered(&bytes));
+        let home = tempfile::tempdir().unwrap();
+        let lookup = Arc::new(lookup_of(&[&blobs], None));
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())))
+            .with_blob_overlay(
+                ocx_oci::client::OverlayMode::LookupOnly,
+                home.path().join("blobs"),
+                lookup.clone(),
+                LOGICAL,
+                Vec::new(),
+            );
+        let manager = lookup_manager(home.path(), (*lookup).clone(), Some(client));
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("the export copy is bad");
+
+        assert_eq!(exit_code(&error), Some(ocx_exit::ExitCode::DataError), "{error}");
+    }
+
+    // ── provenance gate ──────────────────────────────────────────────────────
+
+    /// Pulls a one-layer package whose layer sits in a blob directory and whose leaf manifest was read from
+    /// `leaf_origin`, with no provided metadata so the registry-pull path runs; returns the recorded origins.
+    async fn origins_after_pull(leaf_origin: ocx_index::BlobOrigin) -> Vec<String> {
+        let (bytes, layer) = shared_layer();
+        let blobs = tempfile::tempdir().unwrap();
+        plant(blobs.path(), &layer, &bytes);
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[blobs.path()], None), None);
+
+        let config = serde_json::to_vec(&bundle_metadata()).unwrap();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(&config);
+        manager
+            .file_structure()
+            .blobs
+            .write_blob(LOGICAL, &config_digest, &config)
+            .await
+            .unwrap();
+
+        let pinned = plain_pinned();
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: Ok(ocx_oci::OciIdentifier::from_parts("test/lookup", LOGICAL).pinned_at(pinned.digest())),
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest: ocx_oci::ImageManifest {
+                artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+                config: ocx_oci::Descriptor {
+                    media_type: ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
+                    digest: config_digest.to_string(),
+                    size: config.len() as i64,
+                    urls: None,
+                    artifact_type: None,
+                    annotations: None,
+                },
+                layers: vec![layer],
+                ..Default::default()
+            },
+            platform: linux_amd64(),
+            leaf_origin,
+        };
+        let info = setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            linux_amd64(),
+            SetupGroups::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("the package sets up from the lookup");
+        info.dir().recorded_origins()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_hit_records_no_origin() {
+        let lookup_hit = ocx_index::BlobOrigin::Lookup(ocx_oci::blob_lookup::LookupOrigin::Cache);
+        assert!(
+            origins_after_pull(lookup_hit).await.is_empty(),
+            "a lookup hit mints no origin"
+        );
+        assert!(
+            origins_after_pull(ocx_index::BlobOrigin::Home).await.is_empty(),
+            "a home hit mints no origin"
+        );
+        assert_eq!(
+            origins_after_pull(ocx_index::BlobOrigin::Network).await.len(),
+            1,
+            "a network read still records the origin"
+        );
+    }
+
+    /// A root with one dependency in a fresh offline home; returns both pinned refs and the manager.
+    async fn root_with_dependency() -> (
+        PackageManager,
+        ocx_oci::PackageRef,
+        ocx_oci::PinnedPackageRef,
+        ocx_oci::PinnedPackageRef,
+        tempfile::TempDir,
+    ) {
+        let (manager, file_structure, dir) = offline_manager(crate::activity::ActivityLog::new());
+        let dep_digest =
+            write_zero_layer_package(&file_structure, serde_json::to_value(bundle_metadata()).unwrap()).await;
+        let root_metadata = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [],
+            "dependencies": [{ "identifier": format!("ocx.sh/acme/dep:1.0@{dep_digest}") }],
+        });
+        let root_digest = write_zero_layer_package(&file_structure, root_metadata).await;
+        let root = ocx_oci::PackageRef::new_registry("acme/root", "ocx.sh").clone_with_digest(root_digest);
+        let root_pinned = ocx_oci::PinnedPackageRef::try_from(root.clone()).unwrap();
+        let dep = ocx_oci::PackageRef::new_registry("acme/dep", "ocx.sh").clone_with_digest(dep_digest);
+        let dep_pinned = ocx_oci::PinnedPackageRef::try_from(dep).unwrap();
+        (manager, root, root_pinned, dep_pinned, dir)
+    }
+
+    async fn origins_of(manager: &PackageManager, pinned: &ocx_oci::PinnedPackageRef) -> Vec<String> {
+        manager.file_structure().packages.package_dir(pinned).recorded_origins()
+    }
+
+    /// The prefetch walk leaves home copies, so each dependency it read from a source must still record one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dependency_the_prefetch_read_from_a_source_records_its_origin() {
+        let (manager, root, root_pinned, dep_pinned, _dir) = root_with_dependency().await;
+        let groups = SetupGroups::new().with_network_leaves([dep_pinned.clone()].into());
+
+        super::setup_impl(
+            &manager,
+            &root,
+            ocx_oci::Platform::any(),
+            groups,
+            None,
+            crate::activity::Role::Root,
+        )
+        .await
+        .expect("the pull succeeds");
+
+        assert_eq!(origins_of(&manager, &dep_pinned).await.len(), 1);
+        assert!(
+            origins_of(&manager, &root_pinned).await.is_empty(),
+            "the root's leaf was a home hit"
+        );
+    }
+
+    /// A network record is bound to its digest: another package's record mints nothing here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_network_record_for_another_digest_mints_no_origin() {
+        let (manager, root, root_pinned, dep_pinned, _dir) = root_with_dependency().await;
+        let other = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("acme/other", "ocx.sh")
+                .clone_with_digest(ocx_oci::Digest::Sha256("e".repeat(64))),
+        )
+        .unwrap();
+        let groups = SetupGroups::new().with_network_leaves([other].into());
+
+        super::setup_impl(
+            &manager,
+            &root,
+            ocx_oci::Platform::any(),
+            groups,
+            None,
+            crate::activity::Role::Root,
+        )
+        .await
+        .expect("the pull succeeds");
+
+        assert!(origins_of(&manager, &root_pinned).await.is_empty());
+        assert!(origins_of(&manager, &dep_pinned).await.is_empty());
+    }
+
+    /// A layer whose decompressed size passes the cap, as a blob-directory copy with a matching digest.
+    fn bomb_layer() -> (Vec<u8>, ocx_oci::Descriptor) {
+        use std::io::Read as _;
+
+        let size = (257u64) << 20;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(size);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "bomb.bin", std::io::repeat(0).take(size))
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let bytes = encoder.finish().unwrap();
+        let descriptor = ocx_oci::Descriptor {
+            media_type: ocx_oci::media_type::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: ocx_oci::Algorithm::Sha256.hash(&bytes).to_string(),
+            size: bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        (bytes, descriptor)
+    }
+
+    /// An over-cap lookup copy is rejected like a bad copy, so the walk ends in the bad-copy verdict (65)
+    /// rather than the first source's cap error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_over_cap_lookup_copy_is_rejected_and_the_walk_continues() {
+        let (bytes, layer) = bomb_layer();
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        plant(first.path(), &layer, &bytes);
+        plant(second.path(), &layer, &bytes);
+        let home = tempfile::tempdir().unwrap();
+        let manager = lookup_manager(home.path(), lookup_of(&[first.path(), second.path()], None), None);
+
+        let error = pull_layer_of(&manager, &layer)
+            .await
+            .expect_err("no source holds a usable copy");
+
+        assert!(
+            format!("{error:?}").contains("DigestMismatch"),
+            "expected the bad-copy verdict, got {error:?}"
+        );
+        assert!(!layer_is_extracted(&manager, &layer));
     }
 }

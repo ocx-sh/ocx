@@ -54,6 +54,17 @@ pub enum VerifyErrorKind {
     )]
     NoSignaturesOnIndex,
 
+    /// Verifying from an export whose listing for the subject is not marked complete. Exit 79, same slug.
+    ///
+    /// An export may have left referrers out, so this does not claim the subject is unsigned.
+    #[error("no signatures found for target; referrers were not exported")]
+    #[exit(
+        NotFound,
+        slug = "no_signatures_found",
+        summary = "The target has no signature referrers"
+    )]
+    NoSignaturesNotExported,
+
     /// The identifier did not resolve to a manifest for the requested platform.
     ///
     /// Exit 79 (`NotFound`), with its own slug: "unsigned" and "not here" must never read alike.

@@ -70,6 +70,8 @@ fn fully_populated() -> ExecState {
             allow_yanked: Some(true),
             default_registry: Some("reg".to_owned()),
             insecure_registries: Some("h:1".to_owned()),
+            blob_dir: Some(vec![PathBuf::from("/b")]),
+            blob_cache_dir: Some(PathBuf::from("/bc")),
         },
         applied: vec![
             AppliedValue {

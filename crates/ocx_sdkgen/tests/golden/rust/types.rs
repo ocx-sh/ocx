@@ -2949,8 +2949,12 @@ pub enum ErrorDetail {
     BindingValueInvalid,
     /// A binding's identifier names no registry
     BindingValueMissingRegistry,
+    /// A --blob-dir path does not exist or is not a directory
+    BlobDirNotFound,
     /// The registry has no such blob
     BlobNotFound,
+    /// A \[blobs\] path is relative where only an absolute one is accepted
+    BlobPathRelative,
     /// The acting identity is a bot account
     BotIdentity,
     /// No build receipt exists beside the bundle
@@ -3015,7 +3019,7 @@ pub enum ErrorDetail {
     ConfigFileTooLarge,
     /// Reading a config file failed
     ConfigIo,
-    /// OCX_CONFIG lists more config files than the limit
+    /// A path list holds more entries than the limit
     ConfigListTooLong,
     /// A config file does not parse
     ConfigParse,
@@ -3100,6 +3104,12 @@ pub enum ErrorDetail {
     EntrypointCollision,
     /// An .envrc already exists and --force was not given
     EnvrcExists,
+    /// A directory is not a valid export
+    ExportDirInvalid,
+    /// The export directory lacks something that was asked for
+    ExportNotFound,
+    /// A digest identifier needs exactly one platform to export
+    ExportPlatformRequired,
     /// The extra CA bundle the payload names is not usable
     ExtraCaCertsInvalid,
     /// The extra CA bundle is not UTF-8 and cannot be persisted
@@ -3341,6 +3351,8 @@ pub enum ErrorDetail {
     LockStale,
     /// The registry rejected the supplied credentials
     LoginRejected,
+    /// Reading or writing a blob directory failed
+    LookupIo,
     /// An index source served a malformed catalog key
     MalformedCatalogKey,
     /// A fork's full name is malformed
@@ -3723,6 +3735,8 @@ pub enum ErrorDetail {
     SetupIo,
     /// A shell subprocess setup needs could not run
     SetupProfileSubprocess,
+    /// Two digests share one blob directory
+    ShardCollision,
     /// ocx.toml declares a \[shell\] section, which only config.toml may hold
     ShellSectionInProject,
     /// A declared interface name does not exist in the package
@@ -3983,7 +3997,9 @@ impl ErrorDetail {
             Self::BindingNotSelected => "binding_not_selected",
             Self::BindingValueInvalid => "binding_value_invalid",
             Self::BindingValueMissingRegistry => "binding_value_missing_registry",
+            Self::BlobDirNotFound => "blob_dir_not_found",
             Self::BlobNotFound => "blob_not_found",
+            Self::BlobPathRelative => "blob_path_relative",
             Self::BotIdentity => "bot_identity",
             Self::BuildReceiptNotFound => "build_receipt_not_found",
             Self::BuilderMismatch => "builder_mismatch",
@@ -4058,6 +4074,9 @@ impl ErrorDetail {
             Self::EndpointUnresolvable => "endpoint_unresolvable",
             Self::EntrypointCollision => "entrypoint_collision",
             Self::EnvrcExists => "envrc_exists",
+            Self::ExportDirInvalid => "export_dir_invalid",
+            Self::ExportNotFound => "export_not_found",
+            Self::ExportPlatformRequired => "export_platform_required",
             Self::ExtraCaCertsInvalid => "extra_ca_certs_invalid",
             Self::ExtraCaCertsNotUtf8 => "extra_ca_certs_not_utf8",
             Self::ExtraCaCertsPemInvalid => "extra_ca_certs_pem_invalid",
@@ -4178,6 +4197,7 @@ impl ErrorDetail {
             Self::LockRepositoryNotBare => "lock_repository_not_bare",
             Self::LockStale => "lock_stale",
             Self::LoginRejected => "login_rejected",
+            Self::LookupIo => "lookup_io",
             Self::MalformedCatalogKey => "malformed_catalog_key",
             Self::MalformedForkFullName => "malformed_fork_full_name",
             Self::MalformedIndexDocument => "malformed_index_document",
@@ -4368,6 +4388,7 @@ impl ErrorDetail {
             Self::SetupBootstrapFailed => "setup_bootstrap_failed",
             Self::SetupIo => "setup_io",
             Self::SetupProfileSubprocess => "setup_profile_subprocess",
+            Self::ShardCollision => "shard_collision",
             Self::ShellSectionInProject => "shell_section_in_project",
             Self::ShimClaimUnfulfilled => "shim_claim_unfulfilled",
             Self::ShimNameInvalid => "shim_name_invalid",
@@ -4518,7 +4539,9 @@ impl ErrorDetail {
             "binding_not_selected" => Self::BindingNotSelected,
             "binding_value_invalid" => Self::BindingValueInvalid,
             "binding_value_missing_registry" => Self::BindingValueMissingRegistry,
+            "blob_dir_not_found" => Self::BlobDirNotFound,
             "blob_not_found" => Self::BlobNotFound,
+            "blob_path_relative" => Self::BlobPathRelative,
             "bot_identity" => Self::BotIdentity,
             "build_receipt_not_found" => Self::BuildReceiptNotFound,
             "builder_mismatch" => Self::BuilderMismatch,
@@ -4593,6 +4616,9 @@ impl ErrorDetail {
             "endpoint_unresolvable" => Self::EndpointUnresolvable,
             "entrypoint_collision" => Self::EntrypointCollision,
             "envrc_exists" => Self::EnvrcExists,
+            "export_dir_invalid" => Self::ExportDirInvalid,
+            "export_not_found" => Self::ExportNotFound,
+            "export_platform_required" => Self::ExportPlatformRequired,
             "extra_ca_certs_invalid" => Self::ExtraCaCertsInvalid,
             "extra_ca_certs_not_utf8" => Self::ExtraCaCertsNotUtf8,
             "extra_ca_certs_pem_invalid" => Self::ExtraCaCertsPemInvalid,
@@ -4713,6 +4739,7 @@ impl ErrorDetail {
             "lock_repository_not_bare" => Self::LockRepositoryNotBare,
             "lock_stale" => Self::LockStale,
             "login_rejected" => Self::LoginRejected,
+            "lookup_io" => Self::LookupIo,
             "malformed_catalog_key" => Self::MalformedCatalogKey,
             "malformed_fork_full_name" => Self::MalformedForkFullName,
             "malformed_index_document" => Self::MalformedIndexDocument,
@@ -4903,6 +4930,7 @@ impl ErrorDetail {
             "setup_bootstrap_failed" => Self::SetupBootstrapFailed,
             "setup_io" => Self::SetupIo,
             "setup_profile_subprocess" => Self::SetupProfileSubprocess,
+            "shard_collision" => Self::ShardCollision,
             "shell_section_in_project" => Self::ShellSectionInProject,
             "shim_claim_unfulfilled" => Self::ShimClaimUnfulfilled,
             "shim_name_invalid" => Self::ShimNameInvalid,
@@ -5157,6 +5185,147 @@ impl Unknowns for ExitCode {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
         }
+    }
+}
+
+/// Whether this run wrote a platform's blobs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ExportPlatformWord {
+    /// The blobs were written by this run.
+    Written,
+    /// The directory held them already.
+    Present,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl ExportPlatformWord {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Written => "written",
+            Self::Present => "present",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "written" => Self::Written,
+            "present" => Self::Present,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for ExportPlatformWord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ExportPlatformWord {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ExportPlatformWord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for ExportPlatformWord {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// Result of `ocx package export` and `ocx export`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportReport {
+    /// The export directory, absolute.
+    pub output_dir: AbsolutePath,
+    /// One entry per package, in request order.
+    pub packages: Vec<ExportedPackageRow>,
+    /// Blobs this run wrote.
+    pub blob_count: i64,
+    /// Bytes this run wrote.
+    pub written_size: ByteSize,
+}
+
+impl Unknowns for ExportReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "output_dir", &self.output_dir);
+        field(pointer, out, "packages", &self.packages);
+        field(pointer, out, "blob_count", &self.blob_count);
+        field(pointer, out, "written_size", &self.written_size);
+    }
+}
+
+/// One package of an export.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportedPackageRow {
+    /// The package as named; a lock pin reads `registry/repository@sha256:...`.
+    pub identifier: PackageRef,
+    /// The tags written to the export's index; absent for a digest identifier and a lock pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<ExportedTag>>,
+    /// One row per exported platform.
+    pub manifests: Vec<ExportedPlatformRow>,
+    /// Referrer manifests carried; 0 under `--no-referrers`.
+    pub referrer_count: i64,
+}
+
+impl Unknowns for ExportedPackageRow {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "identifier", &self.identifier);
+        field(pointer, out, "tags", &self.tags);
+        field(pointer, out, "manifests", &self.manifests);
+        field(pointer, out, "referrer_count", &self.referrer_count);
+    }
+}
+
+/// One platform of an exported package.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportedPlatformRow {
+    /// The platform the manifest serves.
+    pub platform: Platform,
+    /// The platform manifest digest.
+    pub digest: Digest,
+    /// Whether this run wrote the blobs.
+    pub status: ExportPlatformWord,
+}
+
+impl Unknowns for ExportedPlatformRow {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "platform", &self.platform);
+        field(pointer, out, "digest", &self.digest);
+        field(pointer, out, "status", &self.status);
+    }
+}
+
+/// One tag of an exported root.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportedTag {
+    /// The tag as the export's index pins it.
+    pub tag: String,
+    /// The image index digest the tag pins.
+    pub digest: Digest,
+    /// `added`, `replaced` or `unchanged`; an export never reports `conflict`.
+    pub status: TagStatus,
+}
+
+impl Unknowns for ExportedTag {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "tag", &self.tag);
+        field(pointer, out, "digest", &self.digest);
+        field(pointer, out, "status", &self.status);
     }
 }
 
@@ -5605,6 +5774,140 @@ impl Unknowns for IdentitySource {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());
         }
+    }
+}
+
+/// Whether this run put a platform into the home.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImportPlatformWord {
+    /// This run assembled the package in the home.
+    Materialized,
+    /// The home held it already.
+    Present,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl ImportPlatformWord {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Materialized => "materialized",
+            Self::Present => "present",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "materialized" => Self::Materialized,
+            "present" => Self::Present,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for ImportPlatformWord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ImportPlatformWord {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImportPlatformWord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for ImportPlatformWord {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// Result of `ocx package import` and `ocx import`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportReport {
+    /// One entry per package, in the order the export lists them.
+    pub items: Vec<ImportedItem>,
+}
+
+impl Unknowns for ImportReport {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "items", &self.items);
+    }
+}
+
+/// One package of an import.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportedItem {
+    /// The package as listed; a root import reads the lock pin, `registry/repository@sha256:...`.
+    pub identifier: PackageRef,
+    /// The tags the export lists; absent for a digest identifier and a root import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<ImportedTag>>,
+    /// Platforms assembled for `added`, `unchanged` and `replaced` tags; a `conflict` tag adds
+    /// none.
+    pub manifests: Vec<ImportedPlatformRow>,
+}
+
+impl Unknowns for ImportedItem {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "identifier", &self.identifier);
+        field(pointer, out, "tags", &self.tags);
+        field(pointer, out, "manifests", &self.manifests);
+    }
+}
+
+/// One platform of an imported package.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportedPlatformRow {
+    /// The platform the manifest serves.
+    pub platform: Platform,
+    /// The platform manifest digest.
+    pub digest: Digest,
+    /// Whether this run assembled it or the home held it already.
+    pub status: ImportPlatformWord,
+}
+
+impl Unknowns for ImportedPlatformRow {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "platform", &self.platform);
+        field(pointer, out, "digest", &self.digest);
+        field(pointer, out, "status", &self.status);
+    }
+}
+
+/// One tag of an imported package.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportedTag {
+    /// The tag as the export lists it.
+    pub tag: String,
+    /// The digest the export pins the tag to.
+    pub digest: Digest,
+    /// What the import did with the tag; `conflict` leaves the home's pin alone and exits 0.
+    pub status: TagStatus,
+    /// The digest the home pinned before (`replaced`) or still pins (`conflict`); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_digest: Option<Digest>,
+}
+
+impl Unknowns for ImportedTag {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        field(pointer, out, "tag", &self.tag);
+        field(pointer, out, "digest", &self.digest);
+        field(pointer, out, "status", &self.status);
+        field(pointer, out, "home_digest", &self.home_digest);
     }
 }
 
@@ -7697,6 +8000,13 @@ pub struct PolicyReport {
     /// `OCX_INSECURE_REGISTRIES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub insecure_registries: Option<String>,
+    /// The blob directories the parent named, in order: `OCX_BLOB_DIR` and/or `--blob-dir`. Omitted
+    /// when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_dirs: Option<Vec<AbsolutePath>>,
+    /// `OCX_BLOB_CACHE_DIR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_cache_dir: Option<AbsolutePath>,
 }
 
 impl Unknowns for PolicyReport {
@@ -7719,6 +8029,8 @@ impl Unknowns for PolicyReport {
         field(pointer, out, "allow_yanked", &self.allow_yanked);
         field(pointer, out, "default_registry", &self.default_registry);
         field(pointer, out, "insecure_registries", &self.insecure_registries);
+        field(pointer, out, "blob_dirs", &self.blob_dirs);
+        field(pointer, out, "blob_cache_dir", &self.blob_cache_dir);
     }
 }
 
@@ -10725,6 +11037,74 @@ impl<'de> Deserialize<'de> for SweptStatus {
 }
 
 impl Unknowns for SweptStatus {
+    fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
+        if matches!(self, Self::Unknown(_)) {
+            out.push(pointer.clone());
+        }
+    }
+}
+
+/// What a run did with one tag of an exported or imported root.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TagStatus {
+    /// The tag was not pinned before this run and is now.
+    Added,
+    /// The tag was pinned to the digest it carries here already.
+    Unchanged,
+    /// The tag was pinned to another digest and moved; `home_digest` names the old one. Only for a
+    /// named package.
+    Replaced,
+    /// The tag is pinned to another digest and was kept; `home_digest` names it. Import only, never
+    /// for a named package.
+    Conflict,
+    /// A value this SDK was not generated for, kept as sent.
+    Unknown(String),
+}
+
+impl TagStatus {
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Added => "added",
+            Self::Unchanged => "unchanged",
+            Self::Replaced => "replaced",
+            Self::Conflict => "conflict",
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The entry for a wire value; one the SDK does not know becomes `Unknown`.
+    pub fn from_value(value: String) -> Self {
+        match value.as_str() {
+            "added" => Self::Added,
+            "unchanged" => Self::Unchanged,
+            "replaced" => Self::Replaced,
+            "conflict" => Self::Conflict,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl std::fmt::Display for TagStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for TagStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TagStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_value(String::deserialize(deserializer)?))
+    }
+}
+
+impl Unknowns for TagStatus {
     fn collect_unknowns(&self, pointer: &mut String, out: &mut Vec<String>) {
         if matches!(self, Self::Unknown(_)) {
             out.push(pointer.clone());

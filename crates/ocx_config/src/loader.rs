@@ -207,6 +207,7 @@ impl ConfigLoader {
         }
         if entries.len() > MAX_CONFIG_LIST_ENTRIES {
             return Err(Error::ConfigListTooLong {
+                list: "OCX_CONFIG",
                 count: entries.len(),
                 limit: MAX_CONFIG_LIST_ENTRIES,
             });
@@ -347,6 +348,17 @@ impl ConfigLoader {
         };
         if let Some(telemetry) = parsed.telemetry.as_mut() {
             telemetry.stamp_origin(format!("managed config {}", resolved.source));
+        }
+        // A payload has no directory to anchor against.
+        if let Some(blobs) = parsed.blobs.as_ref()
+            && let Some(path) = blobs
+                .dirs
+                .iter()
+                .flatten()
+                .chain(blobs.cache_dir.as_ref())
+                .find(|path| path.is_relative())
+        {
+            return Err(Error::BlobPathRelative { path: path.clone() });
         }
         // One-hop: a remote payload can never redirect or loosen the tier that fetched it.
         if parsed.managed.take().is_some() {
@@ -1138,6 +1150,12 @@ impl ConfigLoader {
                  operator or user settings in config.toml, never a repository's to set)"
             );
         }
+        if project_contribution.blobs.take().is_some() {
+            log::warn!(
+                "a project-tier config declared [blobs]; stripped before merge (where a machine reads and writes \
+                 blobs is configured in config.toml, never a repository's to redirect)"
+            );
+        }
         accumulator.merge(project_contribution);
     }
 
@@ -1156,6 +1174,13 @@ impl ConfigLoader {
             records.dir = Some(dir.join(sink));
         }
         parsed.anchor_relative_extra_ca_certs(dir);
+        if let Some(blobs) = parsed.blobs.as_mut() {
+            for path in blobs.dirs.iter_mut().flatten().chain(blobs.cache_dir.as_mut()) {
+                if path.is_relative() {
+                    *path = dir.join(&*path);
+                }
+            }
+        }
         let Some(trust) = parsed.trust.as_mut() else {
             return;
         };
@@ -1185,6 +1210,7 @@ impl ConfigLoader {
             shell,
             records,
             telemetry,
+            blobs,
             toolchain_dir,
             extra_ca_certs,
             extra_ca_certs_pem,
@@ -1195,6 +1221,8 @@ impl ConfigLoader {
         *registry = registry.take().filter(|registry| registry.system_locked);
         *records = records.take().filter(|records| records.system_locked);
         *telemetry = telemetry.take().filter(|telemetry| telemetry.system_locked);
+        // Not lockable: blob locations are ambient host configuration.
+        *blobs = None;
         // Dropped even when locked: the flag skips the snapshot read, so a `required` tier would fail
         // every hermetic invocation.
         *managed = None;
@@ -1718,7 +1746,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                Error::ConfigListTooLong { count, limit }
+                Error::ConfigListTooLong { count, limit, .. }
                     if count == MAX_CONFIG_LIST_ENTRIES + 1 && limit == MAX_CONFIG_LIST_ENTRIES
             ),
             "got: {err:?}"
@@ -5851,6 +5879,29 @@ mod tests {
             merged.telemetry.as_ref().and_then(|t| t.endpoint.as_deref()),
             Some("https://ops.example")
         );
+        assert_eq!(merged.resolved_default_registry(), Some("ocx.sh"));
+    }
+
+    /// A repository must not redirect where a machine reads or writes blobs.
+    ///
+    /// Red state until the strip lands: `fold_project_tier` has no `take()` for `blobs`.
+    #[test]
+    fn project_tier_blobs_stripped() {
+        let mut merged: Config = toml::from_str("[blobs]\ndirs = [\"/ops/blobs\"]\n").expect("base parses");
+        let project: Config = toml::from_str(
+            "[blobs]\ndirs = [\"/evil/blobs\"]\ncache_dir = \"/evil/cache\"\n[registry]\ndefault = \"ocx.sh\"\n",
+        )
+        .expect("a project-tier contribution parses as a Config");
+        assert!(project.blobs.is_some(), "the fixture must carry [blobs]");
+
+        ConfigLoader::fold_project_tier(&mut merged, project);
+
+        let blobs = merged.blobs.as_ref().expect("the base [blobs] survives");
+        assert_eq!(
+            blobs.dirs.as_deref(),
+            Some([std::path::PathBuf::from("/ops/blobs")].as_slice())
+        );
+        assert_eq!(blobs.cache_dir, None);
         assert_eq!(merged.resolved_default_registry(), Some("ocx.sh"));
     }
 

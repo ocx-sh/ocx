@@ -60,6 +60,34 @@ pub enum Error {
     )]
     OfflineMode,
 
+    /// An export names a registry, package, tag, platform or blob the directory does not hold.
+    #[error("{what} is not in the export at '{}'", dir.display())]
+    #[exit(
+        NotFound,
+        slug = "export_not_found",
+        summary = "The export directory lacks something that was asked for"
+    )]
+    ExportNotFound { dir: std::path::PathBuf, what: String },
+
+    /// A directory is not a usable export: no marker, an unmapped or colliding registry, a root that
+    /// disagrees with its catalog, or a shard collision.
+    #[error("'{}' is not a valid export: {reason}", dir.display())]
+    #[exit(
+        DataError,
+        slug = "export_dir_invalid",
+        summary = "A directory is not a valid export"
+    )]
+    ExportDirInvalid { dir: std::path::PathBuf, reason: String },
+
+    /// A digest identifier was exported without exactly one `--platform`.
+    #[error("'{identifier}' is a digest: name exactly one platform to export (got {found})")]
+    #[exit(
+        UsageError,
+        slug = "export_platform_required",
+        summary = "A digest identifier needs exactly one platform to export"
+    )]
+    ExportPlatformRequired { identifier: String, found: usize },
+
     /// JSON serialization or deserialization failed.
     #[error("JSON serialization error")]
     #[exit(

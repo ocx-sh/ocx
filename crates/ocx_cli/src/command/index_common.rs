@@ -10,11 +10,6 @@ use futures::StreamExt;
 
 use crate::api::data::{sanitize_error_chain, sanitize_for_terminal};
 
-/// Bounded concurrency for the per-package refresh fan-out. Nested inside
-/// [`ocx_index::TAG_REFRESH_CONCURRENCY`], it caps a run at 512 in-flight requests, since the
-/// fan-out is over the flattened set, not per registry.
-pub(super) const INDEX_REFRESH_CONCURRENCY: usize = 8;
-
 /// The one place the `index` verbs render a failure; both arguments are sanitized here, `subject`
 /// even when it looks like argv. `sanitize_error_chain`, never `{error:#}`: a `thiserror` `Display`
 /// ignores the alternate flag and drops the cause.
@@ -61,7 +56,7 @@ pub(super) fn log_derived_enumeration(registry: &str) {
     );
 }
 
-/// Refreshes every identifier in `packages`, bounded at [`INDEX_REFRESH_CONCURRENCY`]; logs every
+/// Refreshes every identifier in `packages`, bounded at [`ocx_index::PACKAGE_REFRESH_CONCURRENCY`]; logs every
 /// failure and returns the lowest-index one, never a partial report, so a nonzero exit carries no
 /// SUCCESS-shaped stdout.
 pub(super) async fn refresh_packages(
@@ -121,7 +116,7 @@ async fn refresh_each(
                     .map_err(anyhow::Error::from),
             )
         })
-        .buffer_unordered(INDEX_REFRESH_CONCURRENCY)
+        .buffer_unordered(ocx_index::PACKAGE_REFRESH_CONCURRENCY)
         .collect()
         .await;
 
@@ -183,7 +178,7 @@ mod tests {
         // at compile time whatever `TAG_REFRESH_CONCURRENCY` had become. It is
         // `pub` in ocx_lib for exactly this reason.
         assert_eq!(
-            INDEX_REFRESH_CONCURRENCY * ocx_index::TAG_REFRESH_CONCURRENCY,
+            ocx_index::PACKAGE_REFRESH_CONCURRENCY * ocx_index::TAG_REFRESH_CONCURRENCY,
             512,
             "C-024 states ≤ 512 in-flight requests; both factors must be read, not restated"
         );
@@ -206,9 +201,10 @@ mod tests {
         // Sized by the constant, not by a literal — `buffer_unordered(100_000)`
         // is nominally bounded and effectively is not.
         assert_eq!(
-            body.matches("buffer_unordered(INDEX_REFRESH_CONCURRENCY)").count(),
+            body.matches("buffer_unordered(ocx_index::PACKAGE_REFRESH_CONCURRENCY)")
+                .count(),
             1,
-            "the ceiling C-024 states is INDEX_REFRESH_CONCURRENCY's, so the call must name it"
+            "the ceiling C-024 states is PACKAGE_REFRESH_CONCURRENCY's, so the call must name it"
         );
     }
 

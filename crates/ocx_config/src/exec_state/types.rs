@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Major version, in the plaintext header.
 pub const MAJOR: u32 = 2;
 /// Minor version, in the payload.
-pub const MINOR: u32 = 0;
+pub const MINOR: u32 = 1;
 /// Whole value, every platform: cmd.exe's 8,191-char line minus `SET "`, the name, `=` and `"`.
 pub const MAX_ENCODED: usize = 8_169;
 /// Bytes before the first `.`; part of the frozen header grammar.
@@ -197,6 +197,12 @@ pub struct Policy {
     /// Relaxing, `OCX_INSECURE_REGISTRIES` (a `host[:port]` list).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure_registries: Option<String>,
+    /// Relaxing, `OCX_BLOB_DIR`: the directories as a list, each absolute, at most 32.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_dir: Option<Vec<PathBuf>>,
+    /// Relaxing, `OCX_BLOB_CACHE_DIR`; absolute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_cache_dir: Option<PathBuf>,
 }
 
 /// One value ocx applied to an environment.

@@ -835,11 +835,14 @@ impl VerifyPipeline {
         // Transport calls target `physical`; trust policy scope stays on the logical identifier.
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
         // Fail-closed dial-site re-check: the resolve-time guard tolerates DNS failure and the client has no resolver.
-        ocx_oci::ssrf::guard_physical_dial(&ctx.dial, &resolved, &physical)
-            .await
-            .map_err(|error| VerifyErrorKind::ForbiddenRegistryTarget {
-                reason: error.to_string(),
-            })?;
+        // A lookup-only client never dials, and the guard's own DNS lookup would be the one network call left.
+        if client.blob_overlay_mode() != Some(ocx_oci::client::OverlayMode::LookupOnly) {
+            ocx_oci::ssrf::guard_physical_dial(&ctx.dial, &resolved, &physical)
+                .await
+                .map_err(|error| VerifyErrorKind::ForbiddenRegistryTarget {
+                    reason: error.to_string(),
+                })?;
+        }
         // Every registry-facing reference goes through `transport_reference`, or `[mirrors]` stops applying.
         let image = client.transport_reference(&physical);
         Ok(ScanTarget {
@@ -3176,12 +3179,22 @@ mod tests {
         mirrors: ocx_oci::client::MirrorMap,
         trust_root: TrustRoot,
     ) -> (Result<Vec<VerifyResult>, VerifyError>, Vec<String>, tempfile::TempDir) {
-        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
-        let physical = PackageRef::parse(physical).expect("physical identifier");
-
         let transport = recording_transport();
         let mut client = Client::with_transport(Box::new(transport.clone()));
         client.set_mirrors(mirrors);
+        let (outcome, state) = drive_verify_with_client(&client, physical, &trust_root).await;
+        (outcome, transport.calls(), state)
+    }
+
+    /// The run itself, over a client the caller built.
+    async fn drive_verify_with_client(
+        client: &Client,
+        physical: &str,
+        trust_root: &TrustRoot,
+    ) -> (Result<Vec<VerifyResult>, VerifyError>, tempfile::TempDir) {
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = PackageRef::parse(physical).expect("physical identifier");
+
         let dial = TestDial::new();
         let temp = tempfile::TempDir::new().expect("state dir");
         let state = SigningStatePaths::new(temp.path());
@@ -3192,7 +3205,7 @@ mod tests {
         let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
 
         let outcome = VerifyPipeline::run(
-            &client,
+            client,
             VerifyContext {
                 identifier: &logical,
                 platform: None,
@@ -3200,7 +3213,7 @@ mod tests {
                 no_cache: true,
                 dial: dial.policy(),
                 resolve: indirecting_resolver(physical.clone()),
-                trust_root: &trust_root,
+                trust_root,
                 rekor_url: &rekor_url,
                 state: state.clone(),
                 offline: true,
@@ -3213,7 +3226,7 @@ mod tests {
             },
         )
         .await;
-        (outcome, transport.calls(), temp)
+        (outcome, temp)
     }
 
     #[tokio::test]
@@ -3322,6 +3335,38 @@ mod tests {
         assert!(
             calls.is_empty(),
             "no transport call may precede the refusal, got: {calls:?}",
+        );
+    }
+
+    /// A lookup-only client never dials, so the dial-site guard's own DNS lookup is skipped for it: the
+    /// link-local target the registry client is refused at, a lookup-only client reads past.
+    #[tokio::test]
+    async fn lookup_only_skips_dial_guard_dns() {
+        let (_key, cert) = self_signed_cert();
+        let trust_root = trust_root_of(&[&cert]);
+        let target = "169.254.169.254/acme/tool:1.0";
+
+        let (registry, _calls, _state) = drive_verify_at(target, ocx_oci::client::MirrorMap::default()).await;
+        assert!(
+            matches!(registry, Err(ref error) if matches!(error.kind, VerifyErrorKind::ForbiddenRegistryTarget { .. })),
+            "the control: a registry client is refused at the dial site",
+        );
+
+        let home = tempfile::TempDir::new().expect("home blobs");
+        let overlay = Client::with_transport(Box::new(recording_transport())).with_blob_overlay(
+            ocx_oci::client::OverlayMode::LookupOnly,
+            home.path().to_path_buf(),
+            std::sync::Arc::new(ocx_oci::blob_lookup::BlobLookup::default()),
+            "ocx.sh",
+            Vec::new(),
+        );
+        let (lookup_only, _state) = drive_verify_with_client(&overlay, target, &trust_root).await;
+        let Err(error) = lookup_only else {
+            panic!("nothing is exported here, so the verdict is not a success");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::NoSignaturesFound),
+            "a lookup-only client reaches the scan and finds nothing, got: {error}",
         );
     }
 

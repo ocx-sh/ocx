@@ -140,16 +140,18 @@ pub enum Error {
         source: Box<ParseFailure>,
     },
 
-    /// `OCX_CONFIG` names more config files than ocx will load.
-    #[error(
-        "OCX_CONFIG lists {count} config files, more than the limit of {limit}; reduce OCX_CONFIG to at most {limit} entries"
-    )]
+    /// A path list (`OCX_CONFIG`, or the blob directories) names more entries than ocx will use.
+    #[error("{list} lists {count} entries, more than the limit of {limit}; reduce it to at most {limit} entries")]
     #[exit(
         ConfigError,
         slug = "config_list_too_long",
-        summary = "OCX_CONFIG lists more config files than the limit"
+        summary = "A path list holds more entries than the limit"
     )]
-    ConfigListTooLong { count: usize, limit: usize },
+    ConfigListTooLong {
+        list: &'static str,
+        count: usize,
+        limit: usize,
+    },
 
     /// A path in the `OCX_CONFIG` list contains the list separator and cannot be carried through it.
     #[error(
@@ -231,6 +233,15 @@ pub enum Error {
         summary = "Both extra_ca_certs and extra_ca_certs_pem are declared"
     )]
     AmbiguousExtraCaCerts { path: PathBuf },
+
+    /// A `[blobs]` path in the managed tier, or one that reached resolution unanchored, is relative.
+    #[error("[blobs] path {} is relative; the managed tier accepts absolute paths only", path.display())]
+    #[exit(
+        ConfigError,
+        slug = "blob_path_relative",
+        summary = "A [blobs] path is relative where only an absolute one is accepted"
+    )]
+    BlobPathRelative { path: PathBuf },
 }
 
 /// [`Result`](std::result::Result) over this tier's own [`Error`].

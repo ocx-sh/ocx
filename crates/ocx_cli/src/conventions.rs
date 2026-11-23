@@ -106,6 +106,15 @@ pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<o
     })
 }
 
+/// `path` made absolute against the working directory, symlinks left alone.
+///
+/// # Errors
+///
+/// An I/O failure naming the path (exit 74).
+pub fn absolute_dir(path: &std::path::Path) -> Result<std::path::PathBuf, ocx_util::error::FileError> {
+    std::path::absolute(path).map_err(|error| ocx_util::error::FileError::new(path, error))
+}
+
 /// Resolves `--platform`, defaulting to the host platform for every resolution command.
 pub fn platform_or_default(platform: Option<ocx_oci::Platform>) -> ocx_oci::Platform {
     platform.unwrap_or_else(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any))

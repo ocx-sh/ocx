@@ -178,6 +178,37 @@ pub enum Package {
         entries) instead of the interface surface (public and interface entries); `integrations` is always \
         empty under `--self`.")]
     Env(super::env::Env),
+    /// Write packages and their blobs to a directory for offline transfer.
+    #[command(long_about = "\
+        Write packages and their blobs to a directory for offline transfer.\n\n\
+        Each package is exported with its dependencies, its metadata and, unless `--no-referrers` is given, the \
+        signatures, SBOMs and attestations anchored to it. The directory holds a restricted copy of the index \
+        for the exported tags (`index/`), the blobs (`blobs/`) and the marker `ocx-export.json`, which is written \
+        last. Exporting into an existing export directory adds to it.\n\n\
+        A package is `registry/repository:tag`, which exports every platform the tag publishes, or \
+        `registry/repository@sha256:<hex>`, which names one platform manifest and needs exactly one `--platform`. \
+        A tag is resolved as `ocx package pull` resolves it, so a tag the local index has not seen yet is recorded \
+        there. `--offline` works when every blob is already local and exits 81 otherwise.\n\n\
+        An unknown registry, package, tag or platform exits 79. A directory that is not a usable export, or two \
+        registries whose names differ only in case, exits 65. A write failure exits 74.\n\n\
+        Move the directory to the other machine and run `ocx package import` there.")]
+    Export(super::package_export::PackageExport),
+    /// Import packages from an export directory without network access.
+    #[command(long_about = "\
+        Import packages from an export directory without network access.\n\n\
+        Assembles the packages `ocx package export` wrote in the local object store and pins their tags in the \
+        local index, with no registry traffic. It installs nothing: no candidate or `current` symlink is created, \
+        so `ocx clean` collects an imported package nothing else holds. Name packages to import only those; without names every package \
+        the export lists is imported, for the host platform unless `--platform` says otherwise. DIR is the export \
+        root that holds `ocx-export.json`, not its `index` or `blobs` subdirectory.\n\n\
+        A package covered by a trust policy is verified from the signatures the export carries, and fails with \
+        exit 79 when the export carries none. A tag the local index already pins to a different digest is kept and \
+        reported as `conflict`, unless the package was named, in which case it moves and is reported as \
+        `replaced`. A conflict is a report row and a warning, not an error. A package that fails to import \
+        changes nothing.\n\n\
+        A directory without a valid marker, or one that disagrees with its own index, exits 65. A registry, \
+        package, tag, platform or blob the export lacks exits 79.")]
+    Import(super::package_import::PackageImport),
     /// Inspect one or more package references (platforms, metadata, or resolution chain).
     #[command(long_about = "\
         Inspect one or more package references (platforms, metadata, or resolution chain).\n\n\
@@ -506,6 +537,8 @@ impl Package {
             }
             Package::Deps(deps) => boxed(move || deps.execute(context)).await,
             Package::Env(env) => boxed(move || env.execute(context)).await,
+            Package::Export(export) => boxed(move || export.execute(context)).await,
+            Package::Import(import) => boxed(move || import.execute(context)).await,
             Package::Inspect(inspect) => boxed(move || inspect.execute(context)).await,
             Package::Install(install) => boxed(move || install.execute(context)).await,
             Package::Prune(prune) => boxed(move || prune.execute(context)).await,

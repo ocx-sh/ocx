@@ -15,5 +15,7 @@ pub static ENV_FLAGS: &[(&EnvVar, &str)] = &[
     (&ocx_env::OCX_QUIET, "--quiet"),
     (&ocx_env::OCX_JOBS, "--jobs"),
     (&ocx_env::OCX_INDEX, "--index"),
+    (&ocx_env::OCX_BLOB_DIR, "--blob-dir"),
+    (&ocx_env::OCX_BLOB_CACHE_DIR, "--blob-cache-dir"),
     (&ocx_env::OCX_LOG_LEVEL, "--log-level"),
 ];

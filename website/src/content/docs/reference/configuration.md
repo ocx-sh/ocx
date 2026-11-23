@@ -18,6 +18,36 @@ OCX reads each file that exists, lowest precedence first. A file over 64 KiB is 
 | OCX home | `$OCX_HOME/config.toml`, default `~/.ocx/config.toml` |
 | Explicit | [`OCX_CONFIG`](./environment.md#ocx-config) and [`--config`](./command-line/index.md#arg-config) |
 
+## `blobs` {#keys-blobs}
+
+Blob directories and the blob cache (`[blobs]`).
+
+Read from `config.toml` tiers only: a project's `ocx.toml` refuses it and the loader strips
+it from a project tier. Not lockable, so `OCX_NO_CONFIG` drops it.
+
+Absent → no blob directories and no blob cache.
+
+- Type: `table`
+
+## `blobs.cache_dir` {#keys-blobs-cache-dir}
+
+Directory where blobs fetched from a registry are kept for later runs. Absent → no blob cache.
+
+A relative path resolves against the directory of the `config.toml` that declared it.
+Overridden by the `OCX_BLOB_CACHE_DIR` environment variable and the `--blob-cache-dir` flag.
+
+- Type: `string`
+
+## `blobs.dirs` {#keys-blobs-dirs}
+
+Directories searched, read-only, for blobs before a registry is contacted.
+
+A relative path resolves against the directory of the `config.toml` that declared it, and the `[managed]` tier accepts absolute paths only. A later tier replaces this list whole.
+
+More than 32 entries are refused (exit 78). Overridden by the `OCX_BLOB_DIR` environment variable and the `--blob-dir` flag.
+
+- Type: `array`
+
 ## `extra_ca_certs` {#keys-extra_ca_certs}
 
 Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge

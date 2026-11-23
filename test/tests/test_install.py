@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from src import (
     make_package,
     registry_dir,
 )
+from src.registry import fetch_platform_manifest_digest
 
 pytestmark = pytest.mark.command("install")
 
@@ -92,9 +94,7 @@ def test_install_without_select_reports_candidate_path(
     assert reported.parent.name == "candidates"
 
 
-def test_install_cleans_temp_directory(
-    ocx: OcxRunner, published_package: PackageInfo
-):
+def test_install_cleans_temp_directory(ocx: OcxRunner, published_package: PackageInfo):
     """ocx install <pkg> should not leave temp directories behind."""
     pkg = published_package
     ocx.json("package", "install", pkg.short)
@@ -125,7 +125,9 @@ def test_install_foreign_platform_writes_no_candidate(
     installs = ocx.json("package", "install", f"--platform={foreign}", ref)["packages"]
     assert len(installs) == 1, f"one identifier in, one entry out: {installs}"
     entry = next(iter(installs.values()))
-    assert "path" not in entry, f"foreign install must report no host symlink: {installs}"
+    assert "path" not in entry, (
+        f"foreign install must report no host symlink: {installs}"
+    )
 
     candidate = (
         Path(ocx.env["OCX_HOME"])
@@ -162,7 +164,7 @@ def test_install_without_select_preserves_current(
 
 
 def test_install_records_the_pulling_origin(
-    ocx: OcxRunner, published_package: PackageInfo
+    ocx: OcxRunner, second_home: OcxRunner, published_package: PackageInfo
 ):
     """A real pull writes the `refs/origins/` marker shell-consent clause 2 rests on.
 
@@ -175,7 +177,8 @@ def test_install_records_the_pulling_origin(
     the one the registry served.
     """
     pkg = published_package
-    result = ocx.json("package", "install", pkg.short)["packages"]
+    # A fresh home: the publishing home already holds the manifest, and a home hit mints no origin.
+    result = second_home.json("package", "install", pkg.short)["packages"]
 
     pkg_root = Path(result[pkg.short]["path"])
     origins = pkg_root / "refs" / "origins"
@@ -190,3 +193,72 @@ def test_install_records_the_pulling_origin(
         f"recorded origins {recorded} != the one repository the registry "
         f"served: {{{expected!r}}}"
     )
+
+
+def _package_root(path: str) -> Path:
+    """The package directory, whether the report names it or its `content` directory."""
+    root = Path(path).resolve()
+    return root.parent if root.name == "content" else root
+
+
+def _dependency_roots(home: Path, app_root: Path) -> list[Path]:
+    """Every package root in `home` other than `app_root`."""
+    roots = {c.resolve().parent for c in (home / "packages").rglob("content") if c.is_dir()}
+    return sorted(roots - {app_root})
+
+
+def _publish_app_with_dependency(ocx: OcxRunner, repo: str, tmp_path: Path):
+    leaf = make_package(ocx, f"{repo}_leaf", "1.0.0", tmp_path / "leaf")
+    digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
+    app = make_package(
+        ocx,
+        f"{repo}_app",
+        "1.0.0",
+        tmp_path / "app",
+        dependencies=[{"identifier": f"{leaf.fq}@{digest}"}],
+    )
+    return leaf, app
+
+
+def test_dependency_pulled_into_fresh_home_records_origin(
+    ocx: OcxRunner, second_home: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A dependency fetched from the registry into a fresh home records where it came from."""
+    (tmp_path / "leaf").mkdir()
+    (tmp_path / "app").mkdir()
+    leaf, app = _publish_app_with_dependency(ocx, unique_repo, tmp_path)
+
+    result = second_home.json("package", "install", app.short)["packages"]
+
+    deps = _dependency_roots(second_home.ocx_home, _package_root(result[app.short]["path"]))
+    assert len(deps) == 1, f"expected exactly one dependency package root, got {deps}"
+    origins = deps[0] / "refs" / "origins"
+    recorded = {p.read_text().strip() for p in origins.glob("*") if p.is_file()}
+    assert recorded == {f"{ocx.registry.lower()}/{leaf.repo}"}, (
+        f"the dependency pulled from the registry recorded origins {recorded}"
+    )
+
+
+def test_install_from_an_import_records_no_origin(
+    ocx: OcxRunner,
+    second_home: OcxRunner,
+    registry_guard,
+    published_package: PackageInfo,
+    tmp_path: Path,
+):
+    """Bytes that came from an export, not the network, record no registry origin."""
+    pkg = published_package
+    out = tmp_path / "export"
+    ocx.json("package", "export", "-o", str(out), pkg.fq)
+
+    registry_guard.deny(second_home)
+    registry_guard.reset()
+    imported = second_home.run("package", "import", str(out), check=False)
+    assert imported.returncode == 0, imported.stderr
+    result = second_home.run("package", "install", pkg.short, check=False)
+    assert result.returncode == 0, result.stderr
+    assert registry_guard.count == 0, registry_guard.requests
+
+    root = _package_root(json.loads(result.stdout)["packages"][pkg.short]["path"])
+    origins = root / "refs" / "origins"
+    assert not origins.exists() or list(origins.iterdir()) == []

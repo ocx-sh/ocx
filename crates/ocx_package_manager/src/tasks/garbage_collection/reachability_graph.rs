@@ -253,8 +253,7 @@ async fn index_retention_pairs(data_path: &Path, blob_dir: &Path, registry_root:
         let Ok(child_digest) = ocx_oci::Digest::try_from(entry.digest.as_str()) else {
             continue;
         };
-        let child_dir =
-            canonicalize_or_keep(&registry_root.join(ocx_store::file_structure::cas_shard_path(&child_digest)));
+        let child_dir = canonicalize_or_keep(&registry_root.join(ocx_oci::cas_path::cas_shard_path(&child_digest)));
         pairs.push((child_dir, index_dir.clone()));
     }
     pairs
@@ -542,7 +541,8 @@ pub mod tests {
     /// descriptors). The retention edge for an advertised child must exist.
     #[tokio::test]
     async fn large_index_manifest_still_retains_via_child_edge() {
-        use ocx_store::file_structure::{BlobDir, cas_shard_path};
+        use ocx_oci::cas_path::cas_shard_path;
+        use ocx_store::file_structure::BlobDir;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         // Blob layout: {root}/{registry_slug}/{algo}/{2hex}/{30hex}/data — the
@@ -1226,9 +1226,8 @@ pub mod tests {
                 let Ok(child_digest) = ocx_oci::Digest::try_from(entry.digest.as_str()) else {
                     continue;
                 };
-                let child_dir = super::canonicalize_or_keep(
-                    &registry_root.join(ocx_store::file_structure::cas_shard_path(&child_digest)),
-                );
+                let child_dir =
+                    super::canonicalize_or_keep(&registry_root.join(ocx_oci::cas_path::cas_shard_path(&child_digest)));
                 edges.entry(child_dir).or_default().push(index_dir.clone());
             }
         }
@@ -1245,7 +1244,8 @@ pub mod tests {
         children_per_index: usize,
         noise_count: usize,
     ) -> Vec<ocx_store::file_structure::BlobDir> {
-        use ocx_store::file_structure::{BlobDir, cas_shard_path};
+        use ocx_oci::cas_path::cas_shard_path;
+        use ocx_store::file_structure::BlobDir;
 
         // `cas_shard_path` keys on the FIRST 32 hex chars of the digest, so a
         // unique on-disk shard requires the counter to vary the leading hex —

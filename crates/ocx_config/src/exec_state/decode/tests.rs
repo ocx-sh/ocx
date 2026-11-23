@@ -698,3 +698,34 @@ fn a_changed_raw_value_never_returns_the_previous_result() {
     assert_ne!(before, after);
     assert_eq!(readable(decoded(&after)), state);
 }
+
+#[test]
+fn blob_cache_dir_relative_refused() {
+    let mut state = ExecState::default();
+    state.policy.blob_cache_dir = Some(PathBuf::from("relative/cache"));
+    assert_eq!(invalid_field(&state), "policy.blob_cache_dir");
+}
+
+#[test]
+fn blob_dir_over_cap_refused() {
+    let mut state = ExecState::default();
+    state.policy.blob_dir = Some((0..33).map(|i| abs(&format!("blobs-{i}"))).collect());
+    assert_eq!(invalid_field(&state), "policy.blob_dir");
+
+    let mut relative = ExecState::default();
+    relative.policy.blob_dir = Some(vec![PathBuf::from("relative")]);
+    assert_eq!(invalid_field(&relative), "policy.blob_dir");
+}
+
+#[test]
+fn minor_zero_state_defaults_blob_fields() {
+    assert_eq!(
+        crate::exec_state::types::MINOR,
+        1,
+        "the blob fields arrive with minor 1"
+    );
+    let state = readable(decoded(&value_of_json(r#"{"minor":0}"#)));
+    assert_eq!(state.minor, 0);
+    assert_eq!(state.policy.blob_dir, None);
+    assert_eq!(state.policy.blob_cache_dir, None);
+}

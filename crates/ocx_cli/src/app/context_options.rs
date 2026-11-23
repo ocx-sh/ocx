@@ -120,6 +120,24 @@ pub struct ContextOptions {
     #[arg(long, value_name = "PATH")]
     pub index: Option<std::path::PathBuf>,
 
+    /// Directory searched, read-only, for blobs before a registry is contacted.
+    ///
+    /// Repeat the flag to search several directories; any flag given replaces `OCX_BLOB_DIR` and
+    /// `[blobs] dirs` whole. Every blob is checked against its digest. The directory must exist,
+    /// or the command exits 79. Equivalent env var: `OCX_BLOB_DIR`, a list separated like `PATH`
+    /// (`:` on Unix, `;` on Windows). More than 32 directories are refused (exit 78). A flag path
+    /// that contains the separator is refused when a child OCX process is started, because the
+    /// child would read it as a list (exit 78).
+    #[arg(long, value_name = "PATH")]
+    pub blob_dir: Vec<std::path::PathBuf>,
+
+    /// Directory where blobs fetched from a registry are kept for later runs.
+    ///
+    /// Writable, unlike `--blob-dir`. Equivalent env var: `OCX_BLOB_CACHE_DIR`; the config key is
+    /// `[blobs] cache_dir`. Without any of them, fetched blobs are not kept.
+    #[arg(long, value_name = "PATH")]
+    pub blob_cache_dir: Option<std::path::PathBuf>,
+
     /// The log level to use.
     ///
     /// Default `info`. Logs go to stderr, never stdout. At `info` and below a line reads `error: message` or `warning: message`;
@@ -201,6 +219,8 @@ impl ContextOptions {
             offline: typed.offline,
             frozen: typed.frozen,
             index: self.index.clone(),
+            blob_dir: (!self.blob_dir.is_empty()).then(|| self.blob_dir.clone()),
+            blob_cache_dir: self.blob_cache_dir.clone(),
         }
     }
 
@@ -391,6 +411,7 @@ mod tests {
             offline,
             frozen,
             index,
+            ..
         } = options.root_flags();
         assert_eq!(
             (config, remote, offline, frozen, index),
@@ -406,6 +427,7 @@ mod tests {
             offline,
             frozen,
             index,
+            ..
         } = typed.root_flags();
         assert_eq!(config.as_deref(), Some(std::path::Path::new("c.toml")));
         assert_eq!(index.as_deref(), Some(std::path::Path::new("i")));

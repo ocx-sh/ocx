@@ -19,9 +19,7 @@ pub use assemble::{
     assemble_from_layers_with_layouts,
 };
 pub use blob_store::{BlobDir, BlobStore};
-pub use cas_path::{
-    CasTier, DIGEST_FILENAME, DigestFileError, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file,
-};
+pub use cas_path::{CasTier, DIGEST_FILENAME, DigestFileError, cas_ref_name, read_digest_file, write_digest_file};
 pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageDirError, PackageStore, is_verified, record_origin, record_verified};
 pub use shim_bin_store::ShimBinStore;

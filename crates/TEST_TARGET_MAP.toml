@@ -149,7 +149,7 @@ cases = 2
 [[target]]
 label = "//crates/ocx_oci:ocx_oci_test"
 crate = "ocx_oci"
-cases = 813
+cases = 903
 skipped = 2
 ignored = 5
 
@@ -286,7 +286,7 @@ cases = 477
 [[target]]
 label = "//crates/ocx_store:ocx_store_test"
 crate = "ocx_store"
-cases = 356
+cases = 354
 
 [[target]]
 label = "//crates/ocx_telemetry:ocx_telemetry_test"

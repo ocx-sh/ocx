@@ -48,7 +48,7 @@ impl LayerStore {
     pub fn path(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         self.root
             .join(super::slugify(registry))
-            .join(super::cas_path::cas_shard_path(digest))
+            .join(ocx_oci::cas_path::cas_shard_path(digest))
     }
 
     pub fn content(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {

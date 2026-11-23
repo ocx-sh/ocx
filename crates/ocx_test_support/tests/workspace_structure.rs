@@ -1499,6 +1499,8 @@ const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "from_file_magic",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
+    // Public for the package export and import verbs, which land after this item; drop the
+    // entry when the first one calls it.
     "with_level",
 ];
 

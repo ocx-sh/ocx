@@ -66,7 +66,7 @@ impl ShimStore {
         self.root
             .join(super::slugify(identifier.registry()))
             .join(super::repository_path(identifier.repository()))
-            .join(super::cas_path::cas_shard_path(&identifier.digest()))
+            .join(ocx_oci::cas_path::cas_shard_path(&identifier.digest()))
     }
 
     pub fn shim_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> ShimDir {

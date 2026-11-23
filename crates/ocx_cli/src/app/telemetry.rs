@@ -61,6 +61,8 @@ pub fn class(leaf: Option<Leaf>, shell_flag: bool) -> Class {
         | Leaf::ConfigSetup
         | Leaf::ConfigUpdate
         | Leaf::DirenvInit
+        | Leaf::Export
+        | Leaf::Import
         | Leaf::IndexCatalog
         | Leaf::IndexList
         | Leaf::IndexRegenerate
@@ -83,6 +85,8 @@ pub fn class(leaf: Option<Leaf>, shell_flag: bool) -> Class {
         | Leaf::PackageDescriptionPull
         | Leaf::PackageDescriptionPush
         | Leaf::PackageDeselect
+        | Leaf::PackageExport
+        | Leaf::PackageImport
         | Leaf::PackageInfo
         | Leaf::PackageInspect
         | Leaf::PackageInstall

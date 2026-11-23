@@ -13,7 +13,7 @@ type IndexedTagResult = (usize, anyhow::Result<(String, Vec<String>)>);
 
 /// How many per-repository tag listings `--with-tags` keeps in flight.
 ///
-/// Its own permit class, never `INDEX_REFRESH_CONCURRENCY`: one class shared across an inner fan-out
+/// Its own permit class, never `PACKAGE_REFRESH_CONCURRENCY`: one class shared across an inner fan-out
 /// deadlocks when an ancestor holds a permit its children wait for (ocx-sh/ocx#316, ocx-sh/ocx#167).
 /// 16 keeps a several-hundred-repository catalog within the `index` family's 512-request ceiling.
 const CATALOG_TAG_CONCURRENCY: usize = 16;

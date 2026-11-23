@@ -103,6 +103,7 @@ pub(crate) mod hashing_reader;
 pub mod mirror_map;
 pub(crate) mod native_transport;
 pub(super) mod progress_reader;
+mod tee_reader;
 #[cfg(any(test, feature = "__testing"))]
 pub mod test_transport;
 mod transport;
@@ -154,6 +155,7 @@ pub fn network_refused() -> bool {
     refused
 }
 
+pub use crate::blob_lookup::transport::OverlayMode;
 pub use builder::ClientBuilder;
 /// Shared so every hand-built client (the login ping, the index singleflight,
 /// `ocx-mirror`'s own `ClientConfig`, which defaults every timeout to `None`)
@@ -235,6 +237,12 @@ pub struct Client {
     progress: ocx_console::progress::ProgressManager,
     /// Per-upstream-host mirror map, applied on the read path only; empty is identity.
     pub(super) mirrors: MirrorMap,
+    /// Where a network pull tees verified bytes, keyed per call by the caller's logical registry.
+    blob_cache: Option<crate::blob_lookup::BlobCacheDir>,
+    /// Directories and cache copy reads consult before this client's network; `None` behaves as none configured.
+    blob_lookup: Option<std::sync::Arc<crate::blob_lookup::BlobLookup>>,
+    /// Set by [`Self::with_blob_overlay`]; `None` for every other client.
+    overlay_mode: Option<OverlayMode>,
 }
 
 impl Clone for Client {
@@ -247,6 +255,9 @@ impl Clone for Client {
             repository_chunk_size: self.repository_chunk_size,
             progress: self.progress.clone(),
             mirrors: self.mirrors.clone(),
+            blob_cache: self.blob_cache.clone(),
+            blob_lookup: self.blob_lookup.clone(),
+            overlay_mode: self.overlay_mode,
         }
     }
 }
@@ -295,7 +306,177 @@ impl Client {
             repository_chunk_size: 100,
             progress: ocx_console::progress::ProgressManager::disabled(),
             mirrors: MirrorMap::default(),
+            blob_cache: None,
+            blob_lookup: None,
+            overlay_mode: None,
         }
+    }
+
+    /// Tees every network layer pull that names a logical registry into `cache`.
+    #[must_use]
+    pub fn with_blob_cache(mut self, cache: crate::blob_lookup::BlobCacheDir) -> Self {
+        self.blob_cache = Some(cache);
+        self
+    }
+
+    /// Attaches the lookup that digest-addressed reads of this client (copy's source) consult first.
+    #[must_use]
+    pub fn with_blob_lookup(mut self, lookup: std::sync::Arc<crate::blob_lookup::BlobLookup>) -> Self {
+        self.blob_lookup = Some(lookup);
+        self
+    }
+
+    pub fn blob_lookup(&self) -> Option<&crate::blob_lookup::BlobLookup> {
+        self.blob_lookup.as_deref()
+    }
+
+    pub fn blob_cache(&self) -> Option<&crate::blob_lookup::BlobCacheDir> {
+        self.blob_cache.as_ref()
+    }
+
+    /// A client whose transport answers digest reads from `home_blobs` and `lookup` for `registry`.
+    ///
+    /// `LookupOnly` replaces the transport this client's recipe would build, so no connection, resolver or
+    /// credential is ever made. `Live` keeps it and asks it first for listings. Mirrors, transport config, lock
+    /// timeout, chunk sizes and progress are kept; the transport cell is fresh, never shared with `self`, or the
+    /// overlay would swap the transport of every clone of the original.
+    #[must_use]
+    pub fn with_blob_overlay(
+        self,
+        mode: OverlayMode,
+        home_blobs: std::path::PathBuf,
+        lookup: std::sync::Arc<crate::blob_lookup::BlobLookup>,
+        registry: &str,
+        accept_artifact_types: Vec<String>,
+    ) -> Self {
+        use crate::blob_lookup::transport::LookupTransport;
+
+        let transport: Box<dyn OciTransport> = match mode {
+            OverlayMode::LookupOnly => Box::new(LookupTransport::lookup_only(
+                home_blobs,
+                lookup,
+                registry,
+                accept_artifact_types,
+            )),
+            OverlayMode::Live => Box::new(LookupTransport::live_over_client(
+                self.clone(),
+                home_blobs,
+                lookup,
+                registry,
+                accept_artifact_types,
+            )),
+        };
+        Self {
+            transport_cell: std::sync::Arc::new(std::sync::OnceLock::from(transport)),
+            overlay_mode: Some(mode),
+            ..self
+        }
+    }
+
+    /// The mode of the overlay this client was built with, `None` for a client without one.
+    pub fn blob_overlay_mode(&self) -> Option<OverlayMode> {
+        self.overlay_mode
+    }
+
+    /// Runs one layer through the pull pipeline from a lookup hit instead of the network.
+    ///
+    /// Same caps and pipeline as [`pull_layer`](Self::pull_layer); a short read is a digest mismatch (65), never
+    /// a retryable short read.
+    ///
+    /// # Errors
+    ///
+    /// As `pull_layer`, with the short-read difference above.
+    pub async fn extract_layer_from_stream(
+        &self,
+        stream: crate::blob_lookup::LookupStream,
+        layer: &crate::Descriptor,
+        output_dir: &std::path::Path,
+    ) -> std::result::Result<(), ClientError> {
+        let (blob_total_size, decompressed_cap) = layer_caps(layer)?;
+        let label = layer.digest.clone();
+        let job = LayerJob::new(
+            layer,
+            blob_total_size,
+            decompressed_cap,
+            label,
+            ShortRead::DigestMismatch,
+        )?;
+        log::info!(
+            "Extracting layer {} from a local blob to {}",
+            job.layer_digest.to_short_string(),
+            output_dir.display()
+        );
+        extract_layer_from_reader(stream.reader, job, output_dir, transport::no_progress()).await
+    }
+
+    /// Streams one raw blob into `writer` under the blob caps, verifying its digest.
+    ///
+    /// The stream is capped at the descriptor's size, so a registry streaming past it cannot fill the disk; a short
+    /// delivery is [`ClientError::ShortBlobRead`] (retryable) and wrong bytes are [`ClientError::DigestMismatch`].
+    /// The writer publishes only after both checks pass.
+    ///
+    /// # Errors
+    ///
+    /// Transport failure, [`ClientError::DigestMismatch`], [`ClientError::ShortBlobRead`], or a write failure.
+    pub async fn pull_blob_into(
+        &self,
+        identifier: &crate::PinnedOciIdentifier,
+        descriptor: &crate::Descriptor,
+        writer: crate::blob_lookup::BlobWriter,
+    ) -> std::result::Result<crate::blob_lookup::WriteOutcome, ClientError> {
+        use std::io::Read as _;
+        use tokio_util::io::SyncIoBridge;
+
+        let size = u64::try_from(descriptor.size).map_err(|_| {
+            ClientError::InvalidManifest(format!(
+                "blob descriptor size '{}' is not a byte count",
+                descriptor.size
+            ))
+        })?;
+        let digest = Digest::try_from(descriptor.digest.as_str()).map_err(|e| {
+            ClientError::InvalidManifest(format!("blob digest '{}' is malformed: {e}", descriptor.digest))
+        })?;
+        let image = self.transport_reference(identifier);
+        self.transport()
+            .ensure_auth(&image, crate::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
+        let stream = self
+            .transport()
+            .pull_blob_streaming(&image, &digest)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
+
+        let outcome = tokio::task::spawn_blocking(move || -> std::result::Result<_, ClientError> {
+            let mut writer = writer;
+            let mut capped = SyncIoBridge::new(tokio::io::AsyncReadExt::take(stream, size));
+            let mut buffer = vec![0u8; 64 * 1024];
+            let mut received = 0u64;
+            loop {
+                let read = capped.read(&mut buffer).map_err(|source| ClientError::Io {
+                    path: std::path::PathBuf::from("<blob stream>"),
+                    source,
+                })?;
+                if read == 0 {
+                    break;
+                }
+                received += read as u64;
+                writer.write(&buffer[..read]).map_err(|source| ClientError::Io {
+                    path: writer.root().to_path_buf(),
+                    source,
+                })?;
+            }
+            if received != size {
+                return Err(ClientError::ShortBlobRead {
+                    expected: size,
+                    actual: received,
+                });
+            }
+            writer.finish().map_err(client_error_from_lookup)
+        })
+        .await
+        .map_err(ClientError::internal)??;
+        Ok(outcome)
     }
 
     /// Replaces a built client's whole mirror map; outside the crate only this seam,
@@ -843,34 +1024,28 @@ impl Client {
     /// The content comes back unsigned; every caller must sign it with
     /// `codesign::sign_extracted_content` before anything reads it. Callers create
     /// `output_dir` and write the digest marker.
+    ///
+    /// With a blob cache attached and a `cache_key` (the caller's logical registry, never the mirror-rewritten host),
+    /// the verified compressed bytes are also published into the cache; a cache failure is one warning, never a
+    /// failed pull.
     pub async fn pull_layer(
         &self,
         identifier: &crate::PinnedOciIdentifier,
         layer: &crate::Descriptor,
         output_dir: &std::path::Path,
+        cache_key: Option<&str>,
     ) -> std::result::Result<(), ClientError> {
-        // A non-positive or over-`u64` size is a malformed manifest: it would collapse
-        // the compressed cap to zero and the decompressed cap to its floor.
-        let blob_total_size = match u64::try_from(layer.size) {
-            Ok(size) if size > 0 => size,
-            _ => {
-                return Err(ClientError::InvalidManifest(format!(
-                    "layer descriptor size '{}' is not a positive byte count",
-                    layer.size
-                )));
-            }
-        };
-
-        // Decompressed-side cap (CWE-400), so a high-ratio stream cannot exhaust disk
-        // before the digest check fires: 100x covers realistic xz ratios, 256 MiB floors small layers.
-        const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
-        const DECOMPRESSED_CAP_MINIMUM: u64 = 256 << 20; // 256 MiB
-        let decompressed_cap =
-            (blob_total_size.saturating_mul(DECOMPRESSED_CAP_MULTIPLIER)).max(DECOMPRESSED_CAP_MINIMUM);
-
-        self.pull_layer_with_caps(identifier, layer, output_dir, blob_total_size, decompressed_cap)
-            .await
-            .map_err(|e| self.via_mirror(identifier, &self.transport_reference(identifier), e))
+        let (blob_total_size, decompressed_cap) = layer_caps(layer)?;
+        self.pull_layer_with_caps(
+            identifier,
+            layer,
+            output_dir,
+            blob_total_size,
+            decompressed_cap,
+            cache_key,
+        )
+        .await
+        .map_err(|e| self.via_mirror(identifier, &self.transport_reference(identifier), e))
     }
 
     /// [`pull_layer`] with the decompressed cap injected, so tests can reach
@@ -882,29 +1057,24 @@ impl Client {
         output_dir: &std::path::Path,
         blob_total_size: u64,
         decompressed_cap: u64,
+        cache_key: Option<&str>,
     ) -> std::result::Result<(), ClientError> {
-        use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
-        use hashing_reader::HashingAsyncReader;
-        use progress_reader::ProgressReader;
-        use tokio::io::BufReader;
-        use tokio_util::io::SyncIoBridge;
-
-        let blob_compression = crate::media_type::compression_for(&layer.media_type).ok_or_else(|| {
-            ClientError::InvalidManifest(format!("unsupported layer media type: {}", layer.media_type))
-        })?;
-        let content_path = output_dir.join("content");
+        let mut job = LayerJob::new(
+            layer,
+            blob_total_size,
+            decompressed_cap,
+            identifier.to_string(),
+            ShortRead::Retryable,
+        )?;
 
         let image = self.transport_reference(identifier);
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
             .await?;
 
-        let layer_digest = Digest::try_from(layer.digest.as_str())
-            .map_err(|e| ClientError::InvalidManifest(format!("layer digest '{}' is malformed: {e}", layer.digest)))?;
-
         log::info!(
             "Downloading layer {} to {}",
-            layer_digest.to_short_string(),
+            job.layer_digest.to_short_string(),
             output_dir.display()
         );
 
@@ -913,161 +1083,29 @@ impl Client {
             .bytes(format!("Downloading '{identifier}'"), blob_total_size);
         let on_progress = bar.callback();
 
-        let raw_stream = self.transport().pull_blob_streaming(&image, &layer_digest).await?;
+        let raw_stream = self.transport().pull_blob_streaming(&image, &job.layer_digest).await?;
 
-        // Both caps and the pipeline order: `subsystem-oci.md § Pull Path`. Hashing and
-        // progress sit on the compressed side: the digest is over compressed bytes.
-        use tokio::io::AsyncReadExt as _;
-        let capped_stream = raw_stream.take(blob_total_size);
+        job.tee = self.open_tee(cache_key, &job.layer_digest).await;
+        extract_layer_from_reader(raw_stream, job, output_dir, on_progress).await
+    }
 
-        let hashing_reader = HashingAsyncReader::new(capped_stream, layer_digest.algorithm());
-        let progress_reader = ProgressReader::new(hashing_reader, on_progress);
-
-        // Extract verbatim (strip = 0): strip and prefix apply at assemble time, since
-        // baking them in corrupts the shared layer store for packages reusing the blob.
-        let content_path_clone = content_path.clone();
-        let identifier_label = identifier.to_string();
-
-        // Occupancy budget of this blocking section: `subsystem-oci.md § Pull Path`.
-        type PipelineResult = (archive::Result<()>, (crate::Digest, u64), bool);
-
-        // Buffers decoder reads so each poll does not cross SyncIoBridge's `block_on`;
-        // the 8 KiB default crosses it ~32x more often.
-        const BUF_READER_CAPACITY: usize = 256 * 1024;
-
-        // `take(cap + 1)`: reaching the probe byte means the output exceeds the cap, surfaced
-        // as `DecompressionCapExceeded`, never misread as a digest mismatch or tar error.
-        let cap_with_probe = decompressed_cap.saturating_add(1);
-
-        /// Drains the compressed bytes tar left unread, so the digest covers the whole
-        /// blob (`subsystem-oci.md § Pull Path`, "Drain before finalize"); runs on the
-        /// extraction-error path too. Skipped on `cap_exceeded`, where it would only pull a
-        /// known bomb. Swallows its own error, or the fork's `VerifyingStream` pre-empts
-        /// the canonical digest check.
-        fn drain_compressed_remainder<R: tokio::io::AsyncRead + Unpin>(reader: R, cap_exceeded: bool) -> R {
-            if cap_exceeded {
-                return reader;
+    /// The cache writer for one network layer pull, or `None` when there is no cache, no key, or the cache refuses.
+    async fn open_tee(&self, cache_key: Option<&str>, digest: &Digest) -> Option<crate::blob_lookup::BlobWriter> {
+        let cache = self.blob_cache.clone()?;
+        let registry = cache_key?.to_string();
+        let digest = digest.clone();
+        let opened = tokio::task::spawn_blocking(move || cache.writer(&registry, &digest)).await;
+        match opened {
+            Ok(Ok(writer)) => Some(writer),
+            Ok(Err(error)) => {
+                log::warn!("blob cache is not written for this pull: {error}");
+                None
             }
-            let mut bridge = SyncIoBridge::new(reader);
-            if let Err(error) = std::io::copy(&mut bridge, &mut std::io::sink()) {
-                log::debug!("draining the trailing compressed bytes failed: {error}");
+            Err(error) => {
+                log::warn!("blob cache is not written for this pull: {error}");
+                None
             }
-            bridge.into_inner()
         }
-
-        let (extract_result, digest_result, cap_exceeded): PipelineResult = match blob_compression {
-            compression::CompressionAlgorithm::Lzma => {
-                let decoder = XzDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
-                tokio::task::spawn_blocking(move || -> PipelineResult {
-                    use std::io::Read as _;
-                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
-                    let cap_exceeded = bridge.limit() == 0;
-                    let buffered = bridge.into_inner().into_inner().into_inner();
-                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
-                        .into_inner()
-                        .into_inner();
-                    (extract_result, hashing_reader.finalize(), cap_exceeded)
-                })
-                .await
-                .map_err(ClientError::internal)?
-            }
-            compression::CompressionAlgorithm::Gzip => {
-                let decoder = GzipDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
-                tokio::task::spawn_blocking(move || -> PipelineResult {
-                    use std::io::Read as _;
-                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
-                    let cap_exceeded = bridge.limit() == 0;
-                    let buffered = bridge.into_inner().into_inner().into_inner();
-                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
-                        .into_inner()
-                        .into_inner();
-                    (extract_result, hashing_reader.finalize(), cap_exceeded)
-                })
-                .await
-                .map_err(ClientError::internal)?
-            }
-            compression::CompressionAlgorithm::Zstd => {
-                let decoder = ZstdDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
-                tokio::task::spawn_blocking(move || -> PipelineResult {
-                    use std::io::Read as _;
-                    let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
-                    let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
-                    let cap_exceeded = bridge.limit() == 0;
-                    let buffered = bridge.into_inner().into_inner().into_inner();
-                    let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
-                        .into_inner()
-                        .into_inner();
-                    (extract_result, hashing_reader.finalize(), cap_exceeded)
-                })
-                .await
-                .map_err(ClientError::internal)?
-            }
-            // Unreachable while no layer media type spells bzip2 (adding one is a wire-format
-            // change); refused like `None` so the refusal names it.
-            compression::CompressionAlgorithm::Bzip2 => {
-                return Err(ClientError::InvalidManifest(format!(
-                    "bzip2 layers are not supported (media type: {})",
-                    layer.media_type
-                )));
-            }
-            compression::CompressionAlgorithm::None => {
-                return Err(ClientError::InvalidManifest(format!(
-                    "uncompressed layers are not supported (media type: {})",
-                    layer.media_type
-                )));
-            }
-        };
-
-        // Cap first: an overrun is a bomb whatever the hash, and the hash of a truncated
-        // prefix would misreport it as a digest mismatch.
-        if cap_exceeded {
-            return Err(ClientError::DecompressionCapExceeded { cap: decompressed_cap });
-        }
-
-        let (computed_digest, bytes_read) = digest_result;
-
-        // Completeness before digest: a prefix cannot hash to the whole, so a short
-        // delivery would misreport as wrong content.
-        if bytes_read != blob_total_size {
-            return Err(ClientError::ShortBlobRead {
-                expected: blob_total_size,
-                actual: bytes_read,
-            });
-        }
-
-        // Digest before the extraction result: wrong bytes (CWE-345) can fail extraction
-        // with a format error, and the mismatch must win the attribution.
-        if computed_digest != layer_digest {
-            return Err(ClientError::DigestMismatch {
-                expected: layer_digest.to_string(),
-                actual: computed_digest.to_string(),
-            });
-        }
-
-        // Bytes verified, so an extraction error is a corrupt archive; `output_dir` is
-        // left for the caller's TempStore. A fork `DigestError` still maps to DigestMismatch.
-        if let Err(archive_err) = extract_result {
-            let mut current: Option<&dyn std::error::Error> = Some(&archive_err);
-            while let Some(err) = current {
-                if let Some(io_err) = err.downcast_ref::<std::io::Error>()
-                    && let Some(client_err) = native_transport::check_fork_io_error(io_err)
-                {
-                    return Err(client_err);
-                }
-                current = err.source();
-            }
-            return Err(ClientError::internal(archive_err));
-        }
-
-        log::debug!(
-            "[{}] layer {} extracted to {}",
-            identifier_label,
-            layer_digest.to_short_string(),
-            content_path.display()
-        );
-        Ok(())
     }
 
     // ── Package push ─────────────────────────────────────────────────
@@ -1656,6 +1694,289 @@ impl Client {
     }
 }
 
+/// How a delivery that ends before the descriptor's size is reported.
+#[derive(Clone, Copy)]
+enum ShortRead {
+    /// A network stream cut short: [`ClientError::ShortBlobRead`], which a caller may retry.
+    Retryable,
+    /// A local file that is too short is wrong content: the prefix hashes to a different digest.
+    DigestMismatch,
+}
+
+/// What the layer pipeline needs besides its byte source.
+struct LayerJob<'a> {
+    layer: &'a crate::Descriptor,
+    layer_digest: Digest,
+    compression: compression::CompressionAlgorithm,
+    blob_total_size: u64,
+    decompressed_cap: u64,
+    label: String,
+    short_read: ShortRead,
+    /// Receives a copy of the compressed bytes; published only after the digest check passes.
+    tee: Option<crate::blob_lookup::BlobWriter>,
+}
+
+impl<'a> LayerJob<'a> {
+    /// Checks the descriptor before any byte moves: media type, digest and the caps handed in.
+    fn new(
+        layer: &'a crate::Descriptor,
+        blob_total_size: u64,
+        decompressed_cap: u64,
+        label: String,
+        short_read: ShortRead,
+    ) -> std::result::Result<Self, ClientError> {
+        let compression = crate::media_type::compression_for(&layer.media_type).ok_or_else(|| {
+            ClientError::InvalidManifest(format!("unsupported layer media type: {}", layer.media_type))
+        })?;
+        let layer_digest = Digest::try_from(layer.digest.as_str())
+            .map_err(|e| ClientError::InvalidManifest(format!("layer digest '{}' is malformed: {e}", layer.digest)))?;
+        Ok(Self {
+            layer,
+            layer_digest,
+            compression,
+            blob_total_size,
+            decompressed_cap,
+            label,
+            short_read,
+            tee: None,
+        })
+    }
+}
+
+/// The compressed and decompressed ceilings of one layer, from its descriptor.
+fn layer_caps(layer: &crate::Descriptor) -> std::result::Result<(u64, u64), ClientError> {
+    // A non-positive or over-`u64` size is a malformed manifest: it would collapse
+    // the compressed cap to zero and the decompressed cap to its floor.
+    let blob_total_size = match u64::try_from(layer.size) {
+        Ok(size) if size > 0 => size,
+        _ => {
+            return Err(ClientError::InvalidManifest(format!(
+                "layer descriptor size '{}' is not a positive byte count",
+                layer.size
+            )));
+        }
+    };
+
+    // Decompressed-side cap (CWE-400), so a high-ratio stream cannot exhaust disk
+    // before the digest check fires: 100x covers realistic xz ratios, 256 MiB floors small layers.
+    const DECOMPRESSED_CAP_MULTIPLIER: u64 = 100;
+    const DECOMPRESSED_CAP_MINIMUM: u64 = 256 << 20; // 256 MiB
+    let decompressed_cap = (blob_total_size.saturating_mul(DECOMPRESSED_CAP_MULTIPLIER)).max(DECOMPRESSED_CAP_MINIMUM);
+    Ok((blob_total_size, decompressed_cap))
+}
+
+/// Publishes the cache copy of a layer whose digest just verified; any failure is one warning.
+async fn publish_tee(slot: tee_reader::TeeSlot) {
+    let Some(writer) = slot.take() else {
+        return;
+    };
+    let digest = writer.digest().clone();
+    match tokio::task::spawn_blocking(move || writer.finish()).await {
+        Ok(Ok(outcome)) => log::debug!("blob cache copy of {digest}: {outcome:?}"),
+        Ok(Err(error)) => log::warn!("blob cache copy of {digest} not published: {error}"),
+        Err(error) => log::warn!("blob cache copy of {digest} not published: {error}"),
+    }
+}
+
+/// A blob write failure in the client's vocabulary: a wrong hash stays a digest mismatch (65), a disk failure is I/O.
+fn client_error_from_lookup(error: crate::blob_lookup::LookupError) -> ClientError {
+    use crate::blob_lookup::LookupError;
+    match error {
+        LookupError::DigestMismatch { expected, actual, .. } => ClientError::DigestMismatch { expected, actual },
+        LookupError::Io { path, source } => ClientError::Io { path, source },
+        other => ClientError::internal(other),
+    }
+}
+
+/// The layer pipeline from the compressed byte source on: caps, hash, decode, extract, then the post-drain checks
+/// (`subsystem-oci.md § Pull Path`). Network and file sources share it.
+async fn extract_layer_from_reader<S>(
+    source: S,
+    job: LayerJob<'_>,
+    output_dir: &std::path::Path,
+    on_progress: transport::ProgressFn,
+) -> std::result::Result<(), ClientError>
+where
+    S: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use async_compression::tokio::bufread::{GzipDecoder, XzDecoder, ZstdDecoder};
+    use hashing_reader::HashingAsyncReader;
+    use progress_reader::ProgressReader;
+    use tokio::io::BufReader;
+    use tokio_util::io::SyncIoBridge;
+
+    let LayerJob {
+        layer,
+        layer_digest,
+        compression: blob_compression,
+        blob_total_size,
+        decompressed_cap,
+        label: identifier_label,
+        short_read,
+        tee,
+    } = job;
+    let content_path = output_dir.join("content");
+
+    // Both caps and the pipeline order: `subsystem-oci.md § Pull Path`. Hashing and
+    // progress sit on the compressed side: the digest is over compressed bytes.
+    use tokio::io::AsyncReadExt as _;
+    let capped_stream = source.take(blob_total_size);
+
+    // The cache copy sees exactly the bytes the digest covers, so it can be published once that digest passes.
+    let tee_slot = tee_reader::TeeSlot::new(tee);
+    let teed_stream = tee_reader::TeeReader::new(capped_stream, tee_slot.clone());
+
+    let hashing_reader = HashingAsyncReader::new(teed_stream, layer_digest.algorithm());
+    let progress_reader = ProgressReader::new(hashing_reader, on_progress);
+
+    // Extract verbatim (strip = 0): strip and prefix apply at assemble time, since
+    // baking them in corrupts the shared layer store for packages reusing the blob.
+    let content_path_clone = content_path.clone();
+
+    // Occupancy budget of this blocking section: `subsystem-oci.md § Pull Path`.
+    type PipelineResult = (archive::Result<()>, (crate::Digest, u64), bool);
+
+    // Buffers decoder reads so each poll does not cross SyncIoBridge's `block_on`;
+    // the 8 KiB default crosses it ~32x more often.
+    const BUF_READER_CAPACITY: usize = 256 * 1024;
+
+    // `take(cap + 1)`: reaching the probe byte means the output exceeds the cap, surfaced
+    // as `DecompressionCapExceeded`, never misread as a digest mismatch or tar error.
+    let cap_with_probe = decompressed_cap.saturating_add(1);
+
+    /// Drains the compressed bytes tar left unread, so the digest covers the whole
+    /// blob (`subsystem-oci.md § Pull Path`, "Drain before finalize"); runs on the
+    /// extraction-error path too. Skipped on `cap_exceeded`, where it would only pull a
+    /// known bomb. Swallows its own error, or the fork's `VerifyingStream` pre-empts
+    /// the canonical digest check.
+    fn drain_compressed_remainder<R: tokio::io::AsyncRead + Unpin>(reader: R, cap_exceeded: bool) -> R {
+        if cap_exceeded {
+            return reader;
+        }
+        let mut bridge = SyncIoBridge::new(reader);
+        if let Err(error) = std::io::copy(&mut bridge, &mut std::io::sink()) {
+            log::debug!("draining the trailing compressed bytes failed: {error}");
+        }
+        bridge.into_inner()
+    }
+
+    let (extract_result, digest_result, cap_exceeded): PipelineResult = match blob_compression {
+        compression::CompressionAlgorithm::Lzma => {
+            let decoder = XzDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
+            tokio::task::spawn_blocking(move || -> PipelineResult {
+                use std::io::Read as _;
+                let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
+                let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
+                let cap_exceeded = bridge.limit() == 0;
+                let buffered = bridge.into_inner().into_inner().into_inner();
+                let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                    .into_inner()
+                    .into_inner();
+                (extract_result, hashing_reader.finalize(), cap_exceeded)
+            })
+            .await
+            .map_err(ClientError::internal)?
+        }
+        compression::CompressionAlgorithm::Gzip => {
+            let decoder = GzipDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
+            tokio::task::spawn_blocking(move || -> PipelineResult {
+                use std::io::Read as _;
+                let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
+                let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
+                let cap_exceeded = bridge.limit() == 0;
+                let buffered = bridge.into_inner().into_inner().into_inner();
+                let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                    .into_inner()
+                    .into_inner();
+                (extract_result, hashing_reader.finalize(), cap_exceeded)
+            })
+            .await
+            .map_err(ClientError::internal)?
+        }
+        compression::CompressionAlgorithm::Zstd => {
+            let decoder = ZstdDecoder::new(BufReader::with_capacity(BUF_READER_CAPACITY, progress_reader));
+            tokio::task::spawn_blocking(move || -> PipelineResult {
+                use std::io::Read as _;
+                let bridge = SyncIoBridge::new(decoder).take(cap_with_probe);
+                let (extract_result, bridge) = archive::extract_tar_from_reader(bridge, &content_path_clone, 0);
+                let cap_exceeded = bridge.limit() == 0;
+                let buffered = bridge.into_inner().into_inner().into_inner();
+                let hashing_reader = drain_compressed_remainder(buffered, cap_exceeded)
+                    .into_inner()
+                    .into_inner();
+                (extract_result, hashing_reader.finalize(), cap_exceeded)
+            })
+            .await
+            .map_err(ClientError::internal)?
+        }
+        // Unreachable while no layer media type spells bzip2 (adding one is a wire-format
+        // change); refused like `None` so the refusal names it.
+        compression::CompressionAlgorithm::Bzip2 => {
+            return Err(ClientError::InvalidManifest(format!(
+                "bzip2 layers are not supported (media type: {})",
+                layer.media_type
+            )));
+        }
+        compression::CompressionAlgorithm::None => {
+            return Err(ClientError::InvalidManifest(format!(
+                "uncompressed layers are not supported (media type: {})",
+                layer.media_type
+            )));
+        }
+    };
+
+    // Cap first: an overrun is a bomb whatever the hash, and the hash of a truncated
+    // prefix would misreport it as a digest mismatch.
+    if cap_exceeded {
+        return Err(ClientError::DecompressionCapExceeded { cap: decompressed_cap });
+    }
+
+    let (computed_digest, bytes_read) = digest_result;
+
+    // Completeness before digest: a prefix cannot hash to the whole, so a short
+    // delivery would misreport as wrong content.
+    if bytes_read != blob_total_size && matches!(short_read, ShortRead::Retryable) {
+        return Err(ClientError::ShortBlobRead {
+            expected: blob_total_size,
+            actual: bytes_read,
+        });
+    }
+
+    // Digest before the extraction result: wrong bytes (CWE-345) can fail extraction
+    // with a format error, and the mismatch must win the attribution.
+    if computed_digest != layer_digest {
+        return Err(ClientError::DigestMismatch {
+            expected: layer_digest.to_string(),
+            actual: computed_digest.to_string(),
+        });
+    }
+
+    publish_tee(tee_slot).await;
+
+    // Bytes verified, so an extraction error is a corrupt archive; `output_dir` is
+    // left for the caller's TempStore. A fork `DigestError` still maps to DigestMismatch.
+    if let Err(archive_err) = extract_result {
+        let mut current: Option<&dyn std::error::Error> = Some(&archive_err);
+        while let Some(err) = current {
+            if let Some(io_err) = err.downcast_ref::<std::io::Error>()
+                && let Some(client_err) = native_transport::check_fork_io_error(io_err)
+            {
+                return Err(client_err);
+            }
+            current = err.source();
+        }
+        return Err(ClientError::internal(archive_err));
+    }
+
+    log::debug!(
+        "[{}] layer {} extracted to {}",
+        identifier_label,
+        layer_digest.to_short_string(),
+        content_path.display()
+    );
+    Ok(())
+}
+
 /// Parses registry-served manifest bytes, refusing an invalid image index.
 ///
 /// The one place a [`crate::Manifest`] is decoded from registry bytes, so no caller
@@ -1666,7 +1987,7 @@ impl Client {
 ///
 /// [`ClientError::Serialization`] for non-manifest bytes, [`ClientError::InvalidImageIndex`]
 /// for an index failing [`crate::manifest::validate_image_index`].
-fn parse_registry_manifest(bytes: &[u8]) -> std::result::Result<crate::Manifest, ClientError> {
+pub(crate) fn parse_registry_manifest(bytes: &[u8]) -> std::result::Result<crate::Manifest, ClientError> {
     let manifest: crate::Manifest = serde_json::from_slice(bytes).map_err(ClientError::Serialization)?;
     if let crate::Manifest::ImageIndex(index) = &manifest {
         crate::manifest::validate_image_index(index)?;
@@ -2611,7 +2932,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         match result {
             Err(ClientError::DigestMismatch { expected, actual }) => {
                 assert_eq!(
@@ -2754,7 +3075,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         // A mirrored failure carries the routing that produced it (#327); the
         // verdict underneath must still be the digest mismatch, unchanged.
         let inner = match result {
@@ -2821,7 +3142,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         // If the pipeline succeeds or fails with Internal (codesign, tar), that's fine;
         // the key invariant is that no .tar.gz blob file exists in output_dir.
         match &result {
@@ -2881,7 +3202,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         match result {
             Err(ClientError::Internal(_)) => {
                 // expected — garbage tar body wrapping valid xz compression → archive error
@@ -2940,7 +3261,7 @@ mod tests {
 
         let blob_total_size = tar_gz_bytes.len() as u64;
         let result = client
-            .pull_layer_with_caps(&id, &layer, dir.path(), blob_total_size, 512)
+            .pull_layer_with_caps(&id, &layer, dir.path(), blob_total_size, 512, None)
             .await;
         match result {
             Err(ClientError::DecompressionCapExceeded { cap }) => {
@@ -2973,7 +3294,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         match result {
             Err(ClientError::InvalidManifest(msg)) => {
                 assert!(
@@ -3018,7 +3339,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         client
-            .pull_layer(&id, &layer, dir.path())
+            .pull_layer(&id, &layer, dir.path(), None)
             .await
             .expect("pull_layer must extract the layer");
 
@@ -3038,6 +3359,237 @@ mod tests {
             b"tool bytes\n",
             "extracted file contents must be intact"
         );
+    }
+
+    // ── Layer source seams: local streams, cache tee, raw blob pulls ─────
+
+    /// A tar.gz layer holding `topdir/bin/tool`, its descriptor and bytes.
+    fn tool_layer() -> (crate::Descriptor, Vec<u8>) {
+        let bytes = make_minimal_tar_gz(b"tool bytes\n", "topdir/bin/tool");
+        let layer = crate::Descriptor {
+            media_type: crate::media_type::MEDIA_TYPE_TAR_GZ.to_string(),
+            digest: Algorithm::Sha256.hash(&bytes).to_string(),
+            size: bytes.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        (layer, bytes)
+    }
+
+    fn pinned_for(layer: &crate::Descriptor) -> crate::PinnedOciIdentifier {
+        test_pinned(layer.digest.strip_prefix("sha256:").unwrap())
+    }
+
+    /// A lookup stream over a file holding `bytes`, as a blob directory hit would hand it out.
+    async fn lookup_stream_of(dir: &std::path::Path, bytes: &[u8]) -> crate::blob_lookup::LookupStream {
+        let path = dir.join("data");
+        std::fs::write(&path, bytes).unwrap();
+        crate::blob_lookup::LookupStream {
+            origin: crate::blob_lookup::LookupOrigin::Cache,
+            reader: tokio::fs::File::open(&path).await.unwrap(),
+            size: bytes.len() as u64,
+        }
+    }
+
+    const CACHE_REGISTRY: &str = "registry.example";
+
+    fn cached_blob(cache_root: &std::path::Path, layer: &crate::Descriptor) -> std::path::PathBuf {
+        let digest = Digest::try_from(layer.digest.as_str()).unwrap();
+        crate::blob_lookup::blob_data_path(cache_root, CACHE_REGISTRY, &digest)
+    }
+
+    #[tokio::test]
+    async fn extract_from_stream_matches_network() {
+        let (layer, bytes) = tool_layer();
+        let data = StubTransportData::new();
+        data.write().blobs.insert(layer.digest.clone(), bytes.clone());
+        let client = stub(&data);
+        let id = pinned_for(&layer);
+
+        let network = tempfile::tempdir().unwrap();
+        client.pull_layer(&id, &layer, network.path(), None).await.unwrap();
+
+        let source = tempfile::tempdir().unwrap();
+        let stream = lookup_stream_of(source.path(), &bytes).await;
+        let local = tempfile::tempdir().unwrap();
+        client
+            .extract_layer_from_stream(stream, &layer, local.path())
+            .await
+            .unwrap();
+
+        let relative = "content/topdir/bin/tool";
+        assert_eq!(
+            std::fs::read(local.path().join(relative)).unwrap(),
+            std::fs::read(network.path().join(relative)).unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_from_stream_short_read_is_digest_mismatch() {
+        let (layer, bytes) = tool_layer();
+        let client = stub(&StubTransportData::new());
+
+        let source = tempfile::tempdir().unwrap();
+        let stream = lookup_stream_of(source.path(), &bytes[..bytes.len() / 2]).await;
+        let output = tempfile::tempdir().unwrap();
+        let result = client.extract_layer_from_stream(stream, &layer, output.path()).await;
+        match result {
+            Err(ClientError::DigestMismatch { expected, .. }) => assert_eq!(expected, layer.digest),
+            other => panic!("a short local file must be a digest mismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tee_writes_only_verified() {
+        let (layer, bytes) = tool_layer();
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = crate::blob_lookup::BlobCacheDir::at(cache_root.path().to_path_buf());
+        let id = pinned_for(&layer);
+
+        // Wrong bytes of the declared length: the digest fails, so nothing lands in the cache.
+        let tampered = vec![7u8; bytes.len()];
+        let data = StubTransportData::new();
+        data.write().blobs.insert(layer.digest.clone(), tampered);
+        let client = stub(&data).with_blob_cache(cache.clone());
+        let output = tempfile::tempdir().unwrap();
+        let result = client
+            .pull_layer(&id, &layer, output.path(), Some(CACHE_REGISTRY))
+            .await;
+        assert!(
+            matches!(result, Err(ClientError::DigestMismatch { .. })),
+            "got {result:?}"
+        );
+        assert!(!cached_blob(cache_root.path(), &layer).exists());
+
+        // A cut-short delivery is not cached either.
+        data.write()
+            .blobs
+            .insert(layer.digest.clone(), bytes[..bytes.len() / 2].to_vec());
+        let output = tempfile::tempdir().unwrap();
+        let result = client
+            .pull_layer(&id, &layer, output.path(), Some(CACHE_REGISTRY))
+            .await;
+        assert!(
+            matches!(result, Err(ClientError::ShortBlobRead { .. })),
+            "got {result:?}"
+        );
+        assert!(!cached_blob(cache_root.path(), &layer).exists());
+
+        // No key, no copy, even with a cache attached.
+        data.write().blobs.insert(layer.digest.clone(), bytes.clone());
+        let output = tempfile::tempdir().unwrap();
+        client.pull_layer(&id, &layer, output.path(), None).await.unwrap();
+        assert!(!cached_blob(cache_root.path(), &layer).exists());
+
+        // Verified bytes land under the caller's registry, byte for byte.
+        let output = tempfile::tempdir().unwrap();
+        client
+            .pull_layer(&id, &layer, output.path(), Some(CACHE_REGISTRY))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(cached_blob(cache_root.path(), &layer)).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn tee_failure_does_not_fail_pull() {
+        let (layer, bytes) = tool_layer();
+        let data = StubTransportData::new();
+        data.write().blobs.insert(layer.digest.clone(), bytes);
+        // A regular file where the cache root should be: the writer cannot create its staging directory.
+        let blocker = tempfile::NamedTempFile::new().unwrap();
+        let cache = crate::blob_lookup::BlobCacheDir::at(blocker.path().to_path_buf());
+        let client = stub(&data).with_blob_cache(cache);
+
+        let output = tempfile::tempdir().unwrap();
+        client
+            .pull_layer(&pinned_for(&layer), &layer, output.path(), Some(CACHE_REGISTRY))
+            .await
+            .expect("an unusable cache must not fail the pull");
+        assert!(output.path().join("content/topdir/bin/tool").is_file());
+    }
+
+    #[tokio::test]
+    async fn retry_uses_fresh_output_dir() {
+        let (layer, bytes) = tool_layer();
+        let cache_root = tempfile::tempdir().unwrap();
+        let data = StubTransportData::new();
+        let client = stub(&data).with_blob_cache(crate::blob_lookup::BlobCacheDir::at(cache_root.path().to_path_buf()));
+        let id = pinned_for(&layer);
+
+        data.write()
+            .blobs
+            .insert(layer.digest.clone(), bytes[..bytes.len() / 2].to_vec());
+        let first = tempfile::tempdir().unwrap();
+        let result = client.pull_layer(&id, &layer, first.path(), Some(CACHE_REGISTRY)).await;
+        assert!(
+            matches!(result, Err(ClientError::ShortBlobRead { .. })),
+            "got {result:?}"
+        );
+
+        data.write().blobs.insert(layer.digest.clone(), bytes.clone());
+        let second = tempfile::tempdir().unwrap();
+        client
+            .pull_layer(&id, &layer, second.path(), Some(CACHE_REGISTRY))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(second.path().join("content/topdir/bin/tool")).unwrap(),
+            b"tool bytes\n"
+        );
+        assert_eq!(std::fs::read(cached_blob(cache_root.path(), &layer)).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn pull_blob_into_verifies_digest() {
+        let payload = b"raw blob payload".to_vec();
+        let digest = Algorithm::Sha256.hash(&payload);
+        let descriptor = crate::Descriptor {
+            media_type: "application/octet-stream".to_string(),
+            digest: digest.to_string(),
+            size: payload.len() as i64,
+            urls: None,
+            artifact_type: None,
+            annotations: None,
+        };
+        let id = pinned_for(&descriptor);
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = crate::blob_lookup::BlobCacheDir::at(cache_root.path().to_path_buf());
+        let published = crate::blob_lookup::blob_data_path(cache_root.path(), CACHE_REGISTRY, &digest);
+
+        // Wrong bytes of the declared length.
+        let data = StubTransportData::new();
+        data.write()
+            .blobs
+            .insert(descriptor.digest.clone(), vec![1u8; payload.len()]);
+        let client = stub(&data);
+        let writer = cache.writer(CACHE_REGISTRY, &digest).unwrap();
+        let result = client.pull_blob_into(&id, &descriptor, writer).await;
+        assert!(
+            matches!(result, Err(ClientError::DigestMismatch { .. })),
+            "got {result:?}"
+        );
+        assert!(!published.exists());
+
+        // Too few bytes.
+        data.write()
+            .blobs
+            .insert(descriptor.digest.clone(), payload[..4].to_vec());
+        let writer = cache.writer(CACHE_REGISTRY, &digest).unwrap();
+        let result = client.pull_blob_into(&id, &descriptor, writer).await;
+        assert!(
+            matches!(result, Err(ClientError::ShortBlobRead { .. })),
+            "got {result:?}"
+        );
+        assert!(!published.exists());
+
+        // Bytes past the declared size are cut off by the cap, so the verified prefix is what lands.
+        let mut long = payload.clone();
+        long.extend_from_slice(b"trailing");
+        data.write().blobs.insert(descriptor.digest.clone(), long);
+        let writer = cache.writer(CACHE_REGISTRY, &digest).unwrap();
+        client.pull_blob_into(&id, &descriptor, writer).await.unwrap();
+        assert_eq!(std::fs::read(&published).unwrap(), payload);
     }
 
     // ── Undrained-stream regression (compressed-side digest) ─────────
@@ -3084,7 +3636,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         client
-            .pull_layer(&id, &layer, dir.path())
+            .pull_layer(&id, &layer, dir.path(), None)
             .await
             .expect("a trailer left in the final chunk must be drained, not reported as a digest mismatch");
 
@@ -3129,7 +3681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         client
-            .pull_layer(&id, &layer, dir.path())
+            .pull_layer(&id, &layer, dir.path(), None)
             .await
             .expect("an xz footer left in the final chunk must be drained, not reported as a digest mismatch");
 
@@ -3172,7 +3724,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         client
-            .pull_layer(&id, &layer, dir.path())
+            .pull_layer(&id, &layer, dir.path(), None)
             .await
             .expect("a zstd checksum left in the final chunk must be drained, not reported as a digest mismatch");
 
@@ -3210,7 +3762,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        match client.pull_layer(&id, &layer, dir.path()).await {
+        match client.pull_layer(&id, &layer, dir.path(), None).await {
             Err(ClientError::DigestMismatch { expected, actual }) => {
                 assert_eq!(expected, wrong_digest, "the declared digest must be reported");
                 assert_ne!(actual, wrong_digest, "the computed digest must differ");
@@ -3255,7 +3807,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        match client.pull_layer(&id, &layer, dir.path()).await {
+        match client.pull_layer(&id, &layer, dir.path(), None).await {
             Err(ClientError::ShortBlobRead { expected, actual }) => {
                 assert_eq!(expected, declared_size, "expected must be the declared blob size");
                 assert_eq!(actual, split as u64, "actual must be the number of bytes delivered");
@@ -3516,7 +4068,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
 
         // A cut stream and a lying registry are distinguishable after all: the
         // declared size is manifest-verified, so `bytes_read` short of it is
@@ -3576,7 +4128,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
 
         // The gzip header is invalid, so extraction fails too — but the
         // completeness check runs first and is the more precise answer: the
@@ -3701,7 +4253,7 @@ mod tests {
         // pull_layer must NOT hang (take(layer.size) bounds read) and must return an error.
         // DigestMismatch is expected: the first declared_size bytes of the served stream
         // do not hash to the declared digest.
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         match result {
             Ok(()) => panic!(
                 "over-length compressed stream with mismatched content must not succeed; \
@@ -3742,7 +4294,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         assert!(
             result.is_ok(),
             "exact-length compressed stream must succeed: {result:?}"
@@ -3788,7 +4340,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
 
-        let result = client.pull_layer(&id, &layer, dir.path()).await;
+        let result = client.pull_layer(&id, &layer, dir.path(), None).await;
         assert!(
             result.is_ok(),
             "small valid archive must not be affected by decompressed-side cap: {result:?}"
@@ -4739,7 +5291,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
 
             // Outcome is irrelevant — auth must precede the blob fetch either way.
-            let _ = client.pull_layer(&id, &layer, dir.path()).await;
+            let _ = client.pull_layer(&id, &layer, dir.path(), None).await;
             let calls = auth_calls(&data);
             assert_eq!(calls.len(), 1);
             assert!(matches!(calls[0].1, RegistryOperation::Pull));
@@ -6156,7 +6708,7 @@ mod tests {
             // Outcome is irrelevant (the recording transport yields an empty
             // stream, so extraction fails downstream) — only the reference
             // handed to pull_blob_streaming matters.
-            let _ = client.pull_layer(&pinned, &layer, dir.path()).await;
+            let _ = client.pull_layer(&pinned, &layer, dir.path(), None).await;
             let (registry, repository) = data.call("pull_blob_streaming");
             assert_eq!(
                 registry, MIRROR_HOST,
@@ -7556,6 +8108,72 @@ mod tests {
                 [("example.com".to_string(), crate::RegistryOperation::Delete)],
                 "a delete token is minted at the canonical host, unlike a pull"
             );
+        }
+    }
+
+    /// A blob overlay swaps the transport and nothing else (`adr_package_export_import.md` DV-1).
+    mod blob_overlay {
+        use super::*;
+        use crate::blob_lookup::BlobLookup;
+
+        fn overlaid(client: Client, mode: OverlayMode) -> Client {
+            client.with_blob_overlay(
+                mode,
+                std::path::PathBuf::from("home-blobs"),
+                std::sync::Arc::new(BlobLookup::default()),
+                "example.com",
+                Vec::new(),
+            )
+        }
+
+        fn configured(data: &StubTransportData) -> Client {
+            let mut client = stub(data).with_test_mirror("example.com", "mirror.invalid", "upstream");
+            client.lock_timeout = std::time::Duration::from_secs(17);
+            client.tag_chunk_size = 7;
+            client.repository_chunk_size = 9;
+            client
+        }
+
+        #[tokio::test]
+        async fn blob_overlay_keeps_mirrors() {
+            let data = StubTransportData::new();
+            for mode in [OverlayMode::Live, OverlayMode::LookupOnly] {
+                let original = configured(&data);
+                let before = original.transport_reference(&test_identifier("1.0"));
+
+                let overlay = overlaid(original.clone(), mode);
+
+                assert_eq!(overlay.blob_overlay_mode(), Some(mode));
+                assert_eq!(
+                    overlay.transport_reference(&test_identifier("1.0")).to_string(),
+                    before.to_string()
+                );
+                assert_eq!(overlay.lock_timeout(), std::time::Duration::from_secs(17));
+                assert_eq!((overlay.tag_chunk_size, overlay.repository_chunk_size), (7, 9));
+                assert!(
+                    !std::sync::Arc::ptr_eq(&overlay.transport_cell, &original.transport_cell),
+                    "the overlay never shares the original's transport cell"
+                );
+                assert_eq!(original.blob_overlay_mode(), None, "the original is untouched");
+            }
+        }
+
+        #[tokio::test]
+        async fn lookup_only_overlay_leaves_the_original_transport_unused() {
+            let data = StubTransportData::new();
+            let overlay = overlaid(configured(&data), OverlayMode::LookupOnly);
+
+            overlay
+                .transport()
+                .ensure_auth(
+                    &overlay.transport_reference(&test_identifier("1.0")),
+                    crate::RegistryOperation::Pull,
+                )
+                .await
+                .expect("a lookup transport needs no credential");
+
+            assert!(data.read().calls.is_empty(), "calls: {:?}", data.read().calls);
+            assert!(data.read().auth_calls.is_empty());
         }
     }
 }

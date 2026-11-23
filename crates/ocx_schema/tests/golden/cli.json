@@ -330,6 +330,59 @@
         "env": "OCX_INDEX"
       },
       {
+        "id": "blob_dir",
+        "long": "blob-dir",
+        "value": {
+          "type": "path"
+        },
+        "required": false,
+        "required_unless": [],
+        "num_args": {
+          "min": 1,
+          "max": 1
+        },
+        "repeatable": true,
+        "global": false,
+        "hidden": false,
+        "default": [],
+        "requires": [],
+        "conflicts": [],
+        "overrides": [],
+        "require_equals": false,
+        "allow_hyphen_values": false,
+        "last": false,
+        "trailing_var_arg": false,
+        "stdin_secret": false,
+        "help": "Directory searched, read-only, for blobs before a registry is contacted",
+        "env": "OCX_BLOB_DIR"
+      },
+      {
+        "id": "blob_cache_dir",
+        "long": "blob-cache-dir",
+        "value": {
+          "type": "path"
+        },
+        "required": false,
+        "required_unless": [],
+        "num_args": {
+          "min": 1,
+          "max": 1
+        },
+        "global": false,
+        "hidden": false,
+        "default": [],
+        "requires": [],
+        "conflicts": [],
+        "overrides": [],
+        "require_equals": false,
+        "allow_hyphen_values": false,
+        "last": false,
+        "trailing_var_arg": false,
+        "stdin_secret": false,
+        "help": "Directory where blobs fetched from a registry are kept for later runs",
+        "env": "OCX_BLOB_CACHE_DIR"
+      },
+      {
         "id": "log_level",
         "long": "log-level",
         "short": "l",
@@ -7069,6 +7122,259 @@
           {
             "path": [
               "package",
+              "export"
+            ],
+            "version": 1,
+            "summary": "Write packages and their blobs to a directory for offline transfer",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "ExportReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "output",
+                "long": "output",
+                "short": "o",
+                "value": {
+                  "type": "path"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Directory to write the export to; created when absent"
+              },
+              {
+                "id": "platforms",
+                "long": "platform",
+                "short": "p",
+                "value": {
+                  "type": "platform"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "repeatable": true,
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Export only this platform; repeat for several. Defaults to every platform the package publishes"
+              },
+              {
+                "id": "referrers",
+                "long": "referrers",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "no_referrers"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Carry the signatures, SBOMs and attestations of each exported manifest (default)"
+              },
+              {
+                "id": "no_referrers",
+                "long": "no-referrers",
+                "value": {
+                  "type": "switch"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 0,
+                  "max": 0
+                },
+                "global": false,
+                "hidden": false,
+                "default": [
+                  "false"
+                ],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [
+                  "referrers"
+                ],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Leave them out; a trust policy then cannot verify the import offline"
+              },
+              {
+                "id": "packages",
+                "position": 1,
+                "value": {
+                  "type": "identifier"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1
+                },
+                "repeatable": true,
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Packages to export, as `registry/repository:tag` or `registry/repository@sha256:<hex>`"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "package",
+              "import"
+            ],
+            "version": 1,
+            "summary": "Import packages from an export directory without network access",
+            "hidden": false,
+            "external_subcommands": false,
+            "output": [
+              {
+                "type": "report",
+                "root": "ImportReport"
+              }
+            ],
+            "args": [
+              {
+                "id": "input",
+                "position": 1,
+                "value": {
+                  "type": "path"
+                },
+                "required": true,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "The export directory: the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory"
+              },
+              {
+                "id": "platforms",
+                "long": "platform",
+                "short": "p",
+                "value": {
+                  "type": "platform"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1,
+                  "max": 1
+                },
+                "repeatable": true,
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Import only this platform; repeat for several. Defaults to the host platform"
+              },
+              {
+                "id": "packages",
+                "position": 2,
+                "value": {
+                  "type": "identifier"
+                },
+                "required": false,
+                "required_unless": [],
+                "num_args": {
+                  "min": 1
+                },
+                "repeatable": true,
+                "global": false,
+                "hidden": false,
+                "default": [],
+                "requires": [],
+                "conflicts": [],
+                "overrides": [],
+                "require_equals": false,
+                "allow_hyphen_values": false,
+                "last": false,
+                "trailing_var_arg": false,
+                "stdin_secret": false,
+                "help": "Packages to import; without any, every package the export lists. A named package may move a tag the local index pins differently"
+              }
+            ],
+            "groups": [],
+            "commands": []
+          },
+          {
+            "path": [
+              "package",
               "inspect"
             ],
             "version": 1,
@@ -12710,6 +13016,261 @@
       },
       {
         "path": [
+          "export"
+        ],
+        "version": 1,
+        "summary": "Write every package the project lock pins to a directory",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [
+          {
+            "type": "report",
+            "root": "ExportReport"
+          }
+        ],
+        "args": [
+          {
+            "id": "output",
+            "long": "output",
+            "short": "o",
+            "value": {
+              "type": "path"
+            },
+            "required": true,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Directory to write the export to; created when absent"
+          },
+          {
+            "id": "groups",
+            "long": "group",
+            "short": "g",
+            "value": {
+              "type": "string"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Restrict to the named group(s)"
+          },
+          {
+            "id": "platforms",
+            "long": "platform",
+            "short": "p",
+            "value": {
+              "type": "platform"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Export only this platform; repeat for several. Defaults to every platform the lock records"
+          },
+          {
+            "id": "referrers",
+            "long": "referrers",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "no_referrers"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Carry the signatures, SBOMs and attestations of each exported manifest (default)"
+          },
+          {
+            "id": "no_referrers",
+            "long": "no-referrers",
+            "value": {
+              "type": "switch"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 0,
+              "max": 0
+            },
+            "global": false,
+            "hidden": false,
+            "default": [
+              "false"
+            ],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [
+              "referrers"
+            ],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Leave them out; a trust policy then cannot verify the import offline"
+          }
+        ],
+        "groups": [],
+        "commands": []
+      },
+      {
+        "path": [
+          "import"
+        ],
+        "version": 1,
+        "summary": "Assemble the project lock's packages from an export directory, offline",
+        "hidden": false,
+        "external_subcommands": false,
+        "output": [
+          {
+            "type": "report",
+            "root": "ImportReport"
+          }
+        ],
+        "args": [
+          {
+            "id": "input",
+            "position": 1,
+            "value": {
+              "type": "path"
+            },
+            "required": true,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "The export directory: the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory"
+          },
+          {
+            "id": "groups",
+            "long": "group",
+            "short": "g",
+            "value": {
+              "type": "string"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Restrict to the named group(s)"
+          },
+          {
+            "id": "platforms",
+            "long": "platform",
+            "short": "p",
+            "value": {
+              "type": "platform"
+            },
+            "required": false,
+            "required_unless": [],
+            "num_args": {
+              "min": 1,
+              "max": 1
+            },
+            "repeatable": true,
+            "global": false,
+            "hidden": false,
+            "default": [],
+            "requires": [],
+            "conflicts": [],
+            "overrides": [],
+            "require_equals": false,
+            "allow_hyphen_values": false,
+            "last": false,
+            "trailing_var_arg": false,
+            "stdin_secret": false,
+            "help": "Import only this platform; repeat for several. Defaults to the host platform"
+          }
+        ],
+        "groups": [],
+        "commands": []
+      },
+      {
+        "path": [
           "shell"
         ],
         "version": 1,
@@ -14459,6 +15020,26 @@
       "visibility": "public",
       "summary": " Path to the local index directory. Mirrors `--index`.",
       "flag": "--index",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OCX_BLOB_DIR",
+      "value": "path_list",
+      "visibility": "public",
+      "summary": " Directories searched, read-only, for the blobs a command needs before it contacts a registry.",
+      "flag": "--blob-dir",
+      "secret": false,
+      "propagation": "user_input",
+      "on_invalid": "default"
+    },
+    {
+      "name": "OCX_BLOB_CACHE_DIR",
+      "value": "path",
+      "visibility": "public",
+      "summary": " Directory where blobs fetched from a registry are kept for later runs. Mirrors",
+      "flag": "--blob-cache-dir",
       "secret": false,
       "propagation": "user_input",
       "on_invalid": "default"

@@ -3,6 +3,8 @@
 
 //! The OCX resolution-index protocol and its local collection.
 
+use std::sync::Arc;
+
 use ocx_oci::tag::is_reserved_tag;
 use ocx_util::prelude::*;
 
@@ -14,7 +16,9 @@ pub use self::ocx_index::{IndexBase, IndexFetch, IndexTransport, OcxIndex, OcxIn
 pub use file_transport::FileIndexTransport;
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
-pub use local_index::TAG_REFRESH_CONCURRENCY;
+pub use local_index::{
+    PACKAGE_REFRESH_CONCURRENCY, PlannedTag, TAG_REFRESH_CONCURRENCY, TagOutcome, TagPlan, TagStatus,
+};
 pub use oci_index::OciIndex;
 pub use oci_index::OciIndexConfig;
 pub use regenerate::{RegenerateOutcome, regenerate_catalog};
@@ -25,6 +29,7 @@ pub use wire::{
 pub use wire_writer::{serialize_catalog, serialize_config, serialize_root};
 
 mod chained_index;
+pub mod export;
 mod file_transport;
 mod index_impl;
 pub use index_impl::DeclaredPublishers;
@@ -148,11 +153,31 @@ pub enum ResolvedVersion {
     Absent,
 }
 
+/// Where the bytes of a digest-addressed read came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobOrigin {
+    /// The machine-global blob store.
+    Home,
+    /// A blob directory or the shared cache.
+    Lookup(ocx_oci::blob_lookup::LookupOrigin),
+    /// A source, in this very call.
+    Network,
+}
+
+/// A read result with the [`BlobOrigin`] that served it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetched<T> {
+    pub value: T,
+    pub origin: BlobOrigin,
+}
+
 /// A package index; clones share one in-memory cache, which is never cleared.
 pub struct Index {
     inner: Box<dyn index_impl::IndexImpl>,
     /// Proxy-route rules for the dial-site SSRF guard ([`Self::guard_physical_dial`]).
     rules: std::sync::Arc<ocx_oci::ssrf::ProxyRules>,
+    /// Blob directories and cache digest-addressed reads consult after the home; empty by default.
+    blob_lookup: Arc<ocx_oci::blob_lookup::BlobLookup>,
 }
 
 impl Index {
@@ -160,6 +185,7 @@ impl Index {
         Self {
             inner: Box::new(oci_index),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -169,6 +195,7 @@ impl Index {
         Self {
             inner: Box::new(source),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -178,6 +205,7 @@ impl Index {
         Self {
             inner: Box::new(inner),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -186,6 +214,7 @@ impl Index {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode)),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -200,6 +229,7 @@ impl Index {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode).with_content_store(content_store)),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -209,6 +239,7 @@ impl Index {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new_lock_scoped(cache, sources, mode)),
             rules: ocx_oci::ssrf::proxy_rules(),
+            blob_lookup: Arc::default(),
         }
     }
 
@@ -221,12 +252,32 @@ impl Index {
         self
     }
 
+    /// Attaches the blob lookup that digest-addressed reads consult after the home and before any source.
+    #[must_use]
+    pub fn with_blob_lookup(mut self, lookup: Arc<ocx_oci::blob_lookup::BlobLookup>) -> Self {
+        self.inner.set_blob_lookup(lookup.clone());
+        self.blob_lookup = lookup;
+        self
+    }
+
+    /// Provenance of the index owning `registry`, read from configuration so it holds offline; a registry
+    /// nothing serves is `SourceKind::Derived`. For import: resolve paths keep their own routing.
+    pub fn source_kind_for(&self, registry: &str) -> local_index::SourceKind {
+        self.inner.source_kind_for(registry)
+    }
+
+    /// The catalog entry this source lists for `identifier`'s repository (`sha256:<hex>` of its root bytes).
+    pub async fn fetch_catalog_entry(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<String>> {
+        self.inner.fetch_catalog_entry(identifier).await
+    }
+
     /// A view that resolves identically but writes nothing into the local index;
     /// content-addressed blob writes still happen.
     pub fn read_only_view(&self) -> Self {
         Self {
             inner: self.inner.read_only_view(),
             rules: self.rules.clone(),
+            blob_lookup: self.blob_lookup.clone(),
         }
     }
 
@@ -236,6 +287,21 @@ impl Index {
         Self {
             inner: self.inner.remote_view(),
             rules: self.rules.clone(),
+            blob_lookup: self.blob_lookup.clone(),
+        }
+    }
+
+    /// Whether a tag-addressed read is always answered by a source, never by a local pin (`--remote`).
+    pub fn serves_tags_live(&self) -> bool {
+        self.inner.serves_tags_live()
+    }
+
+    /// A view that reads local copies only whatever the [`ChainMode`] and never dials a source.
+    pub fn offline_view(&self) -> Self {
+        Self {
+            inner: self.inner.offline_view(),
+            rules: self.rules.clone(),
+            blob_lookup: self.blob_lookup.clone(),
         }
     }
 
@@ -348,6 +414,16 @@ impl Index {
         identifier: &ocx_oci::PackageRef,
         routed: &ocx_oci::OciIdentifier,
     ) -> Result<ResolvedVersion> {
+        // An import view has no registry to ask, so a locally pinned tag answers first when a lookup is attached.
+        if identifier.digest().is_none()
+            && !self.blob_lookup.is_empty()
+            && let Some((digest, manifest)) = self.fetch_manifest(identifier, IndexOperation::Query).await?
+        {
+            return Ok(ResolvedVersion::Indexed {
+                digest,
+                manifest: Box::new(manifest),
+            });
+        }
         let index_served = !identifier.is_located_at(routed) || self.authoritative_index_base_url(identifier).is_some();
         if identifier.digest().is_some() || !index_served {
             return Ok(ResolvedVersion::Registry);
@@ -519,6 +595,15 @@ impl Index {
         self.inner.source_kind()
     }
 
+    /// [`Self::fetch_manifest_raw_bytes`] with the [`BlobOrigin`] of the bytes: [`BlobOrigin::Network`] only when
+    /// a source supplied them in this call.
+    pub async fn fetch_manifest_raw_bytes_with_origin(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+    ) -> Result<Option<Fetched<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>>> {
+        self.inner.fetch_manifest_raw_bytes_with_origin(identifier).await
+    }
+
     /// The verbatim manifest bytes with digest and parsed manifest, so
     /// [`LocalIndex::persist_dispatch`] writes a verifiable dispatch object; `Ok(None)` when absent.
     pub async fn fetch_manifest_raw_bytes(
@@ -635,6 +720,7 @@ impl Clone for Index {
         Self {
             inner: self.inner.box_clone(),
             rules: self.rules.clone(),
+            blob_lookup: self.blob_lookup.clone(),
         }
     }
 }
@@ -878,6 +964,91 @@ pub mod test_source {
         }
         fn index_base_url(&self) -> Option<&str> {
             self.authoritative_base_url.as_deref()
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A source serving one manifest under one tag, counting every request made to it.
+    #[derive(Clone)]
+    pub struct CountingSource {
+        tag: String,
+        bytes: Vec<u8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingSource {
+        /// `bytes` must be a JSON OCI manifest; its sha256 is the digest the source answers with.
+        pub fn new(tag: &str, bytes: Vec<u8>) -> Self {
+            Self {
+                tag: tag.to_string(),
+                bytes,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// Requests made to this source or any clone of it.
+        pub fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        /// The digest this source answers with.
+        pub fn digest(&self) -> Digest {
+            ocx_oci::Algorithm::Sha256.hash(&self.bytes)
+        }
+
+        /// This source wrapped as an [`Index`], ready to hand to `from_chained`.
+        pub fn into_index(self) -> Index {
+            Index::from_impl(self).with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+        }
+
+        fn answers(&self, identifier: &PackageRef) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            identifier.digest().is_none_or(|digest| digest == self.digest())
+                && (identifier.digest().is_some() || identifier.tag_or_latest() == self.tag)
+        }
+
+        fn manifest(&self) -> Result<Manifest> {
+            Ok(serde_json::from_slice(&self.bytes)?)
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for CountingSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![self.tag.clone()]))
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &PackageRef,
+            _: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            if !self.answers(identifier) {
+                return Ok(None);
+            }
+            Ok(Some((self.digest(), self.manifest()?)))
+        }
+        async fn fetch_manifest_digest(&self, identifier: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(self.answers(identifier).then(|| self.digest()))
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &PackageRef,
+        ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            if !self.answers(identifier) {
+                return Ok(None);
+            }
+            Ok(Some((self.bytes.clone(), self.digest(), self.manifest()?)))
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -2386,6 +2557,51 @@ mod tests {
         assert!(
             chrono::NaiveDateTime::parse_from_str(&rendered, "%Y-%m-%dT%H:%M:%SZ").is_ok(),
             "expected the index bot's %Y-%m-%dT%H:%M:%SZ seconds-Z form, got {rendered:?}"
+        );
+    }
+
+    /// A tag the home already pins resolves from the home, not the registry, once a blob lookup is attached:
+    /// an import view has no registry to ask.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn derived_tag_resolves_locally_with_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = LocalIndex::new(LocalConfig {
+            index_store: crate::IndexStore::new(directory.path().join("index")),
+        });
+        let dispatch = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{}","size":2,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+            "a".repeat(64)
+        );
+        let content = ocx_oci::Algorithm::Sha256.hash(dispatch.as_bytes());
+        let identifier = logical_id().clone_with_tag("3.28");
+        local
+            .seed_root_document(
+                &identifier,
+                format!(
+                    r#"{{"repository":"oci://example.com/kitware/cmake","tags":{{"3.28":{{"content":"{content}"}}}}}}"#
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        local
+            .stage_dispatch_bytes(&identifier, &content, dispatch.as_bytes())
+            .await
+            .unwrap();
+        let routed = ocx_oci::OciIdentifier::passthrough(&identifier);
+        let lookup = Arc::new(ocx_oci::blob_lookup::BlobLookup::new(
+            vec![directory.path().join("blobs")],
+            None,
+        ));
+        let index = Index::from_chained(local, vec![], ChainMode::Default)
+            .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+            .with_blob_lookup(lookup);
+
+        let resolved = index.resolve_version(&identifier, &routed).await.unwrap();
+
+        assert!(
+            matches!(resolved, ResolvedVersion::Indexed { digest, .. } if digest == content),
+            "a locally pinned tag resolves from the home when a lookup is attached"
         );
     }
 }

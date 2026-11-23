@@ -1112,6 +1112,13 @@ impl index_impl::IndexImpl for OcxIndex {
         Ok(self.resolve_tag(identifier).await?.map(|(digest, _)| digest))
     }
 
+    async fn fetch_catalog_entry(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<String>> {
+        if !self.serves_registry(identifier.registry()) {
+            return Ok(None);
+        }
+        Ok(self.fetch_catalog_strict().await?.get(identifier.repository()).cloned())
+    }
+
     async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         if !self.serves_registry(blob_ref.as_identifier().registry()) {
             return Ok(None);

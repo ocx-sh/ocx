@@ -310,6 +310,14 @@ fn validate_policy(policy: &Policy) -> Result<(), UnreadableReason> {
             return Err(invalid(field));
         }
     }
+    if let Some(dirs) = &policy.blob_dir
+        && (dirs.len() > super::policy::MAX_BLOB_DIRS || dirs.iter().any(|dir| !dir.is_absolute()))
+    {
+        return Err(invalid("policy.blob_dir"));
+    }
+    if policy.blob_cache_dir.as_deref().is_some_and(|path| !path.is_absolute()) {
+        return Err(invalid("policy.blob_cache_dir"));
+    }
     if let Some(mirrors) = &policy.mirrors {
         mirrors_parse(mirrors).map_err(|()| invalid("policy.mirrors"))?;
     }

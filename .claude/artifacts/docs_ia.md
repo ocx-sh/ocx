@@ -876,6 +876,7 @@ Cluster rule: a page belongs to the cluster that owns the old page it is split f
 | user-guide.mdx | guides/configure-ocx.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/authenticate.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/work-offline.mdx | how-to | everyday | everyday | settings |
+| — | guides/export-and-import.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/corporate-mirror.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/manage-config-centrally.mdx | how-to | everyday | everyday | settings |
 | user-guide.mdx | guides/verify-installs.mdx | how-to | everyday | everyday | settings |

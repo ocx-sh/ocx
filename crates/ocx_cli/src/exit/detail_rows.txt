@@ -33,8 +33,10 @@ binding_not_found	NotFound	The named binding does not exist in ocx.toml
 binding_not_selected	UsageError	The named binding is declared in no selected group
 binding_value_invalid	ConfigError	A binding's value is not a valid identifier
 binding_value_missing_registry	ConfigError	A binding's identifier names no registry
+blob_dir_not_found	NotFound	A --blob-dir path does not exist or is not a directory
 blob_not_found	NotFound	The registry has no such blob
 blob_not_found	NotFound	The registry has no such blob
+blob_path_relative	ConfigError	A [blobs] path is relative where only an absolute one is accepted
 bot_identity	UsageError	The acting identity is a bot account
 build_receipt_not_found	NotFound	No build receipt exists beside the bundle
 builder_mismatch	DataError	The provenance builder does not match the pinned builder
@@ -67,7 +69,7 @@ config_edit_too_large	ConfigError	The config file being edited exceeds the allow
 config_file_not_found	NotFound	An explicitly named config or project file does not exist
 config_file_too_large	ConfigError	A config file exceeds the allowed size
 config_io	IoError	Reading a config file failed
-config_list_too_long	ConfigError	OCX_CONFIG lists more config files than the limit
+config_list_too_long	ConfigError	A path list holds more entries than the limit
 config_parse	ConfigError	A config file does not parse
 config_path_contains_separator	ConfigError	A config path contains the OCX_CONFIG list separator
 credential_helper_failed	AuthError	The credential helper failed to supply credentials
@@ -97,6 +99,7 @@ destination_not_a_directory	UsageError	The destination exists and is not a direc
 destination_not_empty	UsageError	The destination directory is not empty
 destination_through_symlink	UsageError	A destination path resolves through a symlink
 digest_mismatch	DataError	Downloaded content does not hash to its expected digest
+digest_mismatch	DataError	Downloaded content does not hash to its expected digest
 digest_missing	DataError	The identifier carries no digest after resolution
 direct_digest_pin_in_any_target	DataError	An `any` package pins a dependency by a platform-specific digest
 dispatch_object_digest_mismatch	DataError	A stored dispatch object does not hash to its claimed digest
@@ -110,6 +113,11 @@ empty_push_set	DataError	A push names no target platform
 endpoint_unresolvable	Unavailable	An endpoint host does not resolve
 entrypoint_collision	DataError	Two packages declare the same entry point name
 envrc_exists	ConfigError	An .envrc already exists and --force was not given
+export_dir_invalid	DataError	A directory is not a valid export
+export_dir_invalid	DataError	A directory is not a valid export
+export_dir_invalid	DataError	A directory is not a valid export
+export_not_found	NotFound	The export directory lacks something that was asked for
+export_platform_required	UsageError	A digest identifier needs exactly one platform to export
 extra_ca_certs_invalid	DataError	The extra CA bundle the payload names is not usable
 extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
 extra_ca_certs_not_utf8	DataError	The extra CA bundle is not UTF-8 and cannot be persisted
@@ -205,6 +213,7 @@ invalid_list_separator	DataError	A package env entry declares an unusable list s
 invalid_logo_content	DataError	The logo file's content does not match its format
 invalid_managed_config_source	ConfigError	The managed-config source is not a valid identifier
 invalid_manifest	DataError	A manifest is invalid
+invalid_manifest	DataError	A manifest is invalid
 invalid_owner_login	UsageError	An owner login carries a character outside letters, digits, dot, underscore and hyphen
 invalid_platform	DataError	A platform string does not follow the platform grammar
 invalid_repo_coordinate	UsageError	A repository coordinate is not a valid owner/name
@@ -242,6 +251,7 @@ lock_repository_not_bare	ConfigError	ocx.lock records a repository carrying a ta
 lock_stale	DataError	ocx.lock does not match ocx.toml
 lock_stale	DataError	ocx.lock does not match ocx.toml
 login_rejected	AuthError	The registry rejected the supplied credentials
+lookup_io	IoError	Reading or writing a blob directory failed
 malformed_catalog_key	DataError	An index source served a malformed catalog key
 malformed_fork_full_name	Failure	A fork's full name is malformed
 malformed_index_document	DataError	An index document is not valid JSON of the expected shape
@@ -441,6 +451,7 @@ session_path_unencodable	ConfigError	A session PATH entry contains a character t
 setup_bootstrap_failed	Failure	Installing OCX into the object store failed with an unclassified cause
 setup_io	IoError	Reading or writing a setup file failed
 setup_profile_subprocess	Unavailable	A shell subprocess setup needs could not run
+shard_collision	DataError	Two digests share one blob directory
 shell_section_in_project	ConfigError	ocx.toml declares a [shell] section, which only config.toml may hold
 shim_claim_unfulfilled	DataError	A declared interface name does not exist in the package
 shim_name_invalid	DataError	A shim name is not a valid binary name

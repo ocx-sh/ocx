@@ -25,6 +25,7 @@ use super::ContextOptions;
 
 #[derive(Clone)]
 pub struct Context {
+    blob_lookup: std::sync::Arc<ocx_oci::blob_lookup::BlobLookup>,
     offline: bool,
     project_path: Option<PathBuf>,
     remote_client: Option<ocx_oci::Client>,
@@ -326,6 +327,10 @@ impl Context {
         let sigstore_view = extra_roots_sigstore.clone();
         ocx_util::tls::install_sigstore_roots(extra_roots_sigstore);
 
+        let blob_lookup = std::sync::Arc::new(
+            build_blob_lookup(options, &env_slot, &config, &cwd, file_structure.locks.clone()).await?,
+        );
+
         // A plain-HTTP mirror needs its own host declared insecure; the scheme alone opts nothing
         // out (`adr_oci_registry_mirror.md`).
         let registry_client_cell: std::sync::Arc<std::sync::OnceLock<ocx_oci::Client>> =
@@ -335,7 +340,12 @@ impl Context {
             (None, None)
         } else {
             let client = registry_client_cell
-                .get_or_init(|| client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build())
+                .get_or_init(|| {
+                    with_blob_lookup(
+                        client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build(),
+                        &blob_lookup,
+                    )
+                })
                 .clone();
             (
                 Some(client.clone()),
@@ -385,7 +395,8 @@ impl Context {
             sources,
             mode,
             file_structure.blobs.clone(),
-        );
+        )
+        .with_blob_lookup(blob_lookup.clone());
 
         let default_registry = env_slot.policy.default_registry.clone().unwrap_or_else(|| {
             config
@@ -498,6 +509,7 @@ impl Context {
         .with_patches(resolved_patches.clone())
         .with_patch_snapshot(patch_snapshot)
         .with_managed_config_client(managed_config_client)
+        .with_blob_lookup(blob_lookup.clone())
         // Companion and site-patch lookups must read the same (`--index`-redirected) store.
         .with_index(index_store);
 
@@ -508,7 +520,12 @@ impl Context {
         // Always constructed: an index-declared publisher covers a package no policy names.
         let auto_verify = {
             let client = registry_client_cell
-                .get_or_init(|| client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build())
+                .get_or_init(|| {
+                    with_blob_lookup(
+                        client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build(),
+                        &blob_lookup,
+                    )
+                })
                 .clone();
             ocx_package_manager::AutoVerify::new(build_auto_verify(
                 operator_policies,
@@ -561,6 +578,7 @@ impl Context {
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
+            blob_lookup,
             remote_client,
             oci_index,
             index_sources,
@@ -626,6 +644,11 @@ impl Context {
 
     pub fn is_offline(&self) -> bool {
         self.offline
+    }
+
+    /// The blob directories and cache every digest-addressed read consults; empty when none is configured.
+    pub fn blob_lookup(&self) -> &std::sync::Arc<ocx_oci::blob_lookup::BlobLookup> {
+        &self.blob_lookup
     }
 
     /// The explicit `--project` / `OCX_PROJECT` path, if any; pass it to `ProjectConfig::resolve`
@@ -1096,6 +1119,42 @@ fn build_managed_config_client(
         extra_roots,
     )
     .build())
+}
+
+/// Resolves the blob settings of this invocation into the one lookup every reader shares.
+///
+/// # Errors
+///
+/// A missing `--blob-dir` (exit 79), or a blob cache root that cannot be opened.
+async fn build_blob_lookup(
+    options: &ContextOptions,
+    policy: &PolicyLayer,
+    config: &ocx_config::Config,
+    cwd: &Path,
+    locks: std::path::PathBuf,
+) -> anyhow::Result<ocx_oci::blob_lookup::BlobLookup> {
+    let settings = super::blob_settings::resolve(options, policy, config, cwd)?;
+    let cache = match settings.cache_dir {
+        Some(root) => Some(ocx_oci::blob_lookup::BlobCacheDir::open(root, locks).await?),
+        None => None,
+    };
+    let dirs = settings.dirs.into_iter().map(|dir| dir.path).collect();
+    Ok(ocx_oci::blob_lookup::BlobLookup::new(dirs, cache))
+}
+
+/// `client` reading `lookup` first and teeing network layer pulls into its cache; an empty lookup changes nothing.
+fn with_blob_lookup(
+    client: ocx_oci::Client,
+    lookup: &std::sync::Arc<ocx_oci::blob_lookup::BlobLookup>,
+) -> ocx_oci::Client {
+    if lookup.is_empty() {
+        return client;
+    }
+    let client = client.with_blob_lookup(lookup.clone());
+    match lookup.cache() {
+        Some(cache) => client.with_blob_cache(cache.clone()),
+        None => client,
+    }
 }
 
 /// The shared `ClientBuilder` recipe; [`Context::client_builder`] wraps it, and init-time

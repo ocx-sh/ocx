@@ -53,9 +53,8 @@ tokio.workspace = true
 # The index format's own `config.json` and the project-tier config it reads.
 toml.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-# `O_NONBLOCK` on the file transport's read path: opening a FIFO must not block
-# the runtime waiting for a writer that may never come.
+[target.'cfg(unix)'.dev-dependencies]
+# `O_NONBLOCK` in the file transport tests' own FIFO opens.
 libc.workspace = true
 
 [dev-dependencies]

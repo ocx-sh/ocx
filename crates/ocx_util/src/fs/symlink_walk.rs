@@ -81,7 +81,7 @@ pub async fn refuse_if_symlink_in_path(path: &Path, boundary: Option<&Path>) -> 
 }
 
 /// Synchronous sibling of [`refuse_if_symlink_in_path`] for `spawn_blocking` callers such as the archive extractor.
-pub(crate) fn refuse_if_symlink_in_path_sync(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
+pub fn refuse_if_symlink_in_path_sync(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
     let mut current: Option<&Path> = Some(path);
     while let Some(p) = current {
         if boundary == Some(p) {

@@ -96,6 +96,8 @@ ocx_exit::families!(
     ::ocx_oci::layer_layout::LayerLayoutError,
     ::ocx_oci::pinned_package_ref::PinnedIdentifierError,
     ::ocx_oci::ssrf::SsrfError,
+    ::ocx_oci::blob_lookup::LookupError,
+    ::ocx_oci::blob_lookup::export_marker::ExportMarkerError,
     ::ocx_oci::client::error::ClientError,
     ::ocx_oci::digest::error::DigestError,
     ::ocx_oci::platform::error::PlatformError,
@@ -129,6 +131,7 @@ ocx_exit::families!(
     // the CLI-local pass answers these before the ladder is reached
     ProjectContextError: rows_only,
     CliRefusal: rows_only,
+    crate::app::blob_settings::BlobSettingsError,
 );
 
 /// One cause's verdict: the exit code and the `error.detail` slug of the same error.

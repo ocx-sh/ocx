@@ -116,6 +116,28 @@ ocx package exec [OPTIONS] <PACKAGES>... <COMMAND>...
 | `--rm` |  | Remove the packages from the store once the command finishes |
 | `--self` |  | Expose the package's full env, including its private (self-only) entries. Off by default: only public + interface entries are loaded (the interface surface). Generated launchers use `ocx launcher exec` which enables self-view internally |
 
+## `ocx package import` {#package-import}
+
+Import packages from an export directory without network access.
+
+Assembles the packages `ocx package export` wrote in the local object store and pins their tags in the local index, with no registry traffic. It installs nothing: no candidate or `current` symlink is created, so `ocx clean` collects an imported package nothing else holds.
+
+Name packages to import only those; without names every package the export lists is imported, for the host platform unless `--platform` says otherwise. DIR is the export root that holds `ocx-export.json`, not its `index` or `blobs` subdirectory.
+
+A package covered by a trust policy is verified from the signatures the export carries, and fails with exit 79 when the export carries none. A tag the local index already pins to a different digest is kept and reported as `conflict`, unless the package was named, in which case it moves and is reported as `replaced`.
+
+A conflict is a report row and a warning, not an error. A package that fails to import changes nothing.
+
+A directory without a valid marker, or one that disagrees with its own index, exits 65. A registry, package, tag, platform or blob the export lacks exits 79.
+
+```text
+ocx package import [OPTIONS] <DIR> [PACKAGE]...
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--platform`, `-p` | `PLATFORM` | Import only this platform; repeat for several. Defaults to the host platform |
+
 ## `ocx package inspect` {#package-inspect}
 
 Inspect one or more package references (platforms, metadata, or resolution chain).

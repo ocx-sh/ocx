@@ -453,7 +453,7 @@ mod tests {
         );
     }
 
-    /// C-016 (#759): a link already resolving to the project is left alone.
+    /// A link already resolving to the project is left alone.
     #[tokio::test]
     async fn register_if_absent_no_write_when_present() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(before.modified().expect("mtime"), after.modified().expect("mtime"));
     }
 
-    /// C-016 (#759): an entry under the project's key that points elsewhere is rewritten.
+    /// An entry under the project's key that points elsewhere is rewritten.
     #[tokio::test]
     async fn rewrites_when_pointing_elsewhere() {
         let home = tempfile::tempdir().expect("tempdir");
