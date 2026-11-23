@@ -205,7 +205,7 @@ impl PackageClaim {
             None
         };
 
-        let credentials = ocx_announce::forge::ForgeCredentials::resolve(self.forge.transport);
+        let credentials = ocx_announce::forge::ForgeCredentials::resolve(self.forge.transport)?;
         self.forge.require_credential(&credentials)?;
 
         self.forge.warn_push_identity(context.ui(), &credentials);

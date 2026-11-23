@@ -587,6 +587,18 @@ mod tests {
         assert_eq!(read_key_env("OCX_SIGNING_KEY").as_deref(), Ok("pem"));
     }
 
+    /// `OCX_SIGNING_KEY` is a `--key env://` target, taken literally: a `file://` value is key text, never read.
+    #[test]
+    fn read_key_env_does_not_resolve_a_reference_held_in_the_signing_key() {
+        let env = ocx_env::overrides::lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("key.pem");
+        std::fs::write(&target, "file content").expect("write");
+        let literal = format!("file://{}", target.display());
+        env.set(ocx_env::OCX_SIGNING_KEY.declaration(), literal.clone());
+        assert_eq!(read_key_env("OCX_SIGNING_KEY"), Ok(literal));
+    }
+
     /// C-033: `MAX_KEY_PEM_BYTES` bounds the variable exactly as it bounds a
     /// file, so an oversized value is a data fault and not a key.
     #[test]

@@ -63,9 +63,9 @@ fn select_source(gitlab: bool, circle: bool, gha: bool) -> Option<AmbientSource>
 /// The one reader for `detect` and `acquire`, or they disagree on a set-but-empty variable.
 fn ambient_env() -> (bool, bool, bool) {
     (
-        GITLAB_TOKEN.get().is_some(),
-        CIRCLE_TOKEN.get().is_some(),
-        GHA_URL.get_os().is_some() && GHA_TOKEN.get().is_some(),
+        GITLAB_TOKEN.is_set(),
+        CIRCLE_TOKEN.is_set(),
+        GHA_URL.get_os().is_some() && GHA_TOKEN.is_set(),
     )
 }
 
@@ -108,7 +108,7 @@ impl TokenProvider for InlineAmbientProvider {
         match select_source(gitlab, circle, gha) {
             None => return Err(no_token()),
             Some(AmbientSource::Direct(var)) => {
-                return Ok(OidcToken::new(var.get().ok_or_else(no_token)?.into_inner()));
+                return Ok(OidcToken::new(var.get()?.ok_or_else(no_token)?.into_inner()));
             }
             Some(AmbientSource::GithubExchange) => {}
         }
@@ -116,7 +116,7 @@ impl TokenProvider for InlineAmbientProvider {
         {
             let (url, bearer) = (
                 GHA_URL.get().ok_or_else(no_token)?,
-                GHA_TOKEN.get().ok_or_else(no_token)?,
+                GHA_TOKEN.get()?.ok_or_else(no_token)?,
             );
             let bearer = Zeroizing::new(bearer.into_inner());
             let request_url = guarded_request_url(&url, audience, &self.trusted_hosts).await?;
@@ -282,6 +282,19 @@ mod tests {
             }
             assert_eq!(ambient_env(), expected, "{set:?}");
         }
+    }
+
+    /// `SIGSTORE_ID_TOKEN` is the CI platform's variable, not an OCX one: a value shaped like a
+    /// reference is the token itself.
+    #[tokio::test]
+    async fn a_foreign_ambient_token_holding_a_file_reference_reads_as_the_literal() {
+        let env = ocx_env::overrides::lock();
+        env.remove(CIRCLE_TOKEN.declaration());
+        env.remove(GHA_URL);
+        env.set(GITLAB_TOKEN.declaration(), "file:///x");
+        let provider = InlineAmbientProvider { trusted_hosts: vec![] };
+        let token = provider.acquire("sigstore").await.expect("a foreign token never errs");
+        assert_eq!(token.as_str(), "file:///x");
     }
 
     // ── GitHub token exchange over a loopback stub ───────────────────────────

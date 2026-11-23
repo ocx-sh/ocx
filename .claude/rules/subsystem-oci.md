@@ -595,7 +595,7 @@ Subset semantics apply **only** to `os_features`. Extending subset or any non-eq
 1. **Cache never invalidated** — both index types cache aggressive in memory. For fresh data, create new instance or call `update()`.
 2. **Internal tags filtered** — tags prefixed `__ocx.` stripped by every `IndexImpl::list_tags()` auto.
 3. **Digest overrides tag** — when identifier has both, `fetch_manifest()` uses digest direct.
-4. **Auth at Client level** — index impls don't handle auth; `Client::ensure_auth()` called before operations.
+4. **Auth at Client level** — index impls don't handle auth; `Client::ensure_auth()` called before operations. An `OCX_AUTH_*` value that is a `file://`, `env://` or `plain://` reference and cannot be resolved fails the command; it never falls through to Docker config or anonymous.
 5. **A read that backs a write shares the write's addressing** — reads address the canonical registry by default (`list_tags`, `fetch_manifest`, `fetch_manifest_raw_bytes`, `pull_description`); a mirror is asked for by name through the `*_addressed` variants. Writes are always canonical. Any read whose answer decides, gates, or verifies a write therefore takes the plain short form and must never name `ReadAddressing::Mirrored`, so the whole transaction stays on one host; deciding from a mirror and applying to the canonical registry is CWE-345/367. Precedent: `merge_platform_into_index` (one canonical ref for read + write), `ocx package cascade check|repair`.
 
 ## Pull Path (streaming single-pass pipeline) {#pull-path}

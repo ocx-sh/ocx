@@ -91,6 +91,7 @@ ocx_exit::families!(
     ::ocx_config::tls::TlsError,
     // ocx_env
     ::ocx_env::InvalidEnv,
+    ::ocx_env::ReferenceError,
     // ocx_oci
     ::ocx_oci::endpoint::UrlRejection,
     ::ocx_oci::layer_layout::LayerLayoutError,

@@ -115,7 +115,7 @@ Three variables carry signing credentials. OCX reads each one directly and strip
 
 [`OCX_SIGNING_KEY`][env-ocx-signing-key] holds the private key itself for `--key env://OCX_SIGNING_KEY`. It carries the PEM, never a path. Use it on a runner with no writable disk. An unset or empty value exits 74 and names the variable. A value over 64 KiB exits 65.
 
-[`OCX_KEY_PASSWORD`][env-ocx-key-password] opens an encrypted private key. It is never a flag, because a password in `argv` is visible to every process on the host. An unset variable reads as the empty password.
+[`OCX_KEY_PASSWORD`][env-ocx-key-password] opens an encrypted private key. It is never a flag, because a password in `argv` is visible to every process on the host. An unset variable reads as the empty password. It also accepts a [secret reference][env-secret-references], such as `file://<path>`.
 
 :::caution[Any other variable name is inherited]
 `env://` accepts any variable name, and only `OCX_SIGNING_KEY` is on the credential list. A key held in `MY_KEY` reaches every plugin and generated launcher that OCX starts. Use `OCX_SIGNING_KEY` unless you have a specific reason not to.
@@ -204,6 +204,7 @@ A signature says who published the package. An SBOM says what is inside it. Atta
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
 [env-ocx-signing-key]: ../reference/environment.md#ocx-signing-key
 [env-ocx-key-password]: ../reference/environment.md#ocx-key-password
+[env-secret-references]: ../reference/environment.md#secret-references
 
 [in-depth-signing]: ../explanation/signing.mdx
 [publishing-build-and-push]: ./build-and-push.mdx

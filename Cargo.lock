@@ -4278,6 +4278,7 @@ dependencies = [
 name = "ocx_env"
 version = "0.6.8"
 dependencies = [
+ "libc",
  "ocx_exit",
  "tempfile",
 ]

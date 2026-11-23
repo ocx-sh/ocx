@@ -948,7 +948,10 @@ mod tests {
         assert!(declaration.get().is_none());
         assert!(declaration.get_raw().is_none());
         assert!(declaration.get_os().is_none());
-        let sensitive = ocx_env::OCX_TELEMETRY_HEADERS.get().expect("the secret reader sees it");
+        let sensitive = ocx_env::OCX_TELEMETRY_HEADERS
+            .get()
+            .expect("a literal never fails to resolve")
+            .expect("the secret reader sees it");
         assert!(!format!("{sensitive:?}").contains("hunter2"));
     }
 

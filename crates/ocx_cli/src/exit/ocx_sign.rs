@@ -423,6 +423,12 @@ mod tests {
                 "unsupported_key_backend",
                 KeyBackend(KeyBackendError::Unsupported { scheme: Scheme::AwsKms }),
             ),
+            (
+                "secret_reference_invalid",
+                KeyBackend(KeyBackendError::Reference(ocx_env::ReferenceError::EnvSelfReference {
+                    variable: "OCX_SIGN_KEY".into(),
+                })),
+            ),
             ("rekor_upload_required_for_keyless", RekorUploadRequiredForKeyless),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
@@ -436,7 +442,7 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            31,
+            32,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

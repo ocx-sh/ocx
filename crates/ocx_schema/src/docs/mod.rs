@@ -88,6 +88,8 @@ pub struct EnvVarEntry {
     pub description: String,
     /// The `--long` flag that stands in for the variable.
     pub flag: Option<String>,
+    /// The value may be a `file://`, `env://` or `plain://` reference.
+    pub accepts_reference: bool,
 }
 
 /// One key of the config or project file.

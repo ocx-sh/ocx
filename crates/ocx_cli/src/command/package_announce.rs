@@ -238,7 +238,7 @@ impl PackageAnnounce {
 
         // Through `resolve` with the selected transport: a direct `OCX_ANNOUNCE_TOKEN` read misses the
         // GitLab job-token rung.
-        let credentials = ForgeCredentials::resolve(self.forge.transport);
+        let credentials = ForgeCredentials::resolve(self.forge.transport)?;
         self.forge.require_credential(&credentials)?;
 
         // On the shared flatten, so `ocx package claim` warns identically for the same state.

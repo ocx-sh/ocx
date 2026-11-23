@@ -123,6 +123,8 @@ The refused header-name list is intentionally minimal. It blocks framing, hop-by
 
 Put a token in a config file where a file permission can protect it, and run `chmod 600` on a file that holds one. The `OCX_TELEMETRY_HEADERS` variable carries tokens too, but it is a credential: OCX removes it from the environment of every child process.
 
+The variable accepts the [secret reference forms][env-secret-references], such as `file://<path>`. A reference that cannot be resolved turns telemetry off for that run with one warning. The command's exit code does not change, and nothing is exported.
+
 A nested `ocx` armed only by environment therefore exports without that token. Under `ocx exec`, put the token in a config file, which the child still reads.
 
 Headers sent to an `http://` endpoint that is not loopback travel in plaintext, and OCX prints one warning naming the header source. Use `https://` for anything that crosses a network you do not own.
@@ -191,6 +193,7 @@ The debug lines name the decision, the destination without its query string and 
 [alloy]: https://grafana.com/docs/alloy/latest/
 [splunk-uf]: https://docs.splunk.com/Documentation/Forwarder/latest/Forwarder/Abouttheuniversalforwarder
 
+[env-secret-references]: ../reference/environment.md#secret-references
 [env-ocx-telemetry]: ../reference/environment.md#ocx-telemetry
 [env-ocx-config]: ../reference/environment.md#ocx-config
 [env-ocx-offline]: ../reference/environment.md#ocx-offline

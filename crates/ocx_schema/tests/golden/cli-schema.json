@@ -602,6 +602,10 @@
         "secret": {
           "type": "boolean"
         },
+        "accepts_reference": {
+          "description": "The value may be a `file://`, `env://` or `plain://` reference.",
+          "type": "boolean"
+        },
         "propagation": {
           "description": "How the variable reaches a child process: `user_input`, `secret_input`, `setup_written`, `state`,\n`binary_pin`, `hook_local` or `credential`.",
           "type": "string"
@@ -617,6 +621,7 @@
         "visibility",
         "summary",
         "secret",
+        "accepts_reference",
         "propagation",
         "on_invalid"
       ]

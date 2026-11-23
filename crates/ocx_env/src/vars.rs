@@ -450,15 +450,13 @@ crate::env_vars! {
     /// Stripped from plugin-dispatched children and from any environment OCX writes. OCX does not
     /// generate key pairs.
     pub OCX_KEY_PASSWORD: String, Public, secret, propagation = Credential;
-    /// The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`; any other `env://` name
-    /// works but is not scrubbed from plugins.
+    /// The signing key PEM itself, never a path, for `--key env://OCX_SIGNING_KEY`.
     ///
-    /// Holds the PEM, never a path: a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` envelope when
-    /// signing, an SPKI public key when a `[[trust.policy]]` signer names it. For runners with no
-    /// writable disk.
-    ///
-    /// Unset or empty exits 74 naming the variable; over 64 KiB exits 65. Stripped from plugin-dispatched
-    /// children and from any environment OCX writes; a key held in any other `env://` name is inherited by plugins and launchers.
+    /// A cosign `ENCRYPTED SIGSTORE PRIVATE KEY` envelope when signing, an SPKI public key for a
+    /// `[[trust.policy]]` signer. For runners with no writable disk. Read literally as an `env://`
+    /// target; a file key is `--key file://<path>`. Unset or empty exits 74 naming the variable;
+    /// over 64 KiB exits 65. Stripped from plugin-dispatched children and written environments;
+    /// a key in any other `env://` name is inherited.
     pub OCX_SIGNING_KEY: String, Public, secret, propagation = Credential;
     /// Headers sent with every telemetry export, `name=value[,name=value...]`; values are
     /// percent-decoded and names trimmed.
@@ -493,7 +491,7 @@ crate::env_vars! {
     /// a value containing `:`, and an empty one, fall back to the default.
     ///
     /// Not a credential, so plugins inherit it from the ambient environment.
-    pub OCX_ANNOUNCE_GIT_USERNAME: String, Public, propagation = UserInput;
+    pub OCX_ANNOUNCE_GIT_USERNAME: String, Public, reference, propagation = UserInput;
     /// Authentication type for one registry.
     ///
     /// `<REGISTRY>` is the registry name with every non-alphanumeric character replaced by `_`, case
@@ -505,7 +503,7 @@ crate::env_vars! {
     /// User name for one registry; `<REGISTRY>` is the registry slug.
     ///
     /// Read for the `basic` type only; ignored for any other type.
-    pub OCX_AUTH_USER = "OCX_AUTH_{REGISTRY}_USER": String, Public, propagation = UserInput;
+    pub OCX_AUTH_USER = "OCX_AUTH_{REGISTRY}_USER": String, Public, reference, propagation = UserInput;
     /// Registry token for one registry; `<REGISTRY>` is the registry slug.
     ///
     /// The bearer token, or the password for `basic`; ignored unless the type is `bearer` or `basic`.

@@ -23,7 +23,7 @@ mod var {
 
     pub const OCX_ANNOUNCE_TOKEN: &EnvVar = ocx_env::OCX_ANNOUNCE_TOKEN.declaration();
     pub const OCX_ANNOUNCE_GIT_TOKEN: &EnvVar = ocx_env::OCX_ANNOUNCE_GIT_TOKEN.declaration();
-    pub const OCX_ANNOUNCE_GIT_USERNAME: &EnvVar = &ocx_env::OCX_ANNOUNCE_GIT_USERNAME;
+    pub const OCX_ANNOUNCE_GIT_USERNAME: &EnvVar = ocx_env::OCX_ANNOUNCE_GIT_USERNAME.declaration();
     pub const GITLAB_CI: &EnvVar = &ocx_env::GITLAB_CI;
     pub const CI_JOB_TOKEN: &EnvVar = ocx_env::CI_JOB_TOKEN.declaration();
     pub const CI_PROJECT_PATH: &EnvVar = &ocx_env::CI_PROJECT_PATH;
@@ -115,30 +115,37 @@ impl ForgeCredentials {
     /// [`WriteTransport::Git`] and `GITLAB_CI` is set, else an empty [`Self::api`]
     /// (not an error; the CLI owns the exit-80 refusal). Push: `OCX_ANNOUNCE_GIT_TOKEN`,
     /// then the resolved API credential, else `None`. Empty counts as unset throughout.
-    #[must_use]
-    pub fn resolve(transport: WriteTransport) -> Self {
-        let job_token = (transport == WriteTransport::Git && in_gitlab_ci())
-            .then(|| ocx_env::CI_JOB_TOKEN.get())
-            .flatten();
+    ///
+    /// # Errors
+    ///
+    /// [`ocx_env::ReferenceError`] when `OCX_ANNOUNCE_TOKEN`, `OCX_ANNOUNCE_GIT_TOKEN` or
+    /// `OCX_ANNOUNCE_GIT_USERNAME` is a reference that cannot be resolved.
+    pub fn resolve(transport: WriteTransport) -> Result<Self, ocx_env::ReferenceError> {
+        let job_token = if transport == WriteTransport::Git && in_gitlab_ci() {
+            ocx_env::CI_JOB_TOKEN.get()?
+        } else {
+            None
+        };
         // `get` reads empty as unset: CI runners export empty variables, and an empty
         // `OCX_ANNOUNCE_TOKEN` would win rung 1 and leave a good `CI_JOB_TOKEN` unused.
         let api = ocx_env::OCX_ANNOUNCE_TOKEN
-            .get()
+            .get()?
             .or(job_token)
             .map(ocx_env::Sensitive::into_inner)
             .unwrap_or_default();
 
         // An empty API credential falls through to `None`, or the push injects a header that authenticates as nobody.
         let explicit_push = ocx_env::OCX_ANNOUNCE_GIT_TOKEN
-            .get()
+            .get()?
             .map(ocx_env::Sensitive::into_inner);
         let push_is_explicit = explicit_push.is_some();
         let push_secret = explicit_push.or_else(|| (!api.is_empty()).then(|| api.clone()));
 
         // Through `new`, so `api_is_job_token` and the `CI_PROJECT_PATH` filter cannot drift from it.
+        let username = push_username()?;
         let mut credentials = Self::new(ForgeToken::new(api));
         credentials.push = push_secret.map(|secret| GitPushCredential {
-            username: push_username(),
+            username,
             secret: ForgeToken::new(secret),
         });
         credentials.push_is_explicit = push_is_explicit;
@@ -147,7 +154,7 @@ impl ForgeCredentials {
             .push
             .as_ref()
             .is_some_and(|push| is_job_token(&push.secret.0));
-        credentials
+        Ok(credentials)
     }
 
     /// The REST credential.
@@ -225,20 +232,19 @@ fn is_valid_project_path(path: &str) -> bool {
 ///
 /// A `:` makes it count as absent: HTTP Basic splits on the first colon, so
 /// `a:b` would re-partition the pair into a 401 that reads like a bad token.
-fn push_username() -> String {
-    ocx_env::OCX_ANNOUNCE_GIT_USERNAME
-        .get()
+fn push_username() -> Result<String, ocx_env::ReferenceError> {
+    Ok(ocx_env::OCX_ANNOUNCE_GIT_USERNAME
+        .get()?
         .filter(|username| !username.contains(':'))
-        .unwrap_or_else(|| GitPushCredential::DEFAULT_USERNAME.to_string())
+        .unwrap_or_else(|| GitPushCredential::DEFAULT_USERNAME.to_string()))
 }
 
 /// Whether `secret` is this environment's own `CI_JOB_TOKEN`.
 ///
 /// Requires a non-empty `CI_JOB_TOKEN`, or `"" == ""` claims a job token outside CI.
 fn is_job_token(secret: &str) -> bool {
-    ocx_env::CI_JOB_TOKEN
-        .get()
-        .is_some_and(|token| token.expose() == secret)
+    // `CI_JOB_TOKEN` is a foreign secret, which never holds a reference, so its read cannot fail.
+    matches!(ocx_env::CI_JOB_TOKEN.get(), Ok(Some(token)) if token.expose() == secret)
 }
 
 /// Whether this process is a GitLab CI job; the one spelling the ladder and
@@ -410,14 +416,18 @@ mod tests {
 
         env.set(var::CI_PROJECT_PATH, "acme?x=1/index");
         assert_eq!(
-            ForgeCredentials::resolve(WriteTransport::Git).publishing_project(),
+            ForgeCredentials::resolve(WriteTransport::Git)
+                .expect("the fixture holds no reference")
+                .publishing_project(),
             None,
             "an illegal segment must not reach the ladder's output either"
         );
 
         env.set(var::CI_PROJECT_PATH, "acme/index");
         assert_eq!(
-            ForgeCredentials::resolve(WriteTransport::Git).publishing_project(),
+            ForgeCredentials::resolve(WriteTransport::Git)
+                .expect("the fixture holds no reference")
+                .publishing_project(),
             Some("acme/index"),
             "an ordinary GitLab path must survive the ladder unchanged, or the row above passes vacuously"
         );
@@ -478,7 +488,7 @@ mod tests {
         env.set(var::CI_JOB_TOKEN, "glcbt-64-notarealjobtoken");
 
         env.set(var::OCX_ANNOUNCE_TOKEN, "glpat-notarealapivalue");
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert_eq!(
             credentials.api().0,
             "glpat-notarealapivalue",
@@ -490,7 +500,7 @@ mod tests {
         );
 
         env.set(var::OCX_ANNOUNCE_TOKEN, "");
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert_eq!(
             credentials.api().0,
             "glcbt-64-notarealjobtoken",
@@ -564,7 +574,7 @@ mod tests {
                 env.set(var::GITLAB_CI, marker);
             }
 
-            let credentials = ForgeCredentials::resolve(transport);
+            let credentials = ForgeCredentials::resolve(transport).expect("the fixture holds no reference");
             assert_eq!(credentials.api().0, expected, "{why}");
             assert_eq!(
                 credentials.api_is_job_token(),
@@ -601,7 +611,7 @@ mod tests {
 
         // Rung 1 wins with the job token's own value.
         env.set(var::OCX_ANNOUNCE_TOKEN, "glcbt-64-notarealjobtoken");
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert_eq!(credentials.api().0, "glcbt-64-notarealjobtoken");
         assert!(
             credentials.api_is_job_token(),
@@ -615,7 +625,7 @@ mod tests {
 
         // The independence half: a separate push PAT must not change the answer.
         env.set(var::OCX_ANNOUNCE_GIT_TOKEN, "glpat-notarealpushvalue");
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert!(
             credentials.api_is_job_token(),
             "the flag describes the API half; the push half is a different credential"
@@ -634,7 +644,9 @@ mod tests {
         env.remove(var::OCX_ANNOUNCE_TOKEN);
         env.set(var::OCX_ANNOUNCE_TOKEN, "glpat-notarealapivalue");
         assert!(
-            !ForgeCredentials::resolve(WriteTransport::Git).api_is_job_token(),
+            !ForgeCredentials::resolve(WriteTransport::Git)
+                .expect("the fixture holds no reference")
+                .api_is_job_token(),
             "a credential that differs from CI_JOB_TOKEN is not a job token"
         );
     }
@@ -653,7 +665,7 @@ mod tests {
         let _ = &env;
 
         for transport in [WriteTransport::Api, WriteTransport::Git] {
-            let credentials = ForgeCredentials::resolve(transport);
+            let credentials = ForgeCredentials::resolve(transport).expect("the fixture holds no reference");
             assert!(
                 credentials.api().0.is_empty(),
                 "the terminal rung is an empty credential, not a guess"
@@ -685,7 +697,7 @@ mod tests {
         env.set(var::OCX_ANNOUNCE_TOKEN, "glpat-notarealapivalue");
         env.set(var::OCX_ANNOUNCE_GIT_TOKEN, "glpat-notarealpushvalue");
 
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert_eq!(
             credentials.api().0,
             "glpat-notarealapivalue",
@@ -718,6 +730,7 @@ mod tests {
         env.set(var::OCX_ANNOUNCE_GIT_TOKEN, "");
 
         let push = ForgeCredentials::resolve(WriteTransport::Git)
+            .expect("the fixture holds no reference")
             .push()
             .expect("the API credential is the push ladder's second rung")
             .clone();
@@ -742,7 +755,10 @@ mod tests {
         let env = isolated();
         let _ = &env;
         assert!(
-            ForgeCredentials::resolve(WriteTransport::Git).push().is_none(),
+            ForgeCredentials::resolve(WriteTransport::Git)
+                .expect("the fixture holds no reference")
+                .push()
+                .is_none(),
             "an empty credential must not be injected as a header"
         );
     }
@@ -856,7 +872,7 @@ mod tests {
                 env.set(var::OCX_ANNOUNCE_GIT_TOKEN, token);
             }
 
-            let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+            let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
             assert_eq!(
                 credentials.push().map(|push| push.secret.0.as_str()),
                 expected_secret,
@@ -889,7 +905,7 @@ mod tests {
         env.set(var::CI_JOB_TOKEN, "glcbt-64-notarealjobtoken");
         env.set(var::OCX_ANNOUNCE_GIT_TOKEN, "glpat-notarealpushvalue");
 
-        let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
         assert_eq!(
             credentials.api().0,
             "glcbt-64-notarealjobtoken",
@@ -956,7 +972,7 @@ mod tests {
                 env.set(var::OCX_ANNOUNCE_GIT_USERNAME, username);
             }
 
-            let credentials = ForgeCredentials::resolve(WriteTransport::Git);
+            let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("the fixture holds no reference");
             assert_eq!(
                 credentials
                     .push()
@@ -1005,5 +1021,80 @@ mod tests {
             .unwrap_or_else(|| panic!("the pair must be `user:secret`: {pair:?}"));
         assert_eq!(username, credential.username, "the user half comes first");
         assert_eq!(secret, credential.secret.0, "the secret half survives its own colons");
+    }
+
+    /// A `file://` reference to a path that does not exist, under a fresh directory.
+    fn missing_reference(dir: &tempfile::TempDir) -> String {
+        format!("file://{}", dir.path().join("absent").display())
+    }
+
+    fn assert_reference_error(result: Result<ForgeCredentials, ocx_env::ReferenceError>, variable: &str) {
+        match result {
+            Err(error) => assert!(
+                error.to_string().contains(variable),
+                "the error must name the carrying variable {variable}: {error}"
+            ),
+            Ok(credentials) => panic!("an unresolvable {variable} must fail, got {credentials:?}"),
+        }
+    }
+
+    /// Reds on: collapsing the API read to the job token or an empty credential.
+    #[test]
+    fn unresolvable_announce_token_is_an_error_not_the_job_token() {
+        let env = isolated();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(var::GITLAB_CI, "true");
+        env.set(var::CI_JOB_TOKEN, "job-token-value");
+        env.set(var::OCX_ANNOUNCE_TOKEN, missing_reference(&dir));
+
+        assert_reference_error(ForgeCredentials::resolve(WriteTransport::Git), "OCX_ANNOUNCE_TOKEN");
+    }
+
+    #[test]
+    fn unresolvable_announce_git_token_is_an_error_not_the_api_token() {
+        let env = isolated();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(var::OCX_ANNOUNCE_TOKEN, "api-token-value");
+        env.set(var::OCX_ANNOUNCE_GIT_TOKEN, missing_reference(&dir));
+
+        assert_reference_error(ForgeCredentials::resolve(WriteTransport::Git), "OCX_ANNOUNCE_GIT_TOKEN");
+    }
+
+    #[test]
+    fn unresolvable_announce_git_username_is_an_error_not_the_default() {
+        let env = isolated();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(var::OCX_ANNOUNCE_TOKEN, "api-token-value");
+        env.set(var::OCX_ANNOUNCE_GIT_USERNAME, missing_reference(&dir));
+
+        assert_reference_error(
+            ForgeCredentials::resolve(WriteTransport::Git),
+            "OCX_ANNOUNCE_GIT_USERNAME",
+        );
+    }
+
+    /// The `:` refusal reads the resolved value, so a file holding `a:b` is refused
+    /// while the same name held literally in a file without a colon is kept.
+    #[test]
+    fn username_colon_filter_applies_to_the_resolved_value() {
+        let env = isolated();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(var::OCX_ANNOUNCE_TOKEN, "api-token-value");
+
+        let colon = dir.path().join("colon");
+        std::fs::write(&colon, "a:b\n").expect("write");
+        env.set(var::OCX_ANNOUNCE_GIT_USERNAME, format!("file://{}", colon.display()));
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("a readable file resolves");
+        assert_eq!(
+            credentials.push().expect("push credential").username,
+            GitPushCredential::DEFAULT_USERNAME,
+            "a resolved value holding a colon counts as absent"
+        );
+
+        let clean = dir.path().join("clean");
+        std::fs::write(&clean, "deploy-bot\n").expect("write");
+        env.set(var::OCX_ANNOUNCE_GIT_USERNAME, format!("file://{}", clean.display()));
+        let credentials = ForgeCredentials::resolve(WriteTransport::Git).expect("a readable file resolves");
+        assert_eq!(credentials.push().expect("push credential").username, "deploy-bot");
     }
 }

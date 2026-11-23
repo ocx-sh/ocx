@@ -654,6 +654,9 @@ const COMMAND_FLAGS: &[(&str, &str, &str)] = &[(
     "./command-line/self.md#self-setup",
 )];
 
+/// The four value forms a secret variable accepts, and how a reference resolves or fails.
+const SECRET_REFERENCES: &str = "A secret variable, and a few user-name variables, accept a reference in place of the value.\n\n| Form | Reads |\n| --- | --- |\n| literal | The value as written |\n| `file://<path>` | The file's contents |\n| `env://<NAME>` | The value of the variable `NAME` |\n| `plain://<text>` | The text after the prefix, taken literally |\n\n- Resolution: one step. A reference never chains, so a target that is itself a reference is read literally.\n- File size: at most 64 KiB, with trailing CR and LF characters removed.\n- Failure: a reference that cannot be resolved fails the command, never an anonymous request. The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run with one warning, and the exit code is unchanged.\n- Targets: an `env://` target is an ordinary variable. Children inherit it even when the variable carrying the reference is withheld, and a nested `ocx` resolves the reference against its own environment.";
+
 /// The boolean vocabulary every `Bool` variable shares, and the four that refuse a value outside it.
 const TRUTHY_VALUES: &str = "A boolean variable reads these spellings in any case.\n\n| Reads as | Spellings |\n| --- | --- |\n| On | `1`, `y`, `yes`, `on`, `true` |\n| Off | `0`, `n`, `no`, `off`, `false` |\n\n- Strict: [`OCX_OFFLINE`](#ocx-offline), [`OCX_FROZEN`](#ocx-frozen), [`OCX_NO_CONSENT`](#ocx-no-consent) and [`OCX_NO_VERIFY`](#ocx-no-verify) exit 78 naming the variable on any other value.\n- Lenient: every other boolean variable logs a warning and uses its default.";
 
@@ -912,10 +915,16 @@ fn env_page(vars: &[EnvVarEntry]) -> Page {
         sections.push((Some(group), members));
     }
     let mut ids = Ids::default();
-    let mut entries = vec![entry(vec![
-        format!("## Truthy values {{#{}}}", ids.claim("truthy-values", "group")),
-        TRUTHY_VALUES.to_owned(),
-    ])];
+    let mut entries = vec![
+        entry(vec![
+            format!("## Truthy values {{#{}}}", ids.claim("truthy-values", "group")),
+            TRUTHY_VALUES.to_owned(),
+        ]),
+        entry(vec![
+            format!("## Secret references {{#{}}}", ids.claim("secret-references", "group")),
+            SECRET_REFERENCES.to_owned(),
+        ]),
+    ];
     for (group, members) in sections {
         if members.is_empty() {
             continue;
@@ -933,6 +942,12 @@ fn env_page(vars: &[EnvVarEntry]) -> Page {
                 format!("- Audience: {}", var.visibility),
                 format!("- Value: `{}`", var.value),
             ];
+            if var.accepts_reference {
+                facts.push(
+                    "- Value forms: literal, `file://<path>`, `env://<NAME>`, `plain://<text>`; see [Secret references](#secret-references)"
+                        .to_owned(),
+                );
+            }
             if let Some(flag) = &var.flag {
                 facts.push(format!(
                     "- Flag: [`{flag}`](./command-line/index.md#{})",
@@ -1298,6 +1313,29 @@ fn pipe_safe(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_reference_capable_variable_renders_the_value_forms_line() {
+        let var = |name: &str, accepts_reference| EnvVarEntry {
+            name: name.to_owned(),
+            visibility: "public".to_owned(),
+            value: "string".to_owned(),
+            accepts_reference,
+            ..EnvVarEntry::default()
+        };
+        let page = env_page(&[var("OCX_WITH", true), var("OCX_WITHOUT", false)]);
+        let text = page.body;
+        let section = |name: &str| {
+            text.split("## `")
+                .find(|part| part.starts_with(name))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(section("OCX_WITH`").contains("Value forms: literal, `file://<path>`"));
+        assert!(!section("OCX_WITHOUT`").contains("Value forms"));
+        assert!(text.contains("## Secret references {#secret-references}"));
+        assert!(text.contains("The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run"));
+    }
 
     #[test]
     fn a_run_of_more_than_two_sentences_becomes_paragraphs_of_two() {

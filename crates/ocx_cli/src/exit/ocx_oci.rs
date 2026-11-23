@@ -41,6 +41,17 @@ mod tests {
         assert_eq!(ec(e), Some(ExitCode::ConfigError));
     }
 
+    /// Reds on: a cancelled lookup filed under the helper-timeout slug, or under another code than 75.
+    #[tokio::test]
+    async fn a_cancelled_credential_lookup_reports_its_own_detail() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let aborted = task.await.expect_err("an aborted task joins as an error");
+        let e = AuthError::LookupAborted(aborted);
+        crate::exit::tests::assert_detail(&e, "credential_lookup_aborted");
+        assert_eq!(ec(e), Some(ExitCode::TempFail));
+    }
+
     #[test]
     fn login_rejected_classifies_to_auth_error() {
         let e = AuthError::LoginRejected {

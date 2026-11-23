@@ -26,6 +26,7 @@ fn declaration(name: &'static str, visibility: Visibility, secret: bool, doc: &'
         on_invalid: OnInvalid::Default,
         visibility,
         secret,
+        accepts_reference: false,
         propagation: Propagation::UserInput,
         reader: Reader::Ocx,
     }))
@@ -312,4 +313,151 @@ fn the_stood_down_copy_is_declared_hook_local_plumbing() {
     assert_eq!(__OCX_ENV_STOOD_DOWN.propagation, Propagation::HookLocal);
     assert_eq!(__OCX_ENV_STOOD_DOWN.visibility, Visibility::Plumbing);
     assert!(__OCX_ENV_STOOD_DOWN.doc.contains("never transported"));
+}
+
+// ── Reference-capable declarations ──
+
+/// The non-secret declarations that accept a reference: a user name is not secret, but it may live in a file.
+const REFERENCE_USER_NAMES: &[&str] = &["OCX_ANNOUNCE_GIT_USERNAME", "OCX_AUTH_{REGISTRY}_USER"];
+
+fn with_reference(var: &EnvVar, accepts_reference: bool) -> &'static EnvVar {
+    Box::leak(Box::new(EnvVar {
+        accepts_reference,
+        ..*declaration(var.name, var.visibility, var.secret, "d")
+    }))
+}
+
+/// Reds on: a `secret` + `Public` declaration that does not accept a reference.
+fn secrets_without_reference(vars: &[&EnvVar]) -> Vec<String> {
+    vars.iter()
+        .filter(|var| var.secret && var.visibility == Visibility::Public && !var.accepts_reference)
+        .map(|var| var.name.to_owned())
+        .collect()
+}
+
+/// Reds on: a `Foreign`, `Plumbing` or `Testing` declaration that accepts a reference.
+fn references_outside_public(vars: &[&EnvVar]) -> Vec<String> {
+    vars.iter()
+        .filter(|var| var.accepts_reference && var.visibility != Visibility::Public)
+        .map(|var| var.name.to_owned())
+        .collect()
+}
+
+/// Reds on: a path-valued declaration that accepts a reference, which would read the file named by the path.
+fn references_on_paths(vars: &[&EnvVar]) -> Vec<String> {
+    vars.iter()
+        .filter(|var| {
+            var.accepts_reference && matches!(var.value, EnvValue::Path | EnvValue::PathList | EnvValue::PathOrPem)
+        })
+        .map(|var| var.name.to_owned())
+        .collect()
+}
+
+/// Reds on: a non-secret declaration that accepts a reference outside the allow list, or one on the list
+/// that is secret, does not accept one or is not `UserInput`.
+fn unlisted_reference_users(vars: &[&EnvVar]) -> Vec<String> {
+    let mut found: Vec<String> = vars
+        .iter()
+        .filter(|var| var.accepts_reference && !var.secret)
+        .filter(|var| !REFERENCE_USER_NAMES.contains(&var.name) || var.propagation != Propagation::UserInput)
+        .map(|var| var.name.to_owned())
+        .collect();
+    for name in REFERENCE_USER_NAMES {
+        let listed = vars.iter().find(|var| var.name == *name);
+        if !listed.is_some_and(|var| var.accepts_reference && !var.secret) {
+            found.push((*name).to_owned());
+        }
+    }
+    found
+}
+
+#[test]
+fn every_public_secret_accepts_a_reference() {
+    assert_eq!(secrets_without_reference(&live()), Vec::<String>::new());
+    let bad = with_reference(declaration("OCX_X_TOKEN", Visibility::Public, true, "d"), false);
+    assert_eq!(secrets_without_reference(&[bad]), ["OCX_X_TOKEN"]);
+}
+
+#[test]
+fn only_a_public_declaration_accepts_a_reference() {
+    assert_eq!(references_outside_public(&live()), Vec::<String>::new());
+    for visibility in [Visibility::Foreign, Visibility::Plumbing, Visibility::Testing] {
+        let bad = with_reference(declaration("X", visibility, false, "d"), true);
+        assert_eq!(references_outside_public(&[bad]), ["X"], "{visibility:?}");
+    }
+}
+
+#[test]
+fn no_path_valued_declaration_accepts_a_reference() {
+    assert_eq!(references_on_paths(&live()), Vec::<String>::new());
+    for value in [EnvValue::Path, EnvValue::PathList, EnvValue::PathOrPem] {
+        let bad: &'static EnvVar = Box::leak(Box::new(EnvVar {
+            value,
+            accepts_reference: true,
+            ..*declaration("OCX_X", Visibility::Public, false, "d")
+        }));
+        assert_eq!(references_on_paths(&[bad]), ["OCX_X"], "{value:?}");
+    }
+}
+
+#[test]
+fn the_non_secret_reference_users_are_exactly_the_two_user_names() {
+    assert_eq!(unlisted_reference_users(&live()), Vec::<String>::new());
+    let stray = with_reference(declaration("OCX_STRAY", Visibility::Public, false, "d"), true);
+    assert_eq!(
+        unlisted_reference_users(&[stray]).first().map(String::as_str),
+        Some("OCX_STRAY")
+    );
+    let listed = live()
+        .into_iter()
+        .filter(|var| REFERENCE_USER_NAMES.contains(&var.name))
+        .collect::<Vec<_>>();
+    assert_eq!(listed.len(), REFERENCE_USER_NAMES.len());
+    assert!(
+        listed
+            .iter()
+            .all(|var| !var.secret && var.propagation == Propagation::UserInput)
+    );
+}
+
+#[test]
+fn a_reference_capable_declaration_is_only_read_through_a_typed_reader() {
+    let _: &ReferenceVar = &OCX_ANNOUNCE_GIT_USERNAME;
+    let _: &ReferenceVar = &OCX_AUTH_USER;
+    let _: &SecretVar = &OCX_AUTH_TOKEN;
+    let env = overrides::lock();
+    let capable: Vec<_> = live().into_iter().filter(|var| var.accepts_reference).collect();
+    assert!(capable.len() > REFERENCE_USER_NAMES.len());
+    for var in capable {
+        let value = "plain://x";
+        if var.is_pattern() {
+            env.set_raw(var.slot_name("PROBE").unwrap(), value);
+            assert_eq!(var.get_slot("PROBE"), None, "{}", var.name);
+        } else {
+            env.set(var, value);
+            assert_eq!(var.get(), None, "{}", var.name);
+            assert_eq!(var.get_os(), None, "{}", var.name);
+            assert_eq!(var.get_raw(), None, "{}", var.name);
+        }
+    }
+}
+
+#[test]
+fn a_foreign_variable_never_accepts_a_reference() {
+    let offenders: Vec<&str> = live()
+        .into_iter()
+        .filter(|var| var.visibility == Visibility::Foreign && var.accepts_reference)
+        .map(|var| var.name)
+        .collect();
+    assert_eq!(offenders, Vec::<&str>::new());
+}
+
+#[test]
+fn every_owned_secret_accepts_a_reference() {
+    let offenders: Vec<&str> = live()
+        .into_iter()
+        .filter(|var| var.secret && var.visibility != Visibility::Foreign && !var.accepts_reference)
+        .map(|var| var.name)
+        .collect();
+    assert_eq!(offenders, Vec::<&str>::new());
 }

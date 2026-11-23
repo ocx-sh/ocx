@@ -3038,6 +3038,8 @@ pub enum ErrorDetail {
     CredentialHelperTimeout,
     /// The credential helper resolves to an unsafe path
     CredentialHelperUnsafePath,
+    /// The registry credential lookup was cancelled before it finished
+    CredentialLookupAborted,
     /// Writing the credential store failed
     CredentialStoreWrite,
     /// A declared binary is not executable
@@ -3717,6 +3719,12 @@ pub enum ErrorDetail {
     SameFilesystemCheckFailed,
     /// An unsigned SBOM referrer declares a media type outside the SBOM set
     SbomMediaTypeUnsupported,
+    /// An OCX secret variable holds a file:// or env:// reference the grammar refuses
+    SecretReferenceInvalid,
+    /// A file referenced by an OCX secret variable is too large or not UTF-8
+    SecretReferenceMalformed,
+    /// A file:// or env:// reference in an OCX secret variable has nothing to read
+    SecretReferenceUnreadable,
     /// The selection matches more than one package
     SelectionAmbiguous,
     /// The fork namespace is the upstream's own
@@ -4041,6 +4049,7 @@ impl ErrorDetail {
             Self::CredentialHelperNotOnPath => "credential_helper_not_on_path",
             Self::CredentialHelperTimeout => "credential_helper_timeout",
             Self::CredentialHelperUnsafePath => "credential_helper_unsafe_path",
+            Self::CredentialLookupAborted => "credential_lookup_aborted",
             Self::CredentialStoreWrite => "credential_store_write",
             Self::DeclaredBinaryNotExecutable => "declared_binary_not_executable",
             Self::DecompressionCapExceeded => "decompression_cap_exceeded",
@@ -4379,6 +4388,9 @@ impl ErrorDetail {
             Self::RootRepositoryMismatch => "root_repository_mismatch",
             Self::SameFilesystemCheckFailed => "same_filesystem_check_failed",
             Self::SbomMediaTypeUnsupported => "sbom_media_type_unsupported",
+            Self::SecretReferenceInvalid => "secret_reference_invalid",
+            Self::SecretReferenceMalformed => "secret_reference_malformed",
+            Self::SecretReferenceUnreadable => "secret_reference_unreadable",
             Self::SelectionAmbiguous => "selection_ambiguous",
             Self::SelfForkRefused => "self_fork_refused",
             Self::SeparatorEdgedListValue => "separator_edged_list_value",
@@ -4583,6 +4595,7 @@ impl ErrorDetail {
             "credential_helper_not_on_path" => Self::CredentialHelperNotOnPath,
             "credential_helper_timeout" => Self::CredentialHelperTimeout,
             "credential_helper_unsafe_path" => Self::CredentialHelperUnsafePath,
+            "credential_lookup_aborted" => Self::CredentialLookupAborted,
             "credential_store_write" => Self::CredentialStoreWrite,
             "declared_binary_not_executable" => Self::DeclaredBinaryNotExecutable,
             "decompression_cap_exceeded" => Self::DecompressionCapExceeded,
@@ -4921,6 +4934,9 @@ impl ErrorDetail {
             "root_repository_mismatch" => Self::RootRepositoryMismatch,
             "same_filesystem_check_failed" => Self::SameFilesystemCheckFailed,
             "sbom_media_type_unsupported" => Self::SbomMediaTypeUnsupported,
+            "secret_reference_invalid" => Self::SecretReferenceInvalid,
+            "secret_reference_malformed" => Self::SecretReferenceMalformed,
+            "secret_reference_unreadable" => Self::SecretReferenceUnreadable,
             "selection_ambiguous" => Self::SelectionAmbiguous,
             "self_fork_refused" => Self::SelfForkRefused,
             "separator_edged_list_value" => Self::SeparatorEdgedListValue,
