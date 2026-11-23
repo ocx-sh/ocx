@@ -9,6 +9,10 @@ use ocx_config::managed_config::ManagedConfigUpdateError;
 use ocx_config::patch::ResolvedPatchConfig;
 use ocx_config::refresh::RefreshPolicy;
 use ocx_oci::Digest;
+use std::time::Duration;
+
+/// Bound on the background patch revalidation, so a slow patch registry cannot hold the user's command open.
+const PATCH_REVALIDATION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Outcome of a full managed-config update cycle.
 #[derive(Debug, Clone)]
@@ -111,7 +115,10 @@ impl PackageManager {
             }
         };
 
-        sync_patches_from_payload(self, &payload_text).await;
+        // A dropped `[patches]` must not be re-contacted: after an update `self` still holds the
+        // pre-update tier, so only an unchanged config may fall back to it.
+        let effective_tier_fallback = matches!(result, ManagedConfigUpdateResult::AlreadyCurrent { .. });
+        sync_patches_from_payload(self, &payload_text, effective_tier_fallback).await;
 
         Ok(result)
     }
@@ -192,6 +199,10 @@ impl PackageManager {
                 || snapshot.digest != probed_digest
         });
         if !drift {
+            // Before the marker, so a revalidation that errors or times out still throttles the next tick.
+            if let (RefreshPolicy::Apply, Some(snapshot)) = (&resolved.refresh, &existing) {
+                revalidate_patches_from_payload(self, &snapshot.config, PATCH_REVALIDATION_DEADLINE).await;
+            }
             ocx_store::file_structure::StateStore::touch(marker).await;
             return ManagedConfigRefreshOutcome::UpToDate;
         }
@@ -230,7 +241,7 @@ impl PackageManager {
                 {
                     Ok(snapshot) => {
                         ocx_store::file_structure::StateStore::touch(marker).await;
-                        sync_patches_from_payload(self, &snapshot.config).await;
+                        sync_patches_from_payload(self, &snapshot.config, false).await;
                         ManagedConfigRefreshOutcome::Applied {
                             digest: snapshot.digest,
                         }
@@ -254,25 +265,83 @@ impl PackageManager {
     }
 }
 
-/// Best-effort patch-descriptor sync from a just-fetched managed-config payload; never fails the caller.
+/// Best-effort patch-descriptor sync after a managed-config fetch; never fails the caller.
 ///
-/// Resolves `[patches]` from the payload, not `patches()`, which still holds the pre-update config.
-async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str) {
+/// Reads `[patches]` from the payload, not `patches()`, which still holds the pre-update config.
+/// With `effective_tier_fallback`, a payload without `[patches]` syncs `patches()` instead.
+async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str, effective_tier_fallback: bool) {
     if manager.is_offline() {
         return;
     }
-    let Some(resolved) = patches_from_payload(payload_toml) else {
-        return; // payload declares no (usable) patch tier — nothing to converge
+    if manager.patch_snapshot().is_some() {
+        log::debug!("managed-config patch sync: skipped under a patch snapshot");
+        return;
+    }
+    let target = match patches_from_payload(payload_toml) {
+        Some(resolved) => manager.clone().with_patches(Some(resolved)),
+        None if effective_tier_fallback && manager.patches().is_some() => manager.clone(),
+        None => return, // no patch tier to converge
     };
 
     let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
-    match manager.clone().with_patches(Some(resolved)).sync_patches(&[host]).await {
+    match target.sync_patches(&[host]).await {
         Ok(_report) => log::debug!("managed-config patch sync: completed"),
         Err(error) => log::warn!(
             "managed-config patch sync failed (non-fatal): {chain}",
             chain = ocx_util::error::render_chain(&error)
         ),
     }
+}
+
+/// Best-effort patch revalidation on the payload's `[patches]` tier; bounded, never fails the caller.
+///
+/// A payload without `[patches]` makes no request, even when `patches()` is set: that tier may come
+/// from `OCX_PATCHES` or a local config, and a background tick must never install from it.
+async fn revalidate_patches_from_payload(manager: &PackageManager, payload_toml: &str, deadline: Duration) {
+    let Some(resolved) = patches_from_payload(payload_toml) else {
+        return;
+    };
+    let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
+    let target = manager.clone().with_patches(Some(resolved));
+    let timed_out = tokio::time::timeout(deadline, target.revalidate_patches(&host)).await;
+    let marker = manager.file_structure.state.managed_config().patch_timeout_marker();
+    match timed_out {
+        Ok(Ok(())) => {
+            log::debug!("managed-config patch revalidation: completed");
+            // Only a completed revalidation ends the streak, or a registry alternating a timeout with
+            // an error never warns. Best effort: a missing marker is the common case.
+            let _ = tokio::fs::remove_file(&marker).await;
+        }
+        Ok(Err(error)) if operator_must_see(&error) => log::warn!(
+            "managed-config patch revalidation failed (non-fatal): {chain}",
+            chain = ocx_util::error::render_chain(&error)
+        ),
+        Ok(Err(error)) => log::debug!(
+            "managed-config patch revalidation failed: {chain}",
+            chain = ocx_util::error::render_chain(&error)
+        ),
+        Err(_elapsed) => {
+            // The marker from the previous tick makes a repeat visible: one slow tick is noise, every tick is not.
+            // Check-then-touch races across processes; the cost is one missed or doubled warning.
+            if ocx_util::fs::path_exists_lossy(&marker).await {
+                log::warn!(
+                    "managed-config patch revalidation timed out again after {deadline:?}; patch descriptors are not being refreshed"
+                );
+            } else {
+                log::debug!("managed-config patch revalidation: timed out");
+            }
+            ocx_store::file_structure::StateStore::touch(marker).await;
+        }
+    }
+}
+
+/// Whether a background revalidation failure is a refusal the operator must act on, not an unreachable registry.
+///
+/// An unclassified error warns on purpose, so a refusal never hides: a new transient error variant
+/// must classify as `Unavailable` or `TempFail`, or it warns on every background tick.
+fn operator_must_see(error: &crate::Error) -> bool {
+    use ocx_exit::{ClassifyExitCode, ExitCode};
+    !matches!(error.classify(), Some(ExitCode::Unavailable | ExitCode::TempFail))
 }
 
 /// The `[patches]` tier a managed-config payload declares; `None`, never an error, for any unusable payload.
@@ -709,6 +778,429 @@ mod tests {
         assert!(
             matches!(outcome, ManagedConfigRefreshOutcome::DriftDetected),
             "a cross-repo snapshot at an unchanged digest must still drift, got {outcome:?}"
+        );
+    }
+
+    // ── patch tier authority ─────────────────────────────────────────────────
+
+    const PAYLOAD_WITH_PATCHES: &str = "[patches]\nregistry = \"patches.corp.com\"\n";
+    const PAYLOAD_WITHOUT_PATCHES: &str = "[registry]\ndefault = \"corp\"\n";
+
+    fn patch_tier() -> ResolvedPatchConfig {
+        ResolvedPatchConfig {
+            system_required: false,
+            no_patches: std::collections::BTreeSet::new(),
+            registry: "patches.corp.com".to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: false,
+        }
+    }
+
+    /// A manager whose patch requests land on `patch_data` and whose managed-config fetches land on
+    /// `client`, so a test can tell the two apart.
+    fn manager_with_patch_transport(
+        root: &std::path::Path,
+        client: Client,
+        patch_data: &StubTransportData,
+        local_tier: Option<ResolvedPatchConfig>,
+    ) -> PackageManager {
+        let fs = FileStructure::with_root(root.to_path_buf());
+        // One installed base, so a revalidation or sync has something to look up.
+        let candidate = ocx_store::file_structure::SymlinkStore::new(root.join("symlinks"))
+            .candidate(&ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28"));
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, b"").unwrap();
+        let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = ocx_index::Index::from_chained(local_index, vec![], ocx_index::ChainMode::Offline);
+        let patch_client = ocx_oci::client::test_transport::stub_client(patch_data);
+        PackageManager::new(fs, index, Some(patch_client), "localhost:5000")
+            .with_managed_config_client(Some(client))
+            .with_patches(local_tier)
+    }
+
+    fn patch_requests(data: &StubTransportData) -> usize {
+        data.read().calls.len()
+    }
+
+    fn source() -> OciIdentifier {
+        OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap()
+    }
+
+    /// `Apply` with no drift revalidates the payload's patch tier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_managed_config_refresh_apply_without_drift_revalidates_the_payload_tier() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, None);
+        let resolved = resolved(source(), RefreshPolicy::Apply, Duration::ZERO);
+
+        // The first tick applies the drift; the second sees none.
+        manager.check_managed_config_refresh(&resolved).await;
+        patch_data.write().calls.clear();
+        let outcome = manager.check_managed_config_refresh(&resolved).await;
+
+        assert!(
+            matches!(outcome, ManagedConfigRefreshOutcome::UpToDate),
+            "got {outcome:?}"
+        );
+        assert!(
+            patch_requests(&patch_data) > 0,
+            "a tick without drift must revalidate the payload's patch tier"
+        );
+    }
+
+    /// A payload without `[patches]` makes no patch request, even when the manager's own tier is set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_managed_config_refresh_without_payload_patches_ignores_the_local_tier() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITHOUT_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, Some(patch_tier()));
+        let resolved = resolved(source(), RefreshPolicy::Apply, Duration::ZERO);
+
+        manager.check_managed_config_refresh(&resolved).await;
+        let outcome = manager.check_managed_config_refresh(&resolved).await;
+
+        assert!(
+            matches!(outcome, ManagedConfigRefreshOutcome::UpToDate),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            patch_requests(&patch_data),
+            0,
+            "the local tier must never trigger a background request"
+        );
+    }
+
+    /// `Notify` makes no patch request, with or without drift.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_managed_config_refresh_notify_without_drift_makes_no_patch_request() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, None);
+        let apply = resolved(source(), RefreshPolicy::Apply, Duration::ZERO);
+        manager.check_managed_config_refresh(&apply).await;
+        patch_data.write().calls.clear();
+
+        let notify = resolved(source(), RefreshPolicy::Notify, Duration::ZERO);
+        let outcome = manager.check_managed_config_refresh(&notify).await;
+
+        assert!(
+            matches!(outcome, ManagedConfigRefreshOutcome::UpToDate),
+            "got {outcome:?}"
+        );
+        assert_eq!(patch_requests(&patch_data), 0);
+    }
+
+    /// A revalidation that never answers is cut at its deadline without failing the caller.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_patches_from_payload_gives_up_at_the_deadline() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        patch_data.write().tag_read_delay = Some(Duration::from_secs(3600));
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, None);
+        // A fresh source is fetched, not probed; a recorded one reaches the delayed digest probe.
+        let global = crate::tasks::patch_discovery::global_descriptor_id(&patch_tier());
+        let path = manager.file_structure().patch_descriptor_path(&global);
+        crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
+            &path,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &crate::tasks::patch_discovery::stamp_beside(&path),
+        )
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_millis(100)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must cut the wait"
+        );
+        assert!(
+            patch_data
+                .read()
+                .calls
+                .iter()
+                .any(|call| call == "fetch_manifest_digest"),
+            "setup: the delayed digest probe must have started"
+        );
+    }
+
+    /// Records `digest` as the descriptor `patch_tier()`'s global source last held.
+    async fn record_global_descriptor(manager: &PackageManager, digest: &str) {
+        let global = crate::tasks::patch_discovery::global_descriptor_id(&patch_tier());
+        let path = manager.file_structure().patch_descriptor_path(&global);
+        crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
+            &path,
+            digest,
+            &crate::tasks::patch_discovery::stamp_beside(&path),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A timed-out revalidation leaves the marker a later tick reads; only a completed one removes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_patch_timeout_marker_follows_the_last_revalidation() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        patch_data.write().tag_read_delay = Some(Duration::from_secs(3600));
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, None);
+        let marker = manager.file_structure.state.managed_config().patch_timeout_marker();
+        record_global_descriptor(
+            &manager,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await;
+
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_millis(100)).await;
+        assert!(marker.exists(), "a timed-out revalidation must leave the marker");
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_millis(100)).await;
+        assert!(marker.exists(), "a repeated timeout keeps the marker");
+
+        patch_data.write().tag_read_delay = None;
+        patch_data.write().ensure_auth_error_override = Some("denied".to_string());
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_secs(30)).await;
+        assert!(marker.exists(), "a failed revalidation must not end the streak");
+
+        // The recorded digest names a descriptor the registry never held, so that source keeps failing; with
+        // no record the source is fetched fresh, found absent, and the revalidation completes.
+        patch_data.write().ensure_auth_error_override = None;
+        let global = crate::tasks::patch_discovery::global_descriptor_id(&patch_tier());
+        std::fs::remove_file(manager.file_structure().patch_descriptor_path(&global)).unwrap();
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_secs(30)).await;
+        assert!(!marker.exists(), "a completed revalidation must remove the marker");
+    }
+
+    /// A deadline that cuts a companion install mid-read leaves the old descriptor record, no pin and no
+    /// package; the next tick with time to spare installs it and advances the record.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deadline_cutting_a_companion_install_leaves_no_half_installed_state() {
+        use crate::tasks::patch_discovery::{PatchDiscoveryState, PatchTagMap};
+        use crate::tasks::patch_sync::tests::{build_descriptor_artifact, publish_companion};
+
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let companion = publish_companion(&patch_data, "ca-certs", &[("any", "any")]);
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(br#"{"type":"bundle","version":1}"#);
+        let rules = serde_json::json!([{
+            "match": "*", "packages": ["patches.corp.com/ca-certs:latest"], "required": true
+        }]);
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) = build_descriptor_artifact(rules);
+        {
+            let mut inner = patch_data.write();
+            inner.manifests.insert(
+                crate::tasks::patch_discovery::global_descriptor_id(&patch_tier()).to_string(),
+                (manifest_bytes, manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes);
+            inner
+                .blob_delays
+                .insert(config_digest.to_string(), Duration::from_secs(3600));
+        }
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let fs = FileStructure::with_root(home.path().to_path_buf());
+        let candidate = ocx_store::file_structure::SymlinkStore::new(home.path().join("symlinks"))
+            .candidate(&ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28"));
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, b"").unwrap();
+        let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        // A source, or the companion's tag has nothing to resolve against.
+        let source_index = ocx_index::Index::from_remote(ocx_index::OciIndex::new(ocx_index::OciIndexConfig {
+            client: ocx_oci::client::test_transport::stub_client(&patch_data),
+        }));
+        let index = ocx_index::Index::from_chained(local_index, vec![source_index], ocx_index::ChainMode::Default);
+        let manager = PackageManager::new(
+            fs,
+            index,
+            Some(ocx_oci::client::test_transport::stub_client(&patch_data)),
+            "localhost:5000",
+        )
+        .with_managed_config_client(Some(client));
+        let old = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        record_global_descriptor(&manager, old).await;
+        let global_path = manager
+            .file_structure()
+            .patch_descriptor_path(&crate::tasks::patch_discovery::global_descriptor_id(&patch_tier()));
+        let companion_id = ocx_oci::PackageRef::parse("patches.corp.com/ca-certs:latest").unwrap();
+        let pin_path = manager.file_structure().patch_companion_path(&companion_id);
+
+        let started = std::time::Instant::now();
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_millis(100)).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline must cut the install"
+        );
+        assert!(
+            patch_data
+                .read()
+                .calls
+                .iter()
+                .any(|call| *call == format!("pull_blob_streaming:{config_digest}")
+                    || *call == format!("pull_blob:{config_digest}")
+                    || *call == format!("pull_blob_to_file:{config_digest}")),
+            "setup: the install must have reached the delayed companion blob"
+        );
+        assert_eq!(
+            PatchTagMap::read(&global_path).await.unwrap(),
+            PatchDiscoveryState::LookedHasDescriptor {
+                manifest_digest: old.to_string()
+            },
+            "the descriptor record must keep the old digest"
+        );
+        assert_eq!(
+            PatchTagMap::read_tag(&pin_path, "latest").await.unwrap(),
+            None,
+            "no companion pin"
+        );
+        assert!(
+            manager.file_structure().packages.list_all().await.unwrap().is_empty(),
+            "the package store must hold no entry"
+        );
+
+        patch_data.write().blob_delays.clear();
+        revalidate_patches_from_payload(&manager, PAYLOAD_WITH_PATCHES, Duration::from_secs(30)).await;
+
+        assert_eq!(
+            PatchTagMap::read_tag(&pin_path, "latest").await.unwrap().as_deref(),
+            Some(companion.top.to_string().as_str()),
+            "the companion pin is recorded once it installed"
+        );
+        assert_eq!(
+            manager.file_structure().packages.list_all().await.unwrap().len(),
+            1,
+            "the companion is installed"
+        );
+        assert_eq!(
+            PatchTagMap::read(&global_path).await.unwrap(),
+            PatchDiscoveryState::LookedHasDescriptor {
+                manifest_digest: manifest_digest.to_string()
+            },
+            "the descriptor record advances"
+        );
+    }
+
+    /// A no-drift tick reports `UpToDate` and touches the throttle marker after its revalidation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_managed_config_refresh_touches_the_marker_after_the_revalidation() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITH_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, None);
+        let resolved = resolved(source(), RefreshPolicy::Apply, Duration::ZERO);
+        manager.check_managed_config_refresh(&resolved).await;
+        let marker = manager.file_structure.state.managed_config().refresh_marker();
+        std::fs::remove_file(&marker).unwrap();
+
+        let outcome = manager.check_managed_config_refresh(&resolved).await;
+
+        assert!(
+            matches!(outcome, ManagedConfigRefreshOutcome::UpToDate),
+            "got {outcome:?}"
+        );
+        assert!(
+            marker.exists(),
+            "a no-drift tick must touch the marker after revalidating"
+        );
+    }
+
+    /// Only a refusal the operator can act on warns; an unreachable or retryable registry stays at debug.
+    #[test]
+    fn operator_must_see_separates_refusals_from_an_unreachable_registry() {
+        use crate::error::{PackageError, PackageErrorKind};
+        use ocx_oci::client::error::ClientError;
+        let fetch_failed = |source| crate::Error::from(crate::patch::PatchError::FetchFailed { source });
+        let unavailable = fetch_failed(ClientError::Registry(Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ))));
+        let temp_fail = fetch_failed(ClientError::ShortBlobRead {
+            expected: 10,
+            actual: 5,
+        });
+        let auth = fetch_failed(ClientError::Authentication(Box::new(std::io::Error::other(
+            "bad creds",
+        ))));
+        let required_companion = crate::Error::DiscoverFailed(vec![PackageError::new(
+            ocx_oci::PackageRef::new_registry("java", "example.com"),
+            PackageErrorKind::RequiredCompanionFailed {
+                companion: ocx_oci::PackageRef::new_registry("license-server", "patches.corp.com"),
+                source: Box::new(PackageErrorKind::NotFound),
+            },
+        )]);
+        let unclassified = crate::Error::Singleflight(ocx_util::singleflight::Error::Failed(
+            ocx_util::singleflight::SharedError::for_test(std::io::Error::other("leader failed")),
+        ));
+        {
+            use ocx_exit::ClassifyExitCode;
+            assert_eq!(
+                unavailable.classify(),
+                Some(ocx_exit::ExitCode::Unavailable),
+                "setup: unreachable"
+            );
+            assert_eq!(
+                temp_fail.classify(),
+                Some(ocx_exit::ExitCode::TempFail),
+                "setup: retryable"
+            );
+            assert_eq!(unclassified.classify(), None, "setup: no exit code");
+        }
+
+        for (name, error, loud) in [
+            ("unavailable", &unavailable, false),
+            ("temp fail", &temp_fail, false),
+            ("required companion", &required_companion, true),
+            ("auth", &auth, true),
+            ("unclassified", &unclassified, true),
+        ] {
+            assert_eq!(operator_must_see(error), loud, "{name}");
+        }
+    }
+
+    /// An unchanged config with no `[patches]` in the payload syncs the manager's effective tier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_managed_config_already_current_without_payload_patches_syncs_the_effective_tier() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITHOUT_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, Some(patch_tier()));
+        let resolved = resolved(source(), RefreshPolicy::Notify, Duration::ZERO);
+        manager.update_managed_config(&resolved, None).await.unwrap();
+        patch_data.write().calls.clear();
+
+        let second = manager.update_managed_config(&resolved, None).await.unwrap();
+
+        assert!(matches!(second, ManagedConfigUpdateResult::AlreadyCurrent { .. }));
+        assert!(patch_requests(&patch_data) > 0, "the effective tier must be synced");
+    }
+
+    /// An applied update whose payload drops `[patches]` contacts no patch registry, though the
+    /// manager still holds the pre-update tier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_managed_config_updated_without_payload_patches_syncs_nothing() {
+        let home = TempDir::new().unwrap();
+        let patch_data = StubTransportData::new();
+        let client = stub_client_with_artifact(&source(), PAYLOAD_WITHOUT_PATCHES);
+        let manager = manager_with_patch_transport(home.path(), client, &patch_data, Some(patch_tier()));
+        let resolved = resolved(source(), RefreshPolicy::Notify, Duration::ZERO);
+
+        let result = manager.update_managed_config(&resolved, None).await.unwrap();
+
+        assert!(matches!(result, ManagedConfigUpdateResult::Updated { .. }));
+        assert_eq!(
+            patch_requests(&patch_data),
+            0,
+            "a dropped registry must not be contacted"
         );
     }
 }

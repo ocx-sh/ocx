@@ -320,6 +320,12 @@ impl StateStore {
         }
     }
 
+    /// Zero-byte file every changing patch-record write touches, so an open shell sees patch changes:
+    /// `<state>/patch-state.stamp`.
+    pub fn patch_state_stamp(&self) -> PathBuf {
+        self.root.join("patch-state.stamp")
+    }
+
     pub fn host_capabilities_file(&self) -> PathBuf {
         self.root.join("host").join("capabilities.json")
     }
@@ -527,6 +533,12 @@ mod tests {
             Some(store.project_state_root().as_path()),
             "every project state dir must be a direct child of the sweep root"
         );
+    }
+
+    #[test]
+    fn patch_state_stamp_is_patch_state_stamp_in_the_state_root() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(store.patch_state_stamp(), PathBuf::from("/ocx/state/patch-state.stamp"));
     }
 
     /// C-022 — the consent stamp is `consent.json` inside the project's state dir.

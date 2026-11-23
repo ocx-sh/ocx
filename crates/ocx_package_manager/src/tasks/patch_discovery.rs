@@ -4,7 +4,7 @@
 //! Lazy three-state patch discovery and companion install
 //! (`adr_infrastructure_patches.md § Three-state discovery`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
@@ -16,6 +16,7 @@ use crate::{
 use ocx_config::patch::{PatchConfig, ResolvedPatchConfig, expand_patch_path};
 use ocx_oci::{self, PackageRef, tag::InternalTag};
 use ocx_package::install_info::InstallInfo;
+use ocx_store::file_structure::StateStore;
 
 use ocx_util::fs::LockedJsonFile;
 use ocx_util::singleflight;
@@ -32,7 +33,7 @@ use crate::{concurrency, concurrency::Concurrency};
 /// alone allow `256 × 64 × 2 = 32 768` from a compromised registry.
 pub const MAX_TOTAL_COMPANIONS: usize = 256;
 
-/// Distinct `(companion, platform)` installs one sync shares; past it each install runs uncoordinated.
+/// Distinct entries each of a sync's shared companion groups holds; past it work runs uncoordinated.
 const MAX_SHARED_COMPANION_INSTALLS: usize = 8192;
 
 /// How long a sync pass waits on another pass installing the same companion.
@@ -71,11 +72,24 @@ impl PatchTagMap {
     }
 
     /// Atomically records `tag` → `digest`, leaving every other key untouched.
-    pub async fn write_tag(path: &std::path::Path, tag: &str, digest: &str) -> crate::Result<()> {
+    ///
+    /// A changed map moves the `stamp` file, which open shells watch to recompose.
+    pub async fn write_tag(
+        path: &std::path::Path,
+        tag: &str,
+        digest: &str,
+        stamp: &std::path::Path,
+    ) -> crate::Result<()> {
         let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(path).await?;
-        let mut map = locked.read().await?.unwrap_or_default();
+        let before = locked.read().await?.unwrap_or_default();
+        let mut map = before.clone();
         map.insert(tag.to_string(), digest.to_string());
-        locked.write(&map).await.map_err(Into::into)
+        locked.write(&map).await?;
+        if map != before {
+            // After the record write, never before: a shell drawing a prompt in between would stamp stale state as current.
+            StateStore::touch(stamp.to_path_buf()).await;
+        }
+        Ok(())
     }
 
     /// Reads the discovery state for the given tag-store path.
@@ -93,17 +107,35 @@ impl PatchTagMap {
     }
 
     /// Atomically records the "looked, no descriptor" state.
-    pub async fn write_no_descriptor(tags_path: &std::path::Path) -> crate::Result<()> {
+    ///
+    /// A changed map moves the `stamp` file, as [`write_tag`](Self::write_tag) does.
+    pub async fn write_no_descriptor(tags_path: &std::path::Path, stamp: &std::path::Path) -> crate::Result<()> {
         let mut locked = LockedJsonFile::<BTreeMap<String, String>>::open_exclusive(tags_path).await?;
-        let mut map = locked.read().await?.unwrap_or_default();
+        let before = locked.read().await?.unwrap_or_default();
+        let mut map = before.clone();
         map.remove(InternalTag::PATCH_TAG);
-        locked.write(&map).await.map_err(Into::into)
+        locked.write(&map).await?;
+        if map != before {
+            // After the record write, never before: see `write_tag`.
+            StateStore::touch(stamp.to_path_buf()).await;
+        }
+        Ok(())
     }
 
     /// Atomically records the "looked, has descriptor" state.
-    pub async fn write_has_descriptor(tags_path: &std::path::Path, manifest_digest: &str) -> crate::Result<()> {
-        Self::write_tag(tags_path, InternalTag::PATCH_TAG, manifest_digest).await
+    pub async fn write_has_descriptor(
+        tags_path: &std::path::Path,
+        manifest_digest: &str,
+        stamp: &std::path::Path,
+    ) -> crate::Result<()> {
+        Self::write_tag(tags_path, InternalTag::PATCH_TAG, manifest_digest, stamp).await
     }
+}
+
+/// Test stamp path beside a record file, so a unit test needs no `FileStructure`.
+#[cfg(test)]
+pub(crate) fn stamp_beside(record: &std::path::Path) -> std::path::PathBuf {
+    record.with_file_name("patch-state.stamp")
 }
 
 // ── PatchDiscoveryMode ────────────────────────────────────────────────────────
@@ -204,7 +236,7 @@ impl PackageManager {
 
         // Capped, or the discovery fan-out outruns the concurrency the caller asked for.
         let semaphore = concurrency.semaphore();
-        let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
+        let mut tasks: JoinSet<(usize, DiscoveryOutcome)> = JoinSet::new();
         for (index, package) in packages.iter().enumerate() {
             let manager = self.clone();
             let package = package.clone();
@@ -251,7 +283,7 @@ impl PackageManager {
 
         // Any failed base keeps the last-known-good descriptor digests for the whole batch.
         if all_clean && let Some(revalidated) = revalidated {
-            commit_descriptor_advances(&revalidated.pending).await?;
+            commit_descriptor_advances(&revalidated.pending, &self.file_structure().state.patch_state_stamp()).await?;
         }
         Ok(())
     }
@@ -273,7 +305,9 @@ impl PackageManager {
         }
 
         if mode != PatchDiscoveryMode::Revalidate || reads_snapshot(self, mode) {
-            return discover_from(self, base_id, platform, mode, scope, None, None).await;
+            return discover_from(self, base_id, platform, mode, scope, None, None)
+                .await
+                .map(|installed| installed.len());
         }
         let ids = descriptor_ids(patches, base_id, scope);
         let (revalidated, errors) = revalidate_descriptors(self, patches, &ids, Concurrency::cores()).await;
@@ -281,10 +315,10 @@ impl PackageManager {
             return Err(error);
         }
         let installed = discover_from(self, base_id, platform, mode, scope, Some(&revalidated), None).await?;
-        commit_descriptor_advances(&revalidated.pending)
+        commit_descriptor_advances(&revalidated.pending, &self.file_structure().state.patch_state_stamp())
             .await
             .map_err(PackageErrorKind::Internal)?;
-        Ok(installed)
+        Ok(installed.len())
     }
 
     /// Installs a companion into the object store at its patch-tier pin, never touching the local index.
@@ -337,9 +371,20 @@ impl PackageManager {
             let pinned = companion_id.clone_with_digest(digest);
             return super::pull::pull_as(&store_only, &pinned, platform, Role::Companion).await;
         }
+        self.fetch_companion_unpinned(companion_id, platform, None).await
+    }
+
+    /// The unpinned half of [`Self::fetch_companion`], sharing its resolve and install through `installs` when given.
+    async fn fetch_companion_unpinned(
+        &self,
+        companion_id: &PackageRef,
+        platform: ocx_oci::Platform,
+        installs: Option<&CompanionInstalls>,
+    ) -> Result<InstallInfo, PackageErrorKind> {
         if self.patch_snapshot().is_some() {
             return Err(PackageErrorKind::NotFound);
         }
+        let store_only = self.read_only_view();
         // Here, not by the resolver, whose refusal names `ocx index update`, which never writes a companion pin.
         if self.is_offline() {
             return Err(PackageErrorKind::PatchDiscovery(
@@ -350,22 +395,36 @@ impl PackageManager {
         }
 
         // `remote_view`, not the ambient chain, which fails under `--frozen` and serves stale local tags.
-        let top_digest = self
-            .index()
-            .remote_view()
-            .fetch_manifest_digest(companion_id, ocx_index::IndexOperation::Resolve)
-            .await
-            .map_err(|error| PackageErrorKind::Internal(error.into()))?
-            .ok_or(PackageErrorKind::NotFound)?;
+        let resolve_top = async {
+            self.index()
+                .remote_view()
+                .fetch_manifest_digest(companion_id, ocx_index::IndexOperation::Resolve)
+                .await
+                .map_err(|error| PackageErrorKind::Internal(error.into()))?
+                .ok_or(PackageErrorKind::NotFound)
+        };
+        let top_digest = match installs {
+            Some(installs) => share_once(&installs.tops, companion_id.clone(), resolve_top).await?,
+            None => resolve_top.await?,
+        };
 
         let pinned = companion_id.clone_with_digest(top_digest.clone());
-        let installed = super::pull::pull_as(&store_only, &pinned, platform, Role::Companion).await?;
+        let installed = match installs {
+            None => super::pull::pull_as(&store_only, &pinned, platform, Role::Companion).await?,
+            Some(installs) => {
+                // Selected here, so the key names the content: a platform-independent companion is one install.
+                let leaf = select_leaf(&store_only, &pinned, &platform).await?;
+                let pull = super::pull::pull_as(&store_only, &pinned, platform, Role::Companion);
+                share_once(&installs.by_leaf, (companion_id.clone(), leaf), pull).await?
+            }
+        };
 
         // Only once materialized, or the pin composes as "not installed".
         PatchTagMap::write_tag(
             &self.file_structure().patch_companion_path(companion_id),
             companion_id.tag_or_latest(),
             &top_digest.to_string(),
+            &self.file_structure().state.patch_state_stamp(),
         )
         .await
         .map_err(PackageErrorKind::Internal)?;
@@ -435,7 +494,7 @@ pub(super) fn install_discovery_error_is_fatal(
 }
 
 /// `Ok` for a non-fatal discovery failure, which is warned and leaves `base` without companions.
-fn tolerate_discovery_error(
+pub(super) fn tolerate_discovery_error(
     patches: Option<&ResolvedPatchConfig>,
     base: &PackageRef,
     error: PackageErrorKind,
@@ -478,9 +537,9 @@ pub(super) async fn sync_discover_all(
     manager: &PackageManager,
     passes: &[SyncPass],
     concurrency: Concurrency,
-) -> crate::Result<Vec<Result<usize, PackageErrorKind>>> {
+) -> crate::Result<Vec<DiscoveryOutcome>> {
     let Some(patches) = manager.patches() else {
-        return Ok(passes.iter().map(|_| Ok(0)).collect());
+        return Ok(passes.iter().map(|_| Ok(BTreeSet::new())).collect());
     };
     let mut seen: HashSet<PackageRef> = HashSet::new();
     let ids: Vec<PackageRef> = passes
@@ -492,7 +551,7 @@ pub(super) async fn sync_discover_all(
     let installs = CompanionInstalls::new(MAX_SHARED_COMPANION_INSTALLS, SHARED_COMPANION_INSTALL_TIMEOUT);
 
     let semaphore = concurrency.semaphore();
-    let mut tasks: JoinSet<(usize, Result<usize, PackageErrorKind>)> = JoinSet::new();
+    let mut tasks: JoinSet<(usize, DiscoveryOutcome)> = JoinSet::new();
     for (index, pass) in passes.iter().enumerate() {
         let manager = manager.clone();
         let (base, platform, scope) = (pass.base.clone(), pass.platform.clone(), pass.scope);
@@ -507,7 +566,7 @@ pub(super) async fn sync_discover_all(
             (index, result)
         });
     }
-    let mut results: Vec<(usize, Result<usize, PackageErrorKind>)> = Vec::with_capacity(passes.len());
+    let mut results: Vec<(usize, DiscoveryOutcome)> = Vec::with_capacity(passes.len());
     while let Some(join_result) = tasks.join_next().await {
         match join_result {
             Ok(outcome) => results.push(outcome),
@@ -523,7 +582,7 @@ pub(super) async fn sync_discover_all(
         .iter()
         .any(|(_, result)| matches!(result, Err(PackageErrorKind::RequiredCompanionFailed { .. })));
     if !required_failed {
-        commit_descriptor_advances(&synced.pending).await?;
+        commit_descriptor_advances(&synced.pending, &manager.file_structure().state.patch_state_stamp()).await?;
     }
     Ok(results.into_iter().map(|(_, result)| result).collect())
 }
@@ -585,8 +644,71 @@ async fn sync_descriptor(
     fetch_or_record_absent(manager, descriptor_id, &tags_path, commit, pending).await
 }
 
-/// One `install_companion` per `(companion, platform)` across a sync, however many bases name it.
-type CompanionInstalls = singleflight::Group<(PackageRef, ocx_oci::Platform), InstallInfo>;
+/// The companions one discovery installed, or why it failed.
+type DiscoveryOutcome = Result<BTreeSet<(PackageRef, ocx_oci::Digest)>, PackageErrorKind>;
+
+/// What one sync shares between its passes, so a companion is resolved and installed once per distinct content.
+#[derive(Clone)]
+struct CompanionInstalls {
+    /// Answers a later pass asking for the same companion on the same platform without re-selecting its leaf;
+    /// on the non-Sync path it is the only dedup, not merely a fast path.
+    by_platform: singleflight::Group<(PackageRef, ocx_oci::Platform), InstallInfo>,
+    /// The companion's top manifest digest, resolved from the registry once per reference.
+    tops: singleflight::Group<PackageRef, ocx_oci::Digest>,
+    /// One install per companion reference and selected leaf: the reference stays in the key, or two
+    /// repositories serving the same bytes would share one pin record and origin marker.
+    by_leaf: singleflight::Group<(PackageRef, ocx_oci::Digest), InstallInfo>,
+}
+
+impl CompanionInstalls {
+    fn new(max_entries: usize, timeout: std::time::Duration) -> Self {
+        Self {
+            by_platform: singleflight::Group::new(max_entries, timeout),
+            tops: singleflight::Group::new(max_entries, timeout),
+            by_leaf: singleflight::Group::new(max_entries, timeout),
+        }
+    }
+}
+
+/// The digest of the leaf `pull_as` selects for `platform`, without fetching the leaf manifest.
+///
+/// A platform the companion's index does not offer keeps the error the pull itself would raise.
+async fn select_leaf(
+    manager: &PackageManager,
+    top: &PackageRef,
+    platform: &ocx_oci::Platform,
+) -> Result<ocx_oci::Digest, PackageErrorKind> {
+    let operation = ocx_index::IndexOperation::Resolve;
+    // A flat manifest is its own leaf and carries no platform to select on, as in `resolve`.
+    let (top_pinned, top_manifest) = super::common::resolve_top_manifest(manager.index(), top, operation).await?;
+    if matches!(top_manifest, ocx_oci::Manifest::Image(_)) {
+        return Ok(top_pinned.digest());
+    }
+    let selected = super::common::select_platform(manager.index(), top, platform, operation).await?;
+    selected.digest().ok_or(PackageErrorKind::DigestMissing)
+}
+
+/// Runs `work` as the leader for `key`, or reuses the value of the pass that already did.
+///
+/// A failed or abandoned leader shares nothing: the caller runs `work` itself and keeps its own error.
+async fn share_once<K, V, E, F>(group: &singleflight::Group<K, V>, key: K, work: F) -> Result<V, E>
+where
+    K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    F: std::future::Future<Output = Result<V, E>>,
+{
+    let handle = match group.try_acquire(key).await {
+        Ok(singleflight::Acquisition::Resolved(value)) => return Ok(value),
+        Ok(singleflight::Acquisition::Leader(handle)) => Some(handle),
+        Err(_) => None,
+    };
+    let result = work.await;
+    // On failure the dropped handle tells waiters "abandoned", so each retries with its own error.
+    if let (Some(handle), Ok(value)) = (handle, &result) {
+        handle.complete(value.clone());
+    }
+    result
+}
 
 /// [`PackageManager::install_companion`], shared through `installs` when given.
 async fn install_companion_once(
@@ -596,21 +718,19 @@ async fn install_companion_once(
     mode: PatchDiscoveryMode,
     installs: Option<&CompanionInstalls>,
 ) -> Result<InstallInfo, PackageErrorKind> {
-    let handle = match installs {
-        None => None,
-        Some(installs) => match installs.try_acquire((companion_id.clone(), platform.clone())).await {
-            Ok(singleflight::Acquisition::Resolved(installed)) => return Ok(installed),
-            Ok(singleflight::Acquisition::Leader(handle)) => Some(handle),
-            // A failed or abandoned leader shares nothing: install here and keep this call's own error.
-            Err(_) => None,
-        },
+    let Some(installs) = installs else {
+        return manager.install_companion(companion_id, platform.clone(), mode).await;
     };
-    let result = manager.install_companion(companion_id, platform.clone(), mode).await;
-    // On failure the dropped handle tells waiters "abandoned", so each retries with its own error.
-    if let (Some(handle), Ok(installed)) = (handle, &result) {
-        handle.complete(installed.clone());
-    }
-    result
+    share_once(&installs.by_platform, (companion_id.clone(), platform.clone()), async {
+        if mode == PatchDiscoveryMode::Sync {
+            manager
+                .fetch_companion_unpinned(companion_id, platform.clone(), Some(installs))
+                .await
+        } else {
+            manager.install_companion(companion_id, platform.clone(), mode).await
+        }
+    })
+    .await
 }
 
 /// Descriptor sources a Revalidate or Sync pass checked once, read by every base it covers.
@@ -725,7 +845,7 @@ async fn revalidate_descriptor(
                         },
                     ));
                 }
-                record_no_descriptor(&tags_path).await?;
+                record_no_descriptor(manager, &tags_path).await?;
             }
             Ok(fetched)
         }
@@ -773,7 +893,8 @@ async fn load_recorded_descriptor(
     }
 }
 
-/// Discovers `base_id`'s descriptors and installs their companions; returns how many installed.
+/// Discovers `base_id`'s descriptors and installs their companions; returns each installed one as
+/// its reference and resolved leaf digest.
 ///
 /// A source in `revalidated` is taken as re-checked; any other is read by `mode`. Companion
 /// installs are shared through `installs` when given.
@@ -785,9 +906,9 @@ async fn discover_from(
     scope: PatchDescriptorScope,
     revalidated: Option<&RevalidatedDescriptors>,
     installs: Option<&CompanionInstalls>,
-) -> Result<usize, PackageErrorKind> {
+) -> DiscoveryOutcome {
     let Some(patches) = manager.patches() else {
-        return Ok(0);
+        return Ok(BTreeSet::new());
     };
     let snapshot = manager.patch_snapshot().filter(|_| reads_snapshot(manager, mode));
     let file_structure = manager.file_structure();
@@ -852,7 +973,7 @@ async fn discover_from(
         ));
     }
 
-    let mut installed_count: usize = 0;
+    let mut installed: BTreeSet<(PackageRef, ocx_oci::Digest)> = BTreeSet::new();
     if companions.is_empty() {
         log::debug!("patch discovery: no companions for '{}'", base_id);
     } else {
@@ -895,8 +1016,8 @@ async fn discover_from(
                 }
             }
             match install_companion_once(manager, &companion_id, platform, mode, installs).await {
-                Ok(_) => {
-                    installed_count += 1;
+                Ok(info) => {
+                    installed.insert((companion_id.clone(), info.identifier().digest()));
                     log::debug!("patch discovery: companion '{}' installed", companion_id);
                 }
                 Err(kind) => {
@@ -921,10 +1042,10 @@ async fn discover_from(
         }
     }
 
-    commit_descriptor_advances(&pending_tag_writes)
+    commit_descriptor_advances(&pending_tag_writes, &manager.file_structure().state.patch_state_stamp())
         .await
         .map_err(PackageErrorKind::Internal)?;
-    Ok(installed_count)
+    Ok(installed)
 }
 
 /// Whether discovery reads the active patch snapshot instead of the live tier: every mode but `Sync`.
@@ -933,16 +1054,16 @@ fn reads_snapshot(manager: &PackageManager, mode: PatchDiscoveryMode) -> bool {
 }
 
 /// Records each deferred descriptor advance.
-async fn commit_descriptor_advances(pending: &[PendingDescriptorCommit]) -> crate::Result<()> {
+async fn commit_descriptor_advances(pending: &[PendingDescriptorCommit], stamp: &std::path::Path) -> crate::Result<()> {
     for commit in pending {
-        PatchTagMap::write_has_descriptor(&commit.tags_path, &commit.manifest_digest).await?;
+        PatchTagMap::write_has_descriptor(&commit.tags_path, &commit.manifest_digest, stamp).await?;
     }
     Ok(())
 }
 
 /// Records "looked, no descriptor" for a source.
-async fn record_no_descriptor(tags_path: &std::path::Path) -> Result<(), PackageErrorKind> {
-    PatchTagMap::write_no_descriptor(tags_path)
+async fn record_no_descriptor(manager: &PackageManager, tags_path: &std::path::Path) -> Result<(), PackageErrorKind> {
+    PatchTagMap::write_no_descriptor(tags_path, &manager.file_structure().state.patch_state_stamp())
         .await
         .map_err(PackageErrorKind::Internal)
 }
@@ -957,7 +1078,7 @@ async fn fetch_or_record_absent(
 ) -> Result<Option<PatchDescriptor>, PackageErrorKind> {
     let fetched = fetch_and_persist_descriptor(manager, descriptor_id, tags_path, commit, pending).await?;
     if fetched.is_none() {
-        record_no_descriptor(tags_path).await?;
+        record_no_descriptor(manager, tags_path).await?;
     }
     Ok(fetched)
 }
@@ -1018,9 +1139,13 @@ async fn fetch_and_persist_descriptor(
             let persisted_digest = persisted.manifest_digest.to_string();
             match commit {
                 DescriptorCommit::Eager => {
-                    PatchTagMap::write_has_descriptor(tags_path, &persisted_digest)
-                        .await
-                        .map_err(PackageErrorKind::Internal)?;
+                    PatchTagMap::write_has_descriptor(
+                        tags_path,
+                        &persisted_digest,
+                        &manager.file_structure().state.patch_state_stamp(),
+                    )
+                    .await
+                    .map_err(PackageErrorKind::Internal)?;
                 }
                 DescriptorCommit::Deferred => {
                     pending.push(PendingDescriptorCommit {
@@ -1294,6 +1419,88 @@ mod tests {
         );
     }
 
+    /// Stamp pre-created with an old mtime, so "did not move" needs no sleep.
+    fn old_stamp(dir: &TempDir) -> (PathBuf, std::time::SystemTime) {
+        let stamp = dir.path().join("patch-state.stamp");
+        let f = std::fs::File::create(&stamp).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        f.set_modified(old).unwrap();
+        (stamp, old)
+    }
+
+    fn mtime(path: &Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changing_descriptor_write_moves_the_stamp_after_the_record() {
+        let dir = TempDir::new().unwrap();
+        let path = tags_path(&dir, "patches.corp.com", "r/t");
+        let (stamp, old) = old_stamp(&dir);
+        PatchTagMap::write_has_descriptor(&path, "sha256:aa", &stamp)
+            .await
+            .unwrap();
+        assert!(mtime(&stamp) > old, "a changed record must move the stamp");
+        assert_eq!(
+            PatchTagMap::read_tag(&path, InternalTag::PATCH_TAG)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("sha256:aa"),
+            "the record must already hold the new value once the stamp moved"
+        );
+        // Same digest again: unchanged map leaves the stamp alone.
+        std::fs::File::options()
+            .write(true)
+            .open(&stamp)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        PatchTagMap::write_has_descriptor(&path, "sha256:aa", &stamp)
+            .await
+            .unwrap();
+        assert_eq!(mtime(&stamp), old, "an identical rewrite must not move the stamp");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_descriptor_record_moves_the_stamp_only_when_it_changes_the_map() {
+        let dir = TempDir::new().unwrap();
+        let path = tags_path(&dir, "patches.corp.com", "r/t");
+        let (stamp, old) = old_stamp(&dir);
+        PatchTagMap::write_no_descriptor(&path, &stamp).await.unwrap();
+        assert_eq!(mtime(&stamp), old, "no key to remove: the stamp stays put");
+        PatchTagMap::write_has_descriptor(&path, "sha256:aa", &stamp)
+            .await
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stamp)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        PatchTagMap::write_no_descriptor(&path, &stamp).await.unwrap();
+        assert!(mtime(&stamp) > old, "removing the descriptor key must move the stamp");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn companion_pin_write_moves_the_stamp_only_when_it_changes_the_map() {
+        let dir = TempDir::new().unwrap();
+        let path = tags_path(&dir, "patches.corp.com", "c/t");
+        let (stamp, old) = old_stamp(&dir);
+        PatchTagMap::write_tag(&path, "1.0", "sha256:aa", &stamp).await.unwrap();
+        assert!(mtime(&stamp) > old, "a new pin must move the stamp");
+        std::fs::File::options()
+            .write(true)
+            .open(&stamp)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        PatchTagMap::write_tag(&path, "1.0", "sha256:aa", &stamp).await.unwrap();
+        assert_eq!(mtime(&stamp), old, "re-pinning the same digest must not move the stamp");
+        PatchTagMap::write_tag(&path, "1.0", "sha256:bb", &stamp).await.unwrap();
+        assert!(mtime(&stamp) > old, "a moved pin must move the stamp");
+    }
+
     /// State (c): file present with `__ocx.patch` key → `LookedHasDescriptor`.
     ///
     /// Traces: TESTABILITY §three-state TagStore, state (c).
@@ -1333,7 +1540,7 @@ mod tests {
             .await
             .unwrap();
 
-        PatchTagMap::write_no_descriptor(&path)
+        PatchTagMap::write_no_descriptor(&path, &stamp_beside(&path))
             .await
             .expect("write must succeed");
 
@@ -1355,7 +1562,7 @@ mod tests {
         tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
         let digest = "sha256:cafebabe00000000000000000000000000000000000000000000000000000000";
 
-        PatchTagMap::write_has_descriptor(&path, digest)
+        PatchTagMap::write_has_descriptor(&path, digest, &stamp_beside(&path))
             .await
             .expect("write must succeed");
 
@@ -1376,7 +1583,7 @@ mod tests {
         // Path where parent dir does not yet exist.
         let path = dir.path().join("new_registry").join("deep").join("repo.json");
 
-        PatchTagMap::write_no_descriptor(&path)
+        PatchTagMap::write_no_descriptor(&path, &stamp_beside(&path))
             .await
             .expect("write must create file");
 
@@ -1404,12 +1611,12 @@ mod tests {
         let digest_clone = digest.clone();
 
         let task_has = tokio::spawn(async move {
-            PatchTagMap::write_has_descriptor(&path1, &digest_clone)
+            PatchTagMap::write_has_descriptor(&path1, &digest_clone, &stamp_beside(&path1))
                 .await
                 .expect("write_has_descriptor must not fail");
         });
         let task_no = tokio::spawn(async move {
-            PatchTagMap::write_no_descriptor(&path2)
+            PatchTagMap::write_no_descriptor(&path2, &stamp_beside(&path2))
                 .await
                 .expect("write_no_descriptor must not fail");
         });
@@ -1443,10 +1650,10 @@ mod tests {
         let path = tags_path(&dir, "patches.corp.com", "tool/idem");
         let digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-        PatchTagMap::write_has_descriptor(&path, digest)
+        PatchTagMap::write_has_descriptor(&path, digest, &stamp_beside(&path))
             .await
             .expect("first write must succeed");
-        PatchTagMap::write_has_descriptor(&path, digest)
+        PatchTagMap::write_has_descriptor(&path, digest, &stamp_beside(&path))
             .await
             .expect("second write must succeed (idempotent)");
 
@@ -1478,7 +1685,7 @@ mod tests {
             .await
             .unwrap();
 
-        PatchTagMap::write_no_descriptor(&path)
+        PatchTagMap::write_no_descriptor(&path, &stamp_beside(&path))
             .await
             .expect("write must succeed");
 
@@ -1896,13 +2103,19 @@ mod tests {
             .file_structure()
             .patch_descriptor_path(&global_descriptor_id(patches));
         match global {
-            Some(digest) => PatchTagMap::write_has_descriptor(&global_path, digest).await.unwrap(),
-            None => PatchTagMap::write_no_descriptor(&global_path).await.unwrap(),
+            Some(digest) => PatchTagMap::write_has_descriptor(&global_path, digest, &stamp_beside(&global_path))
+                .await
+                .unwrap(),
+            None => PatchTagMap::write_no_descriptor(&global_path, &stamp_beside(&global_path))
+                .await
+                .unwrap(),
         }
         let package_path = manager
             .file_structure()
             .patch_descriptor_path(&patch_descriptor_id(patches, base_id));
-        PatchTagMap::write_no_descriptor(&package_path).await.unwrap();
+        PatchTagMap::write_no_descriptor(&package_path, &stamp_beside(&package_path))
+            .await
+            .unwrap();
     }
 
     /// A Revalidate probe the registry refuses fails a required tier and leaves an optional one on its cache.
@@ -2033,6 +2246,27 @@ mod tests {
         );
     }
 
+    /// Past the group's entry cap the work still runs, uncoordinated, instead of failing the sync.
+    #[tokio::test]
+    async fn share_once_fails_open_past_the_entry_cap() {
+        let installs = CompanionInstalls::new(1, std::time::Duration::from_secs(5));
+        let key = |name: &str| PackageRef::new_registry(name, "patches.corp.com");
+        // Held, so the single slot stays taken while the second key arrives.
+        let held = installs.tops.try_acquire(key("first")).await;
+        assert!(
+            matches!(held, Ok(singleflight::Acquisition::Leader(_))),
+            "setup: the first key takes the only slot"
+        );
+
+        let digest = ocx_oci::Algorithm::Sha256.hash(b"second");
+        let ran = share_once(&installs.tops, key("second"), async {
+            Ok::<_, PackageErrorKind>(digest.clone())
+        })
+        .await
+        .expect("the over-cap key's work still runs");
+        assert_eq!(ran, digest);
+    }
+
     /// A companion one sync pass installed answers every later pass on that platform; without
     /// the shared group the same call installs afresh, which fails against an empty registry.
     #[tokio::test(flavor = "multi_thread")]
@@ -2056,8 +2290,10 @@ mod tests {
             ocx_store::file_structure::PackageDir { dir: package_dir },
         );
         let installs = CompanionInstalls::new(8, std::time::Duration::from_secs(5));
-        let Ok(singleflight::Acquisition::Leader(handle)) =
-            installs.try_acquire((companion.clone(), platform.clone())).await
+        let Ok(singleflight::Acquisition::Leader(handle)) = installs
+            .by_platform
+            .try_acquire((companion.clone(), platform.clone()))
+            .await
         else {
             panic!("the first pass leads the install");
         };
@@ -2082,6 +2318,37 @@ mod tests {
             matches!(unshared, Err(PackageErrorKind::NotFound)),
             "nothing publishes the companion; got: {unshared:?}"
         );
+    }
+
+    /// Manifest reads one `any` companion install costs, with or without the shared-install group.
+    async fn manifest_reads_of_one_companion_install(shared: bool) -> usize {
+        use crate::tasks::patch_sync::tests::{companion_sync_manager, publish_companion};
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        publish_companion(&data, "ca-certs", &[("any", "any")]);
+        let (manager, _log) = companion_sync_manager(tmp.path(), &data, serde_json::json!([])).await;
+        let companion = PackageRef::parse("patches.corp.com/ca-certs:latest").expect("valid identifier");
+        let installs = CompanionInstalls::new(8, std::time::Duration::from_secs(5));
+        install_companion_once(
+            &manager,
+            &companion,
+            &ocx_oci::Platform::any(),
+            PatchDiscoveryMode::Sync,
+            shared.then_some(&installs),
+        )
+        .await
+        .expect("the companion installs");
+        data.read().manifest_reads.len()
+    }
+
+    /// Selecting the leaf before the shared pull reads no manifest the unshared pull does not: the
+    /// index serves the pre-check's reads from the cache the pull then hits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_shared_install_path_reads_no_more_manifests_than_the_unshared_one() {
+        let shared = manifest_reads_of_one_companion_install(true).await;
+        let unshared = manifest_reads_of_one_companion_install(false).await;
+        assert!(unshared > 0, "setup: an install reads manifests");
+        assert_eq!(shared, unshared, "shared path reads {shared}, unshared path {unshared}");
     }
 
     /// A failed optional re-check holds the recorded state for every base: no base refetches it.
@@ -2306,7 +2573,7 @@ mod tests {
 
         // Pinned: the same install answers from the record — no tag resolve.
         let pin_path = manager.file_structure().patch_companion_path(&companion_id);
-        PatchTagMap::write_tag(&pin_path, "1.0", &digest)
+        PatchTagMap::write_tag(&pin_path, "1.0", &digest, &stamp_beside(&pin_path))
             .await
             .expect("pin write");
         let pinned = manager
@@ -2343,9 +2610,14 @@ mod tests {
             pin_path.display()
         );
 
-        PatchTagMap::write_tag(&pin_path, "1.0", &format!("sha256:{}", "a".repeat(64)))
-            .await
-            .expect("pin write");
+        PatchTagMap::write_tag(
+            &pin_path,
+            "1.0",
+            &format!("sha256:{}", "a".repeat(64)),
+            &stamp_beside(&pin_path),
+        )
+        .await
+        .expect("pin write");
         assert!(
             !manager.file_structure().root().join("index").exists(),
             "pinning a companion must not create anything in the local index home"
@@ -2401,6 +2673,7 @@ mod tests {
             &file_structure.patch_companion_path(&companion_id),
             "1.0",
             &top_digest.to_string(),
+            &stamp_beside(&file_structure.patch_companion_path(&companion_id)),
         )
         .await
         .expect("pin write");

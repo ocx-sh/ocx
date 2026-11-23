@@ -42,11 +42,11 @@ Only three things touch the network:
 
 - an explicit sync with [`ocx config update`][cmd-config-update],
 - an [`ocx config setup`][cmd-config-setup] or `ocx self setup --managed-config` run, which reconciles an already-adopted seed every time and not only the first,
-- an optional background tick.
+- an optional background tick. Under `refresh = "apply"` the tick also re-checks the patch registry.
 
 The tick never blocks the command it rides along with. It is a throttled, best-effort probe, governed by [`interval`][config-managed-interval]. It does one of three things:
 
-- applies a new snapshot silently (`refresh = "apply"`),
+- applies a new snapshot silently (`refresh = "apply"`), or, when the config has not changed, re-checks the patch descriptors of its `[patches]` tier,
 - prints a one-line stderr advisory (`refresh = "notify"`, the default),
 - does nothing (`refresh = "manual"`).
 

@@ -522,23 +522,10 @@ impl PackageManager {
                     size: top_size,
                 }];
 
-                let pinned = match self.index().select(&top_id, &platform, IndexOperation::Resolve).await {
-                    Ok(SelectResult::Found(id)) => {
-                        ocx_oci::PinnedPackageRef::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
-                    }
-                    Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
-                    Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
-                    Ok(SelectResult::FeatureMismatch {
-                        host_features,
-                        available,
-                    }) => {
-                        return Err(PackageErrorKind::FeatureMismatch {
-                            host_features,
-                            available,
-                        });
-                    }
-                    Err(e) => return Err(PackageErrorKind::Internal(e.into())),
-                };
+                let pinned = ocx_oci::PinnedPackageRef::try_from(
+                    super::common::select_platform(self.index(), &top_id, &platform, IndexOperation::Resolve).await?,
+                )
+                .map_err(|_| PackageErrorKind::DigestMissing)?;
 
                 let child_id = top_id.clone_with_digest(pinned.digest());
                 let leaf_origin = probe_manifest_origin(self.index(), &child_id, self.is_offline()).await;
@@ -2823,9 +2810,13 @@ mod phase4_spec_tests {
         // Write the global tag-map entry: LookedHasDescriptor.
         let global_id = global_descriptor_id(&test_patch_config());
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── Root and dep ───────────────────────────────────────────────────────
         let dep_id = pinned("libfoo", 'd');
@@ -2969,6 +2960,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -3133,6 +3125,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -3276,6 +3269,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -3523,9 +3517,13 @@ mod phase4_spec_tests {
 
         let global_id = global_descriptor_id(&test_patch_config());
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── Root with a PUBLIC dep. ────────────────────────────────────────────
         let dep_id = pinned("basepkg", 'b');
@@ -3731,9 +3729,13 @@ mod phase4_spec_tests {
 
         let global_id = global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // Root with no deps — still admitted (roots always in admitted set).
         let root_id = pinned("rootpkg", 'r');
@@ -3871,9 +3873,13 @@ mod phase4_spec_tests {
                 .unwrap();
             let pkg_specific_id = patch_descriptor_id(&patch_config, root_id.as_identifier());
             let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
-            PatchTagMap::write_has_descriptor(&pkg_tags_path, &manifest_digest.to_string())
-                .await
-                .unwrap();
+            PatchTagMap::write_has_descriptor(
+                &pkg_tags_path,
+                &manifest_digest.to_string(),
+                &crate::tasks::patch_discovery::stamp_beside(&pkg_tags_path),
+            )
+            .await
+            .unwrap();
 
             // Build the root InstallInfo from the seeded package.
             let root_pkg_path = store.path(&root_id);
@@ -4009,9 +4015,13 @@ mod phase4_spec_tests {
 
         let global_id = global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &global_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &global_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // Root package to be admitted.
         let root_id = pinned("rootpkg", 'r');
@@ -4039,9 +4049,13 @@ mod phase4_spec_tests {
 
         let pkg_specific_id = patch_descriptor_id(&patch_config, root_base_id);
         let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
-        PatchTagMap::write_has_descriptor(&pkg_tags_path, &pkg_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &pkg_tags_path,
+            &pkg_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&pkg_tags_path),
+        )
+        .await
+        .unwrap();
 
         // Build the root InstallInfo from the seeded package.
         let root_pkg_path = store.path(&root_id);
@@ -4186,9 +4200,13 @@ mod phase4_spec_tests {
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &global_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &global_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // Root package.
         let root_id = pinned("rootpkg", 'r');
@@ -4218,9 +4236,13 @@ mod phase4_spec_tests {
             .unwrap();
         let pkg_specific_id = patch_descriptor_id(&patch_config, root_id.as_identifier());
         let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_specific_id);
-        PatchTagMap::write_has_descriptor(&pkg_tags_path, &pkg_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &pkg_tags_path,
+            &pkg_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&pkg_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── Resolve and assert pkg-specific value is last (wins) ──────────────
         let root_pkg_path = store.path(&root_id);
@@ -4398,9 +4420,13 @@ mod phase4_spec_tests {
 
         let global_id = global_descriptor_id(&test_patch_config());
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── Resolve and assert C1 global-last for Path vars ───────────────────
         let root_pkg_path = store.path(&root_id);
@@ -4519,6 +4545,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &global_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -4550,6 +4577,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&pkg_specific_id),
             &pkg_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&pkg_specific_id)),
         )
         .await
         .unwrap();
@@ -4638,6 +4666,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -4733,6 +4762,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -4869,6 +4899,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -4981,6 +5012,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -5205,6 +5237,7 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();
@@ -7031,6 +7064,9 @@ mod phase4_spec_tests {
         PatchTagMap::write_has_descriptor(
             &manager.file_structure().patch_descriptor_path(descriptor_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(
+                &manager.file_structure().patch_descriptor_path(descriptor_id),
+            ),
         )
         .await
         .unwrap();
@@ -7233,9 +7269,13 @@ mod phase5a_spec_tests {
 
         let global_id = global_descriptor_id(patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         (manifest_digest, layer_digest)
     }
@@ -7692,6 +7732,7 @@ mod phase5a_spec_tests {
             super::super::patch_discovery::PatchTagMap::write_has_descriptor(
                 &global_tags_path,
                 &manifest_digest.to_string(),
+                &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
             )
             .await
             .unwrap();
@@ -7810,6 +7851,7 @@ mod phase5a_spec_tests {
             super::super::patch_discovery::PatchTagMap::write_has_descriptor(
                 &tag_store.patch_descriptor_path(&global_id),
                 &manifest_digest.to_string(),
+                &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
             )
             .await
             .unwrap();
@@ -8221,6 +8263,7 @@ mod phase5b_spec_tests {
         PatchTagMap::write_has_descriptor(
             &tag_store.patch_descriptor_path(&global_id),
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&tag_store.patch_descriptor_path(&global_id)),
         )
         .await
         .unwrap();

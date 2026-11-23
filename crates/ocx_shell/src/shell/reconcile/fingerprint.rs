@@ -162,6 +162,8 @@ fn watch_paths_in(
     paths.push(home.join("ocx.toml"));
     paths.push(home.join("ocx.lock"));
     paths.push(file_structure.state.managed_config().snapshot_file());
+    // A patch record change moves this stamp; without it an open shell keeps the old patch-supplied env.
+    paths.push(file_structure.state.patch_state_stamp());
 
     // `CARGO_PKG_VERSION` stays put when `self update` swaps a `-dev` binary, so watch the binary itself.
     paths.push(file_structure.ocx_install_bin_path());
@@ -804,5 +806,18 @@ mod watch_path_tests {
         let stamp = file_structure.state.consent_stamp_file("a1b2c3d4e5f60718");
         assert!(with.contains(&stamp), "the consent stamp is a watch-set member (A-13)");
         assert!(!without.contains(&stamp), "no project key, no stamp member");
+    }
+
+    #[test]
+    fn watch_paths_carry_the_patch_state_stamp_after_the_managed_snapshot() {
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home_nonexistent"));
+
+        let paths = watch_paths(&file_structure, None, None, None);
+
+        let snapshot = file_structure.state.managed_config().snapshot_file();
+        let stamp = file_structure.state.patch_state_stamp();
+        let snapshot_at = paths.iter().position(|p| *p == snapshot).expect("snapshot is a member");
+        assert!(!stamp.exists(), "the stamp is absent, yet still a member");
+        assert_eq!(paths.get(snapshot_at + 1), Some(&stamp));
     }
 }

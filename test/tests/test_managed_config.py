@@ -349,6 +349,208 @@ def test_setup_refresh_syncs_patch_descriptors(
     assert ca_entry["value"] == "/etc/ssl/managed-patch-ca.pem"
 
 
+def _patch_descriptor_records(ocx: OcxRunner) -> dict[str, bytes]:
+    """Every recorded patch-descriptor state file, by path under `$OCX_HOME/state/patch-descriptors`."""
+    root = Path(ocx.env["OCX_HOME"]) / "state" / "patch-descriptors"
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def _publish_descriptor(ocx: OcxRunner, tmp_path: Path, base_fq: str, companions: list[str], env: dict[str, str]) -> str:
+    """Publishes a (non-required) descriptor naming `companions` at `base_fq`; returns its manifest digest."""
+    path = tmp_path / f"descriptor-{len(companions)}.json"
+    path.write_text(
+        json.dumps({"version": 1, "rules": [{"match": "*", "packages": companions, "required": False}]})
+    )
+    report = json.loads(
+        ocx.run("patch", "publish", "--descriptor", str(path), base_fq, env_overrides=env).stdout
+    )
+    return report["manifest_digest"]
+
+
+@pytest.mark.requires_testing_build
+def test_setup_handoff_refresh_syncs_patch_descriptors(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """The `ocx self update` hand-off (`ocx self setup --handoff`, no `--managed-config`) re-syncs patches.
+
+    The adopted, unpaused, tag-following managed config is resolved from the seed alone, so the hand-off
+    reaches the managed refresh and a descriptor republished since the last sync is recorded when it returns.
+    Ran: `ocx self setup --no-modify-path --handoff`; left out: the `<tag>@sha256:<hex>` positional the real
+    hand-off passes (it names the release to adopt, which the self-image seam stands in for here).
+    """
+    ref = f"{registry}/{unique_repo}:v1"
+    push_raw_config_package(
+        registry,
+        unique_repo,
+        "v1",
+        f'[patches]\nregistry = "{registry}/{unique_repo}_patches"\nrequired = false\n'.encode(),
+    )
+    self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
+    assert _self_setup(ocx, ref, self_image).returncode == 0, "setup: adopting the managed config must succeed"
+
+    def companion(label: str) -> str:
+        repo = f"{unique_repo}_{label}"
+        make_package(
+            ocx,
+            repo,
+            "1.0.0",
+            tmp_path,
+            bins=[],
+            env=[{"key": f"HANDOFF_{label.upper()}", "type": "constant", "value": label, "visibility": "interface"}],
+            cascade=True,
+            platform="any",
+        )
+        return f"{registry}/{repo}:1.0.0"
+
+    first, second = companion("first"), companion("second")
+    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, cascade=True)
+    first_digest = _publish_descriptor(ocx, tmp_path, base_pkg.fq, [first], {})
+    ocx.run("package", "install", base_pkg.short, format=None)
+    assert any(first_digest.encode() in record for record in _patch_descriptor_records(ocx).values()), (
+        "setup: the install must have recorded the first descriptor"
+    )
+
+    new_digest = _publish_descriptor(ocx, tmp_path, base_pkg.fq, [first, second], {})
+    assert new_digest != first_digest
+    assert not any(new_digest.encode() in record for record in _patch_descriptor_records(ocx).values()), (
+        "setup: the republished descriptor must not be recorded before the hand-off"
+    )
+
+    handoff = _run(
+        ocx,
+        "self",
+        "setup",
+        "--no-modify-path",
+        "--handoff",
+        env_overrides={"__OCX_TESTING_SELF_IMAGE": self_image},
+    )
+    assert handoff.returncode == 0, f"the hand-off setup must succeed: {handoff.stderr}"
+    assert any(new_digest.encode() in record for record in _patch_descriptor_records(ocx).values()), (
+        "patch records must be current when the hand-off returns: the republished descriptor was not recorded"
+    )
+
+
+@requires_pty
+def test_background_tick_revalidates_a_republished_patch_when_the_config_is_unchanged(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """Under posture `apply`, a tick that finds the managed config unchanged still revalidates the
+    patch descriptors of what is installed: a descriptor republished since the last sync is
+    refetched and its companions installed, with the managed config byte-identical throughout.
+    """
+    write_home_config(ocx, '[managed]\nrefresh = "apply"\ninterval = "0"\n')
+    ref = f"{registry}/{unique_repo}:v1"
+    env = {"OCX_MANAGED_CONFIG": ref}
+    push_raw_config_package(
+        registry,
+        unique_repo,
+        "v1",
+        f'[patches]\nregistry = "{registry}/{unique_repo}_patches"\nrequired = false\n'.encode(),
+    )
+    assert _run(ocx, "config", "update", env_overrides=env).returncode == 0
+    config_digest = _snapshot_digest(ocx)
+
+    def companion(label: str, key: str) -> str:
+        repo = f"{unique_repo}_{label}"
+        make_package(
+            ocx,
+            repo,
+            "1.0.0",
+            tmp_path,
+            bins=[],
+            env=[{"key": key, "type": "constant", "value": label, "visibility": "interface"}],
+            cascade=True,
+            platform="any",
+        )
+        return f"{registry}/{repo}:1.0.0"
+
+    first, second = companion("first", "TICK_FIRST"), companion("second", "TICK_SECOND")
+    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, cascade=True)
+    first_digest = _publish_descriptor(ocx, tmp_path, base_pkg.fq, [first], env)
+    ocx.run("package", "install", base_pkg.short, format=None, env_overrides=env)
+    assert any(first_digest.encode() in record for record in _patch_descriptor_records(ocx).values()), (
+        "setup: the install must have recorded the first descriptor under its manifest digest"
+    )
+
+    new_digest = _publish_descriptor(ocx, tmp_path, base_pkg.fq, [first, second], env)
+    records_before = _patch_descriptor_records(ocx)
+    assert not any(new_digest.encode() in record for record in records_before.values()), (
+        "setup: the new descriptor must not be recorded before the tick"
+    )
+
+    # stderr stays on the pty (the tick's TTY gate); the update check is silenced so only the managed tick runs.
+    script = tmp_path / "tick.sh"
+    script.write_text(f'"{ocx.binary}" index catalog >/dev/null\n')
+    status, terminal = run_on_a_terminal(
+        script, cwd=tmp_path, env={**ocx.env, **env, "OCX_NO_UPDATE_CHECK": "1"}
+    )
+    assert status == 0, terminal
+
+    assert _snapshot_digest(ocx) == config_digest, f"the managed config must be unchanged by the tick; terminal:\n{terminal}"
+    records_after = _patch_descriptor_records(ocx)
+    assert any(new_digest.encode() in record for record in records_after.values()), (
+        f"the tick must record the republished descriptor {new_digest}; records: {records_after}\nterminal:\n{terminal}"
+    )
+
+
+def _freeze_empty_snapshot(ocx: OcxRunner, env: dict[str, str]) -> Path:
+    result = ocx.run("--global", "patch", "freeze", env_overrides=env, check=False)
+    assert result.returncode == 0, f"patch freeze must succeed:\n{result.stderr}"
+    return Path(json.loads(result.stdout)["path"])
+
+
+def test_config_update_under_a_patch_snapshot_prints_no_patch_warning(
+    ocx: OcxRunner, unique_repo: str, registry: str
+) -> None:
+    """The patch sync that rides `ocx config update` is skipped, quietly, while `OCX_PATCH_SNAPSHOT`
+    freezes patches: an applied update whose payload declares `[patches]` logs no patch-sync warning.
+    """
+    ref = f"{registry}/{unique_repo}:v1"
+    patches = f'[patches]\nregistry = "{registry}/{unique_repo}_patches"\nrequired = false\n'
+    push_raw_config_package(registry, unique_repo, "v1", f'[registry]\ndefault = "snap-a.example"\n{patches}'.encode())
+    env = {"OCX_MANAGED_CONFIG": ref}
+    assert _run(ocx, "config", "update", env_overrides=env).returncode == 0
+    env["OCX_PATCH_SNAPSHOT"] = str(_freeze_empty_snapshot(ocx, env))
+
+    push_raw_config_package(registry, unique_repo, "v1", f'[registry]\ndefault = "snap-b.example"\n{patches}'.encode())
+    update = _run(ocx, "config", "update", env_overrides=env)
+    assert update.returncode == 0, f"config update under a snapshot must succeed: {update.stderr}"
+    assert json.loads(update.stdout)["status"] == "updated", update.stdout
+    assert "patch sync" not in update.stderr, (
+        f"a snapshot must skip the automatic patch sync quietly; stderr: {update.stderr}"
+    )
+
+
+def test_config_update_that_drops_patches_contacts_no_patch_registry(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """An applied update whose payload no longer declares `[patches]` makes no request to the patch
+    registry the previous payload named. Contact is observed through its failure: the registry is an
+    address nothing listens on, so any request surfaces as a "patch sync: descriptor check" warning (the control
+    below shows the earlier update, which still declared it, producing that line).
+    """
+    ref = f"{registry}/{unique_repo}:v1"
+    env = {"OCX_MANAGED_CONFIG": ref}
+    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, cascade=True)
+    ocx.plain("package", "install", base_pkg.short)
+
+    dead = f'[patches]\nregistry = "127.0.0.1:1/{unique_repo}_patches"\nrequired = true\n'
+    push_raw_config_package(registry, unique_repo, "v1", f'[registry]\ndefault = "drop-a.example"\n{dead}'.encode())
+    adopted = _run(ocx, "config", "update", env_overrides=env)
+    assert adopted.returncode == 0, adopted.stderr
+    assert "patch sync: descriptor check" in adopted.stderr, (
+        f"control: a payload declaring the dead patch registry must be seen contacting it; stderr: {adopted.stderr}"
+    )
+
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "drop-b.example"\n')
+    dropped = _run(ocx, "config", "update", env_overrides=env)
+    assert dropped.returncode == 0, dropped.stderr
+    assert json.loads(dropped.stdout)["status"] == "updated", dropped.stdout
+    assert "patch sync" not in dropped.stderr, (
+        f"a payload without [patches] must not contact the old patch registry; stderr: {dropped.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Criterion 4 — different-ref re-setup: re-adopt (fence rewrite + fresh fetch)
 # ---------------------------------------------------------------------------

@@ -456,7 +456,7 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # `active/bin` spelling on the session PATH, and the withhold on a
     # dangling `active`) — both rows, so the count below is fully accounted for
     # + EC-HOOK-018 (ocx#397: a project created under an unchanged `$PWD`).
-    assert len(register) == 237, f"the register must still parse to exactly 237 rows; got {len(register)}"
+    assert len(register) == 242, f"the register must still parse to exactly 242 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
     known_test_names = set(test_to_ids.keys()) | _shell_module_test_names()
     known_manual_procedures = {

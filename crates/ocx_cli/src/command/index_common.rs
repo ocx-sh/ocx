@@ -142,6 +142,10 @@ pub(super) async fn sync_patch_descriptors(manager: &ocx_package_manager::Packag
     if manager.patches().is_none() || manager.is_offline() {
         return;
     }
+    if manager.patch_snapshot().is_some() {
+        log::debug!("index refresh: patch descriptor sync skipped under a patch snapshot");
+        return;
+    }
     let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
     match manager.sync_patches(&[host]).await {
         Ok(_report) => log::debug!("index refresh: patch descriptor sync completed"),

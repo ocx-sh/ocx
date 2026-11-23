@@ -965,6 +965,24 @@ def test_patch_sync_under_a_snapshot_is_refused(
     assert not pin_path.exists(), "a refused sync must not record a companion pin"
 
 
+def test_index_update_under_a_patch_snapshot_prints_no_patch_warning(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """The patch sync that rides `ocx index update` is skipped, quietly, while `OCX_PATCH_SNAPSHOT`
+    freezes patches: the command succeeds and logs no "patch descriptor sync failed" warning.
+    """
+    base_pkg, _pin_path = _install_then_unpin(ocx, unique_repo, tmp_path, registry, "INDEX_SNAPSHOT", required=True)
+    snapshot_env = {**ocx.env, "OCX_PATCH_SNAPSHOT": str(_freeze_snapshot(ocx))}
+
+    result = _run_ocx(ocx, "index", "update", base_pkg.short, env=snapshot_env)
+    assert result.returncode == 0, (
+        f"index update under a snapshot must succeed; rc={result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "patch descriptor sync failed" not in result.stderr, (
+        f"a snapshot must skip the automatic patch sync quietly; stderr: {result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scenario 4: required=false — missing companion does not block install
 # ---------------------------------------------------------------------------
@@ -1220,6 +1238,41 @@ def test_patch_sync_refreshes_descriptor_and_companion(
     ca_after_clean = _entry_by_key(_env_entries(ocx, base_pkg.short), "SYNC_CA")
     assert ca_after_clean is not None and ca_after_clean["value"] == "/certs/v2/ca.pem", (
         f"the synced companion must survive `ocx clean` — its pin is a GC root; got: {ca_after_clean}"
+    )
+
+
+def test_patch_sync_installs_a_shared_companion_once(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """A bare `ocx patch sync` fans out over six platforms, but one platform-independent
+    companion named by two bases is one companion: the report counts it once and its
+    install is announced once.
+
+    Today the report says 12 (two bases times six platforms) and stderr repeats, once per
+    platform, the line `no trust policy covers '<companion>'; installing '<companion>:<tag>@<digest>'
+    without signature verification`. That line is the install announcement a non-TTY run
+    prints, so it must appear exactly once per companion install.
+    """
+    first = make_package(ocx, unique_repo, "1.0.0", tmp_path / "first", cascade=True)
+    second = make_package(ocx, _unique_repo("shared_second"), "1.0.0", tmp_path / "second", cascade=True)
+    companion_fq = _publish_private_companion(ocx, tmp_path, registry, "shared_companion")
+    companion_repo = companion_fq.removeprefix(f"{registry}/").rpartition(":")[0]
+    _publish_global_rules(ocx, tmp_path, registry, [{"match": "*", "packages": [companion_fq]}])
+    ocx.plain("package", "install", first.short)
+    ocx.plain("package", "install", second.short)
+
+    sync_result = ocx.run("patch", "sync", format="json", check=False)
+    assert sync_result.returncode == 0, f"sync failed: {sync_result.stderr}"
+    report = json.loads(sync_result.stdout)
+    assert report["companions_installed"] == 1, f"one distinct companion; got: {report}"
+
+    announcements = [
+        line
+        for line in sync_result.stderr.splitlines()
+        if f"installing '{registry}/{companion_repo}:" in line and "without signature verification" in line
+    ]
+    assert len(announcements) == 1, (
+        f"the companion's install must be announced once; got {len(announcements)}:\n{sync_result.stderr}"
     )
 
 

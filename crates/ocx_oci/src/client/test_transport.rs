@@ -24,6 +24,8 @@ pub struct StubTransportInner {
     /// Image string → artificial latency before `pull_manifest_raw` answers, so completion order can differ
     /// from submission order.
     pub manifest_delays: HashMap<String, std::time::Duration>,
+    /// Digest string → artificial latency before a blob read of that digest answers, so a test can cut an install mid-flight.
+    pub blob_delays: HashMap<String, std::time::Duration>,
     /// Digest string → blob bytes; which repository holds one is [`blob_locations`](Self::blob_locations).
     pub blobs: HashMap<String, Vec<u8>>,
     /// `"<registry>/<repository>"` → the digests it holds, for `head_blob`; `None` answers from `blobs` alone.
@@ -54,6 +56,9 @@ pub struct StubTransportInner {
     /// `(method, registry, repository)` each manifest/blob read was handed, from the `pull_*` methods that
     /// call `record_target`.
     pub read_targets: Vec<(&'static str, String, String)>,
+    /// The full reference string of every `pull_manifest_raw` call, in call order: unlike
+    /// [`read_targets`](Self::read_targets) it tells a tag read from a digest read.
+    pub manifest_reads: Vec<String>,
     /// The `Accept` media types of every `pull_manifest_raw` call, in call order.
     pub accepted_media_types: Vec<Vec<String>>,
     /// When true, `push_manifest_raw` stores pushed data back into `manifests`
@@ -185,6 +190,14 @@ impl StubTransport {
         ));
     }
 
+    /// Sleeps the digest's `blob_delays` entry, lock released first so concurrent readers do not serialise.
+    async fn blob_delay(&self, digest_key: &str) {
+        let delay = self.data.read().blob_delays.get(digest_key).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     fn next_push_result(&self) -> Result<String> {
         let mut inner = self.data.write();
         if inner.push_results.is_empty() {
@@ -286,6 +299,7 @@ impl OciTransport for StubTransport {
             .push(accepted_media_types.iter().map(ToString::to_string).collect());
         self.record_target("pull_manifest_raw", image);
         let key = image.to_string();
+        self.data.write().manifest_reads.push(key.clone());
         // Lock released before the sleep, or concurrent callers serialise here.
         let delay = self.data.read().manifest_delays.get(&key).copied();
         if let Some(delay) = delay {
@@ -324,6 +338,7 @@ impl OciTransport for StubTransport {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob:{}", digest_key));
         self.record_target("pull_blob", image);
+        self.blob_delay(&digest_key).await;
         let inner = self.data.read();
         Ok(inner.blobs.get(&digest_key).cloned().unwrap_or_default())
     }
@@ -337,6 +352,7 @@ impl OciTransport for StubTransport {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob_to_file:{}", digest_key));
         self.record_target("pull_blob_to_file", image);
+        self.blob_delay(&digest_key).await;
         let inner = self.data.read();
         if let Some(blob) = inner.blobs.get(&digest_key) {
             let blob = blob.clone();
@@ -363,6 +379,7 @@ impl OciTransport for StubTransport {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob_streaming:{digest_key}"));
         self.record_target("pull_blob_streaming", image);
+        self.blob_delay(&digest_key).await;
         // Overridden (not the temp-file default) so read boundaries are controllable.
         let chunks = {
             let inner = self.data.read();

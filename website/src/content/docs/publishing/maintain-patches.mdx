@@ -216,6 +216,8 @@ ocx patch sync
 
 It installs any newly referenced companion packages and re-checks packages installed before the `[patches]` section was added. It is safe to run often, because it piggybacks on the same index-update mechanism as `ocx index update`.
 
+Open bash, zsh, fish and PowerShell sessions show the new patch environment at their next prompt. Under `refresh = "apply"`, the managed-config background tick also re-checks the patch descriptors of the managed `[patches]` tier.
+
 Other commands contact the patch registry less often. These commands re-check each patch descriptor they have seen before, whether it was found or absent:
 
 `ocx package install`, `ocx package pull`, `ocx pull`, `ocx lock`, `ocx add`, `ocx update` and `ocx package test`.

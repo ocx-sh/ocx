@@ -263,6 +263,31 @@ pub async fn resolve_top_manifest(
     Ok((top_pinned, top_manifest))
 }
 
+/// Picks the platform's child of the index at `top_id`, mapping each non-match outcome to its [`PackageErrorKind`].
+///
+/// The one mapping of [`ocx_index::SelectResult`] to errors; `resolve`, the closure fetch and
+/// patch discovery all go through it, so a pull and its pre-check raise the same error.
+pub(crate) async fn select_platform(
+    index: &ocx_index::Index,
+    top_id: &ocx_oci::PackageRef,
+    platform: &ocx_oci::Platform,
+    op: ocx_index::IndexOperation,
+) -> Result<ocx_oci::PackageRef, PackageErrorKind> {
+    match index.select(top_id, platform, op).await {
+        Ok(ocx_index::SelectResult::Found(id)) => Ok(id),
+        Ok(ocx_index::SelectResult::Ambiguous(candidates)) => Err(PackageErrorKind::SelectionAmbiguous(candidates)),
+        Ok(ocx_index::SelectResult::NotFound) => Err(PackageErrorKind::NotFound),
+        Ok(ocx_index::SelectResult::FeatureMismatch {
+            host_features,
+            available,
+        }) => Err(PackageErrorKind::FeatureMismatch {
+            host_features,
+            available,
+        }),
+        Err(error) => Err(PackageErrorKind::Internal(error.into())),
+    }
+}
+
 /// Creates a [`ReferenceManager`] from a [`FileStructure`].
 pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager {
     ReferenceManager::new(fs.clone())
@@ -812,26 +837,8 @@ async fn fetch_closure_node(
     let (resolved_pinned, image) = match manifest {
         ocx_oci::Manifest::Image(img) => (dep_pinned.clone(), img),
         ocx_oci::Manifest::ImageIndex(_) => {
-            let selected = match index
-                .select(&dep_identifier, platform, ocx_index::IndexOperation::Resolve)
-                .await
-                .map_err(|error| PackageErrorKind::Internal(error.into()))?
-            {
-                ocx_index::SelectResult::Found(id) => id,
-                ocx_index::SelectResult::Ambiguous(candidates) => {
-                    return Err(PackageErrorKind::SelectionAmbiguous(candidates));
-                }
-                ocx_index::SelectResult::NotFound => return Err(PackageErrorKind::NotFound),
-                ocx_index::SelectResult::FeatureMismatch {
-                    host_features,
-                    available,
-                } => {
-                    return Err(PackageErrorKind::FeatureMismatch {
-                        host_features,
-                        available,
-                    });
-                }
-            };
+            let selected =
+                select_platform(index, &dep_identifier, platform, ocx_index::IndexOperation::Resolve).await?;
             let child_pinned =
                 ocx_oci::PinnedPackageRef::try_from(selected.clone()).map_err(|_| PackageErrorKind::DigestMissing)?;
             from_network = super::resolve::probe_manifest_origin(index, &selected, offline).await
