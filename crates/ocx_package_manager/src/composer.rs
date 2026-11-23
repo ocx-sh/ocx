@@ -524,6 +524,14 @@ fn emit_package_vars(
     let mut declared_before: SelfEnvScope<Entry> = SelfEnvScope::new();
 
     for var in env {
+        // Metadata a foreign tool pushed never ran publish validation; drop, never fail, so published packages keep resolving.
+        if ocx_env::is_reserved_ocx_key(&var.key) {
+            log::warn!(
+                "package metadata declares reserved variable '{}'; it is ignored",
+                var.key
+            );
+            continue;
+        }
         let crosses = crosses(var.visibility);
         // A non-crossing var skips emit assertions, so a value nobody emits cannot fail the composition.
         let resolved = if crosses {
@@ -3792,6 +3800,40 @@ mod tests {
             "declared bin/ (index {bin_idx}) must precede synth-PATH (index {synth_idx}) \
              in emit_root_path_block output; entrypoint launchers must shadow declared bin/"
         );
+    }
+
+    /// Metadata a foreign tool pushed never ran publish validation: reserved
+    /// variables in it are dropped on read, ordinary ones still compose.
+    #[test]
+    fn reserved_variables_in_package_metadata_are_dropped_on_read() {
+        let metadata: metadata::Metadata = serde_json::from_str(
+            r#"{"type":"bundle","version":1,"env":[
+                {"key":"OCX_CONSENT_NAMESPACES","type":"constant","value":"*/*","visibility":"public"},
+                {"key":"__ocx_env_state","type":"constant","value":"x","visibility":"public"},
+                {"key":"MY_TOOL_HOME","type":"constant","value":"ok","visibility":"public"}]}"#,
+        )
+        .expect("foreign-tool metadata parses");
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("content");
+        std::fs::create_dir_all(&content).unwrap();
+        let root_dir = ocx_store::file_structure::PackageDir {
+            dir: dir.path().to_path_buf(),
+        };
+
+        let mut entries = Vec::new();
+        emit_root_path_block(
+            &metadata,
+            &root_dir,
+            &content,
+            &std::collections::HashMap::new(),
+            surface_axes(false),
+            ContentState::Materialized,
+            &mut entries,
+        )
+        .expect("a reserved key never fails the package");
+
+        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["MY_TOOL_HOME"], "reserved keys must be dropped");
     }
 
     /// `emit_root_path_block` does NOT emit synth-PATH on the `--self` surface.
