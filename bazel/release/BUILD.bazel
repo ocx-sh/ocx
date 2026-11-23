@@ -23,6 +23,20 @@ config_setting(
     ],
 )
 
+# The stamped build on a musl target, the only one whose binary is a static PIE that relocates
+# itself (musl >= 1.2.4; the hermetic sysroot is 1.2.6), so `ocx_bin` may link with RELR
+# relocation packing. A glibc binary needs glibc >= 2.36 for DT_RELR; the `-gnu` build links
+# dynamically against 2.28 and must not get it.
+config_setting(
+    name = "stamped_musl",
+    constraint_values = ["@rules_rs//rs/platforms/constraints:musl"],
+    define_values = {"ocx_provenance": "release"},
+    visibility = [
+        "//crates:__subpackages__",
+        "@rules_rust//rust:__subpackages__",
+    ],
+)
+
 # `manual`: it reads the workspace status, so a `bazel build //...` must not
 # pull it in; only the select above reaches it.
 release_provenance(

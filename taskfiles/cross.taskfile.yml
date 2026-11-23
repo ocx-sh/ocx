@@ -75,7 +75,7 @@ tasks:
           case "$__OCX_BUILD_CHANNEL" in release|candidate|dev) ;; *) echo "CHANNEL must be release, candidate or dev, got '$__OCX_BUILD_CHANNEL'" >&2; exit 1;; esac
           printf '%s\n' "$__OCX_BUILD_VERSION" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?' || { echo "VERSION must be a semver, got '$__OCX_BUILD_VERSION'" >&2; exit 1; }
           bin=ocx; case "$TARGET" in *-windows-*) bin=ocx.exe;; esac
-          set -- -c opt "--platforms=@rules_rs//rs/platforms:$TARGET" --define=ocx_provenance=release --remote_cache= --noremote_accept_cached --noremote_upload_local_results --disk_cache= '--workspace_status_command=python3 bazel/release/workspace_status.py'
+          set -- -c opt --config=dist "--platforms=@rules_rs//rs/platforms:$TARGET" --define=ocx_provenance=release --remote_cache= --noremote_accept_cached --noremote_upload_local_results --disk_cache= '--workspace_status_command=python3 bazel/release/workspace_status.py'
           ocx exec bazel -- bazel build "$@" //crates/ocx_cli:ocx
           src=$(ocx exec bazel -- bazel cquery "$@" --output=files //crates/ocx_cli:ocx 2>/dev/null | tail -n1)
           mkdir -p "target/cross-release/$TARGET"

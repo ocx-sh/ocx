@@ -125,6 +125,13 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
+    # `--pack-dyn-relocs=relr`, lld's spelling: the GNU `-z pack-dyn-relocs=relr` is accepted and
+    # silently ignored (measured: byte-different binary, no DT_RELR). Shrinks `.rela.dyn` from
+    # 1.33 MB to 13 KB on x86_64-unknown-linux-musl.
+    rustc_flags = select({
+        "//bazel/release:stamped_musl": ["-Clink-arg=-Wl,--pack-dyn-relocs=relr"],
+        "//conditions:default": [],
+    }),
     stamp = 0,
     version = OCX_VERSION,
     visibility = [

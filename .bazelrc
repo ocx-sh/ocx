@@ -105,6 +105,26 @@ build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
 build --aspects=//:rustdoc_diagnostics.bzl%rustdoc_diagnostics_aspect
 
 # ---------------------------------------------------------------------------
+# Dist — the size tuning of the shipped binary, read by `task cross:build:release`.
+# ---------------------------------------------------------------------------
+
+# `-c opt` alone is opt-level 3, no LTO, default codegen units, `strip=debuginfo`:
+# the 0.6.7 binary came out at twice the 0.6.6 size. These are the `[profile.dist]`
+# settings of Cargo.toml (see its comments for panic=abort and opt-level z, both
+# rejected). `extra_rustc_flag` and `lto` are target-configuration only, so
+# proc-macros and build scripts keep the fast exec build; the extra flags come after
+# the toolchain's `--codegen=opt-level=3` / `strip=debuginfo`, and the last wins.
+# Only the release task passes `--config=dist`, so `build` keeps its cache keys.
+# Each flag was proven by `bazel query @rules_rust//rust/settings:<name>` resolving.
+# Measured on x86_64-unknown-linux-musl, cumulative: 73.0 MB (-c opt) -> 56.2 strip -> 42.0
+# opt-level=s -> 30.5 fat LTO -> 28.6 one codegen unit. Relocation packing for musl is in
+# crates/ocx_cli/BUILD.bazel, selected on the stamped build, not here.
+build:dist --@rules_rust//rust/settings:lto=fat
+build:dist --@rules_rust//rust/settings:codegen_units=1
+build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Copt-level=s
+build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=symbols
+
+# ---------------------------------------------------------------------------
 # Remote cache — read-only everywhere this file reaches.
 # ---------------------------------------------------------------------------
 
