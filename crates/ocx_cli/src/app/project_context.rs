@@ -3,10 +3,11 @@
 
 //! Shared project-tier resolution prologue for `pull.rs` and `toolchain_exec.rs`.
 //!
-//! The loaders never register the project in `ProjectRegistry`, or every `ocx exec`/`ocx pull`
-//! pays a flock, JSON read and rename; registration lives at the lock-write sites that already
-//! hold the flock, `ProjectLock::save` and `MutationGuard::commit` (superseded design:
-//! `adr_clean_project_backlinks.md`).
+//! The loaders never register the project in `ProjectRegistry`: they are shared by read-only callers.
+//! Registration lives at the lock-write sites that already hold the flock, `ProjectLock::save` and
+//! `MutationGuard::commit`, and in `ocx exec` (`toolchain_exec.rs`), which fetches the lock's tools and
+//! would otherwise leave a fresh clone's tools unrooted (#759). The ledger is one symlink per project, so
+//! `ocx exec` pays one `read_link` and writes only when the entry is absent (`register_if_absent`).
 
 use std::path::{Path, PathBuf};
 
@@ -196,9 +197,6 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
             return Err(ocx_project::LockCurrency::Missing { path: lock_path }.into());
         }
     };
-
-    // Deliberately inert: registration happens only at lock-write sites (module doc).
-    let _ = context.file_structure().root();
 
     if !lock.is_current(&config) {
         return Err(ocx_project::LockCurrency::Stale { lock_path }.into());

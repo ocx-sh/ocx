@@ -187,6 +187,12 @@ impl ToolchainExec {
         for advisory in &composed.advisories {
             context.ui().warn(advisory.to_string());
         }
+        // The tools this composition fetched are the project's pins: root them (#759). Never the
+        // global tier, and a no-op once registered.
+        if !context.global() {
+            ocx_project::register_project_dir_if_absent_best_effort(&ctx.config_path, context.file_structure().root())
+                .await;
+        }
         let install_infos = composed.roots;
         let omitted = composed.omitted;
         // Tools materialized on the spot: half of the execution record's drift signal.

@@ -44,7 +44,7 @@ pub use mutate::{
 };
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
-pub use registry::ProjectRegistry;
+pub use registry::{ProjectRegistry, Registered, register_project_dir_if_absent_best_effort};
 pub use resolve::{
     ResolveLockOptions, expand_touched, lookup_host_leaf, resolve_lock, resolve_lock_reconcile, resolve_lock_touched,
 };

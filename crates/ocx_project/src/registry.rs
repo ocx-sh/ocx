@@ -82,34 +82,40 @@ fn unknown_root_or_escalate(entry_path: &Path) -> Result<PathBuf, Error> {
     })
 }
 
+/// Canonical project directory of `config_path`, or `None` after a warning.
+///
+/// Through `consent::canonical_project_dir`, so the ledger key and the consent stamp cannot drift.
+async fn canonical_project_dir_or_warn(config_path: &Path) -> Option<PathBuf> {
+    let owned_config_path = config_path.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::consent::canonical_project_dir(&owned_config_path)).await {
+        Ok(Ok(dir)) => Some(dir),
+        Ok(Err(e)) => {
+            log::warn!(
+                "Project registry: canonicalize of config path '{}' failed \
+                 (non-fatal, registration skipped): {e}",
+                config_path.display()
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                "Project registry: canonicalize task for config path '{}' panicked \
+                 (non-fatal, registration skipped): {e}",
+                config_path.display()
+            );
+            None
+        }
+    }
+}
+
 /// Best-effort, infallible GC-ledger registration of the project owning
 /// `config_path`, run after an `ocx.lock` write. Keying on the project
 /// directory holds only while `lock_path_for(config)` is `<config.parent()>/ocx.lock`.
 /// A failure leaves the pins without a GC root, so it warns (never debug).
 pub async fn register_project_dir_best_effort(config_path: &Path, ocx_home: &Path) {
-    // Through `consent::canonical_project_dir`, so the ledger key and the
-    // consent stamp cannot drift.
-    let owned_config_path = config_path.to_path_buf();
-    let canonical_project_dir =
-        match tokio::task::spawn_blocking(move || crate::consent::canonical_project_dir(&owned_config_path)).await {
-            Ok(Ok(dir)) => dir,
-            Ok(Err(e)) => {
-                log::warn!(
-                    "Project registry: canonicalize of config path '{}' failed \
-                 (non-fatal, registration skipped): {e}",
-                    config_path.display()
-                );
-                return;
-            }
-            Err(e) => {
-                log::warn!(
-                    "Project registry: canonicalize task for config path '{}' panicked \
-                 (non-fatal, registration skipped): {e}",
-                    config_path.display()
-                );
-                return;
-            }
-        };
+    let Some(canonical_project_dir) = canonical_project_dir_or_warn(config_path).await else {
+        return;
+    };
     let registry = ProjectRegistry::new(ocx_home);
     if let Err(e) = registry.register(&canonical_project_dir).await {
         log::warn!(
@@ -117,6 +123,32 @@ pub async fn register_project_dir_best_effort(config_path: &Path, ocx_home: &Pat
             canonical_project_dir.display()
         );
     }
+}
+
+/// [`register_project_dir_best_effort`] for a command that only reads the lock (`ocx exec`):
+/// one `read_link`, and a ledger write only when the project is not registered yet.
+pub async fn register_project_dir_if_absent_best_effort(config_path: &Path, ocx_home: &Path) {
+    let Some(canonical_project_dir) = canonical_project_dir_or_warn(config_path).await else {
+        return;
+    };
+    if let Err(e) = ProjectRegistry::new(ocx_home)
+        .register_if_absent(&canonical_project_dir)
+        .await
+    {
+        log::warn!(
+            "Project registry: registration of '{}' failed (non-fatal): {e}",
+            canonical_project_dir.display()
+        );
+    }
+}
+
+/// Outcome of [`ProjectRegistry::register_if_absent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Registered {
+    /// The ledger link was created or re-pointed.
+    Written,
+    /// The link already resolved to the project (or the project is `$OCX_HOME`); nothing was written.
+    AlreadyPresent,
 }
 
 /// Per-user GC ledger at `$OCX_HOME/projects/`, written on every `ocx.lock`
@@ -141,10 +173,24 @@ impl ProjectRegistry {
     /// [`ProjectRegistryErrorKind::Io`] on store creation or atomic replace;
     /// callers log it at WARN, since the project's pins lose their GC root.
     pub async fn register(&self, project_dir: &Path) -> Result<(), Error> {
+        self.register_blocking(project_dir, false).await.map(|_| ())
+    }
+
+    /// [`Self::register`] that writes only when the entry is absent or points elsewhere: one
+    /// `read_link` on the hot path, so a read-only command (`ocx exec`) can call it on every run.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register`].
+    pub async fn register_if_absent(&self, project_dir: &Path) -> Result<Registered, Error> {
+        self.register_blocking(project_dir, true).await
+    }
+
+    async fn register_blocking(&self, project_dir: &Path, only_if_absent: bool) -> Result<Registered, Error> {
         let projects_dir = self.projects_dir.clone();
         let project_dir = project_dir.to_path_buf();
 
-        tokio::task::spawn_blocking(move || -> Result<(), Error> {
+        tokio::task::spawn_blocking(move || -> Result<Registered, Error> {
             let canonical_project_dir = dunce::canonicalize(&project_dir)
                 .map_err(|e| ProjectRegistryError::new(project_dir.clone(), ProjectRegistryErrorKind::Io(e)))?;
 
@@ -152,19 +198,23 @@ impl ProjectRegistry {
             // device+inode: canonical bytes miss case-insensitive filesystems.
             let ocx_home = projects_dir.parent().unwrap_or(&projects_dir);
             if ocx_util::fs::same_dir(&canonical_project_dir, ocx_home).unwrap_or(false) {
-                return Ok(());
+                return Ok(Registered::AlreadyPresent);
             }
 
             // 64-bit names: a collision (~1e-13) drops one live project from the GC roots.
             let name = ocx_store::reference_manager::ReferenceManager::name_for_path(&canonical_project_dir);
             let link_path = projects_dir.join(name);
 
+            if only_if_absent && std::fs::read_link(&link_path).is_ok_and(|target| target == canonical_project_dir) {
+                return Ok(Registered::AlreadyPresent);
+            }
+
             // Staged rename, not `symlink::update`: remove-then-create drops a live
             // root on a crash or a concurrent `live_projects`. Raw primitives, not
             // `validate_target`: the target lies outside `$OCX_HOME` by design.
             ocx_util::fs::symlink::replace_atomic(&canonical_project_dir, &link_path)
                 .map_err(|e| ProjectRegistryError::new(link_path.clone(), into_io_kind(e.into())))?;
-            Ok(())
+            Ok(Registered::Written)
         })
         .await
         .map_err(|e| {
@@ -401,6 +451,47 @@ mod tests {
             project,
             "and resolve to the project directory, not to the config file"
         );
+    }
+
+    /// C-016 (#759): a link already resolving to the project is left alone.
+    #[tokio::test]
+    async fn register_if_absent_no_write_when_present() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let registry = ProjectRegistry::new(home.path());
+
+        assert_eq!(
+            registry.register_if_absent(&project).await.expect("first"),
+            Registered::Written
+        );
+        let link = home.path().join("projects").join(link_name(&project));
+        let before = std::fs::symlink_metadata(&link).expect("lstat");
+
+        assert_eq!(
+            registry.register_if_absent(&project).await.expect("second"),
+            Registered::AlreadyPresent
+        );
+        let after = std::fs::symlink_metadata(&link).expect("lstat");
+        assert_eq!(before.modified().expect("mtime"), after.modified().expect("mtime"));
+    }
+
+    /// C-016 (#759): an entry under the project's key that points elsewhere is rewritten.
+    #[tokio::test]
+    async fn rewrites_when_pointing_elsewhere() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let other = make_live_project(home.path(), "proj-b");
+        let projects_dir = home.path().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir");
+        let link = projects_dir.join(link_name(&project));
+        symlink::replace_atomic(&other, &link).expect("seed wrong entry");
+
+        let registry = ProjectRegistry::new(home.path());
+        assert_eq!(
+            registry.register_if_absent(&project).await.expect("register"),
+            Registered::Written
+        );
+        assert_eq!(canon(&std::fs::read_link(&link).expect("read_link")), project);
     }
 
     /// C1.1: re-registering the same project is idempotent — exactly one
