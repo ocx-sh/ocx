@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from src import registry_guard as registry_guard_mod
 from src.helpers import make_package
 from src.otlp_fixture import serve_collector
 from src.runner import OcxRunner, PackageInfo
@@ -47,9 +50,7 @@ def otlp_collector(request: pytest.FixtureRequest):
 
 
 @pytest.fixture()
-def published_package(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> PackageInfo:
+def published_package(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> PackageInfo:
     """Push a single test package (v1.0.0) and return its metadata."""
     return make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
@@ -62,3 +63,60 @@ def published_two_versions(
     v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path)
     return v1, v2
+
+
+@pytest.fixture()
+def registry_guard() -> Iterator[registry_guard_mod.RegistryGuard]:
+    """A counting refusal proxy (`src/registry_guard.py`), applied to no home until `deny` is called.
+
+    `registry_guard.deny(runner)` blocks one home's registry traffic from then
+    on; `registry_guard.count` is the number of requests it attempted;
+    `registry_guard.allow(runner)` lifts the block.
+    """
+    with registry_guard_mod.running() as guard:
+        yield guard
+
+
+@pytest.fixture()
+def second_home(ocx_binary: Path, tmp_path: Path, registry: str) -> OcxRunner:
+    """A fresh `OcxRunner` with its own empty `OCX_HOME`, on the same registry as `ocx`."""
+    home = tmp_path / "second-home"
+    home.mkdir()
+    return OcxRunner(ocx_binary, home, registry)
+
+
+@dataclasses.dataclass
+class RegistryPair:
+    """One repository path on two registries, holding different content on each."""
+
+    source: OcxRunner  # default registry = `registry`
+    target: OcxRunner  # default registry = `target_registry`
+    repo: str
+    source_pkg: PackageInfo
+    target_pkg: PackageInfo
+
+
+@pytest.fixture()
+def registry_pair(
+    ocx: OcxRunner,
+    ocx_binary: Path,
+    tmp_path: Path,
+    registry: str,
+    target_registry: str,
+    unique_repo: str,
+) -> RegistryPair:
+    """`registry` and `target_registry` both serve `unique_repo:1.0.0` with different content."""
+    home = tmp_path / "target-home"
+    home.mkdir()
+    target = OcxRunner(ocx_binary, home, target_registry)
+    target.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{target_registry}"
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{target_registry}"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dst").mkdir()
+    source_pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "src", bins=["hello"]
+    )
+    target_pkg = make_package(
+        target, unique_repo, "1.0.0", tmp_path / "dst", bins=["hello", "other"]
+    )
+    return RegistryPair(ocx, target, unique_repo, source_pkg, target_pkg)

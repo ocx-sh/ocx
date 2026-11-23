@@ -2142,6 +2142,8 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_sbom": "package sbom",
         "package_announce": "package announce",
         "package_claim": "package claim",
+        "package_export": "package export",
+        "package_import": "package import",
         # `cascade check` / `cascade repair` are two levels below `package`; the
         # table cell parser keeps the first two tokens, so both map to the same
         # documented head.

@@ -119,6 +119,33 @@ binary is that one and the path is safely owned, else the running binary; never 
 - Value: `path`
 - See: [Launcher forwarding](../explanation/launcher-forwarding.md)
 
+## `OCX_BLOB_CACHE_DIR` {#ocx-blob-cache-dir}
+
+Directory where blobs fetched from a registry are kept for later runs. Mirrors `--blob-cache-dir`.
+
+Writable, unlike `OCX_BLOB_DIR`; OCX never writes into a blob directory. An empty value is unset.
+
+`--blob-cache-dir` takes precedence, and this variable outranks `[blobs] cache_dir`. Forwarded, so a launcher re-entry fills the same cache.
+
+- Audience: public
+- Value: `path`
+- Flag: [`--blob-cache-dir`](./command-line/index.md#arg-blob-cache-dir)
+
+## `OCX_BLOB_DIR` {#ocx-blob-dir}
+
+Directories searched, read-only, for the blobs a command needs before it contacts a registry. Mirrors `--blob-dir`, which is repeatable.
+
+A list in the platform path-list syntax: `:` on Unix, `;` on Windows. Empty entries are skipped, an empty value is unset, and a list of more than 32 entries is refused (exit 78).
+
+A directory that is missing here is skipped with one warning on first use. Every blob is checked against its digest, so a directory cannot change what a digest means.
+
+A `--blob-dir` flag replaces the whole list, and the list replaces `[blobs] dirs`. Forwarded,
+so a launcher re-entry reads the same directories.
+
+- Audience: public
+- Value: `path_list`
+- Flag: [`--blob-dir`](./command-line/index.md#arg-blob-dir)
+
 ## `OCX_CEILING_PATH` {#ocx-ceiling-path}
 
 Path at which the CWD walk for a project `ocx.toml` stops; relative values join onto the working directory. An explicit `--project` or `OCX_PROJECT` is not bounded by it.

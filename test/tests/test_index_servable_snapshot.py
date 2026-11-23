@@ -97,7 +97,7 @@ pytestmark = pytest.mark.command(
 
 NAMESPACE = "ocx.sh"
 
-# The shared refresh loop fans out over at most `INDEX_REFRESH_CONCURRENCY`
+# The shared refresh loop fans out over at most `PACKAGE_REFRESH_CONCURRENCY`
 # packages (8) and each package's own tag refresh over at most
 # `TAG_REFRESH_CONCURRENCY` (64), so C-024 states a ceiling of 512 in-flight
 # index requests however large the catalog is — and, since `index sync` flattens

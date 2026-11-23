@@ -5,6 +5,30 @@ title: "Command line"
 
 Options before the command name apply to every command. Each command group has its own page.
 
+## `--blob-cache-dir` {#arg-blob-cache-dir}
+
+Directory where blobs fetched from a registry are kept for later runs.
+
+Writable, unlike `--blob-dir`. Equivalent env var: `OCX_BLOB_CACHE_DIR`; the config key is `[blobs] cache_dir`.
+
+Without any of them, fetched blobs are not kept.
+
+- Value: `PATH`
+- Environment: [`OCX_BLOB_CACHE_DIR`](../environment.md#ocx-blob-cache-dir)
+
+## `--blob-dir` {#arg-blob-dir}
+
+Directory searched, read-only, for blobs before a registry is contacted.
+
+Repeat the flag to search several directories; any flag given replaces `OCX_BLOB_DIR` and `[blobs] dirs` whole. Every blob is checked against its digest.
+
+The directory must exist, or the command exits 79. Equivalent env var: `OCX_BLOB_DIR`, a list separated like `PATH` (`:` on Unix, `;` on Windows).
+
+More than 32 directories are refused (exit 78). A flag path that contains the separator is refused when a child OCX process is started, because the child would read it as a list (exit 78).
+
+- Value: `PATH`
+- Environment: [`OCX_BLOB_DIR`](../environment.md#ocx-blob-dir)
+
 ## `--color` {#arg-color}
 
 When to use ANSI colors in output.
@@ -160,12 +184,12 @@ Every command is documented on the page of its group.
 
 | Page | Commands |
 | --- | --- |
-| [Top-level commands](./commands.md) | `ocx about`, `ocx add`, `ocx clean`, `ocx env`, `ocx exec`, `ocx init`, `ocx inspect`, `ocx lock`, `ocx login`, `ocx logout`, `ocx pull`, `ocx remove`, `ocx status`, `ocx update`, `ocx upgrade`, `ocx version` |
+| [Top-level commands](./commands.md) | `ocx about`, `ocx add`, `ocx clean`, `ocx env`, `ocx exec`, `ocx export`, `ocx import`, `ocx init`, `ocx inspect`, `ocx lock`, `ocx login`, `ocx logout`, `ocx pull`, `ocx remove`, `ocx status`, `ocx update`, `ocx upgrade`, `ocx version` |
 | [`ocx config`](./config.md) | `ocx config`, `ocx config push`, `ocx config setup`, `ocx config test`, `ocx config update` |
 | [`ocx direnv`](./direnv.md) | `ocx direnv`, `ocx direnv export`, `ocx direnv init` |
 | [`ocx index`](./index-commands.md) | `ocx index`, `ocx index catalog`, `ocx index list`, `ocx index regenerate`, `ocx index sync`, `ocx index update` |
-| [`ocx package`: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package push`, `ocx package sign`, `ocx package test` |
-| [`ocx package`: consuming](./package-consuming.md) | `ocx package deps`, `ocx package deselect`, `ocx package env`, `ocx package exec`, `ocx package inspect`, `ocx package install`, `ocx package prune`, `ocx package pull`, `ocx package receipt`, `ocx package sbom`, `ocx package select`, `ocx package uninstall`, `ocx package verify`, `ocx package which` |
+| [`ocx package`: publishing](./package-publishing.md) | `ocx package`, `ocx package announce`, `ocx package attest`, `ocx package cascade`, `ocx package cascade check`, `ocx package cascade repair`, `ocx package claim`, `ocx package copy`, `ocx package create`, `ocx package description`, `ocx package description pull`, `ocx package description push`, `ocx package export`, `ocx package push`, `ocx package sign`, `ocx package test` |
+| [`ocx package`: consuming](./package-consuming.md) | `ocx package deps`, `ocx package deselect`, `ocx package env`, `ocx package exec`, `ocx package import`, `ocx package inspect`, `ocx package install`, `ocx package prune`, `ocx package pull`, `ocx package receipt`, `ocx package sbom`, `ocx package select`, `ocx package uninstall`, `ocx package verify`, `ocx package which` |
 | [`ocx patch`](./patch.md) | `ocx patch`, `ocx patch freeze`, `ocx patch publish`, `ocx patch sync`, `ocx patch test`, `ocx patch why` |
 | [`ocx self`](./self.md) | `ocx self`, `ocx self activate`, `ocx self setup`, `ocx self update` |
 | [`ocx shell`](./shell.md) | `ocx shell`, `ocx shell allow`, `ocx shell completion`, `ocx shell revoke`, `ocx shell state` |
@@ -191,6 +215,8 @@ These anchors resolve on the page listed.
 | `env-root` | [commands.md#env-root](./commands.md#env-root) |
 | `exec` | [commands.md#exec](./commands.md#exec) |
 | `exit-codes` | [../exit-codes.md](../exit-codes.md) |
+| `export` | [commands.md#export](./commands.md#export) |
+| `import` | [commands.md#import](./commands.md#import) |
 | `index` | [index-commands.md#index](./index-commands.md#index) |
 | `index-catalog` | [index-commands.md#index-catalog](./index-commands.md#index-catalog) |
 | `index-list` | [index-commands.md#index-list](./index-commands.md#index-list) |
@@ -217,6 +243,8 @@ These anchors resolve on the page listed.
 | `package-deselect` | [package-consuming.md#package-deselect](./package-consuming.md#package-deselect) |
 | `package-env` | [package-consuming.md#package-env](./package-consuming.md#package-env) |
 | `package-exec` | [package-consuming.md#package-exec](./package-consuming.md#package-exec) |
+| `package-export` | [package-publishing.md#package-export](./package-publishing.md#package-export) |
+| `package-import` | [package-consuming.md#package-import](./package-consuming.md#package-import) |
 | `package-inspect` | [package-consuming.md#package-inspect](./package-consuming.md#package-inspect) |
 | `package-install` | [package-consuming.md#package-install](./package-consuming.md#package-install) |
 | `package-prune` | [package-consuming.md#package-prune](./package-consuming.md#package-prune) |

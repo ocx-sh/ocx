@@ -176,6 +176,51 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 | `--records-name` | `TEMPLATE` | Filename template for the record, e.g. `{time}-{host}-{pid}.json` |
 | `--with` | `IDENTIFIER` | Add a package that `ocx.toml` does not pin to the composed environment |
 
+## `ocx export` {#export}
+
+Write every package the project lock pins to a directory.
+
+Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and writes each pinned platform leaf, its dependencies and, unless `--no-referrers` is given, its signatures, SBOMs and attestations to DIR, with a marker. Unlike `ocx pull`, no `-g` selects every group, since the machine that imports the directory cannot ask for more; `--platform` narrows it to the named platforms.
+
+No index is written, because the lock needs none.
+
+Move the directory to the other machine and run `ocx import` there.
+
+A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65, as for `ocx exec`. A blob nowhere local under `--offline` exits 81.
+
+```text
+ocx export [OPTIONS] --output <DIR>
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--no-referrers` |  | Leave them out; a trust policy then cannot verify the import offline |
+| `--output`, `-o` | `DIR` | Directory to write the export to; created when absent |
+| `--platform`, `-p` | `PLATFORM` | Export only this platform; repeat for several. Defaults to every platform the lock records |
+| `--referrers` |  | Carry the signatures, SBOMs and attestations of each exported manifest (default) |
+
+## `ocx import` {#import}
+
+Assemble the project lock's packages from an export directory, offline.
+
+Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and assembles the locked packages of the selected groups from the directory `ocx export` wrote, with no registry traffic. Without `-g` that is the default group, as for `ocx pull`; `--platform` defaults to the host platform.
+
+Then it renders the project toolchain and registers the project, as `ocx pull` does. It changes no tag in the local index.
+
+Signatures are verified from what the export carries. A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65.
+
+A package the directory lacks exits 79 and a directory that is not a usable export exits 65.
+
+```text
+ocx import [OPTIONS] <DIR>
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
+| `--platform`, `-p` | `PLATFORM` | Import only this platform; repeat for several. Defaults to the host platform |
+
 ## `ocx init` {#init}
 
 Create a minimal ocx.toml in the current directory.

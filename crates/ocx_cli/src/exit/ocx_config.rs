@@ -291,7 +291,11 @@ mod tests {
     fn config_list_refusals_classify_as_config_error_with_their_slugs() {
         use crate::exit::tests::assert_detail;
 
-        let too_long = ocx_config::error::Error::ConfigListTooLong { count: 33, limit: 32 };
+        let too_long = ocx_config::error::Error::ConfigListTooLong {
+            list: "OCX_CONFIG",
+            count: 33,
+            limit: 32,
+        };
         assert_eq!(too_long.classify(), Some(ExitCode::ConfigError));
         assert_detail(&too_long, "config_list_too_long");
 

@@ -12,19 +12,17 @@ use std::path::Path;
 use futures::StreamExt as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use super::blob_lookup::{BlobLookup, LookupError, MAX_REFERRERS_PER_SUBJECT};
 use super::client::error::{ClientError, TraversalLimit};
 use super::client::hashing_reader::HashingAsyncReader;
-use super::client::{ReadAddressing, no_progress};
+use super::client::{MAX_INDEX_DOCUMENT_BYTES, ReadAddressing, no_progress};
 use super::{Client, Digest, OciIdentifier};
 
 /// Concurrent blob transfers per leaf; each holds a spooled file, not the blob's bytes.
-const MAX_CONCURRENT_BLOB_TRANSFERS: usize = 4;
+pub const MAX_CONCURRENT_BLOB_TRANSFERS: usize = 4;
 
 /// How far a referrer chain is followed; a signature over an SBOM is depth 2.
 const MAX_REFERRER_DEPTH: usize = 8;
-
-/// Ceiling on referrer manifests copied per leaf, across the whole chain.
-const MAX_REFERRERS_PER_LEAF: usize = 256;
 
 /// Distinct blobs one manifest may name, or a hostile source buys a target HEAD per descriptor.
 const MAX_BLOBS_PER_MANIFEST: usize = 512;
@@ -104,7 +102,9 @@ pub struct SidecarCopy {
 /// Copies one leaf platform manifest, its blobs and its referrers, addressed by digest on both ends.
 ///
 /// Every source read is [`ReadAddressing::Canonical`]: the read becomes the bytes written, so a poisoned
-/// mirror would choose what lands under a promoted tag (CWE-345/367). `scratch_root` is required because
+/// mirror would choose what lands under a promoted tag (CWE-345/367). The leaf manifest, its blobs and the referrer
+/// listing are read from the client's blob lookup first, keyed by the source's registry as written, so a copy from
+/// an export needs no source registry. `scratch_root` is required because
 /// `$TMPDIR` is often memory-backed, which defeats the spool's bound.
 ///
 /// # Errors
@@ -125,18 +125,25 @@ pub async fn copy_leaf(
         path: scratch_root.to_path_buf(),
         source: e,
     })?;
-    let transfer = Transfer {
+    let mut transfer = Transfer {
         client,
         source,
         target,
         scratch: scratch.path(),
+        lookup: client.blob_lookup().filter(|lookup| !lookup.is_empty()),
+        leaf_from_lookup: false,
     };
 
     let source_leaf = source.without_tag().clone_with_digest(leaf_digest.clone());
-    let (leaf_bytes, digest, manifest) = client
-        .fetch_manifest_raw_bytes_addressed(&source_leaf, ReadAddressing::Canonical)
-        .await?
-        .ok_or_else(|| ClientError::ManifestNotFound(source_leaf.to_string()))?;
+    let from_lookup = transfer.manifest_from_lookup(&source_leaf).await?;
+    transfer.leaf_from_lookup = from_lookup.is_some();
+    let (leaf_bytes, digest, manifest) = match from_lookup {
+        Some(found) => found,
+        None => client
+            .fetch_manifest_raw_bytes_addressed(&source_leaf, ReadAddressing::Canonical)
+            .await?
+            .ok_or_else(|| ClientError::ManifestNotFound(source_leaf.to_string()))?,
+    };
     // Backstop against a source answering request A with a coherent manifest for B (CWE-345); the fetch
     // already refuses this, so its green state is not coverage.
     if &digest != leaf_digest {
@@ -208,9 +215,53 @@ struct Transfer<'a> {
     source: &'a OciIdentifier,
     target: &'a OciIdentifier,
     scratch: &'a Path,
+    /// Non-empty blob lookup, read before the source registry.
+    lookup: Option<&'a BlobLookup>,
+    /// The leaf manifest came from the lookup, so the source registry may be unreachable.
+    leaf_from_lookup: bool,
+}
+
+fn lookup_error(error: LookupError) -> ClientError {
+    match error {
+        LookupError::DigestMismatch { expected, actual, .. } => ClientError::DigestMismatch { expected, actual },
+        LookupError::Io { path, source } => ClientError::Io { path, source },
+        other => ClientError::Internal(Box::new(other)),
+    }
 }
 
 impl Transfer<'_> {
+    /// A manifest the lookup holds under the digest `id` pins, verified; `None` when it holds none.
+    async fn manifest_from_lookup(
+        &self,
+        id: &OciIdentifier,
+    ) -> Result<Option<(Vec<u8>, Digest, super::Manifest)>, ClientError> {
+        let (Some(lookup), Some(digest)) = (self.lookup, id.digest()) else {
+            return Ok(None);
+        };
+        let Some(bytes) = lookup
+            .read_metadata(self.source.registry(), &digest, MAX_INDEX_DOCUMENT_BYTES as u64)
+            .await
+            .map_err(lookup_error)?
+        else {
+            return Ok(None);
+        };
+        let manifest = super::client::parse_registry_manifest(&bytes)?;
+        Ok(Some((bytes, digest, manifest)))
+    }
+
+    /// The manifest `id` pins: the lookup first, then the source registry.
+    async fn fetch_manifest(
+        &self,
+        id: &OciIdentifier,
+    ) -> Result<Option<(Vec<u8>, Digest, super::Manifest)>, ClientError> {
+        if let Some(found) = self.manifest_from_lookup(id).await? {
+            return Ok(Some(found));
+        }
+        self.client
+            .fetch_manifest_raw_bytes_addressed(id, ReadAddressing::Canonical)
+            .await
+    }
+
     /// Refuses a target that cannot serve the OCI 1.1 Referrers API.
     async fn ensure_target_serves_referrers(&self, subject: &Digest) -> Result<(), ClientError> {
         use super::referrer::{ReferrersApiCapability, ReferrersSupport};
@@ -245,6 +296,10 @@ impl Transfer<'_> {
             let served = match transport.fetch_manifest_digest(&source_tag).await {
                 Ok(digest) => digest,
                 Err(ClientError::ManifestNotFound(_)) => continue,
+                Err(error) if self.leaf_from_lookup => {
+                    log::warn!("source registry unreachable ({error}); skipping the cosign sidecar tags of {subject}");
+                    break;
+                }
                 Err(other) => return Err(other),
             };
             let served = parse_descriptor_digest(&served)?;
@@ -267,11 +322,7 @@ impl Transfer<'_> {
 
             // By the HEAD's digest, never the tag, or a tag moved in between substitutes an unchecked manifest.
             let sidecar_id = self.source.without_tag().clone_with_digest(served.clone());
-            let Some((bytes, digest, manifest)) = self
-                .client
-                .fetch_manifest_raw_bytes_addressed(&sidecar_id, ReadAddressing::Canonical)
-                .await?
-            else {
+            let Some((bytes, digest, manifest)) = self.fetch_manifest(&sidecar_id).await? else {
                 return Err(ClientError::InvalidManifest(format!(
                     "sidecar tag {tag} of {subject} resolves to {served} but the source cannot serve it; \
                      re-run the copy, and if it persists the source registry is inconsistent"
@@ -365,6 +416,11 @@ impl Transfer<'_> {
     /// source registry (CWE-345).
     async fn spool(&self, blob: &BlobRef) -> Result<std::path::PathBuf, ClientError> {
         let declared = blob.size;
+        let (_, hex) = blob.digest.parts();
+        let path = self.scratch.join(hex);
+        if self.spool_from_lookup(blob, &path).await? {
+            return Ok(path);
+        }
 
         let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
         let transport = self.client.transport();
@@ -372,8 +428,6 @@ impl Transfer<'_> {
             .ensure_auth(&source_image, super::RegistryOperation::Pull)
             .await?;
 
-        let (_, hex) = blob.digest.parts();
-        let path = self.scratch.join(hex);
         let mut file = tokio::fs::File::create(&path).await.map_err(|e| ClientError::Io {
             path: path.clone(),
             source: e,
@@ -411,6 +465,75 @@ impl Transfer<'_> {
         Ok(path)
     }
 
+    /// Spools the blob from the first lookup source whose bytes verify; false when none holds it.
+    async fn spool_from_lookup(&self, blob: &BlobRef, path: &Path) -> Result<bool, ClientError> {
+        let Some(lookup) = self.lookup else {
+            return Ok(false);
+        };
+        let io = |source| ClientError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut walk = lookup.walk(self.source.registry(), &blob.digest);
+        while let Some(stream) = walk.next_source().await.map_err(lookup_error)? {
+            let mut file = tokio::fs::File::create(path).await.map_err(io)?;
+            let mut hashing =
+                HashingAsyncReader::new(stream.reader.take(blob.size.saturating_add(1)), blob.digest.algorithm());
+            tokio::io::copy(&mut hashing, &mut file).await.map_err(io)?;
+            file.flush().await.map_err(io)?;
+            let (actual, read) = hashing.finalize();
+            if read == blob.size && actual == blob.digest {
+                return Ok(true);
+            }
+            walk.reject(stream.origin).await;
+        }
+        walk.exhausted().map_err(lookup_error)?;
+        Ok(false)
+    }
+
+    /// The digests of `subject`'s referrers: a complete lookup listing alone, else the lookup's markers joined with
+    /// the source's listing. An unreachable source falls back to the markers when there are any.
+    ///
+    /// The second value is the digests only a marker named: no registry listing vouched for them.
+    async fn list_referrer_digests(&self, subject: &Digest) -> Result<(Vec<String>, BTreeSet<String>), ClientError> {
+        let mut digests = Vec::new();
+        if let Some(lookup) = self.lookup {
+            let found = lookup
+                .referrers(self.source.registry(), subject)
+                .await
+                .map_err(lookup_error)?;
+            digests.extend(found.digests.iter().map(ToString::to_string));
+            if found.complete {
+                let marker_only = digests.iter().cloned().collect();
+                return Ok((digests, marker_only));
+            }
+        }
+        let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
+        // `_with_fallback`: the source's referrers may live on the fallback tag, and a verdict here would
+        // misattribute exit 82 to the source.
+        let mut marker_only: BTreeSet<String> = digests.iter().cloned().collect();
+        match self
+            .client
+            .transport()
+            .list_referrers_with_fallback(&source_image, subject, None)
+            .await
+        {
+            Ok(listing) => {
+                for descriptor in listing.descriptors {
+                    marker_only.remove(&descriptor.digest);
+                    if !digests.contains(&descriptor.digest) {
+                        digests.push(descriptor.digest);
+                    }
+                }
+            }
+            Err(error) if !digests.is_empty() => {
+                log::warn!("source registry unreachable ({error}); using the referrers found in blob directories");
+            }
+            Err(error) => return Err(error),
+        }
+        Ok((digests, marker_only))
+    }
+
     /// Copies every referrer anchored to `subject`, then recurses into each one; `seen` stops cycles.
     ///
     /// Caps and unservable referrers are errors: skipping one reports success for a target whose signature
@@ -430,42 +553,55 @@ impl Transfer<'_> {
             });
         }
         let transport = self.client.transport();
-        let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
         let target_image = self.client.transport_write_reference(self.target);
 
-        // `_with_fallback`: the source's referrers may live on the fallback tag, and a verdict here would
-        // misattribute exit 82 to the source.
-        let descriptors = transport
-            .list_referrers_with_fallback(&source_image, subject, None)
-            .await?
-            .descriptors;
+        let (descriptors, marker_only) = self.list_referrer_digests(subject).await?;
         let mut copied = 0usize;
-        for descriptor in descriptors {
-            if seen.len() >= MAX_REFERRERS_PER_LEAF {
-                return Err(ClientError::TraversalLimitExceeded {
-                    limit_kind: TraversalLimit::ReferrersPerLeaf,
-                    limit: MAX_REFERRERS_PER_LEAF,
-                    actual: seen.len().saturating_add(1),
-                    subject: subject.to_string(),
-                });
-            }
-            if !seen.insert(descriptor.digest.clone()) {
+        for referrer in descriptors {
+            if seen.contains(&referrer) {
                 continue;
             }
-            let referrer_digest = parse_descriptor_digest(&descriptor.digest)?;
+            let referrer_digest = parse_descriptor_digest(&referrer)?;
             let referrer_id = self.source.without_tag().clone_with_digest(referrer_digest.clone());
-            let Some((bytes, digest, manifest)) = self
-                .client
-                .fetch_manifest_raw_bytes_addressed(&referrer_id, ReadAddressing::Canonical)
-                .await?
-            else {
+            let Some((bytes, digest, manifest)) = self.fetch_manifest(&referrer_id).await? else {
                 return Err(ClientError::InvalidManifest(format!(
                     "referrer {} is listed for {subject} but the source cannot serve it; \
                      re-run the copy, and if it persists the source registry's referrers \
                      index is stale",
-                    descriptor.digest
+                    referrer
                 )));
             };
+            // A marker lists names, not proof: a planted or stale one must not republish a manifest that is not
+            // anchored to `subject`. Dropped before the cap, so noise cannot exhaust it.
+            let anchored = !marker_only.contains(&referrer)
+                || match &manifest {
+                    super::Manifest::Image(image) => {
+                        // The OCI rule: an absent `artifactType` is the config media type.
+                        let artifact_type = image
+                            .artifact_type
+                            .as_deref()
+                            .unwrap_or(image.config.media_type.as_str());
+                        image
+                            .subject
+                            .as_ref()
+                            .is_some_and(|anchor| anchor.digest == subject.to_string())
+                            && !artifact_type.is_empty()
+                    }
+                    super::Manifest::ImageIndex(_) => false,
+                };
+            if !anchored {
+                log::warn!("ignoring listed referrer {referrer}: it names no subject {subject} or no artifact type");
+                continue;
+            }
+            if seen.len() >= MAX_REFERRERS_PER_SUBJECT {
+                return Err(ClientError::TraversalLimitExceeded {
+                    limit_kind: TraversalLimit::ReferrersPerLeaf,
+                    limit: MAX_REFERRERS_PER_SUBJECT,
+                    actual: seen.len().saturating_add(1),
+                    subject: subject.to_string(),
+                });
+            }
+            seen.insert(referrer.clone());
             // Backstop like the leaf's: the fetch already refuses a digest other than `referrer_id` pins.
             if digest != referrer_digest {
                 return Err(ClientError::DigestMismatch {
@@ -1733,6 +1869,8 @@ mod tests {
             source: &source,
             target: &target,
             scratch: control_scratch.path(),
+            lookup: None,
+            leaf_from_lookup: false,
         };
         assert_eq!(
             control_transfer
@@ -1782,6 +1920,8 @@ mod tests {
             source: &source,
             target: &target,
             scratch: scratch.path(),
+            lookup: None,
+            leaf_from_lookup: false,
         };
         let error = transfer
             .copy_referrers(&leaf, 0, &mut BTreeSet::new())
@@ -1801,6 +1941,243 @@ mod tests {
             rendered.contains("cannot serve it"),
             "the walk must have reached the referrer fetch: {rendered}"
         );
+    }
+
+    // ── blob lookup as the source ────────────────────────────────────────
+
+    const LOOKUP_REGISTRY: &str = "dev.example.com";
+
+    /// A blob directory holding the leaf, its blobs and one referrer with its blobs, as an export lays them out.
+    /// The stub registry is seeded with none of it.
+    fn export_dir(complete_referrers: bool) -> (tempfile::TempDir, Digest, Digest) {
+        export_dir_with(complete_referrers, true)
+    }
+
+    /// As [`export_dir`]; `anchored` false leaves the referrer manifest without a `subject`, as a planted marker would.
+    fn export_dir_with(complete_referrers: bool, anchored: bool) -> (tempfile::TempDir, Digest, Digest) {
+        export_dir_referrer(complete_referrers, |leaf_bytes| {
+            let mut manifest = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+            if let (true, super::super::Manifest::Image(image)) = (anchored, &mut manifest) {
+                image.subject = Some(descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, leaf_bytes));
+            }
+            manifest
+        })
+    }
+
+    /// As [`export_dir`], with the one marker-listed referrer built by `build` from the leaf's bytes.
+    fn export_dir_referrer(
+        complete_referrers: bool,
+        build: impl FnOnce(&[u8]) -> super::super::Manifest,
+    ) -> (tempfile::TempDir, Digest, Digest) {
+        use crate::blob_lookup::markers::{write_complete, write_marker};
+        use crate::blob_lookup::test_support::put_blob;
+
+        let dir = tempfile::tempdir().expect("blob dir");
+        let leaf_bytes = serde_json::to_vec_pretty(&leaf_manifest()).expect("serialize");
+        let leaf = put_blob(dir.path(), LOOKUP_REGISTRY, &leaf_bytes);
+        put_blob(dir.path(), LOOKUP_REGISTRY, CONFIG_BLOB);
+        put_blob(dir.path(), LOOKUP_REGISTRY, LAYER_BLOB);
+
+        let referrer_bytes = serde_json::to_vec_pretty(&build(&leaf_bytes)).expect("serialize");
+        let referrer = put_blob(dir.path(), LOOKUP_REGISTRY, &referrer_bytes);
+        put_blob(dir.path(), LOOKUP_REGISTRY, EMPTY_CONFIG);
+        put_blob(dir.path(), LOOKUP_REGISTRY, SBOM_PAYLOAD);
+        write_marker(dir.path(), LOOKUP_REGISTRY, &leaf, &referrer).expect("marker");
+        if complete_referrers {
+            write_complete(dir.path(), LOOKUP_REGISTRY, &leaf).expect("complete");
+        }
+        (dir, leaf, referrer)
+    }
+
+    fn lookup_client(data: &StubTransportData, dir: &Path) -> Client {
+        let lookup = crate::blob_lookup::BlobLookup::new(vec![dir.to_path_buf()], None);
+        client_for(data).with_blob_lookup(std::sync::Arc::new(lookup))
+    }
+
+    /// The source registry holds nothing: every byte the target receives came from the blob directory, and the
+    /// stub records no read against the source.
+    #[tokio::test]
+    async fn digest_source_from_lookup() {
+        let scratch = scratch_dir();
+        let (dir, leaf, _) = export_dir(true);
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let source = identifier(LOOKUP_REGISTRY, "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+
+        let copied = copy_leaf(
+            &lookup_client(&data, dir.path()),
+            &source,
+            &target,
+            &leaf,
+            true,
+            scratch.path(),
+        )
+        .await
+        .expect("copy from the blob directory");
+
+        assert_eq!(copied.digest, leaf);
+        assert_eq!(copied.blobs.uploaded, 2, "the leaf's config and layer");
+        assert_eq!(copied.referrers, 1);
+        assert!(
+            pushed_manifest(&data, &target, &leaf).is_some(),
+            "the leaf lands at the target"
+        );
+        let calls = data.read().calls.clone();
+        assert!(
+            !calls.iter().any(|call| call == "pull_manifest_raw"),
+            "no manifest is read from the source registry: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.starts_with("pull_blob_streaming")),
+            "no blob is downloaded from the source: {calls:?}"
+        );
+    }
+
+    /// A marker names a manifest that does not anchor to the leaf: it is not republished.
+    #[tokio::test]
+    async fn marker_listed_unanchored_referrer_is_skipped() {
+        let scratch = scratch_dir();
+        let (dir, leaf, _) = export_dir_with(true, false);
+        let data = StubTransportData::new();
+        let source = identifier(LOOKUP_REGISTRY, "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+
+        let copied = copy_leaf(
+            &lookup_client(&data, dir.path()),
+            &source,
+            &target,
+            &leaf,
+            true,
+            scratch.path(),
+        )
+        .await
+        .expect("copy from the blob directory");
+        assert_eq!(copied.referrers, 0, "a referrer with no subject is dropped");
+    }
+
+    async fn copy_from_export(dir: &Path, leaf: &Digest) -> Result<LeafCopy, ClientError> {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier(LOOKUP_REGISTRY, "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        copy_leaf(&lookup_client(&data, dir), &source, &target, leaf, true, scratch.path()).await
+    }
+
+    /// An anchored referrer without `artifactType` is typed by its config media type, as the import side reads it.
+    #[tokio::test]
+    async fn marker_listed_referrer_typed_by_config_media_type_is_copied() {
+        let (dir, leaf, _) = export_dir_referrer(true, |leaf_bytes| {
+            let mut manifest = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+            if let super::super::Manifest::Image(image) = &mut manifest {
+                image.subject = Some(descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, leaf_bytes));
+                image.artifact_type = None;
+            }
+            manifest
+        });
+        let copied = copy_from_export(dir.path(), &leaf).await.expect("copy");
+        assert_eq!(
+            copied.referrers, 1,
+            "the config media type stands in for the artifact type"
+        );
+    }
+
+    /// With neither `artifactType` nor a config media type there is no type at all: dropped.
+    #[tokio::test]
+    async fn marker_listed_referrer_without_any_type_is_skipped() {
+        let (dir, leaf, _) = export_dir_referrer(true, |leaf_bytes| {
+            let mut manifest = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+            if let super::super::Manifest::Image(image) = &mut manifest {
+                image.subject = Some(descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, leaf_bytes));
+                image.artifact_type = None;
+                image.config.media_type = String::new();
+            }
+            manifest
+        });
+        let copied = copy_from_export(dir.path(), &leaf).await.expect("copy");
+        assert_eq!(copied.referrers, 0);
+    }
+
+    /// A marker may name an image index; it is dropped, never republished.
+    #[tokio::test]
+    async fn marker_listed_image_index_referrer_is_skipped() {
+        let (dir, leaf, _) = export_dir_referrer(true, |_| {
+            super::super::Manifest::ImageIndex(super::super::ImageIndex {
+                schema_version: super::super::INDEX_SCHEMA_VERSION,
+                media_type: Some(crate::media_type::MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                manifests: Vec::new(),
+                artifact_type: Some("application/spdx+json".to_string()),
+                annotations: None,
+            })
+        });
+        let copied = copy_from_export(dir.path(), &leaf).await.expect("copy");
+        assert_eq!(copied.referrers, 0);
+    }
+
+    /// Unanchored marker names are dropped before the cap, so enough of them cannot crowd out a real referrer.
+    #[tokio::test]
+    async fn referrer_cap_counts_only_what_survives_the_filter() {
+        use crate::blob_lookup::markers::write_marker;
+        use crate::blob_lookup::test_support::put_blob;
+
+        let (dir, leaf, _) = export_dir(true);
+        for noise in 0..=crate::blob_lookup::MAX_REFERRERS_PER_SUBJECT {
+            let mut manifest = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+            if let super::super::Manifest::Image(image) = &mut manifest {
+                image.annotations = Some([("noise".to_string(), noise.to_string())].into());
+            }
+            let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize");
+            let digest = put_blob(dir.path(), LOOKUP_REGISTRY, &bytes);
+            write_marker(dir.path(), LOOKUP_REGISTRY, &leaf, &digest).expect("marker");
+        }
+        let copied = copy_from_export(dir.path(), &leaf).await.expect("copy");
+        assert_eq!(copied.referrers, 1, "only the anchored referrer counts against the cap");
+    }
+
+    /// With the source unreachable and the leaf read from the lookup, the sidecar HEAD failing is a warning, not a
+    /// failure. Without a lookup the same error fails the copy, so the skip is the lookup's doing.
+    #[tokio::test]
+    async fn sidecar_skipped_with_warning() {
+        let scratch = scratch_dir();
+        let (dir, leaf, _) = export_dir(true);
+        let data = StubTransportData::new();
+        let source = identifier(LOOKUP_REGISTRY, "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let down = sidecar_reference(&source, &leaf, ".sig").to_string();
+        data.write()
+            .manifest_errors
+            .insert(down, "connection refused".to_string());
+
+        let copied = copy_leaf(
+            &lookup_client(&data, dir.path()),
+            &source,
+            &target,
+            &leaf,
+            true,
+            scratch.path(),
+        )
+        .await
+        .expect("an unreachable source skips the sidecars");
+        assert_eq!(copied.sidecars, SidecarCopy::default());
+        assert_eq!(copied.referrers, 1);
+
+        // Control: the leaf served by the registry itself keeps the hard failure.
+        let registry_data = StubTransportData::new();
+        let leaf = seed_source(&registry_data, &source, &leaf_manifest());
+        registry_data.write().manifest_errors.insert(
+            sidecar_reference(&source, &leaf, ".sig").to_string(),
+            "connection refused".to_string(),
+        );
+        copy_leaf(
+            &client_for(&registry_data),
+            &source,
+            &target,
+            &leaf,
+            true,
+            scratch.path(),
+        )
+        .await
+        .expect_err("no lookup, no skip");
     }
 }
 

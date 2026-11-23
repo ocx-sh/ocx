@@ -4,6 +4,7 @@
 //! Resolved settings from files and environment: the four config tiers, the
 //! managed tier, env-var vocabulary and validation.
 
+pub mod blobs;
 pub mod edit;
 pub mod env;
 pub mod error;
@@ -169,6 +170,15 @@ pub struct Config {
     ///
     /// Absent → no telemetry is exported (opt-in).
     pub telemetry: Option<telemetry::TelemetryConfig>,
+
+    /// Blob directories and the blob cache (`[blobs]`).
+    ///
+    /// Read from `config.toml` tiers only: a project's `ocx.toml` refuses it and the loader strips
+    /// it from a project tier. Not lockable, so `OCX_NO_CONFIG` drops it.
+    ///
+    /// Absent → no blob directories and no blob cache.
+    // `ConfigLoader::fold_project_tier` must strip `blobs`, or a repository redirects where a machine reads and writes blobs.
+    pub blobs: Option<blobs::BlobsConfig>,
 
     // Reach a home root only through `ToolchainRoot::resolve`; using the field directly skips every refusal.
     /// Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
@@ -354,6 +364,12 @@ impl Config {
             match self.telemetry.as_mut() {
                 Some(self_telemetry) => self_telemetry.merge(other_telemetry),
                 None => self.telemetry = Some(other_telemetry),
+            }
+        }
+        if let Some(other_blobs) = other.blobs {
+            match self.blobs.as_mut() {
+                Some(self_blobs) => self_blobs.merge(other_blobs),
+                None => self.blobs = Some(other_blobs),
             }
         }
         // Empty is absent, or `toolchain_dir = ""` in a higher tier erases a lower tier's real value.

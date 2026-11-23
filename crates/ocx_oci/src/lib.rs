@@ -149,6 +149,10 @@ pub const INDEX_SCHEMA_VERSION: u8 = 2;
 
 pub mod annotations;
 
+pub mod blob_lookup;
+
+pub mod cas_path;
+
 pub mod auth;
 
 pub mod media_type;

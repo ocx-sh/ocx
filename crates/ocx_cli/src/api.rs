@@ -95,6 +95,8 @@ pub fn visit_report_roots(visitor: &mut impl RootVisitor) {
     visitor.root::<data::deps::DependenciesTrace>();
     visitor.root::<data::deps::FlatDependencies>();
     visitor.root::<data::env::EnvVars>();
+    visitor.root::<data::export::ExportReport>();
+    visitor.root::<data::import::ImportReport>();
     visitor.root::<data::index::CatalogPreview>();
     visitor.root::<data::index::RegenerateReport>();
     visitor.root::<data::install::Installs>();
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn every_registered_root_has_a_version_of_at_least_one() {
         let versions = report_versions();
-        assert_eq!(versions.len(), 56, "{versions:?}");
+        assert_eq!(versions.len(), 58, "{versions:?}");
         assert!(versions.values().all(|version| *version >= 1), "{versions:?}");
     }
 

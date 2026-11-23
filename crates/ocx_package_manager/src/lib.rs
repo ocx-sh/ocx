@@ -445,10 +445,16 @@ pub use error::DependencyError;
 pub use error::{Error, Result, file_error};
 pub use mutate::{MutationOutcome, ToolchainRender, default_group_roots, skipped_render_warnings, unrendered_warning};
 pub use tasks::attest::{AttestOptions, AttestReport};
-pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
+pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput, ReferrerSource};
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::{ClosureEdge, ClosureEnvVar, ClosureNode, WireSelectionOutcome};
+pub use tasks::export::{
+    ExportOutcome, ExportPlatformStatus, ExportRequest, ExportedPackage, ExportedPlatform, LockPin,
+};
 pub use tasks::find_or_install::{Arrival, FoundPackage};
+pub use tasks::import::{
+    ImportOutcome, ImportPlatformStatus, ImportRequest, ImportedPackage, ImportedPlatform, ProjectImportRequest,
+};
 pub use tasks::inspect::{
     ClosureConflicts, EntrypointConflict, InspectClosure, InspectOptions, InspectResult, RepositoryConflict, Surface,
 };
@@ -545,6 +551,8 @@ pub struct PackageManager {
     auto_verify: Option<AutoVerify>,
     /// What this command did to packages; `None` records nothing.
     activity: Option<activity::ActivityLog>,
+    /// Blob directories and cache the CLI attached to the client and the index; empty by default.
+    blob_lookup: std::sync::Arc<ocx_oci::blob_lookup::BlobLookup>,
 }
 
 impl PackageManager {
@@ -572,6 +580,7 @@ impl PackageManager {
             index_store: None,
             auto_verify: None,
             activity: None,
+            blob_lookup: std::sync::Arc::default(),
         }
     }
 
@@ -635,6 +644,19 @@ impl PackageManager {
     /// The injected auto-verify configuration, if any.
     pub fn auto_verify(&self) -> Option<&AutoVerify> {
         self.auto_verify.as_ref()
+    }
+
+    /// Attach the blob lookup export and import read and write through; the CLI attaches the same one to the
+    /// client and the index.
+    #[must_use]
+    pub fn with_blob_lookup(mut self, lookup: std::sync::Arc<ocx_oci::blob_lookup::BlobLookup>) -> Self {
+        self.blob_lookup = lookup;
+        self
+    }
+
+    /// The attached blob lookup; empty when none was configured.
+    pub fn blob_lookup(&self) -> &ocx_oci::blob_lookup::BlobLookup {
+        &self.blob_lookup
     }
 
     /// Attach the log every package set up by this manager (and its clones) is recorded in.
@@ -904,7 +926,8 @@ impl PackageManager {
             Vec::new(),
             ocx_index::ChainMode::Offline,
             self.file_structure.blobs.clone(),
-        );
+        )
+        .with_blob_lookup(self.blob_lookup.clone());
         Self {
             file_structure: self.file_structure.clone(),
             index: offline_index,
@@ -932,6 +955,7 @@ impl PackageManager {
             // reached; carry the config through unchanged for parity.
             auto_verify: self.auto_verify.clone(),
             activity: self.activity.clone(),
+            blob_lookup: self.blob_lookup.clone(),
         }
     }
 

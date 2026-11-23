@@ -65,6 +65,18 @@ pub const PUBLIC: &[EnvVar] = &[
         secret: false,
     },
     EnvVar {
+        name: "OCX_BLOB_CACHE_DIR",
+        value: "path",
+        summary: "Directory where blobs fetched from a registry are kept for later runs. Mirrors",
+        secret: false,
+    },
+    EnvVar {
+        name: "OCX_BLOB_DIR",
+        value: "path_list",
+        summary: "Directories searched, read-only, for the blobs a command needs before it contacts a registry.",
+        secret: false,
+    },
+    EnvVar {
         name: "OCX_CEILING_PATH",
         value: "path",
         summary: "Path at which the CWD walk for a project `ocx.toml` stops; relative values join onto the",

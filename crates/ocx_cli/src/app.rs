@@ -11,6 +11,8 @@ use crate::options::FormatMode;
 
 mod background_check;
 
+pub mod blob_settings;
+
 mod boundary;
 pub use boundary::finish;
 
@@ -407,7 +409,9 @@ fn should_check_toolchain_drift(command: &command::Command) -> bool {
         | Command::Logout(_)
         | Command::Package(_)
         | Command::Patch(_)
-        | Command::Pull(_) => true,
+        | Command::Pull(_)
+        | Command::Export(_)
+        | Command::Import(_) => true,
     }
 }
 

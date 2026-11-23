@@ -4,7 +4,7 @@
 use super::RootFlags;
 
 #[test]
-fn root_flags_has_exactly_the_five_root_flag_fields() {
+fn root_flags_has_exactly_the_seven_root_flag_fields() {
     // No `..`: adding or removing a field stops this compiling.
     let RootFlags {
         config,
@@ -12,8 +12,10 @@ fn root_flags_has_exactly_the_five_root_flag_fields() {
         offline,
         frozen,
         index,
+        blob_dir,
+        blob_cache_dir,
     } = RootFlags::default();
-    assert!(config.is_none() && index.is_none());
+    assert!(config.is_none() && index.is_none() && blob_dir.is_none() && blob_cache_dir.is_none());
     assert!(!remote && !offline && !frozen);
 }
 
@@ -54,7 +56,9 @@ fn every_policy_field_has_a_class() {
             .find(|(field, _)| *field == name)
             .map(|(_, class)| *class)
     };
-    assert_eq!(classes.len(), 19);
+    assert_eq!(classes.len(), 21);
+    assert_eq!(class_of("blob_dir"), Some(FieldClass::Relaxing));
+    assert_eq!(class_of("blob_cache_dir"), Some(FieldClass::Relaxing));
     assert_eq!(class_of("remote"), Some(FieldClass::Neutral));
     assert_eq!(class_of("no_project"), Some(FieldClass::Neutral));
     assert_eq!(class_of("no_config_refresh"), Some(FieldClass::Relaxing));
@@ -392,4 +396,85 @@ fn config_flag_with_separator_is_not_forwarded() {
         ..RootFlags::default()
     };
     assert!(inputs(&whole, None, &ambient).to_write(WriteMode::Inherit).is_ok());
+}
+
+#[test]
+fn blob_dir_flag_reaches_child_policy() {
+    let dirs = vec![
+        std::env::temp_dir().join("blobs-a"),
+        std::env::temp_dir().join("blobs-b"),
+    ];
+    let cache = std::env::temp_dir().join("blob-cache");
+    let flags = RootFlags {
+        blob_dir: Some(dirs.clone()),
+        blob_cache_dir: Some(cache.clone()),
+        ..RootFlags::default()
+    };
+    let ambient = PolicyLayer::default();
+    for mode in [WriteMode::Inherit, WriteMode::Clean] {
+        let written = inputs(&flags, None, &ambient).to_write(mode).unwrap();
+        assert_eq!(written.policy.blob_dir, Some(dirs.clone()), "{mode:?}");
+        assert_eq!(written.policy.blob_cache_dir, Some(cache.clone()), "{mode:?}");
+    }
+}
+
+#[test]
+fn blob_dir_with_list_separator_refused() {
+    let joined = std::env::join_paths([std::env::temp_dir().join("a"), std::env::temp_dir().join("b")])
+        .expect("paths without the separator");
+    let flags = RootFlags {
+        blob_dir: Some(vec![PathBuf::from(&joined)]),
+        ..RootFlags::default()
+    };
+    for mode in [WriteMode::Inherit, WriteMode::Clean] {
+        let err = inputs(&flags, None, &PolicyLayer::default())
+            .to_write(mode)
+            .expect_err("a list-shaped --blob-dir value must not be forwarded");
+        assert!(
+            matches!(err, crate::error::Error::ConfigPathContainsSeparator { .. }),
+            "got: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn more_than_the_cap_of_blob_dirs_is_refused_at_write() {
+    let too_many: Vec<PathBuf> = (0..=super::MAX_BLOB_DIRS)
+        .map(|i| std::env::temp_dir().join(format!("blobs-{i}")))
+        .collect();
+    let flags = RootFlags {
+        blob_dir: Some(too_many.clone()),
+        ..RootFlags::default()
+    };
+    for mode in [WriteMode::Inherit, WriteMode::Clean] {
+        let err = inputs(&flags, None, &PolicyLayer::default())
+            .to_write(mode)
+            .expect_err("a list the child would refuse is not written");
+        assert!(
+            matches!(err, crate::error::Error::ConfigListTooLong { .. }),
+            "flag, {mode:?}: {err:?}"
+        );
+    }
+    let ambient = layer_with(Policy {
+        blob_dir: Some(too_many),
+        ..Policy::default()
+    });
+    let err = inputs(&RootFlags::default(), None, &ambient)
+        .to_write(WriteMode::Clean)
+        .expect_err("an over-long OCX_BLOB_DIR is not written either");
+    assert!(
+        matches!(err, crate::error::Error::ConfigListTooLong { .. }),
+        "env: {err:?}"
+    );
+}
+
+#[test]
+fn a_relative_path_is_refused_when_the_working_directory_is_unreadable() {
+    let unreadable = || Err(std::io::Error::other("cwd gone"));
+    let err = super::anchor_in(std::path::Path::new("rel"), unreadable).expect_err("no guessing a relative path");
+    assert!(matches!(err, crate::error::Error::Io { .. }), "got: {err:?}");
+    let abs = std::env::temp_dir();
+    assert_eq!(super::anchor_in(&abs, unreadable).expect("absolute needs no cwd"), abs);
+    let anchored = super::anchor_in(std::path::Path::new("rel"), || Ok(abs.clone())).expect("anchors");
+    assert_eq!(anchored, abs.join("rel"));
 }

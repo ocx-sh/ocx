@@ -8,7 +8,56 @@ use std::path::{Path, PathBuf};
 use super::types::{Narrowing, Policy};
 use crate::error::{Error, Result};
 
-/// The five root flags that may reach child policy, by construction nothing else can.
+/// The most blob directories one invocation reads, and the most a child's state may carry.
+pub const MAX_BLOB_DIRS: usize = 32;
+
+/// Splits an `OCX_BLOB_DIR` value like `PATH`: empty entries are skipped. The count is not capped
+/// here; a list over [`MAX_BLOB_DIRS`] is refused where it is used or written.
+pub fn split_blob_dirs(raw: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(raw)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .collect()
+}
+
+/// Refuses a blob directory list over [`MAX_BLOB_DIRS`] (exit 78); `list` names where it came from.
+pub fn check_blob_dir_count(list: &'static str, count: usize) -> Result<()> {
+    if count > MAX_BLOB_DIRS {
+        return Err(Error::ConfigListTooLong {
+            list,
+            count,
+            limit: MAX_BLOB_DIRS,
+        });
+    }
+    Ok(())
+}
+
+/// Anchors a relative path at the working directory, so the value written into a child is absolute.
+///
+/// # Errors
+/// [`Error::Io`] when the path is relative and the working directory cannot be read.
+fn absolutize(path: &Path) -> Result<PathBuf> {
+    anchor_in(path, ocx_env::current_dir)
+}
+
+/// [`absolutize`] over an injectable working-directory read; an absolute path never reads it.
+fn anchor_in(path: &Path, cwd: impl FnOnce() -> std::io::Result<PathBuf>) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    cwd().map(|cwd| cwd.join(path)).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        tier: crate::error::ConfigSource::Config,
+        source,
+    })
+}
+
+/// [`absolutize`] for the read-side slots that cannot fail; [`PolicyInputs::to_write`] refuses
+/// whatever stays relative, so a child never receives it.
+fn anchored(path: &Path) -> PathBuf {
+    absolutize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The seven root flags that may reach child policy, by construction nothing else can.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootFlags {
     /// `--config` -> `policy.config_path`, which is read as a path list; a path the child would
@@ -22,6 +71,10 @@ pub struct RootFlags {
     pub frozen: bool,
     /// `--index` -> `policy.index_dir`.
     pub index: Option<PathBuf>,
+    /// `--blob-dir`, repeatable -> `policy.blob_dir`; each entry is one path the child must read back whole.
+    pub blob_dir: Option<Vec<PathBuf>>,
+    /// `--blob-cache-dir` -> `policy.blob_cache_dir`.
+    pub blob_cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +120,16 @@ impl PolicyLayer {
                 allow_yanked: bool_set(&ocx_env::OCX_ALLOW_YANKED),
                 default_registry: ocx_env::OCX_DEFAULT_REGISTRY.get(),
                 insecure_registries: ocx_env::OCX_INSECURE_REGISTRIES.get(),
+                blob_dir: ocx_env::OCX_BLOB_DIR
+                    .get_os()
+                    .map(|raw| {
+                        split_blob_dirs(&raw)
+                            .iter()
+                            .map(|dir| anchored(dir))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|dirs| !dirs.is_empty()),
+                blob_cache_dir: path(&ocx_env::OCX_BLOB_CACHE_DIR).map(|dir| anchored(&dir)),
             },
         }
     }
@@ -138,6 +201,8 @@ pub fn field_classes() -> Vec<(&'static str, FieldClass)> {
         allow_yanked: _,
         default_registry: _,
         insecure_registries: _,
+        blob_dir: _,
+        blob_cache_dir: _,
     } = Policy::default();
     use FieldClass::{Neutral, Relaxing};
     vec![
@@ -159,6 +224,8 @@ pub fn field_classes() -> Vec<(&'static str, FieldClass)> {
         ("allow_yanked", Relaxing),
         ("default_registry", Relaxing),
         ("insecure_registries", Relaxing),
+        ("blob_dir", Relaxing),
+        ("blob_cache_dir", Relaxing),
         ("home", Relaxing),
     ]
 }
@@ -243,6 +310,8 @@ impl PolicyInputs<'_> {
             allow_yanked,
             default_registry,
             insecure_registries,
+            blob_dir,
+            blob_cache_dir,
         } = &received.policy;
         let a = &ambient.policy;
         let policy = Policy {
@@ -336,6 +405,23 @@ impl PolicyInputs<'_> {
                 a.insecure_registries.as_ref(),
                 &mut out,
             ),
+            blob_dir: relaxing(
+                "blob_dir",
+                self.flags
+                    .blob_dir
+                    .as_ref()
+                    .map(|dirs| dirs.iter().map(|dir| anchored(dir)).collect()),
+                blob_dir.as_ref(),
+                a.blob_dir.as_ref(),
+                &mut out,
+            ),
+            blob_cache_dir: relaxing(
+                "blob_cache_dir",
+                self.flags.blob_cache_dir.as_deref().map(anchored),
+                blob_cache_dir.as_ref(),
+                a.blob_cache_dir.as_ref(),
+                &mut out,
+            ),
         };
 
         (
@@ -356,15 +442,31 @@ impl PolicyInputs<'_> {
     ///
     /// # Errors
     /// [`Error::ConfigPathContainsSeparator`] when `--config` is a path the child's list split would
-    /// not return whole, in either mode.
+    /// not return whole, in either mode; [`Error::ConfigListTooLong`] when the blob directory list is
+    /// over [`MAX_BLOB_DIRS`]; [`Error::Io`] when a blob path stays relative because the working
+    /// directory is unreadable.
     pub fn to_write(&self, mode: WriteMode) -> Result<PolicyLayer> {
-        if let Some(config) = &self.flags.config
-            && !survives_list_split(config)
-        {
-            return Err(Error::ConfigPathContainsSeparator { path: config.clone() });
+        let list_shaped = self
+            .flags
+            .config
+            .iter()
+            .chain(self.flags.blob_dir.iter().flatten())
+            .find(|path| !survives_list_split(path));
+        if let Some(path) = list_shaped {
+            return Err(Error::ConfigPathContainsSeparator { path: path.clone() });
         }
-        Ok(match mode {
-            WriteMode::Clean => self.env_slot().0,
+        if let Some(dirs) = &self.flags.blob_dir {
+            check_blob_dir_count("--blob-dir", dirs.len())?;
+        }
+        let layer = match mode {
+            WriteMode::Clean => {
+                // Flags were counted above; this catches the ambient `OCX_BLOB_DIR`/config list.
+                let layer = self.env_slot().0;
+                if let Some(dirs) = &layer.policy.blob_dir {
+                    check_blob_dir_count("blob directories", dirs.len())?;
+                }
+                layer
+            }
             WriteMode::Inherit => {
                 let mut layer = self.received_or_default();
                 layer.narrowing.offline |= self.flags.offline;
@@ -376,12 +478,31 @@ impl PolicyInputs<'_> {
                 if let Some(index) = &self.flags.index {
                     layer.policy.index_dir = Some(index.clone());
                 }
+                if let Some(dirs) = &self.flags.blob_dir {
+                    layer.policy.blob_dir = Some(dirs.iter().map(|dir| absolutize(dir)).collect::<Result<_>>()?);
+                }
+                if let Some(cache) = &self.flags.blob_cache_dir {
+                    layer.policy.blob_cache_dir = Some(absolutize(cache)?);
+                }
                 if self.flags.remote {
                     layer.policy.remote = Some(true);
                 }
                 layer
             }
-        })
+        };
+        // The read-side slots keep a relative path when the working directory is unreadable; a child
+        // must never receive one.
+        for path in layer
+            .policy
+            .blob_dir
+            .iter()
+            .flatten()
+            .chain(&layer.policy.blob_cache_dir)
+        {
+            // Called for its error only: a path that cannot be made absolute must not reach a child.
+            absolutize(path)?;
+        }
+        Ok(layer)
     }
 }
 

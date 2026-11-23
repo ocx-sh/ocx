@@ -27,20 +27,46 @@ pub async fn lock_scoped(
     discriminator: &str,
     timeout: Duration,
 ) -> Result<LockedFile, crate::error::FileError> {
-    let key = key_material(guarded_dir, scope, discriminator).await;
-    let hex = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(key.as_bytes()));
-    let lock_path = locks_root.join(&hex[..2]).join(&hex[2..]).with_added_extension("lock");
+    let (locks_root, scope, guarded_dir, discriminator) = (
+        locks_root.to_path_buf(),
+        scope.to_owned(),
+        guarded_dir.to_path_buf(),
+        discriminator.to_owned(),
+    );
+    let error_path = guarded_dir.clone();
+    let lock_path = tokio::task::spawn_blocking(move || lock_path(&locks_root, &scope, &guarded_dir, &discriminator))
+        .await
+        .map_err(|join| crate::error::FileError::new(error_path, std::io::Error::other(join)))?;
     LockedFile::open_exclusive_with_timeout(lock_path, timeout).await
 }
 
+/// [`lock_scoped`] for a caller already off the async runtime.
+///
+/// # Errors
+///
+/// As [`lock_scoped`].
+pub fn lock_scoped_blocking(
+    locks_root: &Path,
+    scope: &str,
+    guarded_dir: &Path,
+    discriminator: &str,
+    timeout: Duration,
+) -> Result<LockedFile, crate::error::FileError> {
+    LockedFile::open_exclusive_blocking_with_timeout(lock_path(locks_root, scope, guarded_dir, discriminator), timeout)
+}
+
+fn lock_path(locks_root: &Path, scope: &str, guarded_dir: &Path, discriminator: &str) -> std::path::PathBuf {
+    let key = key_material(guarded_dir, scope, discriminator);
+    let hex = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(key.as_bytes()));
+    locks_root.join(&hex[..2]).join(&hex[2..]).with_added_extension("lock")
+}
+
 /// Compose the lock key's SHA-256 pre-image, keyed off the canonical path when the identity is unreadable.
-async fn key_material(guarded_dir: &Path, scope: &str, discriminator: &str) -> String {
-    if let Some((device, inode)) = file_identity(guarded_dir).await {
+fn key_material(guarded_dir: &Path, scope: &str, discriminator: &str) -> String {
+    if let Some((device, inode)) = file_identity(guarded_dir) {
         return format!("{device}:{inode}:{scope}:{discriminator}");
     }
-    let canonical = canonicalize(guarded_dir)
-        .await
-        .unwrap_or_else(|| guarded_dir.to_path_buf());
+    let canonical = dunce::canonicalize(guarded_dir).unwrap_or_else(|_| guarded_dir.to_path_buf());
     log::debug!(
         "scoped lock for '{}' falls back to a path-keyed lock (file identity unavailable)",
         guarded_dir.display()
@@ -48,34 +74,17 @@ async fn key_material(guarded_dir: &Path, scope: &str, discriminator: &str) -> S
     format!("path:{}:{scope}:{discriminator}", canonical.to_string_lossy())
 }
 
-async fn canonicalize(path: &Path) -> Option<std::path::PathBuf> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || dunce::canonicalize(&path).ok())
-        .await
-        .ok()
-        .flatten()
-}
-
 /// The `(device, inode)` identity of `dir`, or `None` if it cannot be read.
 #[cfg(unix)]
-async fn file_identity(dir: &Path) -> Option<(u64, u64)> {
+fn file_identity(dir: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = tokio::fs::metadata(dir).await.ok()?;
+    let metadata = std::fs::metadata(dir).ok()?;
     Some((metadata.dev(), metadata.ino()))
 }
 
 /// The `(volume serial, file index)` identity of `dir`, or `None` if it cannot be read.
 #[cfg(windows)]
-async fn file_identity(dir: &Path) -> Option<(u64, u64)> {
-    let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || file_identity_blocking(&dir))
-        .await
-        .ok()
-        .flatten()
-}
-
-#[cfg(windows)]
-fn file_identity_blocking(dir: &Path) -> Option<(u64, u64)> {
+fn file_identity(dir: &Path) -> Option<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
 
@@ -101,7 +110,7 @@ fn file_identity_blocking(dir: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(not(any(unix, windows)))]
-async fn file_identity(_dir: &Path) -> Option<(u64, u64)> {
+fn file_identity(_dir: &Path) -> Option<(u64, u64)> {
     None
 }
 
@@ -157,6 +166,29 @@ mod tests {
 
         drop(first);
         second.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocking_and_async_acquirers_share_one_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let locks_root = temp.path().join("locks");
+        let guarded = temp.path().join("guarded");
+        std::fs::create_dir(&guarded).unwrap();
+
+        let first = lock_scoped(&locks_root, "scope", &guarded, "disc", TIMEOUT)
+            .await
+            .unwrap();
+        let (root, dir) = (locks_root.clone(), guarded.clone());
+        let second = tokio::task::spawn_blocking(move || lock_scoped_blocking(&root, "scope", &dir, "disc", TIMEOUT));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "a blocking acquirer of the same key must block behind an async holder"
+        );
+        drop(first);
+        second.await.unwrap().unwrap();
+        assert_eq!(lock_files(&locks_root).len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

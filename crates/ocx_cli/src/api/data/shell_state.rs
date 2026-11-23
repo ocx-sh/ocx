@@ -1240,6 +1240,14 @@ pub struct PolicyReport {
     /// `OCX_INSECURE_REGISTRIES`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure_registries: Option<String>,
+    /// The blob directories the parent named, in order: `OCX_BLOB_DIR` and/or `--blob-dir`. Omitted when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(with = "Vec<AbsolutePath>")]
+    pub blob_dirs: Vec<PathBuf>,
+    /// `OCX_BLOB_CACHE_DIR`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<AbsolutePath>")]
+    pub blob_cache_dir: Option<PathBuf>,
 }
 
 impl PolicyReport {
@@ -1264,6 +1272,8 @@ impl PolicyReport {
             allow_yanked,
             default_registry,
             insecure_registries,
+            blob_dir,
+            blob_cache_dir,
         } = policy.clone();
         // The wire carries one path list; the report names each entry (empty entries are dropped as the loader drops them).
         let config_paths = config_path
@@ -1292,6 +1302,8 @@ impl PolicyReport {
             allow_yanked,
             default_registry,
             insecure_registries,
+            blob_dirs: blob_dir.unwrap_or_default(),
+            blob_cache_dir,
         }
     }
 
@@ -1329,6 +1341,14 @@ impl PolicyReport {
             ("allow_yanked", flag(self.allow_yanked)),
             ("default_registry", self.default_registry.clone()),
             ("insecure_registries", self.insecure_registries.clone()),
+            (
+                "blob_dir",
+                (!self.blob_dirs.is_empty()).then(|| {
+                    let paths: Vec<_> = self.blob_dirs.iter().map(|path| path.display().to_string()).collect();
+                    paths.join(", ")
+                }),
+            ),
+            ("blob_cache_dir", path(&self.blob_cache_dir)),
         ]
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
@@ -4052,6 +4072,8 @@ mod tests {
             allow_yanked: Some(true),
             default_registry: Some("d".to_owned()),
             insecure_registries: Some("x".to_owned()),
+            blob_dirs: vec![PathBuf::from("/b")],
+            blob_cache_dir: Some(PathBuf::from("/bc")),
         };
         let set: Vec<&str> = policy.set_values().into_iter().map(|(name, _)| name).collect();
         for (name, class) in field_classes() {

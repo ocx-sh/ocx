@@ -112,6 +112,17 @@
         }
       ]
     },
+    "blobs": {
+      "description": "Blob directories and the blob cache (`[blobs]`).\n\nRead from `config.toml` tiers only: a project's `ocx.toml` refuses it and the loader strips\nit from a project tier. Not lockable, so `OCX_NO_CONFIG` drops it.\n\nAbsent → no blob directories and no blob cache.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BlobsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "toolchain_dir": {
       "description": "Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.\n\nThe global toolchain tree ignores this key, and the directory need not exist yet.",
       "type": [
@@ -838,6 +849,29 @@
     "HeaderValue": {
       "description": "A header value sent with every telemetry export. Always a secret: it never appears in `Debug`\noutput, a log line or an error message.",
       "type": "string"
+    },
+    "BlobsConfig": {
+      "description": "Where ocx looks for blobs before it contacts a registry, and where it keeps the ones it fetches.",
+      "type": "object",
+      "properties": {
+        "dirs": {
+          "description": "Directories searched, read-only, for blobs before a registry is contacted.\n\nA relative path resolves against the directory of the `config.toml` that declared it, and the\n`[managed]` tier accepts absolute paths only. A later tier replaces this list whole. More\nthan 32 entries are refused (exit 78). Overridden by the `OCX_BLOB_DIR` environment variable and the\n`--blob-dir` flag.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cache_dir": {
+          "description": "Directory where blobs fetched from a registry are kept for later runs. Absent → no blob cache.\n\nA relative path resolves against the directory of the `config.toml` that declared it.\nOverridden by the `OCX_BLOB_CACHE_DIR` environment variable and the `--blob-cache-dir` flag.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   },
   "$id": "https://ocx.sh/schemas/config/v1.json"

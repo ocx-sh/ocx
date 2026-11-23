@@ -127,6 +127,8 @@ impl PackageManager {
             }],
             final_manifest: parts.manifest,
             platform: info.platform.clone(),
+            // Never read from a registry; `setup_owned` records no origin for provided metadata anyway.
+            leaf_origin: ocx_index::BlobOrigin::Home,
         };
 
         // A fresh `SetupGroups` per call, or concurrent calls with different `dest_override` share one materialization.
@@ -391,7 +393,9 @@ async fn pull_digest_layer_to_temp(
 
     let synth_pinned = source.pinned_at(digest.clone());
 
-    client.pull_layer(&synth_pinned, &layer_desc, temp_layer).await?;
+    client
+        .pull_layer(&synth_pinned, &layer_desc, temp_layer, Some(base_identifier.registry()))
+        .await?;
 
     // First use of `content/` after extraction: nothing may read or link an unsigned Mach-O out of the layer store.
     ocx_store::codesign::sign_extracted_content(&temp_layer.join("content"))

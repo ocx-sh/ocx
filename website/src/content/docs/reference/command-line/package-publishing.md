@@ -444,6 +444,35 @@ ocx package description push [OPTIONS] <IDENTIFIER>
 | `--readme` | `README` | Path to the README markdown file; required on the first push to a repository with no description |
 | `--title` | `TITLE` | Short title for catalog display (sets org.opencontainers.image.title) |
 
+## `ocx package export` {#package-export}
+
+Write packages and their blobs to a directory for offline transfer.
+
+Each package is exported with its dependencies, its metadata and, unless `--no-referrers` is given, the signatures, SBOMs and attestations anchored to it. The directory holds a restricted copy of the index for the exported tags (`index/`), the blobs (`blobs/`) and the marker `ocx-export.json`, which is written last.
+
+Exporting into an existing export directory adds to it.
+
+A package is `registry/repository:tag`, which exports every platform the tag publishes, or `registry/repository@sha256:<hex>`, which names one platform manifest and needs exactly one `--platform`. A tag is resolved as `ocx package pull` resolves it, so a tag the local index has not seen yet is recorded there.
+
+`--offline` works when every blob is already local and exits 81 otherwise.
+
+An unknown registry, package, tag or platform exits 79. A directory that is not a usable export, or two registries whose names differ only in case, exits 65.
+
+A write failure exits 74.
+
+Move the directory to the other machine and run `ocx package import` there.
+
+```text
+ocx package export [OPTIONS] --output <DIR> <PACKAGE>...
+```
+
+| Flag | Value | Description |
+| --- | --- | --- |
+| `--no-referrers` |  | Leave them out; a trust policy then cannot verify the import offline |
+| `--output`, `-o` | `DIR` | Directory to write the export to; created when absent |
+| `--platform`, `-p` | `PLATFORM` | Export only this platform; repeat for several. Defaults to every platform the package publishes |
+| `--referrers` |  | Carry the signatures, SBOMs and attestations of each exported manifest (default) |
+
 ## `ocx package push` {#package-push}
 
 Publish a package's layers and metadata to a registry.

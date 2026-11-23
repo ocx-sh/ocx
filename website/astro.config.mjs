@@ -79,6 +79,7 @@ export default defineConfig({
             page('Configure OCX', '/guides/configure-ocx/'),
             page('Authenticate', '/guides/authenticate/'),
             page('Work offline', '/guides/work-offline/'),
+            page('Move packages between machines', '/guides/export-and-import/'),
             page('Use a corporate mirror', '/guides/corporate-mirror/'),
             page('Manage configuration', '/guides/manage-config-centrally/'),
             page('Verify what you install', '/guides/verify-installs/'),

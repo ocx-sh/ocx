@@ -153,6 +153,9 @@ impl ClientBuilder {
     pub fn build(self) -> Client {
         Client {
             transport_cell: std::sync::Arc::new(std::sync::OnceLock::new()),
+            blob_cache: None,
+            blob_lookup: None,
+            overlay_mode: None,
             recipe: self.recipe,
             lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),
             tag_chunk_size: 100,

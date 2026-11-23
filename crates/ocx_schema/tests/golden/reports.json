@@ -41,6 +41,12 @@
     "EnvVars": {
       "$ref": "#/$defs/EnvVarsRoot"
     },
+    "ExportReport": {
+      "$ref": "#/$defs/ExportReportRoot"
+    },
+    "ImportReport": {
+      "$ref": "#/$defs/ImportReportRoot"
+    },
     "CatalogPreview": {
       "$ref": "#/$defs/CatalogPreviewRoot"
     },
@@ -1663,6 +1669,270 @@
         }
       ]
     },
+    "ExportReport": {
+      "type": "object",
+      "properties": {
+        "output_dir": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The export directory, absolute."
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExportedPackageRow"
+          },
+          "description": "One entry per package, in request order."
+        },
+        "blob_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Blobs this run wrote."
+        },
+        "written_size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Bytes this run wrote."
+        }
+      },
+      "required": [
+        "output_dir",
+        "packages",
+        "blob_count",
+        "written_size"
+      ],
+      "description": "Result of `ocx package export` and `ocx export`.\n\nAn object root, not a list root: `output_dir`, `blob_count` and `written_size` belong to the run, not to a package.\nPlain stdout is one row per package and platform."
+    },
+    "ExportedPackageRow": {
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package as named; a lock pin reads `registry/repository@sha256:...`."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExportedTag"
+          },
+          "description": "The tags written to the export's index; absent for a digest identifier and a lock pin."
+        },
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExportedPlatformRow"
+          },
+          "description": "One row per exported platform."
+        },
+        "referrer_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Referrer manifests carried; 0 under `--no-referrers`."
+        }
+      },
+      "required": [
+        "identifier",
+        "manifests",
+        "referrer_count"
+      ],
+      "description": "One package of an export."
+    },
+    "ExportedTag": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "description": "The tag as the export's index pins it."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "The image index digest the tag pins."
+        },
+        "status": {
+          "$ref": "#/$defs/TagStatus",
+          "description": "`added`, `replaced` or `unchanged`; an export never reports `conflict`."
+        }
+      },
+      "required": [
+        "tag",
+        "digest",
+        "status"
+      ],
+      "description": "One tag of an exported root."
+    },
+    "TagStatus": {
+      "description": "What a run did with one tag of an exported or imported root.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "added",
+          "description": "The tag was not pinned before this run and is now."
+        },
+        {
+          "value": "unchanged",
+          "description": "The tag was pinned to the digest it carries here already."
+        },
+        {
+          "value": "replaced",
+          "description": "The tag was pinned to another digest and moved; `home_digest` names the old one. Only for a named package."
+        },
+        {
+          "value": "conflict",
+          "description": "The tag is pinned to another digest and was kept; `home_digest` names it. Import only, never for a named package."
+        }
+      ]
+    },
+    "ExportedPlatformRow": {
+      "type": "object",
+      "properties": {
+        "platform": {
+          "$ref": "#/$defs/Platform",
+          "description": "The platform the manifest serves."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "The platform manifest digest."
+        },
+        "status": {
+          "$ref": "#/$defs/ExportPlatformWord",
+          "description": "Whether this run wrote the blobs."
+        }
+      },
+      "required": [
+        "platform",
+        "digest",
+        "status"
+      ],
+      "description": "One platform of an exported package."
+    },
+    "ExportPlatformWord": {
+      "description": "Whether this run wrote a platform's blobs.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "written",
+          "description": "The blobs were written by this run."
+        },
+        {
+          "value": "present",
+          "description": "The directory held them already."
+        }
+      ]
+    },
+    "ByteSize": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Size in bytes."
+    },
+    "ImportReport": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportedItem"
+          },
+          "description": "One entry per package, in the order the export lists them."
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "description": "Result of `ocx package import` and `ocx import`.\n\nPlain stdout is one row per tag, then one row per platform, so the tag's status and each platform's stay apart."
+    },
+    "ImportedItem": {
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "$ref": "#/$defs/PackageRef",
+          "description": "The package as listed; a root import reads the lock pin, `registry/repository@sha256:...`."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportedTag"
+          },
+          "description": "The tags the export lists; absent for a digest identifier and a root import."
+        },
+        "manifests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportedPlatformRow"
+          },
+          "description": "Platforms assembled for `added`, `unchanged` and `replaced` tags; a `conflict` tag adds none."
+        }
+      },
+      "required": [
+        "identifier",
+        "manifests"
+      ],
+      "description": "One package of an import."
+    },
+    "ImportedTag": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "description": "The tag as the export lists it."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "The digest the export pins the tag to."
+        },
+        "status": {
+          "$ref": "#/$defs/TagStatus",
+          "description": "What the import did with the tag; `conflict` leaves the home's pin alone and exits 0."
+        },
+        "home_digest": {
+          "description": "The digest the home pinned before (`replaced`) or still pins (`conflict`); absent otherwise.",
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "tag",
+        "digest",
+        "status"
+      ],
+      "description": "One tag of an imported package."
+    },
+    "ImportedPlatformRow": {
+      "type": "object",
+      "properties": {
+        "platform": {
+          "$ref": "#/$defs/Platform",
+          "description": "The platform the manifest serves."
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "The platform manifest digest."
+        },
+        "status": {
+          "$ref": "#/$defs/ImportPlatformWord",
+          "description": "Whether this run assembled it or the home held it already."
+        }
+      },
+      "required": [
+        "platform",
+        "digest",
+        "status"
+      ],
+      "description": "One platform of an imported package."
+    },
+    "ImportPlatformWord": {
+      "description": "Whether this run put a platform into the home.",
+      "type": "string",
+      "x-ocx-enum": [
+        {
+          "value": "materialized",
+          "description": "This run assembled the package in the home."
+        },
+        {
+          "value": "present",
+          "description": "The home held it already."
+        }
+      ]
+    },
     "CatalogPreview": {
       "type": "object",
       "properties": {
@@ -3169,12 +3439,6 @@
         "platform"
       ],
       "description": "One platform child of an image index, or one locked platform leaf."
-    },
-    "ByteSize": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 9007199254740991,
-      "description": "Size in bytes."
     },
     "Layer": {
       "type": "object",
@@ -5687,6 +5951,17 @@
         "insecure_registries": {
           "type": "string",
           "description": "`OCX_INSECURE_REGISTRIES`."
+        },
+        "blob_dirs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AbsolutePath"
+          },
+          "description": "The blob directories the parent named, in order: `OCX_BLOB_DIR` and/or `--blob-dir`. Omitted when none."
+        },
+        "blob_cache_dir": {
+          "description": "`OCX_BLOB_CACHE_DIR`.",
+          "$ref": "#/$defs/AbsolutePath"
         }
       },
       "description": "The inherited settings that are set; same names as the state's `policy`."
@@ -8378,6 +8653,67 @@
         "advisories"
       ],
       "description": "Resolved environment variables for one or more packages, in declaration order.\n\nEach `items` entry carries its modifier `kind`: `constant` replaces any\nexisting value for the key, `path` prepends using the platform path separator.\nA key may appear more than once, with different kinds.\n\nJSON format: `{\"items\", \"binaries\", \"entrypoints\", \"integrations\",\n\"advisories\"}`, each always present as an array, possibly empty. The last four\nare top-level siblings, never nested inside `items`, and `integrations` is\nnever collapsed for a single root."
+    },
+    "ExportReportRoot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "The version of this root's shape; a breaking change increments it.",
+          "type": "integer",
+          "const": 1
+        },
+        "output_dir": {
+          "$ref": "#/$defs/AbsolutePath",
+          "description": "The export directory, absolute."
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExportedPackageRow"
+          },
+          "description": "One entry per package, in request order."
+        },
+        "blob_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "description": "Blobs this run wrote."
+        },
+        "written_size": {
+          "$ref": "#/$defs/ByteSize",
+          "description": "Bytes this run wrote."
+        }
+      },
+      "required": [
+        "schema_version",
+        "output_dir",
+        "packages",
+        "blob_count",
+        "written_size"
+      ],
+      "description": "Result of `ocx package export` and `ocx export`.\n\nAn object root, not a list root: `output_dir`, `blob_count` and `written_size` belong to the run, not to a package.\nPlain stdout is one row per package and platform."
+    },
+    "ImportReportRoot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "The version of this root's shape; a breaking change increments it.",
+          "type": "integer",
+          "const": 1
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ImportedItem"
+          },
+          "description": "One entry per package, in the order the export lists them."
+        }
+      },
+      "required": [
+        "schema_version",
+        "items"
+      ],
+      "description": "Result of `ocx package import` and `ocx import`.\n\nPlain stdout is one row per tag, then one row per platform, so the tag's status and each platform's stay apart."
     },
     "CatalogPreviewRoot": {
       "type": "object",

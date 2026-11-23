@@ -8,6 +8,7 @@ mod empty_or_absent;
 mod file_lock;
 mod locked_file;
 mod long_path;
+mod open_regular;
 pub mod path;
 mod same_dir;
 mod same_filesystem;
@@ -16,19 +17,19 @@ pub mod symlink;
 mod symlink_walk;
 mod user_file;
 
-pub use bounded_read::{BoundedReadError, read_bounded, read_bounded_async};
+pub use bounded_read::{BoundedReadError, read_bounded, read_bounded_async, read_bounded_no_follow_async};
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};
 pub use file_lock::FileLock;
 pub use locked_file::{LockedFile, LockedJsonFile, LockedTomlFile};
+pub use open_regular::open_regular;
+pub(crate) use open_regular::open_regular_no_follow;
 pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
-pub use scoped_lock::lock_scoped;
-pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};
+pub use scoped_lock::{lock_scoped, lock_scoped_blocking};
+pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path, refuse_if_symlink_in_path_sync};
 pub use user_file::{NewFileMode, UserFileRefusal, replace_user_file, resolve_user_file, user_file_refusal};
-// The blocking arm is used only by this crate's own archive extractors.
-pub(crate) use symlink_walk::refuse_if_symlink_in_path_sync;
 
 use crate::error::FileError;
 

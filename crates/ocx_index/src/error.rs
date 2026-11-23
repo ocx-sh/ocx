@@ -112,6 +112,11 @@ pub enum Error {
     #[exit(delegate)]
     Store(#[from] ocx_store::file_structure::error::Error),
 
+    /// A blob directory or the blob cache could not be read or written, or held a corrupt copy.
+    #[error(transparent)]
+    #[exit(delegate)]
+    BlobLookup(#[from] ocx_oci::blob_lookup::LookupError),
+
     /// A file operation under the index home failed.
     #[error(transparent)]
     #[exit(delegate)]
@@ -289,6 +294,19 @@ pub enum Error {
         repository: String,
         expected: String,
         found: String,
+    },
+
+    /// An export's root document does not hash to the entry its own `c/index.json` carries.
+    #[error("export root for '{repository}' hashes to '{actual}', but the export catalog lists '{expected}'")]
+    #[exit(
+        DataError,
+        slug = "export_dir_invalid",
+        summary = "A directory is not a valid export"
+    )]
+    ExportRootMismatch {
+        repository: String,
+        expected: String,
+        actual: String,
     },
 
     /// A dispatch object parsed as an OCI image index but violates the image

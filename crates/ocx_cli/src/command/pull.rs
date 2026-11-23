@@ -196,7 +196,7 @@ fn select_bound<'a>(
 ///
 /// Never the exit code, or a read-only checkout or an unwalkable offline closure fails a pull that
 /// already landed; stderr, since `--quiet` is a contract about the payload, not a warning.
-async fn render_and_warn(
+pub(super) async fn render_and_warn(
     context: &crate::app::Context,
     project: &crate::app::project_context::ProjectContext,
     groups: &[String],

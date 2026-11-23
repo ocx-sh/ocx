@@ -115,10 +115,12 @@ fn verify_walked_digest(
     Ok(head)
 }
 
-/// How much a resolve may write into the local index; blob-store writes are never gated.
+/// How much a resolve may write into the local index.
 ///
 /// `Full` persists the dispatch object and grows the tag pointer; `NoTag` skips the tag pointer, since
-/// the caller's `ocx.lock` is canonical (`adr_toolchain_update_family.md`); `ReadOnly` writes nothing.
+/// the caller's `ocx.lock` is canonical (`adr_toolchain_update_family.md`); `ReadOnly` writes no index
+/// entry (no tag pointer, pin or dispatch object). Content-addressed blob writes into the home blob store
+/// and the blob cache happen under every policy: they are GC-able and never move a pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalWritePolicy {
     Full,
@@ -142,6 +144,8 @@ pub struct ChainedIndex {
     /// Machine-global blob store holding leaf manifests, consulted on `AbsentDispatch` before any source
     /// so an installed tool resolves offline; `None` only in test constructions.
     content_store: Option<BlobStore>,
+    /// Blob directories and cache read after the home and before any source.
+    blob_lookup: Arc<ocx_oci::blob_lookup::BlobLookup>,
     rules: Arc<ocx_oci::ssrf::ProxyRules>,
 }
 
@@ -159,6 +163,7 @@ impl ChainedIndex {
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
             write_policy: LocalWritePolicy::Full,
             content_store: None,
+            blob_lookup: Arc::default(),
             rules: ocx_oci::ssrf::proxy_rules(),
         }
     }
@@ -183,6 +188,7 @@ impl ChainedIndex {
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
             write_policy: LocalWritePolicy::ReadOnly,
             content_store: self.content_store.clone(),
+            blob_lookup: self.blob_lookup.clone(),
             rules: self.rules.clone(),
         }
     }
@@ -332,24 +338,9 @@ impl ChainedIndex {
         identifier: &ocx_oci::PackageRef,
         content: &ocx_oci::Digest,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
-        let Some(content_store) = &self.content_store else {
+        let Some(bytes) = self.read_home_or_lookup(identifier.registry(), content).await? else {
             return Ok(None);
         };
-        let Some(bytes) = content_store.read_blob(identifier.registry(), content).await? else {
-            return Ok(None);
-        };
-        if !digest_matches(&bytes, content) {
-            log::warn!(
-                "blob-store manifest for '{content}' failed digest verification (recomputed {}); \
-                 removing the corrupt object and falling through to the source walk",
-                content.algorithm().hash(&bytes)
-            );
-            // Removed, or `write_blob`'s check-first fast path re-accepts the corrupt file on the next resolve.
-            if let Err(error) = content_store.remove_blob(identifier.registry(), content).await {
-                log::warn!("failed to remove corrupt blob-store object '{content}': {error}");
-            }
-            return Ok(None);
-        }
         let manifest: ocx_oci::Manifest = match serde_json::from_slice(&bytes) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -364,6 +355,98 @@ impl ChainedIndex {
             log::warn!("failed to self-heal dispatch object '{content}' into the local index: {error}");
         }
         Ok(Some((content.clone(), manifest)))
+    }
+
+    /// The first verified copy of a blob in the lookup order (blob directories, then the cache), with its origin.
+    ///
+    /// A bad cache entry is removed and skipped; a bad directory copy is a digest mismatch when nothing clean follows.
+    async fn read_lookup(
+        &self,
+        registry: &str,
+        digest: &ocx_oci::Digest,
+    ) -> Result<Option<(Vec<u8>, ocx_oci::blob_lookup::LookupOrigin)>> {
+        use tokio::io::AsyncReadExt;
+        let cap = ocx_oci::client::MAX_INDEX_DOCUMENT_BYTES as u64;
+        let mut walk = self.blob_lookup.walk(registry, digest);
+        while let Some(stream) = walk.next_source().await? {
+            let origin = stream.origin;
+            let mut bytes = Vec::new();
+            // `take(cap + 1)`, not the size alone: a file can grow between stat and read.
+            if let Err(source) = stream.reader.take(cap + 1).read_to_end(&mut bytes).await {
+                log::warn!("could not read blob {digest} from {origin:?}: {source}");
+                walk.reject(origin).await;
+                continue;
+            }
+            if bytes.len() as u64 <= cap && digest_matches(&bytes, digest) {
+                log::debug!("blob {digest} served from {origin:?}");
+                return Ok(Some((bytes, origin)));
+            }
+            walk.reject(origin).await;
+        }
+        walk.exhausted()?;
+        Ok(None)
+    }
+
+    /// A lookup hit for `digest`, written to the home so the next read is a home read.
+    async fn lookup_into_home(
+        &self,
+        registry: &str,
+        digest: &ocx_oci::Digest,
+        replace: bool,
+    ) -> Result<Option<(Vec<u8>, ocx_oci::blob_lookup::LookupOrigin)>> {
+        let Some((bytes, origin)) = self.read_lookup(registry, digest).await? else {
+            return Ok(None);
+        };
+        self.write_home(registry, digest, &bytes, replace).await;
+        Ok(Some((bytes, origin)))
+    }
+
+    /// Best-effort write of verified bytes to the home; `replace` overwrites a corrupt existing copy.
+    async fn write_home(&self, registry: &str, digest: &ocx_oci::Digest, bytes: &[u8], replace: bool) {
+        let Some(content_store) = &self.content_store else {
+            return;
+        };
+        let written = if replace {
+            content_store.replace_blob(registry, digest, bytes).await
+        } else {
+            content_store.write_blob(registry, digest, bytes).await
+        };
+        if let Err(error) = written {
+            log::warn!("could not write blob {digest} to the blob store: {error}");
+        }
+    }
+
+    /// Best-effort write-through of source-fetched, verified bytes to the lookup's cache.
+    async fn write_cache(&self, registry: &str, digest: &ocx_oci::Digest, bytes: &[u8]) {
+        if let Some(cache) = self.blob_lookup.cache()
+            && let Err(error) = cache.write_verified(registry, digest, bytes).await
+        {
+            log::warn!("could not write blob {digest} to the blob cache: {error}");
+        }
+    }
+
+    /// The verified home copy, else a lookup hit written to the home; a corrupt home copy is removed first.
+    async fn read_home_or_lookup(&self, registry: &str, digest: &ocx_oci::Digest) -> Result<Option<Vec<u8>>> {
+        if let Some(content_store) = &self.content_store
+            && let Some(bytes) = content_store.read_blob(registry, digest).await?
+        {
+            if digest_matches(&bytes, digest) {
+                return Ok(Some(bytes));
+            }
+            log::warn!(
+                "blob-store manifest for '{digest}' failed digest verification (recomputed {}); \
+                 removing the corrupt object and falling through to the source walk",
+                digest.algorithm().hash(&bytes)
+            );
+            // Removed, or `write_blob`'s check-first fast path re-accepts the corrupt file on the next resolve.
+            if let Err(error) = content_store.remove_blob(registry, digest).await {
+                log::warn!("failed to remove corrupt blob-store object '{digest}': {error}");
+            }
+        }
+        Ok(self
+            .lookup_into_home(registry, digest, false)
+            .await?
+            .map(|(bytes, _)| bytes))
     }
 
     /// Walk the source chain for `identifier`; concurrent waiters share the singleflight leader's result.
@@ -449,6 +532,10 @@ impl ChainedIndex {
             };
             match fetched {
                 Ok(Some((bytes, digest, manifest))) => {
+                    // A manifest a source supplied also lands in the blob cache, as any other network blob does.
+                    if digest_matches(&bytes, &digest) {
+                        self.write_cache(identifier.registry(), &digest, &bytes).await;
+                    }
                     // Cached so the next resolve of this pin recovers a leaf manifest with zero network.
                     if let (Some(store), ocx_oci::Manifest::Image(_)) = (&self.content_store, &manifest)
                         && let Err(error) = store.write_blob(identifier.registry(), &digest, &bytes).await
@@ -772,6 +859,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         let digest = blob_ref.digest();
         // A corrupt entry needs `replace_blob`: `write_blob`'s existence check would re-accept it untouched.
         let mut heal_corrupt = false;
+        let mut offline_corrupt = None;
         if let Some(content_store) = &self.content_store
             && let Some(bytes) = content_store.read_blob(blob_ref.registry(), &digest).await?
         {
@@ -779,14 +867,24 @@ impl index_impl::IndexImpl for ChainedIndex {
                 return Ok(Some(bytes));
             }
             if self.mode == ChainMode::Offline {
-                return Err(ocx_store::file_structure::error::Error::DigestMismatch {
+                // Held, not raised: a blob directory may still hold a clean copy.
+                offline_corrupt = Some(ocx_store::file_structure::error::Error::DigestMismatch {
                     claimed: digest.clone(),
                     computed: digest.algorithm().hash(&bytes),
-                }
-                .into());
+                });
+            } else {
+                log::warn!("Blob-store copy of '{blob_ref}' is corrupt, re-fetching from source.");
             }
-            log::warn!("Blob-store copy of '{blob_ref}' is corrupt, re-fetching from source.");
             heal_corrupt = true;
+        }
+        if let Some((bytes, _)) = self
+            .lookup_into_home(blob_ref.registry(), &digest, heal_corrupt)
+            .await?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(mismatch) = offline_corrupt {
+            return Err(mismatch.into());
         }
         if self.mode == ChainMode::Offline {
             return Ok(None);
@@ -802,16 +900,9 @@ impl index_impl::IndexImpl for ChainedIndex {
                         }
                         .into());
                     }
-                    if let Some(content_store) = &self.content_store {
-                        let write_through = if heal_corrupt {
-                            content_store.replace_blob(blob_ref.registry(), &digest, &bytes).await
-                        } else {
-                            content_store.write_blob(blob_ref.registry(), &digest, &bytes).await
-                        };
-                        if let Err(e) = write_through {
-                            log::warn!("Write-through to blob store failed for '{blob_ref}': {e}");
-                        }
-                    }
+                    self.write_home(blob_ref.registry(), &digest, &bytes, heal_corrupt)
+                        .await;
+                    self.write_cache(blob_ref.registry(), &digest, &bytes).await;
                     return Ok(Some(bytes));
                 }
                 Ok(None) if authoritative => return Ok(None),
@@ -833,22 +924,10 @@ impl index_impl::IndexImpl for ChainedIndex {
         &self,
         identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
-        if self.mode == ChainMode::Offline {
-            return Ok(None);
-        }
-        let mut last_error: Option<super::error::Error> = None;
-        for (source, authoritative) in self.candidate_sources(identifier).await {
-            match source.fetch_manifest_raw_bytes(identifier).await {
-                Ok(Some(result)) => return Ok(Some(result)),
-                Ok(None) if authoritative => return Ok(None),
-                Ok(None) => {}
-                Err(e) => {
-                    log::warn!("Source fetch_manifest_raw_bytes failed for '{}': {e}", identifier);
-                    last_error = Some(e);
-                }
-            }
-        }
-        last_error.map_or(Ok(None), Err)
+        Ok(self
+            .fetch_manifest_raw_bytes_with_origin(identifier)
+            .await?
+            .map(|fetched| fetched.value))
     }
 
     /// The physical transport identifier (`adr_index_indirection.md § Structural enforcement`): committed
@@ -1027,12 +1106,88 @@ impl index_impl::IndexImpl for ChainedIndex {
             singleflight: self.singleflight.clone(),
             write_policy: self.write_policy,
             content_store: self.content_store.clone(),
+            blob_lookup: self.blob_lookup.clone(),
             rules: self.rules.clone(),
         })
     }
 
+    fn source_kind_for(&self, registry: &str) -> SourceKind {
+        self.sources
+            .iter()
+            .find(|source| source.serves_registry(registry))
+            .map(Index::source_kind)
+            .unwrap_or_else(|| self.local_index.source_kind_for_import(registry))
+    }
+
+    fn set_blob_lookup(&mut self, lookup: Arc<ocx_oci::blob_lookup::BlobLookup>) {
+        self.blob_lookup = lookup;
+    }
+
+    async fn fetch_manifest_raw_bytes_with_origin(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+    ) -> Result<Option<super::Fetched<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>>> {
+        use super::{BlobOrigin, Fetched};
+        if let Some(digest) = identifier.digest() {
+            if let Some(content_store) = &self.content_store
+                && let Some(bytes) = content_store.read_blob(identifier.registry(), &digest).await?
+                && digest_matches(&bytes, &digest)
+                && let Ok(manifest) = serde_json::from_slice::<ocx_oci::Manifest>(&bytes)
+            {
+                return Ok(Some(Fetched {
+                    value: (bytes, digest, manifest),
+                    origin: BlobOrigin::Home,
+                }));
+            }
+            if let Some((bytes, origin)) = self.lookup_into_home(identifier.registry(), &digest, false).await?
+                && let Ok(manifest) = serde_json::from_slice::<ocx_oci::Manifest>(&bytes)
+            {
+                return Ok(Some(Fetched {
+                    value: (bytes, digest, manifest),
+                    origin: BlobOrigin::Lookup(origin),
+                }));
+            }
+        }
+        if self.mode == ChainMode::Offline {
+            return Ok(None);
+        }
+        let mut last_error: Option<super::error::Error> = None;
+        for (source, authoritative) in self.candidate_sources(identifier).await {
+            match source.fetch_manifest_raw_bytes(identifier).await {
+                Ok(Some((bytes, digest, manifest))) => {
+                    if digest_matches(&bytes, &digest) {
+                        self.write_home(identifier.registry(), &digest, &bytes, false).await;
+                        self.write_cache(identifier.registry(), &digest, &bytes).await;
+                    }
+                    return Ok(Some(Fetched {
+                        value: (bytes, digest, manifest),
+                        origin: BlobOrigin::Network,
+                    }));
+                }
+                Ok(None) if authoritative => return Ok(None),
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("Source fetch_manifest_raw_bytes failed for '{}': {e}", identifier);
+                    last_error = Some(e);
+                }
+            }
+        }
+        last_error.map_or(Ok(None), Err)
+    }
+
     fn read_only_view(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(self.read_only())
+    }
+
+    fn serves_tags_live(&self) -> bool {
+        self.mode == ChainMode::Remote
+    }
+
+    fn offline_view(&self) -> Box<dyn index_impl::IndexImpl> {
+        Box::new(Self {
+            mode: ChainMode::Offline,
+            ..self.read_only()
+        })
     }
 
     fn remote_view(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1527,6 +1682,57 @@ mod chain_refs_tests {
                 .is_none(),
             "a remote-view resolve must not commit a tag pointer"
         );
+    }
+
+    /// A tag-addressed network read warms the home blob store under every policy, but `ReadOnly` still
+    /// writes no index entry: the blob is content-addressed and GC-able, a dispatch object or tag pointer is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_tag_read_warms_the_blob_store_but_writes_no_index_entry() {
+        let dir = TempDir::new().unwrap();
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        let (_, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained_with_content_store(
+            make_local_index(&dir),
+            vec![src_idx],
+            ChainMode::Default,
+            blobs.clone(),
+        );
+        let path = blobs.data(REGISTRY, &digest_a());
+
+        chained
+            .read_only_view()
+            .fetch_manifest_raw_bytes(&tagged_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(path.exists(), "a ReadOnly tag read may warm the home blob store");
+        assert!(
+            !index_store(&dir)
+                .dispatch_object_path(REGISTRY, REPO, &digest_a())
+                .exists(),
+            "a ReadOnly view must write no dispatch object"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        chained.fetch_manifest_raw_bytes(&tagged_id()).await.unwrap().unwrap();
+        assert!(path.exists(), "a Full-policy tag read writes the manifest to the home");
+    }
+
+    /// An `offline_view` answers from local copies and never dials a source, whatever the ambient mode.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_view_never_reaches_a_source() {
+        let dir = TempDir::new().unwrap();
+        let (spy, src_idx) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(make_local_index(&dir), vec![src_idx], ChainMode::Remote);
+        let view = chained.offline_view();
+        let by_tag = view
+            .fetch_manifest_digest(&tagged_id(), super::super::IndexOperation::Query)
+            .await;
+        let by_digest = view
+            .fetch_manifest_raw_bytes_with_origin(&tagged_id().clone_with_digest(digest_a()))
+            .await;
+        assert!(matches!(by_tag, Ok(None)) && matches!(by_digest, Ok(None)));
+        assert_eq!(spy.calls(), 0, "the offline view dialled a source");
     }
 
     /// Concurrent same-tag resolves through a lock-scoped index: every
@@ -6290,5 +6496,267 @@ mod tests {
             "expected the file_error I/O wrapper, got {error:?}"
         );
         assert!(spy.calls.lock().unwrap().is_empty(), "and the source is not consulted");
+    }
+
+    // ── Blob lookup between the home and the sources ──────────────────────
+
+    use ocx_oci::blob_lookup::{BlobCacheDir, BlobLookup, LookupOrigin, blob_data_path};
+    use ocx_store::file_structure::BlobStore;
+
+    /// A source that answers every blob read with `bytes` and counts the reads.
+    #[derive(Clone)]
+    struct CountingBlobSource {
+        bytes: Vec<u8>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for CountingBlobSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &PackageRef,
+            _: super::super::IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &PackageRef,
+            _: super::super::IndexOperation,
+        ) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Some(self.bytes.clone()))
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// Puts `bytes` where a blob directory or cache holds the blob `registry`/hash(bytes).
+    fn put_lookup_blob(root: &std::path::Path, registry: &str, bytes: &[u8]) -> Digest {
+        let digest = Algorithm::Sha256.hash(bytes);
+        let data = blob_data_path(root, registry, &digest);
+        std::fs::create_dir_all(data.parent().unwrap()).unwrap();
+        std::fs::write(data, bytes).unwrap();
+        digest
+    }
+
+    fn blob_ref_for(digest: &Digest) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(digest_only_id())
+            .unwrap()
+            .clone_with_digest(digest.clone())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_between_home_and_source() {
+        let dir = TempDir::new().unwrap();
+        let blob_dir = dir.path().join("export-blobs");
+        let bytes = b"config blob held only by a blob directory".to_vec();
+        let digest = put_lookup_blob(&blob_dir, REGISTRY, &bytes);
+        let home = BlobStore::new(dir.path().join("blobs"));
+        let source = CountingBlobSource {
+            bytes: bytes.clone(),
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let source_calls = source.calls.clone();
+        let chained = Index::from_chained_with_content_store(
+            make_local_index(&dir),
+            vec![super::super::Index::from_impl(source)],
+            super::super::ChainMode::Default,
+            home.clone(),
+        )
+        .with_blob_lookup(Arc::new(BlobLookup::new(vec![blob_dir], None)));
+
+        let got = chained.fetch_blob(&blob_ref_for(&digest)).await.unwrap();
+
+        assert_eq!(
+            got,
+            Some(bytes.clone()),
+            "a home miss is answered from the blob directory"
+        );
+        assert_eq!(*source_calls.lock().unwrap(), 0, "a lookup hit never reaches a source");
+        assert_eq!(
+            home.read_blob(REGISTRY, &digest).await.unwrap(),
+            Some(bytes),
+            "a lookup hit is written to the home"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_consults_lookup() {
+        let dir = TempDir::new().unwrap();
+        let blob_dir = dir.path().join("export-blobs");
+        let bytes = b"config blob held only by a blob directory".to_vec();
+        let digest = put_lookup_blob(&blob_dir, REGISTRY, &bytes);
+        let chained = Index::from_chained_with_content_store(
+            make_local_index(&dir),
+            vec![],
+            super::super::ChainMode::Offline,
+            BlobStore::new(dir.path().join("blobs")),
+        )
+        .with_blob_lookup(Arc::new(BlobLookup::new(vec![blob_dir], None)));
+
+        let got = chained.fetch_blob(&blob_ref_for(&digest)).await.unwrap();
+
+        assert_eq!(got, Some(bytes), "--offline still reads the blob directory");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn digest_manifest_read_consults_lookup_offline() {
+        let dir = TempDir::new().unwrap();
+        let blob_dir = dir.path().join("export-blobs");
+        let bytes = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:{}","size":1}},"layers":[]}}"#,
+            "0".repeat(64)
+        )
+        .into_bytes();
+        let digest = put_lookup_blob(&blob_dir, REGISTRY, &bytes);
+        let home = BlobStore::new(dir.path().join("blobs"));
+        let chained = Index::from_chained_with_content_store(
+            make_local_index(&dir),
+            vec![],
+            super::super::ChainMode::Offline,
+            home.clone(),
+        )
+        .with_blob_lookup(Arc::new(BlobLookup::new(vec![blob_dir], None)));
+        let identifier = digest_only_id().clone_with_digest(digest.clone());
+
+        let (answered, manifest) = chained
+            .fetch_manifest(&identifier, super::super::IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .expect("the blob directory holds the manifest");
+
+        assert_eq!(answered, digest);
+        assert!(matches!(manifest, Manifest::Image(_)));
+        assert_eq!(
+            home.read_blob(REGISTRY, &digest).await.unwrap(),
+            Some(bytes),
+            "a lookup hit is written to the home"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn source_fetch_writes_cache() {
+        let dir = TempDir::new().unwrap();
+        let cache_root = dir.path().join("cache");
+        let bytes = b"config blob served by the registry".to_vec();
+        let digest = Algorithm::Sha256.hash(&bytes);
+        let source = CountingBlobSource {
+            bytes: bytes.clone(),
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let chained = Index::from_chained_with_content_store(
+            make_local_index(&dir),
+            vec![super::super::Index::from_impl(source)],
+            super::super::ChainMode::Default,
+            BlobStore::new(dir.path().join("blobs")),
+        )
+        .with_blob_lookup(Arc::new(BlobLookup::new(
+            vec![],
+            Some(BlobCacheDir::at(cache_root.clone())),
+        )));
+
+        let got = chained.fetch_blob(&blob_ref_for(&digest)).await.unwrap();
+
+        assert_eq!(got, Some(bytes.clone()));
+        assert_eq!(
+            std::fs::read(blob_data_path(&cache_root, REGISTRY, &digest)).ok(),
+            Some(bytes),
+            "a source fetch is written through to the cache"
+        );
+    }
+
+    // ── Read origin of the leaf manifest ──────────────────────────────────
+
+    fn chain_with_home_and_source(dir: &TempDir, source: TestIndex) -> Index {
+        Index::from_chained_with_content_store(
+            make_local_index(dir),
+            vec![make_source(source)],
+            super::super::ChainMode::Default,
+            BlobStore::new(dir.path().join("blobs")),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn origin_network_only_for_source_bytes() {
+        let dir = TempDir::new().unwrap();
+        let chained = chain_with_home_and_source(&dir, TestIndex::with_tag("latest", digest_a()));
+
+        let fetched = chained
+            .fetch_manifest_raw_bytes_with_origin(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("the source serves the manifest");
+
+        assert_eq!(fetched.value.1, digest_a());
+        assert_eq!(fetched.origin, super::super::BlobOrigin::Network);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn origin_home_after_network_is_home() {
+        let dir = TempDir::new().unwrap();
+        let source = TestIndex::with_tag("latest", digest_a());
+        let source_calls = source.calls.clone();
+        let chained = chain_with_home_and_source(&dir, source);
+        let first = chained
+            .fetch_manifest_raw_bytes_with_origin(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("first read");
+        let calls_after_first = source_calls.lock().unwrap().len();
+
+        let second = chained
+            .fetch_manifest_raw_bytes_with_origin(&digest_only_id())
+            .await
+            .unwrap()
+            .expect("second read");
+
+        assert_eq!(first.origin, super::super::BlobOrigin::Network);
+        assert_eq!(
+            second.origin,
+            super::super::BlobOrigin::Home,
+            "bytes the first read wrote to the home are Home, never Network"
+        );
+        assert_eq!(
+            source_calls.lock().unwrap().len(),
+            calls_after_first,
+            "no second source read"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_reads_report_own_origin() {
+        let dir = TempDir::new().unwrap();
+        let blob_dir = dir.path().join("export-blobs");
+        let held = put_lookup_blob(&blob_dir, REGISTRY, manifest_b_bytes());
+        let chained = chain_with_home_and_source(&dir, TestIndex::with_tag("latest", digest_a()))
+            .with_blob_lookup(Arc::new(BlobLookup::new(vec![blob_dir], None)));
+        let from_lookup = PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(held);
+        let from_source = digest_only_id();
+
+        let (lookup_read, network_read) = tokio::join!(
+            chained.fetch_manifest_raw_bytes_with_origin(&from_lookup),
+            chained.fetch_manifest_raw_bytes_with_origin(&from_source),
+        );
+
+        assert_eq!(
+            lookup_read.unwrap().expect("lookup read").origin,
+            super::super::BlobOrigin::Lookup(LookupOrigin::Dir(0))
+        );
+        assert_eq!(
+            network_read.unwrap().expect("network read").origin,
+            super::super::BlobOrigin::Network,
+            "a concurrent lookup hit must not relabel the source read"
+        );
     }
 }

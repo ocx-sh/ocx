@@ -70,6 +70,27 @@ pub async fn read_bounded_async(path: &Path, cap: u64) -> Result<Vec<u8>, Bounde
 /// [`BoundedReadError::NotRegularFile`] for a directory, device or FIFO,
 /// [`BoundedReadError::TooLarge`] over `cap`, else [`BoundedReadError::Io`].
 pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> {
+    read_bounded_with(path, cap, true)
+}
+
+/// [`read_bounded`] that refuses a symlink leaf as [`BoundedReadError::NotRegularFile`], on the blocking pool:
+/// for an untrusted directory, where a link swapped in after a safety walk must not be read.
+///
+/// # Errors
+///
+/// As [`read_bounded`].
+pub async fn read_bounded_no_follow_async(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> {
+    let target = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read_bounded_with(&target, cap, false)).await {
+        Ok(result) => result,
+        Err(join) => Err(BoundedReadError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("bounded read task panicked: {join}")),
+        }),
+    }
+}
+
+fn read_bounded_with(path: &Path, cap: u64, follow: bool) -> Result<Vec<u8>, BoundedReadError> {
     let io = |source| BoundedReadError::Io {
         path: path.to_path_buf(),
         source,
@@ -78,17 +99,23 @@ pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> 
         path: path.to_path_buf(),
     };
 
-    // Pre-open: a writerless FIFO blocks `open(2)` forever, and Windows fails a directory open as access denied.
-    // Unreadable metadata falls through so the open reports its own error.
-    if std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err(not_regular());
-    }
-    let file = open_for_read(path).map_err(io)?;
-    // Re-checked on the handle: the path can be swapped between the pre-check and the open.
-    let metadata = file.metadata().map_err(io)?;
-    if !metadata.is_file() {
-        return Err(not_regular());
-    }
+    let opened = if follow {
+        crate::fs::open_regular(path)
+    } else {
+        crate::fs::open_regular_no_follow(path)
+    };
+    let Some((file, _)) = opened.map_err(io)? else {
+        // `open_regular` folds a missing path into `None`; a missing file stays an I/O failure here.
+        let stat = if follow {
+            std::fs::metadata(path)
+        } else {
+            std::fs::symlink_metadata(path)
+        };
+        return Err(match stat {
+            Err(source) => io(source),
+            Ok(_) => not_regular(),
+        });
+    };
     read_under_cap(file, cap).map_err(|error| match error {
         None => BoundedReadError::TooLarge {
             path: path.to_path_buf(),
@@ -96,22 +123,6 @@ pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> 
         },
         Some(source) => io(source),
     })
-}
-
-/// `O_NONBLOCK` so a FIFO swapped in after the pre-stat cannot block the open.
-#[cfg(unix)]
-fn open_for_read(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_for_read(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
 }
 
 /// The ceiling over a reader: `Err(None)` is over-cap, `Err(Some(_))` is I/O.

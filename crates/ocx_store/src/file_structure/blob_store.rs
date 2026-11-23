@@ -52,14 +52,12 @@ impl BlobStore {
     }
 
     pub fn path(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
-        self.root
-            .join(super::slugify(registry))
-            .join(super::cas_path::cas_shard_path(digest))
+        ocx_oci::blob_lookup::blob_dir_path(&self.root, registry, digest)
     }
 
     /// Write only through [`Self::write_blob`] / [`Self::replace_blob`], whose atomic rename makes concurrent writers safe.
     pub fn data(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
-        self.path(registry, digest).join("data")
+        ocx_oci::blob_lookup::blob_data_path(&self.root, registry, digest)
     }
 
     pub fn digest_file(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
@@ -140,6 +138,68 @@ impl BlobStore {
         }
     }
 
+    /// Records that `referrer` is a referrer of `subject`, as an empty marker file; idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Disk failure or a symlinked ancestor.
+    pub async fn write_referrer_marker(
+        &self,
+        registry: &str,
+        subject: &ocx_oci::Digest,
+        referrer: &ocx_oci::Digest,
+    ) -> std::result::Result<(), ocx_oci::blob_lookup::LookupError> {
+        let (root, registry, subject, referrer) = (
+            self.root.clone(),
+            registry.to_string(),
+            subject.clone(),
+            referrer.clone(),
+        );
+        blocking_marker_io(&self.root, move || {
+            ocx_oci::blob_lookup::markers::write_marker(&root, &registry, &subject, &referrer)
+        })
+        .await
+    }
+
+    /// Records that the referrer listing of `subject` was read in full.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write_referrer_marker`].
+    pub async fn write_referrers_complete(
+        &self,
+        registry: &str,
+        subject: &ocx_oci::Digest,
+    ) -> std::result::Result<(), ocx_oci::blob_lookup::LookupError> {
+        let (root, registry, subject) = (self.root.clone(), registry.to_string(), subject.clone());
+        blocking_marker_io(&self.root, move || {
+            ocx_oci::blob_lookup::markers::write_complete(&root, &registry, &subject)
+        })
+        .await
+    }
+
+    /// The referrer markers of `subject` held in this store.
+    ///
+    /// # Errors
+    ///
+    /// A marker directory that cannot be listed.
+    pub async fn read_referrer_markers(
+        &self,
+        registry: &str,
+        subject: &ocx_oci::Digest,
+    ) -> std::result::Result<ocx_oci::blob_lookup::markers::ReferrerMarkers, ocx_oci::blob_lookup::LookupError> {
+        let (root, registry, subject) = (self.root.clone(), registry.to_string(), subject.clone());
+        blocking_marker_io(&self.root, move || {
+            ocx_oci::blob_lookup::markers::read_markers(
+                &root,
+                &registry,
+                &subject,
+                ocx_oci::blob_lookup::MAX_MARKER_NAMES_PER_ROOT,
+            )
+        })
+        .await
+    }
+
     /// Lists every blob directory; empty if the root does not exist.
     pub async fn list_all(&self) -> Result<Vec<BlobDir>> {
         if !self.root.exists() {
@@ -150,6 +210,18 @@ impl BlobStore {
             .walk()
             .await
     }
+}
+
+async fn blocking_marker_io<T: Send + 'static>(
+    root: &Path,
+    work: impl FnOnce() -> std::result::Result<T, ocx_oci::blob_lookup::LookupError> + Send + 'static,
+) -> std::result::Result<T, ocx_oci::blob_lookup::LookupError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|join| ocx_oci::blob_lookup::LookupError::Io {
+            path: root.to_path_buf(),
+            source: std::io::Error::other(join),
+        })?
 }
 
 const MAX_WALK_DEPTH: usize = 1 + super::cas_path::CAS_SHARD_DEPTH;
@@ -225,6 +297,23 @@ mod tests {
         let p = store.digest_file("example.com", &digest());
         assert_eq!(p.file_name().unwrap(), "digest");
         assert_eq!(p.parent().unwrap(), store.path("example.com", &digest()));
+    }
+
+    #[tokio::test]
+    async fn referrer_markers_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path());
+        let (subject, referrer) = (digest(), ocx_oci::Algorithm::Sha256.hash(b"referrer"));
+
+        store
+            .write_referrer_marker("example.com", &subject, &referrer)
+            .await
+            .unwrap();
+        store.write_referrers_complete("example.com", &subject).await.unwrap();
+
+        let listed = store.read_referrer_markers("example.com", &subject).await.unwrap();
+        assert_eq!(listed.digests, vec![referrer]);
+        assert!(listed.complete);
     }
 
     // ---- BlobDir accessors ------------------------------------------------

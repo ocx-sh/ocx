@@ -160,7 +160,7 @@ impl PackageStore {
     pub fn path(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
-            .join(super::cas_path::cas_shard_path(&identifier.digest()))
+            .join(ocx_oci::cas_path::cas_shard_path(&identifier.digest()))
     }
 
     pub fn package_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> PackageDir {

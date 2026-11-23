@@ -25,6 +25,8 @@ pub mod direnv_export;
 pub mod direnv_init;
 pub mod env;
 pub mod exec;
+pub mod export;
+pub mod import;
 pub mod index;
 pub mod index_catalog;
 pub mod index_common;
@@ -52,6 +54,8 @@ pub mod package_create;
 pub mod package_description;
 pub mod package_description_pull;
 pub mod package_description_push;
+pub mod package_export;
+pub mod package_import;
 pub mod package_inspect;
 pub mod package_prune;
 pub mod package_pull;
@@ -401,6 +405,30 @@ pub enum Command {
     /// Deprecated spelling of `ocx exec`; removed in 0.7.
     #[command(name = "run", hide = true)]
     DeprecatedRun(toolchain_exec::ToolchainExec),
+    /// Write every package the project lock pins to a directory.
+    #[command(long_about = "\
+        Write every package the project lock pins to a directory.\n\n\
+        Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or \
+        `$OCX_HOME/ocx.lock` under `--global`) and writes each pinned platform leaf, its dependencies and, unless \
+        `--no-referrers` is given, its signatures, SBOMs and attestations to DIR, with a marker. Unlike `ocx pull`, \
+        no `-g` selects every group, since the machine that imports the directory cannot ask for more; \
+        `--platform` narrows it to the named platforms. No index is written, because the lock needs none.\n\n\
+        Move the directory to the other machine and run `ocx import` there.\n\n\
+        A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65, as for `ocx exec`. A \
+        blob nowhere local under `--offline` exits 81.")]
+    Export(export::Export),
+    /// Assemble the project lock's packages from an export directory, offline.
+    #[command(long_about = "\
+        Assemble the project lock's packages from an export directory, offline.\n\n\
+        Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or \
+        `$OCX_HOME/ocx.lock` under `--global`) and assembles the locked packages of the selected groups from the \
+        directory `ocx export` wrote, with no registry traffic. Without `-g` that is the default group, as for \
+        `ocx pull`; `--platform` defaults to the host platform. Then it renders the project toolchain and \
+        registers the project, as `ocx pull` does. It changes no tag in the local index.\n\n\
+        Signatures are verified from what the export carries. A missing `ocx.toml` exits 64 and a missing or \
+        stale `ocx.lock` exits 78 or 65. A package the directory lacks exits 79 and a directory that is not a \
+        usable export exits 65.")]
+    Import(import::Import),
     Shell(shell::ShellArgs),
     /// Manage the OCX installation itself (PATH activation, completions, self-update).
     #[command(name = "self", subcommand)]
@@ -491,6 +519,8 @@ impl Command {
             Command::Pull(pull) => boxed(move || pull.execute(context)).await,
             Command::Remove(remove) => boxed(move || remove.execute(context)).await,
             Command::Exec(exec) => boxed(move || exec.execute(context)).await,
+            Command::Export(export) => boxed(move || export.execute(context)).await,
+            Command::Import(import) => boxed(move || import.execute(context)).await,
             Command::DeprecatedRun(exec) => {
                 boxed(move || {
                     deprecated::warn_renamed(&context, &deprecated::RUN);

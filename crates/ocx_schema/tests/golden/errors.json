@@ -399,9 +399,19 @@
           "exit_code": 78
         },
         {
+          "value": "blob_dir_not_found",
+          "description": "A --blob-dir path does not exist or is not a directory",
+          "exit_code": 79
+        },
+        {
           "value": "blob_not_found",
           "description": "The registry has no such blob",
           "exit_code": 79
+        },
+        {
+          "value": "blob_path_relative",
+          "description": "A [blobs] path is relative where only an absolute one is accepted",
+          "exit_code": 78
         },
         {
           "value": "bot_identity",
@@ -565,7 +575,7 @@
         },
         {
           "value": "config_list_too_long",
-          "description": "OCX_CONFIG lists more config files than the limit",
+          "description": "A path list holds more entries than the limit",
           "exit_code": 78
         },
         {
@@ -772,6 +782,21 @@
           "value": "envrc_exists",
           "description": "An .envrc already exists and --force was not given",
           "exit_code": 78
+        },
+        {
+          "value": "export_dir_invalid",
+          "description": "A directory is not a valid export",
+          "exit_code": 65
+        },
+        {
+          "value": "export_not_found",
+          "description": "The export directory lacks something that was asked for",
+          "exit_code": 79
+        },
+        {
+          "value": "export_platform_required",
+          "description": "A digest identifier needs exactly one platform to export",
+          "exit_code": 64
         },
         {
           "value": "extra_ca_certs_invalid",
@@ -1372,6 +1397,11 @@
           "value": "login_rejected",
           "description": "The registry rejected the supplied credentials",
           "exit_code": 80
+        },
+        {
+          "value": "lookup_io",
+          "description": "Reading or writing a blob directory failed",
+          "exit_code": 74
         },
         {
           "value": "malformed_catalog_key",
@@ -2322,6 +2352,11 @@
           "value": "setup_profile_subprocess",
           "description": "A shell subprocess setup needs could not run",
           "exit_code": 69
+        },
+        {
+          "value": "shard_collision",
+          "description": "Two digests share one blob directory",
+          "exit_code": 65
         },
         {
           "value": "shell_section_in_project",

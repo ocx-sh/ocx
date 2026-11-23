@@ -333,6 +333,9 @@ pub struct ResolvedChain {
     /// The selected platform (`any` for a flat manifest); the candidate-symlink gate uses it
     /// to suppress foreign-platform installs.
     pub platform: ocx_oci::Platform,
+    /// Where the platform-selected leaf manifest came from in this resolve; only
+    /// [`ocx_index::BlobOrigin::Network`] lets a pull record the package's origin.
+    pub leaf_origin: ocx_index::BlobOrigin,
 }
 
 /// Why a [`ResolvedChain`] has no location to read layers from.
@@ -412,6 +415,45 @@ async fn resolve_transport_pinned(
     }
 }
 
+/// Where the manifest `id` names is served from right now, probed before the read that fetches it.
+///
+/// A tag no local pin answers can only come from a source. A failed probe counts as no network, so an
+/// unreadable copy never mints a recorded origin.
+pub(super) async fn probe_manifest_origin(
+    index: &ocx_index::Index,
+    id: &ocx_oci::PackageRef,
+    offline: bool,
+) -> ocx_index::BlobOrigin {
+    // Nothing is served under `Offline`, so an absent manifest can never have come from a source.
+    let absent = if offline {
+        ocx_index::BlobOrigin::Home
+    } else {
+        ocx_index::BlobOrigin::Network
+    };
+    // Under `--remote` a tag never reads a local pin: the real read goes to the source, whatever the home holds.
+    if !offline && id.digest().is_none() && index.serves_tags_live() {
+        return ocx_index::BlobOrigin::Network;
+    }
+    // A local-only view: the probe must not dial a source the real read would not.
+    let index = &index.offline_view();
+    let digest = match id.digest() {
+        Some(digest) => digest,
+        None => match index.fetch_manifest_digest(id, IndexOperation::Query).await {
+            Ok(Some(digest)) => digest,
+            Ok(None) => return absent,
+            Err(_) => return ocx_index::BlobOrigin::Home,
+        },
+    };
+    match index
+        .fetch_manifest_raw_bytes_with_origin(&id.clone_with_digest(digest))
+        .await
+    {
+        Ok(Some(fetched)) => fetched.origin,
+        Ok(None) => absent,
+        Err(_) => ocx_index::BlobOrigin::Home,
+    }
+}
+
 impl PackageManager {
     /// Resolves an identifier through the index (tag → digest, platform matching) to its
     /// pinned identifier and the blob chain behind it.
@@ -420,6 +462,8 @@ impl PackageManager {
         package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<ResolvedChain, PackageErrorKind> {
+        // Probed before the read that fetches the manifest, which leaves a home copy behind.
+        let top_origin = probe_manifest_origin(self.index(), package, self.is_offline()).await;
         // `fetch_manifest` writes through, so every digest in `chain` is backed by an on-disk blob.
         let (top_pinned, top_manifest) =
             super::common::resolve_top_manifest(self.index(), package, IndexOperation::Resolve).await?;
@@ -462,6 +506,7 @@ impl PackageManager {
                     final_manifest: img,
                     // A flat manifest carries no platform metadata (matches `from_image_manifest`).
                     platform: ocx_oci::Platform::any(),
+                    leaf_origin: top_origin,
                 })
             }
             ocx_oci::Manifest::ImageIndex(index) => {
@@ -496,6 +541,7 @@ impl PackageManager {
                 };
 
                 let child_id = top_id.clone_with_digest(pinned.digest());
+                let leaf_origin = probe_manifest_origin(self.index(), &child_id, self.is_offline()).await;
                 let (child_digest, child_manifest) = match self
                     .index()
                     .fetch_manifest(&child_id, IndexOperation::Resolve)
@@ -571,6 +617,7 @@ impl PackageManager {
                     chain,
                     final_manifest,
                     platform: selected_platform,
+                    leaf_origin,
                 })
             }
         }
@@ -1710,7 +1757,7 @@ async fn collect_descriptor_digests(
 /// Read from the snapshot's own map, not the descriptor-derived set, so a companion the live
 /// descriptor has since dropped stays rooted. The advisory tag is kept so one repository
 /// frozen at two tags seeds both digests.
-fn snapshot_companion_roots(
+pub(super) fn snapshot_companion_roots(
     manager: &PackageManager,
     scope: PatchRootScope,
 ) -> Vec<(ocx_oci::PackageRef, ocx_oci::Digest)> {
@@ -9144,5 +9191,102 @@ mod launch_identity_tests {
                 "system_required={system_required}: {entries:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_origin_tests {
+    use ocx_index::test_source::CountingSource;
+    use ocx_index::{BlobOrigin, ChainMode, Index, IndexOperation, IndexStore, LocalConfig, LocalIndex};
+    use ocx_oci::{Digest, PackageRef};
+    use ocx_store::file_structure::{BlobStore, FileStructure};
+    use tempfile::TempDir;
+
+    use crate::PackageManager;
+
+    const REGISTRY: &str = "example.com";
+
+    fn manager(dir: &TempDir, sources: Vec<Index>, mode: ChainMode) -> PackageManager {
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let local = LocalIndex::new(LocalConfig {
+            index_store: IndexStore::machine_local(&fs),
+        });
+        let blobs = BlobStore::new(dir.path().join("blobs"));
+        PackageManager::new(
+            fs,
+            Index::from_chained_with_content_store(local, sources, mode, blobs),
+            None,
+            REGISTRY,
+        )
+    }
+
+    /// An image index, whose dispatch object the local index keeps, so a tag pin survives in the home.
+    fn image_manifest(revision: u64) -> Vec<u8> {
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{}","size":{revision},"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+            "0".repeat(64)
+        )
+        .into_bytes()
+    }
+
+    /// An absent manifest reads as a source answer only when a source can be asked, never under `Offline`,
+    /// and the probe itself never dials a source in any chain mode.
+    #[tokio::test]
+    async fn an_absent_manifest_is_never_network_origin_offline() {
+        let id = PackageRef::new_registry("acme/absent", REGISTRY).clone_with_tag("1.0.0");
+        let pinned = id.clone_with_digest(Digest::Sha256("f".repeat(64)));
+
+        for mode in [ChainMode::Offline, ChainMode::Default] {
+            let dir = TempDir::new().unwrap();
+            let spy = CountingSource::new("other", image_manifest(1));
+            let manager = manager(&dir, vec![spy.clone().into_index()], mode);
+
+            for id in [&id, &pinned] {
+                assert_eq!(
+                    super::probe_manifest_origin(manager.index(), id, true).await,
+                    BlobOrigin::Home,
+                    "{mode:?} {id}"
+                );
+                assert_eq!(
+                    super::probe_manifest_origin(manager.index(), id, false).await,
+                    BlobOrigin::Network,
+                    "{mode:?} {id}: the online control still reports a source"
+                );
+            }
+            assert_eq!(spy.calls(), 0, "{mode:?}: the probe dialled a source");
+        }
+    }
+
+    /// Installed under one tag pin, then the tag moves upstream: `--remote` reads the new bytes from the
+    /// source, so the origin is `Network`, while the default mode keeps answering from the home and never dials.
+    #[tokio::test]
+    async fn a_moved_tag_under_remote_is_a_network_origin_and_default_stays_local() {
+        let dir = TempDir::new().unwrap();
+        let id = PackageRef::new_registry("acme/moved", REGISTRY).clone_with_tag("1.0.0");
+        let old = CountingSource::new("1.0.0", image_manifest(1));
+        let installed = manager(&dir, vec![old.clone().into_index()], ChainMode::Default);
+        installed
+            .index()
+            .fetch_manifest(&id, IndexOperation::Resolve)
+            .await
+            .unwrap()
+            .unwrap();
+        installed.index().fetch_manifest_raw_bytes(&id).await.unwrap().unwrap();
+        assert_eq!(
+            super::probe_manifest_origin(installed.index(), &id, false).await,
+            BlobOrigin::Home,
+            "precondition: the installed tag answers from the home"
+        );
+        let calls_before = old.calls();
+        super::probe_manifest_origin(installed.index(), &id, false).await;
+        assert_eq!(old.calls(), calls_before, "the default-mode probe dialled a source");
+
+        let moved = CountingSource::new("1.0.0", image_manifest(2));
+        let remote = manager(&dir, vec![moved.clone().into_index()], ChainMode::Remote);
+        assert_eq!(
+            super::probe_manifest_origin(remote.index(), &id, false).await,
+            BlobOrigin::Network
+        );
+        assert_eq!(moved.calls(), 0, "the remote-mode probe made its own request");
     }
 }

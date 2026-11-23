@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use super::runtime::{Error, Ocx, Outcome, Raw};
 use super::types::{
     About, AnnounceReport, Catalog, ClaimReport, Clean, ConfigSetupData, ConfigTestData, ConfigUpdateData, CopyReport,
-    InspectReport, Installs, LocatedPaths, LockReport, LoginResult, LogoutResult, PackageCascadeCheck,
-    PackageCascadeRepair, PackageDescriptions, PackageReceipt, PatchFreezeReport, PatchPublishReport, PatchSyncReport,
-    PatchWhyReport, Paths, PruneOutcome, PushReport, RegenerateReport, Removed, SelfSetupData, StatusReport, Tags,
-    VerificationReport,
+    ExportReport, ImportReport, InspectReport, Installs, LocatedPaths, LockReport, LoginResult, LogoutResult,
+    PackageCascadeCheck, PackageCascadeRepair, PackageDescriptions, PackageReceipt, PatchFreezeReport,
+    PatchPublishReport, PatchSyncReport, PatchWhyReport, Paths, PruneOutcome, PushReport, RegenerateReport, Removed,
+    SelfSetupData, StatusReport, Tags, VerificationReport,
 };
 use super::wire::{Argv, Hyphen, Presence, Secret};
 
@@ -37,6 +37,10 @@ pub struct GlobalOptions {
     pub jobs: Option<i64>,
     /// Overrides the local index home directory
     pub index: Option<PathBuf>,
+    /// Directory searched, read-only, for blobs before a registry is contacted
+    pub blob_dir: Vec<PathBuf>,
+    /// Directory where blobs fetched from a registry are kept for later runs
+    pub blob_cache_dir: Option<PathBuf>,
     /// The log level to use
     pub log_level: Option<String>,
     /// When to use ANSI colors in output
@@ -59,6 +63,8 @@ impl GlobalOptions {
             &[],
         );
         argv.flag("index", &self.index, Presence::Optional, &[]);
+        argv.flag("blob-dir", &self.blob_dir, Presence::Optional, &[]);
+        argv.flag("blob-cache-dir", &self.blob_cache_dir, Presence::Optional, &[]);
         argv.flag(
             "log-level",
             &self.log_level,
@@ -371,6 +377,53 @@ impl ExecArgs {
         argv.switch("no-consent", self.no_consent);
         argv.positional("names", &self.names, Presence::Optional, Hyphen::Refuse);
         argv.operand("argv", &self.argv, Presence::Required);
+    }
+}
+
+/// The arguments of `ocx export`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExportArgs {
+    /// Directory to write the export to; created when absent
+    pub output: PathBuf,
+    /// Restrict to the named group(s)
+    pub groups: Vec<String>,
+    /// Export only this platform; repeat for several. Defaults to every platform the lock records
+    pub platforms: Vec<String>,
+    /// Carry the signatures, SBOMs and attestations of each exported manifest (default)
+    pub referrers: bool,
+    /// Leave them out; a trust policy then cannot verify the import offline
+    pub no_referrers: bool,
+}
+
+impl ExportArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.flag("platform", &self.platforms, Presence::Optional, &[]);
+        argv.switch("referrers", self.referrers);
+        argv.switch("no-referrers", self.no_referrers);
+    }
+}
+
+/// The arguments of `ocx import`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ImportArgs {
+    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs`
+    /// subdirectory
+    pub input: PathBuf,
+    /// Restrict to the named group(s)
+    pub groups: Vec<String>,
+    /// Import only this platform; repeat for several. Defaults to the host platform
+    pub platforms: Vec<String>,
+}
+
+impl ImportArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.positional("input", [&self.input], Presence::Required, Hyphen::Refuse);
+        argv.flag("group", &self.groups, Presence::Optional, &[]);
+        argv.flag("platform", &self.platforms, Presence::Optional, &[]);
     }
 }
 
@@ -1205,6 +1258,55 @@ impl PackageExecArgs {
         argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
         argv.terminator();
         argv.positional("command", &self.command, Presence::Required, Hyphen::Allow);
+    }
+}
+
+/// The arguments of `ocx package export`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PackageExportArgs {
+    /// Directory to write the export to; created when absent
+    pub output: PathBuf,
+    /// Export only this platform; repeat for several. Defaults to every platform the package
+    /// publishes
+    pub platforms: Vec<String>,
+    /// Carry the signatures, SBOMs and attestations of each exported manifest (default)
+    pub referrers: bool,
+    /// Leave them out; a trust policy then cannot verify the import offline
+    pub no_referrers: bool,
+    /// Packages to export, as `registry/repository:tag` or `registry/repository@sha256:<hex>`
+    pub packages: Vec<String>,
+}
+
+impl PackageExportArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.flag("platform", &self.platforms, Presence::Optional, &[]);
+        argv.switch("referrers", self.referrers);
+        argv.switch("no-referrers", self.no_referrers);
+        argv.positional("packages", &self.packages, Presence::Required, Hyphen::Refuse);
+    }
+}
+
+/// The arguments of `ocx package import`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PackageImportArgs {
+    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs`
+    /// subdirectory
+    pub input: PathBuf,
+    /// Import only this platform; repeat for several. Defaults to the host platform
+    pub platforms: Vec<String>,
+    /// Packages to import; without any, every package the export lists. A named package may move a
+    /// tag the local index pins differently
+    pub packages: Vec<String>,
+}
+
+impl PackageImportArgs {
+    /// Appends the arguments to `argv`.
+    pub fn push(&self, argv: &mut Argv) {
+        argv.positional("input", [&self.input], Presence::Required, Hyphen::Refuse);
+        argv.flag("platform", &self.platforms, Presence::Optional, &[]);
+        argv.positional("packages", &self.packages, Presence::Optional, Hyphen::Refuse);
     }
 }
 
@@ -2373,6 +2475,24 @@ impl Ocx {
         self.call_passthrough("exec", &[], argv)
     }
 
+    /// Write every package the project lock pins to a directory
+    ///
+    /// Runs `ocx export`.
+    pub fn export(&self, args: &ExportArgs) -> Result<ExportReport, Error> {
+        let mut argv = self.argv(&["export"]);
+        args.push(&mut argv);
+        self.call("export", "ExportReport", argv)
+    }
+
+    /// Assemble the project lock's packages from an export directory, offline
+    ///
+    /// Runs `ocx import`.
+    pub fn import(&self, args: &ImportArgs) -> Result<ImportReport, Error> {
+        let mut argv = self.argv(&["import"]);
+        args.push(&mut argv);
+        self.call("import", "ImportReport", argv)
+    }
+
     /// List available repositories in the registry
     ///
     /// Runs `ocx index catalog`.
@@ -2607,6 +2727,24 @@ impl Ocx {
         let mut argv = self.argv(&["package", "exec"]);
         args.push(&mut argv);
         self.call_passthrough("package exec", &[], argv)
+    }
+
+    /// Write packages and their blobs to a directory for offline transfer
+    ///
+    /// Runs `ocx package export`.
+    pub fn package_export(&self, args: &PackageExportArgs) -> Result<ExportReport, Error> {
+        let mut argv = self.argv(&["package", "export"]);
+        args.push(&mut argv);
+        self.call("package export", "ExportReport", argv)
+    }
+
+    /// Import packages from an export directory without network access
+    ///
+    /// Runs `ocx package import`.
+    pub fn package_import(&self, args: &PackageImportArgs) -> Result<ImportReport, Error> {
+        let mut argv = self.argv(&["package", "import"]);
+        args.push(&mut argv);
+        self.call("package import", "ImportReport", argv)
     }
 
     /// Inspect one or more package references (platforms, metadata, or resolution chain)

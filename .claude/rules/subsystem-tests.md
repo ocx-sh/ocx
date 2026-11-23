@@ -164,7 +164,7 @@ The crate split (`plan_crate_split_workspace.md` DEC-10, C-012…C-014, C-069, C
 the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
 
 - **`smoke` marker.** One `@pytest.mark.smoke` happy path per visible top-level `ocx` verb
-  (22), registry only, never `sigstore_stack` / `identity_token`, never a `sign|attest|verify|cosign`
+  (24), registry only, never `sigstore_stack` / `identity_token`, never a `sign|attest|verify|cosign`
   test. `test/pyproject.toml` registers the marker and sets `--strict-markers`, so a misspelled
   marker is a collection error, not a silently unselected test. `task test:smoke` runs
   `-m smoke -n auto --dist loadgroup` under a 90 s wall-clock budget (target 60 s);
@@ -215,6 +215,7 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
 - **Adding a verb** (see `subsystem-cli-commands.md`): its acceptance test carries a `smoke`
   row and a `command` marker, or `test:rows:check` (T0) and
   `test/lint/test_smoke_coverage.py` (T0) both red; `SUITE_FLOOR` rises in the same commit.
+- **Export / import modules** (blob directories, `adr_package_export_import.md`): `test_package_export.py`, `test_package_import.py`, `test_package_import_verify.py`, `test_blob_cache.py`, `test_package_copy_from_export.py`, `test_project_export_import.py`, `test_registry_guard.py`, `test_exec_registers_project.py`. Root `export` and `import` are the two added visible verbs, so the smoke count is 24.
 
 ## Unit-Test Duration Budget (Rust)
 

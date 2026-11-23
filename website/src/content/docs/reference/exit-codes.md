@@ -99,6 +99,7 @@ The command line is invalid: unknown flag, wrong argument count or bad syntax.
 | `duplicate_binding_across_groups` | A binding is defined in more than one selected group |
 | `duplicate_owner` | The same owner was supplied twice |
 | `empty_group_filter` | A group filter names an empty group |
+| `export_platform_required` | A digest identifier needs exactly one platform to export |
 | `forge_kind_unknown` | The forge kind of a self-hosted host is unknown; name it explicitly |
 | `forge_transport_operation_unsupported` | The selected transport does not support this operation |
 | `forge_transport_unsupported` | The forge does not support the selected transport |
@@ -195,6 +196,7 @@ Input data is malformed or fails verification.
 | `duplicate_platform_key` | ocx.lock lists the same platform twice for one binding |
 | `empty_push_set` | A push names no target platform |
 | `entrypoint_collision` | Two packages declare the same entry point name |
+| `export_dir_invalid` | A directory is not a valid export |
 | `extra_ca_certs_invalid` | The extra CA bundle the payload names is not usable |
 | `extra_ca_certs_not_utf8` | The extra CA bundle is not UTF-8 and cannot be persisted |
 | `extra_ca_file_invalid` | The extra CA bundle file holds no usable certificate |
@@ -285,6 +287,7 @@ Input data is malformed or fails verification.
 | `sbom_media_type_unsupported` | An unsigned SBOM referrer declares a media type outside the SBOM set |
 | `selection_ambiguous` | The selection matches more than one package |
 | `separator_edged_list_value` | A package list value starts or ends with its separator |
+| `shard_collision` | Two digests share one blob directory |
 | `shim_claim_unfulfilled` | A declared interface name does not exist in the package |
 | `shim_name_invalid` | A shim name is not a valid binary name |
 | `shim_name_not_claimed` | A shim name is not an interface name the package declares |
@@ -381,6 +384,7 @@ A filesystem read or write failed.
 | `file_io` | Reading or writing an internal file failed |
 | `key_unreadable` | A signing or verification key could not be read from its location |
 | `libc_lint_read` | Reading a file while checking its libc requirement failed |
+| `lookup_io` | Reading or writing a blob directory failed |
 | `managed_config_payload_read_failed` | Reading the managed-config payload failed |
 | `managed_config_snapshot_write` | Writing the managed-config snapshot failed |
 | `managed_config_stage_failed` | Staging the managed-config payload for publishing failed |
@@ -464,10 +468,11 @@ Configuration is invalid or incomplete.
 | `binding_from_invalid` | A group binding's from reference is malformed or has no target |
 | `binding_value_invalid` | A binding's value is not a valid identifier |
 | `binding_value_missing_registry` | A binding's identifier names no registry |
+| `blob_path_relative` | A [blobs] path is relative where only an absolute one is accepted |
 | `ci_missing_env` | A CI environment variable the export needs is not set |
 | `config_edit_too_large` | The config file being edited exceeds the allowed size |
 | `config_file_too_large` | A config file exceeds the allowed size |
-| `config_list_too_long` | OCX_CONFIG lists more config files than the limit |
+| `config_list_too_long` | A path list holds more entries than the limit |
 | `config_parse` | A config file does not parse |
 | `config_path_contains_separator` | A config path contains the OCX_CONFIG list separator |
 | `credential_helper_not_on_path` | The configured credential helper is not on PATH |
@@ -568,11 +573,13 @@ A named package, tag, file or resource does not exist.
 | `attestation_not_found` | No verified attestation matches the requested predicate type |
 | `binding_not_declared` | The named binding is not declared in ocx.toml |
 | `binding_not_found` | The named binding does not exist in ocx.toml |
+| `blob_dir_not_found` | A --blob-dir path does not exist or is not a directory |
 | `blob_not_found` | The registry has no such blob |
 | `build_receipt_not_found` | No build receipt exists beside the bundle |
 | `config_file_not_found` | An explicitly named config or project file does not exist |
 | `dependency_manifest_not_found` | A pinned dependency manifest is not in the registry |
 | `dependency_not_found` | A dependency is not in the selected index |
+| `export_not_found` | The export directory lacks something that was asked for |
 | `index_manifest_not_found` | The registry has no manifest for a tag the index update walked |
 | `managed_config_input_not_found` | A file the managed-config payload names does not exist |
 | `managed_config_source_not_found` | The registry has no managed-config package at the configured source |

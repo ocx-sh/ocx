@@ -86,6 +86,13 @@ pub trait IndexImpl: Send + Sync {
         self.fetch_root_document(identifier).await
     }
 
+    /// The catalog entry (`sha256:<hex>` of the root bytes) this source lists for `identifier`'s repository;
+    /// `Ok(None)` for a source with no catalog or no such entry.
+    async fn fetch_catalog_entry(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<String>> {
+        let _ = identifier;
+        Ok(None)
+    }
+
     /// The effective `publishers` of `identifier` from state this process already holds; never a request.
     ///
     /// [`DeclaredPublishers::Undeclared`] for a derived source and for a name nothing declares `publishers` for.
@@ -197,6 +204,39 @@ pub trait IndexImpl: Send + Sync {
         super::local_index::SourceKind::Derived
     }
 
+    /// [`Self::source_kind`] of the source owning `registry`, or the provenance an import gives a registry
+    /// nothing serves; reads configuration only, so it is valid offline.
+    fn source_kind_for(&self, registry: &str) -> super::local_index::SourceKind {
+        if self.serves_registry(registry) {
+            self.source_kind()
+        } else {
+            super::local_index::SourceKind::Derived
+        }
+    }
+
+    /// Attaches the blob lookup digest-addressed reads consult after the home and before a source.
+    /// A source with nothing to consult ignores it.
+    fn set_blob_lookup(&mut self, lookup: std::sync::Arc<ocx_oci::blob_lookup::BlobLookup>) {
+        let _ = lookup;
+    }
+
+    /// [`Self::fetch_manifest_raw_bytes`] with where the bytes came from.
+    ///
+    /// The default labels every read [`BlobOrigin::Network`](super::BlobOrigin): a plain source has no home or
+    /// lookup to answer from.
+    async fn fetch_manifest_raw_bytes_with_origin(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+    ) -> Result<Option<super::Fetched<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>>> {
+        Ok(self
+            .fetch_manifest_raw_bytes(identifier)
+            .await?
+            .map(|value| super::Fetched {
+                value,
+                origin: super::BlobOrigin::Network,
+            }))
+    }
+
     fn box_clone(&self) -> Box<dyn IndexImpl>;
 
     /// A view that resolves identically but writes nothing into the local index;
@@ -209,5 +249,20 @@ pub trait IndexImpl: Send + Sync {
     /// [`ChainMode`](super::ChainMode) and writes nothing, so it can never move a pin.
     fn remote_view(&self) -> Box<dyn IndexImpl> {
         self.box_clone()
+    }
+
+    /// A view that reads the local copies only, whatever the ambient [`ChainMode`](super::ChainMode),
+    /// and writes nothing into the local index; it never dials a source.
+    ///
+    /// Only [`ChainedIndex`](super::chained_index::ChainedIndex) honours this: a bare remote index has no
+    /// local copy to fall back to, so the default clone would still dial. Production holds remotes only
+    /// inside the chain.
+    fn offline_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
+
+    /// Whether a tag-addressed read is always answered by a source, never by a local pin (`--remote`).
+    fn serves_tags_live(&self) -> bool {
+        false
     }
 }

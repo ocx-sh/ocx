@@ -89,25 +89,6 @@ async fn bounded(
         .unwrap_or_else(|_elapsed| Err(refused(url, format!("index read exceeded {deadline:?}"))))
 }
 
-/// Opens `path` for reading without blocking on a FIFO or device node.
-///
-/// Without `O_NONBLOCK`, a FIFO swapped in after the pre-stat blocks inside
-/// `open()` before the handle re-check can refuse it.
-#[cfg(unix)]
-async fn open_for_read(path: &Path) -> std::io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .await
-}
-
-/// Opens `path` for reading.
-#[cfg(not(unix))]
-async fn open_for_read(path: &Path) -> std::io::Result<fs::File> {
-    fs::File::open(path).await
-}
-
 impl FileIndexTransport {
     /// Build a transport serving `root` under `base_url`, which
     /// [`OcxIndex::resolve_base_url`](super::OcxIndex::resolve_base_url) has already checked.
@@ -150,15 +131,16 @@ impl FileIndexTransport {
             return Err(refused(url, "index object resolves outside the index root"));
         }
 
-        // Re-check the type on the handle: a writer can swap a FIFO in after the pre-stat.
-        let file = match open_for_read(&path).await {
-            Ok(file) => file,
+        // The type is re-checked on the handle inside `open_regular`: a writer can swap a FIFO in after the pre-stat.
+        let blocking_path = path.clone();
+        let opened = tokio::task::spawn_blocking(move || ocx_util::fs::open_regular(&blocking_path))
+            .await
+            .map_err(|source| refused(url, source))?;
+        let file = match opened {
+            Ok(Some((file, _))) => fs::File::from_std(file),
+            Ok(None) => return Err(refused(url, "index object is not a regular file")),
             Err(source) => return absent_or_refused(&self.root, url, source).await,
         };
-        let opened = file.metadata().await.map_err(|source| refused(url, source))?;
-        if !opened.file_type().is_file() {
-            return Err(refused(url, "index object is not a regular file"));
-        }
 
         // Count what arrived (`cap + 1`), never trust `len()`: a `/proc` entry declares 0 yet yields content.
         let mut bytes = Vec::new();

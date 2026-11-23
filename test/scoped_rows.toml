@@ -34,6 +34,7 @@ ocx_oci = [
     "tests/test_multi_layer.py",
     "tests/test_push*.py",
     "tests/test_referrers_*.py",
+    "tests/test_registry_guard.py",
     "tests/test_proxy_registry.py",
     "tests/test_oci_registry_mirror.py",
     "tests/test_login.py",
