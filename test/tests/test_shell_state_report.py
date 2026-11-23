@@ -369,6 +369,16 @@ def test_a_truncated_state_is_a_note_never_an_error(
     )
 
 
+def test_the_watch_set_names_the_patch_state_stamp(ocx: OcxRunner) -> None:
+    """The patch-state stamp is a watch-set member, so a patch change opens the per-prompt gate (#745)."""
+    _, report = _state(ocx, exec_state.default_state(), verbose=True)
+
+    members = [Path(member["path"]) for member in report["watch_set"]]
+    assert [m for m in members if m.name == "patch-state.stamp" and m.parent.name == "state"], (
+        f"the watch set must name state/patch-state.stamp; members: {members}"
+    )
+
+
 def test_a_readable_state_answers_the_fingerprint_and_the_recorded_tiers(
     ocx: OcxRunner,
 ) -> None:

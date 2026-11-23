@@ -168,7 +168,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
 | `patch freeze` | Write `patches.snapshot.json` pinning companion + descriptor digests beside `ocx.lock` (or `$OCX_HOME/ocx.lock` under `--global`) | — |
-| `patch sync [OPTIONS]` | Re-fetch every patch descriptor for all installed packages, install newly-referenced companions | `-p/--platform` |
+| `patch sync [OPTIONS]` | Re-fetch every patch descriptor for all installed packages, install newly-referenced companions; `companions_installed` counts distinct companions, a shared one is installed once | `-p/--platform` |
 | `patch publish --descriptor <FILE> [--global \| <BASE-ID>]` | Push a patch descriptor to the configured (or `--registry`) `[patches]` registry | `--descriptor`, `--global`, `--registry` |
 | `patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- CMD]` | Compose a descriptor onto a base locally without publishing (maintainer preview); `--self` previews the private surface a launcher sees | `--descriptor`, `--companion-archive`, `-p/--platform`, `--self`, `--script`, `--registry`, `--env` |
 | `patch why <BASE-ID>` | List which companion, and which descriptor rule, contributes each patched env var to a base; `--self` traces the private surface | `-p/--platform`, `--self` |

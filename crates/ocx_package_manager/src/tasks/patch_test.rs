@@ -169,9 +169,13 @@ impl PackageManager {
         // unchanged `build_site_patch_set` reads this tag + the CAS blob to
         // reconstruct the descriptor — no compose-time descriptor override.
         let global_tags_path = self.file_structure().patch_descriptor_path(&global_id);
-        super::patch_discovery::PatchTagMap::write_has_descriptor(&global_tags_path, &manifest_digest.to_string())
-            .await
-            .map_err(PackageErrorKind::Internal)?;
+        super::patch_discovery::PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &manifest_digest.to_string(),
+            &self.file_structure().state.patch_state_stamp(),
+        )
+        .await
+        .map_err(PackageErrorKind::Internal)?;
 
         // ── Step 2b: Prove the seed is readable back, through the loader compose
         // will use. ──
@@ -264,6 +268,7 @@ impl PackageManager {
             &self.file_structure().patch_companion_path(companion_tag_id),
             companion_tag_id.tag_or_latest(),
             &digest.to_string(),
+            &self.file_structure().state.patch_state_stamp(),
         )
         .await
         .map_err(PackageErrorKind::Internal)?;
@@ -362,13 +367,19 @@ mod tests {
         let digest_b = Digest::Sha256("b".repeat(64));
         let pin_path = file_structure.patch_companion_path(&id_a);
 
-        PatchTagMap::write_tag(&pin_path, id_a.tag_or_latest(), &digest_a.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_tag(
+            &pin_path,
+            id_a.tag_or_latest(),
+            &digest_a.to_string(),
+            &file_structure.state.patch_state_stamp(),
+        )
+        .await
+        .unwrap();
         PatchTagMap::write_tag(
             &file_structure.patch_companion_path(&id_b),
             id_b.tag_or_latest(),
             &digest_b.to_string(),
+            &file_structure.state.patch_state_stamp(),
         )
         .await
         .unwrap();

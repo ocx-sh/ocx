@@ -57,7 +57,9 @@ At **shell start**, `ocx self activate` emits three things:
 
 The prepends happen in every mode. Only the `eval` is the mode's to withhold.
 
-In bash, zsh, fish, PowerShell and elvish, `ocx self activate` also registers a per-prompt hook. The hook re-checks a small watch set, the global `ocx.toml` and the selected binary, and re-runs only when something changed. Elvish is the exception: its guard checks only the carrier and the working directory, not a watch-set stat. An unchanged prompt costs a stat comparison and not a re-resolve. So `ocx --global add ripgrep` followed by `rg --version` in the same terminal works at the very next prompt.
+In bash, zsh, fish, PowerShell and elvish, `ocx self activate` also registers a per-prompt hook. The hook re-checks a small watch set and re-runs only when something changed. The set includes the global `ocx.toml`, the selected binary and a stamp that OCX touches when a patch changes. Elvish is the exception: its guard checks only the carrier and the working directory, not a watch-set stat.
+
+An unchanged prompt costs a stat comparison and not a re-resolve. So `ocx --global add ripgrep` followed by `rg --version` in the same terminal works at the very next prompt.
 
 `nushell`'s directory-change hook keeps the global toolchain live the same way. The strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe hook point in their prompt machinery. They refresh only at shell start. See [Shell integration][in-depth-shell-integration] for the per-shell coverage table and the mechanism underneath it.
 

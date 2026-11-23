@@ -6,7 +6,7 @@ runtime environment can put the design in, written so that a test author needs n
 further design work: the trigger is a reproduction, the expectation cites the
 decision it follows from, and the tier says where the check belongs.
 
-**237 rows.** Produced by four parallel adversarial passes over the ADR and the
+**242 rows.** Produced by four parallel adversarial passes over the ADR and the
 shipped code — reconciler semantics, per-shell mechanics across ten `Shell` arms,
 consent/trust/config, and operational/environmental. `review_adr_env_sota.md`'s
 G-1..G-6 are folded in as `known` rows rather than rediscovered. Twelve
@@ -36,9 +36,9 @@ wildcard.
 | `ADR ref` | Decision number and/or ADR line range. |
 | `Coverage` | A test that proves the row, as `<file>::<test>`. Filled from the test tree, never by hand. **A sample, not an index**: the cell names *a* covering test, never every one — `reconcile/fingerprint.rs` holds 13 tests and is cited by 2 rows. Read it as "this row is proven here", never as "this is all the coverage there is", and check the tree before deleting a test because no row names it. |
 
-**Coverage: 237 / 237 rows cited, 235 by a test that asserts** — 137 by a pytest
+**Coverage: 242 / 242 rows cited, 240 by a test that asserts** — 142 by a pytest
 test in `test/tests/test_shell_reconcile*.py`, 108 by a Rust `#[test]` under
-`crates/`, 8 rows by both (137 + 108 − 8 = 237). Five rows are tiered `manual-only`
+`crates/`, 8 rows by both (142 + 108 − 8 = 242). Five rows are tiered `manual-only`
 and two more carry a `manual-only` half; each cites a documented
 `manual_procedure_*` function instead of an executable check, and each states the
 obstacle that earns the tier rather than merely asserting one.
@@ -63,7 +63,7 @@ sibling checks close the loop the other way — every `pytest`-tier row must nam
 test in the edge-case module, and every test in that module must trace to a row
 that exists.
 
-**Tier distribution** — `rust-unit` 124 · `pytest-hostshell` 75 ·
+**Tier distribution** — `rust-unit` 124 · `pytest-hostshell` 80 ·
 `pytest-shellzoo` 33 · `manual-only` 5, each row counted once by its
 first-listed ("primary") tier. "Needs a Windows runner leg" is *not*
 `manual-only`: the ADR's Validation §Windows already commits to that leg, so
@@ -73,7 +73,7 @@ real interactive ConPTY session under Windows PowerShell 5.1, a real IDE
 process, a genuine multi-user privilege boundary, and a fix that reaches
 outside this package's own files (`shell/reconcile.rs`'s carrier).
 
-**Known/Edge** — 140 `known`, 86 `edge`.
+**Known/Edge** — 142 `known`, 87 `edge`.
 
 **The addendum binds.** [`adr_shell_env_addenda.md`](./adr_shell_env_addenda.md) closes
 every `UNSPECIFIED-BY-ADR` row below and overrides the rows carrying an addendum-override
@@ -174,6 +174,11 @@ chasing one is chasing nothing; no rows are added for them and nothing is renumb
 | EC-FP-007 | Fingerprint | An `Activate` verdict is never cached | known | Consented project, active shell; hand-edit the carrier to add `verdict: "activate"` for a directory with no stamp and no grant; next prompt | Only the negative verdict is cached. `Activate` is always re-derived — caching it would make the ledger a **consent input**, which D1's three rules forbid; caching `inert` can only make ocx do less, the fail-safe direction | rust-unit | D5 L281 | `crates/ocx_cli/src/command/self_group/activate.rs::c042_c007_an_activate_verdict_is_never_cached` |
 | EC-FP-008 | Fingerprint | A new grant is invisible to an inert-cached shell | edge | Shell sitting in `/fresh-clone` with `verdict: "inert"` cached; another terminal adds `/fresh-clone` to `[shell.consent] paths` in `config.toml`; press enter in the first shell | UNSPECIFIED-BY-ADR — closed by [A-13](./adr_shell_env_addenda.md) — the watch set is project `ocx.toml`+`ocx.lock`, global `ocx.toml`+`ocx.lock`, the managed snapshot, the binary version and the project directory. `config.toml` and `state/projects/<key>/consent.json` are **not** in it, so the cached `inert` verdict never expires and the grant lands only at the next shell start. **Recommendation**: add the resolved `config.toml` tier paths and the project's consent stamp to the watch set — two extra `stat`s on an already stat-only path, and it makes "grants auto-stamp on first activation" reachable in a live shell | pytest-hostshell | D3 L166, D5 L281 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_fp_008_a_new_grant_is_visible_via_the_widened_watch_set` |
 | EC-FP-009 | Fingerprint | PWD events fire independently of the fingerprint | edge | `cp -a /p1 /p1-clone` (mtimes and sizes preserved), consent both; `cd /p1` then `cd /p1-clone` | The two watch sets are stat-identical, so the fingerprint alone decides "no change". PWD events (enter / leave / switch) are a **separate** trigger and must fire regardless: `/p1` is reverted and `/p1-clone` applied. Guards against a fingerprint-only implementation, which the ADR's "two things run apply" sentence permits but no test currently forces | pytest-hostshell | D3 L152/L168 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_fp_009_pwd_events_fire_independently_of_the_fingerprint` |
+| EC-PATCH-001 | Fingerprint | `ocx patch sync` recomposes an open shell at its next prompt | known | Shell in a consented project whose tool is patched; another command republishes the patch with a new env value, then `ocx patch sync` runs; next prompt | Patch state feeds the composition, so the patch-state stamp is a watch-set member: a changed patch record moves it, the gate opens and the next prompt shows the new value. Named red state: drop the stamp from the watch set and the shell keeps the old patch-supplied value until something else moves | pytest-hostshell | D3 L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_patch_001_patch_sync_recomposes_the_next_prompt` |
+| EC-PATCH-002 | Fingerprint | `ocx config update` on a current config recomposes an open shell | known | As EC-PATCH-001, but the project's config is a managed one already current, and `ocx config update` runs the patch sync | The patch sync riding `config update` advances the patch record even when the managed snapshot does not change, so the snapshot member alone never opens the gate; the patch-state stamp does | pytest-hostshell | D3 L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_patch_002_config_update_on_a_current_config_recomposes_the_next_prompt` |
+| EC-PATCH-003 | Fingerprint | A per-prompt recompose never moves the patch-state stamp | edge | After a first `ocx patch sync` wrote the stamp, run `ocx --offline self activate --reconcile` twice in the project; compare the stamp's mtime | Reconcile only reads patch records; a recompose that wrote one would move the stamp, reopen the gate and recompose at every prompt. The mtime stays unchanged | pytest-hostshell | D3 L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_patch_003_offline_recompose_does_not_move_the_patch_stamp` |
+| EC-PATCH-004 | Fingerprint | A freshly assembled `current` target opens the gate of a running session | edge | Session open in a consented project; a new `current/content/bin` directory is assembled and `current` re-pointed to it (what `ocx self update` leaves behind); next prompt | `ocx_install_bin_path()` is a watch-set member, so the new directory is newer than the session stamp and the next prompt reconciles. Not proven: a re-selection of a version already in the store may not give the directory a new mtime | pytest-hostshell | D3 L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_patch_004_a_freshly_assembled_current_target_opens_the_gate_of_a_running_session` |
+| EC-PATCH-005 | Fingerprint | A session whose recorded membership digest predates the patch stamp gets its hook re-emitted with the stamp in the gate | edge | Session whose live hook lacks the patch-state stamp and whose recorded `ws` differs from the current membership digest; next prompt after the gate opens | The membership digest differs, so the reconcile re-emits the hook (`hook::redefinition`) and the new gate carries the patch-state stamp. Not proven: the previous release's real hook text | pytest-hostshell | D3 L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_patch_005_a_session_with_the_old_watch_membership_gets_the_stamp_in_its_gate` |
 
 ### Reconciler surfaces, parity, `ocx shell state`
 

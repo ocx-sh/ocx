@@ -33,6 +33,7 @@ runs ocx ``--offline``. It touches no shared-registry fixture.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -881,6 +883,312 @@ def test_ec_fp_003_env_only_edit_with_lock_untouched_recomposes(arena: Arena) ->
     assert result.returncode == 0
     assert _read(result, "old") == "old"
     assert _read(result, "new") == "new", "[env] applies on its own authority — the lock never moved"
+
+
+@dataclass
+class _PatchedProject:
+    """A locked, pulled project whose one tool carries a patch that sets ``_PATCH_VAR``."""
+
+    project: Path
+    env: dict[str, str]
+    publish_new: str
+    old_value: str
+    new_value: str
+
+
+# The shell-zoo container mounts this module alone: no `src` package and no registry fixture.
+_needs_suite = pytest.mark.skipif(
+    importlib.util.find_spec("src") is None,
+    reason="needs the acceptance suite's registry fixture and `src` helpers; the shell-zoo container has neither",
+)
+
+
+_PATCH_VAR = "WP745_PATCH_VAR"
+
+
+def _patched_project(arena: Arena, registry: str, *, managed: bool) -> _PatchedProject:
+    """Stage a registry-backed project whose tool is patched, up to the point a session can open.
+
+    Everything that touches a watched file (config, lock, pull, the first patch sync) happens
+    here, before the session. ``publish_new`` is the shell command that republishes the patch
+    with a different value; it moves no watched file.
+    """
+    # Imported here, not at the top: the shell-zoo container mounts this module without ``src``.
+    from src.helpers import make_package
+    from src.registry import push_raw_config_package
+    from src.runner import OcxRunner
+    from src.toolchain_fixtures import run_in
+
+    token = uuid.uuid4().hex[:8]
+    runner = OcxRunner(arena.ocx, arena.ocx_home, registry)
+    tmp = arena.scripts.parent / "registry_fixture"
+    tmp.mkdir()
+    base = make_package(runner, f"t_{token}_base", "1.0.0", tmp, cascade=True)
+    companion_repo = f"t_{token}_companion"
+    values = {"1.0.0": "old-value", "2.0.0": "new-value"}
+    companions = {
+        tag: make_package(
+            runner,
+            companion_repo,
+            tag,
+            tmp,
+            bins=[],
+            env=[{"key": _PATCH_VAR, "type": "constant", "value": value, "visibility": "public"}],
+            cascade=True,
+            platform="any",
+        )
+        for tag, value in values.items()
+    }
+
+    patch_registry = f"{registry}/t_{token}_patches"
+    rule_match = f"{base.fq.rpartition(':')[0]}:*"
+    descriptors: dict[str, Path] = {}
+    for tag, companion in companions.items():
+        descriptors[tag] = tmp / f"descriptor_{tag}.json"
+        descriptors[tag].write_text(
+            json.dumps({"version": 1, "rules": [{"match": rule_match, "packages": [companion.fq], "required": False}]}),
+            encoding="utf-8",
+        )
+    publish = ("patch", "publish", "--global", "--registry", patch_registry, "--descriptor")
+    runner.run(*publish, str(descriptors["1.0.0"]), format=None)
+    runner.run("package", "install", base.short, format=None)
+
+    patches_table = f'[patches]\nregistry = "{patch_registry}"\nrequired = false\n'
+    config = arena.ocx_home / "config.toml"
+    if managed:
+        config_repo = f"t_{token}_config"
+        push_raw_config_package(registry, config_repo, "v1", patches_table.encode())
+        config.write_text(f'[managed]\nsource = "{registry}/{config_repo}:v1"\n', encoding="utf-8")
+        # Adopt now, so the update inside the session finds the config already current.
+        runner.run("config", "update", format=None)
+    else:
+        config.write_text(patches_table, encoding="utf-8")
+        runner.run("patch", "sync", format=None)
+
+    project = arena.projects / "patched"
+    matrix.write_project(project, "", tools_block=f'[tools]\nbase = "{base.fq}"\n')
+    for verb in ("lock", "pull"):
+        done = run_in(runner, project, verb)
+        assert done.returncode == 0, f"ocx {verb} must succeed for the fixture; stderr:\n{done.stderr}"
+
+    shell_abs = _require("bash")
+    env = arena.env(
+        shell_abs,
+        OCX_DEFAULT_REGISTRY=registry,
+        OCX_INSECURE_REGISTRIES=registry,
+        XDG_CONFIG_HOME=runner.env["XDG_CONFIG_HOME"],
+    )
+    words = " ".join(matrix.quote("bash", word) for word in (*publish, str(descriptors["2.0.0"])))
+    publish_new = f"'{arena.ocx}' {words} >/dev/null"
+    return _PatchedProject(project, env, publish_new, values["1.0.0"], values["2.0.0"])
+
+
+def _patch_session(arena: Arena, staged: _PatchedProject, change: str) -> dict[str, str]:
+    """Open a shell with the real prompt hook, republish the patch, run ``change``, and read the variable at each prompt.
+
+    The hook's own newer-than gate decides whether ocx is invoked at all, so the prompt is a real
+    pty one; ``matrix.prompt`` calls the reconciler directly and would bypass the gate.
+    """
+    shell_abs = _require("bash")
+    env = dict(staged.env)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    output = matrix.pty_session(
+        [shell_abs, "--norc", "-i"],
+        [
+            f'eval "$("{arena.ocx}" --offline self activate --shell=bash --hook --no-completion)"',
+            f"cd '{staged.project}'",
+            'printf "%s\\n" "@@before@@${' + _PATCH_VAR + '-__OCX_ABSENT__}"',
+            staged.publish_new,
+            "sleep 1.1",  # one filesystem timestamp tick between the session's stamp and the change
+            change,
+            "true",
+            'printf "%s\\n" "@@after@@${' + _PATCH_VAR + '-__OCX_ABSENT__}"',
+        ],
+        cwd=staged.project,
+        env=env,
+    )
+    found = matrix.probes(output)
+    assert "before" in found and "after" in found, f"the session did not reach both probes\npty transcript:\n{output}"
+    return {**found, "transcript": output}
+
+
+@_needs_suite
+def test_ec_patch_001_patch_sync_recomposes_the_next_prompt(arena: Arena, registry: str) -> None:
+    """EC-PATCH-001 — patch state feeds the composition, so a synced patch must recompose the next prompt (#745)."""
+    staged = _patched_project(arena, registry, managed=False)
+    found = _patch_session(arena, staged, f"'{arena.ocx}' patch sync >/dev/null")
+    assert found["before"] == staged.old_value, f"fixture sanity: the patch supplies the old value at entry\n{found['transcript']}"
+    assert found["after"] == staged.new_value, (
+        "`ocx patch sync` advanced the patch record, so the next prompt must show the new value"
+    )
+
+
+@_needs_suite
+def test_ec_patch_002_config_update_on_a_current_config_recomposes_the_next_prompt(arena: Arena, registry: str) -> None:
+    """EC-PATCH-002 — the patch sync riding `ocx config update` on a current config recomposes the next prompt (#745)."""
+    staged = _patched_project(arena, registry, managed=True)
+    found = _patch_session(arena, staged, f"'{arena.ocx}' config update >/dev/null")
+    assert found["before"] == staged.old_value, f"fixture sanity: the patch supplies the old value at entry\n{found['transcript']}"
+    assert found["after"] == staged.new_value, (
+        "the patch sync that rides `ocx config update` advanced the patch record, so the next prompt must show the new value"
+    )
+
+
+@_needs_suite
+def test_ec_patch_003_offline_recompose_does_not_move_the_patch_stamp(arena: Arena, registry: str) -> None:
+    """EC-PATCH-003 — the per-prompt recompose only reads patch records, so it never re-touches the stamp it reacts to (#745)."""
+    staged = _patched_project(arena, registry, managed=False)
+    stamp = arena.ocx_home / "state" / "patch-state.stamp"
+    assert stamp.is_file(), "fixture sanity: the first `ocx patch sync` wrote the patch-state stamp"
+    before = stamp.stat().st_mtime_ns
+
+    for _ in range(2):
+        done = matrix.reconcile(arena.ocx, "bash", staged.project, staged.env)
+        assert done.returncode == 0, f"the reconcile must succeed; stderr:\n{done.stderr}"
+        assert staged.old_value in done.stdout and _PATCH_VAR in done.stdout, (
+            f"the reconcile must have composed the patch variable, or the recompose was never observed:\n{done.stdout}"
+        )
+
+    assert stamp.stat().st_mtime_ns == before, (
+        "a per-prompt reconcile moved the patch-state stamp: the gate would reopen at every prompt"
+    )
+
+    # Positive control: the same probe sees a real record change, so the equality above can fail.
+    time.sleep(1.1)
+    published = subprocess.run(["bash", "-c", staged.publish_new], capture_output=True, check=False, text=True, env=staged.env)
+    assert published.returncode == 0, f"publishing the new patch must succeed; stderr:\n{published.stderr}"
+    synced = subprocess.run(
+        [str(arena.ocx), "patch", "sync"], cwd=str(staged.project), capture_output=True, check=False, text=True, env=staged.env
+    )
+    assert synced.returncode == 0, f"`ocx patch sync` must succeed; stderr:\n{synced.stderr}"
+    assert stamp.stat().st_mtime_ns > before, "control: a sync that changes a record must move the stamp, or the mtime probe is blind"
+    done = matrix.reconcile(arena.ocx, "bash", staged.project, staged.env)
+    assert staged.new_value in done.stdout, f"the recompose after the sync must carry the new value:\n{done.stdout}"
+
+
+def _stamp_newer(label: str, marker: Path) -> str:
+    """Probe: did a reconcile refresh the session stamp after ``marker`` was touched (the checkpoint does, nothing else)."""
+    return (
+        f"if [ \"$__ocx_stamp\" -nt '{marker}' ]; then __v=yes; else __v=no; fi; "
+        f"printf '%s\\n' \"@@{label}@@$__v\""
+    )
+
+
+def _hook_has(label: str, needle: str) -> str:
+    """Probe: does the live ``__ocx_prompt_hook`` text contain ``needle``."""
+    return (
+        f'case "$(declare -f __ocx_prompt_hook)" in *{needle}*) __v=yes;; *) __v=no;; esac; '
+        f"printf '%s\\n' \"@@{label}@@$__v\""
+    )
+
+
+def _bash_hook_session(arena: Arena, project: Path, lines: list[str]) -> dict[str, str]:
+    shell_abs = _require("bash")
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    output = matrix.pty_session(
+        [shell_abs, "--norc", "-i"],
+        [
+            f'eval "$("{arena.ocx}" --offline self activate --shell=bash --hook --no-completion)"',
+            f"cd '{project}'",
+            "true",
+            "true",
+            *lines,
+        ],
+        cwd=arena.projects,
+        env=env,
+    )
+    found = matrix.probes(output)
+    return {**found, "transcript": output}
+
+
+def test_ec_patch_004_a_freshly_assembled_current_target_opens_the_gate_of_a_running_session(arena: Arena) -> None:
+    """EC-PATCH-004 — after a self update selects a newly assembled ``current``, the open shell's next prompt reconciles (#745).
+
+    Observed through the session stamp: only a reconcile's checkpoint refreshes it, and only an open gate runs one.
+    The ``idle`` probe is the control (no change, stamp stays older than the marker).
+
+    Not proven: a re-selection of a version already in the store may not give ``current/content/bin`` a new
+    mtime (this test assembles a fresh directory), and nothing here runs the previous release's binary.
+    """
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    candidate = arena.ocx_home / _CANDIDATE_REL
+    current = candidate.parents[2]
+    assembled = arena.scripts / "assembled_current"
+    marker_a, marker_b = arena.scripts / "marker_a", arena.scripts / "marker_b"
+    found = _bash_hook_session(
+        arena,
+        project,
+        [
+            "sleep 1.1",
+            f"touch '{marker_a}'",
+            "true",
+            _stamp_newer("idle", marker_a),
+            "sleep 1.1",
+            f"touch '{marker_b}'",
+            "sleep 0.1",  # keeps `-nt` from tying on a coarse clock
+            f"mkdir -p '{assembled}/content/bin' && ln '{candidate}' '{assembled}/content/bin/ocx'",
+            # One command line: a prompt between the removal and the link would open the gate through the presence term.
+            f"rm -rf '{current}' && ln -s '{assembled}' '{current}'",
+            "true",
+            _stamp_newer("after", marker_b),
+        ],
+    )
+    assert found.get("idle") == "no", f"control: an unchanged session must not reconcile\n{found['transcript']}"
+    assert found.get("after") == "yes", (
+        "the freshly assembled `current/content/bin` is newer than the session stamp, so the next prompt must reconcile\n"
+        f"{found['transcript']}"
+    )
+
+
+@_needs_suite
+def test_ec_patch_005_a_session_with_the_old_watch_membership_gets_the_stamp_in_its_gate(arena: Arena) -> None:
+    """EC-PATCH-005 — a session whose recorded membership digest predates the patch stamp has its hook re-emitted with the stamp (#745).
+
+    The session starts on the current binary, so its hook already carries the stamp. The test strips it from the
+    live hook text and overwrites the recorded ``ws`` in ``__OCX_ENV_STATE``: the state a session opened by the
+    previous release is in. The next reconcile must re-emit the hook with the stamp path back in its gate.
+
+    Not proven: the previous release's real hook text (nothing here runs it); the stripped text is a stand-in.
+    """
+    from src import exec_state
+
+    script = arena.scripts / "rewrite_ws.py"
+    script.write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(Path(exec_state.__file__).parent)!r})\n"
+        "import exec_state\n"
+        "state = exec_state.decode(os.environ['__OCX_ENV_STATE'])\n"
+        "assert isinstance(state, dict), state\n"
+        "meta = {k: state.pop(k) for k in ('narrowing', 'home', 'major')}\n"
+        "assert state['session']['ws'] != '0000000000000000'\n"
+        "state['session']['ws'] = '0000000000000000'\n"
+        "sys.stdout.write(exec_state.encode(state, major=meta['major'], narrowing=meta['narrowing'], home=meta['home']))\n",
+        encoding="utf-8",
+    )
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    found = _bash_hook_session(
+        arena,
+        project,
+        [
+            _hook_has("fresh", "patch-state.stamp"),
+            "eval \"$(declare -f __ocx_prompt_hook | sed 's/patch-state\\.stamp/old-membership.stamp/g')\"",
+            _hook_has("stripped", "patch-state.stamp"),
+            f"export __OCX_ENV_STATE=\"$('{sys.executable}' -I '{script}')\"",
+            "sleep 1.1",
+            f"touch '{project}/ocx.toml'",
+            "true",
+            _hook_has("after", "patch-state.stamp"),
+        ],
+    )
+    assert found.get("fresh") == "yes", f"fixture sanity: the current binary's hook carries the stamp\n{found['transcript']}"
+    assert found.get("stripped") == "no", f"fixture sanity: the stand-in old hook lacks the stamp\n{found['transcript']}"
+    assert found.get("after") == "yes", (
+        "a session with an old membership digest must get its hook re-emitted with the patch stamp in the gate\n"
+        f"{found['transcript']}"
+    )
 
 
 def test_ec_fp_004_deleting_ocx_toml_is_caught_via_the_project_directory(arena: Arena) -> None:

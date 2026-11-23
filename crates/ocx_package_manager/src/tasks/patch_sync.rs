@@ -5,9 +5,10 @@
 
 use crate::{
     concurrency::Concurrency, error::PackageErrorKind, tasks::patch_discovery::PatchDescriptorScope,
-    tasks::patch_discovery::PatchDiscoveryState, tasks::patch_discovery::PatchTagMap, tasks::patch_discovery::SyncPass,
+    tasks::patch_discovery::PatchDiscoveryMode, tasks::patch_discovery::PatchDiscoveryState,
+    tasks::patch_discovery::PatchTagMap, tasks::patch_discovery::SyncPass,
     tasks::patch_discovery::global_descriptor_id, tasks::patch_discovery::patch_descriptor_id,
-    tasks::patch_discovery::sync_discover_all,
+    tasks::patch_discovery::sync_discover_all, tasks::patch_discovery::tolerate_discovery_error,
 };
 
 use super::super::PackageManager;
@@ -304,6 +305,31 @@ impl PackageManager {
     }
 }
 
+/// Every patch base per platform: the installed bases, their dependency closure and the project-lock
+/// bases built for that platform's leaves. Shared by a sync and a revalidation, so both cover the same set.
+async fn patch_bases_per_platform<'a>(
+    manager: &PackageManager,
+    platforms: &'a [ocx_oci::Platform],
+) -> crate::Result<Vec<(&'a ocx_oci::Platform, Vec<ocx_oci::PackageRef>)>> {
+    // Expanded once: the installed bases' `resolve.json` reads do not depend on the platform.
+    let installed = with_dependency_bases(manager, enumerate_installed_bases(manager).await?).await?;
+    let installed_set: std::collections::HashSet<&ocx_oci::PackageRef> = installed.iter().collect();
+    let project_locks = load_project_locks(manager.file_structure(), UnreadableConfig::Fallback).await?;
+    // Per platform: a project base carries that platform's leaf, as `ocx lock` discovered it.
+    let mut bases_per_platform = Vec::with_capacity(platforms.len());
+    for platform in platforms {
+        let project: Vec<ocx_oci::PackageRef> = project_locks
+            .iter()
+            .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform))
+            // `resolve.json` dependencies are the full transitive closure, so an installed base adds nothing.
+            .filter(|base| !installed_set.contains(base))
+            .collect();
+        let bases = union_bases(installed.clone(), with_dependency_bases(manager, project).await?);
+        bases_per_platform.push((platform, bases));
+    }
+    Ok(bases_per_platform)
+}
+
 // ── PackageManager::sync_patches ──────────────────────────────────────────────
 
 impl PackageManager {
@@ -327,23 +353,7 @@ impl PackageManager {
             return Ok(PatchSyncReport::default());
         };
 
-        // Expanded once: the installed bases' `resolve.json` reads do not depend on the platform.
-        let installed = with_dependency_bases(self, enumerate_installed_bases(self).await?).await?;
-        let installed_set: std::collections::HashSet<&ocx_oci::PackageRef> = installed.iter().collect();
-        let project_locks = load_project_locks(self.file_structure(), UnreadableConfig::Fallback).await?;
-        // Per platform: a project base carries that platform's leaf, as `ocx lock` discovered it.
-        let mut bases_per_platform: Vec<(&ocx_oci::Platform, Vec<ocx_oci::PackageRef>)> =
-            Vec::with_capacity(platforms.len());
-        for platform in platforms {
-            let project: Vec<ocx_oci::PackageRef> = project_locks
-                .iter()
-                .flat_map(|(lock, config)| lock_bases(lock, config.as_ref(), platform))
-                // `resolve.json` dependencies are the full transitive closure, so an installed base adds nothing.
-                .filter(|base| !installed_set.contains(base))
-                .collect();
-            let bases = union_bases(installed.clone(), with_dependency_bases(self, project).await?);
-            bases_per_platform.push((platform, bases));
-        }
+        let bases_per_platform = patch_bases_per_platform(self, platforms).await?;
         let all_bases = union_bases(
             Vec::new(),
             bases_per_platform.iter().flat_map(|(_, bases)| bases.iter().cloned()),
@@ -352,7 +362,7 @@ impl PackageManager {
 
         let file_structure = self.file_structure();
 
-        let mut companions_installed: usize = 0;
+        let mut installed_companions = std::collections::BTreeSet::new();
 
         // Keyed by tag-store path: tags of one repository share a source, counted once, not once per tag.
         let global_id = global_descriptor_id(patches);
@@ -396,7 +406,7 @@ impl PackageManager {
         let mut fatal: Option<PackageErrorKind> = None;
         for (pass, result) in passes.iter().zip(results) {
             match result {
-                Ok(count) => companions_installed += count,
+                Ok(installed) => installed_companions.extend(installed),
                 Err(err) if is_fatal_sync_error(&err) => {
                     fatal.get_or_insert(err);
                 }
@@ -429,15 +439,56 @@ impl PackageManager {
         Ok(PatchSyncReport {
             bases_checked: total_checked,
             descriptors_updated,
-            companions_installed,
+            companions_installed: installed_companions.len(),
         })
+    }
+}
+
+impl PackageManager {
+    /// Re-checks every patch descriptor behind the bases `sync_patches` covers, probing each distinct
+    /// source once and refetching only on drift; makes no request offline, without a `[patches]` tier
+    /// or under a patch snapshot.
+    ///
+    /// # Errors
+    ///
+    /// A required companion's failure, or a required descriptor that vanished.
+    pub async fn revalidate_patches(&self, platform: &ocx_oci::Platform) -> crate::Result<()> {
+        if self.patch_snapshot().is_some() || self.is_offline() || self.patches().is_none() {
+            return Ok(());
+        }
+        let bases_per_platform = patch_bases_per_platform(self, std::slice::from_ref(platform)).await?;
+        let bases: Vec<ocx_oci::PackageRef> = bases_per_platform.into_iter().flat_map(|(_, bases)| bases).collect();
+        if bases.is_empty() {
+            // The global descriptor applies to every base, so an empty store still has one to keep current.
+            let Some(patches) = self.patches() else {
+                return Ok(());
+            };
+            let global_id = global_descriptor_id(patches);
+            let revalidated = self
+                .discover_and_install_patches_with_mode(
+                    &global_id,
+                    platform,
+                    PatchDiscoveryMode::Revalidate,
+                    PatchDescriptorScope::GlobalOnly,
+                )
+                .await;
+            if let Err(kind) = revalidated {
+                tolerate_discovery_error(Some(patches), &global_id, kind).map_err(|kind| {
+                    crate::error::Error::DiscoverFailed(vec![crate::error::PackageError::new(global_id.clone(), kind)])
+                })?;
+            }
+            return Ok(());
+        }
+        self.discover_patches_all(&bases, platform, PatchDiscoveryMode::Revalidate, Concurrency::cores())
+            .await?;
+        Ok(())
     }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tasks::patch_discovery::PatchDiscoveryMode;
     use std::path::Path;
@@ -470,7 +521,7 @@ mod tests {
         PackageManager::new(fs, index, Some(client), "localhost:5000")
     }
 
-    fn test_patch_config() -> ResolvedPatchConfig {
+    pub(crate) fn test_patch_config() -> ResolvedPatchConfig {
         ResolvedPatchConfig {
             system_required: false,
             no_patches: std::collections::BTreeSet::new(),
@@ -847,6 +898,7 @@ mod tests {
         crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
         )
         .await
         .unwrap();
@@ -950,6 +1002,504 @@ mod tests {
         );
     }
 
+    // ── companion de-duplication ──────────────────────────────────────────────────
+
+    /// The platforms a bare `ocx patch sync` fans out over.
+    fn ship_matrix() -> Vec<ocx_oci::Platform> {
+        [
+            "linux/amd64",
+            "linux/arm64",
+            "darwin/amd64",
+            "darwin/arm64",
+            "windows/amd64",
+            "windows/arm64",
+        ]
+        .iter()
+        .map(|platform| platform.parse().unwrap())
+        .collect()
+    }
+
+    /// A companion published on the stub registry: its top manifest and one leaf per offer.
+    pub(crate) struct PublishedCompanion {
+        pub(crate) top: ocx_oci::Digest,
+        pub(crate) leaves: Vec<ocx_oci::Digest>,
+    }
+
+    /// Publishes `patches.corp.com/<repository>:latest` as an image index with one leaf per
+    /// `(platform, seed)` offer; the seed only makes leaves differ in bytes, so in digest.
+    pub(crate) fn publish_companion(
+        data: &ocx_oci::client::test_transport::StubTransportData,
+        repository: &str,
+        offers: &[(&str, &str)],
+    ) -> PublishedCompanion {
+        let registry = "patches.corp.com";
+        let config = br#"{"type":"bundle","version":1}"#.to_vec();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(&config);
+        let mut inner = data.write();
+        inner.blobs.insert(config_digest.to_string(), config.clone());
+        let mut entries = Vec::new();
+        let mut leaves = Vec::new();
+        for (platform, seed) in offers {
+            let leaf = serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": ocx_oci::OCI_IMAGE_MEDIA_TYPE,
+                "artifactType": ocx_oci::media_type::MEDIA_TYPE_PACKAGE_V1,
+                "config": {
+                    "mediaType": ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1,
+                    "digest": config_digest.to_string(),
+                    "size": config.len(),
+                },
+                "layers": [],
+                "annotations": { "seed": seed },
+            }))
+            .unwrap();
+            let leaf_digest = ocx_oci::Algorithm::Sha256.hash(&leaf);
+            let platform_json = match platform.split_once('/') {
+                Some((os, architecture)) => serde_json::json!({ "os": os, "architecture": architecture }),
+                None => serde_json::json!({ "os": "any", "architecture": "any" }),
+            };
+            entries.push(serde_json::json!({
+                "mediaType": ocx_oci::OCI_IMAGE_MEDIA_TYPE,
+                "digest": leaf_digest.to_string(),
+                "size": leaf.len(),
+                "artifactType": ocx_oci::media_type::MEDIA_TYPE_PACKAGE_V1,
+                "platform": platform_json,
+            }));
+            for key in [
+                format!("{registry}/{repository}@{leaf_digest}"),
+                format!("{registry}/{repository}:latest@{leaf_digest}"),
+            ] {
+                inner.manifests.insert(key, (leaf.clone(), leaf_digest.to_string()));
+            }
+            leaves.push(leaf_digest);
+        }
+        let index = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": ocx_oci::OCI_IMAGE_INDEX_MEDIA_TYPE,
+            "manifests": entries,
+        }))
+        .unwrap();
+        let top = ocx_oci::Algorithm::Sha256.hash(&index);
+        for key in [
+            format!("{registry}/{repository}:latest"),
+            format!("{registry}/{repository}@{top}"),
+            format!("{registry}/{repository}:latest@{top}"),
+        ] {
+            inner.manifests.insert(key, (index.clone(), top.to_string()));
+        }
+        PublishedCompanion { top, leaves }
+    }
+
+    /// A sync manager over `data` with three installed bases and a global descriptor holding `rules`.
+    pub(crate) async fn companion_sync_manager(
+        tmp: &Path,
+        data: &ocx_oci::client::test_transport::StubTransportData,
+        rules: serde_json::Value,
+    ) -> (PackageManager, crate::activity::ActivityLog) {
+        let patch_config = test_patch_config();
+        let fs = FileStructure::with_root(tmp.to_path_buf());
+        let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.join("symlinks"));
+        for (repository, tag) in [("cmake", "3.28"), ("cmake", "3.29"), ("ninja", "1.12")] {
+            let candidate =
+                symlink_store.candidate(&ocx_oci::PackageRef::new_registry(repository, "ocx.sh").clone_with_tag(tag));
+            tokio::fs::create_dir_all(candidate.parent().unwrap()).await.unwrap();
+            tokio::fs::write(&candidate, b"").await.unwrap();
+        }
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) = build_descriptor_artifact(rules);
+        {
+            let mut inner = data.write();
+            inner.manifests.insert(
+                global_descriptor_id(&patch_config).to_string(),
+                (manifest_bytes, manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes);
+        }
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        // A source, or `remote_view` has nothing to resolve a companion tag against.
+        let source = Index::from_remote(ocx_index::OciIndex::new(ocx_index::OciIndexConfig {
+            client: ocx_oci::client::test_transport::stub_client(data),
+        }));
+        let index = Index::from_chained(local_index, vec![source], ChainMode::Default);
+        let log = crate::activity::ActivityLog::new();
+        let client = ocx_oci::client::test_transport::stub_client(data);
+        let manager = PackageManager::new(fs, index, Some(client), "localhost:5000")
+            .with_patches(Some(patch_config))
+            .with_activity_log(log.clone());
+        (manager, log)
+    }
+
+    /// Syncs one `any` companion named by three bases over `platforms`; returns the registry reads of
+    /// its tag (resolves) and of its leaf manifest (one per install).
+    async fn sync_any_companion(platforms: &[ocx_oci::Platform]) -> (usize, usize) {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let companion = publish_companion(&data, "ca-certs", &[("any", "any")]);
+        let rules = serde_json::json!([{
+            "match": "*", "packages": ["patches.corp.com/ca-certs:latest"], "required": true
+        }]);
+        let (manager, _log) = companion_sync_manager(tmp.path(), &data, rules).await;
+        manager
+            .sync_patches(platforms)
+            .await
+            .expect("every pass installs the companion");
+
+        let reads = data.read().manifest_reads.clone();
+        let resolves = reads
+            .iter()
+            .filter(|reference| *reference == "patches.corp.com/ca-certs:latest")
+            .count();
+        let leaf_suffix = format!("@{}", companion.leaves[0]);
+        let leaf_reads = reads
+            .iter()
+            .filter(|reference| reference.ends_with(&leaf_suffix))
+            .count();
+        (resolves, leaf_reads)
+    }
+
+    /// One `any` companion named by three bases on six platforms is resolved from the registry
+    /// and installed once, not once per platform: the six-platform sync does the work of a
+    /// one-platform sync.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_resolves_and_installs_a_platform_independent_companion_once() {
+        let (single_resolves, single_leaf_reads) = sync_any_companion(&ship_matrix()[..1]).await;
+        assert_eq!(single_resolves, 1, "setup: one platform resolves the companion once");
+        assert!(
+            single_leaf_reads > 0,
+            "setup: the single install reads its leaf manifest"
+        );
+
+        let (resolves, leaf_reads) = sync_any_companion(&ship_matrix()).await;
+        assert_eq!(
+            resolves, 1,
+            "the companion's top digest is resolved once, not once per platform"
+        );
+        assert_eq!(
+            leaf_reads, single_leaf_reads,
+            "the companion is installed once, as on a single platform, not once per platform"
+        );
+    }
+
+    /// The report counts the distinct companion once, not once per base and platform.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_counts_each_distinct_companion_once() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        publish_companion(&data, "ca-certs", &[("any", "any")]);
+        let rules = serde_json::json!([{
+            "match": "*", "packages": ["patches.corp.com/ca-certs:latest"], "required": true
+        }]);
+        let (manager, _log) = companion_sync_manager(tmp.path(), &data, rules).await;
+
+        let report = manager
+            .sync_patches(&ship_matrix())
+            .await
+            .expect("every pass installs the companion");
+
+        assert_eq!(
+            report.companions_installed, 1,
+            "one distinct companion, however many bases and platforms name it"
+        );
+    }
+
+    /// A companion with a different leaf per platform installs each leaf: deduplicating on the
+    /// top digest alone would leave five platforms without their package.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_installs_each_leaf_of_a_platform_specific_companion() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let platforms = ship_matrix();
+        let offers: Vec<(String, String)> = platforms
+            .iter()
+            .map(|platform| (platform.to_string(), format!("leaf-{platform}")))
+            .collect();
+        let offers: Vec<(&str, &str)> = offers.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+        let companion = publish_companion(&data, "ca-certs", &offers);
+        let rules = serde_json::json!([{
+            "match": "*", "packages": ["patches.corp.com/ca-certs:latest"], "required": true
+        }]);
+        let (manager, _log) = companion_sync_manager(tmp.path(), &data, rules).await;
+
+        let report = manager
+            .sync_patches(&platforms)
+            .await
+            .expect("every platform installs its own leaf");
+        assert_eq!(
+            report.companions_installed,
+            companion.leaves.len(),
+            "one install per distinct leaf"
+        );
+
+        for leaf in &companion.leaves {
+            let pinned = ocx_oci::PinnedPackageRef::try_from(
+                ocx_oci::PackageRef::new_registry("ca-certs", "patches.corp.com").clone_with_digest(leaf.clone()),
+            )
+            .expect("pinned identifier");
+            assert!(
+                manager.file_structure().packages.path(&pinned).exists(),
+                "leaf {leaf} of top digest {} must be installed",
+                companion.top
+            );
+        }
+    }
+
+    /// Two companion repositories serving the same bytes are two installs, each with its own pin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_pins_each_companion_repository_that_serves_one_digest() {
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let first = publish_companion(&data, "ca-certs", &[("any", "same")]);
+        let second = publish_companion(&data, "ca-mirror", &[("any", "same")]);
+        assert_eq!(
+            first.top, second.top,
+            "setup: both repositories serve one manifest digest"
+        );
+        let rules = serde_json::json!([{
+            "match": "*",
+            "packages": ["patches.corp.com/ca-certs:latest", "patches.corp.com/ca-mirror:latest"],
+            "required": true
+        }]);
+        let (manager, _log) = companion_sync_manager(tmp.path(), &data, rules).await;
+
+        manager
+            .sync_patches(&ship_matrix())
+            .await
+            .expect("both companions install");
+
+        for repository in ["ca-certs", "ca-mirror"] {
+            let id = ocx_oci::PackageRef::new_registry(repository, "patches.corp.com").clone_with_tag("latest");
+            let pin = PatchTagMap::read_tag(&manager.file_structure().patch_companion_path(&id), "latest")
+                .await
+                .unwrap();
+            assert_eq!(
+                pin.as_deref(),
+                Some(first.top.to_string().as_str()),
+                "'{repository}' must record its own pin"
+            );
+        }
+    }
+
+    // ── revalidate_patches ────────────────────────────────────────────────────────
+
+    /// A manager over `data` with a patch tier and three installed bases (two repositories).
+    async fn revalidate_manager(
+        tmp: &Path,
+        data: &ocx_oci::client::test_transport::StubTransportData,
+        patches: Option<ResolvedPatchConfig>,
+    ) -> PackageManager {
+        let fs = FileStructure::with_root(tmp.to_path_buf());
+        let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.join("symlinks"));
+        for (repository, tag) in [("cmake", "3.28"), ("cmake", "3.29"), ("ninja", "1.12")] {
+            let candidate =
+                symlink_store.candidate(&ocx_oci::PackageRef::new_registry(repository, "ocx.sh").clone_with_tag(tag));
+            tokio::fs::create_dir_all(candidate.parent().unwrap()).await.unwrap();
+            tokio::fs::write(&candidate, b"").await.unwrap();
+        }
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        let client = ocx_oci::client::test_transport::stub_client(data);
+        PackageManager::new(fs, index, Some(client), "localhost:5000").with_patches(patches)
+    }
+
+    /// Records every descriptor source of the three bases as looked-and-absent, except the global
+    /// root, which gets `global`.
+    async fn record_revalidate_states(manager: &PackageManager, global: Option<&str>) {
+        let patches = manager.patches().expect("patch tier configured");
+        let file_structure = manager.file_structure();
+        for base in [("cmake", "3.28"), ("ninja", "1.12")] {
+            let base = ocx_oci::PackageRef::new_registry(base.0, "ocx.sh").clone_with_tag(base.1);
+            let path = file_structure.patch_descriptor_path(&patch_descriptor_id(patches, &base));
+            PatchTagMap::write_no_descriptor(&path, &crate::tasks::patch_discovery::stamp_beside(&path))
+                .await
+                .unwrap();
+        }
+        let path = file_structure.patch_descriptor_path(&global_descriptor_id(patches));
+        let stamp = crate::tasks::patch_discovery::stamp_beside(&path);
+        match global {
+            Some(digest) => PatchTagMap::write_has_descriptor(&path, digest, &stamp).await.unwrap(),
+            None => PatchTagMap::write_no_descriptor(&path, &stamp).await.unwrap(),
+        }
+    }
+
+    fn call_count(data: &ocx_oci::client::test_transport::StubTransportData, name: &str) -> usize {
+        data.read().calls.iter().filter(|call| *call == name).count()
+    }
+
+    /// Revalidation probes each distinct source once across the bases and refetches a drifted one,
+    /// recording its new digest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_probes_each_source_once_and_refetches_a_drifted_descriptor() {
+        let tmp = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = revalidate_manager(tmp.path(), &data, Some(patch_config.clone())).await;
+        record_revalidate_states(
+            &manager,
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+        )
+        .await;
+
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) =
+            build_descriptor_artifact(serde_json::json!([{ "match": "*", "packages": [] }]));
+        {
+            let mut inner = data.write();
+            inner.manifests.insert(
+                global_descriptor_id(&patch_config).to_string(),
+                (manifest_bytes, manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes);
+        }
+
+        manager
+            .revalidate_patches(&ocx_oci::Platform::any())
+            .await
+            .expect("revalidation must succeed");
+
+        assert_eq!(
+            call_count(&data, "fetch_manifest_digest"),
+            3,
+            "global, cmake and ninja once each; not one per base"
+        );
+        assert_eq!(
+            call_count(&data, "pull_manifest_raw"),
+            1,
+            "only the drifted descriptor refetches"
+        );
+        let path = manager
+            .file_structure()
+            .patch_descriptor_path(&global_descriptor_id(&patch_config));
+        assert_eq!(
+            PatchTagMap::read(&path).await.unwrap(),
+            PatchDiscoveryState::LookedHasDescriptor {
+                manifest_digest: manifest_digest.to_string()
+            },
+            "the drifted descriptor's new digest must be recorded"
+        );
+    }
+
+    /// With no installed or project bases, revalidation still re-checks the global descriptor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_with_no_bases_still_refreshes_the_global_descriptor() {
+        let tmp = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let fs = FileStructure::with_root(tmp.path().to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: ocx_index::IndexStore::machine_local(&fs),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        let client = ocx_oci::client::test_transport::stub_client(&data);
+        let manager =
+            PackageManager::new(fs, index, Some(client), "localhost:5000").with_patches(Some(patch_config.clone()));
+        let path = manager
+            .file_structure()
+            .patch_descriptor_path(&global_descriptor_id(&patch_config));
+        PatchTagMap::write_has_descriptor(
+            &path,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            &crate::tasks::patch_discovery::stamp_beside(&path),
+        )
+        .await
+        .unwrap();
+
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) =
+            build_descriptor_artifact(serde_json::json!([{ "match": "*", "packages": [] }]));
+        {
+            let mut inner = data.write();
+            inner.manifests.insert(
+                global_descriptor_id(&patch_config).to_string(),
+                (manifest_bytes, manifest_digest.to_string()),
+            );
+            inner.blobs.insert(layer_digest.to_string(), layer_bytes);
+        }
+
+        manager
+            .revalidate_patches(&ocx_oci::Platform::any())
+            .await
+            .expect("revalidation must succeed");
+
+        assert_eq!(
+            PatchTagMap::read(&path).await.unwrap(),
+            PatchDiscoveryState::LookedHasDescriptor {
+                manifest_digest: manifest_digest.to_string()
+            },
+            "the republished global descriptor's new digest must be recorded"
+        );
+    }
+
+    /// An unchanged descriptor is probed and not refetched: revalidation is not a sync.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_probes_an_unchanged_descriptor_without_refetching() {
+        let tmp = TempDir::new().unwrap();
+        let patch_config = test_patch_config();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = revalidate_manager(tmp.path(), &data, Some(patch_config.clone())).await;
+
+        let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) =
+            build_descriptor_artifact(serde_json::json!([{ "match": "*", "packages": [] }]));
+        let blobs = &manager.file_structure().blobs;
+        blobs
+            .write_blob("patches.corp.com", &manifest_digest, &manifest_bytes)
+            .await
+            .unwrap();
+        blobs
+            .write_blob("patches.corp.com", &layer_digest, &layer_bytes)
+            .await
+            .unwrap();
+        record_revalidate_states(&manager, Some(&manifest_digest.to_string())).await;
+        data.write().manifests.insert(
+            global_descriptor_id(&patch_config).to_string(),
+            (manifest_bytes, manifest_digest.to_string()),
+        );
+
+        manager
+            .revalidate_patches(&ocx_oci::Platform::any())
+            .await
+            .expect("revalidation must succeed");
+
+        assert_eq!(call_count(&data, "fetch_manifest_digest"), 3);
+        assert_eq!(
+            call_count(&data, "pull_manifest_raw"),
+            0,
+            "an unchanged digest must not refetch, unlike a sync"
+        );
+    }
+
+    /// Offline, without a patch tier, or under a patch snapshot: `Ok(())` and no request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revalidate_makes_no_request_offline_without_a_tier_or_under_a_snapshot() {
+        let platform = ocx_oci::Platform::any();
+
+        let tmp = TempDir::new().unwrap();
+        let offline = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
+        assert!(offline.is_offline(), "setup: manager must be offline");
+        offline.revalidate_patches(&platform).await.expect("offline is a no-op");
+
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = revalidate_manager(tmp.path(), &data, None).await;
+        manager.revalidate_patches(&platform).await.expect("no tier is a no-op");
+        assert!(data.read().calls.is_empty(), "no [patches] tier must make no request");
+
+        let tmp = TempDir::new().unwrap();
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let manager = revalidate_manager(tmp.path(), &data, Some(test_patch_config()))
+            .await
+            .with_patch_snapshot(Some(crate::patch::PatchSnapshot {
+                version: crate::patch::snapshot::SnapshotVersion::CURRENT,
+                companions: std::collections::BTreeMap::new(),
+                descriptors: std::collections::BTreeMap::new(),
+            }));
+        manager
+            .revalidate_patches(&platform)
+            .await
+            .expect("a snapshot silences revalidation");
+        assert!(data.read().calls.is_empty(), "a patch snapshot must make no request");
+    }
+
     /// `descriptor_digest_advanced` counts exactly the transitions that represent
     /// a real upstream digest advance, and nothing else.
     ///
@@ -1025,9 +1575,12 @@ mod tests {
         // Seed LookedNoDescriptor for the global descriptor.
         let global_id = crate::tasks::patch_discovery::global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        crate::tasks::patch_discovery::PatchTagMap::write_no_descriptor(&global_tags_path)
-            .await
-            .unwrap();
+        crate::tasks::patch_discovery::PatchTagMap::write_no_descriptor(
+            &global_tags_path,
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // Verify the state is LookedNoDescriptor before calling.
         let state_before = crate::tasks::patch_discovery::PatchTagMap::read(&global_tags_path)
@@ -1162,6 +1715,7 @@ mod tests {
         crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
         )
         .await
         .unwrap();
@@ -1392,6 +1946,7 @@ mod tests {
         crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
         )
         .await
         .unwrap();
@@ -1537,6 +2092,7 @@ mod tests {
         crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
         )
         .await
         .unwrap();
@@ -1688,6 +2244,7 @@ mod tests {
         crate::tasks::patch_discovery::PatchTagMap::write_has_descriptor(
             &global_tags_path,
             &old_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
         )
         .await
         .unwrap();
@@ -1785,7 +2342,9 @@ mod tests {
     /// Returns `(manifest_bytes, manifest_digest, layer_bytes, layer_digest)`.
     /// Mirrors the inline descriptor construction used by the D1/T1 tests but
     /// keeps the three hybrid-commit regression tests below DRY.
-    fn build_descriptor_artifact(rules: serde_json::Value) -> (Vec<u8>, ocx_oci::Digest, Vec<u8>, ocx_oci::Digest) {
+    pub(crate) fn build_descriptor_artifact(
+        rules: serde_json::Value,
+    ) -> (Vec<u8>, ocx_oci::Digest, Vec<u8>, ocx_oci::Digest) {
         // OCI artifact manifests require a `config` field for valid deserialization.
         let empty_config = serde_json::json!({
             "mediaType": "application/vnd.oci.empty.v1+json",
@@ -1995,9 +2554,13 @@ mod tests {
             .unwrap();
         let global_id = global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &v1_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &v1_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── v2: an optional companion (required=false) + a required companion
         //    (required=true), neither published → optional warns, required fails. ──
@@ -2108,12 +2671,20 @@ mod tests {
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
         let pkg_id = patch_descriptor_id(&patch_config, &base_id);
         let pkg_tags_path = tag_store.patch_descriptor_path(&pkg_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &g1_manifest_digest.to_string())
-            .await
-            .unwrap();
-        PatchTagMap::write_has_descriptor(&pkg_tags_path, &p1_manifest_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &g1_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &pkg_tags_path,
+            &p1_manifest_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&pkg_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── Global v2: "*" rule → REQUIRED companion (absent) → fails closed.
         //    Package-specific v2: distinct content, no companions. ──
@@ -2225,9 +2796,13 @@ mod tests {
         let corrupt_digest = ocx_oci::Algorithm::Sha256.hash(b"corrupt-prior-descriptor");
         let global_id = global_descriptor_id(&patch_config);
         let global_tags_path = tag_store.patch_descriptor_path(&global_id);
-        PatchTagMap::write_has_descriptor(&global_tags_path, &corrupt_digest.to_string())
-            .await
-            .unwrap();
+        PatchTagMap::write_has_descriptor(
+            &global_tags_path,
+            &corrupt_digest.to_string(),
+            &crate::tasks::patch_discovery::stamp_beside(&global_tags_path),
+        )
+        .await
+        .unwrap();
 
         // ── NEW valid descriptor: "*" rule → REQUIRED companion (not published). ──
         let (manifest_bytes, manifest_digest, layer_bytes, layer_digest) = build_descriptor_artifact(

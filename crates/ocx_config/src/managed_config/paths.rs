@@ -14,6 +14,7 @@ const SNAPSHOT_FILE: &str = "snapshot.json";
 const PAYLOAD_FILE: &str = "config.toml";
 const REFRESH_MARKER_FILE: &str = ".last-refresh-check";
 const PAUSE_FILE: &str = "pause.json";
+const PATCH_TIMEOUT_MARKER_FILE: &str = ".patch-revalidation-timeout";
 
 /// The managed-config tier's on-disk layout, rooted at `$OCX_HOME/state`, not `$OCX_HOME`
 /// (use [`Self::for_ocx_home`] for that).
@@ -56,6 +57,11 @@ impl ManagedConfigPaths {
     /// Kept apart from the snapshot so a throttled probe never races the content file.
     pub fn refresh_marker(&self) -> PathBuf {
         self.dir().join(REFRESH_MARKER_FILE)
+    }
+
+    /// `{state_root}/managed-config/.patch-revalidation-timeout`, present while the last background patch revalidation timed out.
+    pub fn patch_timeout_marker(&self) -> PathBuf {
+        self.dir().join(PATCH_TIMEOUT_MARKER_FILE)
     }
 
     /// `{state_root}/managed-config/pause.json`, written by `ocx config update --pause`.
