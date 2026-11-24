@@ -7,6 +7,7 @@
 //! detected platform helper ▸ plaintext `auths[registry]` (only with `allow_plaintext_put`).
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -152,22 +153,31 @@ impl DockerCredentialStore {
     }
 }
 
-/// Resolves `$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`.
+/// Resolves the `config.json` the `docker_credential` reader opens: the same function, so login and pull agree.
 ///
-/// Home via [`ocx_env::home_dir`], not `dirs::home_dir`, which ignores `%USERPROFILE%` and could name a
-/// different file than docker reads.
+/// `$DOCKER_CONFIG` when non-empty, else `.docker` under `$HOME` (`%USERPROFILE%` on Windows). An empty
+/// value reads as unset, a non-UTF-8 one is used as given, and no password-database fallback applies.
 fn resolve_config_path() -> Result<PathBuf, AuthError> {
-    if let Some(dir) = ocx_env::DOCKER_CONFIG
-        .get_raw()
-        .and_then(|value| value.into_string().ok())
-    {
-        return Ok(PathBuf::from(dir).join("config.json"));
+    config_path_from(declared_env, cfg!(windows))
+}
+
+/// The three names `docker_credential::config_dir_from` asks for, each read through its declared static.
+fn declared_env(name: &str) -> Option<OsString> {
+    match name {
+        "DOCKER_CONFIG" => ocx_env::DOCKER_CONFIG.get_raw(),
+        "HOME" => ocx_env::HOME.get_raw(),
+        "USERPROFILE" => ocx_env::USERPROFILE.get_raw(),
+        _ => None,
     }
-    let home = ocx_env::home_dir().ok_or_else(|| AuthError::WriteConfigFailed {
-        path: PathBuf::new(),
-        source: std::io::Error::new(ErrorKind::NotFound, "home directory not found"),
-    })?;
-    Ok(home.join(".docker").join("config.json"))
+}
+
+fn config_path_from(lookup: impl Fn(&str) -> Option<OsString>, windows: bool) -> Result<PathBuf, AuthError> {
+    docker_credential::config_dir_from(lookup, windows)
+        .map(|dir| dir.join("config.json"))
+        .ok_or_else(|| AuthError::WriteConfigFailed {
+            path: PathBuf::new(),
+            source: std::io::Error::new(ErrorKind::NotFound, "home directory not found"),
+        })
 }
 
 /// On-disk schema for `~/.docker/config.json` — preserves unknown fields.
@@ -917,6 +927,74 @@ mod tests {
             "DOCKER_CONFIG must redirect writes to {}",
             expected.display(),
         );
+    }
+
+    /// Without `DOCKER_CONFIG`, the store and the `docker_credential` reader read the same home variable on this host.
+    ///
+    /// `HOME` and `USERPROFILE` name different directories, so a pair that picks different ones fails here.
+    /// The store calls the reader's own `config_dir_from`, so empty and unset values agree too (see the
+    /// `config_path_from` tests).
+    #[test]
+    fn dockerconfigstore_writes_where_the_docker_credential_reader_reads() {
+        let env = ocx_env::overrides::lock();
+        let root = tempfile::tempdir().expect("tempdir");
+        env.hermetic(root.path());
+        for home in ["home", "profile"] {
+            std::fs::create_dir_all(root.path().join(home).join(".docker")).expect("create .docker");
+        }
+        env.set(&ocx_env::HOME, root.path().join("home").display().to_string());
+        env.set(&ocx_env::USERPROFILE, root.path().join("profile").display().to_string());
+
+        let store = DockerCredentialStore::new(opts(true)).expect("new() should succeed");
+        let cred = Credential::basic("u", SecretString::from("p".to_string()));
+        rt().block_on(store.put("ghcr.io", &cred)).expect("put");
+
+        let reader_dir = docker_credential::config_dir_from(declared_env, cfg!(windows))
+            .expect("reader resolves a config directory");
+        assert_eq!(store.config_path(), reader_dir.join("config.json"));
+        let file = std::fs::File::open(reader_dir.join("config.json")).expect("reader finds the written config");
+        let read = docker_credential::get_credential_from_reader(file, "ghcr.io").expect("reader decodes the login");
+        assert_eq!(
+            read,
+            docker_credential::DockerCredential::UsernamePassword("u".into(), "p".into())
+        );
+    }
+
+    #[test]
+    fn config_path_treats_an_empty_docker_config_as_unset() {
+        let lookup = |name: &str| match name {
+            "DOCKER_CONFIG" => Some(OsString::new()),
+            "HOME" | "USERPROFILE" => Some(OsString::from("/home/u")),
+            _ => None,
+        };
+        assert_eq!(
+            config_path_from(lookup, false).expect("resolves"),
+            PathBuf::from("/home/u/.docker/config.json")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_uses_a_non_utf8_docker_config_as_given() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = OsString::from_vec(vec![b'/', b't', 0xff, b'd']);
+        let lookup = |name: &str| {
+            (name == "DOCKER_CONFIG")
+                .then(|| dir.clone())
+                .or_else(|| (name == "HOME").then(|| OsString::from("/home/u")))
+        };
+        assert_eq!(
+            config_path_from(lookup, false).expect("resolves"),
+            PathBuf::from(dir.clone()).join("config.json")
+        );
+    }
+
+    #[test]
+    fn config_path_without_any_home_variable_is_refused() {
+        assert!(matches!(
+            config_path_from(|_| None, false),
+            Err(AuthError::WriteConfigFailed { .. })
+        ));
     }
 
     // ─── malformed config ───
