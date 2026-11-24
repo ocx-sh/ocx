@@ -10,6 +10,7 @@ pid (see ``_LAUNCH``); on Windows the controller joins a KILL_ON_JOB_CLOSE Job O
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -67,6 +68,15 @@ class ZotError(RuntimeError):
     """zot could not be started or never became ready; the message names the log."""
 
 
+@dataclass(frozen=True, slots=True)
+class BasicAuth:
+    """The one htpasswd user an authenticated instance admits; ``bcrypt_hash`` is that user's htpasswd hash."""
+
+    user: str
+    password: str
+    bcrypt_hash: str
+
+
 def parse_chosen_port(log_text: str) -> int | None:
     """The port zot announces when it is told to listen on ``0``, or None yet."""
     for line in log_text.splitlines():
@@ -82,14 +92,20 @@ def parse_chosen_port(log_text: str) -> int | None:
 
 
 def zot_config(
-    store: Path, port: int | None = None, address: str = "127.0.0.1"
+    store: Path,
+    port: int | None = None,
+    address: str = "127.0.0.1",
+    htpasswd: Path | None = None,
 ) -> dict:
     # dedupe stays on: cross-repository mount reads zot's dedupe cache, and
     # `?mount=&from=` answers 202 instead of 201 without it.
+    http_config: dict = {"address": address, "port": str(port or 0)}
+    if htpasswd is not None:
+        http_config["auth"] = {"htpasswd": {"path": str(htpasswd)}}
     return {
         "distSpecVersion": "1.1.1",
         "storage": {"rootDirectory": str(store), "dedupe": True},
-        "http": {"address": address, "port": str(port or 0)},
+        "http": http_config,
         "log": {"level": "info"},  # the chosen port is logged at info
     }
 
@@ -107,9 +123,14 @@ def resolve_zot() -> str:
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _serves_v2(port: int) -> bool:
+def _serves_v2(port: int, auth: BasicAuth | None = None) -> bool:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/v2/")
+    if auth is not None:
+        # zot listens before it loads its htpasswd: only a login that succeeds means ready.
+        login = base64.b64encode(f"{auth.user}:{auth.password}".encode()).decode()
+        request.add_header("Authorization", f"Basic {login}")
     try:
-        with _DIRECT.open(f"http://127.0.0.1:{port}/v2/", timeout=2) as response:
+        with _DIRECT.open(request, timeout=2) as response:
             return response.status == 200
     # URLError covers refused and non-2xx; the others escape urllib while zot is half up.
     except (
@@ -303,16 +324,17 @@ def start(
     timeout: float = READY_TIMEOUT_SECONDS,
     fixed_ports: dict[str, int] | None = None,
     address: str = "127.0.0.1",
+    auth: BasicAuth | None = None,
 ) -> Stack:
     """Start one zot per name and block until each answers ``GET /v2/`` with 200.
 
-    ``fixed_ports`` pins a name to a port, for callers that need a stable one (the golden
-    generator, the bench, the manual rigs); the suite never does. A pinned port that
-    already answers ``GET /v2/`` is refused: it would pass for ours. ``address`` is the
-    listen address, widened only for a client in a container.
+    ``auth`` makes every instance require that Basic login, probed with it.
+    ``fixed_ports`` pins a name to a port for callers needing a stable one (golden
+    generator, bench, manual rigs); the suite never does. A pinned port that already
+    answers ``GET /v2/`` is refused: it would pass for ours. ``address`` is widened
+    only for a client in a container.
 
-    Raises ZotError after ``timeout`` seconds, naming the instance's log; the stores
-    are kept in that case so the log can be read.
+    Raises ZotError after ``timeout`` seconds, naming the instance's log; stores are kept.
     """
     binary = zot or resolve_zot()
     root = Path(tempfile.mkdtemp(prefix="ocx-zot-"))
@@ -330,8 +352,16 @@ def start(
                         f"port {pinned} for `{name}` already answers GET /v2/; stop that registry first"
                     )
                 stack.ports[name] = pinned
+            htpasswd = None
+            if auth is not None:
+                htpasswd = root / name / "htpasswd"
+                htpasswd.write_text(
+                    f"{auth.user}:{auth.bcrypt_hash}\n", encoding="utf-8"
+                )
             config.write_text(
-                json.dumps(zot_config(root / name / "store", pinned, address)),
+                json.dumps(
+                    zot_config(root / name / "store", pinned, address, htpasswd)
+                ),
                 encoding="utf-8",
             )
             logs[name] = root / name / "zot.log"
@@ -351,7 +381,7 @@ def start(
                 )
                 if port is not None:
                     stack.ports[name] = port
-                    if _serves_v2(port):
+                    if _serves_v2(port, auth):
                         del pending[name]
             if pending and time.monotonic() > deadline:
                 name = next(iter(pending))

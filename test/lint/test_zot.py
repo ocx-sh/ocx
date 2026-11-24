@@ -8,6 +8,7 @@ No real zot: a fake that prints zot's own "kernel chosen port" line and serves
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import http.server
 import json
@@ -412,6 +413,59 @@ def answers_with(status: int) -> Iterator[int]:
             yield server.server_port
         finally:
             server.shutdown()
+
+
+AUTH = zot.BasicAuth(user="u", password="p", bcrypt_hash="$2a$04$not-checked-here")
+
+
+@contextlib.contextmanager
+def admits_only(user: str, password: str) -> Iterator[int]:
+    """The port of a local server that answers `GET /v2/` 200 to one Basic login, 401 to anything else."""
+    expected = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    class Registry(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(
+                200 if self.headers.get("Authorization") == expected else 401
+            )
+            self.end_headers()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield server.server_port
+        finally:
+            server.shutdown()
+
+
+def test_the_probe_of_an_authenticated_instance_counts_only_a_login_that_succeeds() -> (
+    None
+):
+    """zot listens before it has loaded its htpasswd, so a 401 alone does not mean ready."""
+    with admits_only("u", "p") as port:
+        assert zot._serves_v2(port) is False
+        assert zot._serves_v2(port, AUTH) is True
+        wrong = zot.BasicAuth(user="u", password="nope", bcrypt_hash="")
+        assert zot._serves_v2(port, wrong) is False
+
+
+@needs_proc
+def test_an_authenticated_instance_reads_the_htpasswd_start_writes(
+    fake_zot: str,
+) -> None:
+    assert "auth" not in zot.zot_config(Path("/s"))["http"]
+    stack = zot.start(fake_zot, names=("auth",), auth=AUTH, timeout=20)
+    try:
+        config = json.loads(
+            (stack.root / "auth" / "config.json").read_text(encoding="utf-8")
+        )
+        htpasswd = Path(config["http"]["auth"]["htpasswd"]["path"])
+        assert htpasswd.read_text(encoding="utf-8") == "u:$2a$04$not-checked-here\n"
+    finally:
+        stack.stop()
 
 
 @needs_proc

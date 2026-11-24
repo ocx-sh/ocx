@@ -220,6 +220,33 @@ def target_registry() -> str:
     return _zot_address("target")
 
 
+# A test-fixture credential, not a secret: the hash is bcrypt (cost 4) of this password.
+_AUTH_REGISTRY_LOGIN = zot.BasicAuth(
+    user="zot-auth-user",
+    password="zot-auth-password-6c1f",
+    bcrypt_hash="$2a$04$rykrdYX5Ov4Ia3zlMGQmLe1Ojd0do/atAtUn5hZmTHdXhsm0DAVAK",
+)
+
+
+@pytest.fixture(scope="session")
+def auth_registry() -> Iterator[tuple[str, zot.BasicAuth]]:
+    """A zot of this session's own that admits only one Basic login: ``(address, login)``.
+
+    Started on first use, not in ``pytest_configure``, so the modules that never
+    ask for it pay nothing; an xdist worker that asks starts its own.
+    """
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: auth registry not started")
+    try:
+        stack = zot.start(names=("auth",), auth=_AUTH_REGISTRY_LOGIN)
+    except zot.ZotError as error:
+        pytest.fail(str(error), pytrace=False)
+    try:
+        yield f"localhost:{stack.ports['auth']}", _AUTH_REGISTRY_LOGIN
+    finally:
+        stack.stop()
+
+
 @pytest.fixture(scope="session")
 def legacy_registry() -> str:
     """Session-scoped referrers-NEGATIVE fixture (registry:2, localhost:5001).
