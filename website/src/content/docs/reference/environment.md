@@ -30,8 +30,11 @@ A secret variable, and a few user-name variables, accept a reference in place of
 
 - Resolution: one step. A reference never chains, so a target that is itself a reference is read literally.
 - File size: at most 64 KiB, with trailing CR and LF characters removed.
+- Encoding: a file is read as UTF-8, with one leading byte order mark removed. A UTF-16 file is refused.
 - Failure: a reference that cannot be resolved fails the command, never an anonymous request. The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run with one warning, and the exit code is unchanged.
 - Targets: an `env://` target is an ordinary variable. Children inherit it even when the variable carrying the reference is withheld, and a nested `ocx` resolves the reference against its own environment.
+- Not Unicode: a reference or an `env://` target that is not valid Unicode fails the command. Any other such value reads as unset.
+- `ocx exec --env NAME`: the child receives the reference text, not the resolved value, and may resolve it itself.
 
 ## `OCX_ALLOW_YANKED` {#ocx-allow-yanked}
 

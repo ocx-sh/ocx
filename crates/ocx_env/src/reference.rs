@@ -3,6 +3,7 @@
 
 //! The value forms an OCX secret variable accepts: a literal, `file://<path>`, `env://<NAME>`, `plain://<text>`.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::Read as _;
@@ -112,6 +113,13 @@ pub enum ReferenceError {
         summary = "A file:// or env:// reference in an OCX secret variable has nothing to read"
     )]
     EnvTargetUnset { variable: String, target: String },
+    /// The `env://` target is set but not valid Unicode.
+    #[exit(
+        IoError,
+        slug = "secret_reference_unreadable",
+        summary = "A file:// or env:// reference in an OCX secret variable has nothing to read"
+    )]
+    EnvTargetNotUnicode { variable: String, target: String },
     /// Opening or reading the file failed.
     #[exit(
         IoError,
@@ -198,6 +206,11 @@ impl fmt::Display for ReferenceError {
                 "'{variable}' references '{}', which is unset or empty",
                 printable(target)
             ),
+            Self::EnvTargetNotUnicode { variable, target } => write!(
+                f,
+                "'{variable}' references '{}', which is not valid Unicode",
+                printable(target)
+            ),
             Self::FileUnreadable { variable, path, .. } => {
                 write!(f, "cannot read '{}', referenced by '{variable}'", printable(path))
             }
@@ -273,12 +286,18 @@ fn resolve_env(variable: &str, name: &str) -> Result<String, ReferenceError> {
             variable: variable.to_owned(),
         });
     }
-    crate::read_named(name)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ReferenceError::EnvTargetUnset {
-            variable: variable.to_owned(),
-            target: name.to_owned(),
-        })
+    env_target(variable, name, crate::named_raw(name))
+}
+
+/// The value `raw` of the `env://` target `name`, carried by `variable`.
+pub(crate) fn env_target(variable: &str, name: &str, raw: Option<OsString>) -> Result<String, ReferenceError> {
+    let (variable, target) = (variable.to_owned(), name.to_owned());
+    match raw.map(OsString::into_string) {
+        Some(Ok(value)) if !value.is_empty() => Ok(value),
+        // A set value that is not Unicode is never reported as unset: the operator would look for the wrong fault.
+        Some(Err(_)) => Err(ReferenceError::EnvTargetNotUnicode { variable, target }),
+        _ => Err(ReferenceError::EnvTargetUnset { variable, target }),
+    }
 }
 
 /// `O_NONBLOCK`, so a FIFO swapped in after the pre-stat cannot block the open.

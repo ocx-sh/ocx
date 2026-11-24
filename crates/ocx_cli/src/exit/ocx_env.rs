@@ -46,6 +46,16 @@ mod tests {
         crate::exit::tests::assert_detail(&unreadable, "secret_reference_unreadable");
     }
 
+    /// Reds on: a non-Unicode `env://` target filed under another slug or code than the unreadable-reference one.
+    #[test]
+    fn a_non_unicode_env_target_detail_is_registered_under_the_unreadable_code() {
+        let unreadable = ReferenceError::EnvTargetNotUnicode {
+            variable: "OCX_AUTH_TOKEN".to_string(),
+            target: "BAD".to_string(),
+        };
+        crate::exit::tests::assert_detail(&unreadable, "secret_reference_unreadable");
+    }
+
     /// Reds on: the malformed-reference slug filed under another code than over-cap or non-UTF-8 data exits with.
     #[test]
     fn a_malformed_reference_detail_is_registered_under_its_code() {

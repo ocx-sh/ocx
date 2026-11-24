@@ -772,6 +772,10 @@ mod firewall_tests {
             "integration test running `otool` against the built binary",
         ),
         (
+            "ocx_env/src/tests.rs",
+            "test-only re-run of the test binary as a child holding a non-Unicode value",
+        ),
+        (
             "ocx_oci/src/host_capabilities.rs",
             "libc detection runs a discovered loader",
         ),

@@ -655,7 +655,7 @@ const COMMAND_FLAGS: &[(&str, &str, &str)] = &[(
 )];
 
 /// The four value forms a secret variable accepts, and how a reference resolves or fails.
-const SECRET_REFERENCES: &str = "A secret variable, and a few user-name variables, accept a reference in place of the value.\n\n| Form | Reads |\n| --- | --- |\n| literal | The value as written |\n| `file://<path>` | The file's contents |\n| `env://<NAME>` | The value of the variable `NAME` |\n| `plain://<text>` | The text after the prefix, taken literally |\n\n- Resolution: one step. A reference never chains, so a target that is itself a reference is read literally.\n- File size: at most 64 KiB, with trailing CR and LF characters removed.\n- Failure: a reference that cannot be resolved fails the command, never an anonymous request. The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run with one warning, and the exit code is unchanged.\n- Targets: an `env://` target is an ordinary variable. Children inherit it even when the variable carrying the reference is withheld, and a nested `ocx` resolves the reference against its own environment.";
+const SECRET_REFERENCES: &str = "A secret variable, and a few user-name variables, accept a reference in place of the value.\n\n| Form | Reads |\n| --- | --- |\n| literal | The value as written |\n| `file://<path>` | The file's contents |\n| `env://<NAME>` | The value of the variable `NAME` |\n| `plain://<text>` | The text after the prefix, taken literally |\n\n- Resolution: one step. A reference never chains, so a target that is itself a reference is read literally.\n- File size: at most 64 KiB, with trailing CR and LF characters removed.\n- Encoding: a file is read as UTF-8, with one leading byte order mark removed. A UTF-16 file is refused.\n- Failure: a reference that cannot be resolved fails the command, never an anonymous request. The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run with one warning, and the exit code is unchanged.\n- Targets: an `env://` target is an ordinary variable. Children inherit it even when the variable carrying the reference is withheld, and a nested `ocx` resolves the reference against its own environment.\n- Not Unicode: a reference or an `env://` target that is not valid Unicode fails the command. Any other such value reads as unset.\n- `ocx exec --env NAME`: the child receives the reference text, not the resolved value, and may resolve it itself.";
 
 /// The boolean vocabulary every `Bool` variable shares, and the four that refuse a value outside it.
 const TRUTHY_VALUES: &str = "A boolean variable reads these spellings in any case.\n\n| Reads as | Spellings |\n| --- | --- |\n| On | `1`, `y`, `yes`, `on`, `true` |\n| Off | `0`, `n`, `no`, `off`, `false` |\n\n- Strict: [`OCX_OFFLINE`](#ocx-offline), [`OCX_FROZEN`](#ocx-frozen), [`OCX_NO_CONSENT`](#ocx-no-consent) and [`OCX_NO_VERIFY`](#ocx-no-verify) exit 78 naming the variable on any other value.\n- Lenient: every other boolean variable logs a warning and uses its default.";
@@ -1335,6 +1335,9 @@ mod tests {
         assert!(!section("OCX_WITHOUT`").contains("Value forms"));
         assert!(text.contains("## Secret references {#secret-references}"));
         assert!(text.contains("The exception is `OCX_TELEMETRY_HEADERS`: telemetry turns off for the run"));
+        assert!(text.contains("with one leading byte order mark removed"));
+        assert!(text.contains("Any other such value reads as unset."));
+        assert!(text.contains("the child receives the reference text, not the resolved value"));
     }
 
     #[test]

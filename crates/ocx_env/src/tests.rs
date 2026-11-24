@@ -931,6 +931,54 @@ mod not_unicode {
         assert!(!var.is_set_raw(raw(b"tok\xff")));
     }
 
+    /// Reds on: a set but non-Unicode `env://` target reading as unset, empty or lossy instead of its own refusal.
+    #[test]
+    fn a_non_unicode_env_target_is_refused_as_not_unicode() {
+        let error = crate::reference::env_target("V", "T", raw(b"tok\xff")).unwrap_err();
+        assert!(matches!(error, ReferenceError::EnvTargetNotUnicode { .. }), "{error}");
+        assert_eq!(error.to_string(), "'V' references 'T', which is not valid Unicode");
+        assert!(matches!(
+            crate::reference::env_target("V", "T", None),
+            Err(ReferenceError::EnvTargetUnset { .. })
+        ));
+    }
+
+    /// Reds on: a non-Unicode `env://` target read from the real process environment, through the declaration's
+    /// own `resolve`, reporting anything but `EnvTargetNotUnicode`.
+    ///
+    /// The overrides carry `String` only and `set_var` is disallowed, so the test re-runs itself in a child
+    /// process whose environment holds the target; the child runs the assertion.
+    #[test]
+    #[expect(
+        clippy::disallowed_types,
+        reason = "re-runs this test binary as a child whose environment holds a non-Unicode value; not a tool launch"
+    )]
+    fn a_non_unicode_env_target_in_the_process_environment_is_refused_through_resolve() {
+        const TARGET: &str = "__OCX_TESTING_NON_UNICODE_TARGET";
+        if crate::dynamic("__OCX_TESTING_NON_UNICODE_CHILD").is_some() {
+            let var = OCX_IDENTITY_TOKEN.declaration();
+            let error = var
+                .resolve("V", Some(OsString::from("env://__OCX_TESTING_NON_UNICODE_TARGET")))
+                .unwrap_err();
+            assert!(matches!(error, ReferenceError::EnvTargetNotUnicode { .. }), "{error}");
+            return;
+        }
+        let name = "tests::not_unicode::a_non_unicode_env_target_in_the_process_environment_is_refused_through_resolve";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(TARGET, OsString::from_vec(b"tok\xff".to_vec()))
+            .env("__OCX_TESTING_NON_UNICODE_CHILD", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("1 passed"), "the child ran no test: {stdout}");
+    }
+
     #[test]
     fn a_non_unicode_value_of_a_declaration_without_references_reads_unset() {
         let var = OCX_LOG_LEVEL.declaration();
