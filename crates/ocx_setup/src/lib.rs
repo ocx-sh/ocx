@@ -754,7 +754,16 @@ fn compose_targets_on(
             .collect();
     }
 
-    let mut targets = profiles::detect_targets_on(host, &home_env_from_environment(ocx_home), windows);
+    let home_env = home_env_from_environment(ocx_home);
+    if host == Host::Windows {
+        for home in profiles::unreached_posix_homes(&home_env, windows) {
+            log::warn!(
+                "{} is an MSYS2 or Cygwin home this run writes no rc file under; if that shell uses it as HOME, run `ocx self setup` inside it",
+                home.display()
+            );
+        }
+    }
+    let mut targets = profiles::detect_targets_on(host, &home_env, windows);
     if let Some(profile) = powershell {
         targets.push(ProfileTarget {
             path: profile,

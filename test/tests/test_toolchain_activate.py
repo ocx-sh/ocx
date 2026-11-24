@@ -65,23 +65,29 @@ import pytest
 
 from src import shell_matrix as matrix
 from src.exec_state import default_state, encode
-from src.helpers import make_package, write_ocx_toml
+from src.helpers import bash_executable, make_package, posix_shell_path, write_ocx_toml
 from src.runner import OcxRunner
+from src.shell_eval import git_bash_env
 from src.toolchain_fixtures import (
     DEFAULT_GROUP,
     EXIT_SUCCESS,
     assert_key_and_binary_namespaces_stay_disjoint,
     bin_entries,
+    copy_tree,
     entry_link,
     git,
     link_entries,
     locked_project,
+    make_link,
     read_render_stamp,
+    remove_link,
     resolved_toolchain_bin,
     resolved_toolchain_home,
     run_in,
     shell_bin,
     snapshot_tree,
+    trampoline_body,
+    trampoline_name,
     two_branch_checkout,
     write_toolchain_dir_config,
 )
@@ -93,13 +99,16 @@ pytestmark = pytest.mark.command("toolchain_env")
 # multiply the runtime by nine to re-observe one PATH string.
 SHELL = "bash"
 
-# Git Bash is a working shell for ocx activation (see the live bash tests in
-# test_toolchain_env.py), but this module's harness is not Windows-shaped: it splits and
-# joins PATH with `os.pathsep` (`;` on Windows, where bash holds `:`-lists), builds the child
-# PATH from the POSIX `matrix.BASE_PATH`, and runs `.bat` fixture tools by bare name.
-_WINDOWS_NO_BASH = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="windows: this harness joins PATH with os.pathsep and a POSIX BASE_PATH and runs .bat fixtures by name",
+# On Windows the session shell is Git Bash: its child gets a native `;` PATH, bash holds
+# `:`-joined MSYS spellings, and every PATH probe is converted back with Git's own `cygpath -w -p`
+# before Python compares directories through `matrix.path_identity`.
+_WINDOWS = sys.platform == "win32"
+
+# Printed by the Windows preamble when Git Bash's own tools are missing; `_session` fails on it.
+_HARNESS_FAULT = "ocx-harness:"
+_WINDOWS_PREAMBLE = (
+    "command -v cygpath >/dev/null 2>&1 || "
+    f"{{ printf '{_HARNESS_FAULT} cygpath is not on the session PATH (%s)\\n' \"$PATH\" >&2; exit 97; }}"
 )
 
 # Every shell session is bounded (RUL-110). The regression this guards is a
@@ -160,7 +169,8 @@ def arena(ocx: OcxRunner, tmp_path: Path) -> Arena:
     ``ocx``, which is what makes the ``command -v`` row discriminating.
     """
     ocx_home = Path(ocx.env["OCX_HOME"])
-    candidate = ocx_home / _CANDIDATE_REL
+    # The binary's own name: `ocx.exe` on Windows, which is what `ocx self setup` installs and bash finds as `ocx`.
+    candidate = ocx_home / _CANDIDATE_REL.parent / ocx.binary.name
     candidate.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ocx.binary, candidate)
     candidate.chmod(0o755)
@@ -177,8 +187,16 @@ def _bash() -> str:
 
     A skip on a host that ships the interpreter is a pass with no evidence, so
     ``__OCX_TESTING_REQUIRE_LIVE_SHELLS`` turns it back into a failure wherever
-    the tool is expected to exist.
+    the tool is expected to exist. On Windows it is Git for Windows' bash,
+    never the WSL launcher, and its absence is a failure.
     """
+    if _WINDOWS:
+        found = bash_executable()
+        assert found is not None, (
+            "Git for Windows' bash is required on Windows, and bash_executable() found none "
+            "(Program Files\\Git, then PATH without System32)"
+        )
+        return found
     resolved = matrix.which_arm(SHELL)
     if resolved is None:
         assert not matrix.missing_arm_is_fatal(SHELL), (
@@ -187,6 +205,39 @@ def _bash() -> str:
         )
         pytest.skip("bash is not installed on this host (shutil.which returned None)")
     return resolved
+
+
+def _windows_base(bash: str) -> list[str]:
+    """The ambient native ``PATH`` a Windows session starts from: Git's ``usr/bin``, then System32.
+
+    ``usr/bin`` carries ``cygpath``, the coreutils and ``msys-2.0.dll``, by which the binary
+    detects the MSYS runtime. Git's ``bin`` stays out: MSYS mounts ``/bin`` onto ``usr/bin``, so
+    ``cygpath -w`` would hand it back as a different directory.
+    """
+    system32 = str(Path(dict(os.environ).get("SYSTEMROOT", r"C:\Windows")) / "System32")
+    base = git_bash_env({"PATH": system32}, bash)["PATH"].split(os.pathsep)
+    assert any((Path(directory) / "cygpath.exe").is_file() for directory in base), (
+        f"Git Bash found at {bash!r}, but no usr/bin holding cygpath.exe beside it, so no session "
+        f"PATH can be converted back to native spellings; base={base}"
+    )
+    return base
+
+
+def _windows_env(
+    arena: Arena, bash: str, extra_env: dict[str, str], path: str | None, session_pair: bool
+) -> dict[str, str]:
+    """``clean_env``'s Windows counterpart: a native ``;`` PATH of ``path``, the session pair, then the base.
+
+    ``USERPROFILE`` follows ``HOME`` because it is the home directory a Windows ``ocx`` reads.
+    """
+    ambient = dict(os.environ)
+    env = {key: ambient[key] for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT") if key in ambient}
+    env.update(HOME=str(arena.home), USERPROFILE=str(arena.home), OCX_HOME=str(arena.ocx_home))
+    env.update(extra_env)
+    planted = [path] if path is not None else []
+    session = matrix.session_path_dirs(arena.ocx_home) if session_pair else []
+    env["PATH"] = ";".join([*planted, *session, *_windows_base(bash)])
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -215,17 +266,21 @@ def _session(
     fixture already had them" are otherwise the same observation.
     """
     shell_abs = _bash()
-    overrides = dict(extra_env or {})
-    if path is not None:
-        overrides["PATH"] = path + os.pathsep + matrix.BASE_PATH
-    env = arena.env(shell_abs, **overrides)
-    if not session_pair:
-        registered = set(matrix.session_path_dirs(arena.ocx_home))
-        env["PATH"] = os.pathsep.join(
-            segment for segment in env["PATH"].split(os.pathsep) if segment not in registered
-        )
+    if _WINDOWS:
+        env = _windows_env(arena, shell_abs, dict(extra_env or {}), path, session_pair)
+        steps = (_WINDOWS_PREAMBLE, *steps)
+    else:
+        overrides = dict(extra_env or {})
+        if path is not None:
+            overrides["PATH"] = path + os.pathsep + matrix.BASE_PATH
+        env = arena.env(shell_abs, **overrides)
+        if not session_pair:
+            registered = set(matrix.session_path_dirs(arena.ocx_home))
+            env["PATH"] = os.pathsep.join(
+                segment for segment in env["PATH"].split(os.pathsep) if segment not in registered
+            )
     body = "\n".join([matrix.header(SHELL, arena.binary), *steps])
-    return matrix.run_script(
+    result = matrix.run_script(
         SHELL,
         shell_abs,
         body,
@@ -235,6 +290,69 @@ def _session(
         name=f"session-{uuid4().hex[:8]}",
         timeout=_TIMEOUT,
     )
+    assert _HARNESS_FAULT not in result.stderr, (
+        f"the Git Bash at {shell_abs!r} could not run the harness preamble (child PATH {env['PATH']!r}):\n"
+        f"{result.stderr}"
+    )
+    return result
+
+
+def _cd(path: Path | str) -> str:
+    """``cd`` into ``path``, spelled the way bash holds it on this host (``/c/x`` under Git Bash)."""
+    return matrix.cd_to(SHELL, posix_shell_path(path))
+
+
+def _path_probe(label: str) -> str:
+    """Probe ``PATH`` under ``label``, in native spellings.
+
+    Under Git Bash the raw value is probed as ``<label>_raw`` and ``label`` carries Git's own
+    ``cygpath -w -p`` conversion of it, so no Python mirror of the MSYS mount table decides a match.
+    """
+    if not _WINDOWS:
+        return matrix.probe(SHELL, label, "PATH")
+    return "\n".join(
+        [
+            matrix.probe(SHELL, f"{label}_raw", "PATH"),
+            '__ocx_native="$(cygpath -w -p "$PATH")"',
+            matrix.probe(SHELL, label, "__ocx_native"),
+        ]
+    )
+
+
+def _lookup_probe(name: str) -> str:
+    """Resolve ``name`` with ``command -v`` (never run it) and probe it as ``lookup``, native on Windows."""
+    steps = [f'__ocx_lookup="$(command -v {name})"']
+    if _WINDOWS:
+        steps.append('[ -n "$__ocx_lookup" ] && __ocx_lookup="$(cygpath -w "$__ocx_lookup")"')
+    steps.append(matrix.probe(SHELL, "lookup", "__ocx_lookup"))
+    return "\n".join(steps)
+
+
+def _lookup(result: subprocess.CompletedProcess[str], name: str) -> str:
+    """The file ``command -v name`` named, with the ``.exe`` the MSYS runtime leaves off restored."""
+    lookup = matrix.probes(result.stdout).get("lookup")
+    assert lookup and lookup != matrix.ABSENT, f"`command -v {name}` resolved nothing:\n{result.stdout}"
+    return matrix.executable_identity(lookup)
+
+
+class _Segments(list[str]):
+    """Native ``PATH`` identities that print the raw bash ``PATH`` beside them, so a failure shows both spellings."""
+
+    def __init__(self, segments: list[str], raw: str) -> None:
+        super().__init__(segments)
+        self.raw = raw
+
+    def __repr__(self) -> str:
+        return f"{list.__repr__(self)} (bash PATH: {self.raw!r})"
+
+    __str__ = __repr__
+
+
+class _WindowsIdentity(str):
+    """A Windows identity key whose repr adds its MSYS spelling, so a failed comparison names both."""
+
+    def __repr__(self) -> str:
+        return f"{str.__repr__(self)} (bash: {posix_shell_path(str(self))!r})"
 
 
 def _segments(result: subprocess.CompletedProcess[str], label: str = "path") -> list[str]:
@@ -250,12 +368,31 @@ def _segments(result: subprocess.CompletedProcess[str], label: str = "path") -> 
         f"(rc={result.returncode})\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     assert found[label] != matrix.ABSENT, f"PATH was unset in the session (probe {label!r})"
-    return [os.path.realpath(segment) for segment in matrix.path_segments(found[label])]
+    segments = [_real(segment) for segment in matrix.native_path_list(found[label])]
+    if not _WINDOWS:
+        return segments
+    raw = found.get(f"{label}_raw", "")
+    fault = matrix.posix_path_list_fault(raw)
+    assert fault is None, (
+        f"session PATH separator: Git Bash must hold PATH as ':'-joined POSIX spellings, but {fault}: {raw!r}"
+    )
+    return _Segments(segments, raw)
 
 
 def _real(path: Path | str) -> str:
     """The identity of a directory, not one of its spellings."""
-    return os.path.realpath(path)
+    resolved = os.path.realpath(path)
+    return _WindowsIdentity(matrix.path_identity(resolved)) if _WINDOWS else resolved
+
+
+def _hint_dirs(stderr: str) -> list[str]:
+    """The project directory of every stale-window hint line on ``stderr``, as the binary spelled it."""
+    prefix, suffix = "ocx: ", f": {_HINT}"
+    return [
+        line[len(prefix) : -len(suffix)]
+        for line in stderr.splitlines()
+        if line.startswith(prefix) and line.endswith(suffix)
+    ]
 
 
 def _session_dirs(ocx: OcxRunner, arena: Arena, project_free: Path) -> tuple[str, str]:
@@ -276,7 +413,7 @@ def _session_dirs(ocx: OcxRunner, arena: Arena, project_free: Path) -> tuple[str
         "the global session directory the fixture puts on PATH must be the one "
         f"`ocx shell state` reports: {global_bin!r} vs {reported_global!r}"
     )
-    assert (Path(install_bin) / "ocx").is_file(), (
+    assert (Path(install_bin) / arena.binary.name).is_file(), (
         f"the arena must seed an installed ocx in {install_bin!r}, or `command -v ocx` proves nothing"
     )
     return _real(install_bin), _real(global_bin)
@@ -318,7 +455,11 @@ def _clone(project: Path, destination: Path) -> Path:
     project directory*, so the copy inherits the committed tree and neither
     stamp — which is exactly the hostile-clone shape S-003 names.
     """
-    shutil.copytree(project, destination, symlinks=True)
+    if _WINDOWS:
+        # `shutil.copytree` walks into a junction; `copy_tree` recreates each one, aimed inside the copy.
+        copy_tree(project, destination)
+    else:
+        shutil.copytree(project, destination, symlinks=True)
     return destination
 
 
@@ -327,7 +468,6 @@ def _clone(project: Path, destination: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-@_WINDOWS_NO_BASH
 def test_bin_mode_path_leads_project_then_global_then_install(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -349,9 +489,9 @@ def test_bin_mode_path_leads_project_then_global_then_install(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -365,7 +505,6 @@ def test_bin_mode_path_leads_project_then_global_then_install(
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -391,7 +530,7 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     assert run_in(ocx, project, "pull", "-g", "all").returncode == EXIT_SUCCESS
 
     home = resolved_toolchain_home(ocx, project)
-    assert "ocx" in bin_entries(home), (
+    assert trampoline_name("ocx") in bin_entries(home), (
         "the fixture must render a trampoline named `ocx`, or nothing is being shadowed; "
         f"got {bin_entries(home)}"
     )
@@ -399,12 +538,11 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project),
+        _cd(project),
         matrix.prompt(SHELL),
         # Lookup, not execution. `command -v` writes a path and returns.
-        '__ocx_lookup="$(command -v ocx)"',
-        matrix.probe(SHELL, "lookup", "__ocx_lookup"),
-        matrix.probe(SHELL, "path", "PATH"),
+        _lookup_probe("ocx"),
+        _path_probe("path"),
         cwd=project,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -417,14 +555,13 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
         "the install directory must also be on PATH, or `ocx` resolving the pin proves "
         f"nothing about precedence: {segments}"
     )
-    lookup = matrix.probes(result.stdout).get("lookup")
-    assert lookup and lookup != matrix.ABSENT, f"`command -v ocx` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(shell_bin(home) / "ocx"), (
-        f"a bare `ocx` must resolve the project's pin, not the installed binary; got {lookup!r}"
+    lookup, pin = _lookup(result, "ocx"), shell_bin(home) / trampoline_name("ocx")
+    assert _real(lookup) == _real(pin), (
+        f"a bare `ocx` must resolve the project's pin, not the installed binary; got {_real(lookup)!r}, "
+        f"want {_real(pin)!r}"
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """The owner-reported case: pin ``ocx`` globally and a bare ``ocx`` finds it.
 
@@ -445,18 +582,17 @@ def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Ar
     project_free = tmp_path / f"plain-{label}"
     project_free.mkdir()
     global_home = resolved_toolchain_home(ocx, project_free)
-    assert "ocx" in bin_entries(global_home), (
+    assert trampoline_name("ocx") in bin_entries(global_home), (
         f"the global tier must render a trampoline named `ocx`; got {bin_entries(global_home)}"
     )
     install_bin, global_bin = _session_dirs(ocx, arena, project_free)
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project_free),
+        _cd(project_free),
         matrix.prompt(SHELL),
-        '__ocx_lookup="$(command -v ocx)"',
-        matrix.probe(SHELL, "lookup", "__ocx_lookup"),
-        matrix.probe(SHELL, "path", "PATH"),
+        _lookup_probe("ocx"),
+        _path_probe("path"),
         cwd=project_free,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -469,14 +605,13 @@ def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Ar
     assert segments.index(global_bin) < segments.index(install_bin), (
         f"the global toolchain bin must precede the install bin; got {segments}"
     )
-    lookup = matrix.probes(result.stdout).get("lookup")
-    assert lookup and lookup != matrix.ABSENT, f"`command -v ocx` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(Path(global_bin) / "ocx"), (
-        f"a bare `ocx` must resolve the global toolchain's pin, not the installed binary; got {lookup!r}"
+    lookup, pin = _lookup(result, "ocx"), Path(global_bin) / trampoline_name("ocx")
+    assert _real(lookup) == _real(pin), (
+        f"a bare `ocx` must resolve the global toolchain's pin, not the installed binary; got {_real(lookup)!r}, "
+        f"want {_real(pin)!r}"
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -493,18 +628,18 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
     home = resolved_toolchain_home(ocx, project.directory)
     global_home = resolved_toolchain_home(ocx, tmp_path)
     binary = project.default_binary
-    assert binary in bin_entries(home) and binary in bin_entries(global_home), (
+    exposed = trampoline_name(binary)
+    assert exposed in bin_entries(home) and exposed in bin_entries(global_home), (
         "both tiers must expose the same binary name, or the shadowing is not exercised: "
         f"project={bin_entries(home)} global={bin_entries(global_home)}"
     )
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        f'__ocx_lookup="$(command -v {binary})"',
-        matrix.probe(SHELL, "lookup", "__ocx_lookup"),
-        matrix.probe(SHELL, "path", "PATH"),
+        _lookup_probe(binary),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -512,14 +647,12 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
     assert _real(shell_bin(global_home)) in segments, (
         f"the global trampoline directory must be on PATH for this row to mean anything: {segments}"
     )
-    lookup = matrix.probes(result.stdout).get("lookup")
-    assert lookup and lookup != matrix.ABSENT, f"`command -v {binary}` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(shell_bin(home) / binary), (
-        f"the project's trampoline must win over the global tier's; got {lookup!r}"
+    lookup, winner = _lookup(result, binary), shell_bin(home) / exposed
+    assert _real(lookup) == _real(winner), (
+        f"the project's trampoline must win over the global tier's; got {_real(lookup)!r}, want {_real(winner)!r}"
     )
 
 
-@_WINDOWS_NO_BASH
 def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -538,9 +671,9 @@ def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "env"},
     )
@@ -554,7 +687,6 @@ def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
         )
 
 
-@_WINDOWS_NO_BASH
 @pytest.mark.parametrize("mode", ["env", "bin", "none"])
 def test_a_fresh_shell_gains_both_session_directories_in_every_mode(
     ocx: OcxRunner, arena: Arena, tmp_path: Path, mode: str
@@ -582,10 +714,10 @@ def test_a_fresh_shell_gains_both_session_directories_in_every_mode(
     install_bin, global_bin = _session_dirs(ocx, arena, project_free)
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project_free),
-        matrix.probe(SHELL, "before", "PATH"),
+        _cd(project_free),
+        _path_probe("before"),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "after", "PATH"),
+        _path_probe("after"),
         cwd=project_free,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": mode},
         session_pair=False,
@@ -614,7 +746,6 @@ _TRANSITIONS = [
 ]
 
 
-@_WINDOWS_NO_BASH
 @pytest.mark.parametrize(("first", "second"), _TRANSITIONS, ids=lambda value: value)
 def test_every_ordered_activate_transition_keeps_both_session_directories(
     ocx: OcxRunner, arena: Arena, tmp_path: Path, first: str, second: str
@@ -652,13 +783,13 @@ def test_every_ordered_activate_transition_keeps_both_session_directories(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.set_var(SHELL, "OCX_TOOLCHAIN_ACTIVATE", first),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "first", "PATH"),
+        _path_probe("first"),
         matrix.set_var(SHELL, "OCX_TOOLCHAIN_ACTIVATE", second),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "second", "PATH"),
+        _path_probe("second"),
         cwd=project.directory,
         path=str(foreign),
     )
@@ -696,13 +827,12 @@ def _poison_trampoline(home: Path, name: str) -> bytes:
     documented accepted residual (R-W4). Growing the file moves the size, so
     the gate reaches the content hash it is really about.
     """
-    trampoline = shell_bin(home) / name
+    trampoline = shell_bin(home) / trampoline_name(name)
     poisoned = trampoline.read_bytes() + b"\n# not what the stamp recorded\n"
     trampoline.write_bytes(poisoned)
     return poisoned
 
 
-@_WINDOWS_NO_BASH
 def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -722,9 +852,9 @@ def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -735,13 +865,20 @@ def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull
     assert install_bin in segments and global_bin in segments, (
         f"withholding the project must not cost the two session directories: {segments}"
     )
-    sentence = f"ocx: {project.directory}: {_HINT}"
-    assert result.stderr.count(sentence) == 1, (
-        f"the C-061 hint must be printed exactly once, naming this project; stderr:\n{result.stderr}"
-    )
+    if _WINDOWS:
+        # The binary spells the directory as it canonicalised it, so the match is on identity.
+        hints = _hint_dirs(result.stderr)
+        assert len(hints) == 1, f"the C-061 hint must be printed exactly once; stderr:\n{result.stderr}"
+        assert _real(hints[0]) == _real(project.directory), (
+            f"the C-061 hint must name this project: {_real(hints[0])!r} vs {_real(project.directory)!r}"
+        )
+    else:
+        sentence = f"ocx: {project.directory}: {_HINT}"
+        assert result.stderr.count(sentence) == 1, (
+            f"the C-061 hint must be printed exactly once, naming this project; stderr:\n{result.stderr}"
+        )
 
 
-@_WINDOWS_NO_BASH
 def test_the_prompt_path_never_prunes_the_stale_trampolines(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -758,21 +895,20 @@ def test_the_prompt_path_never_prunes_the_stale_trampolines(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     _segments(result)  # the prompt ran; without this the comparison is of two untouched trees
 
-    assert (shell_bin(home) / project.default_binary).read_bytes() == poisoned, (
+    assert (shell_bin(home) / trampoline_name(project.default_binary)).read_bytes() == poisoned, (
         "the prompt path must leave a stale trampoline exactly as it found it"
     )
     assert snapshot_tree(home) == before, "the prompt path must not write anywhere under the home"
 
 
-@_WINDOWS_NO_BASH
 def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """C-061's positive half: ``ocx pull`` re-renders, re-stamps, and the hint stops."""
     project = locked_project(ocx, tmp_path, label="c3")
@@ -780,15 +916,15 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
     poisoned = _poison_trampoline(home, project.default_binary)
 
     assert run_in(ocx, project.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
-    assert (shell_bin(home) / project.default_binary).read_bytes() != poisoned, (
+    assert (shell_bin(home) / trampoline_name(project.default_binary)).read_bytes() != poisoned, (
         "`ocx pull` must re-render the trampoline the prompt refused to touch"
     )
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -802,7 +938,6 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
 # ---------------------------------------------------------------------------
 
 
-@_WINDOWS_NO_BASH
 @pytest.mark.parametrize("mode", ["env", "bin", "none"])
 @pytest.mark.parametrize("pinned", [False, True])
 def test_the_activate_pinned_matrix_emits_the_contracted_set(
@@ -827,9 +962,9 @@ def test_the_activate_pinned_matrix_emits_the_contracted_set(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": mode},
     )
@@ -871,7 +1006,6 @@ def test_the_activate_pinned_matrix_emits_the_contracted_set(
             )
 
 
-@_WINDOWS_NO_BASH
 def test_activate_in_ocx_toml_beats_the_environment_variable(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -884,9 +1018,9 @@ def test_activate_in_ocx_toml_beats_the_environment_variable(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -901,7 +1035,6 @@ def test_activate_in_ocx_toml_beats_the_environment_variable(
         assert _real(directory) not in segments, f"`none` composes nothing either: {segments}"
 
 
-@_WINDOWS_NO_BASH
 def test_the_environment_tier_speaks_when_the_file_tier_is_absent(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -914,9 +1047,9 @@ def test_the_environment_tier_speaks_when_the_file_tier_is_absent(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -996,7 +1129,6 @@ def test_pinned_cli_beats_the_file_which_beats_the_environment(ocx: OcxRunner, t
     assert lane("--pinned", env={"OCX_TOOLCHAIN_PINNED": "0"}) == "pinned", "the command line beats both"
 
 
-@_WINDOWS_NO_BASH
 def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1025,9 +1157,9 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, clone),
+        _cd(clone),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=clone,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -1040,7 +1172,6 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     )
 
 
-@_WINDOWS_NO_BASH
 def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1057,7 +1188,7 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     assert run_in(ocx, clone, "pull", "-g", "all").returncode == EXIT_SUCCESS
     # `bin_entries` answers `[]` for a missing directory, so the negative below
     # is satisfied by an unrendered tree unless something pins the set non-empty.
-    assert project.default_binary in bin_entries(home), (
+    assert trampoline_name(project.default_binary) in bin_entries(home), (
         f"the witness: the clone rendered its own trampolines; got {bin_entries(home)}"
     )
     assert hostile_name not in bin_entries(home), (
@@ -1066,9 +1197,9 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, clone),
+        _cd(clone),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=clone,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -1076,7 +1207,6 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     assert _real(shell_bin(home)) in segments, f"a rendered, stamped tree reaches PATH: {segments}"
 
 
-@_WINDOWS_NO_BASH
 def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1113,15 +1243,15 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     assert _real(home) != _real(sibling_home), "the two projects must not share a home"
 
     stale = _real(shell_bin(home))
-    planted = os.pathsep.join([str(root), str(shell_bin(sibling_home)), stale])
+    planted = os.pathsep.join([str(root), str(shell_bin(sibling_home)), os.path.realpath(shell_bin(home))])
 
     def session_segments(extra_env: dict[str, str]) -> list[str]:
         return _segments(
             _session(
                 arena,
-                matrix.cd_to(SHELL, project.directory),
+                _cd(project.directory),
                 matrix.prompt(SHELL),
-                matrix.probe(SHELL, "path", "PATH"),
+                _path_probe("path"),
                 cwd=project.directory,
                 extra_env={"OCX_TOOLCHAIN_ACTIVATE": "env", **extra_env},
                 path=planted,
@@ -1144,7 +1274,6 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     )
 
 
-@_WINDOWS_NO_BASH
 def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
     """C-028: the widening is strictly after consent, not merely usually after it.
 
@@ -1157,20 +1286,20 @@ def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena,
     state = json.loads(run_in(ocx, clone, "--format", "json", "shell", "state").stdout)
     assert state.get("grant") is None, f"this row needs a genuinely unconsented project: {state}"
     home = Path(state["toolchain_home"])
-    planted = _real(shell_bin(home))
+    planted = os.path.realpath(shell_bin(home))
 
     install_bin, global_bin = _session_dirs(ocx, arena, tmp_path)
     result = _session(
         arena,
-        matrix.cd_to(SHELL, clone),
+        _cd(clone),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=clone,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
         path=planted,
     )
     segments = _segments(result)
-    assert planted in segments, (
+    assert _real(planted) in segments, (
         f"an unconsented project's home is not an owned prefix; its segment must survive: {segments}"
     )
     assert install_bin in segments and global_bin in segments, (
@@ -1178,7 +1307,6 @@ def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena,
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_symlinked_project_home_is_refused_from_the_owned_set(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1195,7 +1323,11 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
     clone = _clone(project.directory, tmp_path / "symlinked-home")
     committed = clone / ".ocx" / "toolchain"
     shutil.rmtree(committed)
-    committed.symlink_to("/")
+    if _WINDOWS:
+        # A junction to the drive root: the link kind ocx writes there, and one that needs no privilege.
+        make_link(committed.anchor, committed)
+    else:
+        committed.symlink_to("/")
     _write_home_config(arena, f"[shell.consent]\npaths = [{json.dumps(str(clone))}]\n")
     state = json.loads(run_in(ocx, clone, "--format", "json", "shell", "state").stdout)
     assert state["grant"] == "path", f"the clone must be consented, or the refusal is not the reason: {state}"
@@ -1206,9 +1338,9 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, clone),
+        _cd(clone),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=clone,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
         path=str(foreign),
@@ -1217,14 +1349,13 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
     assert _real(foreign) in segments, (
         f"a home symlinked to `/` must not become a deletion authority over the ambient PATH: {segments}"
     )
-    for ambient in ("/usr/bin", "/bin"):
+    for ambient in _windows_base(_bash()) if _WINDOWS else ("/usr/bin", "/bin"):
         assert _real(ambient) in segments, f"{ambient} must survive: {segments}"
     assert install_bin in segments and global_bin in segments, (
         f"and the prompt still contributes the session pair: {segments}"
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1245,17 +1376,17 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     assert correct != other, "the two groups must point at different digests for this row to discriminate"
 
     link = entry_link(home, DEFAULT_GROUP, project.default_key)
-    link.unlink()
-    link.symlink_to(other)
+    remove_link(link)
+    make_link(other, link)
     assert snapshot_tree(shell_bin(home)) == before, (
         "the repoint must leave shells/default/bin byte-untouched"
     )
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, project.directory),
+        _cd(project.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=project.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
@@ -1277,7 +1408,6 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     )
 
 
-@_WINDOWS_NO_BASH
 def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
@@ -1291,8 +1421,9 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     """
     checkout = two_branch_checkout(ocx, tmp_path, label="d12")
     assert run_in(ocx, checkout.directory, "pull", "-g", "all").returncode == EXIT_SUCCESS
-    trampoline = shell_bin(checkout.home) / checkout.binary
-    before = trampoline.read_bytes()
+    trampoline = shell_bin(checkout.home) / trampoline_name(checkout.binary)
+    # The `.exec` sidecar on Windows: the `.exe` is a launcher blob shared by every project.
+    before = trampoline_body(trampoline).read_bytes()
     stale_target = link_entries(checkout.home)[f"default/{checkout.key}"]
 
     first = subprocess.run(
@@ -1303,15 +1434,15 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     )
 
     assert git(checkout.directory, "checkout", "-q", checkout.other_branch).returncode == EXIT_SUCCESS
-    assert trampoline.read_bytes() == before, (
+    assert trampoline_body(trampoline).read_bytes() == before, (
         "the switch must leave shells/default/bin byte-identical, or the stamp — not the link — is what notices"
     )
 
     result = _session(
         arena,
-        matrix.cd_to(SHELL, checkout.directory),
+        _cd(checkout.directory),
         matrix.prompt(SHELL),
-        matrix.probe(SHELL, "path", "PATH"),
+        _path_probe("path"),
         cwd=checkout.directory,
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )

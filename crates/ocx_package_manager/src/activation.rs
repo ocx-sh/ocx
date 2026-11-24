@@ -249,8 +249,40 @@ pub struct Outcome {
     pub resolved: bool,
     /// Whether the resolved project was refused by consent.
     pub inert: bool,
+    /// The shell [`retain_spellable`](Self::retain_spellable) filtered for; the session directories obey it too.
+    pub spelled_for: Option<ocx_shell::shell::Shell>,
     /// Deferred diagnostics, in emission order.
     pub messages: Vec<String>,
+}
+
+impl Outcome {
+    /// `entries` minus what the shell [`retain_spellable`](Self::retain_spellable) filtered for cannot spell.
+    ///
+    /// The session directories derive from `$OCX_HOME`, which a user can set to a form MSYS has no spelling for.
+    fn spellable(&self, entries: Vec<Entry>) -> Vec<Entry> {
+        match self.spelled_for {
+            Some(shell) => entries
+                .into_iter()
+                .filter(|entry| shell.spells_path_entry(entry))
+                .collect(),
+            None => entries,
+        }
+    }
+
+    /// Drops the path entries `shell` cannot spell on this host, so the plan and the ledger hold only what
+    /// the shell receives: under MSYS a value with no POSIX form (`C:foo`, a relative path) is refused.
+    pub fn retain_spellable(&mut self, shell: ocx_shell::shell::Shell) {
+        self.spelled_for = Some(shell);
+        for entries in [&mut self.global, &mut self.project] {
+            entries.retain(|entry| {
+                let spelled = shell.spells_path_entry(entry);
+                if !spelled {
+                    log::debug!("skipping {}: {:?} has no spelling for {shell}", entry.key, entry.value);
+                }
+                spelled
+            });
+        }
+    }
 }
 
 /// The consent-before-read gate, in its own module so no other code in this file can mint a proof.
@@ -511,6 +543,7 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
         slot: None,
         resolved: input.project.is_some(),
         inert: false,
+        spelled_for: None,
         messages: Vec::new(),
     };
 
@@ -1236,7 +1269,7 @@ fn composed_scope(owner: &Owner) -> Option<exec_state::ScopeId> {
 pub fn session_desired(outcome: &Outcome) -> Vec<Entry> {
     let mut desired = outcome.global.clone();
     if outcome.session_enforced {
-        desired.extend(outcome.session.entries());
+        desired.extend(outcome.spellable(outcome.session.entries()));
     }
     desired.extend(outcome.project.iter().cloned());
     desired
@@ -1279,11 +1312,11 @@ pub fn next_state(previous: &ExecState, outcome: &Outcome, current: &Env, finger
     let global = reconcile::session_writable(&outcome.global, previous);
     next.applied
         .extend(session_records(ScopeId::Global, &global, previous, &mut scratch));
-    scratch.apply_entries(&outcome.session.persistent_entries());
+    scratch.apply_entries(&outcome.spellable(outcome.session.persistent_entries()));
     if !kept {
         // The trampoline directory is recorded as the project's first element, so leaving `bin` mode or
         // the project retires it like any other element instead of waiting on the owned-prefix repair.
-        let mut project: Vec<Entry> = outcome.session.project_entry().into_iter().collect();
+        let mut project: Vec<Entry> = outcome.spellable(outcome.session.project_entry().into_iter().collect());
         project.extend(outcome.project.iter().cloned());
         let project = reconcile::session_writable(&project, previous);
         next.applied
@@ -2015,6 +2048,7 @@ mod session_path_tests {
             resolved: true,
             slot: Some(identity()),
             inert: false,
+            spelled_for: None,
             messages: Vec::new(),
         }
     }
@@ -2159,6 +2193,40 @@ mod session_path_tests {
             position(&path, &global_bin()) + 1,
             "C-060: with no project slot the pair is adjacent, global_bin in front; got {path:#?}"
         );
+    }
+
+    /// Under MSYS a session directory with no POSIX spelling (a relative `$OCX_HOME`) leaves the desired
+    /// vector with the plan's entries, so the ledger never records what the shell never received.
+    ///
+    /// Windows only: `Dialect::host()` is MSYS there and native elsewhere, where every entry spells.
+    /// Red state: read `session.entries()` unfiltered in `session_desired`.
+    #[cfg(windows)]
+    #[test]
+    fn an_unspellable_session_directory_never_reaches_the_desired_vector() {
+        let mut outcome = outcome(
+            SessionPath {
+                global_bin: PathBuf::from(r"rel\toolchain\bin"),
+                project_bin: None,
+                install_bin: PathBuf::from(r"rel\install\bin"),
+            },
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(
+            session_desired(&outcome).len(),
+            2,
+            "unfiltered before the shell is known"
+        );
+        outcome.retain_spellable(ocx_shell::shell::Shell::Bash);
+        assert!(session_desired(&outcome).is_empty(), "{:?}", session_desired(&outcome));
+    }
+
+    /// Off the filter, nothing is dropped: an outcome no shell has filtered keeps its session pair.
+    #[test]
+    fn an_outcome_no_shell_filtered_keeps_its_session_directories() {
+        let outcome = outcome(session(), Vec::new(), Vec::new(), None);
+        assert_eq!(session_desired(&outcome).len(), session().entries().len());
     }
 
     // ── Where the session block sits in the desired vector ─────────
@@ -5258,6 +5326,7 @@ mod hook_state_tests {
             owned_home: None,
             resolved: slot.is_some(),
             inert: false,
+            spelled_for: None,
             slot,
             messages: Vec::new(),
         }
