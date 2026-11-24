@@ -60,7 +60,8 @@ impl Auth {
     ///
     /// # Errors
     ///
-    /// [`AuthError`] when an `OCX_AUTH_*` value is a reference that cannot be resolved.
+    /// [`AuthError`] when an `OCX_AUTH_*` value is a reference that cannot be resolved, or when the
+    /// `OCX_AUTH_*` variables for the registry lack one their type needs, such as a `USER` with no `TOKEN`.
     pub async fn get_or_fallback(&self, registry: impl AsRef<str>) -> Result<crate::native::Auth> {
         use ocx_util::singleflight::Acquisition;
 
@@ -77,9 +78,9 @@ impl Auth {
         }
     }
 
-    /// Answers anonymous for every failure except the two that must stop the command: an unresolvable
-    /// reference, or a cancelled variable read. Either of those answered anonymous would pull without the
-    /// credential the user asked for.
+    /// Answers anonymous for every failure except the three that must stop the command: an unresolvable
+    /// reference, an `OCX_AUTH_*` credential missing a variable it needs, or a cancelled variable read.
+    /// Any of those answered anonymous would pull without the credential the user asked for.
     ///
     /// The inner `Err` is the registry's cached answer; the outer one is a failure no waiter may inherit.
     async fn lookup_or_anonymous(
@@ -89,7 +90,9 @@ impl Auth {
         match self.lookup(registry).await {
             Ok(auth) => Ok(Ok(auth)),
             Err(AuthError::Reference(error)) => Ok(Err(error)),
-            Err(error @ AuthError::LookupAborted(_)) => Err(error),
+            Err(
+                error @ (AuthError::LookupAborted(_) | AuthError::MissingEnv(..) | AuthError::UserWithoutToken { .. }),
+            ) => Err(error),
             Err(error) => {
                 log::warn!(
                     "failed to retrieve authentication for registry '{}', falling back to anonymous: {}",
@@ -204,7 +207,13 @@ fn get_env_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Auth>
         None => match (auth_user, auth_token) {
             (Some(user), Some(token)) => Ok(Some(crate::native::Auth::Basic(user, token))),
             (None, Some(token)) => Ok(Some(crate::native::Auth::Bearer(token))),
-            _ => Ok(None),
+            // `Ok(None)` here hands the registry to the Docker credential helper the user meant to bypass.
+            (Some(_), None) => Err(AuthError::UserWithoutToken {
+                user: user_env,
+                token: token_env,
+                auth_type: name(ocx_env::OCX_AUTH_TYPE.declaration()),
+            }),
+            (None, None) => Ok(None),
         },
     }
 }
@@ -322,6 +331,44 @@ mod tests {
         assert!(
             matches!(auth.get_or_fallback("other.example").await, Ok(crate::native::Auth::Bearer(t)) if t == "tok")
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lone_user_is_an_error_naming_the_token_and_never_asks_the_helper() {
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_reg_example_USER", "lone-user-value");
+        let (auth, calls) = counting_auth(|| Ok(Some(crate::native::Auth::Bearer("t".into()))));
+        let outcome = auth.get_or_fallback("reg.example").await;
+        let Err(ref error @ AuthError::UserWithoutToken { .. }) = outcome else {
+            panic!("expected a user without token error, got {outcome:?}");
+        };
+        assert_eq!(
+            error.to_string(),
+            "'OCX_AUTH_reg_example_USER' is set but 'OCX_AUTH_reg_example_TOKEN' is not; \
+             set the token, or set 'OCX_AUTH_reg_example_TYPE=anonymous' to ask for no credentials"
+        );
+        assert!(!error.to_string().contains("lone-user-value"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_typed_credential_missing_its_token_is_an_error_not_anonymous() {
+        let env = ocx_env::overrides::lock();
+        env.set_raw("OCX_AUTH_reg_example_TYPE", "basic");
+        env.set_raw("OCX_AUTH_reg_example_USER", "user");
+        env.set_raw("OCX_AUTH_other_example_TYPE", "token");
+        let (auth, calls) = counting_auth(|| Ok(Some(crate::native::Auth::Bearer("t".into()))));
+        for (registry, variable) in [
+            ("reg.example", "OCX_AUTH_reg_example_TOKEN"),
+            ("other.example", "OCX_AUTH_other_example_TOKEN"),
+        ] {
+            let outcome = auth.get_or_fallback(registry).await;
+            assert!(
+                matches!(&outcome, Err(AuthError::MissingEnv(_, name)) if name == variable),
+                "expected a missing token error for {registry}, got {outcome:?}"
+            );
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
