@@ -1037,6 +1037,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn registry_slugged_locks_refused() {
+        let home = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let reserved = PackageRef::new_registry(REPO, "locks").clone_with_tag("3.28");
+
+        let error = manager
+            .export(request(out.path(), vec![reserved]))
+            .await
+            .expect_err("import refuses a registry slugged 'locks'");
+
+        assert!(matches!(error, Error::ExportDirInvalid { .. }), "{error}");
+        assert!(
+            error.to_string().contains("'locks'"),
+            "names the reserved slug: {error}"
+        );
+        assert_eq!(exit_of(&error), Some(ExitCode::DataError));
+        assert!(
+            !out.path().join("ocx-export.json").is_file(),
+            "a refused run writes no marker"
+        );
+        assert!(
+            !out.path().join("blobs").join("locks").exists(),
+            "the refusal comes before any blob is written"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn marker_written_last() {
         let home = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
