@@ -21,6 +21,11 @@
 # A listed root or command carries version baseline + 1; one no entry lists,
 # its baseline version. A `doc` entry bumps nothing. An entry that matches no
 # finding is stale and reds, except a `semantic` entry.
+#
+# An `OCX_*` variable has no version, so a change in its meaning has no entry
+# here: its `cli.json` fields and the `!` commit subject record it
+# (adr_ocx_interface_contract.md, Env contract). The only env entries are a
+# `cli` G13 or G14 with subjects = ["*"] and pointer = "/env/<baseline index>".
 
 [[break]]
 document = "reports"

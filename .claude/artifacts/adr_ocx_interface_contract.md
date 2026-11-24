@@ -340,6 +340,23 @@ Each type has one `JsonSchema` impl with a fixed `schema_name` and `schema_id`.
 - **Retired names:** within a rename window the old name warns once (name only) and is honoured; after the removal release it exits 78 naming the replacement; never silently ignored. A polarity change never rides an alias: the old name retires to an error immediately. Invalid values on hardening variables (`OCX_FROZEN`, `OCX_OFFLINE`, `OCX_NO_CONSENT`, `OCX_NO_VERIFY`, …) exit 78 instead of falling back to the default.
 - **Secrets:** `secret` entries are never formatted (values wrapped in a type without `Display`; parse warnings name the key only); child propagation (`scrub`/`inherit`/`forward`) is a separate attribute from which `CREDENTIAL_KEYS`, the `ocx_script` deny set and mirror's forward list derive. `error.context` keys must be vocabulary types; free strings and raw URLs are refused by lint.
 
+**Decision 2026-11-23 (owner, [ocx-sh/ocx#765](https://github.com/ocx-sh/ocx/issues/765)): a change in meaning of an `OCX_*` variable is recorded in `cli.json` and in the commit subject, not in the ledger.** The record has two parts. A program diffs the variable's published fields in `cli.json` between two ocx versions: `value`, `choices`, `on_invalid`, `secret`, `accepts_reference`, `propagation` and `summary` (`EnvSpec`, `crates/ocx_schema/src/cli.rs`). A person reads the `!` commit subject, which is the changelog line. The ledger gains no entry kind for variables, and the gate is unchanged. The secret-reference change ([`521becc7`](https://github.com/ocx-sh/ocx/commit/521becc72197ad1d722e678467b505127918fce8), [ocx-sh/ocx#756](https://github.com/ocx-sh/ocx/issues/756)) is the first case: `accepts_reference` became `true` on each variable whose `file://`, `env://` or `plain://` value changed meaning, and the subject carries `!`. No retroactive entry is written for it.
+
+Why:
+
+- **A variable has no version.** `cli.json` versions each command (`version`) and the document layout (`schema_version`); the env registry is document-wide, and the `contract` table of `ocx version --format json` lists no variable. A ledger row would have nothing to bump, so it would be a second changelog that no program can act on.
+- **The published fields already carry the signal a program can use.** A field that moves between two `cli.json` documents is detectable without any ledger.
+- **The alternative was sized and declined.** A ledger entry kind for variables touches 6–8 files and needs a per-variable version, a concept the contract does not have.
+
+What the gate checks for variables today (`compat.rs`, `Grammar::env`, against `baseline/cli.json`). It reads Public entries only, matched by name:
+
+- **G13:** a Public variable in the baseline is absent from the current Public set (removed, renamed, or no longer Public), and `retired` holds no `window` entry for its name.
+- **G14:** `value` differs in any way (a widening too), a baseline choice is gone, or `on_invalid` became `error`.
+- A G13 or G14 finding is acknowledged by a `cli` entry with `subjects = ["*"]` and `pointer = "/env/<baseline index>"`. That entry bumps no command version.
+- **Not checked:** `accepts_reference`, `secret`, `propagation`, `summary`, `flag`, an added choice, an added variable, and every Foreign or Plumbing entry. A `semantic` entry cannot speak to a variable: `semantic` matches only a reworded description (D01), the env diff emits none, a `semantic` entry is exempt from the stale check, and `["*"]` under `cli` bumps nothing. Such an entry is accepted and does nothing.
+
+**Revisit when** any of these occurs: a variable's meaning changes and no published field moves, which leaves the commit subject as the only record and nothing a program can read; an SDK needs to refuse before spawning because of a variable change, which needs a version the handshake can compare; or the gate is asked to fail on an unrecorded change to a variable's published fields.
+
 ### SDK contract (all languages)
 
 - Handshake over `ocx --format json version`; minimum `ocx` = the contract release recorded in the generated `contract` table; a command whose own version or any output root version differs is **refused before spawning**.
@@ -402,7 +419,7 @@ Open question 3 may add one sentence about env spellings in flight. The § Stabi
 
 ### Communicating breaks
 
-Commit subjects only, one `!` commit per user-visible break (the error document's pretty print included). No `CHANGELOG.md` edit, no migration prose. From phase 2, ledger + version (programs).
+Commit subjects only, one `!` commit per user-visible break (the error document's pretty print included). No `CHANGELOG.md` edit, no migration prose. From phase 2, ledger + version (programs). An `OCX_*` variable has no version: its record for programs is the moved `cli.json` field (§ Env contract, decision 2026-11-23).
 
 ### Flag renames — the batched window
 
@@ -579,4 +596,5 @@ Counts: 94 findings, 47 after merging duplicates. A 86 (generator ownership leav
 | 2026-10-03 | hex-plan (Opus) | Plan-review amendments: roots 56 → 54 (nested-only `PackageInspect`/`PackageDescription`); `waivers/<area>.toml`; gate target always built, live case guarded by the baseline lint; byte lint never deleted, inert once the gate is live |
 | 2026-10-04 | hex-execute (Opus) | § Go/no-go outcome: phase 2 goes with Option D; oasdiff not adopted; criterion (a) partially met (mirror deferred per plan D-17); open question 1 and the Don't-own rows updated |
 | 2026-11-07 | hex-execute (Sonnet) | SDK spawn contract amendment: exact child-environment spec (`__OCX_ENV_STATE` stripped, user `OCX_*` stripped, pin written last) and the `conformance/spawn/cases.json` fixture (plan_exec_env_model, SDK) |
+| 2026-11-23 | hex-execute (Opus) | § Env contract decision: a change in meaning of an `OCX_*` variable is recorded by its `cli.json` fields and the `!` commit subject, with no ledger entry kind; what the gate checks for variables; revisit conditions ([ocx-sh/ocx#765](https://github.com/ocx-sh/ocx/issues/765)) |
 | 2026-11-07 | hex-execute (Sonnet) | D-45 amendment: the SDK strips nothing; child = parent, caller pairs, `OCX_BINARY_PIN` last; corpus and generated Rust spawner follow (plan_exec_env_model, A2 SATS) |

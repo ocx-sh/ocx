@@ -40,7 +40,7 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 | IC-13 | Env name = `OCX_` + SCREAMING(long flag that departs from the default); positive `OCX_X`, negative `OCX_NO_X` | C05 |
 | IC-14 | Internal variables are `__OCX_TESTING_*` (tests) or `__OCX_*` (plumbing), never `OCX_TEST_*` | registry test |
 | IC-15 | Enum values and union variants are open in the schema; adding one is additive; success checks fail closed | L04, L05, compat classification |
-| IC-16 | A value's meaning never changes under the same name; if it must, record a `semantic` break | checklist |
+| IC-16 | A value's meaning never changes under the same name; if it must, record a `semantic` break — for an `OCX_*` variable, a moved `cli.json` field and a `!` subject instead | checklist |
 | IC-17 | Publisher-supplied JSON is `OpaqueJson`, passed through unchanged | L03 exemption |
 | IC-18 | Never `additionalProperties: false` in an output schema | L15 |
 | IC-19 | `error.context` holds vocabulary types only; URLs are `RedactedUrl` | L16 |
@@ -65,7 +65,8 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 
 ## Semantic-break checklist
 
-- Does this change what an existing value, field or description *means* under the same name? Then it is a `semantic` ledger entry and a bumped version, not an edit.
+- Does this change what an existing value, field or description *means* under the same name? Then it is a `semantic` ledger entry and a bumped version, not an edit. An `OCX_*` variable is the exception, next item.
+- Does it change what an `OCX_*` variable's value means? Move the `cli.json` field that carries the change (`value`, `choices`, `on_invalid`, `secret`, `accepts_reference`, `propagation`, or a reworded `summary` (ungated)), and write a `!` commit subject that names the variable and the new reading. Write no ledger entry: a variable has no version, and the gate sees only G13 and G14. If no field moves, stop: that is the ADR § Env contract revisit condition.
 - Does it add an enum value or union variant? Additive, but every success check on it must still fail closed.
 - Does it rename or remove a flag, env name, slug or field? It is a break: the retired name goes into the registry, and an in-flight spelling into `deprecated.rs`.
 - Does it add an exit code or an `error.kind`? Cite the row of `adr_exit_code_taxonomy.md` for its new next action; a feature is a slug, not a code.
