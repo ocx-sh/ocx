@@ -145,14 +145,16 @@ tasks:
     # generators above it need `cargo`, `uv`, a zot registry and a network
     # fetch of `agg`, so they stay on Taskfile.
     #
-    # `scripts:publish` is a hard prerequisite, not a convenience: the rule
-    # refuses by name without `src/_scripts/`, because ~30 pages include those
-    # snippets and astro aborts on the first miss.
+    # `scripts:publish` and `schema:generate` are hard prerequisites, not a
+    # convenience: the rule refuses by name without `src/_scripts/` (~30 pages
+    # include those snippets and astro aborts on the first miss) and without
+    # `src/public/schemas/` (the site publishes them as `schemas/`).
     #
     # No `sources:`, deliberately — Bazel owns the skipping, off the declared
     # inputs in `website/BUILD.bazel`, not a second list kept here.
     dir: '{{.TASKFILE_DIR}}'
     cmds:
+      - task: schema:generate
       - task: scripts:publish
       - ocx exec bazel -- bazel {{.CACHE_RC}} build //website:site
       - rm -rf dist

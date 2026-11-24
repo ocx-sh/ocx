@@ -27,7 +27,7 @@ Starlight + the shared `@ocx-sh/theme` — one theme across the ocx.sh sites; in
 | `src/public/{casts,data,schemas}` | **Generated, gitignored** — asciinema recordings, SBOM data, the published JSON schemas |
 | `src/public/schemas/{metadata,config,project,project-lock,patch,reports,execution-record,errors}/v*.json` | The eight schemas from the `ocx_schema` crate (`patch` = `ocx patch publish --descriptor` format; `reports` and `errors` = the `--format json` output contract) |
 | `taskfile.yml` | Website tasks (install, serve, build, test, check, lint:links, check:budget, reference) |
-| `BUILD.bazel`, `site.bzl` | Coarse Bazel rule `//website:site` (`task website:bazel:build`) |
+| `BUILD.bazel`, `site.bzl` | Coarse Bazel rule `//website:site` (`task website:bazel:build`; runs `schema:generate` first, and the action fails without the generated schemas tree) |
 
 ## Reference Page Shape
 

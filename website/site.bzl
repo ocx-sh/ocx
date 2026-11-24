@@ -39,10 +39,19 @@ cache answers with the old site (`hermetic-declared-input-missing`).
 ## Why the published copies are an input
 
 ~30 pages include `\\<\\<\\< @/_scripts/<slug>.sh` snippets, and the build aborts
-on the first missing one. The published tree is therefore the one hard
+on the first missing one. The published tree is therefore a hard
 prerequisite: the rule declares `src/**` and refuses at action time, naming the
-task that writes them, when the tree is empty. Generated schemas, casts and the
-SBOM page are not prerequisites; the build runs clean without them.
+task that writes them, when the tree is empty. The generated schemas under
+`src/public/schemas` are the other one: the site publishes them as `schemas/`,
+so an empty tree is refused by name rather than packed as a site without them.
+Casts are not prerequisites.
+
+## The schemas tree matches `task website:build`
+
+The action runs the same `scripts/schemas-index.mjs` the Taskfile build runs,
+then `tests/schemas-index.test.mjs` with `WEBSITE_REQUIRE_DIST=1` — the test
+`task website:check` runs over the Taskfile build. Both routes are held to one
+file set: the schema files plus the `index.html` that links them.
 
 ## The output is a `.tar`
 
@@ -140,6 +149,12 @@ published=$(find -L src/_scripts -type f -name '*.sh' | wc -l)
     "no published doc-script snippets under $PWD/src/_scripts - \\`task \\
 website:scripts:publish\\` writes them (they are gitignored build output)"
 
+# The site publishes these as `schemas/`; without them it would pack a site with no schemas tree.
+schemas=$(find -L src/public/schemas -type f -name '*.json' 2>/dev/null | wc -l || true)
+[ "$schemas" -gt 0 ] || fail \\
+    "no generated schemas under $PWD/src/public/schemas - \\`task schema:generate\\` \\
+writes them (they are gitignored build output)"
+
 # Build from a DEREFERENCED copy: vite resolves a symlinked module to its real
 # path, so every page id would name the source tree while the page universe is
 # keyed on execroot paths. `cp -RL` also leaves no path pointing out of the
@@ -149,7 +164,10 @@ work="$PWD/.bazel-site"
 rm -rf "$work"
 mkdir -p "$work/website"
 trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/website/scripts" "$work/website/tests"
 cp -RL astro.config.mjs package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json plugins redirects.d src "$work/website/" \\
+    && cp -L scripts/schemas-index.mjs "$work/website/scripts/" \\
+    && cp -L tests/schemas-index.test.mjs "$work/website/tests/" \\
     || fail "could not dereference the site inputs into $work"
 # The changelog page includes it from outside the package, so it is an input
 # only once the root BUILD.bazel exports it; until then the include fails by name.
@@ -173,10 +191,14 @@ dist=dist/docs
 pages=$(find "$dist" -type f -name '*.html' | wc -l)
 [ "$pages" -gt 0 ] || fail "$PWD/$dist holds 0 rendered pages"
 
-# Schemas are a second tree at the site root, as in `task website:build`.
-if [ -d "$dist/schemas" ]; then
-    mv "$dist/schemas" dist/schemas
-fi
+# Schemas are a second tree at the site root, with the index page, as in `task website:build`.
+[ -d "$dist/schemas" ] || fail "astro exited 0 but copied no $PWD/$dist/schemas"
+mv "$dist/schemas" dist/schemas
+node scripts/schemas-index.mjs dist/schemas \\
+    || fail "scripts/schemas-index.mjs exited $?"
+# The file-set check `task website:check` runs over the Taskfile build.
+WEBSITE_REQUIRE_DIST=1 node --test tests/schemas-index.test.mjs \\
+    || fail "dist/schemas differs from the schema files plus index.html (tests/schemas-index.test.mjs)"
 
 # Deterministic metadata, so check (b) compares astro's output and never tar's
 # framing of it.

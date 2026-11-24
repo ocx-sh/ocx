@@ -30,6 +30,8 @@ load("//website:site.bzl", "site_target")
 # by name without it), plus `src/public/casts`, `src/public/data`,
 # `src/public/schemas` and `src/content/docs/reference/dependencies.md`. They
 # are files the site embeds, so they belong in the key.
+# The schemas tree must exist before the build: `website:bazel:build` runs
+# `schema:generate` first, and a missing tree fails the action.
 #
 # `allow_empty = False` is the floor — a glob that matched nothing would
 # otherwise declare a rule whose inputs are the config files alone, and
@@ -51,6 +53,9 @@ _SITE_SRCS = glob(
     "package.json",
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
+    # Run after `astro build`, as `task website:build` runs them: the schemas index page and its file-set check.
+    "scripts/schemas-index.mjs",
+    "tests/schemas-index.test.mjs",
     "tsconfig.json",
     "//:CHANGELOG.md",
 ]
