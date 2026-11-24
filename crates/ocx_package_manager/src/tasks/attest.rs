@@ -10,7 +10,7 @@ use crate::error::{PackageError, PackageErrorKind};
 use ocx_sign::attest::pipeline::{AttestContext, AttestMode, AttestPipeline, AttestResult};
 use ocx_sign::attest::predicate::PredicateType;
 use ocx_sign::sign::state::SigningStatePaths;
-use ocx_sign::sign::{DispatchingTokenProvider, SignError, SignErrorKind};
+use ocx_sign::sign::{DispatchingTokenProvider, SignError, SignErrorKind, Signer};
 
 use super::super::PackageManager;
 
@@ -66,62 +66,74 @@ impl PackageManager {
         opts: AttestOptions,
         resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
     ) -> Result<AttestReport, PackageError> {
-        // Refused here too, or `require_client`'s `OfflineMode` (81) shadows the 77 policy code scripts branch on.
-        if opts.offline {
-            return Err(map_attest_error(
-                package.clone(),
-                SignError::new(package.clone(), SignErrorKind::OfflineAttestRefused),
-            ));
-        }
-
-        // `RawValue`, not `Value`: validates without normalizing, so the signed bytes are the file's own.
-        let predicate: Box<serde_json::value::RawValue> = serde_json::from_slice(&opts.predicate).map_err(|_| {
-            // Parse error discarded: it quotes user-file bytes that would reach the terminal unsanitized.
-            map_attest_error(
-                package.clone(),
-                SignError::new(package.clone(), SignErrorKind::PredicateNotJson),
-            )
-        })?;
-
-        let client = self
-            .require_client()
-            .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
-
-        let signer = super::sign::build_signer(opts.key.clone(), opts.rekor_upload, opts.rekor_url.clone())
-            .await
-            .map_err(|kind| map_attest_error(package.clone(), SignError::new(package.clone(), kind)))?;
-        let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
-        let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
-        // Sign iff signing material is visible; `--key` counts, or naming a key degrades to unsigned without OIDC.
-        // A failed redemption stays a hard error, or an OIDC job publishes an unsigned, attached-looking referrer.
-        let mode = match opts.key.is_some() || token_provider.has_signing_material() {
-            true => AttestMode::Signed,
-            false => AttestMode::Unsigned,
-        };
-        let resolve = super::resolve_subject::sign_resolver(self.index(), resolved);
-        let state = SigningStatePaths::new(self.file_structure().state.root());
-        let context = AttestContext {
-            identifier: package,
-            platform,
-            mode,
-            format: opts.format,
-            signer: signer.as_ref(),
-            token_provider: &token_provider,
-            predicate_type: &opts.predicate_type,
-            predicate: &predicate,
-            no_cache: opts.no_cache,
-            offline: opts.offline,
-            dial: self.index().dial_policy(package.registry()),
-            resolve,
-            fulcio_url: &opts.fulcio_url,
-            rekor_url: &opts.rekor_url,
-            state,
-        };
-        let result = AttestPipeline::run(client, context)
-            .await
-            .map_err(|err| map_attest_error(package.clone(), err))?;
-        Ok(AttestReport { result })
+        attest_with(self, package, platform, opts, resolved, &mut None).await
     }
+}
+
+/// [`PackageManager::attest_one`] with the command's signer slot, filled by the first item that needs it.
+async fn attest_with(
+    manager: &PackageManager,
+    package: &ocx_oci::PackageRef,
+    platform: Option<&ocx_oci::Platform>,
+    opts: AttestOptions,
+    resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
+    signer: &mut Option<Box<dyn Signer>>,
+) -> Result<AttestReport, PackageError> {
+    // Refused here too, or `require_client`'s `OfflineMode` (81) shadows the 77 policy code scripts branch on.
+    if opts.offline {
+        return Err(map_attest_error(
+            package.clone(),
+            SignError::new(package.clone(), SignErrorKind::OfflineAttestRefused),
+        ));
+    }
+
+    // `RawValue`, not `Value`: validates without normalizing, so the signed bytes are the file's own.
+    let predicate: Box<serde_json::value::RawValue> = serde_json::from_slice(&opts.predicate).map_err(|_| {
+        // Parse error discarded: it quotes user-file bytes that would reach the terminal unsanitized.
+        map_attest_error(
+            package.clone(),
+            SignError::new(package.clone(), SignErrorKind::PredicateNotJson),
+        )
+    })?;
+
+    let client = manager
+        .require_client()
+        .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
+
+    let signer = super::sign::shared_signer(signer, &opts.key, opts.rekor_upload, &opts.rekor_url)
+        .await
+        .map_err(|kind| map_attest_error(package.clone(), SignError::new(package.clone(), kind)))?;
+    let trusted_hosts = manager.index().trusted_hosts_for(package.registry()).to_vec();
+    let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
+    // Sign iff signing material is visible; `--key` counts, or naming a key degrades to unsigned without OIDC.
+    // A failed redemption stays a hard error, or an OIDC job publishes an unsigned, attached-looking referrer.
+    let mode = match opts.key.is_some() || token_provider.has_signing_material() {
+        true => AttestMode::Signed,
+        false => AttestMode::Unsigned,
+    };
+    let resolve = super::resolve_subject::sign_resolver(manager.index(), resolved);
+    let state = SigningStatePaths::new(manager.file_structure().state.root());
+    let context = AttestContext {
+        identifier: package,
+        platform,
+        mode,
+        format: opts.format,
+        signer,
+        token_provider: &token_provider,
+        predicate_type: &opts.predicate_type,
+        predicate: &predicate,
+        no_cache: opts.no_cache,
+        offline: opts.offline,
+        dial: manager.index().dial_policy(package.registry()),
+        resolve,
+        fulcio_url: &opts.fulcio_url,
+        rekor_url: &opts.rekor_url,
+        state,
+    };
+    let result = AttestPipeline::run(client, context)
+        .await
+        .map_err(|err| map_attest_error(package.clone(), err))?;
+    Ok(AttestReport { result })
 }
 
 impl PackageManager {
@@ -138,6 +150,7 @@ impl PackageManager {
 
         // Subject digest -> the tag whose run attested it.
         let mut attested: HashMap<ocx_oci::Digest, String> = HashMap::new();
+        let mut signer = None;
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
@@ -155,13 +168,15 @@ impl PackageManager {
                         );
                         SweptOutcome::CoveredBy(first)
                     }
-                    None => match self.attest_one(&identifier, None, opts.clone(), Some(&resolved)).await {
-                        Ok(report) => {
-                            attested.insert(resolved.0.clone(), tag.clone());
-                            SweptOutcome::Done(report)
+                    None => {
+                        match attest_with(self, &identifier, None, opts.clone(), Some(&resolved), &mut signer).await {
+                            Ok(report) => {
+                                attested.insert(resolved.0.clone(), tag.clone());
+                                SweptOutcome::Done(report)
+                            }
+                            Err(error) => SweptOutcome::Failed(Box::new(error)),
                         }
-                        Err(error) => SweptOutcome::Failed(Box::new(error)),
-                    },
+                    }
                 },
             };
             swept.push(SweptTag {
@@ -342,5 +357,31 @@ mod tests {
             expected_resolutions(),
             "one manifest resolution per swept tag, each for that tag",
         );
+    }
+
+    /// An attest sweep of N tags builds one signer, so a key-mode sweep reads `OCX_KEY_PASSWORD` once.
+    #[tokio::test]
+    async fn an_attest_tag_sweep_builds_its_signer_once() {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::sign::sweep_test_support::{
+            TAGS, manifest_reads, signer_builds, sweep_identifier, sweep_manager,
+        };
+
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let (manager, transport) = sweep_manager(Arc::new(Mutex::new(Vec::new())), temp.path());
+        let tags: Vec<String> = TAGS.iter().map(|tag| (*tag).to_string()).collect();
+
+        let before = signer_builds();
+        manager
+            .attest_tags(&sweep_identifier(), &tags, &options(br#"{"bomFormat":"CycloneDX"}"#))
+            .await;
+
+        assert_eq!(
+            manifest_reads(&transport),
+            TAGS.len(),
+            "positive control: every tag reached the pipeline, past the signer",
+        );
+        assert_eq!(signer_builds() - before, 1, "one signer for the whole sweep");
     }
 }

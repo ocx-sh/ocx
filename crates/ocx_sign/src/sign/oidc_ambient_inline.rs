@@ -105,6 +105,7 @@ impl TokenProvider for InlineAmbientProvider {
             reason: "ambient_provider_no_token".to_string(),
         };
         let (gitlab, circle, gha) = ambient_env();
+        // The `.get()` reads below never block: these are `Foreign` secrets, which accept no `file://`/`env://` reference.
         match select_source(gitlab, circle, gha) {
             None => return Err(no_token()),
             Some(AmbientSource::Direct(var)) => {

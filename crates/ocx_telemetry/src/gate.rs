@@ -182,20 +182,40 @@ fn opt_out(offline: bool) -> Option<OffReason> {
 /// `enabled` value too broken to read, where the intent is unknown. Anyone else gets a debug line,
 /// so a stray key in a shared config never prints on a run that never wanted telemetry.
 pub fn decide(section: Option<&TelemetryConfig>, offline: bool) -> Decision {
+    match precheck(section, offline) {
+        Precheck::Armed(armed_by) => select_destination(section, armed_by),
+        Precheck::Settled(decision) => decision,
+    }
+}
+
+/// The outcome of [`precheck`]: a decision already settled, or a run that wants to export.
+#[derive(Debug)]
+pub enum Precheck {
+    /// Off whatever the destination would be; nothing more to read.
+    Settled(Decision),
+    /// Wants to export and still needs [`select_destination`].
+    Armed(ArmedBy),
+}
+
+/// The part of [`decide`] that reads no secret.
+///
+/// A caller that keeps secret reads off the async runtime runs this inline, and hops to the blocking
+/// pool only for [`Precheck::Armed`], so a run without telemetry pays no thread hop.
+pub fn precheck(section: Option<&TelemetryConfig>, offline: bool) -> Precheck {
     if let Some(reason) = opt_out(offline) {
-        return Decision::off(reason);
+        return Precheck::Settled(Decision::off(reason));
     }
     let switch = read_switch();
     match switch {
-        SwitchState::Off => return Decision::off(OffReason::Switch),
+        SwitchState::Off => return Precheck::Settled(Decision::off(OffReason::Switch)),
         SwitchState::Invalid => {
-            return Decision::Off {
+            return Precheck::Settled(Decision::Off {
                 reason: OffReason::Switch,
                 warnings: vec![format!(
                     "telemetry is off: {} is not a boolean; set it to true or false, or unset it",
                     ocx_env::OCX_TELEMETRY.name
                 )],
-            };
+            });
         }
         SwitchState::On | SwitchState::Unset => {}
     }
@@ -213,20 +233,25 @@ pub fn decide(section: Option<&TelemetryConfig>, offline: bool) -> Decision {
                 tracing::debug!(target: "ocx_telemetry", "{message}");
                 Vec::new()
             };
-            return Decision::Off {
+            return Precheck::Settled(Decision::Off {
                 reason: OffReason::Unusable,
                 warnings,
-            };
+            });
         }
         if section.system_locked && section.enabled == Some(false) {
-            return Decision::off(OffReason::Locked);
+            return Precheck::Settled(Decision::off(OffReason::Locked));
         }
     }
-    let armed_by = match switch {
-        SwitchState::On => ArmedBy::Switch,
-        _ if section.is_some_and(|section| section.enabled == Some(true)) => ArmedBy::Config,
-        _ => return Decision::off(OffReason::NotEnabled),
-    };
+    match switch {
+        SwitchState::On => Precheck::Armed(ArmedBy::Switch),
+        _ if section.is_some_and(|section| section.enabled == Some(true)) => Precheck::Armed(ArmedBy::Config),
+        _ => Precheck::Settled(Decision::off(OffReason::NotEnabled)),
+    }
+}
+
+/// The armed decision for a run [`precheck`] let through: resolves the destination, which reads the
+/// headers secret and so may block on a `file://` reference.
+pub fn select_destination(section: Option<&TelemetryConfig>, armed_by: ArmedBy) -> Decision {
     let (destination, mut warnings) = destination::select(section);
     if unrecognised(&ocx_env::OTEL_SDK_DISABLED) {
         warnings.push(format!(

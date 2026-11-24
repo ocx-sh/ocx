@@ -303,9 +303,10 @@ impl Context {
         let file_structure = file_structure::FileStructure::new();
         let mut activity_log = None;
         if !in_seam && let Some(slot) = telemetry {
+            let decision = super::telemetry::decide(config.telemetry.as_ref(), options.offline).await;
             let arming = super::telemetry::arm(
                 config.telemetry.as_ref(),
-                options.offline,
+                decision,
                 file_structure.state.telemetry_installation_id_file(),
                 extra_roots_merged.clone(),
                 &ui,
