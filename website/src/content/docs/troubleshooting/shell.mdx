@@ -210,7 +210,7 @@ Dropped records are the memory OCX uses to undo its changes. Leaving a project m
 
 This issue occurs when the `[shell] hook` or `[shell] completions` switch resolves to off for the shell you are in. It also occurs when you changed a switch in a shell that is already running, because both are read once, at shell start.
 
-On Windows, an MSYS2 or Cygwin shell reads its startup files from its own home directory, such as `C:\msys64\home\<user>` or `C:\cygwin64\home\<user>`. `ocx self setup` run from PowerShell cannot see that directory, so the shell never sees the managed block. Run `ocx self setup` once inside that shell:
+On Windows, an MSYS2 or Cygwin shell reads its startup files from its own home directory, such as `C:\msys64\home\<user>` or `C:\cygwin64\home\<user>`. `ocx self setup` run from PowerShell writes no rc file there, so the shell never sees the managed block. Setup warns when such a directory exists at the default install location. Run `ocx self setup` once inside that shell:
 
 <ShellSession>
 

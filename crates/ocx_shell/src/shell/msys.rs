@@ -55,7 +55,8 @@ pub(super) fn list_element<'a>(native: &'a str, drive_prefix: &str) -> Cow<'a, s
 /// Refused: a bare drive `C:` (the drive's current directory), a `C:foo` or later `:` (a colon splits
 /// `PATH`), a single leading `\` (rooted on the current drive), a relative result, and, for converted
 /// input, a `..` segment (MSYS resolves it textually, Windows clamps at the root) or an element of
-/// only slashes. POSIX-absolute input passes through unchanged.
+/// only slashes. POSIX-absolute input such as `/bin` passes through unchanged: it names a directory under
+/// the runtime's root, which is a valid MSYS2 and Cygwin path.
 #[must_use]
 pub(super) fn path_element(native: &str, drive_prefix: &str) -> Option<String> {
     let verbatim = native.strip_prefix(r"\\?\").unwrap_or(native);
@@ -71,6 +72,33 @@ pub(super) fn path_element(native: &str, drive_prefix: &str) -> Option<String> {
     let was_converted = converted != native;
     let unspellable = converted.split('/').any(|segment| segment == "..") || converted.bytes().all(|b| b == b'/');
     (!(was_converted && unspellable)).then_some(converted)
+}
+
+/// `element` as a bash or zsh pattern that matches it under ASCII case folding, the way Windows compares
+/// `PATH` entries: a letter becomes `[xX]`, a pattern-special character gets a `\`, anything else stays.
+///
+/// The escape set is exactly the characters special in a bash (extglob) or zsh (extendedglob, kshglob)
+/// pattern: zsh keeps a `\` before any other character as a literal backslash, so the pattern would miss.
+#[must_use]
+pub(super) fn case_folding_pattern(element: &str) -> String {
+    let mut pattern = String::with_capacity(element.len() * 2);
+    for character in element.chars() {
+        if character.is_ascii_alphabetic() {
+            pattern.push('[');
+            pattern.push(character.to_ascii_lowercase());
+            pattern.push(character.to_ascii_uppercase());
+            pattern.push(']');
+        } else {
+            if matches!(
+                character,
+                '\\' | '*' | '?' | '[' | ']' | '(' | ')' | '|' | '<' | '>' | '^' | '#' | '~' | '!'
+            ) {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+    }
+    pattern
 }
 
 /// `X:` followed by the end or a separator.
@@ -183,6 +211,36 @@ mod tests {
                 expected,
                 "input {input}"
             );
+        }
+    }
+
+    /// A driveless POSIX-absolute entry is a valid MSYS2 and Cygwin path: it resolves under the
+    /// runtime's own root, so it is accepted unchanged rather than refused.
+    #[test]
+    fn a_driveless_posix_absolute_entry_is_accepted_unchanged() {
+        for drive_prefix in [MSYS_DRIVE_PREFIX, CYGWIN_DRIVE_PREFIX] {
+            for entry in ["/bin", "/usr/local/bin", "/opt/x y"] {
+                assert_eq!(
+                    path_element(entry, drive_prefix).as_deref(),
+                    Some(entry),
+                    "{drive_prefix} {entry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn case_folding_pattern_table() {
+        let cases = [
+            ("/c/Users/x", "/[cC]/[uU][sS][eE][rR][sS]/[xX]"),
+            ("/c/a b/1", "/[cC]/[aA] [bB]/1"),
+            (r"/x/[1]*?\(a|b)", r"/[xX]/\[1\]\*\?\\\([aA]\|[bB]\)"),
+            ("/x/<^#~!>", r"/[xX]/\<\^\#\~\!\>"),
+            ("/x/@+{},.:=-'$`\"", "/[xX]/@+{},.:=-'$`\""),
+            ("/c/é", "/[cC]/é"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(case_folding_pattern(input), expected, "input {input}");
         }
     }
 

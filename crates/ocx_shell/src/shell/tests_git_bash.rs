@@ -22,6 +22,11 @@ use std::process::Command;
 
 const PROBE: &str = "probe-ocx-msys";
 
+#[cfg(unix)]
+const MSYS: Dialect = Dialect::Msys {
+    drive_prefix: msys::MSYS_DRIVE_PREFIX,
+};
+
 /// Bash to drive on this host, or `None` when it is not installed.
 #[cfg(unix)]
 pub(crate) fn find_bash() -> Option<PathBuf> {
@@ -67,20 +72,59 @@ pub(crate) fn find_bash() -> Option<PathBuf> {
         })
 }
 
-/// Run `script` under `bash -c`, returning stdout; any failure panics with the script and stderr.
+/// A POSIX shell to drive: which emit arm it reads, its executable, the flags before `-c`, and a
+/// directory its child processes need first on `PATH` (MSYS2's own tools for MSYS2 zsh).
+#[derive(Clone, Copy)]
+struct Interpreter<'a> {
+    shell: Shell,
+    program: &'a Path,
+    flags: &'a [&'a str],
+    path_first: Option<&'a Path>,
+}
+
+impl<'a> Interpreter<'a> {
+    fn bash(program: &'a Path) -> Self {
+        Self {
+            shell: Shell::Bash,
+            program,
+            flags: &[],
+            path_first: None,
+        }
+    }
+
+    /// `-f` skips every startup file, so only the script shapes the session.
+    fn zsh(program: &'a Path, path_first: Option<&'a Path>) -> Self {
+        Self {
+            shell: Shell::Zsh,
+            program,
+            flags: &["-f"],
+            path_first,
+        }
+    }
+}
+
+/// Run `script` under `interpreter -c`, returning stdout; any failure panics with the script and stderr.
 #[expect(
     clippy::disallowed_types,
     reason = "test-only live-shell harness sourcing generated export lines in a real shell"
 )]
-fn bash_stdout(bash: &Path, script: &str) -> String {
-    let output = Command::new(bash)
-        .args(["-c", script])
+fn shell_stdout(interpreter: Interpreter<'_>, script: &str) -> String {
+    let mut command = Command::new(interpreter.program);
+    command.args(interpreter.flags).args(["-c", script]);
+    if let Some(first) = interpreter.path_first {
+        let inherited = ocx_env::PATH.get_raw().unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(first.to_path_buf()).chain(std::env::split_paths(&inherited)))
+                .expect("PATH entries carry no separator");
+        command.env("PATH", joined);
+    }
+    let output = command
         .output()
-        .unwrap_or_else(|error| panic!("failed to spawn {}: {error}", bash.display()));
+        .unwrap_or_else(|error| panic!("failed to spawn {}: {error}", interpreter.program.display()));
     assert!(
         output.status.success(),
         "{} exited {} on:\n{script}\nstderr: {}",
-        bash.display(),
+        interpreter.program.display(),
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -109,19 +153,26 @@ struct PathSession {
 
 /// Export `dir` through the emit, resolve a probe script in it, optionally run `native_child_cmd`
 /// (a command line whose last stdout line is the native child's `PATH`), then remove `dir` again.
-fn path_session(bash: &Path, dialect: Dialect, dir: &Path, native_child_cmd: Option<&str>) -> PathSession {
+fn path_session(
+    interpreter: Interpreter<'_>,
+    dialect: Dialect,
+    dir: &Path,
+    native_child_cmd: Option<&str>,
+) -> PathSession {
     let dir_str = dir.to_string_lossy();
-    let export = Shell::Bash
+    let export = interpreter
+        .shell
         .export_path_as(dialect, "PATH", &dir_str)
         .expect("export line");
-    let remove = Shell::Bash
+    let remove = interpreter
+        .shell
         .remove_list_element_as(dialect, "PATH", &dir_str, None)
         .expect("remove line");
     let native = native_child_cmd
         .map(|cmd| format!("echo @@native; {cmd} | tail -n 1\n"))
         .unwrap_or_default();
     let script = format!(
-        "echo @@version; echo \"$BASH_VERSION\"\n\
+        "echo @@version; echo \"${{BASH_VERSION:-$ZSH_VERSION}}\"\n\
          echo @@before; printf '%s\\n' \"$PATH\"\n\
          {export}\n\
          echo @@path; printf '%s\\n' \"$PATH\"\n\
@@ -130,7 +181,7 @@ fn path_session(bash: &Path, dialect: Dialect, dir: &Path, native_child_cmd: Opt
          {remove}\n\
          echo @@removed; printf '%s\\n' \"$PATH\"\n"
     );
-    let stdout = bash_stdout(bash, &script);
+    let stdout = shell_stdout(interpreter, &script);
     PathSession {
         version: section(&stdout, "version").to_string(),
         before_export: section(&stdout, "before").to_string(),
@@ -144,7 +195,7 @@ fn path_session(bash: &Path, dialect: Dialect, dir: &Path, native_child_cmd: Opt
 /// Parts a, c and (when `native_child_cmd` is given) b of the contract: the entry leads `$PATH` in the
 /// dialect's spelling, bash resolves a command placed there, a native child sees the directory under
 /// the in-process comparison rule, and the removal line takes the entry out again.
-fn check_path_entry(bash: &Path, dialect: Dialect, native_child_cmd: Option<&str>) {
+fn check_path_entry(interpreter: Interpreter<'_>, dialect: Dialect, native_child_cmd: Option<&str>) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let dir = temp.path();
     let probe = dir.join(PROBE);
@@ -160,10 +211,10 @@ fn check_path_entry(bash: &Path, dialect: Dialect, native_child_cmd: Option<&str
         Dialect::Msys { drive_prefix } => msys::list_element(&native, drive_prefix).into_owned(),
         Dialect::Native => native.clone().into_owned(),
     };
-    let session = path_session(bash, dialect, dir, native_child_cmd);
+    let session = path_session(interpreter, dialect, dir, native_child_cmd);
 
     let front: Vec<&str> = session.after_export.split(':').take(3).collect();
-    eprintln!("# ocx: bash {} PATH front {front:?}", session.version);
+    eprintln!("# ocx: {} {} PATH front {front:?}", interpreter.shell, session.version);
     if let Some(child) = &session.native_child {
         eprintln!("# ocx: native child PATH {child}");
     }
@@ -227,17 +278,17 @@ fn check_path_entry(bash: &Path, dialect: Dialect, native_child_cmd: Option<&str
 
 /// Part d: `exe` — a runnable binary in a directory whose name holds a space — works as a command
 /// word, `[ -x … ]` operand and wrapped function target.
-fn check_command_word_and_wrapper(bash: &Path, dialect: Dialect, exe: &Path) {
-    let word = Shell::Bash.command_word_as(dialect, exe);
+fn check_command_word_and_wrapper(interpreter: Interpreter<'_>, dialect: Dialect, exe: &Path) {
+    let word = interpreter.shell.command_word_as(dialect, exe);
     assert!(!word.contains('\''), "fixture path must be quote-free: {word}");
-    let wrapper = hook::wrapper_as(dialect, Shell::Bash, exe).expect("bash wrapper");
+    let wrapper = hook::wrapper_as(dialect, interpreter.shell, exe).expect("POSIX wrapper");
     let script = format!(
         "[ -x '{word}' ] && echo exec-ok\n\
          '{word}' >/dev/null; echo status=$?\n\
          {wrapper}\n\
          ocx >/dev/null; echo wrapper-status=$?\n"
     );
-    let stdout = bash_stdout(bash, &script);
+    let stdout = shell_stdout(interpreter, &script);
     for expected in ["exec-ok", "status=0", "wrapper-status=0"] {
         assert!(
             stdout.lines().any(|line| line == expected),
@@ -262,7 +313,10 @@ fn the_native_dialect_round_trips_through_live_bash() {
         bash_absent("the PATH round trip");
         return;
     };
-    check_path_entry(&bash, Dialect::Native, None);
+    let bash = Interpreter::bash(&bash);
+    check_path_entry(bash, Dialect::Native, None);
+    // A POSIX-absolute temp dir passes the MSYS conversion unchanged, so this drives the case-folded removal.
+    check_path_entry(bash, MSYS, None);
 
     let temp = tempfile::TempDir::new().expect("tempdir");
     let dir = temp.path().join("with space");
@@ -273,18 +327,45 @@ fn the_native_dialect_round_trips_through_live_bash() {
         .map(Path::new)
         .find(|candidate| candidate.is_file())
         .expect("a `true` binary");
-    std::fs::copy(source, &exe).expect("copy binary");
-    check_command_word_and_wrapper(&bash, Dialect::Native, &exe);
+    // A link, not a copy: executing a file another thread's `fork` still holds open for writing fails
+    // with ETXTBSY, and this binary's other tests spawn processes concurrently.
+    std::os::unix::fs::symlink(source, &exe).expect("link binary");
+    check_command_word_and_wrapper(bash, Dialect::Native, &exe);
+}
+
+/// zsh reads the same POSIX emit through its own arm, `${~__ocx_q}` included.
+#[cfg(unix)]
+#[test]
+fn the_native_and_msys_dialects_round_trip_through_live_zsh() {
+    let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+    else {
+        assert!(
+            hook::absence_may_skip("zsh"),
+            "zsh is absent, so the zsh PATH round trip proved nothing (__OCX_TESTING_REQUIRE_LIVE_SHELLS names it); install it"
+        );
+        eprintln!("# ocx: UNPROVEN — zsh is not found, so the zsh PATH round trip asserted nothing");
+        return;
+    };
+    let zsh = Interpreter::zsh(zsh, None);
+    check_path_entry(zsh, Dialect::Native, None);
+    check_path_entry(zsh, MSYS, None);
 }
 
 #[cfg(windows)]
 #[test]
 fn the_msys_dialect_round_trips_through_live_git_bash() {
+    // Held for the whole test: a concurrent test's hermetic lock would blank the `ProgramFiles`,
+    // `SystemRoot` and live-shell reads below, so bash goes unfound and the test skips.
+    let _env = ocx_env::overrides::lock();
     let Some(bash) = find_bash() else {
         bash_absent("the Git Bash round trip");
         return;
     };
-    check_path_entry(&bash, Dialect::host(), Some(r#"cmd.exe //c "echo %PATH%""#));
+    let bash = Interpreter::bash(&bash);
+    check_path_entry(bash, Dialect::host(), Some(r#"cmd.exe //c "echo %PATH%""#));
 
     let temp = tempfile::TempDir::new().expect("tempdir");
     let dir = temp.path().join("with space");
@@ -292,5 +373,38 @@ fn the_msys_dialect_round_trips_through_live_git_bash() {
     let system_root = ocx_env::SYSTEM_ROOT.get_os().unwrap_or_else(|| r"C:\Windows".into());
     let exe = dir.join("whoami.exe");
     std::fs::copy(PathBuf::from(system_root).join("System32").join("whoami.exe"), &exe).expect("copy whoami");
-    check_command_word_and_wrapper(&bash, Dialect::host(), &exe);
+    check_command_word_and_wrapper(bash, Dialect::host(), &exe);
+}
+
+/// MSYS2's zsh reads the emit through the zsh arm; the pull-request leg installs it with `pacman`.
+///
+/// It is looked up at MSYS2's default root on the system drive, never on `PATH`.
+#[cfg(windows)]
+#[test]
+fn the_msys_dialect_round_trips_through_live_msys2_zsh() {
+    let _env = ocx_env::overrides::lock();
+    let system_root = PathBuf::from(ocx_env::SYSTEM_ROOT.get_os().unwrap_or_else(|| r"C:\Windows".into()));
+    let Some(drive) = system_root.ancestors().last() else {
+        panic!("SystemRoot {} has no root", system_root.display());
+    };
+    let usr_bin = drive.join("msys64").join("usr").join("bin");
+    let program = usr_bin.join("zsh.exe");
+    if !program.is_file() {
+        assert!(
+            hook::absence_may_skip("zsh"),
+            "{} is absent, so the MSYS2 zsh round trip proved nothing (__OCX_TESTING_REQUIRE_LIVE_SHELLS names it); install it",
+            program.display()
+        );
+        eprintln!("# ocx: UNPROVEN — MSYS2 zsh is not installed, so its round trip asserted nothing");
+        return;
+    }
+    let zsh = Interpreter::zsh(&program, Some(&usr_bin));
+    check_path_entry(zsh, Dialect::host(), Some(r#"cmd.exe //c "echo %PATH%""#));
+
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let dir = temp.path().join("with space");
+    std::fs::create_dir(&dir).expect("mkdir");
+    let exe = dir.join("whoami.exe");
+    std::fs::copy(system_root.join("System32").join("whoami.exe"), &exe).expect("copy whoami");
+    check_command_word_and_wrapper(zsh, Dialect::host(), &exe);
 }

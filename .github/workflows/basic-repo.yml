@@ -343,13 +343,20 @@ jobs:
         with:
           name: unit-tests-${{ matrix.job.target }}
           path: bundle
+      # MSYS2 ships on the image at C:\msys64 without zsh; the live zsh unit test looks for it there,
+      # never on PATH.
+      - name: Install zsh (MSYS2)
+        if: matrix.job.name == 'Windows'
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -Sy --noconfirm --needed zsh
       # `cross:test:run` reds on a failing test and on an under-run.
       - name: Run unit tests
         shell: bash
         env:
-          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper (ocx#524); all
-          # three interpreters ship on the image (Git Bash included, ocx#753), so a skip is a red.
-          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'bash,pwsh,powershell' || '' }}
+          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper (ocx#524); bash, pwsh
+          # and powershell ship on the image (Git Bash included, ocx#753) and zsh is installed above,
+          # so a skip is a red.
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'bash,zsh,pwsh,powershell' || '' }}
         run: task cross:test:run BUNDLE="bundle/unit-tests.tar.gz" SOURCE_ROOT="$GITHUB_WORKSPACE"
       # Annotations and the job summary only: the template's caller grants `contents: read`, so no check run.
       - name: Publish unit test results

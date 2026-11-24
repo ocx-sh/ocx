@@ -63,7 +63,9 @@ Git Bash, MSYS2 and Cygwin are POSIX runtimes. They run bash, zsh and fish, and 
 | Git Bash, MSYS2 | `/c/Users/…` | `C:/…/ocx.exe` |
 | Cygwin | `/proc/cygdrive/c/Users/…` | `C:/…/ocx.exe` |
 
-`/proc/cygdrive` is Cygwin's fixed alias for its drive prefix. It stays valid when a user changed that prefix. OCX picks the spelling from the runtime DLL that comes first on `PATH`: `cygwin1.dll` means Cygwin, `msys-2.0.dll` means Git Bash or MSYS2. No setting is involved. Under that runtime OCX writes the same form for ash, ksh and dash.
+`/proc/cygdrive` is Cygwin's fixed alias for its drive prefix. It stays valid when a user changed that prefix. OCX picks the spelling from the runtime DLL that comes first on `PATH`: `cygwin1.dll` means Cygwin, `msys-2.0.dll` means Git Bash or MSYS2. No setting is involved. Under that runtime OCX writes the same form for ash, ksh and dash. An entry already in POSIX form, such as `/usr/bin`, is written unchanged and resolves under the runtime's own root.
+
+Windows compares `PATH` entries without regard to letter case or slash direction, and OCX follows that when it removes one. This holds under Git Bash and MSYS2 for bash, zsh and fish, and in native nushell and elvish on Windows. Ash, ksh and dash stay case-sensitive.
 
 On Windows, `ocx self setup` wires every shell it finds:
 
@@ -73,9 +75,9 @@ On Windows, `ocx self setup` wires every shell it finds:
 - elvish, when `elvish.exe` is on `PATH`.
 - fish, when `fish.exe` is on `PATH`.
 
-The bash and zsh files are written under `HOME`. When `HOME` is a different directory than `%USERPROFILE%`, setup writes them under `%USERPROFILE%` too. The fish file goes only under the resolved home (`$XDG_CONFIG_HOME`, or `HOME/.config`), never also under `%USERPROFILE%`. Git Bash sets `HOME` to `%USERPROFILE%` and reads its startup files there. MSYS2 and Cygwin use their own home directories, which setup run from PowerShell cannot see. [Shell problems][ts-commands] gives the fix: run `ocx self setup` once inside that shell.
+The bash and zsh files are written under `HOME`. When `HOME` is a different directory than `%USERPROFILE%`, setup writes them under `%USERPROFILE%` too. The fish file goes only under the resolved home (`$XDG_CONFIG_HOME`, or `HOME/.config`), never also under `%USERPROFILE%`. Git Bash sets `HOME` to `%USERPROFILE%` and reads its startup files there. MSYS2 and Cygwin use their own home directories, which setup run from PowerShell does not write to. Setup warns on stderr when it finds one at the default install location, such as `C:\msys64\home\<user>`. [Shell problems][ts-commands] gives the fix: run `ocx self setup` once inside that shell.
 
-Not supported: busybox-w32, and a Windows `ocx.exe` called from inside WSL.
+Not supported: busybox-w32, and a Windows `ocx.exe` called from inside WSL. OCX assumes the default drive prefix: Git Bash and MSYS2 mount drives at `/`, so `C:` is `/c`. If `/etc/fstab` moves that prefix, for example to `/mnt`, OCX still writes `/c/…` and those entries do not resolve.
 
 ### The state carrier \{#activation-state-carrier\}
 

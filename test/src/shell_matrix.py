@@ -36,6 +36,7 @@ import base64
 import functools
 import hashlib
 import json
+import ntpath
 import os
 import re
 import select
@@ -45,6 +46,7 @@ import sys
 import tempfile
 import time
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -735,9 +737,10 @@ def run_script(
     """Write ``body`` to a script file and run it in ``shell``."""
     arm = ARMS[shell]
     script = script_dir / f"{name}{arm.extension}"
-    script.write_text(body.rstrip() + "\n", encoding="utf-8")
+    # LF on every host: Windows text mode writes CRLF, and Git Bash reads the `\r` into every command word.
+    script.write_text(body.rstrip() + "\n", encoding="utf-8", newline="\n")
     return subprocess.run(
-        [shell_abs, *arm.flags, str(script)],
+        [shell_abs, *arm.flags, script.as_posix()],
         cwd=str(cwd),
         capture_output=True,
         check=False,
@@ -821,6 +824,50 @@ def probes(stdout: str) -> dict[str, str]:
 def path_segments(value: str) -> list[str]:
     """Split a PATH-shaped value into its non-empty segments."""
     return [segment for segment in value.split(os.pathsep) if segment]
+
+
+def native_path_list(value: str, host: str = sys.platform) -> list[str]:
+    """Split a *native* PATH list for ``host`` (``;`` on Windows, ``:`` elsewhere) into its non-empty segments."""
+    return [segment for segment in value.split(";" if host == "win32" else ":") if segment]
+
+
+def path_identity(path: str, host: str = sys.platform) -> str:
+    """The key two spellings of one native directory share on ``host``.
+
+    Windows folds case and separators and drops ``\\\\?\\`` and a trailing separator, the way its
+    file system compares names; POSIX keeps the string. Pure: call it on an already-resolved path.
+    """
+    if host != "win32":
+        return path
+    return ntpath.normcase(ntpath.normpath(path.removeprefix("\\\\?\\")))
+
+
+def posix_path_list_fault(value: str, host: str = sys.platform) -> str | None:
+    """Why ``value`` is not the ``:``-joined POSIX ``PATH`` a Git Bash holds, or ``None`` when it is.
+
+    Off Windows every value passes. A ``;``, a backslash or a ``C:`` drive inside bash's own
+    ``PATH`` means the MSYS runtime never converted it, so a ``:`` split would cut a drive in two.
+    """
+    if host != "win32":
+        return None
+    if ";" in value:
+        return "it holds a ';', the Windows separator"
+    if "\\" in value:
+        return "it holds a backslash, a native Windows spelling"
+    if re.search(r"(?:^|:)[A-Za-z]:", value):
+        return "it holds a drive-letter entry such as 'C:', which a ':' split cuts in two"
+    return None
+
+
+def executable_identity(path: str, host: str = sys.platform, exists: Callable[[str], bool] = os.path.exists) -> str:
+    """The file a bash ``command -v`` answer names on ``host``.
+
+    The MSYS runtime finds ``x.exe`` for ``x`` and reports it without the suffix, so on Windows a
+    missing ``path`` whose ``.exe`` twin exists is that twin. Elsewhere the answer is the file.
+    """
+    if host == "win32" and not exists(path) and exists(path + ".exe"):
+        return path + ".exe"
+    return path
 
 
 # ---------------------------------------------------------------------------

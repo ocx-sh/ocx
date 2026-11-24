@@ -161,6 +161,23 @@ impl Shell {
         )
     }
 
+    /// The bash/zsh operand that matches one PATH element in a `${…//…}` or `${…%%…}` pattern.
+    ///
+    /// `literal` (a quoted expansion) natively; under MSYS in bash or zsh a `__ocx_q` glob of `element`
+    /// that folds ASCII case, because Windows compares PATH entries case-insensitively. Returns the
+    /// assignment that sets `__ocx_q`, the operand, and the ` __ocx_q` suffix for the final `unset`.
+    fn case_fold_matcher(self, msys: bool, element: &str, literal: &str) -> (String, String, &'static str) {
+        let operand = match self {
+            _ if !msys => return (String::new(), literal.to_string(), ""),
+            Self::Bash => "$__ocx_q",
+            // zsh matches a parameter's value literally unless `~` turns on GLOB_SUBST for it.
+            Self::Zsh => "${~__ocx_q}",
+            _ => return (String::new(), literal.to_string(), ""),
+        };
+        let pattern = escape::posix_single_quoted(&msys::case_folding_pattern(element));
+        (format!("__ocx_q='{pattern}'; "), operand.to_string(), " __ocx_q")
+    }
+
     /// The binary `path` as the string to embed as a command word (or `[ -x … ]` operand) for the host.
     ///
     /// A POSIX arm on a Windows host runs under MSYS2, where `C:\x\ocx.exe` loses its backslashes and
@@ -213,8 +230,9 @@ impl Shell {
         if raw.is_empty() {
             return Some(self.comment(format!("ocx: {key} path entry is empty, nothing to prepend")));
         }
+        let drive_prefix = self.msys_drive_prefix(dialect);
         let converted;
-        let raw = if let Some(drive_prefix) = self.msys_drive_prefix(dialect) {
+        let raw = if let Some(drive_prefix) = drive_prefix {
             converted = msys::path_element(raw, drive_prefix)?;
             converted.as_str()
         } else {
@@ -243,8 +261,9 @@ impl Shell {
                 // a double-quoted spelling would turn `!` into `\!`, which never matches a plain `!`.
                 // Assigning scalar `PATH` also updates zsh's tied `path` array; `${KEY-}` is `set -u`-safe.
                 let value = escape::posix_single_quoted(raw);
+                let (fold, matcher, unset) = self.case_fold_matcher(drive_prefix.is_some(), raw, "\"$__ocx_p\"");
                 format!(
-                    "__ocx_p='{value}'; {key}=\":${{{key}-}}:\"; while [ \"${key}\" != \"${{{key}//:\"$__ocx_p\":/:}}\" ]; do {key}=\"${{{key}//:\"$__ocx_p\":/:}}\"; done; while [ \"${key}\" != \"${{{key}//::/:}}\" ]; do {key}=\"${{{key}//::/:}}\"; done; {key}=\"${{{key}#:}}\"; {key}=\"${{{key}%:}}\"; export {key}=\"$__ocx_p${{{key}:+:${{{key}}}}}\"; unset __ocx_p"
+                    "{fold}__ocx_p='{value}'; {key}=\":${{{key}-}}:\"; while [ \"${key}\" != \"${{{key}//:{matcher}:/:}}\" ]; do {key}=\"${{{key}//:{matcher}:/:}}\"; done; while [ \"${key}\" != \"${{{key}//::/:}}\" ]; do {key}=\"${{{key}//::/:}}\"; done; {key}=\"${{{key}#:}}\"; {key}=\"${{{key}%:}}\"; export {key}=\"$__ocx_p${{{key}:+:${{{key}}}}}\"; unset __ocx_p{unset}"
                 )
             }
             // strict POSIX (ash / ksh / dash): one `awk`, literal key name (no non-POSIX `${!var}`
@@ -269,8 +288,9 @@ impl Shell {
                 // `PATH`). For `PERL5LIB`, `XDG_DATA_DIRS` and the like the ambient is ONE element, so
                 // iterating `$KEY` never matched and the write-back produced a two-element list fish
                 // exports **space**-joined, corrupting the variable.
+                let (fold, compare, unset) = fish_path_compare(drive_prefix.is_some());
                 format!(
-                    "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"
+                    "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; {fold}set __ocx_r; for __ocx_e in $__ocx_l; {compare}; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l{unset}"
                 )
             }
             // PowerShell: split on the OS path separator, drop empties + the value, prepend; the value is
@@ -298,8 +318,9 @@ impl Shell {
             // across emits and needs elvish 0.16+.
             Self::Elvish => {
                 let value = escape::elvish_single_quoted(raw);
+                let compare = elvish_path_compare(cfg!(windows), raw);
                 format!(
-                    "use str; set E:{key} = (str:join \"{separator}\" ['{value}' (str:split \"{separator}\" $E:{key} | each {{|p| if (and (not-eq $p '{value}') (not-eq $p \"\")) {{ put $p }} }})])"
+                    "use str; set E:{key} = (str:join \"{separator}\" ['{value}' (str:split \"{separator}\" $E:{key} | each {{|p| if (and {compare} (not-eq $p \"\")) {{ put $p }} }})])"
                 )
             }
             // nushell: normalise to a list (`$env.PATH` is auto-listified since 0.101, other path vars
@@ -314,8 +335,9 @@ impl Shell {
                 // refuses to hand a non-string env value to an external command, so storing the list
                 // silently dropped the variable for every child. One joined string agrees with the
                 // shipped `env.nu` applier and the in-process `Env` (`OsString` values).
+                let compare = nushell_path_compare(cfg!(windows), raw);
                 format!(
-                    "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | prepend \"{value}\" | str join (char esep))"
+                    "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| {compare} and $p != \"\" }} | prepend \"{value}\" | str join (char esep))"
                 )
             }
             // batch (cmd.exe): `%VAR:search=%` deletes every literal `search` under *normal* expansion, so
@@ -506,19 +528,22 @@ impl Shell {
             Self::Bash | Self::Zsh | Self::Ash | Self::Ksh | Self::Dash => {
                 let value = escape::posix_single_quoted(raw);
                 let separator = escape::posix_single_quoted(raw_separator);
-                let fold = |pattern: &str| {
+                let fold = |matcher: &str| {
                     format!(
-                        "while [ \"$__ocx_l\" != \"${{__ocx_l%%\"{pattern}\"*}}\" ]; do __ocx_l=\"${{__ocx_l%%\"{pattern}\"*}}$__ocx_s${{__ocx_l#*\"{pattern}\"}}\"; done; "
+                        "while [ \"$__ocx_l\" != \"${{__ocx_l%%{matcher}*}}\" ]; do __ocx_l=\"${{__ocx_l%%{matcher}*}}$__ocx_s${{__ocx_l#*{matcher}}}\"; done; "
                     )
                 };
                 let collapse = if path_kind {
-                    format!("__ocx_d=\"$__ocx_s$__ocx_s\"; {}unset __ocx_d; ", fold("$__ocx_d"))
+                    format!("__ocx_d=\"$__ocx_s$__ocx_s\"; {}unset __ocx_d; ", fold("\"$__ocx_d\""))
                 } else {
                     String::new()
                 };
+                // The MSYS separator is always `:`, so the folded pattern carries it literally.
+                let (case_fold, matcher, unset) =
+                    self.case_fold_matcher(drive_prefix.is_some(), &format!(":{raw}:"), "\"$__ocx_p\"");
                 format!(
-                    "__ocx_v='{value}'; __ocx_s='{separator}'; __ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; __ocx_l=\"${{{key}:+$__ocx_s${{{key}}}}}$__ocx_s\"; {fold}{collapse}__ocx_l=\"${{__ocx_l#\"$__ocx_s\"}}\"; export {key}=\"${{__ocx_l%\"$__ocx_s\"}}\"; unset __ocx_v __ocx_s __ocx_p __ocx_l",
-                    fold = fold("$__ocx_p")
+                    "{case_fold}__ocx_v='{value}'; __ocx_s='{separator}'; __ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; __ocx_l=\"${{{key}:+$__ocx_s${{{key}}}}}$__ocx_s\"; {fold}{collapse}__ocx_l=\"${{__ocx_l#\"$__ocx_s\"}}\"; export {key}=\"${{__ocx_l%\"$__ocx_s\"}}\"; unset __ocx_v __ocx_s __ocx_p __ocx_l{unset}",
+                    fold = fold(&matcher)
                 )
             }
             // fish, path-kind: `$PATH` is a genuine fish *list*, so the list-kind string fold would first
@@ -528,8 +553,9 @@ impl Shell {
             // this arm removed **nothing** for a string ambient, so the ledger could never take the element out.
             Self::Fish if path_kind => {
                 let value = escape::fish_double_quoted(raw);
+                let (fold, compare, unset) = fish_path_compare(drive_prefix.is_some());
                 format!(
-                    "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"
+                    "set --path __ocx_l ${key}; set __ocx_p \"{value}\"; {fold}set __ocx_r; for __ocx_e in $__ocx_l; {compare}; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path {key} $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l{unset}"
                 )
             }
             // fish, list-kind: `string replace` without `-r` is literal and case-sensitive; `--all` covers
@@ -576,6 +602,9 @@ impl Shell {
                     "$__ocx_v={value}; $__ocx_s={separator}; $__ocx_p=\"$__ocx_s$__ocx_v$__ocx_s\"; $__ocx_l=if ($env:{key}) {{ \"$__ocx_s$($env:{key})$__ocx_s\" }} else {{ $__ocx_s }}; while ($__ocx_l.Contains($__ocx_p)) {{ $__ocx_l=$__ocx_l.Replace($__ocx_p,$__ocx_s) }}; $env:{key}=$__ocx_l.Substring($__ocx_s.Length,[Math]::Max(0,$__ocx_l.Length-2*$__ocx_s.Length)); Remove-Variable __ocx_v,__ocx_s,__ocx_p,__ocx_l"
                 )
             }
+            // elvish, path-kind on Windows: the export arm's split and filter minus the prepend, because a
+            // case- and slash-folded compare needs whole segments, which the string fold below never sees.
+            Self::Elvish if path_kind && cfg!(windows) => elvish_windows_path_removal(key, raw),
             // elvish: `str:replace` mirrors Go's `strings.Replace` (literal, case-sensitive, all
             // occurrences). Operands are single-quoted raw strings (`'` doubled) because elvish rejects
             // `\$` / `` \` `` inside double quotes as invalid escapes. `has-env` keeps an unset key from
@@ -600,9 +629,9 @@ impl Shell {
             // the list keeps the two in step; the string fold would have to join it first. The join back
             // is what lets a conversion-less key (`PERL5LIB`, `XDG_DATA_DIRS`) reach a child process at all.
             Self::Nushell if path_kind => {
-                let value = escape::nushell_plain_string(raw);
+                let compare = nushell_path_compare(cfg!(windows), raw);
                 format!(
-                    "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| $p != \"{value}\" and $p != \"\" }} | str join (char esep))"
+                    "$env.{key} = (($env.{key}? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| {compare} and $p != \"\" }} | str join (char esep))"
                 )
             }
             // nushell, list-kind: `str replace` without `--regex` is literal and case-sensitive; `--all`
@@ -757,6 +786,29 @@ pub fn is_emittable(entry: &ocx_package::metadata::env::entry::Entry) -> Result<
     Ok(())
 }
 
+impl Shell {
+    /// Whether [`export_path`](Self::export_path) can write `entry` for this shell on this host.
+    ///
+    /// The per-shell half of admission beside [`is_emittable`]: under MSYS a POSIX arm refuses a path
+    /// value with no MSYS spelling, so the reconciler drops it before it plans or records it.
+    #[must_use]
+    pub fn spells_path_entry(self, entry: &ocx_package::metadata::env::entry::Entry) -> bool {
+        self.spells_path_entry_as(Dialect::host(), entry)
+    }
+
+    /// [`spells_path_entry`](Self::spells_path_entry) under an explicit [`Dialect`]: the emit itself
+    /// decides, so the answer cannot drift from what the shell receives.
+    pub(crate) fn spells_path_entry_as(
+        self,
+        dialect: Dialect,
+        entry: &ocx_package::metadata::env::entry::Entry,
+    ) -> bool {
+        use ocx_package::metadata::env::modifier::ModifierKind;
+
+        !matches!(entry.kind, ModifierKind::Path) || self.export_path_as(dialect, &entry.key, &entry.value).is_some()
+    }
+}
+
 /// The `StringComparison` a PATH element is compared under, chosen at emit time: the emitter
 /// and the shell it emits for run on the same host, so `cfg!(windows)` is the platform test, the
 /// same rule [`ocx_util::path::PATH_SEPARATOR`] follows.
@@ -787,6 +839,63 @@ fn path_segment_normalisation() -> &'static str {
 /// would take a second pair off the operand.
 fn path_slash_fold() -> &'static str {
     if cfg!(windows) { " -replace '/','\\'" } else { "" }
+}
+
+/// fish's PATH-element compare inside the export and removal loops, as `(setup, compare, unset)`.
+///
+/// Under MSYS it folds case (`string lower`), because Windows compares PATH entries case-insensitively;
+/// natively it is the exact `test`.
+fn fish_path_compare(msys: bool) -> (&'static str, &'static str, &'static str) {
+    if msys {
+        (
+            "set __ocx_q (string lower -- \"$__ocx_p\"); ",
+            "set __ocx_k (string lower -- \"$__ocx_e\"); test \"$__ocx_k\" != \"$__ocx_q\"",
+            " __ocx_q __ocx_k",
+        )
+    } else {
+        ("", "test \"$__ocx_e\" != \"$__ocx_p\"", "")
+    }
+}
+
+/// elvish's "segment `$p` is not `raw`" test: exact off Windows; on Windows both sides are lowercased
+/// and have `/` turned into a backslash in the shell, as `path_element_eq` folds them.
+///
+/// The operand is folded by the shell too, with the builtin that folds `$p`: folding it in Rust (ASCII
+/// only) against `str:to-lower` (Unicode) never matched a path holding `É`.
+fn elvish_path_compare(windows: bool, raw: &str) -> String {
+    let operand = escape::elvish_single_quoted(raw);
+    if windows {
+        format!("(not-eq (str:replace '/' '\\' (str:to-lower $p)) (str:replace '/' '\\' (str:to-lower '{operand}')))")
+    } else {
+        format!("(not-eq $p '{operand}')")
+    }
+}
+
+/// nushell's "segment `$p` is not `raw`" test, folded on Windows as [`elvish_path_compare`] is.
+///
+/// The operand is lowercased in Rust, ASCII only, and `$p` is matched with `--ignore-case`, so a path
+/// holding `É` equals itself; nushell's own Unicode fold may also match an `é` sibling the in-process
+/// rule keeps (unproven: no `nu` here).
+///
+/// Equal length plus `str starts-with --ignore-case` is case-insensitive equality on nushell 0.101 and
+/// later; `str downcase` would print a deprecation warning at every prompt from 0.114 on.
+fn nushell_path_compare(windows: bool, raw: &str) -> String {
+    if windows {
+        let folded = escape::nushell_plain_string(&ocx_util::path::path_element_norm(raw, true));
+        format!(
+            "(not ((($p | str length) == (\"{folded}\" | str length)) and ($p | str replace --all '/' '\\' | str starts-with --ignore-case \"{folded}\")))"
+        )
+    } else {
+        format!("$p != \"{}\"", escape::nushell_plain_string(raw))
+    }
+}
+
+/// elvish's path-kind removal on Windows: split on `;`, drop empties and every folded match, re-join.
+fn elvish_windows_path_removal(key: &str, raw: &str) -> String {
+    let compare = elvish_path_compare(true, raw);
+    format!(
+        "use str; if (has-env {key}) {{ set E:{key} = (str:join \";\" [(str:split \";\" $E:{key} | each {{|p| if (and {compare} (not-eq $p \"\")) {{ put $p }} }})]) }}"
+    )
 }
 
 impl std::fmt::Display for Shell {
@@ -1404,8 +1513,13 @@ mod tests {
         // empty segment is stripped, as the other six arms and
         // `utility::path::move_to_front` already do.
         let expected = "__ocx_p='/opt/bin'; PATH=\":${PATH-}:\"; while [ \"$PATH\" != \"${PATH//:\"$__ocx_p\":/:}\" ]; do PATH=\"${PATH//:\"$__ocx_p\":/:}\"; done; while [ \"$PATH\" != \"${PATH//::/:}\" ]; do PATH=\"${PATH//::/:}\"; done; PATH=\"${PATH#:}\"; PATH=\"${PATH%:}\"; export PATH=\"$__ocx_p${PATH:+:${PATH}}\"; unset __ocx_p";
-        assert_eq!(Shell::Bash.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
-        assert_eq!(Shell::Zsh.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
+        // Native on every host: the MSYS dialect, which a Windows host selects, adds a case fold.
+        for shell in [Shell::Bash, Shell::Zsh] {
+            assert_eq!(
+                shell.export_path_as(Dialect::Native, "PATH", "/opt/bin").as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -1424,7 +1538,12 @@ mod tests {
     #[test]
     fn export_path_fish_exact_shape() {
         let expected = "set --path __ocx_l $PATH; set __ocx_p \"/opt/bin\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path PATH $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l";
-        assert_eq!(Shell::Fish.export_path("PATH", "/opt/bin").as_deref(), Some(expected));
+        assert_eq!(
+            Shell::Fish
+                .export_path_as(Dialect::Native, "PATH", "/opt/bin")
+                .as_deref(),
+            Some(expected)
+        );
     }
 
     /// fish infers colon-list-ness from the variable NAME, so the `--path` flag
@@ -1559,19 +1678,20 @@ mod tests {
     #[test]
     fn export_path_elvish_exact_shape() {
         let s = sep();
+        let compare = elvish_path_compare(cfg!(windows), "/opt/bin");
         let expected = format!(
-            "use str; set E:PATH = (str:join \"{s}\" ['/opt/bin' (str:split \"{s}\" $E:PATH | each {{|p| if (and (not-eq $p '/opt/bin') (not-eq $p \"\")) {{ put $p }} }})])"
+            "use str; set E:PATH = (str:join \"{s}\" ['/opt/bin' (str:split \"{s}\" $E:PATH | each {{|p| if (and {compare} (not-eq $p \"\")) {{ put $p }} }})])"
         );
         assert_eq!(Shell::Elvish.export_path("PATH", "/opt/bin"), Some(expected));
     }
 
     #[test]
     fn export_path_nushell_exact_shape() {
-        let expected = "$env.PATH = (($env.PATH? | default \"\") | (if ($in | describe) == 'string' { split row (char esep) } else { $in }) | where {|p| $p != \"/opt/bin\" and $p != \"\" } | prepend \"/opt/bin\" | str join (char esep))";
-        assert_eq!(
-            Shell::Nushell.export_path("PATH", "/opt/bin").as_deref(),
-            Some(expected)
+        let compare = nushell_path_compare(cfg!(windows), "/opt/bin");
+        let expected = format!(
+            "$env.PATH = (($env.PATH? | default \"\") | (if ($in | describe) == 'string' {{ split row (char esep) }} else {{ $in }}) | where {{|p| {compare} and $p != \"\" }} | prepend \"/opt/bin\" | str join (char esep))"
         );
+        assert_eq!(Shell::Nushell.export_path("PATH", "/opt/bin"), Some(expected));
     }
 
     #[test]
@@ -1654,9 +1774,11 @@ mod tests {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Dash] {
             let line = shell.export_path("PATH", "/x!y/bin").unwrap();
             assert!(line.contains("__ocx_p='/x!y/bin'"), "{shell}: {line}");
+            // Native only: the MSYS removal pattern `__ocx_q` escapes `!` as a glob literal.
+            let native = shell.export_path_as(Dialect::Native, "PATH", "/x!y/bin").unwrap();
             assert!(
-                !line.contains("\\!"),
-                "{shell}: value must not be backslash-escaped: {line}"
+                !native.contains("\\!"),
+                "{shell}: value must not be backslash-escaped: {native}"
             );
         }
     }
@@ -2858,7 +2980,9 @@ mod tests {
         // string fold above would space-join it first.
         let expected_path = "set --path __ocx_l $PATH; set __ocx_p \"/opt/bin\"; set __ocx_r; for __ocx_e in $__ocx_l; test \"$__ocx_e\" != \"$__ocx_p\"; and test -n \"$__ocx_e\"; and set -a __ocx_r $__ocx_e; end; set -gx --path PATH $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l";
         assert_eq!(
-            Shell::Fish.remove_list_element("PATH", "/opt/bin", None).as_deref(),
+            Shell::Fish
+                .remove_list_element_as(Dialect::Native, "PATH", "/opt/bin", None)
+                .as_deref(),
             Some(expected_path)
         );
     }
@@ -3802,14 +3926,227 @@ mod tests {
                 );
             }
         }
+        // bash and zsh differ by their case-folding match only; dash has none.
         assert_eq!(
-            Shell::Bash.export_path_as(Dialect::Native, "PATH", "/opt/bin"),
-            Shell::Bash.export_path_as(MSYS, "PATH", "/opt/bin"),
+            Shell::Dash.export_path_as(Dialect::Native, "PATH", "/opt/bin"),
+            Shell::Dash.export_path_as(MSYS, "PATH", "/opt/bin"),
         );
         // list-kind removal keeps its caller-supplied separator and native value
         let list = Shell::Bash
             .remove_list_element_as(MSYS, "CFLAGS", r"C:\a", Some(" "))
             .unwrap();
         assert!(list.contains(r"__ocx_v='C:\a'; __ocx_s=' ';"), "{list}");
+    }
+
+    /// The native emit of every converted arm, byte for byte: a Windows-only fold must not leak into it.
+    #[cfg(unix)]
+    #[test]
+    fn native_path_emit_is_pinned_byte_for_byte() {
+        let cases = [
+            (
+                Shell::Bash,
+                r#"__ocx_p='/opt/bin'; PATH=":${PATH-}:"; while [ "$PATH" != "${PATH//:"$__ocx_p":/:}" ]; do PATH="${PATH//:"$__ocx_p":/:}"; done; while [ "$PATH" != "${PATH//::/:}" ]; do PATH="${PATH//::/:}"; done; PATH="${PATH#:}"; PATH="${PATH%:}"; export PATH="$__ocx_p${PATH:+:${PATH}}"; unset __ocx_p"#,
+                r#"__ocx_v='/opt/bin'; __ocx_s=':'; __ocx_p="$__ocx_s$__ocx_v$__ocx_s"; __ocx_l="${PATH:+$__ocx_s${PATH}}$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_p"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_p"*}$__ocx_s${__ocx_l#*"$__ocx_p"}"; done; __ocx_d="$__ocx_s$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_d"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_d"*}$__ocx_s${__ocx_l#*"$__ocx_d"}"; done; unset __ocx_d; __ocx_l="${__ocx_l#"$__ocx_s"}"; export PATH="${__ocx_l%"$__ocx_s"}"; unset __ocx_v __ocx_s __ocx_p __ocx_l"#,
+            ),
+            (
+                Shell::Zsh,
+                r#"__ocx_p='/opt/bin'; PATH=":${PATH-}:"; while [ "$PATH" != "${PATH//:"$__ocx_p":/:}" ]; do PATH="${PATH//:"$__ocx_p":/:}"; done; while [ "$PATH" != "${PATH//::/:}" ]; do PATH="${PATH//::/:}"; done; PATH="${PATH#:}"; PATH="${PATH%:}"; export PATH="$__ocx_p${PATH:+:${PATH}}"; unset __ocx_p"#,
+                r#"__ocx_v='/opt/bin'; __ocx_s=':'; __ocx_p="$__ocx_s$__ocx_v$__ocx_s"; __ocx_l="${PATH:+$__ocx_s${PATH}}$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_p"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_p"*}$__ocx_s${__ocx_l#*"$__ocx_p"}"; done; __ocx_d="$__ocx_s$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_d"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_d"*}$__ocx_s${__ocx_l#*"$__ocx_d"}"; done; unset __ocx_d; __ocx_l="${__ocx_l#"$__ocx_s"}"; export PATH="${__ocx_l%"$__ocx_s"}"; unset __ocx_v __ocx_s __ocx_p __ocx_l"#,
+            ),
+            (
+                Shell::Ash,
+                r#"__ocx_p='/opt/bin'; export __ocx_p; export PATH="$__ocx_p$(printf %s "${PATH-}" | awk 'BEGIN{ORS="";RS=":";d=ENVIRON["__ocx_p"]} $0!=d && $0!=""{printf ":%s",$0}')"; unset __ocx_p"#,
+                r#"__ocx_v='/opt/bin'; __ocx_s=':'; __ocx_p="$__ocx_s$__ocx_v$__ocx_s"; __ocx_l="${PATH:+$__ocx_s${PATH}}$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_p"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_p"*}$__ocx_s${__ocx_l#*"$__ocx_p"}"; done; __ocx_d="$__ocx_s$__ocx_s"; while [ "$__ocx_l" != "${__ocx_l%%"$__ocx_d"*}" ]; do __ocx_l="${__ocx_l%%"$__ocx_d"*}$__ocx_s${__ocx_l#*"$__ocx_d"}"; done; unset __ocx_d; __ocx_l="${__ocx_l#"$__ocx_s"}"; export PATH="${__ocx_l%"$__ocx_s"}"; unset __ocx_v __ocx_s __ocx_p __ocx_l"#,
+            ),
+            (
+                Shell::Fish,
+                r#"set --path __ocx_l $PATH; set __ocx_p "/opt/bin"; set __ocx_r; for __ocx_e in $__ocx_l; test "$__ocx_e" != "$__ocx_p"; and test -n "$__ocx_e"; and set -a __ocx_r $__ocx_e; end; set -gx --path PATH $__ocx_p $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"#,
+                r#"set --path __ocx_l $PATH; set __ocx_p "/opt/bin"; set __ocx_r; for __ocx_e in $__ocx_l; test "$__ocx_e" != "$__ocx_p"; and test -n "$__ocx_e"; and set -a __ocx_r $__ocx_e; end; set -gx --path PATH $__ocx_r; set -e __ocx_p __ocx_r __ocx_e __ocx_l"#,
+            ),
+            (
+                Shell::Elvish,
+                r#"use str; set E:PATH = (str:join ":" ['/opt/bin' (str:split ":" $E:PATH | each {|p| if (and (not-eq $p '/opt/bin') (not-eq $p "")) { put $p } })])"#,
+                r#"use str; var __ocx_l = ':'; if (and (has-env PATH) (not-eq $E:PATH '')) { set __ocx_l = ':'$E:PATH':' }; while (str:contains $__ocx_l ':/opt/bin:') { set __ocx_l = (str:replace ':/opt/bin:' ':' $__ocx_l) }; while (str:contains $__ocx_l '::') { set __ocx_l = (str:replace '::' ':' $__ocx_l) }; set E:PATH = (str:trim-suffix (str:trim-prefix $__ocx_l ':') ':')"#,
+            ),
+            (
+                Shell::Nushell,
+                r#"$env.PATH = (($env.PATH? | default "") | (if ($in | describe) == 'string' { split row (char esep) } else { $in }) | where {|p| $p != "/opt/bin" and $p != "" } | prepend "/opt/bin" | str join (char esep))"#,
+                r#"$env.PATH = (($env.PATH? | default "") | (if ($in | describe) == 'string' { split row (char esep) } else { $in }) | where {|p| $p != "/opt/bin" and $p != "" } | str join (char esep))"#,
+            ),
+        ];
+        for (shell, export, remove) in cases {
+            assert_eq!(
+                shell.export_path_as(Dialect::Native, "PATH", "/opt/bin").as_deref(),
+                Some(export),
+                "{shell:?}"
+            );
+            assert_eq!(
+                shell
+                    .remove_list_element_as(Dialect::Native, "PATH", "/opt/bin", None)
+                    .as_deref(),
+                Some(remove),
+                "{shell:?}"
+            );
+        }
+    }
+
+    /// Under MSYS bash and zsh retire an entry whatever its ASCII case, as Windows and the in-process
+    /// `path_element_eq` compare it, and keep a near-miss whose difference is a glob character.
+    ///
+    /// Red state: emit the literal `"$__ocx_p"` match under `Dialect::Msys`.
+    #[cfg(unix)]
+    #[test]
+    fn msys_bash_and_zsh_remove_a_path_entry_without_regard_to_case() {
+        let ambient = "/usr/bin:/C/USERS/x/A [B]*:/c/users/x/a [b]?:/bin";
+        for argv in [&["bash", "-c"][..], &["zsh", "-c"][..]] {
+            let shell = Shell::from_argv(argv);
+            let export = shell.export_path_as(MSYS, "PATH", r"C:\Users\x\a [b]*").unwrap();
+            let remove = shell
+                .remove_list_element_as(MSYS, "PATH", r"C:\Users\x\a [b]*", None)
+                .unwrap();
+            for (line, expected) in [
+                (&export, "/c/Users/x/a [b]*:/usr/bin:/c/users/x/a [b]?:/bin"),
+                (&remove, "/usr/bin:/c/users/x/a [b]?:/bin"),
+            ] {
+                let script = format!("export PATH='{ambient}'; {line}; {line}; printf '%s' \"$PATH\"");
+                if let Some(out) = run_script(argv, &script) {
+                    assert_eq!(out, expected, "argv={argv:?} line={line}");
+                }
+            }
+        }
+        assert_every_present_interpreter_ran(&["bash", "zsh"]);
+    }
+
+    /// The reconciler drops exactly the path entries the emit refuses, so the plan, the ledger and the
+    /// shell agree under MSYS; natively nothing is dropped.
+    /// On Windows elvish and nushell compare a PATH segment folded for case and `/`, as `path_element_eq`
+    /// and the PowerShell arm do; off Windows the compare stays exact.
+    ///
+    /// Red state: drop the fold from either helper; a `c:/USERS/x` copy of `C:\Users\x` then survives.
+    #[test]
+    fn windows_elvish_and_nushell_fold_case_and_slashes_in_the_segment_compare() {
+        let raw = r"C:\Users\X [b]/Bin";
+        assert_eq!(
+            elvish_path_compare(true, raw),
+            r"(not-eq (str:replace '/' '\' (str:to-lower $p)) (str:replace '/' '\' (str:to-lower 'C:\Users\X [b]/Bin')))"
+        );
+        assert_eq!(
+            nushell_path_compare(true, raw),
+            r#"(not ((($p | str length) == ("c:\\users\\x [b]\\bin" | str length)) and ($p | str replace --all '/' '\' | str starts-with --ignore-case "c:\\users\\x [b]\\bin")))"#
+        );
+        assert_eq!(elvish_path_compare(false, "/opt/Bin"), "(not-eq $p '/opt/Bin')");
+        assert_eq!(nushell_path_compare(false, "/opt/Bin"), r#"$p != "/opt/Bin""#);
+        let removal = elvish_windows_path_removal("PATH", raw);
+        assert!(removal.contains(&elvish_path_compare(true, raw)), "{removal}");
+        assert!(removal.contains(r#"str:split ";" $E:PATH"#), "{removal}");
+    }
+
+    /// A path holding a non-ASCII capital must equal itself in the shell compare: the operand is
+    /// folded by the shell with the builtin that folds the ambient segment, not by Rust's ASCII fold.
+    ///
+    /// Red state: lowercase the elvish operand with `path_element_norm` (ASCII only) again; the
+    /// operand is then `c:\users\É`, which `str:to-lower` of the ambient `É` never equals.
+    #[test]
+    fn windows_elvish_compare_folds_both_operands_in_the_shell() {
+        let compare = elvish_path_compare(true, r"C:\Users\Élan");
+        assert!(compare.contains(r"(str:to-lower 'C:\Users\Élan')"), "{compare}");
+        let removal = elvish_windows_path_removal("PATH", "/x");
+        assert!(
+            removal.starts_with("use str; if (has-env PATH) { set E:PATH = "),
+            "{removal}"
+        );
+        assert!(removal.ends_with(" }"), "{removal}");
+    }
+
+    /// nushell keeps the non-ASCII capital in the operand and matches it with `--ignore-case`.
+    #[test]
+    fn windows_nushell_compare_keeps_a_non_ascii_capital_intact() {
+        let compare = nushell_path_compare(true, r"C:\Users\Élan");
+        assert!(
+            compare.contains(r#"starts-with --ignore-case "c:\\users\\Élan""#),
+            "{compare}"
+        );
+    }
+
+    /// The Windows compare, run by a live elvish on any host: a path with `É` and `/` equals itself.
+    #[cfg(unix)]
+    #[test]
+    fn live_elvish_windows_compare_matches_a_non_ascii_capital() {
+        let compare = elvish_path_compare(true, r"C:\Users\Élan");
+        for (segment, expected) in [
+            (r"c:/USERS/Élan", "$false"),
+            (r"C:\Users\Élan", "$false"),
+            (r"C:\Users\Other", "$true"),
+        ] {
+            let script = format!("use str; var p = '{segment}'; print {compare}");
+            if let Some(out) = run_script(&["elvish", "-c"], &script) {
+                assert_eq!(out, expected, "segment {segment}");
+            }
+        }
+        assert_every_present_interpreter_ran(&["elvish"]);
+    }
+
+    /// The Windows compare, run by a live nushell on any host.
+    #[cfg(unix)]
+    #[test]
+    fn live_nushell_windows_compare_matches_a_non_ascii_capital() {
+        let compare = nushell_path_compare(true, r"C:\Users\Élan");
+        for (segment, expected) in [
+            (r"c:/USERS/Élan", "false"),
+            (r"C:\\Users\\Élan", "false"),
+            (r"C:\\Users\\Other", "true"),
+        ] {
+            let script = format!("let p = \"{segment}\"; print -n {compare}");
+            if let Some(out) = run_script(&["nu", "-c"], &script) {
+                assert_eq!(out, expected, "segment {segment}");
+            }
+        }
+        assert_every_present_interpreter_ran(&["nu"]);
+    }
+
+    /// fish under MSYS compares PATH entries through `string lower`, in both directions.
+    ///
+    /// Red state: emit the exact `test "$__ocx_e" != "$__ocx_p"` under `Dialect::Msys`.
+    #[test]
+    fn msys_fish_folds_case_in_export_and_removal() {
+        let fold = r#"set __ocx_k (string lower -- "$__ocx_e"); test "$__ocx_k" != "$__ocx_q""#;
+        let export = Shell::Fish.export_path_as(MSYS, "PATH", r"C:\Users\x").unwrap();
+        let removal = Shell::Fish
+            .remove_list_element_as(MSYS, "PATH", r"C:\Users\x", None)
+            .unwrap();
+        for line in [&export, &removal] {
+            assert!(line.contains(r#"set __ocx_q (string lower -- "$__ocx_p"); "#), "{line}");
+            assert!(line.contains(fold), "{line}");
+            assert!(line.ends_with(" __ocx_q __ocx_k"), "{line}");
+        }
+    }
+
+    #[test]
+    fn spells_path_entry_drops_exactly_what_the_msys_emit_refuses() {
+        use ocx_package::metadata::env::entry::Entry;
+        use ocx_package::metadata::env::modifier::ModifierKind;
+        let entry_of = |kind: ModifierKind, value: &str| Entry {
+            key: "PATH".to_string(),
+            value: value.to_string(),
+            kind,
+            separator: None,
+        };
+        for value in [
+            r"C:\a\b",
+            "/usr/bin",
+            "C:foo",
+            r"\bin",
+            "rel/dir",
+            r"C:\a\..\..\Windows",
+        ] {
+            let entry = entry_of(ModifierKind::Path, value);
+            for shell in CONVERTED_ARMS {
+                let emitted = shell.export_path_as(MSYS, "PATH", value).is_some();
+                assert_eq!(shell.spells_path_entry_as(MSYS, &entry), emitted, "{shell:?} {value}");
+                assert!(shell.spells_path_entry_as(Dialect::Native, &entry), "{shell:?} {value}");
+            }
+        }
+        assert!(!Shell::Bash.spells_path_entry_as(MSYS, &entry_of(ModifierKind::Path, "C:foo")));
+        assert!(Shell::Bash.spells_path_entry_as(MSYS, &entry_of(ModifierKind::Constant, "C:foo")));
     }
 }

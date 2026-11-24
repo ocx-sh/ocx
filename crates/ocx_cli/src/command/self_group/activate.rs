@@ -471,6 +471,8 @@ impl SelfActivate {
         outcome
             .messages
             .extend(activation::truncation_notice(state.truncated, None));
+        // Before planning: an entry the shell cannot spell is never written, so it is never recorded either.
+        outcome.retain_spellable(shell);
 
         // `plan_for_state` canonicalizes, so it hops; the values move in and back out because each one deep-copies.
         let owned_root = file_structure.root().to_path_buf();
@@ -1886,6 +1888,7 @@ mod reconcile_tests {
             resolved: slot.is_some(),
             slot,
             inert: false,
+            spelled_for: None,
             messages: Vec::new(),
         }
     }
@@ -4139,6 +4142,7 @@ mod emitted_path_tests {
             resolved: true,
             slot: Some(identity()),
             inert: false,
+            spelled_for: None,
             messages: Vec::new(),
         }
     }

@@ -134,6 +134,8 @@ pub struct WindowsEnv {
     pub elvish: bool,
     /// `fish.exe` is on `PATH`.
     pub fish: bool,
+    /// MSYS2 and Cygwin home directories that exist at their default install locations.
+    pub posix_homes: Vec<PathBuf>,
 }
 
 /// The absolute entries of a `PATH` value. A relative or empty entry means the current directory,
@@ -174,12 +176,19 @@ impl WindowsEnv {
                 }
             }
         }
-        Self::from_parts(
-            ocx_env::USERPROFILE.get().map(PathBuf::from),
-            ocx_env::APPDATA.get().map(PathBuf::from),
-            &dirs,
-            |path| found.contains(path),
-        )
+        let userprofile = ocx_env::USERPROFILE.get().map(PathBuf::from);
+        let mut posix_homes = Vec::new();
+        for candidate in userprofile.as_deref().map(posix_home_candidates).unwrap_or_default() {
+            if ocx_util::fs::path_exists_lossy(&candidate).await {
+                posix_homes.push(candidate);
+            }
+        }
+        Self {
+            posix_homes,
+            ..Self::from_parts(userprofile, ocx_env::APPDATA.get().map(PathBuf::from), &dirs, |path| {
+                found.contains(path)
+            })
+        }
     }
 
     /// The snapshot for the given variables and `PATH` directories, probing shells through `exists`.
@@ -195,8 +204,40 @@ impl WindowsEnv {
             nushell: on_path(dirs, "nu.exe", &exists),
             elvish: on_path(dirs, "elvish.exe", &exists),
             fish: on_path(dirs, "fish.exe", &exists),
+            posix_homes: Vec::new(),
         }
     }
+}
+
+/// Default MSYS2 and Cygwin home directories for the user that owns `userprofile`, on its drive.
+///
+/// shortcut: assumes the default install roots and a home named after the profile directory;
+/// a custom install or a renamed account gets no hint.
+fn posix_home_candidates(userprofile: &Path) -> Vec<PathBuf> {
+    let (Some(user), Some(root)) = (userprofile.file_name(), userprofile.ancestors().last()) else {
+        return Vec::new();
+    };
+    ["msys64", "cygwin64", "cygwin"]
+        .iter()
+        .map(|install| root.join(install).join("home").join(user))
+        .collect()
+}
+
+/// The MSYS2 or Cygwin homes in `windows` that setup writes no rc file under: neither `HOME` nor
+/// `%USERPROFILE%`. A bash or zsh using one as `HOME` never reads what this run writes.
+pub fn unreached_posix_homes<'a>(home_env: &HomeEnv, windows: &'a WindowsEnv) -> Vec<&'a Path> {
+    let written = [Some(home_env.home.as_path()), windows.userprofile.as_deref()];
+    windows
+        .posix_homes
+        .iter()
+        .filter(|home| {
+            !written
+                .iter()
+                .flatten()
+                .any(|dir| ocx_util::path::path_element_eq(home.as_os_str(), dir.as_os_str(), true))
+        })
+        .map(PathBuf::as_path)
+        .collect()
 }
 
 /// The POSIX rc files of one home, in write order.
@@ -739,6 +780,38 @@ mod tests {
             expected.extend(posix_names(Path::new(r"C:\Users\u")));
             assert_eq!(detected, expected, "{home}");
         }
+    }
+
+    #[test]
+    fn a_posix_home_other_than_home_and_the_profile_is_reported_unreached() {
+        let mut windows = windows_env(r"C:\Users\u");
+        windows.posix_homes = vec![PathBuf::from(r"C:\msys64\home\u"), PathBuf::from(r"C:\cygwin64\home\u")];
+        let from_powershell = windows_home(r"C:\Users\u");
+        assert_eq!(
+            unreached_posix_homes(&from_powershell, &windows),
+            [Path::new(r"C:\msys64\home\u"), Path::new(r"C:\cygwin64\home\u")]
+        );
+        // Run inside MSYS2, its home is `HOME` and gets rc files; only Cygwin's stays unreached.
+        let from_msys = windows_home(r"c:\MSYS64\home\u");
+        assert_eq!(
+            unreached_posix_homes(&from_msys, &windows),
+            [Path::new(r"C:\cygwin64\home\u")]
+        );
+        assert!(unreached_posix_homes(&from_powershell, &windows_env(r"C:\Users\u")).is_empty());
+    }
+
+    #[test]
+    fn posix_home_candidates_sit_under_the_profile_drive_root() {
+        let profile = abs("Users").join("u");
+        let root = profile.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(
+            posix_home_candidates(&profile),
+            [
+                root.join("msys64").join("home").join("u"),
+                root.join("cygwin64").join("home").join("u"),
+                root.join("cygwin").join("home").join("u"),
+            ]
+        );
     }
 
     #[test]
