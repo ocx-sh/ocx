@@ -65,7 +65,7 @@ The variables are:
 OCX normalizes the registry name in the variable by replacing every non-alphanumeric character with an underscore. For `docker.io`, it looks for `OCX_AUTH_docker_io_TYPE`. This is stricter than the [path component encoding][in-depth-storage-stores] used for filesystem paths, which preserves dots and hyphens.
 :::
 
-If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is ignored. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variable.
+If `TYPE` is omitted, `USER` and `TOKEN` together mean basic and `TOKEN` alone means bearer. `USER` alone is a configuration error that names the missing `TOKEN` variable. A `basic` or `bearer` type without a `TOKEN` fails the same way. OCX never falls back to anonymous access or to a credential helper in these cases. The [environment variable reference][env-ref] lists every `OCX_AUTH_*` variable.
 
 ### Read a token from a file \{#authentication-token-file\}
 
@@ -119,7 +119,7 @@ docker login "<registry>"
 
 </ShellSession>
 
-Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `auths[REGISTRY]`, then `credsStore`. Any `OCX_AUTH_*` variable for the registry wins over all of them, and then OCX runs no credential helper for that registry.
+Set [`DOCKER_CONFIG`][env-docker-config] to change the directory. OCX delegates to Docker's credential helper, which reads it. A credential resolves from `credHelpers[REGISTRY]`, then `auths[REGISTRY]`, then `credsStore`. A complete set of `OCX_AUTH_*` variables for the registry wins over all of them, and then OCX runs no credential helper. `OCX_AUTH_<REGISTRY>_TYPE=anonymous` also skips the helper, and sends no credentials. With no non-empty `OCX_AUTH_*` variable, OCX asks the helper as usual.
 
 ### Credential helper installed with OCX \{#authentication-helper-from-ocx\}
 
@@ -127,7 +127,7 @@ A credential helper such as the [Amazon ECR credential helper][ecr-helper] can i
 
 - OCX asks a helper for a registry's credentials at most once per run, before it starts installing anything from that registry.
 - The first install of the helper cannot use the helper. Pull it with `OCX_AUTH_*` variables, or from a registry that allows anonymous access. Until the helper is installed, OCX skips it, warns that it is not installed, and carries on without those credentials.
-- To keep a registry away from the helper altogether, set `OCX_AUTH_<REGISTRY>_TYPE=anonymous`, or give it a `TOKEN`.
+- To keep a registry away from the helper, set `OCX_AUTH_<REGISTRY>_TYPE=anonymous`. A `USER` without a `TOKEN` fails the command and never reaches the helper.
 
 :::tip[Learn more]
 [Environment variable reference][env-ref]: every `OCX_AUTH_*` variable and the complete normalization rules.

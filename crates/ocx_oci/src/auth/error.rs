@@ -24,6 +24,20 @@ pub enum AuthError {
         summary = "An environment variable the authentication type needs is not set"
     )]
     MissingEnv(AuthType, String),
+    /// A `USER` is set for a registry with no `TOKEN` and no `TYPE`: the helper must not be asked on its behalf.
+    #[error(
+        "'{user}' is set but '{token}' is not; set the token, or set '{auth_type}=anonymous' to ask for no credentials"
+    )]
+    #[exit(
+        ConfigError,
+        slug = "auth_env_missing",
+        summary = "An environment variable the authentication type needs is not set"
+    )]
+    UserWithoutToken {
+        user: String,
+        token: String,
+        auth_type: String,
+    },
     /// Failed to retrieve credentials from the Docker credential store.
     #[error("failed to retrieve Docker credentials: {0}")]
     #[exit(

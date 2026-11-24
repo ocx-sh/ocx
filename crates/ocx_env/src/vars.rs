@@ -497,12 +497,15 @@ crate::env_vars! {
     /// `<REGISTRY>` is the registry name with every non-alphanumeric character replaced by `_`, case
     /// kept, so `docker.io` reads `OCX_AUTH_docker_io_TYPE`.
     ///
-    /// Any `OCX_AUTH_*` value set for a registry means OCX never invokes a Docker credential helper
-    /// for it; `anonymous` opts a registry out of helper lookup entirely.
+    /// `anonymous` sends no credentials and never asks a Docker credential helper. `basic` needs `USER` and
+    /// `TOKEN`; `token` or `bearer` needs `TOKEN`; a missing one fails the command.
+    ///
+    /// Without `TYPE`, `USER` and `TOKEN` together mean `basic`, `TOKEN` alone `bearer`, a `USER` alone fails
+    /// the command, and neither asks the Docker credential helper. An empty value counts as unset.
     pub OCX_AUTH_TYPE = "OCX_AUTH_{REGISTRY}_TYPE": Choice["anonymous", "basic", "token", "bearer"], Public, propagation = UserInput;
     /// User name for one registry; `<REGISTRY>` is the registry slug.
     ///
-    /// Read for the `basic` type only; ignored for any other type.
+    /// Read for the `basic` type, which `TYPE` may leave to be inferred; ignored for any other type.
     pub OCX_AUTH_USER = "OCX_AUTH_{REGISTRY}_USER": String, Public, reference, propagation = UserInput;
     /// Registry token for one registry; `<REGISTRY>` is the registry slug.
     ///
