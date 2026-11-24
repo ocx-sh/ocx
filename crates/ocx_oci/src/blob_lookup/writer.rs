@@ -362,6 +362,8 @@ pub struct BlobCacheDir {
     locks: Option<PathBuf>,
     /// What this process knows of the marker, shared by every clone.
     marker: Arc<Mutex<MarkerState>>,
+    /// Registries already warned about for a reserved slug; each is refused alone, the marker stays usable.
+    reserved: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[derive(Debug, Default)]
@@ -370,7 +372,7 @@ enum MarkerState {
     Unread,
     /// The marker as this process last read or wrote it; a registry missing here is re-read under the lock.
     Known(ExportMarker),
-    /// The marker is invalid or of an unsupported version: warned once, then left alone.
+    /// The marker file is invalid or of an unsupported version: warned once, then left alone.
     Refused,
 }
 
@@ -392,6 +394,7 @@ impl BlobCacheDir {
             root,
             locks: None,
             marker: Arc::default(),
+            reserved: Arc::default(),
         }
     }
 
@@ -462,6 +465,14 @@ impl BlobCacheDir {
 
     fn try_note_registry(&self, registry: &str) -> Result<(), ExportMarkerError> {
         let slug = ocx_util::prelude::StringExt::to_relaxed_slug(&registry);
+        if self
+            .reserved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(registry)
+        {
+            return Ok(());
+        }
         let mut state = self.marker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*state {
             MarkerState::Refused => return Ok(()),
@@ -477,6 +488,13 @@ impl BlobCacheDir {
             }
             Err(error @ ExportMarkerError::Invalid { .. }) => {
                 *state = MarkerState::Refused;
+                Err(error)
+            }
+            Err(error @ ExportMarkerError::ReservedSlug { .. }) => {
+                self.reserved
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(registry.to_owned());
                 Err(error)
             }
             Err(error) => Err(error),
@@ -786,6 +804,23 @@ mod tests {
         std::fs::remove_file(root.path().join(export_marker::MARKER_FILE)).unwrap();
         cache.try_note_registry(REG).expect("refusal is reported once");
         assert!(!root.path().join(export_marker::MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn a_registry_slugged_locks_is_refused_once_per_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = BlobCacheDir::at(root.path().to_path_buf());
+        cache
+            .try_note_registry("locks")
+            .expect_err("first note reports the reserved slug");
+        cache
+            .try_note_registry("locks")
+            .expect("the refusal is reported once, not on every call");
+        cache
+            .try_note_registry("ghcr.io")
+            .expect("a later registry is still noted");
+        let marker = export_marker::read_marker(root.path()).unwrap().unwrap();
+        assert!(marker.registries.values().any(|registry| registry == "ghcr.io"));
     }
 
     #[test]

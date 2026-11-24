@@ -20,6 +20,15 @@ pub const MARKER_CAP: u64 = 64 * 1024;
 /// The marker's current layout version, and the one an absent file stands for.
 pub const FORMAT_VERSION: u64 = 1;
 
+/// The import safety walk skips `index/locks`, the writer's own lock directory: a registry slugged `locks` would put
+/// index content in a tree nothing walks. Compared ASCII case-insensitively, as a case-folding file system would.
+const RESERVED_SLUG: &str = "locks";
+
+/// Windows file systems drop trailing dots and spaces, so `locks.` names the `locks` directory.
+fn is_reserved_slug(slug: &str) -> bool {
+    slug.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(RESERVED_SLUG)
+}
+
 /// Unknown fields are tolerated: a later version may add some.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportMarker {
@@ -48,6 +57,14 @@ pub enum ExportMarkerError {
         summary = "A directory is not a valid export"
     )]
     SlugCollision { registry: String, existing: String },
+    /// The registry slugs to a directory name the export layout reserves.
+    #[error("registry '{registry}' cannot be exported: its directory name '{RESERVED_SLUG}' is reserved")]
+    #[exit(
+        DataError,
+        slug = "export_dir_invalid",
+        summary = "A directory is not a valid export"
+    )]
+    ReservedSlug { registry: String },
     /// The marker is not valid JSON, or a key is not the slug of its value.
     #[error("export marker '{}' is invalid: {reason}", path.display())]
     #[exit(
@@ -66,7 +83,8 @@ pub enum ExportMarkerError {
 ///
 /// # Errors
 ///
-/// [`ExportMarkerError::Invalid`] for malformed JSON, an unknown `format_version`, or a key that is not its value's slug.
+/// [`ExportMarkerError::Invalid`] for malformed JSON, an unknown `format_version`, or a key that is not its value's slug
+/// or not a usable directory name.
 pub fn read_marker(dir: &Path) -> Result<Option<ExportMarker>, ExportMarkerError> {
     let path = dir.join(MARKER_FILE);
     let invalid = |reason: String| ExportMarkerError::Invalid {
@@ -91,10 +109,14 @@ pub fn read_marker(dir: &Path) -> Result<Option<ExportMarker>, ExportMarkerError
         )));
     }
     for (slug, registry) in &marker.registries {
-        // The import safety walk skips `index/locks`, the writer's own lock directory: a registry slugged
-        // `locks` would put index content in a tree nothing walks.
-        if slug == "locks" {
-            return Err(invalid("'locks' is reserved and cannot be a registry slug".to_string()));
+        if is_reserved_slug(slug) {
+            return Err(invalid(format!(
+                "'{RESERVED_SLUG}' is reserved and cannot be a registry slug"
+            )));
+        }
+        // `..` is left to the index store's containment guard, which refuses it as `repository_escapes_index_home`.
+        if slug != ".." && !super::registry_slug_is_safe(slug) {
+            return Err(invalid(format!("'{slug}' is not a usable directory name")));
         }
         if *slug != registry.to_relaxed_slug() {
             return Err(invalid(format!("'{slug}' is not the slug of '{registry}'")));
@@ -125,9 +147,15 @@ pub fn write_marker(dir: &Path, marker: &ExportMarker) -> Result<(), LookupError
 ///
 /// # Errors
 ///
-/// [`ExportMarkerError::SlugCollision`] when another registry shares the slug after ASCII case folding.
+/// [`ExportMarkerError::SlugCollision`] when another registry shares the slug after ASCII case folding;
+/// [`ExportMarkerError::ReservedSlug`] when the slug is the reserved `locks`, which [`read_marker`] refuses.
 pub fn merge_registry(marker: &mut ExportMarker, registry: &str) -> Result<(), ExportMarkerError> {
     let slug = registry.to_relaxed_slug();
+    if is_reserved_slug(&slug) {
+        return Err(ExportMarkerError::ReservedSlug {
+            registry: registry.to_string(),
+        });
+    }
     for (existing_slug, existing) in &marker.registries {
         if existing_slug.eq_ignore_ascii_case(&slug) && existing != registry {
             return Err(ExportMarkerError::SlugCollision {
@@ -161,6 +189,20 @@ mod tests {
     }
 
     #[test]
+    fn merging_a_registry_slugged_locks_is_refused() {
+        for registry in ["locks", "LOCKS"] {
+            let mut marker = ExportMarker::default();
+            let error = merge_registry(&mut marker, registry).expect_err("import would refuse the marker");
+            assert!(matches!(error, ExportMarkerError::ReservedSlug { .. }), "{error:?}");
+            assert!(
+                error.to_string().contains("'locks'"),
+                "names the reserved slug: {error}"
+            );
+            assert!(marker.registries.is_empty(), "a refused registry is not recorded");
+        }
+    }
+
+    #[test]
     fn slug_must_match_value() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -182,6 +224,47 @@ mod tests {
         .unwrap();
         let error = read_marker(dir.path()).expect_err("the walk skips index/locks");
         assert!(matches!(error, ExportMarkerError::Invalid { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn merging_a_registry_whose_slug_names_locks_on_windows_is_refused() {
+        for registry in ["locks.", "locks..", "LOCKS."] {
+            let mut marker = ExportMarker::default();
+            let error = merge_registry(&mut marker, registry).expect_err("same directory as locks on Windows");
+            assert!(
+                matches!(error, ExportMarkerError::ReservedSlug { .. }),
+                "{registry}: {error:?}"
+            );
+        }
+    }
+
+    fn marker_with_slug(slug: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MARKER_FILE),
+            format!(r#"{{"format_version":1,"registries":{{"{slug}":"{slug}"}}}}"#),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_marker_slug_naming_the_walked_root_itself_is_refused() {
+        for slug in [".", ""] {
+            let error = read_marker(marker_with_slug(slug).path()).expect_err("unsafe slug");
+            assert!(
+                matches!(error, ExportMarkerError::Invalid { .. }),
+                "{slug:?}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_traversal_marker_slug_is_left_to_the_index_containment_guard() {
+        assert!(
+            read_marker(marker_with_slug("..").path()).is_ok(),
+            "`..` must reach the index store's guard, which owns its error slug"
+        );
     }
 
     #[test]
