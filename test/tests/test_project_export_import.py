@@ -18,7 +18,7 @@ from uuid import uuid4
 import pytest
 
 from src import registry_guard as registry_guard_mod
-from src.export_dir import MARKER, blob_data_files, read_marker
+from src.export_dir import MARKER, blob_data_files, read_marker, truncate_blob
 from src.helpers import make_package
 from src.runner import OcxRunner
 
@@ -26,6 +26,8 @@ pytestmark = pytest.mark.command("export", "import")
 
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64
+EXIT_DATA = 65
+EXIT_NOT_FOUND = 79
 EXIT_CONFIG = 78
 
 
@@ -134,19 +136,31 @@ def _env_items(ocx: OcxRunner, cwd: Path) -> list[dict]:
         if item["key"] == "__OCX_ENV_STATE":
             # A compressed record of those absolute paths, not part of the composed env.
             continue
-        value = item["value"].replace(str(ocx.ocx_home), "<HOME>").replace(str(cwd), "<PROJECT>")
+        value = (
+            item["value"]
+            .replace(str(ocx.ocx_home), "<HOME>")
+            .replace(str(cwd), "<PROJECT>")
+        )
         items.append({**item, "value": value})
     return items
 
 
-def test_root_import_patch_snapshot_round_trip(
-    ocx: OcxRunner,
-    second_home: OcxRunner,
-    registry_guard: registry_guard_mod.RegistryGuard,
-    tmp_path: Path,
-    registry: str,
-) -> None:
-    """A project export carries the patch snapshot's companions: the offline composed env equals the connected one."""
+def _blob_file(export_dir: Path, digest: str) -> Path:
+    """The `data` file of `digest` in the export, whatever registry slug it sits under."""
+    hex_digest = digest.split(":", 1)[1]
+    (found,) = [
+        data
+        for data in blob_data_files(export_dir)
+        if data.parent.name == hex_digest[2:32]
+        and data.parent.parent.name == hex_digest[:2]
+    ]
+    return found
+
+
+def _frozen_patch_project(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> tuple[Path, Path]:
+    """A locked project whose patch tier is published and frozen; returns the project dir and the tier config."""
     companion_repo = f"t_{uuid4().hex[:8]}_pe_companion"
     companion = make_package(
         ocx,
@@ -192,6 +206,18 @@ def test_root_import_patch_snapshot_round_trip(
     assert (project / "patches.snapshot.json").is_file(), (
         "setup: the freeze must write the snapshot beside the lock"
     )
+    return project, config
+
+
+def test_root_import_patch_snapshot_round_trip(
+    ocx: OcxRunner,
+    second_home: OcxRunner,
+    registry_guard: registry_guard_mod.RegistryGuard,
+    tmp_path: Path,
+    registry: str,
+) -> None:
+    """A project export carries the patch snapshot's companions: the offline composed env equals the connected one."""
+    project, config = _frozen_patch_project(ocx, tmp_path, registry)
 
     # The snapshot is active only when `OCX_PATCH_SNAPSHOT` selects it.
     ocx.env["OCX_PATCH_SNAPSHOT"] = str(project / "patches.snapshot.json")
@@ -305,3 +331,34 @@ def test_root_import_smoke(
     assert imported.returncode == EXIT_SUCCESS, f"ocx import failed:\n{imported.stderr}"
     ran = _run(second_home, clone, "exec", "--", "hello")
     assert ran.returncode == EXIT_SUCCESS, f"the imported tool must run:\n{ran.stderr}"
+
+
+def test_import_damaged_patch_descriptor_layer_is_a_data_error(
+    ocx: OcxRunner,
+    second_home: OcxRunner,
+    registry_guard: registry_guard_mod.RegistryGuard,
+    tmp_path: Path,
+    registry: str,
+) -> None:
+    """A present descriptor layer failing its digest exits 65 (data error), never 79 (not found)."""
+    project, config = _frozen_patch_project(ocx, tmp_path, registry)
+    ocx.env["OCX_PATCH_SNAPSHOT"] = str(project / "patches.snapshot.json")
+    export_dir = tmp_path / "export"
+    _export(ocx, project, export_dir)
+
+    snapshot = json.loads((project / "patches.snapshot.json").read_text())
+    (descriptor_digest,) = snapshot["descriptors"].values()
+    manifest = json.loads(_blob_file(export_dir, descriptor_digest).read_text())
+    (layer,) = manifest["layers"]
+    truncate_blob(_blob_file(export_dir, layer["digest"]), keep=1)
+
+    clone = _clone(project, tmp_path, "patches.snapshot.json")
+    shutil.copy(config, Path(second_home.env["OCX_HOME"]) / "config.toml")
+    second_home.env["OCX_PATCH_SNAPSHOT"] = str(clone / "patches.snapshot.json")
+    registry_guard.deny(second_home)
+    imported = _run(second_home, clone, "import", str(export_dir))
+
+    assert imported.returncode == EXIT_DATA, (
+        f"a damaged descriptor layer must be a data error; rc={imported.returncode}\n{imported.stderr}"
+    )
+    assert imported.returncode != EXIT_NOT_FOUND
