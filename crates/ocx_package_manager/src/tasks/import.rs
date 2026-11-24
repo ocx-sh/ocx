@@ -220,9 +220,13 @@ impl PackageManager {
             write_blob_to_home(&export.dir, &home, registry, digest, manifest_bytes).await?;
             for layer in &manifest.layers {
                 let layer_digest = Digest::try_from(layer.digest.as_str())?;
-                if !copy_into_home(&lookup, &export.dir, &home, registry, &layer_digest).await? {
-                    return Err(missing());
-                }
+                // Strict, unlike `copy_into_home`: a copy failing its digest check is a data error, not absent.
+                let layer_bytes = lookup
+                    .read_metadata(registry, &layer_digest, MAX_REFERRER_BYTES)
+                    .await
+                    .map_err(|error| lookup_error(&export.dir, error))?
+                    .ok_or_else(missing)?;
+                write_blob_to_home(&export.dir, &home, registry, &layer_digest, layer_bytes).await?;
             }
         }
         Ok(())
@@ -806,7 +810,7 @@ async fn copy_referrers(
     Ok(())
 }
 
-/// Puts one verified blob from `lookup` into the home; `false` when no source holds it.
+/// Puts one verified referrer blob from `lookup` into the home; `false` when no source holds a good copy.
 async fn copy_into_home(
     lookup: &BlobLookup,
     export_dir: &Path,
@@ -1538,6 +1542,187 @@ mod tests {
 
         assert!(matches!(error, Error::ExportDirInvalid { .. }), "{error}");
         assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn index_entry_linked_after_the_walk_is_invalid() {
+        let home = TempDir::new().unwrap();
+        let export = TempDir::new().unwrap();
+        let package = Package::layerless();
+        package.write_export_dir(export.path(), false).await;
+        let opened = ExportDir::open(export.path()).await.unwrap();
+        // Same bytes behind the link, so only the link refusal can reject the read.
+        let object =
+            IndexStore::new(export.path().join("index")).dispatch_object_path(REGISTRY, REPO, &package.dispatch);
+        let outside = export.path().join("outside.json");
+        std::fs::copy(&object, &outside).unwrap();
+        std::fs::remove_file(&object).unwrap();
+        std::os::unix::fs::symlink(&outside, &object).unwrap();
+
+        let plan = opened.plan(&[]).unwrap().remove(0);
+        let error = offline_manager(home.path())
+            .import_package(&opened, plan, &[linux_amd64()])
+            .await
+            .expect_err("a dispatch object swapped for a link after the walk is refused");
+
+        assert!(matches!(error, Error::ExportDirInvalid { .. }), "{error}");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// A manager whose patch snapshot pins one descriptor whose single layer is in `export`'s blobs; returns the
+    /// layer's data file.
+    async fn snapshot_descriptor_in_export(
+        home: &std::path::Path,
+        export: &std::path::Path,
+    ) -> (PackageManager, PathBuf) {
+        Package::layerless().write_export_dir(export, false).await;
+        let blobs = export.join("blobs");
+        let store = ocx_store::file_structure::BlobStore::new(blobs.clone());
+        let layer_bytes = br#"{"version":1,"rules":[]}"#.to_vec();
+        let layer = ocx_oci::Algorithm::Sha256.hash(&layer_bytes);
+        let config_bytes = b"{}".to_vec();
+        let config = ocx_oci::Algorithm::Sha256.hash(&config_bytes);
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"application/vnd.oci.empty.v1+json","digest":"{config}","size":2}},"layers":[{{"mediaType":"application/json","digest":"{layer}","size":{}}}]}}"#,
+            layer_bytes.len()
+        )
+        .into_bytes();
+        let descriptor = ocx_oci::Algorithm::Sha256.hash(&manifest);
+        store.write_blob(REGISTRY, &layer, &layer_bytes).await.unwrap();
+        store.write_blob(REGISTRY, &descriptor, &manifest).await.unwrap();
+        let snapshot = crate::patch::snapshot::PatchSnapshot {
+            version: crate::patch::snapshot::SnapshotVersion::CURRENT,
+            companions: BTreeMap::new(),
+            descriptors: BTreeMap::from([(format!("{REGISTRY}/patches"), descriptor)]),
+        };
+        let manager = offline_manager(home).with_patch_snapshot(Some(snapshot));
+        (manager, ocx_oci::blob_lookup::blob_data_path(&blobs, REGISTRY, &layer))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn damaged_patch_descriptor_layer_is_a_data_error() {
+        let home = TempDir::new().unwrap();
+        let export = TempDir::new().unwrap();
+        let (manager, layer) = snapshot_descriptor_in_export(home.path(), export.path()).await;
+        std::fs::write(&layer, b"damaged").unwrap();
+        let opened = ExportDir::open(export.path()).await.unwrap();
+
+        let error = manager
+            .import_snapshot(&opened, &ImportOutcome::default())
+            .await
+            .expect_err("a layer that fails its digest check");
+
+        assert!(!matches!(error, Error::ExportNotFound { .. }), "{error}");
+        assert_eq!(error.classify(), Some(ExitCode::DataError), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn absent_patch_descriptor_layer_is_not_found() {
+        let home = TempDir::new().unwrap();
+        let export = TempDir::new().unwrap();
+        let (manager, layer) = snapshot_descriptor_in_export(home.path(), export.path()).await;
+        std::fs::remove_file(&layer).unwrap();
+        let opened = ExportDir::open(export.path()).await.unwrap();
+
+        let error = manager
+            .import_snapshot(&opened, &ImportOutcome::default())
+            .await
+            .expect_err("a layer no source holds");
+
+        assert!(matches!(error, Error::ExportNotFound { .. }), "{error}");
+        assert_eq!(error.classify(), Some(ExitCode::NotFound));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn damaged_companion_leaf_layer_is_a_data_error() {
+        let home = TempDir::new().unwrap();
+        let export = TempDir::new().unwrap();
+        let package = Package::new();
+        package.write_export_dir(export.path(), true).await;
+        let layer = package.layer.clone().expect("the package carries a layer");
+        // A digest-pinned companion read resolves its dispatch from the blobs, not the index objects.
+        ocx_store::file_structure::BlobStore::new(export.path().join("blobs"))
+            .write_blob(REGISTRY, &package.dispatch, &package.dispatch_bytes)
+            .await
+            .unwrap();
+        std::fs::write(
+            ocx_oci::blob_lookup::blob_data_path(&export.path().join("blobs"), REGISTRY, &layer),
+            b"damaged",
+        )
+        .unwrap();
+        let snapshot = crate::patch::PatchSnapshot {
+            version: crate::patch::SnapshotVersion::CURRENT,
+            companions: [(
+                crate::patch::snapshot::companion_key(&tagged()),
+                package.dispatch.clone(),
+            )]
+            .into(),
+            descriptors: BTreeMap::new(),
+        };
+        let manager = offline_manager(home.path()).with_patch_snapshot(Some(snapshot));
+        let opened = ExportDir::open(export.path()).await.unwrap();
+        // The companion's platform comes from what the import just assembled.
+        let imported = ImportOutcome {
+            items: vec![ImportedPackage {
+                identifier: tagged(),
+                tags: None,
+                platforms: vec![ImportedPlatform {
+                    platform: linux_amd64(),
+                    digest: package.leaf.clone(),
+                    status: ImportPlatformStatus::Present,
+                }],
+            }],
+        };
+
+        let error = manager
+            .import_snapshot(&opened, &imported)
+            .await
+            .expect_err("a companion layer that fails its digest check");
+
+        assert!(!matches!(error, Error::ExportNotFound { .. }), "{error}");
+        // The pull wraps the mismatch in unclassified setup failures; the innermost link carries the verdict.
+        let innermost = std::iter::successors(Some(&error as &dyn std::error::Error), |cause| cause.source())
+            .last()
+            .and_then(|cause| cause.downcast_ref::<crate::error::PackageErrorKind>())
+            .expect("the chain ends in a package failure");
+        let crate::error::PackageErrorKind::Internal(inner) = innermost else {
+            panic!("the chain ends in {innermost:?}");
+        };
+        assert!(format!("{inner:?}").contains("DigestMismatch"), "{inner:?}");
+        assert_eq!(inner.classify(), Some(ExitCode::DataError), "{inner:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn damaged_referrer_blob_is_skipped() {
+        let home = TempDir::new().unwrap();
+        let export = TempDir::new().unwrap();
+        let package = Package::layerless();
+        let blobs = export.path().join("blobs");
+        let (referrer, config) = write_referrer(&blobs, &package).await;
+        markers::write_marker(&blobs, REGISTRY, &package.leaf, &referrer).unwrap();
+        std::fs::write(
+            ocx_oci::blob_lookup::blob_data_path(&blobs, REGISTRY, &config),
+            b"damaged",
+        )
+        .unwrap();
+        let lookup = BlobLookup::new(vec![blobs], None);
+
+        copy_referrers(
+            &lookup,
+            export.path(),
+            home.path(),
+            REGISTRY,
+            &package.leaf,
+            std::slice::from_ref(&referrer),
+            &SIGNATURE_ARTIFACT_TYPES,
+        )
+        .await
+        .expect("a damaged referrer blob is skipped, never fatal");
+
+        let listed = markers::read_markers(home.path(), REGISTRY, &package.leaf, 4096).unwrap();
+        assert!(listed.digests.is_empty(), "an incomplete referrer earns no marker");
+        assert!(!blob_dir_path(home.path(), REGISTRY, &config).join("data").is_file());
     }
 
     fn project_with_lock(dir: &std::path::Path) -> std::path::PathBuf {
