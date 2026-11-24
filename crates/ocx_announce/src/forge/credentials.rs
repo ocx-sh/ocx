@@ -1023,18 +1023,17 @@ mod tests {
         assert_eq!(secret, credential.secret.0, "the secret half survives its own colons");
     }
 
-    /// A `file://` reference to a path that does not exist, under a fresh directory.
-    fn missing_reference(dir: &tempfile::TempDir) -> String {
-        format!("file://{}", dir.path().join("absent").display())
-    }
-
-    fn assert_reference_error(result: Result<ForgeCredentials, ocx_env::ReferenceError>, variable: &str) {
-        match result {
+    /// Points `var` at a `file://` path that does not exist and asserts the ladder fails naming `var`.
+    fn assert_a_missing_file_fails(env: &ocx_env::overrides::EnvLock, var: &'static ocx_env::EnvVar) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set(var, format!("file://{}", dir.path().join("absent").display()));
+        match ForgeCredentials::resolve(WriteTransport::Git) {
             Err(error) => assert!(
-                error.to_string().contains(variable),
-                "the error must name the carrying variable {variable}: {error}"
+                error.to_string().contains(var.name),
+                "the error must name the carrying variable {}: {error}",
+                var.name
             ),
-            Ok(credentials) => panic!("an unresolvable {variable} must fail, got {credentials:?}"),
+            Ok(credentials) => panic!("an unresolvable {} must fail, got {credentials:?}", var.name),
         }
     }
 
@@ -1042,35 +1041,23 @@ mod tests {
     #[test]
     fn unresolvable_announce_token_is_an_error_not_the_job_token() {
         let env = isolated();
-        let dir = tempfile::tempdir().expect("tempdir");
         env.set(var::GITLAB_CI, "true");
         env.set(var::CI_JOB_TOKEN, "job-token-value");
-        env.set(var::OCX_ANNOUNCE_TOKEN, missing_reference(&dir));
-
-        assert_reference_error(ForgeCredentials::resolve(WriteTransport::Git), "OCX_ANNOUNCE_TOKEN");
+        assert_a_missing_file_fails(&env, var::OCX_ANNOUNCE_TOKEN);
     }
 
     #[test]
     fn unresolvable_announce_git_token_is_an_error_not_the_api_token() {
         let env = isolated();
-        let dir = tempfile::tempdir().expect("tempdir");
         env.set(var::OCX_ANNOUNCE_TOKEN, "api-token-value");
-        env.set(var::OCX_ANNOUNCE_GIT_TOKEN, missing_reference(&dir));
-
-        assert_reference_error(ForgeCredentials::resolve(WriteTransport::Git), "OCX_ANNOUNCE_GIT_TOKEN");
+        assert_a_missing_file_fails(&env, var::OCX_ANNOUNCE_GIT_TOKEN);
     }
 
     #[test]
     fn unresolvable_announce_git_username_is_an_error_not_the_default() {
         let env = isolated();
-        let dir = tempfile::tempdir().expect("tempdir");
         env.set(var::OCX_ANNOUNCE_TOKEN, "api-token-value");
-        env.set(var::OCX_ANNOUNCE_GIT_USERNAME, missing_reference(&dir));
-
-        assert_reference_error(
-            ForgeCredentials::resolve(WriteTransport::Git),
-            "OCX_ANNOUNCE_GIT_USERNAME",
-        );
+        assert_a_missing_file_fails(&env, var::OCX_ANNOUNCE_GIT_USERNAME);
     }
 
     /// The `:` refusal reads the resolved value, so a file holding `a:b` is refused
