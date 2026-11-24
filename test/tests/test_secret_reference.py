@@ -2,9 +2,10 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for secret variables that hold a reference (``file://``, ``env://``, ``plain://``).
 
-The registries here are anonymous, so a pull that ignores a broken token reference
-still succeeds. That is the failure these tests catch: an unresolvable reference
-must fail the command, never fall back to anonymous access.
+Most registries here are anonymous, so a pull that ignores a broken token reference
+still succeeds. That is the failure those tests catch: an unresolvable reference
+must fail the command, never fall back to anonymous access. The ``auth_registry``
+tests prove the other side: a token read from a file is the one the registry accepts.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ pytestmark = pytest.mark.command("package_pull")
 
 EXIT_IO_ERROR = 74
 EXIT_CONFIG = 78
+EXIT_AUTH = 80
 
 
 def slug(registry: str) -> str:
@@ -199,3 +201,98 @@ def test_a_reference_is_resolved_one_step_only(pull_with, target_registry: str) 
     assert "OCX_AUTH" not in result.stderr, result.stderr
     assert "OTHER_VAR" not in result.stderr, result.stderr
     assert chained not in result.stderr, result.stderr
+
+
+@pytest.fixture
+def pull_from_auth(ocx: OcxRunner, auth_registry, tmp_path: Path):
+    """Publish a package to the registry that requires a login; return a puller taking env overrides."""
+    address, auth = auth_registry
+    package = make_package(
+        ocx, f"t_{uuid4().hex[:8]}_auth", "1.0.0", tmp_path, cascade=False
+    )
+    insecure = f"{ocx.registry},{address}"
+    prefix = f"OCX_AUTH_{slug(address)}"
+    ocx.run(
+        "package",
+        "copy",
+        "--to",
+        address,
+        package.short,
+        env_overlay={
+            "OCX_INSECURE_REGISTRIES": insecure,
+            f"{prefix}_USER": auth.user,
+            f"{prefix}_TOKEN": auth.password,
+        },
+    )
+    reference = f"{address}/{package.repo}:{package.tag}"
+    counter = 0
+
+    def pull(**extra: str):
+        nonlocal counter
+        counter += 1
+        home = tmp_path / f"auth-home-{counter}"
+        home.mkdir()
+        return ocx.run(
+            "package",
+            "pull",
+            reference,
+            check=False,
+            env_overlay={
+                "OCX_HOME": str(home),
+                "OCX_INSECURE_REGISTRIES": insecure,
+                # An empty Docker config: a host login must not answer for the variables under test.
+                "DOCKER_CONFIG": str(home / "docker"),
+                **extra,
+            },
+        )
+
+    return pull
+
+
+def test_a_registry_that_requires_a_login_refuses_a_pull_without_credentials(
+    pull_from_auth,
+) -> None:
+    failed = pull_from_auth()
+
+    assert failed.returncode == EXIT_AUTH, (
+        f"stdout: {failed.stdout}\nstderr: {failed.stderr}"
+    )
+
+
+def test_a_wrong_token_in_the_file_is_refused_by_the_registry(
+    pull_from_auth, auth_registry, tmp_path: Path
+) -> None:
+    address, auth = auth_registry
+    token = tmp_path / "token"
+    token.write_text(f"not-{auth.password}\n", encoding="utf-8")
+    prefix = f"OCX_AUTH_{slug(address)}"
+
+    failed = pull_from_auth(
+        **{f"{prefix}_USER": auth.user, f"{prefix}_TOKEN": f"file://{token}"}
+    )
+
+    assert failed.returncode == EXIT_AUTH, (
+        f"stdout: {failed.stdout}\nstderr: {failed.stderr}"
+    )
+
+
+def test_the_token_read_from_a_file_is_accepted_by_a_registry_that_requires_a_login(
+    pull_from_auth, auth_registry, tmp_path: Path
+) -> None:
+    """User plus token resolve to a Basic login; no ``_TYPE`` is needed for that.
+
+    The two refusals above are what make this green mean the file's content was the credential.
+    """
+    address, auth = auth_registry
+    token = tmp_path / "token"
+    token.write_text(f"{auth.password}\n", encoding="utf-8")
+    prefix = f"OCX_AUTH_{slug(address)}"
+
+    result = pull_from_auth(
+        **{f"{prefix}_USER": auth.user, f"{prefix}_TOKEN": f"file://{token}"}
+    )
+
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    for text in (auth.user, auth.password):
+        assert text not in result.stdout
+        assert text not in result.stderr
