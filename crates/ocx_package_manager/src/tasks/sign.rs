@@ -64,35 +64,47 @@ impl PackageManager {
         opts: SignOptions,
         resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
     ) -> Result<SignReport, PackageError> {
-        let client = self
-            .require_client()
-            .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
-
-        let signer = build_signer(opts.key.clone(), opts.rekor_upload, opts.rekor_url.clone())
-            .await
-            .map_err(|kind| map_sign_error(package.clone(), SignError::new(package.clone(), kind)))?;
-        let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
-        let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
-        let resolve = super::resolve_subject::sign_resolver(self.index(), resolved);
-        let state = SigningStatePaths::new(self.file_structure().state.root());
-        let context = SignContext {
-            identifier: package,
-            platform,
-            signer: signer.as_ref(),
-            token_provider: &token_provider,
-            no_cache: opts.no_cache,
-            dial: self.index().dial_policy(package.registry()),
-            resolve,
-            fulcio_url: &opts.fulcio_url,
-            rekor_url: &opts.rekor_url,
-            state,
-            format: opts.format,
-        };
-        let result = SignPipeline::run(client, context)
-            .await
-            .map_err(|err| map_sign_error(package.clone(), err))?;
-        Ok(SignReport { result })
+        sign_with(self, package, platform, opts, resolved, &mut None).await
     }
+}
+
+/// [`PackageManager::sign_one`] with the command's signer slot, filled by the first item that needs it.
+async fn sign_with(
+    manager: &PackageManager,
+    package: &ocx_oci::PackageRef,
+    platform: Option<&ocx_oci::Platform>,
+    opts: SignOptions,
+    resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
+    signer: &mut Option<Box<dyn Signer>>,
+) -> Result<SignReport, PackageError> {
+    let client = manager
+        .require_client()
+        .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
+
+    let signer = shared_signer(signer, &opts.key, opts.rekor_upload, &opts.rekor_url)
+        .await
+        .map_err(|kind| map_sign_error(package.clone(), SignError::new(package.clone(), kind)))?;
+    let trusted_hosts = manager.index().trusted_hosts_for(package.registry()).to_vec();
+    let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
+    let resolve = super::resolve_subject::sign_resolver(manager.index(), resolved);
+    let state = SigningStatePaths::new(manager.file_structure().state.root());
+    let context = SignContext {
+        identifier: package,
+        platform,
+        signer,
+        token_provider: &token_provider,
+        no_cache: opts.no_cache,
+        dial: manager.index().dial_policy(package.registry()),
+        resolve,
+        fulcio_url: &opts.fulcio_url,
+        rekor_url: &opts.rekor_url,
+        state,
+        format: opts.format,
+    };
+    let result = SignPipeline::run(client, context)
+        .await
+        .map_err(|err| map_sign_error(package.clone(), err))?;
+    Ok(SignReport { result })
 }
 
 /// What a `--tags` / `--tags-file` sweep did to one tag, generic over the `sign` or `attest` report.
@@ -132,6 +144,7 @@ impl PackageManager {
     ) -> Vec<SweptTag<SignReport>> {
         // Subject digest -> the tag whose run signed it.
         let mut signed: HashMap<ocx_oci::Digest, String> = HashMap::new();
+        let mut signer = None;
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
@@ -149,13 +162,15 @@ impl PackageManager {
                         );
                         SweptOutcome::CoveredBy(first)
                     }
-                    None => match self.sign_one(&identifier, None, opts.clone(), Some(&resolved)).await {
-                        Ok(report) => {
-                            signed.insert(resolved.0.clone(), tag.clone());
-                            SweptOutcome::Done(report)
+                    None => {
+                        match sign_with(self, &identifier, None, opts.clone(), Some(&resolved), &mut signer).await {
+                            Ok(report) => {
+                                signed.insert(resolved.0.clone(), tag.clone());
+                                SweptOutcome::Done(report)
+                            }
+                            Err(error) => SweptOutcome::Failed(Box::new(error)),
                         }
-                        Err(error) => SweptOutcome::Failed(Box::new(error)),
-                    },
+                    }
                 },
             };
             swept.push(SweptTag {
@@ -212,14 +227,35 @@ impl PackageManager {
         opts: &SignOptions,
     ) -> Vec<(ocx_oci::Platform, Result<SignReport, PackageError>)> {
         let mut signed = Vec::with_capacity(platforms.len());
+        let mut signer = None;
         for (platform, digest) in platforms {
             // Tag dropped: a later platform merge rewrites the tag's index, so a tagged reference re-resolves wrong.
             let pinned = package.clone_with_digest(digest.clone()).without_tag();
-            let outcome = self.sign_one(&pinned, None, opts.clone(), None).await;
+            let outcome = sign_with(self, &pinned, None, opts.clone(), None, &mut signer).await;
             signed.push((platform.clone(), outcome));
         }
         signed
     }
+}
+
+/// The signer in `slot`, built into it first when empty, so every item of one command shares one key password read.
+///
+/// A failed build leaves `slot` empty, and the next item tries again: the error is not `Clone`.
+///
+/// # Errors
+///
+/// [`build_signer`]'s.
+pub(super) async fn shared_signer<'slot>(
+    slot: &'slot mut Option<Box<dyn Signer>>,
+    key: &Option<ocx_trust::key_ref::KeyRef>,
+    rekor_upload: bool,
+    rekor_url: &Url,
+) -> Result<&'slot dyn Signer, ocx_sign::sign::SignErrorKind> {
+    let signer = match slot.take() {
+        Some(signer) => signer,
+        None => build_signer(key.clone(), rekor_upload, rekor_url.clone()).await?,
+    };
+    Ok(&**slot.insert(signer))
 }
 
 /// Build the signer the options select: keyless by default, key mode under `--key`.
@@ -237,6 +273,8 @@ pub(super) async fn build_signer(
     rekor_upload: bool,
     rekor_url: Url,
 ) -> Result<Box<dyn Signer>, ocx_sign::sign::SignErrorKind> {
+    #[cfg(test)]
+    SIGNER_BUILDS.with(|builds| builds.set(builds.get() + 1));
     match tokio::task::spawn_blocking(move || build_signer_blocking(key.as_ref(), rekor_upload, &rekor_url)).await {
         Ok(built) => built,
         Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
@@ -245,6 +283,14 @@ pub(super) async fn build_signer(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Counts [`build_signer`] calls on the polling thread; a current-thread test runtime polls on the test's own thread.
+    pub(super) static SIGNER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`build_signer`]'s body: reads the key file and resolves `OCX_KEY_PASSWORD`, so it blocks, and only
+/// [`build_signer`] calls it, from the blocking pool.
 fn build_signer_blocking(
     key: Option<&ocx_trust::key_ref::KeyRef>,
     rekor_upload: bool,
@@ -412,6 +458,11 @@ pub(super) mod sweep_test_support {
             .collect()
     }
 
+    /// Signers built on this thread so far; a test reads it before and after the call it counts.
+    pub(crate) fn signer_builds() -> usize {
+        super::SIGNER_BUILDS.with(std::cell::Cell::get)
+    }
+
     /// How many manifest reads the registry served — the positive control.
     ///
     /// A count of zero would mean the pipeline never got past resolution, and
@@ -430,7 +481,9 @@ pub(super) mod sweep_test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::sweep_test_support::{TAGS, expected_resolutions, manifest_reads, sweep_identifier, sweep_manager};
+    use super::sweep_test_support::{
+        TAGS, expected_resolutions, manifest_reads, signer_builds, sweep_identifier, sweep_manager,
+    };
     use super::{SignOptions, SweptOutcome, build_signer};
 
     fn sign_options() -> SignOptions {
@@ -497,6 +550,50 @@ mod tests {
             "one manifest resolution per swept tag, each for that tag — the sweep's answer \
              is the pipeline's",
         );
+    }
+
+    /// A `--tags` sweep of N tags builds one signer, so a key-mode sweep reads `OCX_KEY_PASSWORD` once.
+    #[tokio::test]
+    async fn a_tag_sweep_builds_its_signer_once() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let (manager, transport) = sweep_manager(Arc::clone(&asked), temp.path());
+        let tags: Vec<String> = TAGS.iter().map(|tag| (*tag).to_string()).collect();
+
+        let before = signer_builds();
+        manager.sign_tags(&sweep_identifier(), &tags, &sign_options()).await;
+
+        assert_eq!(
+            manifest_reads(&transport),
+            TAGS.len(),
+            "positive control: every tag reached the pipeline, past the signer",
+        );
+        assert_eq!(signer_builds() - before, 1, "one signer for the whole sweep");
+    }
+
+    /// Signing N pushed platforms builds one signer.
+    #[tokio::test]
+    async fn a_platform_sweep_builds_its_signer_once() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let (manager, _transport) = sweep_manager(Arc::clone(&asked), temp.path());
+        let platforms: Vec<(ocx_oci::Platform, ocx_oci::Digest)> = ["linux/amd64", "linux/arm64", "darwin/arm64"]
+            .iter()
+            .map(|platform| {
+                (
+                    platform.parse().expect("platform"),
+                    ocx_oci::Algorithm::Sha256.hash(platform.as_bytes()),
+                )
+            })
+            .collect();
+
+        let before = signer_builds();
+        let signed = manager
+            .sign_platforms(&sweep_identifier(), &platforms, &sign_options())
+            .await;
+
+        assert_eq!(signed.len(), platforms.len(), "one row per platform");
+        assert_eq!(signer_builds() - before, 1, "one signer for every platform");
     }
 
     /// An unresolvable `OCX_KEY_PASSWORD` reference fails signer construction; it is never the empty password.

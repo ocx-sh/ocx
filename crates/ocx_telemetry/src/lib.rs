@@ -25,6 +25,6 @@ mod testing;
 pub use ci::CiEnvironment;
 pub use destination::{Destination, DestinationFamily};
 pub use export::Slot;
-pub use gate::{ArmedBy, Decision, OffReason, decide};
+pub use gate::{ArmedBy, Decision, OffReason, Precheck, decide, precheck, select_destination};
 pub use payload::{CommandOutcome, CommandResult, PackageAction, PackageRecordInput, PackageRole};
 pub use resource::ResourceInputs;

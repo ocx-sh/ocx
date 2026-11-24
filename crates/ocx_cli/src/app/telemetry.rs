@@ -19,6 +19,7 @@ use ocx_util::tls::ExtraRoots;
 use crate::command::Command;
 use crate::command::leaf::Leaf;
 use crate::command::package::Package;
+use crate::off_runtime::off_runtime;
 
 /// Whether a command may export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,12 +217,11 @@ pub struct Arming {
 /// resource producer runs inside [`Slot::finish`], and only for a run with a destination.
 pub fn arm(
     section: Option<&TelemetryConfig>,
-    offline: bool,
+    decision: Decision,
     installation_id_file: PathBuf,
     extra_roots: ExtraRoots,
     ui: &UserInterface,
 ) -> Arming {
-    let decision = ocx_telemetry::decide(section, offline);
     let (warnings, records_packages) = match &decision {
         Decision::Off { warnings, .. } => (warnings, false),
         Decision::Armed {
@@ -254,6 +254,27 @@ pub fn arm(
     Arming { slot, records_packages }
 }
 
+/// [`ocx_telemetry::decide`] with its secret read off the runtime: the headers secret may be a `file://`
+/// reference, and a read on a worker thread stalls every task scheduled there.
+///
+/// The gate that reads no secret runs inline, so a run without telemetry pays no thread hop; only a run
+/// that wants to export hops to resolve its destination. A cancelled read (runtime shutdown) fails
+/// closed as an off decision, since telemetry never fails the command.
+pub async fn decide(section: Option<&TelemetryConfig>, offline: bool) -> Decision {
+    let armed_by = match ocx_telemetry::precheck(section, offline) {
+        ocx_telemetry::Precheck::Armed(armed_by) => armed_by,
+        ocx_telemetry::Precheck::Settled(settled) => return settled,
+    };
+    let section = section.cloned();
+    match off_runtime(move || ocx_telemetry::select_destination(section.as_ref(), armed_by)).await {
+        Some(decision) => decision,
+        None => Decision::Off {
+            reason: ocx_telemetry::OffReason::Unusable,
+            warnings: Vec::new(),
+        },
+    }
+}
+
 /// Probes the process for the resource attributes; every lookup is best-effort and drops its own key.
 fn resource_inputs(
     config_service_name: Option<String>,
@@ -278,6 +299,60 @@ fn resource_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run that is off before any secret read settles inline: a current-thread runtime starts no thread
+    /// of its own, so `on_thread_start` fires only for a blocking-pool thread, which a hop would spawn.
+    /// Red state: route the whole of `decide` through `off_runtime` and the count is 1.
+    #[test]
+    fn a_run_without_telemetry_pays_no_blocking_hop() {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = started.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .on_thread_start(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .build()
+            .expect("a runtime");
+        let decision = runtime.block_on(decide(None, true));
+        assert!(matches!(decision, Decision::Off { .. }), "{decision:?}");
+        assert_eq!(
+            started.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unarmed run hopped to the blocking pool"
+        );
+    }
+
+    /// The destination (the headers secret) is resolved only through `off_runtime`; comments are skipped.
+    #[test]
+    fn the_secret_read_is_consulted_only_through_the_blocking_seam() {
+        let production = |source: &'static str| -> Vec<&'static str> {
+            source
+                .split("\n#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect()
+        };
+        let calls = |lines: &[&str], needle: &str| lines.iter().filter(|line| line.contains(needle)).count();
+        let own = production(include_str!("telemetry.rs"));
+        let context = production(include_str!("context.rs"));
+        assert_eq!(calls(&own, "ocx_telemetry::decide("), 0, "no whole-gate call");
+        for needle in ["ocx_telemetry::decide(", "select_destination(", "precheck("] {
+            assert_eq!(calls(&context, needle), 0, "context: no direct `{needle}` call");
+        }
+        assert_eq!(calls(&context, "telemetry::decide("), 1, "context calls the seam");
+        assert_eq!(
+            calls(&own, "ocx_telemetry::select_destination("),
+            1,
+            "the seam's own call, and no other"
+        );
+        assert!(
+            own.iter()
+                .any(|line| line.contains("off_runtime(move || ocx_telemetry::select_destination(")),
+            "the destination read is wrapped in `off_runtime`"
+        );
+    }
 
     /// Commands whose output is read by a shell, a launcher or a script, or that report on
     /// ocx itself, so they never export.

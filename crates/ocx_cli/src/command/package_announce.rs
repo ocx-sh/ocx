@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use crate::error::UsageError;
 use clap::Parser;
 use ocx_announce::announce::{self, AnnounceRequest, AnnounceTarget, TagSelection};
-use ocx_announce::forge::ForgeCredentials;
+use ocx_announce::forge::{ForgeCredentials, WriteTransport};
 
 use crate::{api::data::announce::AnnounceReport, command::deprecated, options};
 
@@ -238,7 +238,7 @@ impl PackageAnnounce {
 
         // Through `resolve` with the selected transport: a direct `OCX_ANNOUNCE_TOKEN` read misses the
         // GitLab job-token rung.
-        let credentials = ForgeCredentials::resolve(self.forge.transport)?;
+        let credentials = resolve_credentials(self.forge.transport).await?;
         self.forge.require_credential(&credentials)?;
 
         // On the shared flatten, so `ocx package claim` warns identically for the same state.
@@ -319,6 +319,19 @@ fn run_url(var: impl Fn(&'static ocx_env::EnvVar) -> Option<String>) -> Option<S
         "{}/{repository}/actions/runs/{run_id}",
         server.trim_end_matches('/')
     ))
+}
+
+/// [`ForgeCredentials::resolve`] off the runtime, for `announce` and `claim`: a `file://` reference reads a file,
+/// possibly on a slow share, and a read on a worker thread stalls every task scheduled there.
+///
+/// # Errors
+///
+/// The reference error `resolve` raises, or the read's cancellation at runtime shutdown.
+pub(crate) async fn resolve_credentials(transport: WriteTransport) -> anyhow::Result<ForgeCredentials> {
+    let resolved = crate::off_runtime::off_runtime(move || ForgeCredentials::resolve(transport))
+        .await
+        .ok_or_else(|| anyhow::anyhow!("the forge credential read was cancelled"))?;
+    Ok(resolved?)
 }
 
 #[cfg(test)]
@@ -997,6 +1010,45 @@ mod tests {
         assert!(
             !has_trusted_host_flag,
             "ocx package announce must not expose a --trusted-host flag (design register X2)"
+        );
+    }
+
+    // ── forge credentials off the runtime ──────────────────────────────
+
+    /// Both commands reach `ForgeCredentials::resolve` only through `resolve_credentials`, the one seam
+    /// that goes through `off_runtime`. Comments are skipped, so a doc naming `resolve` is not a call.
+    #[test]
+    fn forge_credentials_resolve_only_through_the_blocking_seam() {
+        let production = |source: &'static str| -> Vec<&'static str> {
+            source
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect()
+        };
+        let calls = |lines: &[&str], needle: &str| lines.iter().filter(|line| line.contains(needle)).count();
+        let announce = production(include_str!("package_announce.rs"));
+        let claim = production(include_str!("package_claim.rs"));
+
+        assert_eq!(
+            calls(&announce, "ForgeCredentials::resolve("),
+            1,
+            "announce: the seam's own call, and no other"
+        );
+        assert_eq!(calls(&claim, "ForgeCredentials::resolve("), 0, "claim: no direct call");
+        assert_eq!(
+            calls(&announce, "resolve_credentials("),
+            2,
+            "announce: the seam and its caller"
+        );
+        assert_eq!(calls(&claim, "resolve_credentials("), 1, "claim calls the seam");
+        assert!(
+            announce
+                .iter()
+                .any(|line| line.contains("off_runtime(move || ForgeCredentials::resolve(")),
+            "the credential read is wrapped in `off_runtime`"
         );
     }
 }
