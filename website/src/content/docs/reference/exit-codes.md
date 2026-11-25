@@ -196,7 +196,7 @@ Input data is malformed or fails verification.
 | `duplicate_platform_key` | ocx.lock lists the same platform twice for one binding |
 | `empty_push_set` | A push names no target platform |
 | `entrypoint_collision` | Two packages declare the same entry point name |
-| `export_dir_invalid` | A directory is not a valid export |
+| `export_dir_invalid` | An export directory or archive is not valid |
 | `extra_ca_certs_invalid` | The extra CA bundle the payload names is not usable |
 | `extra_ca_certs_not_utf8` | The extra CA bundle is not UTF-8 and cannot be persisted |
 | `extra_ca_file_invalid` | The extra CA bundle file holds no usable certificate |

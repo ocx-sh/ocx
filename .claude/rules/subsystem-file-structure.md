@@ -296,6 +296,8 @@ Layout: `{root}/temp/{32-hex-hash}/` — deterministic SHA-256 hash of full iden
 
 Lock file sits as sibling: `{32-hex-hash}.lock`. `try_acquire()` non-blocking; stale artifacts cleaned on acquire. Temp dir atomically renamed into `packages/` on completion.
 
+Export and import archive staging also live under `temp/`, in uniquely named directories whose lock file is held exclusively for the run, so `ocx clean` leaves them alone.
+
 ## Path Construction
 
 ### Slugification

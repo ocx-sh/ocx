@@ -20,9 +20,10 @@ use ocx_oci::copy::MAX_CONCURRENT_BLOB_TRANSFERS;
 use ocx_oci::{Digest, OciIdentifier, PackageRef, PinnedOciIdentifier, PinnedPackageRef, Platform};
 
 use super::common::{load_config_metadata, lookup_error, resolve_top_manifest, stage_chain_blobs};
+use super::export_archive;
 use super::resolve::{PatchRootScope, ResolvedChain, snapshot_companion_roots};
 use crate::PackageManager;
-use crate::error::{Error, PackageErrorKind, Result};
+use crate::error::{Error, PackageErrorKind, Result, file_error};
 
 /// How long a second export into the same directory waits for the first.
 const EXPORT_LOCK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,6 +55,8 @@ pub struct ExportRequest {
     pub platforms: Vec<Platform>,
     /// Whether signature referrers travel with their subjects.
     pub referrers: bool,
+    /// Write `output` as one archive file instead of a directory.
+    pub archive: bool,
 }
 
 /// Whether a platform's blobs were written by this run.
@@ -109,63 +112,95 @@ impl PackageManager {
                 });
             }
         }
-
-        let output = request.output.clone();
-        let invalid = |reason: String| Error::ExportDirInvalid {
-            dir: output.clone(),
-            reason,
-        };
-        tokio::fs::create_dir_all(&output)
-            .await
-            .map_err(|error| invalid(error.to_string()))?;
-        let _lock = ocx_util::fs::lock_scoped(
-            &self.file_structure().locks,
-            "export-dir",
-            &output,
-            "",
-            EXPORT_LOCK_TIMEOUT,
-        )
-        .await?;
-
-        let existing = {
-            let dir = output.clone();
-            tokio::task::spawn_blocking(move || export_marker::read_marker(&dir))
+        if !request.archive {
+            let output = request.output.clone();
+            tokio::fs::create_dir_all(&output)
                 .await
-                .map_err(|join| Error::InternalFile(output.clone(), std::io::Error::other(join)))?
-                .map_err(|error| marker_error(&output, error))?
-        };
-        let run = Run::new(self, &request, existing.unwrap_or_default())?;
-        // A slug collision refuses the run before any blob is written.
-        for registry in request
-            .packages
-            .iter()
-            .map(PackageRef::registry)
-            .chain(request.lock_pins.iter().map(|pin| pin.identifier.registry()))
+                .map_err(|error| Error::ExportDirInvalid {
+                    dir: output.clone(),
+                    reason: error.to_string(),
+                })?;
+            let _lock = ocx_util::fs::lock_scoped(
+                &self.file_structure().locks,
+                "export-dir",
+                &output,
+                "",
+                EXPORT_LOCK_TIMEOUT,
+            )
+            .await?;
+            return export_into_dir(self, request).await;
+        }
+        let target = request.output.clone();
+        if tokio::fs::metadata(&target)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
         {
-            run.note_registry(registry)?;
+            return Err(Error::ExportDirInvalid {
+                dir: target,
+                reason: "it is an existing directory; pass a file path, or drop --archive to export into it".to_owned(),
+            });
         }
-
-        let mut exported = Vec::new();
-        for package in &request.packages {
-            exported.push(run.export_named(self, package, &request.platforms).await?);
+        if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| file_error(parent, error))?;
         }
-        for pin in &request.lock_pins {
-            exported.push(run.export_pin(self, pin).await?);
-        }
-        if request.packages.is_empty() {
-            exported.extend(run.export_snapshot(self, &request.platforms).await?);
-        }
-
-        run.write_index(self, &request.packages, &mut exported).await?;
-        run.write_marker().await?;
-
-        Ok(ExportOutcome {
-            output_dir: output,
-            packages: exported,
-            blob_count: run.blob_count.load(Ordering::Relaxed),
-            written_size: run.written_size.load(Ordering::Relaxed),
-        })
+        let staging = export_archive::scratch(self.file_structure(), "export").await?;
+        let staged = ExportRequest {
+            output: staging.path().to_path_buf(),
+            archive: false,
+            ..request
+        };
+        // The scratch directory is private to this run, so it needs no lock of its own.
+        let mut outcome = export_into_dir(self, staged).await?;
+        export_archive::pack(staging.path(), &target).await?;
+        outcome.output_dir = target;
+        Ok(outcome)
     }
+}
+
+/// The directory form of [`PackageManager::export`], writing in place with the marker last; the caller has
+/// created `request.output` and holds whatever lock it needs.
+async fn export_into_dir(manager: &PackageManager, request: ExportRequest) -> Result<ExportOutcome> {
+    let output = request.output.clone();
+    let existing = {
+        let dir = output.clone();
+        tokio::task::spawn_blocking(move || export_marker::read_marker(&dir))
+            .await
+            .map_err(|join| Error::InternalFile(output.clone(), std::io::Error::other(join)))?
+            .map_err(|error| marker_error(&output, error))?
+    };
+    let run = Run::new(manager, &request, existing.unwrap_or_default())?;
+    // A slug collision refuses the run before any blob is written.
+    for registry in request
+        .packages
+        .iter()
+        .map(PackageRef::registry)
+        .chain(request.lock_pins.iter().map(|pin| pin.identifier.registry()))
+    {
+        run.note_registry(registry)?;
+    }
+
+    let mut exported = Vec::new();
+    for package in &request.packages {
+        exported.push(run.export_named(manager, package, &request.platforms).await?);
+    }
+    for pin in &request.lock_pins {
+        exported.push(run.export_pin(manager, pin).await?);
+    }
+    if request.packages.is_empty() {
+        exported.extend(run.export_snapshot(manager, &request.platforms).await?);
+    }
+
+    run.write_index(manager, &request.packages, &mut exported).await?;
+    run.write_marker().await?;
+
+    Ok(ExportOutcome {
+        output_dir: output,
+        packages: exported,
+        blob_count: run.blob_count.load(Ordering::Relaxed),
+        written_size: run.written_size.load(Ordering::Relaxed),
+    })
 }
 
 fn marker_error(dir: &Path, error: ExportMarkerError) -> Error {
@@ -923,6 +958,7 @@ mod tests {
             platforms: vec![linux_amd64()],
             // The fixture managers carry no client, so a referrer listing could never complete.
             referrers: false,
+            archive: false,
         }
     }
 
@@ -1063,6 +1099,237 @@ mod tests {
             !out.path().join("blobs").join("locks").exists(),
             "the refusal comes before any blob is written"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_writes_one_file_that_imports_elsewhere() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::layerless();
+        let manager = complete_home(&home, &package).await;
+        let archive = work.path().join("bundle.tar");
+        let mut archived = request(&archive, vec![tagged()]);
+        archived.archive = true;
+
+        let outcome = manager.export(archived).await.unwrap();
+
+        assert_eq!(outcome.output_dir, archive);
+        assert!(archive.is_file(), "the output is a file, not a directory");
+        let mut names = Vec::new();
+        for entry in tar::Archive::new(std::fs::File::open(&archive).unwrap())
+            .entries()
+            .unwrap()
+        {
+            names.push(entry.unwrap().path().unwrap().to_string_lossy().into_owned());
+        }
+        assert!(
+            names
+                .iter()
+                .any(|name| name.trim_start_matches("./") == "ocx-export.json"),
+            "{names:?}"
+        );
+
+        let other = TempDir::new().unwrap();
+        let target = offline_manager(other.path());
+        target
+            .import(crate::tasks::import::ImportRequest {
+                input: archive,
+                packages: Vec::new(),
+                platforms: vec![linux_amd64()],
+            })
+            .await
+            .unwrap();
+        let pinned = target
+            .index()
+            .fetch_manifest_digest(&tagged(), ocx_index::IndexOperation::Query)
+            .await
+            .unwrap();
+        assert_eq!(pinned, Some(package.dispatch));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_onto_a_directory_is_refused() {
+        let home = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let mut archived = request(out.path(), vec![tagged()]);
+        archived.archive = true;
+
+        let error = manager
+            .export(archived)
+            .await
+            .expect_err("a directory is not replaced by a file");
+
+        assert!(matches!(error, Error::ExportDirInvalid { .. }), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("pass a file path, or drop --archive to export into it"),
+            "{error}"
+        );
+        assert_eq!(exit_of(&error), Some(ExitCode::DataError));
+        assert!(out.path().is_dir());
+    }
+
+    /// Every file under the home's `locks/` directory.
+    fn lock_files(manager: &PackageManager) -> usize {
+        fn count(dir: &std::path::Path) -> usize {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            entries
+                .map(|entry| entry.unwrap().path())
+                .map(|path| if path.is_dir() { count(&path) } else { 1 })
+                .sum()
+        }
+        count(&manager.file_structure().locks)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_leaves_no_lock_file_and_directory_export_still_takes_one() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let empty = lock_files(&manager);
+        manager
+            .export(request(&work.path().join("first"), vec![tagged()]))
+            .await
+            .unwrap();
+        let after_directory = lock_files(&manager);
+        assert!(after_directory > empty, "a directory export is serialized by a lock");
+
+        let mut archived = request(&work.path().join("bundle.tar"), vec![tagged()]);
+        archived.archive = true;
+        manager.export(archived).await.unwrap();
+
+        assert_eq!(
+            lock_files(&manager),
+            after_directory,
+            "an archive export adds no lock file"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_creates_the_missing_parents_of_its_output() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let archive = work.path().join("a").join("b").join("bundle.tar");
+        let mut archived = request(&archive, vec![tagged()]);
+        archived.archive = true;
+
+        manager.export(archived).await.unwrap();
+
+        assert!(archive.is_file());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_replaces_an_existing_file() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let archive = work.path().join("bundle.tar");
+        std::fs::write(&archive, b"stale").unwrap();
+        let mut archived = request(&archive, vec![tagged()]);
+        archived.archive = true;
+
+        manager.export(archived).await.unwrap();
+
+        assert!(
+            tar::Archive::new(std::fs::File::open(&archive).unwrap())
+                .entries()
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_start_matches("./")
+                    == "ocx-export.json"),
+            "the stale file is replaced by an archive holding the marker"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_archive_export_leaves_the_output_and_its_directory_untouched() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let archive = work.path().join("bundle.tar");
+        std::fs::write(&archive, b"previous").unwrap();
+        let mut archived = request(&archive, vec![tagged()]);
+        archived.archive = true;
+
+        let error = offline_manager(home.path())
+            .export(archived)
+            .await
+            .expect_err("an empty offline home pins no tag");
+
+        assert_eq!(exit_of(&error), Some(ExitCode::PolicyBlocked), "{error}");
+        assert_eq!(std::fs::read(&archive).unwrap(), b"previous");
+        let names: Vec<_> = std::fs::read_dir(work.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("bundle.tar")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_usage_error_on_the_archive_path_creates_nothing() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let by_digest = PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(package.leaf.clone());
+        let archive = work.path().join("new").join("bundle.tar");
+        let mut archived = request(&archive, vec![by_digest]);
+        archived.platforms = Vec::new();
+        archived.archive = true;
+
+        let error = manager
+            .export(archived)
+            .await
+            .expect_err("a digest needs exactly one platform");
+
+        assert_eq!(exit_of(&error), Some(ExitCode::UsageError), "{error}");
+        assert!(!work.path().join("new").exists(), "no parent directory is created");
+        assert!(
+            std::fs::read_dir(manager.file_structure().temp.root())
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true),
+            "no scratch directory is left behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unwritable_parent_keeps_its_io_classification() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::new();
+        let manager = complete_home(&home, &package).await;
+        let locked = work.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Root bypasses the mode, so the refusal below could never fire.
+        if std::fs::create_dir(locked.join("probe")).is_ok() {
+            return;
+        }
+        let mut archived = request(&locked.join("sub").join("bundle.tar"), vec![tagged()]);
+        archived.archive = true;
+
+        let error = manager
+            .export(archived)
+            .await
+            .expect_err("the parent cannot be created");
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!matches!(error, Error::ExportDirInvalid { .. }), "{error}");
+        assert_eq!(exit_of(&error), Some(ExitCode::IoError), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -446,11 +446,11 @@ ocx package description push [OPTIONS] <IDENTIFIER>
 
 ## `ocx package export` {#package-export}
 
-Write packages and their blobs to a directory for offline transfer.
+Write packages and their blobs to a directory or archive file for offline transfer.
 
 Each package is exported with its dependencies, its metadata and, unless `--no-referrers` is given, the signatures, SBOMs and attestations anchored to it. The directory holds a restricted copy of the index for the exported tags (`index/`), the blobs (`blobs/`) and the marker `ocx-export.json`, which is written last.
 
-Exporting into an existing export directory adds to it.
+Exporting into an existing export directory adds to it. With `--archive` the same content is written as one file at the `-o` PATH instead, and nothing is merged: an existing file is replaced and an existing directory there exits 65.
 
 A package is `registry/repository:tag`, which exports every platform the tag publishes, or `registry/repository@sha256:<hex>`, which names one platform manifest and needs exactly one `--platform`. A tag is resolved as `ocx package pull` resolves it, so a tag the local index has not seen yet is recorded there.
 
@@ -460,16 +460,17 @@ An unknown registry, package, tag or platform exits 79. A directory that is not 
 
 A write failure exits 74.
 
-Move the directory to the other machine and run `ocx package import` there.
+Move the directory or file to the other machine and run `ocx package import` there.
 
 ```text
-ocx package export [OPTIONS] --output <DIR> <PACKAGE>...
+ocx package export [OPTIONS] --output <PATH> <PACKAGE>...
 ```
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--archive` |  | Write one archive file instead of a directory |
 | `--no-referrers` |  | Leave them out; a trust policy then cannot verify the import offline |
-| `--output`, `-o` | `DIR` | Directory to write the export to; created when absent |
+| `--output`, `-o` | `PATH` | Where to write the export: a directory, or the archive file with --archive; created when absent |
 | `--platform`, `-p` | `PLATFORM` | Export only this platform; repeat for several. Defaults to every platform the package publishes |
 | `--referrers` |  | Carry the signatures, SBOMs and attestations of each exported manifest (default) |
 

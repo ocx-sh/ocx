@@ -118,20 +118,20 @@ ocx package exec [OPTIONS] <PACKAGES>... <COMMAND>...
 
 ## `ocx package import` {#package-import}
 
-Import packages from an export directory without network access.
+Import packages from an export directory or archive without network access.
 
 Assembles the packages `ocx package export` wrote in the local object store and pins their tags in the local index, with no registry traffic. It installs nothing: no candidate or `current` symlink is created, so `ocx clean` collects an imported package nothing else holds.
 
-Name packages to import only those; without names every package the export lists is imported, for the host platform unless `--platform` says otherwise. DIR is the export root that holds `ocx-export.json`, not its `index` or `blobs` subdirectory.
+Name packages to import only those; without names every package the export lists is imported, for the host platform unless `--platform` says otherwise. `PATH` is the export root that holds `ocx-export.json`, not its `index` or `blobs` subdirectory, or an archive file written with `--archive`.
 
 A package covered by a trust policy is verified from the signatures the export carries, and fails with exit 79 when the export carries none. A tag the local index already pins to a different digest is kept and reported as `conflict`, unless the package was named, in which case it moves and is reported as `replaced`.
 
 A conflict is a report row and a warning, not an error. A package that fails to import changes nothing.
 
-A directory without a valid marker, or one that disagrees with its own index, exits 65. A registry, package, tag, platform or blob the export lacks exits 79.
+A directory without a valid marker, or one that disagrees with its own index, exits 65, as does a file that cannot be read as an archive, naming the file passed. A registry, package, tag, platform or blob the export lacks exits 79.
 
 ```text
-ocx package import [OPTIONS] <DIR> [PACKAGE]...
+ocx package import [OPTIONS] <PATH> [PACKAGE]...
 ```
 
 | Flag | Value | Description |

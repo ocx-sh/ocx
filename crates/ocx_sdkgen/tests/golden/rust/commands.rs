@@ -383,8 +383,11 @@ impl ExecArgs {
 /// The arguments of `ocx export`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExportArgs {
-    /// Directory to write the export to; created when absent
+    /// Where to write the export: a directory, or the archive file with --archive; created when
+    /// absent
     pub output: PathBuf,
+    /// Write one archive file instead of a directory
+    pub archive: bool,
     /// Restrict to the named group(s)
     pub groups: Vec<String>,
     /// Export only this platform; repeat for several. Defaults to every platform the lock records
@@ -399,6 +402,7 @@ impl ExportArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
         argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.switch("archive", self.archive);
         argv.flag("group", &self.groups, Presence::Optional, &[]);
         argv.flag("platform", &self.platforms, Presence::Optional, &[]);
         argv.switch("referrers", self.referrers);
@@ -409,8 +413,8 @@ impl ExportArgs {
 /// The arguments of `ocx import`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImportArgs {
-    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs`
-    /// subdirectory
+    /// The export directory (the one holding `ocx-export.json`, not its `index` or `blobs`
+    /// subdirectory), or an archive file written with `--archive`
     pub input: PathBuf,
     /// Restrict to the named group(s)
     pub groups: Vec<String>,
@@ -1264,8 +1268,11 @@ impl PackageExecArgs {
 /// The arguments of `ocx package export`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageExportArgs {
-    /// Directory to write the export to; created when absent
+    /// Where to write the export: a directory, or the archive file with --archive; created when
+    /// absent
     pub output: PathBuf,
+    /// Write one archive file instead of a directory
+    pub archive: bool,
     /// Export only this platform; repeat for several. Defaults to every platform the package
     /// publishes
     pub platforms: Vec<String>,
@@ -1281,6 +1288,7 @@ impl PackageExportArgs {
     /// Appends the arguments to `argv`.
     pub fn push(&self, argv: &mut Argv) {
         argv.flag("output", [&self.output], Presence::Required, &[]);
+        argv.switch("archive", self.archive);
         argv.flag("platform", &self.platforms, Presence::Optional, &[]);
         argv.switch("referrers", self.referrers);
         argv.switch("no-referrers", self.no_referrers);
@@ -1291,8 +1299,8 @@ impl PackageExportArgs {
 /// The arguments of `ocx package import`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageImportArgs {
-    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs`
-    /// subdirectory
+    /// The export directory (the one holding `ocx-export.json`, not its `index` or `blobs`
+    /// subdirectory), or an archive file written with `--archive`
     pub input: PathBuf,
     /// Import only this platform; repeat for several. Defaults to the host platform
     pub platforms: Vec<String>,
@@ -2475,7 +2483,7 @@ impl Ocx {
         self.call_passthrough("exec", &[], argv)
     }
 
-    /// Write every package the project lock pins to a directory
+    /// Write every package the project lock pins to a directory or archive file
     ///
     /// Runs `ocx export`.
     pub fn export(&self, args: &ExportArgs) -> Result<ExportReport, Error> {
@@ -2484,7 +2492,7 @@ impl Ocx {
         self.call("export", "ExportReport", argv)
     }
 
-    /// Assemble the project lock's packages from an export directory, offline
+    /// Assemble the project lock's packages from an export directory or archive, offline
     ///
     /// Runs `ocx import`.
     pub fn import(&self, args: &ImportArgs) -> Result<ImportReport, Error> {
@@ -2729,7 +2737,7 @@ impl Ocx {
         self.call_passthrough("package exec", &[], argv)
     }
 
-    /// Write packages and their blobs to a directory for offline transfer
+    /// Write packages and their blobs to a directory or archive file for offline transfer
     ///
     /// Runs `ocx package export`.
     pub fn package_export(&self, args: &PackageExportArgs) -> Result<ExportReport, Error> {
@@ -2738,7 +2746,7 @@ impl Ocx {
         self.call("package export", "ExportReport", argv)
     }
 
-    /// Import packages from an export directory without network access
+    /// Import packages from an export directory or archive without network access
     ///
     /// Runs `ocx package import`.
     pub fn package_import(&self, args: &PackageImportArgs) -> Result<ImportReport, Error> {

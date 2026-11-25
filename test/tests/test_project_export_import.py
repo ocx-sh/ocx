@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -112,6 +113,38 @@ def test_import_then_project_exec_survives_clean(
     second = _run(second_home, clone, "exec", "--", "hello")
     assert second.returncode == EXIT_SUCCESS, (
         f"exec after clean must still run offline; rc={second.returncode}\n{second.stderr}"
+    )
+    assert registry_guard.count == 0, (
+        f"an imported project must need no registry; saw {registry_guard.requests}"
+    )
+
+
+def test_archive_import_then_project_exec_survives_clean(
+    ocx: OcxRunner,
+    second_home: OcxRunner,
+    registry_guard: registry_guard_mod.RegistryGuard,
+    tmp_path: Path,
+) -> None:
+    """``export --archive`` writes one tar file; ``import`` of it runs the tool offline, even after ``clean``."""
+    project, _ = _locked_project(ocx, tmp_path, "archive")
+    bundle = tmp_path / "bundle.tar"
+    _export(ocx, project, bundle, "--archive")
+    assert bundle.is_file() and tarfile.is_tarfile(bundle)
+    with tarfile.open(bundle) as archive:
+        assert MARKER in {name.removeprefix("./") for name in archive.getnames()}
+    clone = _clone(project, tmp_path)
+
+    registry_guard.deny(second_home)
+    imported = _run(second_home, clone, "import", str(bundle))
+    assert imported.returncode == EXIT_SUCCESS, (
+        f"ocx import of an archive must succeed offline:\n{imported.stderr}"
+    )
+    bundle.unlink()
+
+    assert _run(second_home, clone, "clean").returncode == EXIT_SUCCESS
+    ran = _run(second_home, clone, "exec", "--", "hello")
+    assert ran.returncode == EXIT_SUCCESS, (
+        f"exec after an archive import and clean must run offline:\n{ran.stderr}"
     )
     assert registry_guard.count == 0, (
         f"an imported project must need no registry; saw {registry_guard.requests}"
