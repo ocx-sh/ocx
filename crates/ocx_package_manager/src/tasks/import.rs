@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ocx_exit::ClassifyExitCode as _;
 use ocx_index::{
     FileIndexTransport, Index, IndexStore, LocalConfig, LocalIndex, OcxIndex, OcxIndexConfig, PlannedTag, TagOutcome,
     TagPlan,
@@ -15,10 +16,12 @@ use ocx_oci::blob_lookup::export_marker::{self, ExportMarker, ExportMarkerError}
 use ocx_oci::blob_lookup::{BlobLookup, BlobWriter, LookupError, MAX_REFERRERS_PER_SUBJECT, markers};
 use ocx_oci::client::OverlayMode;
 use ocx_oci::{Digest, Manifest, PackageRef, PinnedPackageRef, Platform, Selection};
+use ocx_store::file_structure::FileStructure;
 
 use super::auto_verify::{ReferrerSource, SIGNATURE_ARTIFACT_TYPES};
 use super::common::{find_in_store, lookup_error};
 use super::export::LockPin;
+use super::export_archive;
 use super::resolve::{PatchRootScope, snapshot_companion_roots};
 use crate::PackageManager;
 use crate::error::{Error, PackageErrorKind, Result};
@@ -77,6 +80,7 @@ pub struct ImportOutcome {
 
 impl PackageManager {
     /// Assembles the packages of an export directory in the home: content first, pins last. Creates no install symlink.
+    /// A regular file at `input` is read as an archive of the export directory, unpacked under the home's `temp/`.
     ///
     /// Content is read from `DIR/blobs` and the configured lookup only, addressed by logical registry and
     /// digest; an export root's `repository` pointer is never resolved or dialled. Each package commits its
@@ -89,7 +93,41 @@ impl PackageManager {
     /// disagrees with its catalog; [`crate::Error::ExportNotFound`] for a registry, package, tag, platform or
     /// blob the export lacks; verification and I/O failures.
     pub async fn import(&self, request: ImportRequest) -> Result<ImportOutcome> {
-        let export = ExportDir::open(&request.input).await?;
+        let staged = stage_archive(self.file_structure(), &request.input).await?;
+        let Some(staged) = staged else {
+            return self.import_dir(&request, &request.input).await;
+        };
+        let directory = ImportRequest {
+            input: staged.path().to_path_buf(),
+            ..request.clone()
+        };
+        self.import_dir(&directory, &request.input).await
+    }
+
+    /// Assembles a project's locked tools from an export directory (or an archive file of one) and registers the
+    /// project. Writes no index pin; the caller renders the toolchain home, as after a pull.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::import`]; a pin whose registry the export's marker does not name is
+    /// [`crate::Error::ExportNotFound`].
+    pub async fn import_project(&self, request: ProjectImportRequest) -> Result<ImportOutcome> {
+        let staged = stage_archive(self.file_structure(), &request.input).await?;
+        let Some(staged) = staged else {
+            return self.import_project_dir(&request, &request.input).await;
+        };
+        let directory = ProjectImportRequest {
+            input: staged.path().to_path_buf(),
+            ..request.clone()
+        };
+        self.import_project_dir(&directory, &request.input).await
+    }
+}
+
+impl PackageManager {
+    /// `shown` is the path errors name: the archive file the caller passed, not the scratch directory it unpacked to.
+    async fn import_dir(&self, request: &ImportRequest, shown: &Path) -> Result<ImportOutcome> {
+        let export = ExportDir::open(&request.input, shown).await?;
         let plans = export.plan(&request.packages)?;
         let platforms = if request.platforms.is_empty() {
             vec![Platform::current().unwrap_or_else(Platform::any)]
@@ -106,15 +144,8 @@ impl PackageManager {
         Ok(outcome)
     }
 
-    /// Assembles a project's locked tools from an export directory and registers the project. Writes no index
-    /// pin; the caller renders the toolchain home, as after a pull.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::import`]; a pin whose registry the export's marker does not name is
-    /// [`crate::Error::ExportNotFound`].
-    pub async fn import_project(&self, request: ProjectImportRequest) -> Result<ImportOutcome> {
-        let export = ExportDir::open(&request.input).await?;
+    async fn import_project_dir(&self, request: &ProjectImportRequest, shown: &Path) -> Result<ImportOutcome> {
+        let export = ExportDir::open(&request.input, shown).await?;
         let mut pins: Vec<&LockPin> = Vec::with_capacity(request.lock_pins.len());
         for pin in &request.lock_pins {
             let registry = pin.identifier.registry();
@@ -214,28 +245,58 @@ impl PackageManager {
             let manifest_bytes = lookup
                 .read_metadata(registry, digest, MAX_REFERRER_BYTES)
                 .await
-                .map_err(|error| lookup_error(&export.dir, error))?
+                .map_err(|error| lookup_error(&export.shown, error))?
                 .ok_or_else(missing)?;
             let manifest: ocx_oci::ImageManifest = serde_json::from_slice(&manifest_bytes)?;
-            write_blob_to_home(&export.dir, &home, registry, digest, manifest_bytes).await?;
+            write_blob_to_home(&export.shown, &home, registry, digest, manifest_bytes).await?;
             for layer in &manifest.layers {
                 let layer_digest = Digest::try_from(layer.digest.as_str())?;
                 // Strict, unlike `copy_into_home`: a copy failing its digest check is a data error, not absent.
                 let layer_bytes = lookup
                     .read_metadata(registry, &layer_digest, MAX_REFERRER_BYTES)
                     .await
-                    .map_err(|error| lookup_error(&export.dir, error))?
+                    .map_err(|error| lookup_error(&export.shown, error))?
                     .ok_or_else(missing)?;
-                write_blob_to_home(&export.dir, &home, registry, &layer_digest, layer_bytes).await?;
+                write_blob_to_home(&export.shown, &home, registry, &layer_digest, layer_bytes).await?;
             }
         }
         Ok(())
     }
 }
 
+/// Unpacks `input` when it is a regular file; `None` for a directory or anything that does not exist.
+async fn stage_archive(file_structure: &FileStructure, input: &Path) -> Result<Option<export_archive::Scratch>> {
+    if !tokio::fs::metadata(input)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Ok(None);
+    }
+    match export_archive::unpack(file_structure, input).await {
+        Ok(staged) => Ok(Some(staged)),
+        Err(Error::Archive(error)) => Err(archive_error(input, error)),
+        Err(other) => Err(other),
+    }
+}
+
+/// An archive that is malformed is a bad export, named by the path the caller passed; a failure of the
+/// machine (disk, permission) keeps its own error and exit code.
+fn archive_error(input: &Path, error: ocx_util::archive::Error) -> Error {
+    if error.classify() != Some(ocx_exit::ExitCode::DataError) {
+        return Error::Archive(error);
+    }
+    Error::ExportArchiveInvalid {
+        archive: input.to_path_buf(),
+        source: error,
+    }
+}
+
 /// What an export directory holds, read and checked before anything is written to the home.
 struct ExportDir {
+    /// Where the export is read from.
     dir: PathBuf,
+    /// What errors name: the directory, or the archive file it was unpacked from.
+    shown: PathBuf,
     index: IndexStore,
     /// Registry as written in the marker, with the roots the export's index holds for it.
     roots: Vec<ExportRoot>,
@@ -266,20 +327,20 @@ fn join_error(path: &Path, join: tokio::task::JoinError) -> Error {
 impl ExportDir {
     fn invalid(&self, reason: impl Into<String>) -> Error {
         Error::ExportDirInvalid {
-            dir: self.dir.clone(),
+            dir: self.shown.clone(),
             reason: reason.into(),
         }
     }
 
     fn not_found(&self, what: impl Into<String>) -> Error {
         Error::ExportNotFound {
-            dir: self.dir.clone(),
+            dir: self.shown.clone(),
             what: what.into(),
         }
     }
 
     /// Reads the marker and every root of the export's index, checking each root against its catalog entry.
-    async fn open(dir: &Path) -> Result<Self> {
+    async fn open(dir: &Path, shown: &Path) -> Result<Self> {
         let marker: ExportMarker = {
             let path = dir.to_path_buf();
             tokio::task::spawn_blocking(move || export_marker::read_marker(&path))
@@ -288,17 +349,18 @@ impl ExportDir {
                 .map_err(|error| match error {
                     ExportMarkerError::Read(error) => ocx_index::error::Error::from(error).into(),
                     other => Error::ExportDirInvalid {
-                        dir: dir.to_path_buf(),
+                        dir: shown.to_path_buf(),
                         reason: other.to_string(),
                     },
                 })?
                 .ok_or_else(|| Error::ExportDirInvalid {
-                    dir: dir.to_path_buf(),
+                    dir: shown.to_path_buf(),
                     reason: format!("it has no {}", export_marker::MARKER_FILE),
                 })?
         };
         let mut export = Self {
             dir: dir.to_path_buf(),
+            shown: shown.to_path_buf(),
             index: IndexStore::new(dir.join("index")).refusing_links(),
             roots: Vec::new(),
             registries: marker.registries.values().cloned().collect(),
@@ -606,7 +668,7 @@ impl PackageManager {
             // The dispatch's raw bytes belong in the home's blob store too: a pull caches them there, and
             // a later exec reads them from it instead of the registry.
             write_blob_to_home(
-                &export.dir,
+                &export.shown,
                 self.file_structure().blobs.root(),
                 &registry,
                 dispatch,
@@ -715,7 +777,7 @@ impl PackageManager {
             .unwrap_or_default();
         copy_referrers(
             view.blob_lookup(),
-            &export.dir,
+            &export.shown,
             self.file_structure().blobs.root(),
             registry,
             subject,
@@ -1129,6 +1191,144 @@ mod tests {
             "the pin routes to this registry, never the export root's pointer (ghcr.io)"
         );
         assert!(dialled.read().calls.is_empty());
+    }
+
+    /// An archive of the export directory built from `package`, named `name` under `work`.
+    async fn archive_of(work: &std::path::Path, package: &Package, name: &str) -> std::path::PathBuf {
+        let directory = work.join("export");
+        package.write_export_dir(&directory, false).await;
+        let archive = work.join(name);
+        crate::tasks::export_archive::pack(&directory, &archive).await.unwrap();
+        archive
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_file_imports_like_its_directory() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let package = Package::layerless();
+        let archive = archive_of(work.path(), &package, "bundle.tar").await;
+        let manager = offline_manager(home.path());
+
+        let outcome = manager.import(request(&archive, Vec::new())).await.unwrap();
+
+        assert_eq!(outcome.items.len(), 1);
+        assert_eq!(pinned_in_home(&manager).await, Some(package.dispatch));
+        let scratch: Vec<_> = std::fs::read_dir(manager.file_structure().temp.root())
+            .map(|entries| entries.collect())
+            .unwrap_or_default();
+        assert!(scratch.is_empty(), "the unpacked export is discarded: {scratch:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_without_a_marker_names_the_archive() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let empty = work.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(empty.join("note.txt"), b"not an export").unwrap();
+        let archive = work.path().join("bundle.tar");
+        crate::tasks::export_archive::pack(&empty, &archive).await.unwrap();
+
+        let manager = offline_manager(home.path());
+        let error = manager
+            .import(request(&archive, Vec::new()))
+            .await
+            .expect_err("an archive without ocx-export.json is not an export");
+
+        match &error {
+            Error::ExportDirInvalid { dir, .. } => assert_eq!(dir, &archive, "{error}"),
+            other => panic!("expected ExportDirInvalid, got {other}"),
+        }
+        let scratch_root = manager.file_structure().temp.root().to_string_lossy().into_owned();
+        assert!(
+            !error.to_string().contains(&scratch_root),
+            "the scratch path leaked: {error}"
+        );
+    }
+
+    #[test]
+    fn an_archive_failure_of_the_machine_keeps_its_exit_code() {
+        let archive = std::path::Path::new("/exports/bundle.tar");
+        let denied = ocx_util::archive::Error::Io {
+            path: "/home/temp/import".into(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let malformed = ocx_util::archive::Error::Tar(std::io::Error::other("bad block"));
+
+        let kept = archive_error(archive, denied);
+        let named = archive_error(archive, malformed);
+
+        assert!(matches!(kept, Error::Archive(_)), "{kept}");
+        assert_eq!(kept.classify(), Some(ExitCode::IoError));
+        assert!(
+            matches!(&named, Error::ExportArchiveInvalid { archive: shown, .. } if shown == archive),
+            "{named}"
+        );
+        assert_eq!(named.classify(), Some(ExitCode::DataError));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_that_is_not_an_archive_names_the_file() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let garbage = work.path().join("garbage.tar");
+        std::fs::write(&garbage, b"this is not a tar archive at all, just text").unwrap();
+
+        let error = offline_manager(home.path())
+            .import(request(&garbage, Vec::new()))
+            .await
+            .expect_err("garbage bytes are not an export");
+
+        match &error {
+            Error::ExportArchiveInvalid { archive, .. } => assert_eq!(archive, &garbage, "{error}"),
+            other => panic!("expected ExportArchiveInvalid, got {other}"),
+        }
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "the archive error stays on the chain"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_import_of_a_file_that_is_not_an_archive_names_the_file() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let garbage = work.path().join("garbage.tar");
+        std::fs::write(&garbage, b"this is not a tar archive at all, just text").unwrap();
+        let manager = offline_manager(home.path());
+
+        let error = manager
+            .import_project(project_request(&garbage, &Package::layerless(), None))
+            .await
+            .expect_err("garbage bytes are not an export");
+
+        match &error {
+            Error::ExportArchiveInvalid { archive, .. } => assert_eq!(archive, &garbage, "{error}"),
+            other => panic!("expected ExportArchiveInvalid, got {other}"),
+        }
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let scratch_root = manager.file_structure().temp.root().to_string_lossy().into_owned();
+        assert!(!error.to_string().contains(&scratch_root), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn archive_naming_a_missing_registry_names_the_archive() {
+        let home = TempDir::new().unwrap();
+        let work = TempDir::new().unwrap();
+        let archive = archive_of(work.path(), &Package::layerless(), "bundle.tar").await;
+        let absent = PackageRef::new_registry(REPO, "other.example").clone_with_tag("1");
+
+        let error = offline_manager(home.path())
+            .import(request(&archive, vec![absent]))
+            .await
+            .expect_err("the export holds no such registry");
+
+        match &error {
+            Error::ExportNotFound { dir, .. } => assert_eq!(dir, &archive, "{error}"),
+            other => panic!("expected ExportNotFound, got {other}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1551,7 +1751,7 @@ mod tests {
         let export = TempDir::new().unwrap();
         let package = Package::layerless();
         package.write_export_dir(export.path(), false).await;
-        let opened = ExportDir::open(export.path()).await.unwrap();
+        let opened = ExportDir::open(export.path(), export.path()).await.unwrap();
         // Same bytes behind the link, so only the link refusal can reject the read.
         let object =
             IndexStore::new(export.path().join("index")).dispatch_object_path(REGISTRY, REPO, &package.dispatch);
@@ -1606,7 +1806,7 @@ mod tests {
         let export = TempDir::new().unwrap();
         let (manager, layer) = snapshot_descriptor_in_export(home.path(), export.path()).await;
         std::fs::write(&layer, b"damaged").unwrap();
-        let opened = ExportDir::open(export.path()).await.unwrap();
+        let opened = ExportDir::open(export.path(), export.path()).await.unwrap();
 
         let error = manager
             .import_snapshot(&opened, &ImportOutcome::default())
@@ -1623,7 +1823,7 @@ mod tests {
         let export = TempDir::new().unwrap();
         let (manager, layer) = snapshot_descriptor_in_export(home.path(), export.path()).await;
         std::fs::remove_file(&layer).unwrap();
-        let opened = ExportDir::open(export.path()).await.unwrap();
+        let opened = ExportDir::open(export.path(), export.path()).await.unwrap();
 
         let error = manager
             .import_snapshot(&opened, &ImportOutcome::default())
@@ -1661,7 +1861,7 @@ mod tests {
             descriptors: BTreeMap::new(),
         };
         let manager = offline_manager(home.path()).with_patch_snapshot(Some(snapshot));
-        let opened = ExportDir::open(export.path()).await.unwrap();
+        let opened = ExportDir::open(export.path(), export.path()).await.unwrap();
         // The companion's platform comes from what the import just assembled.
         let imported = ImportOutcome {
             items: vec![ImportedPackage {

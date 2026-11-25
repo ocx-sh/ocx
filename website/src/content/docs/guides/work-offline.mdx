@@ -75,7 +75,7 @@ Anything the copy is missing fails closed instead of reaching the network. `--of
 
 ## Move packages by export \{#offline-export\}
 
-When the offline machine has neither the packages nor a mirror, write them to a directory on a connected machine and carry it over. [`ocx package export`][cmd-package-export] and [`ocx package import`][cmd-package-import] do this, and `--blob-dir` reads an export in place. See [Move packages between machines][guide-export-import].
+When the offline machine has neither the packages nor a mirror, export them on a connected machine. The export is a directory or one archive file that you carry over. [`ocx package export`][cmd-package-export] and [`ocx package import`][cmd-package-import] do this, and `--blob-dir` reads an export in place. See [Move packages between machines][guide-export-import].
 
 ## Refreshing the index
 

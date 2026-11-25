@@ -14,8 +14,9 @@ use crate::{conventions, options};
 /// Assembles the project lock's packages from an export directory, offline.
 #[derive(Parser, Clone)]
 pub struct Import {
-    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory.
-    #[arg(value_name = "DIR")]
+    /// The export directory (the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory), or an
+    /// archive file written with `--archive`.
+    #[arg(value_name = "PATH")]
     input: PathBuf,
 
     #[clap(flatten)]

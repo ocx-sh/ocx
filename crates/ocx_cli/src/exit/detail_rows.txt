@@ -114,9 +114,9 @@ empty_push_set	DataError	A push names no target platform
 endpoint_unresolvable	Unavailable	An endpoint host does not resolve
 entrypoint_collision	DataError	Two packages declare the same entry point name
 envrc_exists	ConfigError	An .envrc already exists and --force was not given
-export_dir_invalid	DataError	A directory is not a valid export
-export_dir_invalid	DataError	A directory is not a valid export
-export_dir_invalid	DataError	A directory is not a valid export
+export_dir_invalid	DataError	An export directory or archive is not valid
+export_dir_invalid	DataError	An export directory or archive is not valid
+export_dir_invalid	DataError	An export directory or archive is not valid
 export_not_found	NotFound	The export directory lacks something that was asked for
 export_platform_required	UsageError	A digest identifier needs exactly one platform to export
 extra_ca_certs_invalid	DataError	The extra CA bundle the payload names is not usable

@@ -75,9 +75,23 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "export_dir_invalid",
-        summary = "A directory is not a valid export"
+        summary = "An export directory or archive is not valid"
     )]
     ExportDirInvalid { dir: std::path::PathBuf, reason: String },
+
+    /// An export archive that cannot be read; `archive` is the file the caller passed. A failure of the
+    /// machine (disk, permission) while unpacking stays [`Error::Archive`].
+    #[error("'{}' is not a valid export archive", archive.display())]
+    #[exit(
+        DataError,
+        slug = "export_dir_invalid",
+        summary = "An export directory or archive is not valid"
+    )]
+    ExportArchiveInvalid {
+        archive: std::path::PathBuf,
+        #[source]
+        source: ocx_util::archive::Error,
+    },
 
     /// A digest identifier was exported without exactly one `--platform`.
     #[error("'{identifier}' is a digest: name exactly one platform to export (got {found})")]

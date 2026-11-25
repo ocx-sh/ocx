@@ -1674,7 +1674,7 @@
       "properties": {
         "output_dir": {
           "$ref": "#/$defs/AbsolutePath",
-          "description": "The export directory, absolute."
+          "description": "The export directory, or the archive file under `--archive`; absolute."
         },
         "packages": {
           "type": "array",
@@ -8664,7 +8664,7 @@
         },
         "output_dir": {
           "$ref": "#/$defs/AbsolutePath",
-          "description": "The export directory, absolute."
+          "description": "The export directory, or the archive file under `--archive`; absolute."
         },
         "packages": {
           "type": "array",

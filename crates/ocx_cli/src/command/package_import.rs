@@ -13,8 +13,9 @@ use crate::{conventions, options};
 /// Imports packages from an export directory without network access.
 #[derive(Parser, Clone)]
 pub struct PackageImport {
-    /// The export directory: the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory.
-    #[arg(value_name = "DIR")]
+    /// The export directory (the one holding `ocx-export.json`, not its `index` or `blobs` subdirectory), or an
+    /// archive file written with `--archive`.
+    #[arg(value_name = "PATH")]
     input: PathBuf,
 
     /// Import only this platform; repeat for several. Defaults to the host platform.

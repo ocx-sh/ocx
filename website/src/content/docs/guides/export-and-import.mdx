@@ -1,6 +1,6 @@
 ---
 title: "Move packages between machines"
-description: "Export packages to a directory and import them on a machine with no network access."
+description: "Export packages to a directory or one archive file and import them on a machine with no network access."
 ---
 {/* doc_type: how-to */}
 {/* doc_tier: everyday */}
@@ -9,7 +9,7 @@ import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
 
 {/* doc-example: no-run, the commands need registry access, an export directory and a project, none of which a docs test has */}
 
-Copy packages from a connected machine to one with no registry access, and keep them verified, using an export directory.
+Copy packages from a connected machine to one with no registry access, and keep them verified, using an export directory or one archive file.
 
 ## Export a package \{#export-package\}
 
@@ -75,6 +75,37 @@ Package import installs nothing. It creates no candidate symlink and no garbage-
 
 Import takes the export root, not `index/` or `blobs/` inside it. A directory without an `ocx-export.json` marker fails with `export_dir_invalid`, exit code 65.
 
+## Move an export as one file \{#export-archive\}
+
+A directory is awkward to carry on a USB stick or attach to a transfer ticket. Add `--archive` and the export lands in one file instead, at the path you gave to `-o`.
+
+<ShellSession>
+
+```sh
+ocx package export --archive -o ./export.tar registry.example.com/team/tool:1.2
+ocx package import ./export.tar
+```
+
+</ShellSession>
+
+[`ocx export`][cmd-export] takes the same flag. Import needs no flag: a path that is a file is read as an archive, and a directory is read as before. The archive holds the same `ocx-export.json`, `index/` and `blobs/` as a directory export, at its root.
+
+The file name picks the format. A `.zip` name writes a zip archive, and `.tar.gz`, `.tar.xz` and `.tar.zst` write a compressed tar. Any other name writes a plain tar.
+
+A compressed name compresses blobs that are already compressed. That costs CPU for almost no size gain, so prefer a plain `.tar`.
+
+Keep the `.zip` extension when you move a zip archive, because import chooses zip by name. A tar archive is recognised by its content, so renaming it does no harm.
+
+OCX creates any missing parent directory of the output path. A file that already exists there is replaced only once the new archive is complete. A directory there is refused with exit code 65.
+
+Export builds the archive in a temporary directory beside the output file, and stages the export in the home's `temp/` directory. It needs free space equal to the export in both places. Import extracts into a scratch directory under the home's `temp/` and removes it afterwards.
+
+Every archive export starts fresh, because there is nothing to merge into. Layer archives download again unless a blob directory or the blob cache holds them.
+
+Without `--archive`, `-o` is always a directory, and OCX warns when the name looks like an archive. A file that cannot be read as an archive fails with exit code 65 and names the file you passed.
+
+An archive is not a blob directory. Import it, or extract it, before you point [`--blob-dir`][arg-blob-dir] at it.
+
 ## Export and import a project \{#export-project\}
 
 A project pins its tools in `ocx.lock`. Moving them tag by tag would lose the exact digests, so the root commands read the lock instead.
@@ -96,7 +127,7 @@ A project whose tools arrived only through an import holds no record that a regi
 
 ## Use an export in place \{#export-in-place\}
 
-Copying an export into the home costs disk space and time. Point OCX at the export instead, and it reads blobs from there.
+Copying an export into the home costs disk space and time. Point OCX at the export directory instead, and it reads blobs from there. An [archive](#export-archive) must be imported or extracted first.
 
 <ShellSession>
 

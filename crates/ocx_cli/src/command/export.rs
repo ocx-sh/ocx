@@ -15,9 +15,16 @@ use crate::{conventions, options};
 /// Writes every package the project lock pins to a directory.
 #[derive(Parser, Clone)]
 pub struct Export {
-    /// Directory to write the export to; created when absent.
-    #[arg(short = 'o', long = "output", value_name = "DIR", required = true)]
+    /// Where to write the export: a directory, or the archive file with --archive; created when absent
+    #[arg(short = 'o', long = "output", value_name = "PATH", required = true)]
     output: PathBuf,
+
+    /// Write one archive file instead of a directory
+    ///
+    /// The format follows the file name: `.zip`, `.tar.gz`, `.tar.xz` or `.tar.zst`, and a plain tar for any
+    /// other name. An existing file is replaced; an existing directory at the path is refused.
+    #[arg(long)]
+    archive: bool,
 
     /// Export only the named group(s); repeatable and comma-separated. Defaults to every group.
     #[clap(flatten)]
@@ -42,6 +49,7 @@ impl Export {
             self.groups.effective(&project.config)?
         };
         let lock_pins = lock_pins(&project.lock.tools, &groups, &self.platforms)?;
+        conventions::warn_archive_name_without_flag(context.ui(), &self.output, self.archive);
         let outcome = context
             .manager()
             .export(ExportRequest {
@@ -50,6 +58,7 @@ impl Export {
                 lock_pins,
                 platforms: self.platforms.clone(),
                 referrers: self.referrers.enabled(),
+                archive: self.archive,
             })
             .await?;
         context.api().report(&ExportReport::from_outcome(outcome)?)?;
