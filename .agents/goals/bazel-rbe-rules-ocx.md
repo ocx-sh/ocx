@@ -54,6 +54,10 @@ with an unclear cause — runs this protocol:
    secret value or exploit detail — and only the DONE block reports them
    in full.
 
+Recorded decisions:
+
+- Question: the entry reads "Run the /hex-architect skill on .agents/discussions/bazel-rbe-rules-ocx.md at tier high.", and `/hex-architect` refuses a discussion at `State: handed-off → loop` as path input (its step 1, with the fix "paste the decision as free text"). Research: `.claude/skills/hex-architect/SKILL.md`, the state table of its fast path. Decision: the run invokes the skill at tier `high` on the free text "rules_ocx under remote execution, per .agents/discussions/bazel-rbe-rules-ocx.md". The source and the tier are unchanged.
+
 ## Loop shape
 
 - Entry point: Run the /hex-architect skill on .agents/discussions/bazel-rbe-rules-ocx.md at tier high.
@@ -88,7 +92,7 @@ From the source, as pointers; the source's own text governs.
 
 ## Context
 
-- Source discussion: `.agents/discussions/bazel-rbe-rules-ocx.md`. It is ignored by git and exists only in the worktree where this file was written, as do the research files.
+- Source discussion: `.agents/discussions/bazel-rbe-rules-ocx.md`. It is committed on this run's branch, as are the research files.
 - Research: the files under `.agents/research/` that the source lists in its `## Research` section.
 - Earlier discussion, the baseline for decisions the source does not change: `.agents/discussions/bazel-hermetic-package-bundles.md`.
 - Related records: `.claude/artifacts/adr_package_export_import.md`, `.claude/artifacts/adr_bazel_build_adoption.md`, `.claude/artifacts/adr_crate_split_workspace.md`, `.claude/artifacts/adr_ocx_interface_contract.md`.
