@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! A vendored `.cmd` target on Windows, end to end: hostile arguments never run an injected command (BatBadBut,
+//! Windows launches end to end. A vendored `.cmd` target: hostile arguments never run an injected command (BatBadBut,
 //! CVE-2024-24576). An argument std can quote reaches the batch file (exit 0); one holding a line break is refused (exit 64).
+//! A program whose path exceeds `MAX_PATH` starts, from a `.direct` and from a classic launcher.
 //!
 //! Runs on Windows CI only; the dispatch decision itself is a host-run unit in `direct.rs`.
 #![cfg(windows)]
@@ -11,6 +12,7 @@
     reason = "the test runs the launcher binary as a child process"
 )]
 
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -129,4 +131,98 @@ fn an_argument_with_a_line_break_is_refused_with_exit_64() {
         assert!(stderr.contains("argument 1 "), "{argument:?}: {stderr:?}");
         assert!(!vendor.injected(), "{argument:?} ran an injected command");
     }
+}
+
+/// The deepest directory name of [`LongPath::program`]; the child names it when it reports its own path.
+const DEEP_LEAF: &str = "leaf-past-max-path";
+
+/// A temp dir holding a real executable, a copy of the launcher, under a directory deeper than `MAX_PATH`.
+///
+/// The copy has no sidecar of its own, so once started it exits 78 with `sidecar not found` naming its own path:
+/// that exit and that path prove the child ran. A launcher that cannot start it exits 74 or 69 instead.
+struct LongPath {
+    base: PathBuf,
+    relative: String,
+}
+
+impl LongPath {
+    fn new(label: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let base = std::env::temp_dir().join(format!("ocx-long-{label}-{}-{nanos}", std::process::id()));
+        let segments: Vec<String> = (0..5).map(|index| format!("{index}{}", "d".repeat(49))).collect();
+        let relative = format!("packages/{}/{DEEP_LEAF}/probe.exe", segments.join("/"));
+        let long_path = Self { base, relative };
+        let program = long_path.program();
+        assert!(
+            program.as_os_str().encode_wide().count() >= 260,
+            "the program path must exceed MAX_PATH: {}",
+            program.display()
+        );
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::copy(LAUNCHER_BINARY, &program).unwrap();
+        long_path
+    }
+
+    fn vendor_root(&self) -> PathBuf {
+        self.base.join("vendor")
+    }
+
+    fn program(&self) -> PathBuf {
+        self.vendor_root().join(self.relative.replace('/', "\\"))
+    }
+
+    fn assert_child_ran(output: &Output) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(78), "{stderr}");
+        assert!(stderr.contains("sidecar not found"), "{stderr}");
+        assert!(
+            stderr.contains(DEEP_LEAF),
+            "the child must report its own deep path: {stderr}"
+        );
+    }
+}
+
+impl Drop for LongPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+#[test]
+fn a_direct_launcher_starts_a_program_past_max_path() {
+    let long_path = LongPath::new("direct");
+    let root = long_path.vendor_root();
+    let launcher = root.join(format!("{SELF_PATH}.exe"));
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    let sidecar = format!(
+        r#"{{"schema_version":1,"vendor_id":"{VENDOR_ID}","self":"{SELF_PATH}","program":"@VENDOR_DIR@/{}","args":[],"unset":[],"env":[]}}"#,
+        long_path.relative
+    );
+    std::fs::write(root.join(format!("{SELF_PATH}.direct")), sidecar).unwrap();
+
+    let output = Command::new(&launcher).current_dir(&long_path.base).output().unwrap();
+
+    LongPath::assert_child_ran(&output);
+}
+
+#[test]
+fn a_classic_launcher_starts_a_pinned_ocx_past_max_path() {
+    let long_path = LongPath::new("classic");
+    let bin = long_path.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join("tool.exe");
+    std::fs::copy(LAUNCHER_BINARY, &launcher).unwrap();
+    std::fs::write(bin.join("tool.shim"), format!("{}\n", long_path.base.display())).unwrap();
+
+    let output = Command::new(&launcher)
+        .env("OCX_BINARY_PIN", long_path.program())
+        .env_remove("OCX_HOME")
+        .current_dir(&long_path.base)
+        .output()
+        .unwrap();
+
+    LongPath::assert_child_ran(&output);
 }

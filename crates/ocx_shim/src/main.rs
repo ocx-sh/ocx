@@ -359,8 +359,15 @@ fn spawn_child(application_name: Option<&str>, command_line: &str, environment: 
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let app_name_w: Option<Vec<u16>> =
-        application_name.map(|p| std::ffi::OsStr::new(p).encode_wide().chain(Some(0)).collect());
+    // A plain path past MAX_PATH fails with ERROR_PATH_NOT_FOUND (3); its `\\?\` form starts. The command line keeps
+    // the path as given, so the child's `argv[0]` is unchanged.
+    let app_name_w: Option<Vec<u16>> = application_name.map(|p| {
+        let name = ocx_env_apply::windows_path::extended_length_path(p);
+        std::ffi::OsStr::new(name.as_deref().unwrap_or(p))
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    });
     let app_name_ptr = app_name_w.as_ref().map_or(std::ptr::null(), |b| b.as_ptr());
     let environment_ptr = environment.map_or(std::ptr::null(), |block| block.as_ptr().cast());
     let environment_flag = if environment.is_some() {

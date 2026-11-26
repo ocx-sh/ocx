@@ -58,9 +58,131 @@ pub fn is_reserved_device_name(name: &str) -> bool {
         && matches!(number, [b'0'..=b'9'] | [0xC2, 0xB2 | 0xB3 | 0xB9])
 }
 
+/// `MAX_PATH`: the UTF-16 units a path may take, its terminating NUL included, where no extended-length form is used.
+pub const MAX_PATH: usize = 260;
+
+/// The `\\?\` extended-length form of an absolute Windows `path` that does not fit [`MAX_PATH`], or `None` when the
+/// path fits, is relative, or is already in a `\\?\` or `\??\` form.
+///
+/// For `CreateProcessW`'s `lpApplicationName`: a plain absolute path at or past [`MAX_PATH`] fails there with
+/// `ERROR_PATH_NOT_FOUND`. `C:\…` becomes `\\?\C:\…` and `\\server\share\…` becomes `\\?\UNC\server\share\…`.
+/// A verbatim path reaches the system unparsed, so `/` becomes `\`, empty and `.` segments drop and `..` removes
+/// the segment before it (never the drive or the share), as `GetFullPathNameW` would.
+pub fn extended_length_path(path: &str) -> Option<String> {
+    // Fits when the path plus the terminating NUL the caller appends stays within MAX_PATH.
+    if path.encode_utf16().count() < MAX_PATH {
+        return None;
+    }
+    let unified = path.replace('/', "\\");
+    if unified.starts_with(r"\\?\") || unified.starts_with(r"\??\") || unified.starts_with(r"\\.\") {
+        return None;
+    }
+    let (mut out, root_segments, rest) = if let Some(unc) = unified.strip_prefix(r"\\") {
+        (String::from(r"\\?\UNC"), 2, unc)
+    } else {
+        let bytes = unified.as_bytes();
+        if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+            return None;
+        }
+        (format!(r"\\?\{}", &unified[..2]), 0, &unified[3..])
+    };
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rest.split('\\') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if segments.len() > root_segments {
+                    segments.pop();
+                }
+            }
+            _ => segments.push(segment),
+        }
+    }
+    if segments.len() < root_segments {
+        return None;
+    }
+    for segment in segments {
+        out.push('\\');
+        out.push_str(segment);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SegmentViolation, check_segment, is_reserved_device_name};
+    use super::{MAX_PATH, SegmentViolation, check_segment, extended_length_path, is_reserved_device_name};
+
+    /// `C:\` plus 50-character directories until the whole path is `units` long, ending in `\tool.exe`.
+    fn drive_path_of(units: usize) -> String {
+        let tail = r"\tool.exe";
+        let mut path = String::from("C:");
+        while units - path.len() - tail.len() > 52 {
+            path.push('\\');
+            path.push_str(&"d".repeat(50));
+        }
+        let last = units - path.len() - tail.len() - 1;
+        path.push('\\');
+        path.push_str(&"e".repeat(last));
+        path.push_str(tail);
+        assert_eq!(path.len(), units);
+        path
+    }
+
+    #[test]
+    fn a_path_that_fits_max_path_is_left_alone() {
+        assert_eq!(extended_length_path(&drive_path_of(MAX_PATH - 1)), None);
+        assert_eq!(extended_length_path(r"C:\tools\tool.exe"), None);
+    }
+
+    #[test]
+    fn a_drive_path_past_max_path_gains_the_verbatim_prefix() {
+        let long = drive_path_of(MAX_PATH);
+        assert_eq!(extended_length_path(&long), Some(format!(r"\\?\{long}")));
+        let longer = drive_path_of(267);
+        assert_eq!(extended_length_path(&longer), Some(format!(r"\\?\{longer}")));
+    }
+
+    #[test]
+    fn a_unc_path_past_max_path_becomes_verbatim_unc() {
+        let long = format!(r"\\server\share\{}\tool.exe", "u".repeat(260));
+        let expected = format!(r"\\?\UNC\server\share\{}\tool.exe", "u".repeat(260));
+        assert_eq!(extended_length_path(&long), Some(expected));
+    }
+
+    #[test]
+    fn separators_and_dot_segments_are_normalised_as_full_path_resolution_would() {
+        let deep = "x".repeat(260);
+        let mixed = format!(r"C:/runfiles\./{deep}/skipped/..\\bin/tool.exe");
+        assert_eq!(
+            extended_length_path(&mixed),
+            Some(format!(r"\\?\C:\runfiles\{deep}\bin\tool.exe"))
+        );
+        // `..` never climbs above the drive or the share.
+        let above = format!(r"C:\..\..\{deep}\tool.exe");
+        assert_eq!(extended_length_path(&above), Some(format!(r"\\?\C:\{deep}\tool.exe")));
+        let unc_above = format!(r"\\server\share\..\..\{deep}\tool.exe");
+        assert_eq!(
+            extended_length_path(&unc_above),
+            Some(format!(r"\\?\UNC\server\share\{deep}\tool.exe"))
+        );
+    }
+
+    #[test]
+    fn relative_already_verbatim_and_device_paths_are_left_alone() {
+        let deep = "r".repeat(300);
+        for path in [
+            format!(r"relative\{deep}\tool.exe"),
+            format!(r"\rooted-without-drive\{deep}\tool.exe"),
+            format!(r"C:drive-relative\{deep}\tool.exe"),
+            format!(r"\\?\C:\{deep}\tool.exe"),
+            format!(r"\??\C:\{deep}\tool.exe"),
+            format!(r"\\.\C:\{deep}\tool.exe"),
+            // A server with no share names no file.
+            format!(r"\\{deep}"),
+        ] {
+            assert_eq!(extended_length_path(&path), None, "{path}");
+        }
+    }
 
     #[test]
     fn device_names_match_in_any_case_and_with_an_extension() {
