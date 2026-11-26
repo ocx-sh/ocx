@@ -1,0 +1,6 @@
+{
+  "kind": "vendor-manifest",
+  "verdict": "non_break",
+  "change": "The manifest gains an optional `warnings` property.",
+  "findings": []
+}

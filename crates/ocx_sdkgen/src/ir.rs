@@ -943,6 +943,7 @@ pub(crate) mod tests {
             reports: golden("reports"),
             errors: golden("errors"),
             cli: golden("cli"),
+            vendor_manifest: None,
         }
     }
 

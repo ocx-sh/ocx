@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VendorManifest",
+  "description": "The vendor manifest.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "description": "Always 1.",
+      "type": "integer",
+      "minimum": 0,
+      "const": 1
+    },
+    "platform": {
+      "description": "Canonical platform string of the run.",
+      "type": "string"
+    },
+    "vendor_id": {
+      "description": "Digest of the platform and the package digests.",
+      "type": "string"
+    },
+    "tools": {
+      "description": "Every exposed name.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Tool"
+      }
+    },
+    "note": {
+      "description": "A note for the operator.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "platform",
+    "vendor_id",
+    "tools"
+  ],
+  "$defs": {
+    "Tool": {
+      "description": "One exposed tool.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The exposed name.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path of the launcher, relative to DIR.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/vendor-manifest/v1.json"
+}
