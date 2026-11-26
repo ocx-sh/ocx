@@ -149,6 +149,40 @@ mod install_info_identifier_tests {
         );
     }
 
+    /// `index_lookups` is `Some` only when the injected store carries a recorder.
+    #[tokio::test]
+    async fn index_lookups_returns_recorded_paths_only_with_a_recorder() {
+        let ocx_home = tempdir().unwrap();
+        let index_home = tempdir().unwrap();
+
+        // No index store injected.
+        assert!(make_test_manager(ocx_home.path()).index_lookups().is_none());
+
+        // Store without a recorder.
+        let plain = IndexStore::new(index_home.path().join("index"));
+        assert!(
+            make_test_manager(ocx_home.path())
+                .with_index(plain)
+                .index_lookups()
+                .is_none()
+        );
+
+        // Store with a recorder: the recorded paths come back sorted, with `found`.
+        let recorder = ocx_index::LookupRecorder::new();
+        recorder.record("b.example/catalog.json", false);
+        recorder.record("a.example/catalog.json", true);
+        let recorded = IndexStore::new(index_home.path().join("index")).with_lookup_recorder(recorder);
+        let lookups = make_test_manager(ocx_home.path())
+            .with_index(recorded)
+            .index_lookups()
+            .expect("a recorder yields lookups");
+        let got: Vec<(&str, bool)> = lookups.iter().map(|l| (l.path.as_str(), l.found)).collect();
+        assert_eq!(
+            got,
+            vec![("a.example/catalog.json", true), ("b.example/catalog.json", false)]
+        );
+    }
+
     /// Write the minimal set of files that make `install_info_from_package_root`
     /// succeed for a package rooted at `pkg_root` with the given SHA-256 hex.
     async fn write_minimal_package_root(pkg_root: &std::path::Path, hex: &str) {
@@ -559,7 +593,14 @@ pub struct PackageManager {
 impl PackageManager {
     /// The index documents resolution read, when the index store records lookups; `None` without a recorder.
     pub fn index_lookups(&self) -> Option<Vec<ocx_package::vendor::IndexLookup>> {
-        unimplemented!("index_lookups: filled by the index lookup step")
+        let recorder = self.index_store.as_ref()?.lookup_recorder()?;
+        Some(
+            recorder
+                .lookups()
+                .into_iter()
+                .map(|(path, found)| ocx_package::vendor::IndexLookup { path, found })
+                .collect(),
+        )
     }
 
     /// Construct a new `PackageManager`.
