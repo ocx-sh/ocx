@@ -139,6 +139,28 @@ mod tests {
         assert_eq!(extended_length_path(r"C:\tools\tool.exe"), None);
     }
 
+    /// The threshold counts UTF-16 units: `é` is one unit in two UTF-8 bytes, `😀` two units in one `char`.
+    #[test]
+    fn the_threshold_counts_utf16_units_not_bytes_or_chars() {
+        let path = |middle: String| format!(r"C:\{middle}\tool.exe");
+        let bmp_259 = path("é".repeat(247));
+        let bmp_260 = path("é".repeat(248));
+        let astral_259 = path(format!("{}é", "😀".repeat(123)));
+        let astral_260 = path("😀".repeat(124));
+        for (fits, units) in [(&bmp_259, 259), (&astral_259, 259)] {
+            assert_eq!(fits.encode_utf16().count(), units);
+            assert_eq!(extended_length_path(fits), None, "{units} units fit");
+        }
+        for (long, units) in [(&bmp_260, 260), (&astral_260, 260)] {
+            assert_eq!(long.encode_utf16().count(), units);
+            assert_eq!(
+                extended_length_path(long),
+                Some(format!(r"\\?\{long}")),
+                "{units} units do not fit"
+            );
+        }
+    }
+
     #[test]
     fn a_drive_path_past_max_path_gains_the_verbatim_prefix() {
         let long = drive_path_of(MAX_PATH);
