@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "shim_inputs.py"
@@ -192,3 +194,39 @@ def test_a_workflow_without_the_zig_pin_reads_as_nothing(tree: Path) -> None:
     result = run(tree, "--check")
     assert result.returncode == 2, result.stdout + result.stderr
     assert "ZIG_VERSION" in result.stderr, result.stderr
+
+
+def _hashed_files() -> list[str]:
+    """The files `shim_inputs.py` reads, named from its own path constants and launcher crate list."""
+    spec = importlib.util.spec_from_file_location("shim_inputs", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    named = [
+        module.WORKFLOW,
+        module.TASKFILE,
+        module.CARGO_CONFIG,
+        Path("Cargo.toml"),
+        Path("Cargo.lock"),
+        Path("rust-toolchain.toml"),
+        *(Path("crates") / crate / "Cargo.toml" for crate in module.LAUNCHER_CRATES),
+    ]
+    return [path.as_posix() for path in named]
+
+
+def _uncovered(files: list[str], patterns: list[str]) -> list[str]:
+    return [f for f in files if not any(PurePosixPath(f).full_match(p) for p in patterns)]
+
+
+def test_the_coverage_check_reports_a_file_no_pattern_names() -> None:
+    assert _uncovered([".cargo/config.toml", "Cargo.toml"], ["Cargo.toml"]) == [".cargo/config.toml"]
+    assert _uncovered(["crates/ocx_shim/Cargo.toml"], ["crates/ocx_shim/**"]) == []
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+def test_the_shim_workflow_watches_every_hashed_file(event: str) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/build-windows-shims.yml").read_text(encoding="utf-8"))
+    patterns = workflow[True][event]["paths"]  # YAML 1.1 loads the bare key `on` as True
+    files = _hashed_files()
+    assert len(patterns) > 10 and len(files) >= 8, (len(patterns), len(files))
+    assert _uncovered(files, patterns) == [], f"{event} `paths:` misses hashed files"
