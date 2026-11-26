@@ -44,7 +44,7 @@
 #
 # `derive_exclusions` in that script no longer derives the set from
 # `kind != lib|test`. That rule was stale in both directions: `ocx::bin/ocx`
-# (1 case) and `ocx_shim::bin/ocx-shim` (109) do have `rust_test` targets, and
+# (1 case) and `ocx_shim::bin/ocx-shim` (152) do have `rust_test` targets, and
 # `ocx::linux_self_contained` is `kind = "test"` and has none, which the rule
 # could not see — it reported 3 suites / 110 testcases against a true 2 / 1.
 # The set below is the measured one and the script now names the same two.
@@ -94,6 +94,11 @@ cases = 657
 label = "//crates/ocx_console:ocx_console_test"
 crate = "ocx_console"
 cases = 49
+
+[[target]]
+label = "//crates/ocx_env_apply:ocx_env_apply_test"
+crate = "ocx_env_apply"
+cases = 48
 
 [[target]]
 label = "//crates/ocx_env:ocx_env_test"
@@ -276,7 +281,18 @@ cases = 330
 [[target]]
 label = "//crates/ocx_shim:ocx_shim_bin_test"
 crate = "ocx_shim"
-cases = 109
+cases = 152
+
+[[target]]
+label = "//crates/ocx_shim:direct_launch"
+crate = "ocx_shim"
+cases = 9
+ignored = 1
+
+[[target]]
+label = "//crates/ocx_shim:batch_spawn"
+crate = "ocx_shim"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_sign:ocx_sign_test"

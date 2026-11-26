@@ -289,21 +289,21 @@ Creating, modifying, auditing GitHub Actions workflow → follow sequence:
 
 ## Windows Shim Build Workflow (`build-windows-shims.yml`)
 
-Cross-builds the `ocx_shim` binary for `x86_64-pc-windows-gnullvm` and `aarch64-pc-windows-gnullvm` on Linux runners via `cargo-zigbuild` — Zig bundles its own clang/lld/libc, so no Microsoft SDK manifest is fetched. Design authority: `.claude/artifacts/adr_shim_hermetic_zigbuild.md`, addendum 2.
+Cross-builds the `ocx_shim` launcher for six targets (`{x86_64,aarch64}-{unknown-linux-musl,apple-darwin,pc-windows-gnullvm}`) on Linux runners via `cargo-zigbuild` — Zig bundles its own clang/lld/libc, so no Microsoft SDK manifest is fetched. Design authority: `.claude/artifacts/adr_shim_hermetic_zigbuild.md`, addendum 2.
 
 ### Structure
 
 | Job | Runner | Purpose |
 |-----|--------|---------|
 | `gate` | `ubuntu-latest` | Host-runnable shim + launcher spec tests (`cargo nextest run -p ocx_shim -p ocx_store -p ocx_package_manager --locked` — `ocx_store` owns the committed blob, `ocx_package_manager` owns the launcher spec; nextest comes from `taiki-e/install-action`, the toolchain action does not ship it). Both other jobs carry `needs: gate`. |
-| `build` (matrix) | `ubuntu-latest` | Per-arch `task rust:shim:build TARGET=${{ matrix.target }}`, then blob validation, SLSA attestation, artifact upload. `fail-fast: false` so one arch's status never masks the other's. |
+| `build` (matrix) | `ubuntu-latest` | Per-target `task rust:shim:build TARGET=${{ matrix.target }}` (six legs), then blob validation (image magic per format, size budget, `LC_CODE_SIGNATURE` on aarch64-apple-darwin), SLSA attestation, artifact upload. `fail-fast: false` so one target's status never masks another's. |
 | `acceptance-windows` | `windows-latest` | Native `cargo build -p ocx_shim --locked`, then `uv run pytest tests/test_windows_shim.py` with `OCX_SHIM_BINARY` set. Registry-independent (`OCX_TESTS_NO_REGISTRY=1`) — the `registry:2` fixture is Linux-only. Without this job the module is green-by-skip. |
 
 ### Key design points
 
-- **The gate is provenance, not byte-equality.** The "Validate committed shim blob (provenance model)" step asserts three things about the committed blob under `crates/ocx_store/src/shims/`: MZ magic (valid PE), size within the `SHIM_SIZE_BUDGET` it greps out of `crates/ocx_store/src/shim.rs`, and `sha256` equal to that file's per-arch `SHIM_SHA256`. Nothing compares bytes against the fresh build — the gnullvm PE link embeds a per-link build id, so two runs of one pinned toolchain differ (ADR addendum 2). Drift control comes from pairing the SHA canary with the job's `paths:` filter (`crates/ocx_shim/**`, `Cargo.lock`, `rust-toolchain.toml`, `taskfiles/rust.taskfile.yml`, this workflow): a source change without a blob refresh reds the canary.
+- **The gate is provenance, not byte-equality.** The "Validate committed shim blob (provenance model)" step asserts three things about the committed blob under `crates/ocx_store/src/shims/`: the image magic for the target (PE, ELF or Mach-O), size within the `SHIM_SIZE_BUDGET` it greps out of `crates/ocx_store/src/shim.rs`, and `sha256` equal to that file's per-target `RECORDED_SHA256` row in `shim.rs`. Nothing compares bytes against the fresh build — the gnullvm PE link embeds a per-link build id, so two runs of one pinned toolchain differ (ADR addendum 2). Drift control comes from pairing the SHA canary with the job's `paths:` filter (`crates/ocx_shim/**`, `crates/ocx_env_apply/**`, `Cargo.lock`, `rust-toolchain.toml`, `taskfiles/rust.taskfile.yml`, this workflow): a source change without a blob refresh reds the canary.
 - **SLSA attestation** via `actions/attest-build-provenance` signs the *committed* blob (Sigstore/Rekor). The freshly built binary uploads as `ocx-shim-fresh-<target>` **before** the validation step and `if: !cancelled()`, because that artifact is the refresh source.
-- **The whole toolchain is pinned.** `rust-toolchain.toml` pins rustc 1.95.0 and both gnullvm targets; `install:cargo-zigbuild` pins cargo-zigbuild 0.22.3; the workflow pins `ZIG_VERSION: 0.16.0` with a `ZIG_SHA256` the download is checked against. Zig's version changes the emitted bytes, so bump it deliberately in a blob-refresh PR, never incidentally. The `shim` profile (`opt-level="z"`, `lto`, `codegen-units=1`, `panic="abort"`, `strip="symbols"`) is a size control, not a reproducibility one.
+- **The whole toolchain is pinned.** `rust-toolchain.toml` pins rustc 1.95.0 and the gnullvm targets (the matrix leg adds its own musl or darwin target); `install:cargo-zigbuild` pins cargo-zigbuild 0.22.3; the workflow pins `ZIG_VERSION: 0.16.0` with a `ZIG_SHA256` the download is checked against. Zig's version changes the emitted bytes, so bump it deliberately in a blob-refresh PR, never incidentally. The `shim` profile (`opt-level="z"`, `lto`, `codegen-units=1`, `panic="abort"`, `strip="symbols"`) is a size control, not a reproducibility one.
 - **`RUSTFLAGS` goes on the command line, never in task `env:`.** go-task's task-level `env:` loses to an inherited variable and `setup-rust-toolchain` exports `RUSTFLAGS`, which left the former `-Clink-arg=/Brepro` inert in CI for every blob ever shipped while breaking clean dev shells (`zig cc` rejects the MSVC flag). `shim:build` prefixes `RUSTFLAGS=` on the `cargo zigbuild` line, carrying the `--remap-path-prefix` that keeps a dev box's rust-src `$HOME` paths out of the blob.
 - **Gate-before-matrix** is the Cost Factors rule above ("gate macOS/Windows behind Linux passing"), not §"Never let lint block test results".
 - **Signing is Phase 2.** The workflow explicitly does NOT sign. Authenticode signing via SignPath Foundation is a documented follow-on (ADR §Out of Implementation Scope plus the workflow's header and trailing comments). Do not add a signing step without the Phase-2 prerequisites.
@@ -312,9 +312,9 @@ Cross-builds the `ocx_shim` binary for `x86_64-pc-windows-gnullvm` and `aarch64-
 
 Canonical procedure: the `crates/ocx_store/src/shim.rs` module docs. In a dedicated PR:
 
-1. `task rust:shim:build TARGET=x86_64-pc-windows-gnullvm` (and `aarch64-pc-windows-gnullvm`) — or download the `ocx-shim-fresh-<target>` artifact from a CI run, which exists because a dev box need not have a usable Zig.
-2. Copy each `target/<triple>/shim/ocx-shim.exe` to `crates/ocx_store/src/shims/ocx-shim-{x86_64,aarch64}.exe`.
-3. Record each blob's `sha256sum` in the matching per-arch `SHIM_SHA256` in `crates/ocx_store/src/shim.rs` — blob and constant must move together, or the canary reds.
+1. `task rust:shim:build TARGET=<triple>` for each of the six targets — or download the `ocx-shim-fresh-<target>` artifact from a CI run, which exists because a dev box need not have a usable Zig.
+2. Copy each `target/<triple>/shim/ocx-shim[.exe]` to `crates/ocx_store/src/shims/ocx-shim-<triple>[.exe]`.
+3. Record each blob's `sha256sum` in the matching per-target `RECORDED_SHA256` row in `shim.rs` in `crates/ocx_store/src/shim.rs` — blob and constant must move together, or the canary reds.
 
 ## Windows & macOS Coverage — what each gate compiles
 

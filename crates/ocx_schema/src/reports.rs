@@ -447,7 +447,7 @@ mod tests {
         let document: Value = serde_json::from_str(&reports_schema()).expect("the generated contract is valid JSON");
         let versions = ocx::api::report_versions();
         let roots = document["reports"].as_object().expect("`reports` is an object");
-        assert_eq!(roots.len(), 58);
+        assert_eq!(roots.len(), 59);
         assert_eq!(roots.len(), versions.len());
         for (name, entry) in roots {
             let target = entry["$ref"].as_str().expect("a root is a `$ref`");

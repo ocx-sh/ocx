@@ -980,17 +980,17 @@ windows_only = pytest.mark.skipif(
     reason="the committed shim blob is a Windows PE; it can only be executed on Windows",
 )
 
-#: Two arches ship; `include_bytes!` picks by target, this picks by host.
+#: Two Windows arches run this module; `include_bytes!` picks by target, this picks by host.
 _BLOB_BY_MACHINE = {
-    "amd64": "ocx-shim-x86_64.exe",
-    "x86_64": "ocx-shim-x86_64.exe",
-    "arm64": "ocx-shim-aarch64.exe",
-    "aarch64": "ocx-shim-aarch64.exe",
+    "amd64": "ocx-shim-x86_64-pc-windows-gnullvm.exe",
+    "x86_64": "ocx-shim-x86_64-pc-windows-gnullvm.exe",
+    "arm64": "ocx-shim-aarch64-pc-windows-gnullvm.exe",
+    "aarch64": "ocx-shim-aarch64-pc-windows-gnullvm.exe",
 }
 
 
 def _committed_blob() -> Path:
-    """``crates/ocx_store/src/shims/ocx-shim-<arch>.exe`` — the shipped artefact.
+    """``crates/ocx_store/src/shims/ocx-shim-<x86_64|aarch64>-pc-windows-gnullvm.exe`` — the shipped artefact.
 
     Deliberately **not** ``OCX_SHIM_BINARY`` and not a ``target/`` build. This
     is the file ``include_bytes!`` embeds and a user's trampoline slot is a

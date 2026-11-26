@@ -52,9 +52,10 @@ binary.
 
 ## `shim.rs` embeds committed blobs by relative path
 
-`include_bytes!("shims/ocx-shim-<arch>.exe")` resolves against `shim.rs`'s own
-directory, and two tests scan `env!("CARGO_MANIFEST_DIR")/src/shims`. Moving
-either the module or the blob directory breaks both at once, and
+`include_bytes!("shims/ocx-shim-<target-triple>[.exe]")` (six blobs: linux-musl, apple-darwin
+and windows-gnullvm, each x86_64 and aarch64; `blob_for(&Platform)` is the lookup table) resolves
+against `shim.rs`'s own directory, and two tests scan `env!("CARGO_MANIFEST_DIR")/src/shims`.
+Moving either the module or the blob directory breaks both at once, and
 `.github/workflows/build-windows-shims.yml` names the same two paths in its
-`paths:` filter and in five shell steps. `SHIM_SHA256` is a corruption canary,
+`paths:` filter and in its shell steps. The recorded sha256 (`RECORDED_SHA256` in `shim.rs`'s test module) is a corruption canary,
 not a provenance control — refresh it only in the dedicated blob-refresh PR.

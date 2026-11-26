@@ -48,14 +48,6 @@ PATH_ENTRY = {
     "visibility": "public",
 }
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "vendor"
-SCHEMA_GOLDEN = (
-    Path(__file__).resolve().parents[2]
-    / "crates"
-    / "ocx_schema"
-    / "tests"
-    / "golden"
-    / "vendor-manifest.json"
-)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -517,11 +509,7 @@ def _manifest_schema() -> dict[str, Any]:
             f"ocx_schema vendor-manifest failed: {result.stderr}"
         )
         return json.loads(result.stdout)
-    if SCHEMA_GOLDEN.exists():
-        return json.loads(SCHEMA_GOLDEN.read_text(encoding="utf-8"))
-    pytest.skip(
-        f"no vendor-manifest schema: OCX_SCHEMA_BINARY is unset or absent and {SCHEMA_GOLDEN} does not exist"
-    )
+    pytest.skip("no vendor-manifest schema: OCX_SCHEMA_BINARY is unset or absent (Bazel names it)")
 
 
 def test_real_manifest_validates_against_published_schema(

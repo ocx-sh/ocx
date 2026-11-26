@@ -115,11 +115,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # disagreement between the two is the finding.
 # ---------------------------------------------------------------------------
 
-CRATE_PACKAGES = 25
+CRATE_PACKAGES = 26
 """`crates/*/BUILD.bazel`: one per workspace member, `ocx_shim` included.
 
 M-02 subtracted `ocx_shim` on the ground that it builds no target.
-`crates/ocx_shim/src/main.rs` opens a `#[cfg(test)] mod tests` holding 109
+`crates/ocx_shim/src/main.rs` opens a `#[cfg(test)] mod tests` holding 152
 `#[test]` fns, and rules_rust compiles those as a `rust_test` over the `[[bin]]`
 crate root without needing the `rust_binary` — so the package is there and so is
 `//crates/ocx_shim:ocx_shim_bin_test`."""
@@ -134,15 +134,15 @@ reaches one: the patched submodule crates arrive through rules_rs as
 ordinary `@crates//:oci-client-0.17.0` aliases, not as
 `//external/rust-oci-client:oci_client`."""
 
-CRATES_LIB_TARGETS = 23
+CRATES_LIB_TARGETS = 24
 """One `rust_library` per crate that has a lib — every member but `ocx_shim` and the proc-macro `ocx_exit_derive`."""
 
 CRATES_PROC_MACRO_TARGETS = 1
 """`ocx_exit_derive:ocx_exit_derive`, a `rust_proc_macro`. It has no unit-test or doctest target of its own:
 its expansions are tested by `ocx_exit:derive_test` and the `compile_fail` doctests on `ocx_exit`."""
 
-CRATES_TEST_TARGETS = 46
-"""23 lib unit-test targets + 21 `crates/<name>/tests/*.rs` integration targets
+CRATES_TEST_TARGETS = 49
+"""24 lib unit-test targets + 23 `crates/<name>/tests/*.rs` integration targets
 + 2 `[[bin]]` unit-test targets (`ocx_cli:ocx_cli_bin_test`,
 `ocx_shim:ocx_shim_bin_test`).
 
@@ -170,9 +170,9 @@ poisoned `env`. The seven `<crate>_isolated` targets
 (`crates/ocx_test_support/isolated.bzl`) run the testcases a `rust_test`
 `--skip`s, each in a process of its own, with every crate's tree as `data`."""
 
-CRATES_DOC_TEST_TARGETS = 23
+CRATES_DOC_TEST_TARGETS = 24
 """One `rust_doc_test(name = "<crate>_doc_test")` per crate with a `src/lib.rs`
-— every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 23, not only
+— every member but `ocx_shim` (plan_bazel_cargo_port.md C-030). All 24, not only
 the crates carrying a fence today, so a crate's first doctest is run with no
 BUILD edit (BZL-RUST-28's silent gap). `cargo nextest` runs no doctest, so these
 have no nextest suite, and a passing one writes an empty `test.log`, so they have
@@ -203,12 +203,12 @@ CRATES_RULE_TARGETS = (
     + CRATES_TEST_TARGETS
     + CRATES_BINARY_TARGETS
     + CRATES_DOC_TEST_TARGETS
-)  # 97
+)  # 102
 """Every **Rust** rule target under `//crates/...` — the stage-1 tag-guard
 floor, which reads `kind("^rust_.*rule$", ...)` and so does not see filegroups."""
 
-DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 25
-DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 103
+DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 26
+DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 108
 """`bazel:build:drift` reads `kind(rule, //crates/...)`, which is every rule
 target of every kind, so its target floor counts the filegroups too. The
 package floor keeps `+ EXTERNAL_PACKAGES` rather than dropping the term: the
@@ -248,10 +248,10 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
-ACCEPTANCE_MODULE_TARGETS = 218
+ACCEPTANCE_MODULE_TARGETS = 222
 """One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
-'kind(sh_test, //test:all)'` answers 218 and `ls test/tests/test_*.py` answers
-218 (217 before `test_secret_reference.py`; 211 before the six export and import modules; 210 before `test_registry_guard.py`; 209 before `test_exec_registers_project.py`; 208 before `test_telemetry_collector.py`; 199 before the nine telemetry modules (`test_otlp_fixture.py`, `test_telemetry_*.py`, `test_config_list.py`); 198 before `test_user_file_publish.py`; 197 before `test_sign_idempotent.py`; 195 before `test_push_sign_order.py` and `test_self_candidate_switch.py`; 193 before `test_publisher_trust.py` and `test_publisher_trust_previous.py`; 192 before `test_pinned_project_vanished.py`; 187 before the five `test_hardening_*.py` modules; 179 before `test_shell_open.py`; 178 before `test_credential_helper_reentry.py`; 177 before `test_upgrade.py`; 176 before `test_toolchain_drift_notice.py`; 175 before `test_update_config.py`; 174 before `test_install_link.py`; 173 until `test_env_contract.py` was added; 172 until `test_error_document.py` was added; 181 until eight source-only sweep modules moved to the lint tier,
+'kind(sh_test, //test:all)'` answers 222 and `ls test/tests/test_*.py` answers
+222 (218 before the four vendor modules; 217 before `test_secret_reference.py`; 211 before the six export and import modules; 210 before `test_registry_guard.py`; 209 before `test_exec_registers_project.py`; 208 before `test_telemetry_collector.py`; 199 before the nine telemetry modules (`test_otlp_fixture.py`, `test_telemetry_*.py`, `test_config_list.py`); 198 before `test_user_file_publish.py`; 197 before `test_sign_idempotent.py`; 195 before `test_push_sign_order.py` and `test_self_candidate_switch.py`; 193 before `test_publisher_trust.py` and `test_publisher_trust_previous.py`; 192 before `test_pinned_project_vanished.py`; 187 before the five `test_hardening_*.py` modules; 179 before `test_shell_open.py`; 178 before `test_credential_helper_reentry.py`; 177 before `test_upgrade.py`; 176 before `test_toolchain_drift_notice.py`; 175 before `test_update_config.py`; 174 before `test_install_link.py`; 173 until `test_env_contract.py` was added; 172 until `test_error_document.py` was added; 181 until eight source-only sweep modules moved to the lint tier,
 plan_test_speed_tiers.md C-009; 173 until `test_schema_generation.py` was
 ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020; 172 until
 `test_pull_progress.py`, whose only assertions were on log message text, was
@@ -268,7 +268,7 @@ per-module groups that left `:suite_inputs` (`:bench_inputs`,
 `:vendored_specs`). No `sh_test`, but `kind(rule, ...)` counts them, so the
 floor has to."""
 
-ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 227
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 231
 
 GRAPH_TAIL_TARGETS = 8
 """What `//...` holds that no earlier stage's universe names: `//:all` (4 —
@@ -1646,13 +1646,13 @@ def prove_counts() -> int:
     constants block above. They are asserted rather than computed so that a
     correction to one summand that forgot the total cannot pass.
     """
-    expect(CRATE_PACKAGES == 25, f"crate packages is {CRATE_PACKAGES}, the tree has 25")
+    expect(CRATE_PACKAGES == 26, f"crate packages is {CRATE_PACKAGES}, the tree has 26")
     expect(EXTERNAL_PACKAGES == 0, f"external packages is {EXTERNAL_PACKAGES}, the tree has 0")
-    expect(CRATES_LIB_TARGETS == 23, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 23")
-    expect(CRATES_TEST_TARGETS == 46, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 46")
+    expect(CRATES_LIB_TARGETS == 24, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 24")
+    expect(CRATES_TEST_TARGETS == 49, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 49")
     expect(CRATES_BINARY_TARGETS == 4, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 4")
     expect(
-        CRATES_DOC_TEST_TARGETS == CRATES_LIB_TARGETS == 23,
+        CRATES_DOC_TEST_TARGETS == CRATES_LIB_TARGETS == 24,
         f"crates doctest targets is {CRATES_DOC_TEST_TARGETS}; C-030 puts one on each of the "
         f"{CRATES_LIB_TARGETS} crates with a src/lib.rs",
     )
@@ -1660,9 +1660,9 @@ def prove_counts() -> int:
         CRATES_FILEGROUP_TARGETS == 6,
         f"crates filegroups is {CRATES_FILEGROUP_TARGETS}, the tree has 6",
     )
-    expect(CRATES_RULE_TARGETS == 97, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 97")
-    expect(DRIFT_PACKAGE_FLOOR == 25, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 25")
-    expect(DRIFT_TARGET_FLOOR == 103, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 103")
+    expect(CRATES_RULE_TARGETS == 102, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 102")
+    expect(DRIFT_PACKAGE_FLOOR == 26, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 26")
+    expect(DRIFT_TARGET_FLOOR == 108, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 108")
     expect(
         CAST_GENRULE_TARGETS == 40,
         f"cast genrules is {CAST_GENRULE_TARGETS}, the tree has 40 (39 casts + manifest_drift)",
@@ -1678,20 +1678,20 @@ def prove_counts() -> int:
     expect(GIF_SUPPORT_TARGETS == 3, f"gif support targets is {GIF_SUPPORT_TARGETS}, the tree has 3")
     expect(GIF_RULE_TARGETS == 42, f"gif rule targets is {GIF_RULE_TARGETS}, the tree has 42")
     expect(
-        STAGE_FLOORS["stage-3"].minimum == 190,
-        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 190",
+        STAGE_FLOORS["stage-3"].minimum == 195,
+        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 195",
     )
     expect(
-        ACCEPTANCE_MODULE_TARGETS == 218,
-        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 218",
+        ACCEPTANCE_MODULE_TARGETS == 222,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 222",
     )
     expect(
-        ACCEPTANCE_RULE_TARGETS == 227,
-        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 227",
+        ACCEPTANCE_RULE_TARGETS == 231,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 231",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 425,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 425",
+        STAGE_FLOORS["stage-4"].minimum == 434,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 434",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1700,8 +1700,8 @@ def prove_counts() -> int:
         "read the acceptance modules and nothing else would clear it",
     )
     print(
-        "counts  OK : 25 = 25 + 0, 97 = 23 + 1 + 46 + 4 + 23, 103 = 97 + 6, 45 = 40 + 5, 42 = 39 + 3, "
-        "190 = 103 + 45 + 42, 227 = 218 + 9, 425 = 190 + 227 + 8 — internal consistency only; "
+        "counts  OK : 26 = 26 + 0, 102 = 24 + 1 + 49 + 4 + 24, 108 = 102 + 6, 45 = 40 + 5, 42 = 39 + 3, "
+        "195 = 108 + 45 + 42, 231 = 222 + 9, 434 = 195 + 231 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )
