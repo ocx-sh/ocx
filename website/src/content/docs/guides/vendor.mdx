@@ -110,7 +110,7 @@ Darwin content vendored on Linux or Windows stays as published. OCX re-signs a M
 
 ## Windows \{#vendor-windows\}
 
-Launchers are `.exe` files with a `.direct` file beside them. A tool whose program ends in `.bat` or `.cmd` starts through the standard library's batch-argument escaping. An argument it refuses makes the launcher exit 64 and name that argument.
+Launchers are `.exe` files with a `.direct` file beside them. A declared binary is `<name>.exe` in the package's first `PATH` directory, with or without `--manifest-only`. A program that is a batch file must be declared as an entry point, or a full run exits 65. An entry point whose command ends in `.bat` or `.cmd` starts through the standard library's batch-argument escaping. An argument it refuses makes the launcher exit 64 and name that argument.
 
 Every other program starts through `CreateProcessW` with the exit code passed through. Path rules for a `windows/*` platform are stricter than on Unix, listed in the [manifest reference][ref-manifest-paths].
 
