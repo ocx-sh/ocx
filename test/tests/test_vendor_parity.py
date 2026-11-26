@@ -499,7 +499,10 @@ def test_launcher_child_matches_ocx_exec_child(
 
 def _manifest_schema() -> dict[str, Any]:
     binary = os.environ.get("OCX_SCHEMA_BINARY")
-    if binary and Path(binary).exists():
+    if binary:
+        assert Path(binary).exists(), (
+            f"OCX_SCHEMA_BINARY is set but names no file: {binary}"
+        )
         result = subprocess.run(
             [binary, "vendor-manifest"],
             capture_output=True,
@@ -511,7 +514,9 @@ def _manifest_schema() -> dict[str, Any]:
             f"ocx_schema vendor-manifest failed: {result.stderr}"
         )
         return json.loads(result.stdout)
-    pytest.skip("no vendor-manifest schema: OCX_SCHEMA_BINARY is unset or absent (Bazel names it)")
+    pytest.skip(
+        "OCX_SCHEMA_BINARY is unset: only the Bazel acceptance targets name the schema binary"
+    )
 
 
 def test_real_manifest_validates_against_published_schema(
@@ -557,10 +562,9 @@ def test_windows_amd64_manifest_equals_golden(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
     golden = GOLDEN_DIR / "windows_amd64.manifest.json"
-    if not golden.exists():
-        pytest.skip(
-            f"golden {golden} is absent (written by `ocx vendor -p windows/amd64`)"
-        )
+    assert golden.exists(), (
+        f"committed golden {golden} is missing (written by `ocx vendor -p windows/amd64`)"
+    )
     pkg = windows_only_package(ocx, unique_repo, tmp_path / "pkg")
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
     out = tmp_path / "out"
