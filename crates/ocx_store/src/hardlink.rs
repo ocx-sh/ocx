@@ -27,9 +27,41 @@ impl LinkMode {
     ) -> Result<()> {
         match self {
             Self::Hardlink => create_in_existing_parent(source, dest),
-            Self::Copy => unimplemented!("LinkMode::Copy is implemented by the vendor copy-assembly step"),
+            Self::Copy => copy_private(source.as_ref(), dest.as_ref()),
         }
     }
+}
+
+/// Writes `dest` as new bytes with the source mtime and a masked mode.
+///
+/// Setuid, setgid, sticky and group/other-write are cleared; xattr, ACL and clone metadata
+/// never travel, so this reads and writes bytes instead of calling `std::fs::copy` (macOS
+/// `fcopyfile` would carry them). `create_new` refuses an existing node, a planted symlink included.
+fn copy_private(source: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    let mut input = std::fs::File::open(source).map_err(|error| FileError::new(source, error))?;
+    let metadata = input.metadata().map_err(|error| FileError::new(source, error))?;
+    if !metadata.is_file() {
+        return Err(FileError::new(
+            source,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut output = options.open(dest).map_err(|error| FileError::new(dest, error))?;
+    let result = (|| -> std::io::Result<()> {
+        std::io::copy(&mut input, &mut output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let masked = metadata.permissions().mode() & !0o7022;
+            output.set_permissions(std::fs::Permissions::from_mode(masked))?;
+        }
+        output.set_modified(metadata.modified()?)
+    })();
+    result.map_err(|error| FileError::new(dest, error))
 }
 
 /// Hardlinks `link` to `source`, creating missing parents.
@@ -92,6 +124,72 @@ mod tests {
         }
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    // ── LinkMode::Copy ───────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn copy_fixture(mode: u32) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, root) = setup();
+        let source = make_file(&root, "source", b"payload");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode)).unwrap();
+        let dest = root.join("dest");
+        LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap();
+        (dir, source, dest)
+    }
+
+    /// V-70 half: setuid, setgid, sticky and group/other-write are cleared, other bits kept.
+    #[cfg(unix)]
+    #[test]
+    fn copy_clears_special_and_group_other_write_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, _source, dest) = copy_fixture(0o7777);
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_keeps_executable_and_read_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, _source, dest) = copy_fixture(0o4750);
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777, 0o750);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_keeps_bytes_and_mtime_on_a_new_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, source, dest) = copy_fixture(0o644);
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+        assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), past);
+        assert_ne!(
+            std::fs::metadata(&dest).unwrap().ino(),
+            std::fs::metadata(&source).unwrap().ino()
+        );
+    }
+
+    /// A symlink planted at the destination is refused, never followed.
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_a_symlink_at_the_destination() {
+        let (_dir, root) = setup();
+        let source = make_file(&root, "source", b"payload");
+        let victim = make_file(&root, "victim", b"untouched");
+        let dest = root.join("dest");
+        std::os::unix::fs::symlink(&victim, &dest).unwrap();
+        let err = LinkMode::Copy.place_in_existing_parent(&source, &dest).unwrap_err();
+        assert_eq!(err.cause.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
     }
 
     // ── create: happy path ───────────────────────────────────────────────────
