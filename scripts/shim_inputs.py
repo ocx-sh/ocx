@@ -7,10 +7,12 @@
 
 The blobs are not byte-reproducible, so freshness is judged on inputs. `build-windows-shims.yml` already reds
 a blob older than the last change under `crates/ocx_shim/` or `crates/ocx_env_apply/`; this covers the rest:
-the toolchain file, the `shim` profile, the workspace entries of the launcher's direct dependencies, the
-registry packages its lock closure resolves to, the `shim:build` command line, and the Zig and cargo-zigbuild
-pins of the workflow that cuts the blobs. Workspace-member versions are left out, so a release bump is not a
-change. `--check` compares the digest with `crates/ocx_store/src/shim_inputs.sha256`, which a blob re-cut
+the toolchain file, the `shim` profile and the `release` profile it inherits, `.cargo/config.toml` (all but
+`build.jobs`), the workspace entries of the launcher's direct dependencies, the packages its lock closure
+resolves to with their sources, the `shim:build` command line, and the Zig and cargo-zigbuild pins, the
+workflow-level `env:` and the target list of the workflow that cuts the blobs. A path dependency or a `[patch]`
+entry in the closure is refused, since its sources are not read. Workspace-member versions are left out, so a
+release bump is not a change. `--check` compares the digest with `crates/ocx_store/src/shim_inputs.sha256`, which a blob re-cut
 rewrites with `--print`.
 
 Exit: 0 the digest matches (or was printed); 1 it does not; 2 an input is missing or reads as nothing.
@@ -29,6 +31,7 @@ from pathlib import Path
 RECORDED = Path("crates/ocx_store/src/shim_inputs.sha256")
 WORKFLOW = Path(".github/workflows/build-windows-shims.yml")
 TASKFILE = Path("taskfiles/rust.taskfile.yml")
+CARGO_CONFIG = Path(".cargo/config.toml")
 LAUNCHER_CRATES = ("ocx_shim", "ocx_env_apply")
 
 
@@ -71,9 +74,24 @@ def _lock_closure(lock: dict) -> list[dict[str, str]]:
             continue
         seen[key] = package
         stack.extend(resolve(spec) for spec in package.get("dependencies", []))
-    # Only registry packages: a workspace member's version is the release number, not a build input.
+    # A path dependency's bytes are files this digest never reads, so it is refused, not skipped.
+    local = sorted(
+        p["name"]
+        for p in seen.values()
+        if "source" not in p and p["name"] not in LAUNCHER_CRATES
+    )
+    if local:
+        raise InputError(
+            f"Cargo.lock: the launcher's closure has path dependencies {local}, which the digest cannot cover"
+        )
+    # The two launcher crates are left out: their version is the release number, not a build input.
     registry = [
-        {"name": p["name"], "version": p["version"], "checksum": p.get("checksum", "")}
+        {
+            "name": p["name"],
+            "version": p["version"],
+            "source": p["source"],
+            "checksum": p.get("checksum", ""),
+        }
         for p in seen.values()
         if "source" in p
     ]
@@ -94,6 +112,12 @@ def inputs(root: Path) -> dict[str, object]:
         lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
         workflow = (root / WORKFLOW).read_text(encoding="utf-8")
         taskfile = (root / TASKFILE).read_text(encoding="utf-8")
+        cargo_config_path = root / CARGO_CONFIG
+        cargo_config = (
+            tomllib.loads(cargo_config_path.read_text(encoding="utf-8"))
+            if cargo_config_path.exists()
+            else {}
+        )
         direct = set()
         for crate in LAUNCHER_CRATES:
             crate_manifest = tomllib.loads(
@@ -115,11 +139,34 @@ def inputs(root: Path) -> dict[str, object]:
         raise InputError(
             f"Cargo.toml: launcher dependencies {external}, without a workspace entry {missing}"
         )
+    closure = _lock_closure(lock)
+    patched = sorted(
+        name
+        for table in manifest.get("patch", {}).values()
+        for name in table
+        if name in {entry["name"] for entry in closure}
+    )
+    if patched:
+        raise InputError(
+            f"Cargo.toml: [patch] replaces launcher dependencies {patched}, which the digest cannot cover"
+        )
+    # The job count changes no byte under `codegen-units = 1`; every other key of the file is an input.
+    build = {
+        key: value
+        for key, value in cargo_config.get("build", {}).items()
+        if key != "jobs"
+    }
     return {
         "toolchain": toolchain.get("toolchain") or {},
         "profile": profile,
+        "release_profile": manifest.get("profile", {}).get("release", {}),
+        "cargo_config": {**cargo_config, "build": build},
         "dependencies": {name: workspace_deps[name] for name in external},
-        "lock": _lock_closure(lock),
+        "lock": closure,
+        "workflow_env": _one(r"^env:\n((?:[ \t]+\S.*\n)+)", workflow, WORKFLOW),
+        "targets": _one(
+            r"^        target:\n((?:          - \S+\n)+)", workflow, WORKFLOW
+        ),
         "zig": _one(r'^\s*ZIG_VERSION: "([^"]+)"', workflow, WORKFLOW),
         "zig_sha256": _one(r'^\s*ZIG_SHA256: "([0-9a-f]{64})"', workflow, WORKFLOW),
         "cargo_zigbuild": _one(r"^\s*tool: cargo-zigbuild@(\S+)", workflow, WORKFLOW),
@@ -135,7 +182,9 @@ def digest(root: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description="digest the launcher blobs' non-source build inputs"
+    )
     parser.add_argument("--root", type=Path, default=Path.cwd())
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--print", action="store_true", help="print the digest")

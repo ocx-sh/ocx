@@ -20,6 +20,7 @@ FILES = (
     "taskfiles/rust.taskfile.yml",
     "crates/ocx_shim/Cargo.toml",
     "crates/ocx_env_apply/Cargo.toml",
+    ".cargo/config.toml",
 )
 
 
@@ -102,6 +103,30 @@ def test_an_unchanged_tree_matches(tree: Path) -> None:
             "--profile shim -v",
             id="build-command",
         ),
+        pytest.param(
+            "Cargo.toml",
+            r"^\[profile\.shim\]",
+            "[profile.release]\ndebug = 1\n\n[profile.shim]",
+            id="release-profile",
+        ),
+        pytest.param(
+            ".cargo/config.toml",
+            r"^\[build\]",
+            '[target.x86_64-pc-windows-gnullvm]\nrustflags = ["-Cdebuginfo=2"]\n\n[build]',
+            id="cargo-config",
+        ),
+        pytest.param(
+            ".github/workflows/build-windows-shims.yml",
+            r'^  CARGO_INCREMENTAL: "0"',
+            '  CARGO_INCREMENTAL: "1"',
+            id="workflow-env",
+        ),
+        pytest.param(
+            ".github/workflows/build-windows-shims.yml",
+            r"^          - aarch64-pc-windows-gnullvm\n",
+            "",
+            id="target-list",
+        ),
     ],
 )
 def test_a_changed_input_fails(
@@ -117,6 +142,38 @@ def test_a_release_version_bump_is_not_an_input(tree: Path) -> None:
     edit(tree, "Cargo.lock", r'(name = "ocx_shim"\nversion = ")[^"]+', r"\g<1>9.9.9")
     result = run(tree, "--check")
     assert result.returncode == 0, result.stderr
+
+
+def test_the_cargo_job_count_is_not_an_input(tree: Path) -> None:
+    edit(tree, ".cargo/config.toml", r"^jobs = \d+", "jobs = 3")
+    result = run(tree, "--check")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("name", "pattern", "replacement"),
+    [
+        pytest.param(
+            "Cargo.lock",
+            r'(name = "serde_json"\nversion = "[^"]+"\n)source = "[^"]+"\n',
+            r"\g<1>",
+            id="path-dependency",
+        ),
+        pytest.param(
+            "Cargo.toml",
+            r"^\[patch\.crates-io\]\n",
+            '[patch.crates-io]\nserde_json = { path = "external/serde_json" }\n',
+            id="patched-dependency",
+        ),
+    ],
+)
+def test_a_dependency_source_the_digest_cannot_read_is_refused(
+    tree: Path, name: str, pattern: str, replacement: str
+) -> None:
+    edit(tree, name, pattern, replacement)
+    result = run(tree, "--check")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cannot cover" in result.stderr, result.stderr
 
 
 def test_a_lock_without_the_launcher_reads_as_nothing(tree: Path) -> None:
