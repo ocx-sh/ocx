@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use ocx_env_apply::windows_path::{SegmentViolation, check_segment};
 use ocx_oci::Digest;
 use ocx_oci::cas_path::{CAS_SHARD_PREFIX_LEN, CAS_SHARD_TOTAL_LEN};
 use ocx_util::error::FileError;
@@ -26,7 +27,7 @@ pub enum PathViolation {
     Backslash,
     /// Windows targets only: `:`.
     Colon,
-    /// Windows targets only: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension.
+    /// Windows targets only: `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with any extension.
     DeviceName,
     /// Windows targets only: a segment ending in `.` or a space.
     TrailingDotOrSpace,
@@ -108,25 +109,12 @@ impl VendorLayout {
 }
 
 fn check_windows_segment(segment: &str) -> Result<(), PathViolation> {
-    if segment.contains('\\') {
-        return Err(PathViolation::Backslash);
-    }
-    if segment.contains(':') {
-        return Err(PathViolation::Colon);
-    }
-    // Windows resolves `NUL.txt` to the device too, so only the part before the first dot names it.
-    let stem = segment.split('.').next().unwrap_or(segment).to_ascii_uppercase();
-    let is_numbered = |prefix: &str| {
-        stem.strip_prefix(prefix)
-            .is_some_and(|digit| matches!(digit.as_bytes(), [b'1'..=b'9']))
-    };
-    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || is_numbered("COM") || is_numbered("LPT") {
-        return Err(PathViolation::DeviceName);
-    }
-    if segment.ends_with(['.', ' ']) {
-        return Err(PathViolation::TrailingDotOrSpace);
-    }
-    Ok(())
+    check_segment(segment).map_err(|violation| match violation {
+        SegmentViolation::Backslash => PathViolation::Backslash,
+        SegmentViolation::Colon => PathViolation::Colon,
+        SegmentViolation::DeviceName => PathViolation::DeviceName,
+        SegmentViolation::TrailingDotOrSpace => PathViolation::TrailingDotOrSpace,
+    })
 }
 
 /// A fresh sibling directory of `DIR` that is built whole, then renamed onto `DIR` or removed.
@@ -386,8 +374,20 @@ mod tests {
 
     #[test]
     fn similar_names_are_not_device_names() {
-        for path in ["console", "com0", "com10", "lpt", "nul-x"] {
+        for path in ["console", "com10", "lpt", "nul-x"] {
             assert_eq!(VendorLayout::check_relative_path(path, true), Ok(()), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn numbered_device_names_include_zero() {
+        for path in ["COM0", "x/lpt0.txt"] {
+            assert_eq!(
+                VendorLayout::check_relative_path(path, true),
+                Err(PathViolation::DeviceName),
+                "{path:?}"
+            );
+            assert_eq!(VendorLayout::check_relative_path(path, false), Ok(()), "{path:?}");
         }
     }
 
