@@ -856,7 +856,15 @@ async fn publish(output: &Path, staged: StagedTree, manifest: &VendorManifest) -
     tokio::task::spawn_blocking(move || staged.publish())
         .await
         .map_err(|error| joined(output, error))?
-        .map_err(crate::Error::from)?;
+        .map_err(|error| match error.cause.kind() {
+            // `DIR` changed between the early check and the rename: the same refusal, not an I/O fault.
+            std::io::ErrorKind::DirectoryNotEmpty
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::AlreadyExists => VendorError::OutputNotEmpty {
+                path: output.to_path_buf(),
+            },
+            _ => VendorError::Package(crate::Error::from(error)),
+        })?;
     Ok(written_size)
 }
 
@@ -2417,6 +2425,77 @@ mod tests {
         assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
         assert!(output.join("keep").is_file(), "DIR is left as it was");
     }
+    async fn manifest_for_publish(dir: &Path) -> VendorManifest {
+        let (source, _, _) = registered_tool();
+        let manager = manager_over(&dir.join("home"), source);
+        let request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        let selection = select(&manager, &request).await.expect("the selection reads");
+        build_manifest(&manager, &request, &selection, &|_| true)
+            .await
+            .expect("manifest")
+    }
+
+    /// A `DIR` that gained content after the early check is the user's output-not-empty refusal and stays as it was.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dir_that_gains_a_file_before_publish_is_refused_and_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        let output = dir.path().join("out");
+        std::fs::create_dir(&output).expect("empty DIR passes the early check");
+        let staged = stage(&output).await.expect("stages");
+        std::fs::write(output.join("late"), "late").expect("the file arrives after the check");
+
+        let error = publish(&output, staged, &manifest)
+            .await
+            .expect_err("non-empty at publish");
+
+        assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        assert_eq!(std::fs::read(output.join("late")).expect("kept"), b"late");
+        assert_eq!(std::fs::read_dir(&output).expect("dir").count(), 1);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("parent")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".ocx-vendor-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging is removed: {leftovers:?}");
+    }
+
+    /// A file at `DIR` is the same refusal.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_at_dir_at_publish_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        let output = dir.path().join("out");
+        let staged = stage(&output).await.expect("stages");
+        std::fs::write(&output, "a file").expect("a file takes the name");
+
+        let error = publish(&output, staged, &manifest).await.expect_err("a file at DIR");
+
+        assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
+        assert_eq!(std::fs::read(&output).expect("kept"), b"a file");
+    }
+
+    /// An absent or empty `DIR` is published, and the empty one is replaced.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_absent_or_empty_dir_is_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        for name in ["absent", "empty"] {
+            let output = dir.path().join(name);
+            if name == "empty" {
+                std::fs::create_dir(&output).expect("dir");
+            }
+            publish(&output, stage(&output).await.expect("stages"), &manifest)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert!(output.join(MANIFEST_FILE).is_file(), "{name}");
+        }
+    }
+
     /// A symlink at `DIR` is refused even when it points at an empty directory; an absent `DIR` is free.
     #[cfg(unix)]
     #[tokio::test]

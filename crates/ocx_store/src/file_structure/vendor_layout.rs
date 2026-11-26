@@ -164,18 +164,12 @@ impl StagedTree {
     /// # Errors
     ///
     /// The target is a non-empty directory, a symlink or a file, or the rename failed; the
-    /// staging directory is removed and `target` is as it was.
+    /// staging directory is removed and `target` is as it was. A refused target carries the
+    /// io kind `DirectoryNotEmpty`, `NotADirectory` or `AlreadyExists`.
     pub fn publish(self) -> Result<(), FileError> {
         normalise_tree(self.staging.path())?;
-        // `remove_dir` is the emptiness check and the removal in one call: a non-empty or
-        // non-directory target fails here untouched, where list-then-remove would race.
-        match std::fs::remove_dir(&self.target) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(FileError::new(&self.target, error)),
-        }
         let staging = self.staging.keep();
-        rename_tree(&staging, &self.target).map_err(|error| {
+        replace_target(&staging, &self.target).map_err(|error| {
             // The tree is ours alone; leaving it would strand a full copy beside `DIR`.
             let _ = std::fs::remove_dir_all(&staging);
             FileError::new(&self.target, error)
@@ -191,6 +185,31 @@ impl StagedTree {
         let staging = self.staging.path().to_path_buf();
         self.staging.close().map_err(|error| FileError::new(staging, error))
     }
+}
+
+/// `rename(2)` replaces an empty directory atomically and refuses a non-empty one, a file or a link,
+/// so nothing is removed first and a `DIR` created after the caller's check is never lost.
+#[cfg(not(windows))]
+fn replace_target(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_tree(from, to)
+}
+
+/// Windows cannot rename onto an existing directory, so an empty one is removed first; `remove_dir`
+/// is the emptiness check, and a link is refused beforehand because it would remove the link itself.
+#[cfg(windows)]
+fn replace_target(from: &Path, to: &Path) -> std::io::Result<()> {
+    if ocx_util::fs::symlink::is_link(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "the target is a symlink or junction",
+        ));
+    }
+    match std::fs::remove_dir(to) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    rename_tree(from, to)
 }
 
 #[expect(
@@ -465,6 +484,27 @@ mod tests {
             staging_siblings(parent.path()).is_empty(),
             "a failed publish removes staging"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_refuses_a_non_empty_target_and_a_file_with_a_distinguishable_kind() {
+        use std::io::ErrorKind;
+        let parent = tempfile::tempdir().unwrap();
+        let full = parent.path().join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("keep"), b"keep").unwrap();
+        let file = parent.path().join("file");
+        std::fs::write(&file, b"a file").unwrap();
+
+        for (target, kind) in [(&full, ErrorKind::DirectoryNotEmpty), (&file, ErrorKind::NotADirectory)] {
+            let error = StagedTree::create(target).unwrap().publish().unwrap_err();
+            assert_eq!(error.cause.kind(), kind, "{target:?}");
+        }
+
+        assert_eq!(std::fs::read(full.join("keep")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&file).unwrap(), b"a file");
+        assert!(staging_siblings(parent.path()).is_empty());
     }
 
     #[test]
