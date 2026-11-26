@@ -210,6 +210,16 @@ filegroup(
     ),
 )
 
+# `src/vendor_fixtures.py` is in `:suite_inputs` already; the golden manifests
+# the `ocx vendor` modules compare against are not.
+filegroup(
+    name = "vendor_fixtures",
+    srcs = glob(
+        ["fixtures/vendor/**"],
+        allow_empty = False,
+    ),
+)
+
 filegroup(
     name = "vendored_specs",
     srcs = glob(
@@ -316,6 +326,10 @@ acceptance_suite(
         "tests/test_telemetry_collector.py": _PROJECT_TOOLCHAIN,
         "tests/test_telemetry_contract.py": ["//website:src/content/docs/reference/telemetry.md"],
         "tests/test_trampoline_exec.py": ["//crates/ocx_store:shim_blobs"],
+        "tests/test_package_vendor.py": [":vendor_fixtures"],
+        "tests/test_vendor.py": [":vendor_fixtures"],
+        "tests/test_vendor_launcher.py": [":vendor_fixtures"],
+        "tests/test_vendor_parity.py": [":vendor_fixtures"],
     },
     # The schema binary as the two modules that run it read it: an
     # rlocationpath the runner resolves (`bazel.bzl` `_RUNNER`).
