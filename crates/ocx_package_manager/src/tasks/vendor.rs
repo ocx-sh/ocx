@@ -792,18 +792,21 @@ fn check_item(item: &EnvironmentItem, forbidden: &[String]) -> Result<(), Vendor
     if item.key.is_empty() || item.key.contains(['=', '\0']) {
         return Err(unrepresentable("the key is not a variable name".to_owned()));
     }
-    if item.value.contains('\0') {
-        return Err(unrepresentable("the value holds a NUL".to_owned()));
+    check_value(&item.value, forbidden).map_err(unrepresentable)
+}
+
+/// A resolved value holds no NUL and no template, and once the token is gone, no host path; the reason when it does.
+fn check_value(value: &str, forbidden: &[String]) -> Result<(), String> {
+    if value.contains('\0') {
+        return Err("the value holds a NUL".to_owned());
     }
-    if item.value.contains("${") {
-        return Err(unrepresentable(
-            "the value holds an unresolved `${` template".to_owned(),
-        ));
+    if value.contains("${") {
+        return Err("the value holds an unresolved `${` template".to_owned());
     }
     // The token is what stands for `DIR`; whatever it leaves behind must not name a host path.
-    let literal = item.value.replace(DIR_TOKEN, "");
+    let literal = value.replace(DIR_TOKEN, "");
     if let Some(path) = forbidden.iter().find(|path| literal.contains(path.as_str())) {
-        return Err(unrepresentable(format!("the value holds the host path '{path}'")));
+        return Err(format!("the value holds the host path '{path}'"));
     }
     Ok(())
 }
@@ -945,7 +948,8 @@ async fn write_content(
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
-        write_entrypoint_launchers(&layout, manifest, &entrypoints, blob, windows).await?;
+        let forbidden = host_paths(manager, &request.output);
+        write_entrypoint_launchers(&layout, manifest, &entrypoints, &forbidden, blob, windows).await?;
         write_selection_launchers(&layout, manifest, blob, windows).await?;
     }
 
@@ -1027,6 +1031,7 @@ async fn write_entrypoint_launchers(
     layout: &VendorLayout,
     manifest: &VendorManifest,
     declared: &HashMap<String, Entrypoints>,
+    forbidden: &[String],
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
@@ -1059,11 +1064,16 @@ async fn write_entrypoint_launchers(
                 .unwrap_or_default()
                 .iter()
                 .map(|arg| {
-                    resolver
-                        .resolve(arg)
-                        .map_err(|error| VendorError::ValueUnrepresentable {
-                            reason: format!("entry point '{}' argument '{arg}': {error}", entry.name),
-                        })
+                    let refused = |reason: String| VendorError::ValueUnrepresentable {
+                        reason: format!("entry point '{}' argument '{arg}': {reason}", entry.name),
+                    };
+                    // The token is the writer's: an author who spells it would be rewritten onto `DIR`.
+                    if arg.contains(DIR_TOKEN) {
+                        return Err(refused(format!("the argument contains {DIR_TOKEN}")));
+                    }
+                    let resolved = resolver.resolve(arg).map_err(|error| refused(error.to_string()))?;
+                    check_value(&resolved, forbidden).map_err(refused)?;
+                    Ok(resolved)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             sidecars.insert(
@@ -2627,7 +2637,7 @@ mod tests {
             serde_json::from_str(r#"{"hello":{"args":["--root","${installPath}/share"]}}"#).expect("entrypoints");
         let declared = HashMap::from([(package.digest.clone(), declared)]);
 
-        write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+        write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
             .await
             .expect("the launchers write");
 
@@ -2665,6 +2675,50 @@ mod tests {
         assert!(!sidecar.unset.is_empty(), "the writer fills the credential keys");
     }
 
+    /// A baked argument is held to the rules of an environment value: it never spells the vendor token itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_argument_spelling_the_vendor_token_is_unrepresentable() {
+        let files = {
+            let (_dir, _, manifest) = staged_tool(&[]).await;
+            let package = root_package(&manifest);
+            vec![format!("{}/bin/hello", package.content_dir)]
+        };
+        let (_dir, layout, manifest) = staged_tool(&files).await;
+        let package = root_package(&manifest);
+        let declared: Entrypoints =
+            serde_json::from_str(r#"{"hello":{"args":["--root=@VENDOR_DIR@/x"]}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
+            .await
+            .expect_err("the token is the writer's, not the author's");
+
+        assert!(matches!(error, VendorError::ValueUnrepresentable { .. }), "{error:?}");
+        assert!(!layout.resolve(&package.entrypoints[0].launcher_path).exists());
+    }
+
+    /// A baked argument naming this machine's home or `DIR` would leave the directory non-relocatable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_argument_holding_a_host_path_is_unrepresentable() {
+        let files = {
+            let (_dir, _, manifest) = staged_tool(&[]).await;
+            let package = root_package(&manifest);
+            vec![format!("{}/bin/hello", package.content_dir)]
+        };
+        let (_dir, layout, manifest) = staged_tool(&files).await;
+        let package = root_package(&manifest);
+        let declared: Entrypoints =
+            serde_json::from_str(r#"{"hello":{"args":["--home=/home/me/.ocx/x"]}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+        let forbidden = ["/home/me/.ocx".to_owned()];
+
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &forbidden, b"blob", false)
+            .await
+            .expect_err("the host path survives the replacement");
+
+        assert!(matches!(error, VendorError::ValueUnrepresentable { .. }), "{error:?}");
+    }
+
     /// A command no `PATH` entry of the environment holds has no program to start.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_entrypoint_command_on_no_path_entry_is_unrepresentable() {
@@ -2673,7 +2727,7 @@ mod tests {
         let declared: Entrypoints = serde_json::from_str(r#"{"hello":{}}"#).expect("entrypoints");
         let declared = HashMap::from([(package.digest.clone(), declared)]);
 
-        let error = write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
             .await
             .expect_err("nothing to start");
 
