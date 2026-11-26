@@ -132,6 +132,55 @@ impl ShimError {
             }
         }
     }
+
+    /// The clause a failed Windows spawn gains when a path-length limit is its plausible cause.
+    ///
+    /// A pinned `ocx` that was not found carries no Win32 code; it is judged as `ERROR_PATH_NOT_FOUND`, the code a
+    /// too-long path gives.
+    fn length_limit_hint(&self, working_directory_units: usize) -> Option<String> {
+        match self {
+            ShimError::SpawnFailure { win32, program } => length_limit_hint(*win32, working_directory_units, program),
+            ShimError::OcxNotFound { pinned: Some(program) } => length_limit_hint(3, working_directory_units, program),
+            _ => None,
+        }
+    }
+}
+
+/// The clause naming a path-length limit as the plausible cause of Win32 error `win32` starting `program`.
+///
+/// `working_directory_units` is the inherited working directory's length in UTF-16 units.
+fn length_limit_hint(win32: u32, working_directory_units: usize, program: &str) -> Option<String> {
+    use ocx_env_apply::windows_path::{MAX_PATH, extended_length_path};
+
+    // No prefix lifts this one: `CreateProcessW` refuses a working directory of MAX_PATH or more.
+    if working_directory_units >= MAX_PATH && matches!(win32, 3 | 87 | 206 | 267) {
+        return Some(format!(
+            "the working directory is {working_directory_units} characters long and Windows starts no program \
+             from one of {MAX_PATH} or more; start it from a shorter directory"
+        ));
+    }
+    let program_units = program.encode_utf16().count();
+    if program_units < MAX_PATH || !matches!(win32, 2 | 3 | 206) {
+        return None;
+    }
+    let why = if direct::is_batch_target(program) {
+        "a batch file runs through cmd.exe, which has the same limit"
+    } else if extended_length_path(program).is_none() {
+        "a relative program path cannot take the \\\\?\\ prefix"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "the program path is {program_units} characters long, past the {MAX_PATH} Windows allows, and {why}; \
+         move the directory the tree sits in to a shorter path"
+    ))
+}
+
+/// The inherited working directory's length in UTF-16 units; 0 when it cannot be read.
+#[cfg(windows)]
+fn working_directory_units() -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    std::env::current_dir().map_or(0, |dir| dir.as_os_str().encode_wide().count())
 }
 
 mod core;
@@ -146,7 +195,17 @@ fn main() -> ! {
     match run() {
         Ok(code) => exit(code),
         Err(err) => {
-            eprintln!("{}", err.stderr_message());
+            #[cfg_attr(
+                not(windows),
+                expect(unused_mut, reason = "only a Windows spawn gains a length hint")
+            )]
+            let mut message = err.stderr_message();
+            #[cfg(windows)]
+            if let Some(hint) = err.length_limit_hint(working_directory_units()) {
+                message.push_str("; ");
+                message.push_str(&hint);
+            }
+            eprintln!("{message}");
             exit(err.exit_code())
         }
     }
@@ -682,6 +741,75 @@ mod tests {
     // Win32 mock — acceptance-level), but the `exit_code()` mapping itself is
     // pure and is the unit-testable contract surface. These tests encode the
     // E1/E2→78, E3→77, E4→74, E5→69, E6→74, E6+ACCESS_DENIED→77 taxonomy.
+
+    fn spawn_failure(win32: u32, program: &str) -> ShimError {
+        ShimError::SpawnFailure {
+            win32,
+            program: program.to_string(),
+        }
+    }
+
+    /// `C:\` plus `units - 3` characters: a drive path exactly `units` UTF-16 units long.
+    fn drive_path(units: usize, suffix: &str) -> String {
+        format!("C:\\{}{suffix}", "a".repeat(units - 3 - suffix.len()))
+    }
+
+    /// A long-path cause gets one clause naming the length, the limit and what to shorten; anything else gets none.
+    #[test]
+    fn length_limit_hint_names_the_working_directory_or_the_program_only_when_a_limit_is_the_cause() {
+        let short_exe = "C:\\v\\bin\\tool.exe";
+        for code in [3, 87, 206, 267] {
+            let hint = spawn_failure(code, short_exe).length_limit_hint(260);
+            let hint = hint.unwrap_or_else(|| panic!("error {code} with a 260-unit working directory has no hint"));
+            assert!(
+                hint.contains("working directory is 260") && hint.contains("260 or more"),
+                "{hint}"
+            );
+        }
+        assert_eq!(
+            spawn_failure(267, short_exe).length_limit_hint(259),
+            None,
+            "under the limit: no hint"
+        );
+        assert_eq!(
+            spawn_failure(5, short_exe).length_limit_hint(300),
+            None,
+            "access denied is not a length error"
+        );
+
+        let batch = drive_path(260, "\\run.cmd");
+        let hint = spawn_failure(3, &batch)
+            .length_limit_hint(10)
+            .expect("a long batch path");
+        assert!(
+            hint.contains("program path is 260") && hint.contains("cmd.exe"),
+            "{hint}"
+        );
+        let relative = format!("bin\\{}", "a".repeat(260));
+        let hint = spawn_failure(206, &relative)
+            .length_limit_hint(10)
+            .expect("a long relative path");
+        assert!(hint.contains("cannot take the \\\\?\\ prefix"), "{hint}");
+        let pinned = ShimError::OcxNotFound {
+            pinned: Some(batch.clone()),
+        };
+        assert!(
+            pinned.length_limit_hint(10).is_some(),
+            "a pinned ocx is judged as error 3"
+        );
+
+        // An absolute .exe past the limit takes the prefix, so its failure is not a length error.
+        assert_eq!(
+            spawn_failure(3, &drive_path(300, "\\tool.exe")).length_limit_hint(10),
+            None
+        );
+        assert_eq!(
+            spawn_failure(3, &drive_path(259, "\\run.cmd")).length_limit_hint(10),
+            None
+        );
+        let not_a_spawn = ShimError::SidecarNotFound { stem_path: batch };
+        assert_eq!(not_a_spawn.length_limit_hint(300), None);
+    }
 
     #[test]
     fn e1_sidecar_not_found_exits_78() {

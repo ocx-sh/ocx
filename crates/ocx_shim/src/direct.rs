@@ -532,7 +532,7 @@ impl LookupFs for RealFs {
 /// Whether `program` is a batch file, which `CreateProcessW` would hand to `cmd.exe`.
 ///
 /// Windows ignores trailing dots and spaces in a file name, so `tool.cmd. ` still runs as `tool.cmd`.
-fn is_batch_target(program: &str) -> bool {
+pub(super) fn is_batch_target(program: &str) -> bool {
     let name = program.trim_end_matches(['.', ' ']);
     [".bat", ".cmd"].iter().any(|extension| {
         name.len()
@@ -750,7 +750,16 @@ fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
     }
     match status {
         // Full i32 passthrough: never remap or truncate.
-        Ok(status) => Ok(status.code().unwrap_or(1)),
+        Ok(status) => {
+            let code = status.code().unwrap_or(1);
+            // cmd.exe itself starts, then fails on a script path of MAX_PATH or more, so the cause is named after it.
+            if code != 0
+                && let Some(hint) = super::length_limit_hint(3, 0, &launch.program)
+            {
+                eprintln!("ocx-shim: {hint}");
+            }
+            Ok(code)
+        }
         Err(error) => Err(ShimError::SpawnFailure {
             win32: error.raw_os_error().map_or(0, |code| code as u32),
             program: launch.program.clone(),
