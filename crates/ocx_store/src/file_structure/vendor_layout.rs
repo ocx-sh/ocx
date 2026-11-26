@@ -4,9 +4,15 @@
 //! The tree `ocx vendor` writes: where each package, launcher and the manifest sit under `DIR`, and the staged publication of `DIR`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use ocx_oci::Digest;
+use ocx_oci::cas_path::{CAS_SHARD_PREFIX_LEN, CAS_SHARD_TOTAL_LEN};
 use ocx_util::error::FileError;
+use ocx_util::prelude::*;
+
+/// 1980-01-01T00:00:00Z: the mtime of every directory under `DIR`, the earliest a zip can store.
+const NORMALISED_MTIME_SECS: u64 = 315_532_800;
 
 /// Why a manifest path field is refused; the writer maps it to `vendor_path_unrepresentable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,23 +53,31 @@ impl VendorLayout {
     }
 
     /// `packages/<registry slug>/<algorithm>/<2 hex>/<30 hex>`.
-    pub fn relative_package_dir(_registry: &str, _digest: &Digest) -> String {
-        unimplemented!("vendor layout paths are implemented by the vendor copy-assembly step")
+    pub fn relative_package_dir(registry: &str, digest: &Digest) -> String {
+        let (algorithm, hex) = digest.parts();
+        format!(
+            "packages/{}/{algorithm}/{}/{}",
+            registry.to_relaxed_slug(),
+            &hex[..CAS_SHARD_PREFIX_LEN],
+            &hex[CAS_SHARD_PREFIX_LEN..CAS_SHARD_TOTAL_LEN]
+        )
     }
 
     /// `<package_dir>/content`.
-    pub fn relative_content_dir(_registry: &str, _digest: &Digest) -> String {
-        unimplemented!("vendor layout paths are implemented by the vendor copy-assembly step")
+    pub fn relative_content_dir(registry: &str, digest: &Digest) -> String {
+        format!("{}/content", Self::relative_package_dir(registry, digest))
     }
 
     /// `selections/<id>/shells/default/bin`.
-    pub fn relative_launcher_dir(_selection: &str) -> String {
-        unimplemented!("vendor layout paths are implemented by the vendor copy-assembly step")
+    pub fn relative_launcher_dir(selection: &str) -> String {
+        format!("selections/{selection}/shells/default/bin")
     }
 
     /// `DIR` joined with a validated relative path.
-    pub fn resolve(&self, _relative: &str) -> PathBuf {
-        unimplemented!("vendor layout paths are implemented by the vendor copy-assembly step")
+    pub fn resolve(&self, relative: &str) -> PathBuf {
+        relative
+            .split('/')
+            .fold(self.root.clone(), |path, segment| path.join(segment))
     }
 
     /// Applies the manifest's path rules; the Windows-only rules apply when the target platform is `windows/*`.
@@ -71,15 +85,56 @@ impl VendorLayout {
     /// # Errors
     ///
     /// The first [`PathViolation`] found.
-    pub fn check_relative_path(_path: &str, _platform_is_windows: bool) -> Result<(), PathViolation> {
-        unimplemented!("vendor layout paths are implemented by the vendor copy-assembly step")
+    pub fn check_relative_path(path: &str, platform_is_windows: bool) -> Result<(), PathViolation> {
+        if path.is_empty() {
+            return Err(PathViolation::Empty);
+        }
+        if path.starts_with('/') {
+            return Err(PathViolation::Absolute);
+        }
+        for segment in path.split('/') {
+            match segment {
+                "" => return Err(PathViolation::EmptySegment),
+                "." => return Err(PathViolation::DotSegment),
+                ".." => return Err(PathViolation::ParentSegment),
+                _ => {}
+            }
+            if platform_is_windows {
+                check_windows_segment(segment)?;
+            }
+        }
+        Ok(())
     }
 }
 
+fn check_windows_segment(segment: &str) -> Result<(), PathViolation> {
+    if segment.contains('\\') {
+        return Err(PathViolation::Backslash);
+    }
+    if segment.contains(':') {
+        return Err(PathViolation::Colon);
+    }
+    // Windows resolves `NUL.txt` to the device too, so only the part before the first dot names it.
+    let stem = segment.split('.').next().unwrap_or(segment).to_ascii_uppercase();
+    let is_numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|digit| matches!(digit.as_bytes(), [b'1'..=b'9']))
+    };
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || is_numbered("COM") || is_numbered("LPT") {
+        return Err(PathViolation::DeviceName);
+    }
+    if segment.ends_with(['.', ' ']) {
+        return Err(PathViolation::TrailingDotOrSpace);
+    }
+    Ok(())
+}
+
 /// A fresh sibling directory of `DIR` that is built whole, then renamed onto `DIR` or removed.
+///
+/// Dropping it without [`publish`](Self::publish) removes the staging directory.
 #[derive(Debug)]
 pub struct StagedTree {
-    staging: PathBuf,
+    staging: tempfile::TempDir,
     target: PathBuf,
 }
 
@@ -89,23 +144,54 @@ impl StagedTree {
     /// # Errors
     ///
     /// The parent is missing or not writable.
-    pub fn create(_target: &Path) -> Result<Self, FileError> {
-        unimplemented!("staged publication is implemented by the vendor copy-assembly step")
+    pub fn create(target: &Path) -> Result<Self, FileError> {
+        let parent = match target.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".ocx-vendor-");
+        // Created 0700 by `mkdir` itself, so no umask-wide window precedes a `chmod`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let staging = builder
+            .tempdir_in(parent)
+            .map_err(|error| FileError::new(parent, error))?;
+        Ok(Self {
+            staging,
+            target: target.to_path_buf(),
+        })
     }
 
     /// The directory to build into.
     pub fn path(&self) -> &Path {
-        &self.staging
+        self.staging.path()
     }
 
-    /// Sets the top directory to 0755 and renames it onto `target`, absent or empty.
+    /// Normalises the tree (C-008), then renames it onto `target`, absent or empty.
     ///
     /// # Errors
     ///
-    /// The rename failed; the staging directory is removed and `target` is as it was.
+    /// The target is a non-empty directory, a symlink or a file, or the rename failed; the
+    /// staging directory is removed and `target` is as it was.
     pub fn publish(self) -> Result<(), FileError> {
-        let _ = &self.target;
-        unimplemented!("staged publication is implemented by the vendor copy-assembly step")
+        normalise_tree(self.staging.path())?;
+        // `remove_dir` is the emptiness check and the removal in one call: a non-empty or
+        // non-directory target fails here untouched, where list-then-remove would race.
+        match std::fs::remove_dir(&self.target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(FileError::new(&self.target, error)),
+        }
+        let staging = self.staging.keep();
+        std::fs::rename(&staging, &self.target).map_err(|error| {
+            // The tree is ours alone; leaving it would strand a full copy beside `DIR`.
+            let _ = std::fs::remove_dir_all(&staging);
+            FileError::new(&self.target, error)
+        })
     }
 
     /// Removes the staging directory.
@@ -114,8 +200,49 @@ impl StagedTree {
     ///
     /// The removal failed.
     pub fn abort(self) -> Result<(), FileError> {
-        unimplemented!("staged publication is implemented by the vendor copy-assembly step")
+        let staging = self.staging.path().to_path_buf();
+        self.staging.close().map_err(|error| FileError::new(staging, error))
     }
+}
+
+/// Sets every directory under `root`, `root` included, to 0755 and mtime 1980-01-01 (C-008), children first.
+///
+/// Regular files keep what the copy gave them. shortcut: a symlink keeps its write-time mtime,
+/// since std cannot set one without following the link; add `utimensat` when `ocx_store` takes `libc`.
+///
+/// # Errors
+///
+/// An entry cannot be read or its mode or mtime cannot be set.
+fn normalise_tree(root: &Path) -> Result<(), FileError> {
+    let entries = std::fs::read_dir(root).map_err(|error| FileError::new(root, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| FileError::new(root, error))?;
+        let file_type = entry.file_type().map_err(|error| FileError::new(entry.path(), error))?;
+        if file_type.is_dir() {
+            normalise_tree(&entry.path())?;
+        }
+    }
+    normalise_dir(root).map_err(|error| FileError::new(root, error))
+}
+
+fn normalise_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A directory handle needs backup semantics, and `set_modified` needs write access.
+        options.write(true).custom_flags(0x0200_0000);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options
+        .open(dir)?
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(NORMALISED_MTIME_SECS))
 }
 
 #[cfg(test)]
@@ -322,5 +449,65 @@ mod tests {
 
         assert!(staging_siblings(parent.path()).is_empty());
         assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_at_a_staging_child_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = parent.path().join("outside");
+        std::fs::write(&outside, b"original").unwrap();
+        let source = parent.path().join("source");
+        std::fs::write(&source, b"payload").unwrap();
+        let staged = StagedTree::create(&parent.path().join("out")).unwrap();
+        let child = staged.path().join("child");
+        std::os::unix::fs::symlink(&outside, &child).unwrap();
+
+        let result = crate::hardlink::LinkMode::Copy.place_in_existing_parent(&source, &child);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_normalises_directory_modes_and_mtimes() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("out");
+        let staged = StagedTree::create(&target).unwrap();
+        let nested = staged.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(nested.join("file"), b"x").unwrap();
+
+        staged.publish().unwrap();
+
+        let epoch = SystemTime::UNIX_EPOCH + Duration::from_secs(NORMALISED_MTIME_SECS);
+        for dir in [target.clone(), target.join("a"), target.join("a/b")] {
+            let metadata = std::fs::metadata(&dir).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o755, "{dir:?}");
+            assert_eq!(metadata.modified().unwrap(), epoch, "{dir:?}");
+        }
+        assert_ne!(
+            std::fs::metadata(target.join("a/b/file")).unwrap().modified().unwrap(),
+            epoch
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_onto_a_symlink_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let elsewhere = parent.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let target = parent.path().join("out");
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        let staged = StagedTree::create(&target).unwrap();
+
+        assert!(staged.publish().is_err());
+
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert!(staging_siblings(parent.path()).is_empty());
     }
 }
