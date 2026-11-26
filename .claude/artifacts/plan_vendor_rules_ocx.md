@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → I1b (hub regeneration); every code pipeline merged; next P10
+- **Step:** /hex-execute → P10 (ocx proofs); CW P1-P9 I1 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -67,6 +67,7 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-19 | P5's security audit (step 4, opus) found two decoder findings in `crates/ocx_env_apply/src/direct.rs` (P1's merged file): a panic on a multibyte segment (Block) and a case-sensitive reserved-key check on Windows (Warn). P5 gains that file for a fix step 4b before the blob cut. `ocx exec` starts a `.bat`/`.cmd` whose path holds `%` the same way the audit made the launcher refuse; that existing behaviour is not changed here and is reported as a follow-up. | the blob cut must follow the last `ocx_env_apply` change; `ocx exec`'s batch path predates this plan and sits outside its contracts |
 | DP-20 | P7 step 2 reimplemented project selection over `LockedTool` because the CW request type carried no config or lock; step 3 undoes it and calls `select_tool_set` + `resolve_selected_tools`, with `VendorSelection::Project` carrying config and lock, and P7 gains `crates/ocx_cli/src/command/{vendor,package_vendor}.rs` for that glue. | V-23 (no new selection walk) and parity with what `ocx exec`/`ocx env` select |
 | DP-21 | I1 runs in two parts: I1a (bookkeeping the merges left: count literals, docs groups, lint tables, tag-guard reads, test-target map, stale blob names, AI-config rows) beside P7, I1b (hub regeneration, `cargo check`, unit suites) after P7. P7 step 3 did not call `compose_roots`: it installs or runs `prepare_lazy` (writes a shim tree, refuses packages declaring no names); roots are built from the closure (`closure_root`) and composed through `resolve_env(EnvScope::Vendor)`, and the vendor lane skips the shim slot. | I1a touches no P7 file and no generated file; the hub stays regenerated once. `compose_roots` has side effects the manifest-only contract (C-003) forbids |
+| DP-22 | `VendorReport.platform` is the platform object every other report carries, not design § 4.3's string. | the contract lint (L11) reds a string platform in a report root; the house contract wins over the design's shorthand. The on-disk `manifest.json` keeps its platform string (§ 4.1) |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
@@ -358,7 +359,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | merged |
 | P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | merged |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
-| I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | pending |
+| I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | merged |
 | P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | pending |
 | R1 | rules_ocx | rig, baseline, the two rig questions | `e2e/rbe/**` except `e2e/rbe/{tests,workspace}/**` and `e2e/rbe/ocx-under-test.txt`; `taskfiles/rig.taskfile.yml`; `.bazelignore` | 1 | CW-R | | pending |
 | R2 | rules_ocx | C-RO-15; V-51 | `ocx/private/{download,manifest}.bzl`, `ocx/tests/download_test.bzl` (new), `e2e/install_binary/**` (new), `.github/actions/ocx-under-test/action.yml`, `.github/workflows/{verify-basic,verify-deep}.yml` | 1 | CW-R | | pending |
@@ -743,3 +744,12 @@ by line by the reviewer.
   test/design disagreements handed to P10 (manifest-only equality keeps `content`, trust code 79 vs 81, Bazel-name scan reads
   the manifest, symlinked home never reaches a value, setuid lost in the fixture, a `..` link that stays inside, wasm fixture
   claims no binary, package-tier no-leaf code, parity reads `$OCX_HOME/packages`, three launcher-test harness defects).
+- 2026-11-26 — I1 merged: I1b `cf20545b` (goldens `cli`, `reports`, `errors`, new `vendor-manifest`; sdkgen rust golden; website
+  reference pages via `cargo run -p ocx_schema -- docs`; `test/SUITE_FLOOR` 4530 → 4594; no ledger entry, additions only;
+  `MODULE.bazel.lock` unchanged, rules_rs reads `Cargo.lock`), `bf95e2ad` (structure-table counts), L11 fix `cdbd00bc` +
+  `c0bfadaa` (DP-22), text fixes `ce6108f2` (~160 bare plan IDs removed from comments; docs examples on the lint's packages).
+  Checks on `ce6108f2`: `cargo check --workspace --all-targets --locked` green; `cargo clippy --workspace --all-targets --locked
+  -- -D warnings` and `cargo fmt --check` green (I1b, before the comment-only merge); unit run over the 15 touched crates 7928
+  passed, failures = the two known environmental reds + 4 `sdk_rust::real_binary` cases that need `SDK_TEST_OCX_BINARY`
+  (Bazel sets it) + the fixed structure tables; `cargo test -p ocx_schema -p ocx_sdkgen` green but `real_binary`;
+  `cd test && uv run pytest lint -q` 805 passed; `.claude/tests` 607 passed. `test/limits/**` not regenerated (per-OS runs).
