@@ -12005,7 +12005,7 @@ pub struct VendorReport {
     /// `present`, or `absent` under `--manifest-only`.
     pub content: VendorContentWord,
     /// The platform the set was resolved for.
-    pub platform: String,
+    pub platform: Platform,
     /// One entry per package, in manifest order.
     pub packages: Vec<VendoredPackageRow>,
     /// Tools the manifest lists.
