@@ -579,6 +579,35 @@ def test_value_already_holding_the_token_is_refused(
     )
 
 
+def test_a_declared_binary_the_content_lacks_is_refused(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    lacking = _publish(
+        ocx,
+        unique_repo,
+        tmp_path,
+        "lacking",
+        bins=["hello"],
+        binaries=["hello", "absent"],
+    )
+    out = tmp_path / "out"
+    result = _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"l": lacking}), out, *HOST, check=False
+    )
+    assert result.returncode == EXIT_DATA, result.stderr
+    assert _detail(result) == "vendor_path_unrepresentable"
+    assert "absent" in result.stderr, result.stderr
+    assert not out.exists(), "a refused run leaves no directory"
+
+    # Control: the same fixture declaring only the binary it ships vendors.
+    whole = _publish(
+        ocx, f"{unique_repo}_ok", tmp_path, "whole", bins=["hello"], binaries=["hello"]
+    )
+    _vendor(
+        ocx, _project(ocx, tmp_path / "proj2", {"w": whole}), tmp_path / "out2", *HOST
+    )
+
+
 @posix_only
 def test_value_holding_the_real_home_is_refused_under_a_symlinked_home(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
