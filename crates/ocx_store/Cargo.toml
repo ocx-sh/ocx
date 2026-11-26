@@ -35,6 +35,7 @@ ocx_util.workspace = true
 ocx_env.workspace = true
 
 dunce.workspace = true
+filetime.workspace = true
 hex.workspace = true
 log.workspace = true
 serde.workspace = true

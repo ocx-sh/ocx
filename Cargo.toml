@@ -334,6 +334,8 @@ uuid = { version = "1.28", default-features = false, features = ["v4"] }
 
 # Platform
 libc = "0.2"
+# Sets a symlink's own mtime (std follows the link); already in the tree through `tar`.
+filetime = "0.2"
 # Pure-Rust ELF parser (zero runtime deps, zero `unsafe`, dual MIT/Apache).
 # Used by host libc detection to read a system binary's `PT_INTERP` — the
 # host's exact native loader path — for discovery-then-identify libc probing.
