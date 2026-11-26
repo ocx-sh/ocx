@@ -59,6 +59,8 @@ pub enum SidecarError {
     ReservedKey(String),
     /// `self` or `program` is not a representable path inside the vendor directory.
     PathNotInRoot(String),
+    /// An `env` value, `args` element, `program` or `self` holds a NUL byte.
+    NulByte(String),
 }
 
 impl fmt::Display for SidecarError {
@@ -68,6 +70,7 @@ impl fmt::Display for SidecarError {
             Self::InvalidKey(key) => write!(f, "invalid environment key {key:?}"),
             Self::ReservedKey(key) => write!(f, "reserved environment key {key:?}"),
             Self::PathNotInRoot(path) => write!(f, "path {path:?} is not inside the vendor directory"),
+            Self::NulByte(field) => write!(f, "NUL byte in {field}"),
         }
     }
 }
@@ -89,9 +92,21 @@ impl DirectSidecar {
                 return Err(SidecarError::InvalidKey(key.clone()));
             }
         }
+        // A NUL ends a Windows environment entry or command line early.
+        let nul_fields = [("self", &self.self_path), ("program", &self.program)]
+            .into_iter()
+            .chain(self.args.iter().map(|arg| ("args", arg)))
+            .chain(self.env.iter().map(|record| ("env value", &record.value)));
+        for (field, text) in nul_fields {
+            if text.contains('\0') {
+                return Err(SidecarError::NulByte(field.to_owned()));
+            }
+        }
         for record in &self.env {
             let key = &record.key;
+            // Windows treats `__ocx_env_state` as `__OCX_ENV_STATE`.
             let reserved = key_eq("OCX_BINARY_PIN", key, fold)
+                || (platform_is_windows && key.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("__OCX_")))
                 || key.starts_with("__OCX_")
                 || self.unset.iter().any(|u| key_eq(u, key, fold));
             if reserved {
@@ -138,12 +153,14 @@ fn relative_path_ok(path: &str, windows: bool) -> bool {
 /// A Windows device name with any extension: `CON`, `NUL.txt`, `com1.tar.gz`.
 fn is_device_name(segment: &str) -> bool {
     let stem = segment.split('.').next().unwrap_or(segment);
+    // Byte-wise: a multi-byte character makes `stem[..3]` a non-boundary slice.
+    let bytes = stem.as_bytes();
     ["CON", "PRN", "AUX", "NUL"]
         .iter()
-        .any(|d| stem.eq_ignore_ascii_case(d))
-        || (stem.len() == 4
-            && (stem[..3].eq_ignore_ascii_case("COM") || stem[..3].eq_ignore_ascii_case("LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        .any(|d| bytes.eq_ignore_ascii_case(d.as_bytes()))
+        || (bytes.len() == 4
+            && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
+            && matches!(bytes[3], b'1'..=b'9'))
 }
 
 #[cfg(test)]
@@ -262,6 +279,59 @@ mod tests {
     fn v73_windows_fold_unifies_path_keys() {
         assert!(!key_eq("PATH", "Path", KeyFold::Exact));
         assert!(key_eq("PATH", "Path", KeyFold::AsciiCaseInsensitive));
+    }
+
+    /// Multi-byte neighbours of device names never panic and are not device names.
+    #[test]
+    fn multibyte_device_lookalikes_do_not_panic() {
+        for segment in [
+            "CO\u{e9}",
+            "CON\u{e9}",
+            "LPT1\u{e9}",
+            "\u{c4}UX",
+            "COM\u{e9}\u{e9}",
+            "\u{e9}",
+        ] {
+            assert!(!is_device_name(segment), "{segment}");
+            assert!(
+                sidecar(&format!("@VENDOR_DIR@/{segment}"), "PATH", &[])
+                    .validate(true)
+                    .is_ok()
+            );
+        }
+        assert!(is_device_name("con.\u{e9}"));
+    }
+
+    /// W-2: the `__OCX_` prefix folds ASCII case on Windows and stays exact on Unix.
+    #[test]
+    fn reserved_prefix_folds_case_on_windows_only() {
+        for key in ["__ocx_env_state", "Ocx_Binary_Pin"] {
+            assert!(matches!(
+                sidecar(WELL_FORMED, key, &[]).validate(true),
+                Err(SidecarError::ReservedKey(_))
+            ));
+        }
+        assert_eq!(sidecar(WELL_FORMED, "__ocx_env_state", &[]).validate(false), Ok(()));
+    }
+
+    /// A NUL in any value, argument, `program` or `self` is refused on every platform.
+    #[test]
+    fn nul_bytes_are_refused() {
+        let mut value = sidecar(WELL_FORMED, "PATH", &[]);
+        value.env[0].value = "a\0b".into();
+        let mut arg = sidecar(WELL_FORMED, "PATH", &[]);
+        arg.args = vec!["a\0b".into()];
+        let program = sidecar("@VENDOR_DIR@/a\0b", "PATH", &[]);
+        let mut own = sidecar(WELL_FORMED, "PATH", &[]);
+        own.self_path = "a\0b".into();
+        for bad in [value, arg, program, own] {
+            for windows in [false, true] {
+                assert!(
+                    matches!(bad.validate(windows), Err(SidecarError::NulByte(_))),
+                    "{bad:?}"
+                );
+            }
+        }
     }
 
     #[test]
