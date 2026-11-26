@@ -788,12 +788,11 @@ def test_stale_lock_exits_data_error_until_relocked(
 
 
 @posix_only
-def _tree_listing(root: Path) -> list[tuple[str, str, int | None, int | None]]:
+def _tree_listing(root: Path) -> list[tuple[str, str, int, int]]:
     """Path, type, mode and mtime of every entry, links not followed.
 
-    C-008 normalises directories and links. A regular file's mtime is the archive's or, for the
-    launchers and sidecars ocx writes, the clock, so files carry no mtime; `manifest.json` and the
-    sidecars also take the host umask, so they carry no mode.
+    C-008: directories, links and the files ocx writes carry fixed modes and the normalised mtime;
+    package content keeps the archive's mtime and masked mode, equal across hosts.
     """
     rows = []
     for path in sorted(root.rglob("*")):
@@ -804,9 +803,7 @@ def _tree_listing(root: Path) -> list[tuple[str, str, int | None, int | None]]:
         elif stat.S_ISDIR(st.st_mode):
             kind = "dir"
         else:
-            kind, mtime = "file", None
-            if path.name == "manifest.json" or path.suffix == ".direct":
-                mode = None
+            kind = "file"
         rows.append((path.relative_to(root).as_posix(), kind, mode, mtime))
     return rows
 
