@@ -329,13 +329,17 @@ acceptance_suite(
         "tests/test_package_vendor.py": [":vendor_fixtures"],
         "tests/test_vendor.py": [":vendor_fixtures"],
         "tests/test_vendor_launcher.py": [":vendor_fixtures"],
-        "tests/test_vendor_parity.py": [":vendor_fixtures"],
+        "tests/test_vendor_parity.py": [
+            ":vendor_fixtures",
+            "//crates/ocx_schema:ocx_schema_bin",
+        ],
     },
-    # The schema binary as the two modules that run it read it: an
+    # The schema binary as the modules that run it read it: an
     # rlocationpath the runner resolves (`bazel.bzl` `_RUNNER`).
     module_env = {
         "tests/test_execution_records.py": _SCHEMA_BINARY_ENV,
         "tests/test_project_env.py": _SCHEMA_BINARY_ENV,
+        "tests/test_vendor_parity.py": _SCHEMA_BINARY_ENV,
     },
     modules = glob(
         ["tests/test_*.py"],
