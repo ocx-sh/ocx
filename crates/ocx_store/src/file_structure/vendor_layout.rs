@@ -187,7 +187,7 @@ impl StagedTree {
             Err(error) => return Err(FileError::new(&self.target, error)),
         }
         let staging = self.staging.keep();
-        std::fs::rename(&staging, &self.target).map_err(|error| {
+        rename_tree(&staging, &self.target).map_err(|error| {
             // The tree is ours alone; leaving it would strand a full copy beside `DIR`.
             let _ = std::fs::remove_dir_all(&staging);
             FileError::new(&self.target, error)
@@ -203,6 +203,14 @@ impl StagedTree {
         let staging = self.staging.path().to_path_buf();
         self.staging.close().map_err(|error| FileError::new(staging, error))
     }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "publishes a tree ocx just built in a private sibling of the empty or absent destination"
+)]
+fn rename_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
 }
 
 /// Sets every directory under `root`, `root` included, to 0755 and mtime 1980-01-01 (C-008), children first.
