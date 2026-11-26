@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Accepted (goal-loop authority, 2026-11-26)
 **Date:** 2026-11-26
 **Deciders:** architect worker of a `/hex-architect` run (tier high), inside an unattended goal loop; orchestrator rulings R-1…R-8 (goal-loop authority); the owner rules on the result
 **Beads Issue:** N/A
