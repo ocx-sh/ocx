@@ -54,7 +54,7 @@ pub struct VendorReport {
     /// `present`, or `absent` under `--manifest-only`.
     pub content: VendorContentWord,
     /// The platform the set was resolved for.
-    pub platform: String,
+    pub platform: ocx_oci::Platform,
     /// One entry per package, in manifest order.
     pub packages: Vec<VendoredPackageRow>,
     /// Tools the manifest lists.
@@ -74,7 +74,7 @@ impl VendorReport {
             output_dir: absolute(&outcome.output_dir)?,
             manifest_path: absolute(&outcome.manifest_path)?,
             content: outcome.content.into(),
-            platform: outcome.platform.to_string(),
+            platform: outcome.platform,
             packages: outcome
                 .packages
                 .into_iter()
@@ -123,7 +123,7 @@ mod tests {
             output_dir: AbsolutePath::new(std::env::temp_dir()).expect("absolute temp dir"),
             manifest_path: AbsolutePath::new(std::env::temp_dir().join("manifest.json")).expect("absolute"),
             content: VendorContentWord::Present,
-            platform: "linux/amd64".to_owned(),
+            platform: "linux/amd64".parse().expect("platform"),
             packages: vec![VendoredPackageRow {
                 identifier: "registry.test/team/tool:1.2".parse().expect("identifier"),
                 digest: ocx_oci::Digest::Sha256("a".repeat(64)),
@@ -137,7 +137,10 @@ mod tests {
     fn json_carries_the_design_fields() {
         let json = serde_json::to_value(report()).expect("serialize");
         assert_eq!(json["content"], "present");
-        assert_eq!(json["platform"], "linux/amd64");
+        assert_eq!(
+            json["platform"],
+            serde_json::json!({"os": "linux", "architecture": "amd64"})
+        );
         assert_eq!(json["tool_count"], 1);
         assert_eq!(json["written_size"], 61_234_567u64);
         assert_eq!(json["packages"][0]["digest"], format!("sha256:{}", "a".repeat(64)));
