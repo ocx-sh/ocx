@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use ocx_env_apply::direct::{DirectSidecar, SidecarError};
+use ocx_env_apply::direct::{DirectSidecar, SIDECAR_EXTENSION, SidecarError};
 use ocx_store::file_structure::normalise_written_file;
 
 use super::generate::write_launcher_file;
@@ -31,13 +31,13 @@ pub async fn write_direct_launcher_for(
     windows: bool,
 ) -> Result<(), VendorError> {
     // Launcher `X.direct` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
-    let suffix = b".direct";
+    let suffix = format!(".{SIDECAR_EXTENSION}");
     if !windows
         && name.len() >= suffix.len()
-        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
     {
         return Err(VendorError::PathUnrepresentable {
-            path: format!("{name}: a launcher name ends in the sidecar suffix .direct"),
+            path: format!("{name}: a launcher name ends in the sidecar suffix {suffix}"),
         });
     }
     let mut sidecar = sidecar.clone();
@@ -60,7 +60,7 @@ pub async fn write_direct_launcher_for(
     tokio::fs::write(&launcher, blob)
         .await
         .map_err(|e| crate::error::file_error(&launcher, e))?;
-    let sidecar_path = dir.join(format!("{name}.direct"));
+    let sidecar_path = dir.join(format!("{name}.{SIDECAR_EXTENSION}"));
     write_launcher_file(sidecar_path.clone(), body).await?;
     // The host umask and clock must not reach the vendored bytes.
     let normalised = launcher.clone();

@@ -13,6 +13,9 @@ use crate::{ApplyKind, KeyFold};
 /// The only `schema_version` this release writes and reads.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The sidecar's file extension, without the dot: the writer and the launcher both name the file `<self>.direct`.
+pub const SIDECAR_EXTENSION: &str = "direct";
+
 /// The token a launcher replaces with the directory it lives in.
 pub const VENDOR_DIR_TOKEN: &str = "@VENDOR_DIR@";
 

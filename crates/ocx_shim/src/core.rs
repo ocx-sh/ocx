@@ -121,7 +121,7 @@ pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
 ];
 
 /// The vendored launcher's sidecar extension; a vendor set writes nothing else.
-pub(super) const DIRECT_EXTENSION: &str = "direct";
+pub(super) const DIRECT_EXTENSION: &str = ocx_env_apply::direct::SIDECAR_EXTENSION;
 
 /// The sidecar extensions a launcher probes, in precedence order.
 ///
