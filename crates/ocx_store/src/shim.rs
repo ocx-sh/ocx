@@ -22,7 +22,7 @@ struct Blob {
     bytes: &'static [u8],
 }
 
-// Development bytes, built locally and unattested, until the CI-built attested blobs replace them.
+// Blobs cut by `build-windows-shims.yml`; the SLSA attestation of that workflow run is their provenance.
 const BLOBS: [Blob; 6] = [
     Blob {
         target: "x86_64-unknown-linux-musl",
