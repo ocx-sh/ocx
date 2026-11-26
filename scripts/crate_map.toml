@@ -31,7 +31,7 @@ ocx_oci = ["ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
 ocx_trust = ["ocx_oci", "ocx_util", "ocx_env"]
 ocx_sign = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 ocx_config = ["ocx_env_apply", "ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
-ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_store = ["ocx_env_apply", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 ocx_package = ["ocx_env_apply", "ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 # PEP 751 lock -> OCX package translation. `ocx` does not link it; its

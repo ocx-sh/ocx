@@ -4,6 +4,6 @@ The on-disk layout: three-tier CAS, symlink namespace, package materialisation, 
 
 **Tier:** internal
 
-**May depend on:** `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env`
+**May depend on:** `ocx_env_apply`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env`
 
 **Named dependency exceptions:** none

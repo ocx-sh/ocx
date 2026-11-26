@@ -249,28 +249,10 @@ impl Env {
             .find_map(|dir| probe(Some(dir.as_os_str())))
     }
 
-    /// Windows-only: this env's PATHEXT (else the default), in order.
-    ///
-    /// `.EXE` is appended when absent, or a hardened `PATHEXT=.BAT;.CMD` hides every `<name>.exe` shim.
+    /// Windows-only: this env's PATHEXT (else the default), in order; see [`pathext_extensions`].
     #[cfg(windows)]
     fn pathext(&self) -> Vec<String> {
-        let pathext_str = self
-            .get("PATHEXT")
-            .and_then(|v| v.to_str())
-            .unwrap_or(".COM;.EXE;.BAT;.CMD")
-            .to_string();
-
-        let mut extensions: Vec<String> = pathext_str
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
-            extensions.push(".EXE".to_string());
-        }
-        extensions
+        pathext_extensions(self.get("PATHEXT").and_then(|v| v.to_str()))
     }
 
     /// Resolve a command for `ocx * test` / launcher re-entry, package-contributed `PATH` first,
@@ -372,6 +354,25 @@ impl Env {
         );
         Ok(found)
     }
+}
+
+/// The extensions a Windows command lookup probes, in order: `pathext` (a `PATHEXT` value), else the default
+/// `.COM;.EXE;.BAT;.CMD`. The bare name is probed after them.
+///
+/// `.EXE` is appended when absent, or a hardened `PATHEXT=.BAT;.CMD` hides every `<name>.exe` shim. Pure, so
+/// `ocx vendor` applies the same rule for a Windows target on any host.
+pub fn pathext_extensions(pathext: Option<&str>) -> Vec<String> {
+    let mut extensions: Vec<String> = pathext
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !extensions.iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")) {
+        extensions.push(".EXE".to_string());
+    }
+    extensions
 }
 
 /// True unless `command` is exactly one [`Component::Normal`](std::path::Component).
@@ -542,6 +543,13 @@ mod tests {
     // module's contract to state.
     use ocx_env::{is_reserved_ocx_key, is_valid_env_key};
     use ocx_env_apply::PATH_SEPARATOR;
+
+    #[test]
+    fn pathext_extensions_default_order_and_exe_appended() {
+        assert_eq!(pathext_extensions(None), [".COM", ".EXE", ".BAT", ".CMD"]);
+        assert_eq!(pathext_extensions(Some(" .BAT;;.CMD ")), [".BAT", ".CMD", ".EXE"]);
+        assert_eq!(pathext_extensions(Some(".exe;.cmd")), [".exe", ".cmd"]);
+    }
 
     /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
     /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and

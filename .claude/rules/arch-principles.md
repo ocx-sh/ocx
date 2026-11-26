@@ -27,7 +27,7 @@ Tier in brackets; tiers are defined in `AGENTS.md` § Stability tiers.
 | `ocx_trust` [ecosystem] | Signer-identity policy and tiered resolution | `ocx_oci`, `ocx_util`, `ocx_env` |
 | `ocx_sign` [ecosystem] | Sigstore sign, DSSE attest, verify, simplesigning, SBOM referrers | `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
 | `ocx_config` [ecosystem] | Config tiers, managed tier, settings validation | `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
-| `ocx_store` [internal] | Three-tier CAS, symlink namespace, materialisation, shim blobs | `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
+| `ocx_store` [internal] | Three-tier CAS, symlink namespace, materialisation, shim blobs | `ocx_env_apply`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
 | `ocx_index` [ecosystem] | The resolution-index protocol and its local collection | `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
 | `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication | `ocx_index`, `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_env` |
 | `ocx_python` [ecosystem] | PEP 751 lock → OCX package translation: lock parse, wheel selection/repack, env composition — `ocx` does not link it | `ocx_oci`, `ocx_package` |

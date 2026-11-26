@@ -33,6 +33,8 @@ ocx_oci.workspace = true
 ocx_util.workspace = true
 # The environment registry `OCX_NO_CODESIGN` and the publish-race seam are read through.
 ocx_env.workspace = true
+# The Windows path-segment rules a vendor layout checks, the same copy the direct launcher links.
+ocx_env_apply.workspace = true
 
 dunce.workspace = true
 filetime.workspace = true

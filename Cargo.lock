@@ -4691,6 +4691,7 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_env",
+ "ocx_env_apply",
  "ocx_exit",
  "ocx_oci",
  "ocx_util",
