@@ -30,6 +30,7 @@ from src.vendor_fixtures import (
     bazel_names_package,
     cmake_with_ccache,
     env_template_package,
+    host_bins,
     layer_digests,
     links_package,
     no_names_package,
@@ -227,9 +228,7 @@ def _publish_with_link_target(
 
 
 def _publish(ocx: OcxRunner, repo: str, tmp_path: Path, name: str, **kwargs: Any) -> PackageInfo:
-    # A vendored Windows binary is `<name>.exe`; a batch-file program would have to be an entry point.
-    if sys.platform == "win32" and kwargs.get("bins"):
-        kwargs["bins"] = [f"{bin_name}.exe" for bin_name in kwargs["bins"]]
+    kwargs["bins"] = host_bins(kwargs.get("bins"))
     return make_package(ocx, repo, "1.0.0", tmp_path / name, **kwargs)
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import urllib.parse
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -33,6 +34,16 @@ VENDOR_FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "vend
 
 # The literal a package author must never smuggle in.
 VENDOR_TOKEN = "@VENDOR_DIR@"
+
+
+def host_bins(names: list[str] | None = None) -> list[str]:
+    """`make_package` bin names (default `hello`), spelled `<name>.exe` on a Windows host.
+
+    Vendoring takes a Windows binary to be `<name>.exe`; a batch program must be an entry point.
+    No vendor test launches one of these files on Windows, so their batch body is never run.
+    """
+    names = names or ["hello"]
+    return [f"{name}.exe" for name in names] if sys.platform == "win32" else names
 
 
 def publish_tree(
@@ -114,7 +125,7 @@ def cmake_with_ccache(
     """
     ccache_repo = f"{repo}_ccache"
     ccache = make_package(
-        ocx, ccache_repo, "1.0.0", tmp_path / "ccache", bins=["ccache"]
+        ocx, ccache_repo, "1.0.0", tmp_path / "ccache", bins=host_bins(["ccache"])
     )
     digest = fetch_platform_manifest_digest(ocx.registry, ccache_repo, "1.0.0")
     cmake = make_package(
@@ -122,7 +133,7 @@ def cmake_with_ccache(
         repo,
         "1.0.0",
         tmp_path / "cmake",
-        bins=["cmake"],
+        bins=host_bins(["cmake"]),
         dependencies=[{"identifier": f"{ccache.fq}@{digest}", "visibility": "public"}],
     )
     return cmake, ccache
@@ -200,7 +211,7 @@ def env_template_package(
                 "visibility": "public",
             }
         )
-    return make_package(ocx, repo, "1.0.0", tmp_path, env=env)
+    return make_package(ocx, repo, "1.0.0", tmp_path, bins=host_bins(), env=env)
 
 
 def entrypoint_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:

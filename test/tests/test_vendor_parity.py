@@ -30,6 +30,7 @@ from src.vendor_fixtures import (
     VENDOR_TOKEN,
     empty_dir_package,
     entrypoint_package,
+    host_bins,
     links_package,
     publish_tree,
     windows_only_package,
@@ -299,7 +300,9 @@ def test_matching_patch_rule_leaves_manifest_byte_identical(
         ],
         platform="any",
     )
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path / "base", bins=["tool"])
+    base = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path / "base", bins=host_bins(["tool"])
+    )
     project = _project(ocx, tmp_path / "proj", {"tool": base})
     plain = tmp_path / "plain"
     _vendor(ocx, project, plain, *HOST)
