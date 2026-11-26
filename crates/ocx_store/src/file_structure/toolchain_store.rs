@@ -202,7 +202,31 @@ impl ToolchainHome {
 
     /// The render directory name `active` currently links to, `None` when `active` is absent or names no `shells/` child.
     pub fn active_target_name(&self) -> Option<String> {
-        unimplemented!("ToolchainHome::active_target_name")
+        // Raw `read_link`, never canonicalised: only the exact forms `expected_active_target` writes are accepted.
+        let target = std::fs::read_link(self.active()).ok()?;
+        let name = if cfg!(windows) {
+            let target = dunce::simplified(&target);
+            let shells = self.root.join(SHELLS_DIR);
+            let shells = dunce::simplified(&shells);
+            let (target, shells) = (target.as_os_str().to_str()?, shells.as_os_str().to_str()?);
+            let prefix = target.get(..shells.len())?;
+            if !prefix.eq_ignore_ascii_case(shells) {
+                return None;
+            }
+            let rest = target[shells.len()..].strip_prefix(['\\', '/'])?;
+            rest.to_owned()
+        } else {
+            target.strip_prefix(SHELLS_DIR).ok()?.to_str()?.to_owned()
+        };
+        if name.ends_with(std::path::is_separator) {
+            return None;
+        }
+        let mut components = Path::new(&name).components();
+        matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+        .then_some(name)
     }
 
     /// `active`'s one legal target; the heal and [`Self::active_is_valid`] both use this, never a second derivation.

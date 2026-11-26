@@ -99,8 +99,195 @@ fn move_without_replace(staged: &Path, target: &Path) -> std::io::Result<()> {
 /// # Errors
 ///
 /// `link` exists and is neither a symlink nor a junction, or the switch fails.
-pub fn retarget_link(_target: &Path, _link: &Path) -> std::io::Result<()> {
-    unimplemented!("retarget_link")
+pub fn retarget_link(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        retarget_symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        retarget_junction(target, link)
+    }
+}
+
+#[cfg(unix)]
+fn retarget_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(link) {
+        Ok(metadata) if !metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a link", link.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = link.parent().unwrap_or_else(|| Path::new("."));
+    // A name taken by a concurrent retargeter is retried under a fresh one, never overwritten.
+    let mut attempts = 0;
+    let staged = loop {
+        let staged = parent.join(format!(".tmp-retarget-{}", random_suffix()));
+        match std::os::unix::fs::symlink(target, &staged) {
+            Ok(()) => break staged,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempts < 8 => attempts += 1,
+            Err(error) => return Err(error),
+        }
+    };
+    if let Err(error) = rename_staged_link(&staged, link) {
+        // Best effort: the rename error is the one that matters.
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "renames ocx's own freshly staged symlink over its link path"
+)]
+fn rename_staged_link(staged: &Path, link: &Path) -> std::io::Result<()> {
+    std::fs::rename(staged, link)
+}
+
+#[cfg(windows)]
+const REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+#[cfg(windows)]
+const REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+#[cfg(windows)]
+const MAX_REPARSE_BUFFER: usize = 16 * 1024;
+
+/// Sets the mount-point data of an existing junction in place, so `link` is never absent to a concurrent lookup.
+///
+/// A directory symlink at `link` is the one exception: it is removed and replaced by a junction (the heal), with a
+/// window where `link` is absent. A real directory or a file is refused.
+#[cfg(windows)]
+fn retarget_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
+    const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    const OPEN_REPARSE_POINT_BACKUP: u32 = 0x0020_0000 | 0x0200_0000;
+
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        link.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+    let target = std::path::absolute(&target)?;
+    let target = dunce::simplified(&target);
+
+    // A second retargeter may create `link` first; one retry then takes the in-place path.
+    for _ in 0..2 {
+        match std::fs::symlink_metadata(link) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match junction::create(target, link) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                other => return other,
+            },
+            Err(error) => return Err(error),
+            Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{} exists and is not a link", link.display()),
+                ));
+            }
+            Ok(_) => {}
+        }
+        // Full sharing: a concurrent lookup through `link` must never see a sharing violation.
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(GENERIC_READ_WRITE)
+            .share_mode(SHARE_ALL)
+            .custom_flags(OPEN_REPARSE_POINT_BACKUP)
+            .open(link)?;
+        return match reparse_tag(&handle)? {
+            REPARSE_TAG_MOUNT_POINT => set_mount_point(&handle, target),
+            REPARSE_TAG_SYMLINK => {
+                drop(handle);
+                std::fs::remove_dir(link)?;
+                junction::create(target, link)
+            }
+            tag => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a reparse point of unsupported tag {tag:#x}", link.display()),
+            )),
+        };
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("{} is being created concurrently", link.display()),
+    ))
+}
+
+#[cfg(windows)]
+fn device_control(handle: &std::fs::File, code: u32, input: &[u8], output: &mut [u8]) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    let mut returned = 0u32;
+    // SAFETY: `handle` is open for the call; both buffers are valid for the lengths passed and `returned` outlives it.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle.as_raw_handle(),
+            code,
+            input.as_ptr().cast(),
+            input.len() as u32,
+            output.as_mut_ptr().cast(),
+            output.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// The reparse tag is the first `u32` of the `REPARSE_DATA_BUFFER`.
+#[cfg(windows)]
+fn reparse_tag(handle: &std::fs::File) -> std::io::Result<u32> {
+    use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+
+    let mut buffer = vec![0u8; MAX_REPARSE_BUFFER];
+    device_control(handle, FSCTL_GET_REPARSE_POINT, &[], &mut buffer)?;
+    Ok(u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]))
+}
+
+/// Replaces the mount-point data on an open junction handle.
+///
+/// Layout, all little-endian: `ReparseTag u32`, `ReparseDataLength u16` (bytes after the 8-byte header), `Reserved u16`,
+/// then `SubstituteNameOffset/Length`, `PrintNameOffset/Length` (4 x `u16`, bytes) and the UTF-16 path buffer
+/// `\??\<target>\0<target>\0`.
+#[cfg(windows)]
+fn set_mount_point(handle: &std::fs::File, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+    let print: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let substitute: Vec<u16> = r"\??\".encode_utf16().chain(print.iter().copied()).collect();
+    let (substitute_bytes, print_bytes) = (substitute.len() * 2, print.len() * 2);
+    let data_length = 8 + substitute_bytes + 2 + print_bytes + 2;
+    if 8 + data_length > MAX_REPARSE_BUFFER {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "junction target is too long",
+        ));
+    }
+    let mut buffer = Vec::with_capacity(8 + data_length);
+    buffer.extend_from_slice(&REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&(data_length as u16).to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    for (offset, length) in [(0, substitute_bytes), (substitute_bytes + 2, print_bytes)] {
+        buffer.extend_from_slice(&(offset as u16).to_le_bytes());
+        buffer.extend_from_slice(&(length as u16).to_le_bytes());
+    }
+    for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+    device_control(handle, FSCTL_SET_REPARSE_POINT, &buffer, &mut [])
 }
 
 /// Acts only on a real directory, never a symlink or reparse point: renames it to a sibling `.gc-<random>`,
@@ -342,6 +529,32 @@ mod tests {
         assert!(link.is_file());
     }
 
+    #[test]
+    fn retarget_leaves_no_staged_link_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let link = tmp.path().join("active");
+
+        for round in 0..50 {
+            retarget_link(if round % 2 == 0 { &a } else { &b }, &link).unwrap();
+        }
+
+        let leftovers = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp-retarget-")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
     #[tokio::test]
     async fn contract_retire_removes_a_real_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -464,5 +677,130 @@ mod tests {
     async fn retire_absent_dir_is_removed() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(retire_dir(&tmp.path().join("gone")).await.unwrap(), Retired::Removed);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn dir_with_marker(root: &Path, name: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("marker"), name).unwrap();
+        dir
+    }
+
+    /// Reads through `link` until `stop`, returning how many reads failed.
+    fn lookup_failures(link: &Path, stop: &AtomicBool) -> usize {
+        let marker = link.join("marker");
+        let mut failures = 0;
+        while !stop.load(Ordering::Relaxed) {
+            if std::fs::read(&marker).is_err() {
+                failures += 1;
+            }
+        }
+        failures
+    }
+
+    #[test]
+    #[ignore = "junction-proof CI job"]
+    fn junction_proof_retarget_under_lookup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (dir_with_marker(tmp.path(), "a"), dir_with_marker(tmp.path(), "b"));
+        let active = tmp.path().join("active");
+        retarget_link(&a, &active).unwrap();
+
+        // Phase 1: one retargeter against one lookup loop.
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| lookup_failures(&active, &stop));
+            for round in 0..10_000 {
+                retarget_link(if round % 2 == 0 { &b } else { &a }, &active).unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            assert_eq!(reader.join().unwrap(), 0, "lookup failed during a retarget");
+        });
+
+        // Phase 2: two retargeters at once against the lookup loop.
+        let stop = AtomicBool::new(false);
+        let retarget_errors = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| lookup_failures(&active, &stop));
+            let writers: Vec<_> = (0..2)
+                .map(|writer| {
+                    let (a, b, active, errors) = (&a, &b, &active, &retarget_errors);
+                    scope.spawn(move || {
+                        for round in 0..5_000 {
+                            let to = if (round + writer) % 2 == 0 { b } else { a };
+                            if retarget_link(to, active).is_err() {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            assert_eq!(reader.join().unwrap(), 0, "lookup failed during concurrent retargets");
+        });
+        assert_eq!(
+            retarget_errors.load(Ordering::Relaxed),
+            0,
+            "a concurrent retarget failed"
+        );
+
+        // Heal: a directory symlink at `active` becomes a junction at the requested target.
+        std::fs::remove_dir(&active).unwrap();
+        match std::os::windows::fs::symlink_dir(&a, &active) {
+            Ok(()) => {
+                retarget_link(&b, &active).unwrap();
+                assert!(junction::exists(&active).unwrap(), "active is a junction again");
+                assert_eq!(std::fs::read_to_string(active.join("marker")).unwrap(), "b");
+            }
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("symlink privilege missing (os error 1314): heal case not exercised");
+            }
+            Err(error) => panic!("symlink_dir failed: {error}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "junction-proof CI job"]
+    fn junction_proof_retire_running_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("launcher");
+        std::fs::create_dir(&dir).unwrap();
+        let exe = dir.join("ping.exe");
+        std::fs::copy(r"C:\Windows\System32\ping.exe", &exe).unwrap();
+        std::fs::write(dir.join("NAME.launch"), b"{}").unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let outcome = runtime.block_on(retire_dir(&dir)).unwrap();
+
+        match outcome {
+            Retired::Removed => assert!(!dir.exists(), "Removed means the directory is gone"),
+            Retired::LeftForLater => {
+                assert!(
+                    exe.is_file() && dir.join("NAME.launch").is_file(),
+                    "left whole, never partial"
+                );
+            }
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(runtime.block_on(retire_dir(&dir)).unwrap(), Retired::Removed);
+        assert!(!dir.exists());
     }
 }
