@@ -1106,6 +1106,7 @@ const RAW_ENV_RESIDUE: &[(&str, usize)] = &[
     ("crates/ocx_env/src/lib.rs", 3),
     ("crates/ocx_sdkgen/templates/rust/spawn.rs", 1),
     ("crates/ocx_sdkgen/tests/golden/rust/spawn.rs", 1),
+    ("crates/ocx_shim/src/direct.rs", 4),
     ("crates/ocx_shim/src/main.rs", 2),
     ("crates/ocx_test_support/tests/workspace_structure.rs", 1),
 ];
@@ -1503,7 +1504,6 @@ fn testing_feature_forward_list_matches_grep() {
 const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "LockedTomlFile",
     "add_dir",
-    "collect_and_descend",
     // Consumed by ocx-mirror `crates/ocx_mirror_spec/src/concurrency_config.rs`
     // (ocx-sh/ocx#500), a satellite outside this workspace.
     "default_threads",
