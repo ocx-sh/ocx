@@ -1339,7 +1339,7 @@ pub(super) async fn list_tree(
                     .map_err(|error| VendorError::Package(crate::Error::InternalFile(path.clone(), error)))?;
                 files.push(FileEntry {
                     path: relative,
-                    executable: is_executable(&metadata),
+                    executable: ocx_package::bin_scan::unix_is_executable(&metadata),
                 });
             } else {
                 return Err(unrepresentable(&path));
@@ -1403,17 +1403,6 @@ fn relative_path(layout: &VendorLayout, path: &Path, platform_is_windows: bool) 
     VendorLayout::check_relative_path(&relative, platform_is_windows)
         .map_err(|violation| unrepresentable(format!("{relative} ({violation:?})")))?;
     Ok(relative)
-}
-
-#[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(test)]
