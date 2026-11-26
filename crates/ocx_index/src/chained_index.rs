@@ -1575,6 +1575,29 @@ mod chain_refs_tests {
 
     // ── read-only view: inspect resolves without growing the local index ─────
 
+    /// The recorder rides the store clone the view shares, so a read through `read_only_view()` lands in it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_only_view_keeps_the_lookup_recorder() {
+        let cache_dir = TempDir::new().unwrap();
+        let recorder = crate::LookupRecorder::new();
+        let cache = LocalIndex::new(LocalConfig {
+            index_store: index_store(&cache_dir).with_lookup_recorder(recorder.clone()),
+        });
+        let (_spy, src_idx) = make_source(TAG, digest_a());
+        seed_full(&cache, &tagged_id(), digest_a(), &src_idx).await;
+        // Seeding already read; the view's read must add its own record, not just re-find an old one.
+        let before = recorder.lookups();
+        let view = Index::from_chained(cache, vec![src_idx], ChainMode::Default).read_only_view();
+        view.fetch_manifest(&tagged_id(), super::super::IndexOperation::Resolve)
+            .await
+            .unwrap();
+        assert!(
+            recorder.lookups() != before,
+            "the view's reads must reach the recorder: {:?}",
+            recorder.lookups()
+        );
+    }
+
     /// A `ReadOnly` view (`ocx package inspect`) resolves through the source
     /// but writes NOTHING into the local index — no dispatch object, no tag
     /// pointer. A read-only look never grows the permanent index; content warms

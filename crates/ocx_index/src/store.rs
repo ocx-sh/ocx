@@ -88,6 +88,16 @@ impl IndexStore {
         self.lookup_recorder.as_ref()
     }
 
+    /// Reads one index document and, with a recorder set, notes the path as found or absent.
+    /// A failed read is not a lookup result, so it records nothing.
+    async fn read_document(&self, target: &Path) -> Result<Option<Vec<u8>>> {
+        let bytes = read_index_document(target, self.refuse_links).await?;
+        if let (Some(recorder), Ok(relative)) = (&self.lookup_recorder, target.strip_prefix(&self.root)) {
+            recorder.record(relative.to_string_lossy().replace('\\', "/"), bytes.is_some());
+        }
+        Ok(bytes)
+    }
+
     /// Makes every document read refuse a symlink leaf, for a tree the caller does not trust.
     #[must_use]
     pub fn refusing_links(mut self) -> Self {
@@ -201,7 +211,7 @@ impl IndexStore {
 
     /// Read `target` and verify it against `digest`; `None` when absent.
     async fn read_verified_object(&self, target: PathBuf, digest: &Digest) -> Result<Option<Vec<u8>>> {
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
 
@@ -440,7 +450,7 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let root: crate::IndexRoot = serde_json::from_slice(&bytes).map_err(|cause| {
@@ -459,7 +469,7 @@ impl IndexStore {
     pub async fn read_source_catalog(&self, source: &str) -> Result<Option<CatalogIndex>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_catalog_path(source);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let document: CatalogDocument = serde_json::from_slice(&bytes)?;
@@ -476,7 +486,7 @@ impl IndexStore {
     pub async fn read_source_config(&self, source: &str) -> Result<Option<IndexFormatConfig>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_config_path(source);
-        let Some(bytes) = read_index_document(&target, self.refuse_links).await? else {
+        let Some(bytes) = self.read_document(&target).await? else {
             return Ok(None);
         };
         let config = serde_json::from_slice(&bytes).map_err(|cause| crate::error::Error::MalformedIndexDocument {
@@ -524,7 +534,7 @@ impl IndexStore {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
         let target = self.root_document_path(source, repository);
-        read_index_document(&target, self.refuse_links).await
+        self.read_document(&target).await
     }
 
     /// Tempfile + atomic-rename publish; survives a process crash, not power loss (the parent
