@@ -815,8 +815,11 @@ def make_package(
         bin_outputs = (outputs or {}).get(name)
         bin_body = (bin_scripts or {}).get(name)
         executable = (bin_exec or {}).get(name, True)
-        if sys.platform == "win32":
+        # A name already spelled `<name>.exe` keeps it: vendoring takes a Windows binary to be `<name>.exe`.
+        if sys.platform == "win32" and script.suffix != ".exe":
             script = script.with_suffix(".bat")
+            script.write_text(f"@echo {marker}\n")
+        elif sys.platform == "win32":
             script.write_text(f"@echo {marker}\n")
         elif bin_body is not None:
             script.write_text(bin_body)
