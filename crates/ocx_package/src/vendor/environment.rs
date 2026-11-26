@@ -45,6 +45,7 @@ pub struct EnvironmentItem {
     /// How the value combines with the existing one.
     pub kind: ModifierKind,
     /// The fold separator; `list` entries only.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
 }

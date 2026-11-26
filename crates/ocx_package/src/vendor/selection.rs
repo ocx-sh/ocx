@@ -37,6 +37,7 @@ pub struct Tool {
     /// The binary file, or the package's entry-point launcher.
     pub target_path: String,
     /// `<launcher_dir>/<name>[.exe]`; omitted when no launcher blob exists for the platform.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launcher_path: Option<String>,
 }
