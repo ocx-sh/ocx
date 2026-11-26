@@ -40,7 +40,7 @@ advisory fired.
 **`self update` stops enumerating setup phases.** It pulls **without
 selecting**, then spawns the newly pulled binary as
 `ocx self setup <tag>@sha256:<hex> --handoff`. The child's phase 1 performs the
-select; phases 2–5 write every setup surface using the new version's own code.
+select; phases 2–5 write every setup surface using the new version's own code. Phase 1.6 renders the global toolchain home when `$OCX_HOME/ocx.lock` exists; its failure warns and never fails setup, because phase 1 already committed (`adr_unified_launcher.md` § 8.1).
 
 Four supporting decisions:
 

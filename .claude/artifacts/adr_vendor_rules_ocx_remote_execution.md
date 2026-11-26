@@ -14,7 +14,7 @@
 **Supersedes:** the Bazel decisions of `.agents/discussions/bazel-hermetic-package-bundles.md` that the source reverses (extraction in a build action, one repository per package, the repository rule running `ocx package export`)
 **Superseded By:** —
 **Companion:** [`system_design_vendor_rules_ocx.md`](./system_design_vendor_rules_ocx.md) (contracts C-001…C-024 and C-RO-01…C-RO-17, scenarios S-001…S-015, the verification table V-01…V-73, work packages)
-**Reversibility:** one-way door **High** for the manifest (`vendor-manifest` v1). The `.direct` sidecar is versioned (`schema_version`) and always written together with the launcher bytes of the same ocx release, so inside a vendored directory it is two-way; it becomes one-way only once [ocx-sh/ocx#679](https://github.com/ocx-sh/ocx/issues/679) puts it into installed homes. Everything else is two-way (the directory layout is internal; rules_ocx's surface is pre-1.0 and already breaking).
+**Reversibility:** one-way door **High** for the manifest once a release writes it (`vendor-manifest` v2, `adr_unified_launcher.md` R-U4). The record `NAME.launch` is versioned and written with the launcher bytes of the same release: inside a vendored directory it is two-way; in homes it is One-Way Medium, contained by generation directories (`adr_unified_launcher.md`, header). Everything else is two-way (the directory layout is named by the manifest; rules_ocx's surface is pre-1.0 and already breaking).
 
 ## Context
 
@@ -74,7 +74,7 @@ Weights: 5 = binding requirement, 3 = strong driver, 1 = nice to have. Score 1-5
 
 **Chosen: A.** `ocx_sdkgen` gains `Kind::VendorManifest`, `Documents.vendor_manifest`, baseline `crates/ocx_schema/contract/baseline/vendor-manifest.json`, ledger `document = "vendor-manifest"`, the version read from `/properties/schema_version/const` as for the error document. Lint rules: the reports set minus the report-root rules (L09, L13, L14).
 
-### Choice 2 — launcher sidecar format (re-scored under R-1)
+### Choice 2 — launcher record format (re-scored under R-1; the file is `NAME.launch` since `adr_unified_launcher.md`)
 
 | Criterion (weight) | A. NUL-delimited records | B. JSON, `serde_json`, `schema_version` | C. Data appended to the binary |
 |---|---|---|---|
@@ -85,7 +85,7 @@ Weights: 5 = binding requirement, 3 = strong driver, 1 = nice to have. Score 1-5
 | Readable by a human (1) | 2 | 5 | 1 |
 | **Total** | 55 | **82** | 42 |
 
-**Chosen: B** (R-1). The sidecar is a JSON object with `schema_version: 1`; the launcher deserialises it with `serde_json` into types that refuse unknown fields; an unknown version or field exits 78. `ocx_shim` gains `serde` and `serde_json` as dependencies; its crate-map row gains only `ocx_env_apply`. The types live once in `ocx_env_apply::direct` and both the writer and the launcher use them.
+**Chosen: B** (R-1). The record is `NAME.launch`, a JSON object with `kind: "direct"` and `schema_version: 1`; the launcher deserialises it with `serde_json` into a struct that refuses unknown fields; an unknown kind, version or field exits 78. `ocx_shim` gains `serde` and `serde_json`; its crate-map row gains only `ocx_env_apply`. The types live once in `ocx_env_apply::launch` (`adr_unified_launcher.md` § 3.1) and both the writer and the launcher use them.
 
 ### Choice 3 — where a launcher for a platform that is not the host's comes from
 
@@ -135,29 +135,29 @@ Weights: 5 = binding requirement, 3 = strong driver, 1 = nice to have. Score 1-5
 
 ### Choice 7 — launcher root lookup (after spike 6)
 
-| Criterion (weight) | A. Started path when it ends with `self` → `<P>.runfiles/<entry>` → `$RUNFILES_DIR/<entry>` only when P lies under it; `vendor_id` binds the sidecar | B. Source order plus a runfiles-manifest-file mode | C. Starlark writes a root hint |
+| Criterion (weight) | A. Started path when it ends with `self` → `<P>.runfiles/<entry>` → `$RUNFILES_DIR/<entry>` only when P lies under it → the runfiles manifest (`adr_unified_launcher.md` § 5 step 6); byte equality binds the record | B. Source order plus a runfiles-manifest-file mode | C. Starlark writes a root hint |
 |---|---|---|---|
 | Links visible (they exist only in the runfiles tree) (5) | 5 | 5 | 5 |
 | No Bazel term in directory or manifest (5) | 4 (the launcher binary knows the runfiles convention, DV-12) | 4 | 1 (and Starlark writes launcher data) |
 | Works outside Bazel and after a move (5) | 5 | 5 | 2 |
 | Not diverted by an inherited environment (3) | 5 | 4 (`RUNFILES_MANIFEST_FILE` inherits too) | 3 |
-| Windows default runfiles (manifest only) (1) | 1 | 1 (a manifest has no directory for the token) | 3 |
+| Windows default runfiles (manifest only) (1) | 5 | 1 (a manifest has no directory for the token) | 3 |
 | Implementation size (1) | 4 | 2 | 3 |
-| **Total** | **90** | 85 | 55 |
+| **Total** | **94** | 85 | 55 |
 
-**Chosen: A** (DV-6). Full algorithm: system design C-012.
+**Chosen: A** (DV-6). Full algorithm: system design C-012; the manifest stage is scored in `adr_unified_launcher.md` M8.
 
 ## Decision Outcome
 
-**Chosen:** ocx ships `ocx vendor` and `ocx package vendor`, the `vendor-manifest` v1 schema as a fourth gated document, a `.direct` launcher kind with a JSON sidecar built for six targets, and the leaf crate `ocx_env_apply`. rules_ocx becomes one repository rule per set and platform that runs `ocx vendor` in an isolated home, a hub generated from facts produced by `ocx vendor --manifest-only`, and a Buildbarn + NativeLink rig in its CI.
+**Chosen:** ocx ships `ocx vendor` and `ocx package vendor`, the `vendor-manifest` v1 schema as a fourth gated document, a native launcher built for six targets with a JSON record `NAME.launch` of kind `direct`, and the leaf crate `ocx_env_apply`. rules_ocx becomes one repository rule per set and platform that runs `ocx vendor` in an isolated home, a hub generated from facts produced by `ocx vendor --manifest-only`, and a Buildbarn + NativeLink rig in its CI.
 
 ### What a run writes (layout internal; the manifest names every path)
 
 ```
 DIR/manifest.json
-DIR/packages/<registry>/<algorithm>/<2 hex>/<30 hex>/content/…                one per package digest, once
-DIR/packages/<registry>/<algorithm>/<2 hex>/<30 hex>/entrypoints/<name>[.exe] + <name>.direct
-DIR/selections/default/shells/default/bin/<name>[.exe] + <name>.direct       one per tool of the selection
+DIR/l/NAME[.exe] + NAME.launch                    one per tool of the selection
+DIR/p/<HEX16>/c/…                                 one per package digest, once
+DIR/p/<HEX16>/e/NAME[.exe] + NAME.launch          the package's entry points
 ```
 
 Every launcher is a copy of the target's blob (no hardlinks inside `DIR`). Nothing under `refs/`, no `metadata.json`, `resolve.json`, `install.json`, `digest` or OCI `manifest.json` per package (DV-1). No `active` link and no `links/<group>/<entry>` tree (DV-2). The whole tree is staged in a fresh private directory beside `DIR` and renamed into place (R-8).
@@ -213,7 +213,7 @@ VendorManifest { schema_version: 1, content: present|absent, platform, available
 | Cross-host rendering differs (Windows separators, `:native`) | vendor lane renders `/` after the token; `:native` renders the target separator; V-46 compares Linux-host and Windows-host manifests |
 | A shared remote repo contents cache is written by an untrusted client | docs: only trusted CI lanes write it; content is fetched into an isolated home from digest-verified blobs (R-4) |
 | Unsigned darwin Mach-O content vendored on Linux stays unsigned | stated limit; all 12 sampled Mach-O files carry signatures; ocx signs only on a macOS host |
-| Windows default runfiles have no tree | launcher exits 78 naming `--enable_runfiles`; rules_ocx docs require it on Windows (DV-6, owner confirmation deferred) |
+| Windows default runfiles have no tree | the launcher reads the runfiles manifest (`adr_unified_launcher.md` § 5 step 6); `--enable_runfiles` is no longer required |
 
 ## Orchestrator rulings (goal-loop authority)
 
@@ -267,7 +267,7 @@ Every entry of the source's `## Open questions` (lines 627-720), in source order
 | OQ-31 | Patches and client configuration | Patches never reach a vendored environment, whatever `[patches]`, `OCX_PATCHES` or `OCX_PATCH_SNAPSHOT` say; configuration that only routes bytes (mirrors, registries, auth) and the trust policy apply, in both modes (V-63) | a vendor is a render and renders do not model companions; routing is digest-verified |
 | OQ-32 | Signature on every path on Apple Silicon | ocx CI on `macos-latest`: hardlink under another name, copy, rename, tar round trip, a quarantined copy; control: one changed byte is killed (V-27); rules_ocx macOS CI: the launcher runs after `bazel vendor` and from the disk cache (V-27c); no macOS remote executor exists (DV-13) | no macOS host here |
 | OQ-33 | Launcher for a non-host platform | Choice 3 A | offline-first, lockstep |
-| OQ-34 | Installed-home launchers move now? | Later, under [ocx-sh/ocx#679](https://github.com/ocx-sh/ocx/issues/679); on Unix the program accepts only `.direct` (others exit 78, V-52) | ruled |
+| OQ-34 | Installed-home launchers move now? | Done: installed homes use the same launcher and record on every OS (`adr_unified_launcher.md`) | owner, second run |
 | OQ-35 | darwin content needing signing, vendored on Linux | Stated limit | ocx signs only on a macOS host |
 | OQ-36 | Marker for the directory in a value | The literal token `@VENDOR_DIR@`, replaced by plain search; a resolved value that already contains it, contains NUL, is not UTF-8, or still holds the home's or `DIR`'s absolute path after replacement is refused (65 `vendor_value_unrepresentable`) | no escape syntax exists, so none can be got wrong |
 | OQ-37 | Does `inspect` need an addition? | No | ratified |
@@ -294,7 +294,7 @@ Every entry of the source's `## Open questions` (lines 627-720), in source order
 | DV-3 | Non-host launcher "published per platform as an ocx package" (recommended) | embedded (Choice 3) | lockstep with the sidecar, offline-first |
 | DV-4 | ocx "stores such a file under another name on request" | rules_ocx moves it after the run | the flag would be a Bazel term in ocx's interface |
 | DV-5 | "a list of every file makes the document large" | `tree.files` added | reserved names detectable with no walk; installers need file lists; size stays out of facts |
-| DV-6 | Lookup: started path, `.runfiles`, then the runfiles manifest | started path, `<P>.runfiles`, `$RUNFILES_DIR` only when P lies under it; no manifest-file mode; Windows needs `--enable_runfiles` (owner confirmation deferred) | a manifest-only tree has no directory to stand for the token |
+| DV-6 | Lookup: started path, `.runfiles`, then the runfiles manifest | started path, `<P>.runfiles`, `$RUNFILES_DIR` only when P lies under it, then the runfiles manifest; Windows needs no `--enable_runfiles` | superseded by `adr_unified_launcher.md` § 5 |
 | DV-7 | rules_ocx runs the command in a repository rule, extension untouched | the extension also runs `ocx vendor --manifest-only`; invariant 3 amended | facts need it |
 | DV-8 | Patches: "the same composer brings patches in when the client configures them" (recommended) | never (OQ-31) | a vendored directory must not depend on site overlays; `patch_snapshot` goes |
 | DV-9 | V-16: "a digest and its blob data as plain attributes" | digest as a plain attribute; blob data specified for a later field | the native download is out of the first release |
@@ -346,3 +346,4 @@ Every entry of the source's `## Open questions` (lines 627-720), in source order
 |------|--------|--------|
 | 2026-11-26 | architect worker | Initial draft (Proposed) |
 | 2026-11-26 | architect worker | Review round 1: R-1…R-8 recorded; JSON sidecar; isolated home; staged publish; exact facts; explicit platforms; Windows batch spawn; matrices re-computed; DV-12, DV-13 |
+| 2026-11-26 | architect worker | Amended by adr_unified_launcher.md |
