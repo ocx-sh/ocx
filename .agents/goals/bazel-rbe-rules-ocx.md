@@ -4,8 +4,7 @@ Source: .agents/discussions/bazel-rbe-rules-ocx.md · Written: 2026-11-26 by /he
 
 ## Definition of done
 
-- [ ] "ocx has the vendor command in both tiers" — evidence: the commit, PR comment or
-  artifact that satisfies it.
+- [x] "ocx has the vendor command in both tiers" — evidence: https://github.com/ocx-sh/ocx/pull/784 — `ocx vendor` and `ocx package vendor`; `test/tests/test_vendor.py` and `test/tests/test_package_vendor.py` pass in the pull request acceptance jobs on head `95759e78`.
 - [ ] "ocx has a native launcher that starts a tool with no `ocx`" — evidence: the commit, PR comment or
   artifact that satisfies it.
 - [ ] "rules_ocx builds every repository from the manifest alone" — evidence: the commit, PR comment or
