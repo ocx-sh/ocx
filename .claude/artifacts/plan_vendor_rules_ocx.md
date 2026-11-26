@@ -7,8 +7,8 @@
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
-- **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P10 (ocx proofs); CW P1-P9 I1 merged
+- **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
+- **Step:** /hex-execute → ocx pipelines done; awaiting rules_ocx pipelines, X, then the meta-orchestrator's closing gate, /hex-review and /hex-finalize
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -68,6 +68,8 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-20 | P7 step 2 reimplemented project selection over `LockedTool` because the CW request type carried no config or lock; step 3 undoes it and calls `select_tool_set` + `resolve_selected_tools`, with `VendorSelection::Project` carrying config and lock, and P7 gains `crates/ocx_cli/src/command/{vendor,package_vendor}.rs` for that glue. | V-23 (no new selection walk) and parity with what `ocx exec`/`ocx env` select |
 | DP-21 | I1 runs in two parts: I1a (bookkeeping the merges left: count literals, docs groups, lint tables, tag-guard reads, test-target map, stale blob names, AI-config rows) beside P7, I1b (hub regeneration, `cargo check`, unit suites) after P7. P7 step 3 did not call `compose_roots`: it installs or runs `prepare_lazy` (writes a shim tree, refuses packages declaring no names); roots are built from the closure (`closure_root`) and composed through `resolve_env(EnvScope::Vendor)`, and the vendor lane skips the shim slot. | I1a touches no P7 file and no generated file; the hub stays regenerated once. `compose_roots` has side effects the manifest-only contract (C-003) forbids |
 | DP-22 | `VendorReport.platform` is the platform object every other report carries, not design § 4.3's string. | the contract lint (L11) reds a string platform in a report root; the house contract wins over the design's shorthand. The on-disk `manifest.json` keeps its platform string (§ 4.1) |
+| DP-23 | Files ocx writes into `DIR` (launchers 0755, sidecars and `manifest.json` 0644) carry fixed modes and the normalised mtime, not the host umask and clock. | found by P10's V-09 proof; C-008 "normalised modes and mtimes; host-independent bytes" |
+| DP-24 | Trust refusals of `ocx vendor` keep the codes `ocx package install` gives for the same policy (an unsigned package under a covering policy: 79), not design § 5.2's 81. | C-024 says the manifest path runs the same trust checks; one trust path, one code. Owner may revisit the § 5.2 row |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
@@ -360,7 +362,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | merged |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
 | I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | merged |
-| P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | pending |
+| P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | merged |
 | R1 | rules_ocx | rig, baseline, the two rig questions | `e2e/rbe/**` except `e2e/rbe/{tests,workspace}/**` and `e2e/rbe/ocx-under-test.txt`; `taskfiles/rig.taskfile.yml`; `.bazelignore` | 1 | CW-R | | pending |
 | R2 | rules_ocx | C-RO-15; V-51 | `ocx/private/{download,manifest}.bzl`, `ocx/tests/download_test.bzl` (new), `e2e/install_binary/**` (new), `.github/actions/ocx-under-test/action.yml`, `.github/workflows/{verify-basic,verify-deep}.yml` | 1 | CW-R | | pending |
 | R3 | rules_ocx | C-RO-02…C-RO-07, C-RO-12, C-RO-13, C-RO-16, C-RO-17; S-003, S-009…S-011; V-48, V-49, V-69 | `ocx/private/{vendor_manifest,set_repo,set_rules}.bzl`, `ocx/private/repo_utils.bzl` (`make_isolated_ocx_env` only), `ocx/tests/{vendor_manifest,set_repo}_test.bzl`, `ocx/tests/testdata/**` except the CW-R example | 1 | CW-R | hard | pending |
@@ -691,6 +693,50 @@ by line by the reviewer.
 
 (The orchestrator folds one line per V-row here at merge.)
 
+ocx side, folded from `.claude/artifacts/evidence/vendor_rules_ocx/P10.md` (Steps 1-3), `P5-security.md` and the pipeline
+reports. "in" = the permanent control case and the main case ran in one run (both outcomes); "mut" = mutation in a scratch
+worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable on this Linux host, proven in ocx-deep only
+(DP-5), not yet run. rules_ocx rows (R-pipelines, X) are the other sub-orchestrator's.
+
+- V-08 (ocx half) — in: `package_vendor::wasm_package_has_files_and_no_launcher`, host-tool control gets a launcher — local
+- V-09 (ocx half) — mut: `normalise_tree` disabled → `vendor::…byte_identical_across_hosts` red on the tree listing (tightened
+  owner case, `e649f5ee`) and `setuid_bit_is_cleared_and_modes_and_mtimes_are_normalised` red; green after revert — local
+- V-14 — in: `vendor_launcher::relative_path_entry_start_survives_tool_chdir` — local
+- V-19 — in: `vendor::manifest_only_fetches_no_layer_and_equals_full_run_without_content` (+ package tier) — local
+- V-20 — in: `vendor_parity::selection_environment_equals_ocx_env_report`, `entrypoint_environment_equals_package_env_self` — local
+- V-20b — mut: vendor lane bypassed in `resolve.rs` → V-20b case red; green after revert — local
+- V-21 — in: `vendor_parity::vendored_tree_equals_installed_content_with_empty_dir`, `vendored_links_follow_omit_links_flag` — local
+- V-22 — mut: sidecar `unset` emptied → V-22 parity case red; green after revert — local
+- V-24 — mut: writer bakes the absolute root → V-24 case red; green after revert — local
+- V-25 (ocx half) — mut: raw template kept for vendored content (needed a second guard: `check_item` also disabled) → V-25 red;
+  green after revert — local
+- V-26 — in: unit, `LC_CODE_SIGNATURE` present in the aarch64-apple-darwin blob, absent in x86_64 (control) — local unit
+- V-27, V-27b — CI: ocx-deep macOS (cases skip here with a reason)
+- V-28 — in: `vendor_launcher::launcher_starts_on_image_without_a_shell` (docker ran; `/bin/sh` control fails in the image) — local
+- V-30 — mut: selection environment from the first root only → V-30 red; green after revert — local
+- V-35 — in: `vendor::vendor_output_carries_no_bazel_file_or_term` — local
+- V-36 — in: `vendor_launcher::launcher_from_read_only_tree_leaves_tree_unchanged` (+ shim unit half) — local; also CI
+- V-38 — in: manifest-only case, full-run control holds the layer GETs — local
+- V-39 — in: `vendor::vendor_without_output_exits_usage_and_writes_nothing` (+ package tier) — local (smoke)
+- V-40 — in: sdkgen corpus `vendor_manifest_property_removed` red / `_added` green (P2); real manifest validates against the
+  generated schema (`vendor_parity::real_manifest_validates_against_published_schema`) — local
+- V-42, V-43, V-53, V-54, V-57 (ocx half), V-61, V-63, V-69, V-70 — in: cases and controls listed in P10.md Step 1 — local
+  (V-61 macOS half: CI)
+- V-46 — in: `vendor_parity::windows_amd64_manifest_equals_golden` against `test/fixtures/vendor/windows_amd64.manifest.json`
+  (written on Linux by P10); host-separator unit control in P4 — local; CI: ocx-deep `Acceptance (windows)`
+- V-52 — in: shim unit, `.direct` accepted on Unix, other kinds refused — local unit
+- V-58 — dispatch-decision unit (extension trimming, case) local; batch-spawn case — CI: ocx-deep `Acceptance (windows)`
+- V-59 — mut: unit level red (rule removed: 2 `v59` tests fail, control passes); end to end the rebuilt blob stayed green (own
+  tree found first), red once sidecar byte-identity was also disabled — local
+- V-60 — mut: `O_NONBLOCK` dropped, blob rebuilt → V-60 case red; green after revert (also unit, P5) — local
+- V-62, V-72 — in: decoder (P1) and writer (P6) units, well-formed / ordinary-key controls — local unit
+- V-66 — rev: shim profile, 1000 runfiles entries, min 3.712 ms, median 3.793 ms (3 runs; budget ≤ 5 ms) — local (DP-4)
+- V-67 — mut: `DIR` created before success → `test_failed_vendor_leaves_target_as_it_was_and_no_staging[absent]` red; green after
+  revert. No kill-mid-download case: the plan's mutation is "publication without staging"; the kill half rests on `StagedTree` units
+- V-68 — in + mut: shim units (root without `:` runs; separator check removed → 2 tests red) — local unit
+- V-73 — in: unit fold control (P1) and Windows fold mutation (P5) red; Windows case — CI: ocx-deep `Acceptance (windows)`
+- V-23 — rev: Reuse table held except where DP-20/DP-21 record why (`compose_roots` not called by the manifest path)
+
 ## Schedule log
 
 - 2026-11-26 — /hex-execute (ocx side) started: CW, then P1 P2 P3 P4 P8 P9 (wave 1), P5 P6 (after P1), P7, I1, P10. Builders capped at
@@ -753,3 +799,11 @@ by line by the reviewer.
   passed, failures = the two known environmental reds + 4 `sdk_rust::real_binary` cases that need `SDK_TEST_OCX_BINARY`
   (Bazel sets it) + the fixed structure tables; `cargo test -p ocx_schema -p ocx_sdkgen` green but `real_binary`;
   `cd test && uv run pytest lint -q` 805 passed; `.claude/tests` 607 passed. `test/limits/**` not regenerated (per-OS runs).
+- 2026-11-26 — P10 done on the branch (`f5fc5cca`, `7cf514b0`, `1f2fc2bd`, `563fe145`, `e649f5ee`, `6603b619`, `6b0ec4d3`,
+  `58e36d95`): the 16 disagreements arbitrated against the contracts (test corrections only, each named in P10.md; no code
+  defect among them), V-46 golden written on Linux, nine mut rows red then green, V-66 3.79 ms median (shim profile),
+  `satellite:verify` green against a clone of ocx-mirror (no upgrade needed), umask/clock leak fixed (DP-23). Final local state
+  of the tip: the four vendor modules 59 passed, 5 skipped (3 macOS, 2 Windows: CI only); `cargo clippy --workspace
+  --all-targets --locked -- -D warnings` green; `cargo fmt --check` green; lint tier 805 passed; `.claude/tests` 607 passed.
+  Not run here: Bazel gates, macOS/Windows cases, the full acceptance suite (CI). rules_ocx pipelines CW-R, R1-R9 and X:
+  pending in this table — the other sub-orchestrator runs them.
