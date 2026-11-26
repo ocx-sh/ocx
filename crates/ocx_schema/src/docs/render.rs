@@ -33,6 +33,7 @@ const SPLIT_PAGES: &[(&str, &[&str])] = &[
             "push",
             "sign",
             "test",
+            "vendor",
         ],
     ),
     (
