@@ -30,6 +30,16 @@ pub async fn write_direct_launcher_for(
     sidecar: &DirectSidecar,
     windows: bool,
 ) -> Result<(), VendorError> {
+    // Launcher `X.direct` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
+    let suffix = b".direct";
+    if !windows
+        && name.len() >= suffix.len()
+        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    {
+        return Err(VendorError::PathUnrepresentable {
+            path: format!("{name}: a launcher name ends in the sidecar suffix .direct"),
+        });
+    }
     let mut sidecar = sidecar.clone();
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
@@ -134,6 +144,21 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = write_direct_launcher_for(tmp.path(), "tool", b"blob", sidecar, cfg!(windows)).await;
         (tmp, result)
+    }
+
+    /// A name ending `.direct` would write its launcher over another tool's sidecar; a Windows launcher is `.exe`, so only a Unix one collides.
+    #[tokio::test]
+    async fn a_launcher_name_ending_in_the_sidecar_suffix_is_refused() {
+        for name in ["tool.direct", "tool.DIRECT"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let result = write_direct_launcher_for(tmp.path(), name, b"blob", &sidecar("bin/tool"), false).await;
+            assert!(matches!(result, Err(VendorError::PathUnrepresentable { .. })), "{name}");
+            assert_eq!(std::fs::read_dir(tmp.path()).expect("dir").count(), 0, "{name}");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_direct_launcher_for(tmp.path(), "tool.direct", b"blob", &sidecar("bin/tool"), true)
+            .await
+            .expect("tool.direct.exe collides with no sidecar");
     }
 
     /// A `program` outside the root is refused with nothing written; a well-formed one is written.
