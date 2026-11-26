@@ -54,7 +54,7 @@ pub enum ExportMarkerError {
     #[exit(
         DataError,
         slug = "export_dir_invalid",
-        summary = "A directory is not a valid export"
+        summary = "An export directory or archive is not valid"
     )]
     SlugCollision { registry: String, existing: String },
     /// The registry slugs to a directory name the export layout reserves.
@@ -62,7 +62,7 @@ pub enum ExportMarkerError {
     #[exit(
         DataError,
         slug = "export_dir_invalid",
-        summary = "A directory is not a valid export"
+        summary = "An export directory or archive is not valid"
     )]
     ReservedSlug { registry: String },
     /// The marker is not valid JSON, or a key is not the slug of its value.
@@ -70,7 +70,7 @@ pub enum ExportMarkerError {
     #[exit(
         DataError,
         slug = "export_dir_invalid",
-        summary = "A directory is not a valid export"
+        summary = "An export directory or archive is not valid"
     )]
     Invalid { path: PathBuf, reason: String },
     #[error(transparent)]

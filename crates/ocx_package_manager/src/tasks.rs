@@ -10,6 +10,7 @@ pub(crate) mod common;
 pub(crate) mod deselect;
 // `pub`: the request and report vocabulary `ocx_cli` names.
 pub mod export;
+pub(crate) mod export_archive;
 pub(crate) mod find;
 pub(crate) mod find_or_install;
 pub(crate) mod find_symlink;

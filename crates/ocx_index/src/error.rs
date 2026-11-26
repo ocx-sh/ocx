@@ -301,7 +301,7 @@ pub enum Error {
     #[exit(
         DataError,
         slug = "export_dir_invalid",
-        summary = "A directory is not a valid export"
+        summary = "An export directory or archive is not valid"
     )]
     ExportRootMismatch {
         repository: String,

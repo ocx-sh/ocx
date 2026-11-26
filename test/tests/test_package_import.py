@@ -14,6 +14,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +225,44 @@ def test_import_then_offline_install_by_tag(
 
     _guarded(second_home, registry_guard)
     _imported(_import(second_home, out))
+    second_home.json("--offline", "package", "install", pkg.short)
+
+    candidate = (
+        second_home.ocx_home
+        / "symlinks"
+        / registry_dir(registry)
+        / unique_repo
+        / "candidates"
+        / pkg.tag
+    )
+    assert_symlink_exists(candidate)
+    assert registry_guard.count == 0, (
+        f"the importing home dialed the registry: {registry_guard.requests}"
+    )
+
+
+def test_archive_export_then_offline_install(
+    ocx: OcxRunner,
+    second_home: OcxRunner,
+    registry_guard: RegistryGuard,
+    unique_repo: str,
+    registry: str,
+    tmp_path: Path,
+) -> None:
+    """`export --archive` writes one tar file; importing it on a denied home installs offline."""
+    _mkdirs(tmp_path, "src")
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path / "src")
+    bundle = tmp_path / "bundle.tar"
+    exported = ocx.json("package", "export", "--archive", "-o", str(bundle), pkg.fq)
+    assert exported["output_dir"] == str(bundle)
+    assert bundle.is_file(), "an archive export is a file, not a directory"
+    assert tarfile.is_tarfile(bundle)
+    with tarfile.open(bundle) as archive:
+        names = {name.removeprefix("./") for name in archive.getnames()}
+    assert MARKER in names, f"the marker sits at the archive root: {sorted(names)}"
+
+    _guarded(second_home, registry_guard)
+    _imported(_import(second_home, bundle))
     second_home.json("--offline", "package", "install", pkg.short)
 
     candidate = (

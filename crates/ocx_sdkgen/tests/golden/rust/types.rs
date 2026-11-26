@@ -3106,7 +3106,7 @@ pub enum ErrorDetail {
     EntrypointCollision,
     /// An .envrc already exists and --force was not given
     EnvrcExists,
-    /// A directory is not a valid export
+    /// An export directory or archive is not valid
     ExportDirInvalid,
     /// The export directory lacks something that was asked for
     ExportNotFound,
@@ -5277,7 +5277,7 @@ impl Unknowns for ExportPlatformWord {
 /// Result of `ocx package export` and `ocx export`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportReport {
-    /// The export directory, absolute.
+    /// The export directory, or the archive file under `--archive`; absolute.
     pub output_dir: AbsolutePath,
     /// One entry per package, in request order.
     pub packages: Vec<ExportedPackageRow>,

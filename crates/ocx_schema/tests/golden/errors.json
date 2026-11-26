@@ -790,7 +790,7 @@
         },
         {
           "value": "export_dir_invalid",
-          "description": "A directory is not a valid export",
+          "description": "An export directory or archive is not valid",
           "exit_code": 65
         },
         {

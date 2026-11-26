@@ -178,42 +178,45 @@ ocx exec [OPTIONS] [NAMES]... -- <ARGV>...
 
 ## `ocx export` {#export}
 
-Write every package the project lock pins to a directory.
+Write every package the project lock pins to a directory or archive file.
 
-Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and writes each pinned platform leaf, its dependencies and, unless `--no-referrers` is given, its signatures, SBOMs and attestations to DIR, with a marker. Unlike `ocx pull`, no `-g` selects every group, since the machine that imports the directory cannot ask for more; `--platform` narrows it to the named platforms.
+Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and writes each pinned platform leaf, its dependencies and, unless `--no-referrers` is given, its signatures, SBOMs and attestations to the `-o` PATH, with a marker. Unlike `ocx pull`, no `-g` selects every group, since the machine that imports the directory cannot ask for more; `--platform` narrows it to the named platforms.
 
 No index is written, because the lock needs none.
 
-Move the directory to the other machine and run `ocx import` there.
+`--archive` writes one file instead of a directory, so the export moves as a single file. Exporting into an existing directory adds to it; `--archive` onto an existing directory exits 65, and an existing file is replaced.
+
+Move the directory or file to the other machine and run `ocx import` there.
 
 A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65, as for `ocx exec`. A blob nowhere local under `--offline` exits 81.
 
 ```text
-ocx export [OPTIONS] --output <DIR>
+ocx export [OPTIONS] --output <PATH>
 ```
 
 | Flag | Value | Description |
 | --- | --- | --- |
+| `--archive` |  | Write one archive file instead of a directory |
 | `--group`, `-g` | `GROUPS` | Restrict to the named group(s) |
 | `--no-referrers` |  | Leave them out; a trust policy then cannot verify the import offline |
-| `--output`, `-o` | `DIR` | Directory to write the export to; created when absent |
+| `--output`, `-o` | `PATH` | Where to write the export: a directory, or the archive file with --archive; created when absent |
 | `--platform`, `-p` | `PLATFORM` | Export only this platform; repeat for several. Defaults to every platform the lock records |
 | `--referrers` |  | Carry the signatures, SBOMs and attestations of each exported manifest (default) |
 
 ## `ocx import` {#import}
 
-Assemble the project lock's packages from an export directory, offline.
+Assemble the project lock's packages from an export directory or archive, offline.
 
-Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and assembles the locked packages of the selected groups from the directory `ocx export` wrote, with no registry traffic. Without `-g` that is the default group, as for `ocx pull`; `--platform` defaults to the host platform.
+Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or `$OCX_HOME/ocx.lock` under `--global`) and assembles the locked packages of the selected groups from the directory or archive file `ocx export` wrote (the `PATH` argument), with no registry traffic. Without `-g` that is the default group, as for `ocx pull`; `--platform` defaults to the host platform.
 
 Then it renders the project toolchain and registers the project, as `ocx pull` does. It changes no tag in the local index.
 
 Signatures are verified from what the export carries. A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65.
 
-A package the directory lacks exits 79 and a directory that is not a usable export exits 65.
+A package the export lacks exits 79. A directory that is not a usable export exits 65, and so does a file that cannot be read as an archive, naming the file passed.
 
 ```text
-ocx import [OPTIONS] <DIR>
+ocx import [OPTIONS] <PATH>
 ```
 
 | Flag | Value | Description |

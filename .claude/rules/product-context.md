@@ -113,7 +113,7 @@ Distributing pre-built binaries across platforms and teams fragmented:
 4. **Devcontainer features** — tools resolved at build time without per-arch conditionals
 5. **Polyglot teams** — install Go, Python, Node, Rust, CMake, etc. with one tool, one command pattern
 6. **Internal tool distribution** — push proprietary CLI tools to private registry; `ocx install` from any team
-7. **Air-gapped machines** — `ocx package export` / `ocx export` write a directory; `ocx package import` / `ocx import` load it, or `--blob-dir` reads it in place, with no registry reachable; `ocx vendor` writes the unpacked tools themselves
+7. **Air-gapped machines** — `ocx package export` / `ocx export` write a directory, or one archive file with `--archive`; `ocx package import` / `ocx import` load either, or `--blob-dir` reads it in place, with no registry reachable; `ocx vendor` writes the unpacked tools themselves
 
 ## CLI at a Glance
 
@@ -147,7 +147,7 @@ Global flags: `--offline`, `--remote`, `--format json`, `--blob-dir`, `--blob-ca
 └── temp/                                 # Download staging directories
 ```
 
-An export directory (`ocx package export`) holds `index/` + `blobs/` in the same home layouts, plus an `ocx-export.json` marker; a root `ocx export` writes `blobs/` and the marker only. Blob lookup order: home → blob directories (`--blob-dir`, `OCX_BLOB_DIR`, `[blobs] dirs`, read-only) → optional blob cache (`--blob-cache-dir`, the one writable directory) → network.
+An export directory (`ocx package export`) holds `index/` + `blobs/` in the same home layouts, plus an `ocx-export.json` marker; a root `ocx export` writes `blobs/` and the marker only. `--archive` packs the same layout into one file at the `-o` path. Blob lookup order: home → blob directories (`--blob-dir`, `OCX_BLOB_DIR`, `[blobs] dirs`, read-only) → optional blob cache (`--blob-cache-dir`, the one writable directory) → network.
 
 ## Technical Overview
 

@@ -417,29 +417,32 @@ pub enum Command {
     /// Deprecated spelling of `ocx exec`; removed in 0.7.
     #[command(name = "run", hide = true)]
     DeprecatedRun(toolchain_exec::ToolchainExec),
-    /// Write every package the project lock pins to a directory.
+    /// Write every package the project lock pins to a directory or archive file.
     #[command(long_about = "\
-        Write every package the project lock pins to a directory.\n\n\
+        Write every package the project lock pins to a directory or archive file.\n\n\
         Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or \
         `$OCX_HOME/ocx.lock` under `--global`) and writes each pinned platform leaf, its dependencies and, unless \
-        `--no-referrers` is given, its signatures, SBOMs and attestations to DIR, with a marker. Unlike `ocx pull`, \
-        no `-g` selects every group, since the machine that imports the directory cannot ask for more; \
+        `--no-referrers` is given, its signatures, SBOMs and attestations to the `-o` PATH, with a marker. Unlike \
+        `ocx pull`, no `-g` selects every group, since the machine that imports the directory cannot ask for more; \
         `--platform` narrows it to the named platforms. No index is written, because the lock needs none.\n\n\
-        Move the directory to the other machine and run `ocx import` there.\n\n\
+        `--archive` writes one file instead of a directory, so the export moves as a single file. Exporting into an \
+        existing directory adds to it; `--archive` onto an existing directory exits 65, and an existing file is \
+        replaced.\n\n\
+        Move the directory or file to the other machine and run `ocx import` there.\n\n\
         A missing `ocx.toml` exits 64 and a missing or stale `ocx.lock` exits 78 or 65, as for `ocx exec`. A \
         blob nowhere local under `--offline` exits 81.")]
     Export(export::Export),
-    /// Assemble the project lock's packages from an export directory, offline.
+    /// Assemble the project lock's packages from an export directory or archive, offline.
     #[command(long_about = "\
-        Assemble the project lock's packages from an export directory, offline.\n\n\
+        Assemble the project lock's packages from an export directory or archive, offline.\n\n\
         Reads the digest-pinned `ocx.lock` of the nearest `ocx.toml` (the walk `--project` describes, or \
         `$OCX_HOME/ocx.lock` under `--global`) and assembles the locked packages of the selected groups from the \
-        directory `ocx export` wrote, with no registry traffic. Without `-g` that is the default group, as for \
+        directory or archive file `ocx export` wrote (the `PATH` argument), with no registry traffic. Without `-g` that is the default group, as for \
         `ocx pull`; `--platform` defaults to the host platform. Then it renders the project toolchain and \
         registers the project, as `ocx pull` does. It changes no tag in the local index.\n\n\
         Signatures are verified from what the export carries. A missing `ocx.toml` exits 64 and a missing or \
-        stale `ocx.lock` exits 78 or 65. A package the directory lacks exits 79 and a directory that is not a \
-        usable export exits 65.")]
+        stale `ocx.lock` exits 78 or 65. A package the export lacks exits 79. A directory that is not a usable \
+        export exits 65, and so does a file that cannot be read as an archive, naming the file passed.")]
     Import(import::Import),
     Shell(shell::ShellArgs),
     /// Manage the OCX installation itself (PATH activation, completions, self-update).

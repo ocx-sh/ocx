@@ -281,12 +281,13 @@ fn extract_from_archive<R: std::io::Read>(
                 if let Some(mode) = archived_mode
                     && (matches!(unpacked, tar::Unpacked::File(_)) || landed_directory)
                 {
-                    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode & !(0o7000 | 0o022))).map_err(
-                        |e| Error::Io {
-                            path: dst.clone(),
-                            source: e,
-                        },
-                    )?;
+                    // A directory keeps owner rwx: without it later entries cannot land and the tree cannot be removed.
+                    let owner = if landed_directory { 0o700 } else { 0 };
+                    let masked = (mode & !(0o7000 | 0o022)) | owner;
+                    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(masked)).map_err(|e| Error::Io {
+                        path: dst.clone(),
+                        source: e,
+                    })?;
                 }
             }
             #[cfg(not(unix))]
@@ -953,6 +954,46 @@ mod tests {
 
         let mode = std::fs::metadata(output.join("wide-dir")).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755, "directory mode not capped: setgid/world-write survived");
+    }
+
+    /// A directory entry without owner `rwx` must not strand the tree: children still land and the
+    /// extracted tree stays removable, or `ocx clean` fails on it for good.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn extract_keeps_owner_access_on_a_restrictive_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for hostile in [0o000u32, 0o500] {
+            let scratch = tempfile::tempdir().unwrap();
+            let archive_path = scratch.path().join("locked.tar");
+            {
+                let file = std::fs::File::create(&archive_path).unwrap();
+                let mut builder = ::tar::Builder::new(file);
+                let mut dir = ::tar::Header::new_gnu();
+                dir.set_entry_type(::tar::EntryType::Directory);
+                dir.set_size(0);
+                dir.set_mode(hostile);
+                dir.set_mtime(0);
+                dir.set_path("locked").unwrap();
+                dir.set_cksum();
+                builder.append(&dir, &b""[..]).unwrap();
+                let mut file_header = ::tar::Header::new_gnu();
+                file_header.set_size(2);
+                file_header.set_mode(0o644);
+                file_header.set_mtime(0);
+                file_header.set_path("locked/inner.txt").unwrap();
+                file_header.set_cksum();
+                builder.append(&file_header, &b"hi"[..]).unwrap();
+                builder.finish().unwrap();
+            }
+
+            let output = scratch.path().join("out");
+            Archive::extract(&archive_path, &output).await.unwrap();
+
+            let mode = std::fs::metadata(output.join("locked")).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode & 0o700, 0o700, "owner rwx missing for {hostile:o}: {mode:o}");
+            std::fs::remove_dir_all(&output).unwrap();
+        }
     }
 
     /// R1 residual: tar-rs unpacks a non-ustar header whose name ends in `/` as

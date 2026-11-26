@@ -101,7 +101,7 @@ pub struct ExportedPackageRow {
 /// Plain stdout is one row per package and platform.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ExportReport {
-    /// The export directory, absolute.
+    /// The export directory, or the archive file under `--archive`; absolute.
     pub output_dir: AbsolutePath,
     /// One entry per package, in request order.
     pub packages: Vec<ExportedPackageRow>,

@@ -287,6 +287,57 @@ def test_export_requires_output_and_package(
     assert no_package.returncode == 64, no_package.stdout + no_package.stderr
 
 
+def test_archive_onto_a_directory_is_refused(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """`--archive -o <existing directory>` is a data error that says why; the directory is untouched."""
+    target = tmp_path / "already-a-directory"
+    target.mkdir()
+
+    result = ocx.run(
+        "package",
+        "export",
+        "--archive",
+        "-o",
+        str(target),
+        published_package.short,
+        check=False,
+    )
+
+    assert result.returncode == 65, result.stdout + result.stderr
+    assert "existing directory" in result.stderr, result.stderr
+    assert target.is_dir() and not any(target.iterdir())
+
+
+def test_archive_shaped_output_without_the_flag_warns_and_writes_a_directory(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """`-o bundle.tar` without `--archive` still writes a directory, and says so on stderr only."""
+    target = tmp_path / "bundle.tar"
+
+    result = _export(ocx, target, published_package.short)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pass --archive" in result.stderr, result.stderr
+    assert result.stderr.count("pass --archive") == 1, result.stderr
+    assert target.is_dir() and (target / MARKER).is_file()
+    assert "pass --archive" not in result.stdout
+    assert _report(result)["packages"], result.stdout
+
+
+def test_import_of_a_file_that_is_not_an_archive_names_the_file(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A regular file is read as an archive; one that is not fails and says which file."""
+    garbage = tmp_path / "garbage.tar"
+    garbage.write_bytes(b"this is not a tar archive at all, just some text")
+
+    result = ocx.run("package", "import", str(garbage), check=False)
+
+    assert result.returncode == 65, result.stdout + result.stderr
+    assert str(garbage) in result.stderr, result.stderr
+
+
 def test_export_report_fields(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_leaf_referrer(ocx.registry, unique_repo, pkg)

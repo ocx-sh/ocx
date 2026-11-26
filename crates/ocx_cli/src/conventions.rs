@@ -115,6 +115,23 @@ pub fn absolute_dir(path: &std::path::Path) -> Result<std::path::PathBuf, ocx_ut
     std::path::absolute(path).map_err(|error| ocx_util::error::FileError::new(path, error))
 }
 
+/// Whether `path` is named like an archive an `--archive` export would write: `.tar`, `.zip` or a compressed tar.
+pub fn is_archive_name(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tar") || ext.eq_ignore_ascii_case("zip"))
+        || ocx_util::compression::CompressionAlgorithm::from_file(path).is_some()
+}
+
+/// Warns once when `-o` is named like an archive but `--archive` is absent, so it is written as a directory.
+pub fn warn_archive_name_without_flag(ui: &ocx_console::UserInterface, output: &std::path::Path, archive: bool) {
+    if !archive && is_archive_name(output) {
+        ui.warn(format!(
+            "'{}' is written as a directory; pass --archive to write one archive file",
+            output.display()
+        ));
+    }
+}
+
 /// Resolves `--platform`, defaulting to the host platform for every resolution command.
 pub fn platform_or_default(platform: Option<ocx_oci::Platform>) -> ocx_oci::Platform {
     platform.unwrap_or_else(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any))
@@ -492,8 +509,8 @@ pub fn report_purge(
 mod tests {
     use super::{
         append_tags_file, check_tags_file_writable, emit_line, export_ci, infer_metadata_file, infer_receipt_file,
-        merge_tags_file, not_eval_safe_advisory, parse_tags_file, resolve_ci_arg, resolve_receipt_path,
-        resolve_shell_arg, resolved_lazy_mode,
+        is_archive_name, merge_tags_file, not_eval_safe_advisory, parse_tags_file, resolve_ci_arg,
+        resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
     };
     use crate::error::UsageError;
     use ocx_oci::layer_ref::LayerRef;
@@ -1194,5 +1211,15 @@ mod tests {
         assert!(line.contains("/opt/bin"), "{line}");
         let invalid = emit_line(Shell::Bash, &path_entry("2FOO", "/opt/bin"));
         assert!(invalid.is_err(), "an invalid key is still refused");
+    }
+
+    #[test]
+    fn archive_shaped_output_names_are_recognised() {
+        for name in ["bundle.tar", "bundle.tar.gz", "bundle.zip"] {
+            assert!(is_archive_name(std::path::Path::new(name)), "{name}");
+        }
+        for name in ["out", "export-dir", "v1.2"] {
+            assert!(!is_archive_name(std::path::Path::new(name)), "{name}");
+        }
     }
 }
