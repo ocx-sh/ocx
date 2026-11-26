@@ -20,7 +20,7 @@ A tool store under `~/.ocx` holds absolute paths, so a copy of it breaks. Build 
 <ShellSession>
 
 ```sh
-ocx vendor -o /work/tools -p linux/amd64 cmake ninja
+ocx vendor -o /work/tools -p linux/amd64 jq ripgrep
 ocx vendor -o /work/tools-ci -p linux/amd64 -g ci
 ```
 
@@ -31,7 +31,7 @@ For packages with no project, [`ocx package vendor`][cmd-package-vendor] takes i
 <ShellSession>
 
 ```sh
-ocx package vendor -o /work/tools -p linux/amd64 ocx.sh/kitware/cmake:3.31
+ocx package vendor -o /work/tools -p linux/amd64 ocx.sh/jqlang/jq:1.8
 ```
 
 </ShellSession>
@@ -61,7 +61,7 @@ Start a tool by its launcher. The launcher finds the directory from its own path
 <ShellSession>
 
 ```sh
-/work/tools/selections/default/shells/default/bin/cmake --version
+/work/tools/selections/default/shells/default/bin/jq --version
 ```
 
 </ShellSession>
@@ -83,7 +83,7 @@ Under Bazel the launcher also looks beside its own runfiles tree. Each `.direct`
 <ShellSession>
 
 ```sh
-ocx vendor --manifest-only -o /work/plan -p windows/amd64 cmake
+ocx vendor --manifest-only -o /work/plan -p windows/amd64 jq
 ```
 
 </ShellSession>

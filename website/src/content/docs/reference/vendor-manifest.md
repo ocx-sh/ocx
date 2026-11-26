@@ -116,7 +116,7 @@ Exit codes shared with every command are in [Exit codes][exit-codes].
 
 ## Example {#vendor-manifest-example}
 
-The result of `ocx vendor -o out -p linux/amd64+libc.glibc cmake`, with made-up digests.
+The result of `ocx vendor -o out -p linux/amd64+libc.glibc jq`, with made-up digests.
 
 ```json
 {
@@ -128,7 +128,7 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc cmake`, with made-up 
   "dir_token": "@VENDOR_DIR@",
   "packages": [
     {
-      "identifier": "ocx.sh/kitware/cmake:3.31.6@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
+      "identifier": "ocx.sh/jqlang/jq:1.8.1@sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
       "digest": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
       "package_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988",
       "content_dir": "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content",
@@ -136,8 +136,8 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc cmake`, with made-up 
       "names_declared": true,
       "entrypoints": [],
       "tree": {
-        "files": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/cmake", "executable": true}],
-        "links": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/cmake3", "target": "cmake"}],
+        "files": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq", "executable": true}],
+        "links": [{"path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq-1.8", "target": "jq"}],
         "link_free_dirs": ["packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/share"]
       }
     }
@@ -152,10 +152,10 @@ The result of `ocx vendor -o out -p linux/amd64+libc.glibc cmake`, with made-up 
     }
   ],
   "selections": [
-    {"id": "default", "groups": [], "bindings": ["cmake"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"], "environment": "selection:default", "launcher_dir": "selections/default/shells/default/bin"}
+    {"id": "default", "groups": [], "bindings": ["jq"], "roots": ["sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988"], "environment": "selection:default", "launcher_dir": "selections/default/shells/default/bin"}
   ],
   "tools": [
-    {"name": "cmake", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/cmake", "launcher_path": "selections/default/shells/default/bin/cmake"}
+    {"name": "jq", "selection": "default", "kind": "binary", "package": "sha256:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988", "environment": "selection:default", "target_path": "packages/ocx.sh/sha256/1f/2e3d4c5b6a7988/content/bin/jq", "launcher_path": "selections/default/shells/default/bin/jq"}
   ]
 }
 ```
