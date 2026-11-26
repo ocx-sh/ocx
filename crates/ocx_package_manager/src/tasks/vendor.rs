@@ -90,7 +90,7 @@ pub struct VendorOutcome {
 #[derive(Debug, thiserror::Error, ocx_exit::Classify)]
 pub enum VendorError {
     /// The output directory exists and is not an empty directory, or is a symlink.
-    #[error("vendor output '{}' exists and is not an empty directory", .path.display())]
+    #[error("vendor output '{}' exists and is not an empty directory; name a new or empty directory", .path.display())]
     #[exit(
         UsageError,
         slug = "vendor_output_not_empty",
@@ -362,19 +362,20 @@ async fn read_closures(
 ///
 /// Sequential: a closure is a handful of packages and the first refusal must be the same one on every run.
 async fn verify_selection(manager: &PackageManager, closures: &ClosureSet) -> Result<(), VendorError> {
-    let mut verified: Vec<PinnedPackageRef> = Vec::new();
+    let mut verified: Vec<(PinnedPackageRef, bool)> = Vec::new();
     for root in &closures.roots {
         for node in closures.nodes(root) {
-            let leaf = node.identifier.strip_advisory();
-            if verified.contains(&leaf) {
-                continue;
-            }
             // The request that named a root decides which declaration its publisher round reads; a dependency is pinned.
             let requested = if node.is_root {
                 &root.requested
             } else {
                 node.identifier.as_identifier()
             };
+            // A pinned sighting runs a weaker round than a tagged one, so it never stands in for a tagged sighting.
+            let leaf = (node.identifier.strip_advisory(), requested.digest().is_some());
+            if verified.contains(&leaf) {
+                continue;
+            }
             manager
                 .maybe_auto_verify_requested(node.identifier.as_identifier(), requested)
                 .await
@@ -551,7 +552,7 @@ async fn build_manifest(
             let directory = metadata_of(&roots, &owner.tool)
                 .map(|metadata| binary_directory(metadata, windows))
                 .unwrap_or_default();
-            // shortcut: a manifest-only Windows binary is taken to be `<name>.exe`; with content, `settle_windows_binary_targets` reads the tree.
+            // The guess is the contract in both modes: a full run refuses it when the content lacks the file.
             (
                 ToolKind::Binary,
                 format!("{}/{directory}{name}{}", package.content_dir, exe_suffix(windows)),
@@ -791,18 +792,21 @@ fn check_item(item: &EnvironmentItem, forbidden: &[String]) -> Result<(), Vendor
     if item.key.is_empty() || item.key.contains(['=', '\0']) {
         return Err(unrepresentable("the key is not a variable name".to_owned()));
     }
-    if item.value.contains('\0') {
-        return Err(unrepresentable("the value holds a NUL".to_owned()));
+    check_value(&item.value, forbidden).map_err(unrepresentable)
+}
+
+/// A resolved value holds no NUL and no template, and once the token is gone, no host path; the reason when it does.
+fn check_value(value: &str, forbidden: &[String]) -> Result<(), String> {
+    if value.contains('\0') {
+        return Err("the value holds a NUL".to_owned());
     }
-    if item.value.contains("${") {
-        return Err(unrepresentable(
-            "the value holds an unresolved `${` template".to_owned(),
-        ));
+    if value.contains("${") {
+        return Err("the value holds an unresolved `${` template".to_owned());
     }
     // The token is what stands for `DIR`; whatever it leaves behind must not name a host path.
-    let literal = item.value.replace(DIR_TOKEN, "");
+    let literal = value.replace(DIR_TOKEN, "");
     if let Some(path) = forbidden.iter().find(|path| literal.contains(path.as_str())) {
-        return Err(unrepresentable(format!("the value holds the host path '{path}'")));
+        return Err(format!("the value holds the host path '{path}'"));
     }
     Ok(())
 }
@@ -855,7 +859,15 @@ async fn publish(output: &Path, staged: StagedTree, manifest: &VendorManifest) -
     tokio::task::spawn_blocking(move || staged.publish())
         .await
         .map_err(|error| joined(output, error))?
-        .map_err(crate::Error::from)?;
+        .map_err(|error| match error.cause.kind() {
+            // `DIR` changed between the early check and the rename: the same refusal, not an I/O fault.
+            std::io::ErrorKind::DirectoryNotEmpty
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::AlreadyExists => VendorError::OutputNotEmpty {
+                path: output.to_path_buf(),
+            },
+            _ => VendorError::Package(crate::Error::from(error)),
+        })?;
     Ok(written_size)
 }
 
@@ -932,13 +944,12 @@ async fn write_content(
         }
     }
     manifest.content = Content::Present;
-    if windows {
-        settle_windows_binary_targets(&layout, &mut manifest.tools).await;
-    }
+    ensure_binary_targets_exist(&layout, &manifest.tools).await?;
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
-        write_entrypoint_launchers(&layout, manifest, &entrypoints, blob, windows).await?;
+        let forbidden = host_paths(manager, &request.output);
+        write_entrypoint_launchers(&layout, manifest, &entrypoints, &forbidden, blob, windows).await?;
         write_selection_launchers(&layout, manifest, blob, windows).await?;
     }
 
@@ -959,25 +970,26 @@ async fn write_content(
     Ok(())
 }
 
-/// Points each Windows binary at the file the content holds: `<name>.exe` is the manifest-only guess, and a
-/// package may ship `<name>.cmd` or `<name>.bat` instead. A target found under none keeps the guess.
-async fn settle_windows_binary_targets(layout: &VendorLayout, tools: &mut [Tool]) {
-    for tool in tools.iter_mut().filter(|tool| tool.kind == ToolKind::Binary) {
-        let Some(stem) = tool.target_path.strip_suffix(".exe") else {
-            continue;
-        };
-        // No bare name: `CreateProcessW` appends `.exe` to a program without an extension.
-        for extension in [".exe", ".cmd", ".bat"] {
-            let candidate = format!("{stem}{extension}");
-            if tokio::fs::metadata(layout.resolve(&candidate))
-                .await
-                .is_ok_and(|metadata| metadata.is_file())
-            {
-                tool.target_path = candidate;
-                break;
-            }
+/// Refuses a binary whose manifest `target_path` is not a regular file of the staged tree.
+///
+/// The path is derived from metadata alone, so `--manifest-only` and a full run emit the same one; this is
+/// where a full run proves it.
+async fn ensure_binary_targets_exist(layout: &VendorLayout, tools: &[Tool]) -> Result<(), VendorError> {
+    for tool in tools.iter().filter(|tool| tool.kind == ToolKind::Binary) {
+        let is_file = tokio::fs::metadata(layout.resolve(&tool.target_path))
+            .await
+            .is_ok_and(|metadata| metadata.is_file());
+        if !is_file {
+            return Err(VendorError::PathUnrepresentable {
+                path: format!(
+                    "binary `{}` is expected at {}, which the package content does not hold as a file; \
+                     a package whose program is a batch file or lives outside its first PATH directory must expose it as an entry point",
+                    tool.name, tool.target_path
+                ),
+            });
         }
     }
+    Ok(())
 }
 
 /// Pulls one package into the staging tree and lists what landed.
@@ -1019,6 +1031,7 @@ async fn write_entrypoint_launchers(
     layout: &VendorLayout,
     manifest: &VendorManifest,
     declared: &HashMap<String, Entrypoints>,
+    forbidden: &[String],
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
@@ -1030,14 +1043,12 @@ async fn write_entrypoint_launchers(
         let Some(entries) = declared.get(&package.digest) else {
             continue;
         };
-        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|error| crate::error::file_error(&dir, error))?;
         // Baked arguments name the content directory; `${deps.*}` is refused by the usage gate, as at launch.
         let install_path = PathBuf::from(format!("{DIR_TOKEN}/{}", package.content_dir));
         let no_dependencies = HashMap::new();
         let resolver = TemplateResolver::new(&install_path, &no_dependencies).usage(Usage::EntryPointArgs);
+        // Program resolution is async, so every sidecar is built before the generator asks for one.
+        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
         for entry in &package.entrypoints {
             let environment = environment_of(manifest, &entry.environment)?;
             let program = resolve_program(
@@ -1053,23 +1064,40 @@ async fn write_entrypoint_launchers(
                 .unwrap_or_default()
                 .iter()
                 .map(|arg| {
-                    resolver
-                        .resolve(arg)
-                        .map_err(|error| VendorError::ValueUnrepresentable {
-                            reason: format!("entry point '{}' argument '{arg}': {error}", entry.name),
-                        })
+                    let refused = |reason: String| VendorError::ValueUnrepresentable {
+                        reason: format!("entry point '{}' argument '{arg}': {reason}", entry.name),
+                    };
+                    // The token is the writer's: an author who spells it would be rewritten onto `DIR`.
+                    if arg.contains(DIR_TOKEN) {
+                        return Err(refused(format!("the argument contains {DIR_TOKEN}")));
+                    }
+                    let resolved = resolver.resolve(arg).map_err(|error| refused(error.to_string()))?;
+                    check_value(&resolved, forbidden).map_err(refused)?;
+                    Ok(resolved)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let sidecar = sidecar_of(
-                &manifest.vendor_id,
-                &entry.launcher_path,
-                windows,
-                program,
-                args,
-                &environment.items,
+            sidecars.insert(
+                &entry.name,
+                sidecar_of(
+                    &manifest.vendor_id,
+                    &entry.launcher_path,
+                    windows,
+                    program,
+                    args,
+                    &environment.items,
+                ),
             );
-            crate::launcher::direct::write_direct_launcher_for(&dir, &entry.name, blob, &sidecar, windows).await?;
         }
+        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
+        crate::launcher::generate_direct(entries, &dir, blob, windows, &|name| {
+            sidecars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| VendorError::ValueUnrepresentable {
+                    reason: format!("the manifest lists no launcher for entry point '{name}'"),
+                })
+        })
+        .await?;
     }
     Ok(())
 }
@@ -1081,25 +1109,41 @@ async fn write_selection_launchers(
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
-    for tool in &manifest.tools {
-        let Some(launcher_path) = &tool.launcher_path else {
-            continue;
-        };
-        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(&tool.selection));
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|error| crate::error::file_error(&dir, error))?;
-        let environment = environment_of(manifest, &tool.environment)?;
-        let program = format!("{DIR_TOKEN}/{}", tool.target_path);
-        let sidecar = sidecar_of(
-            &manifest.vendor_id,
-            launcher_path,
-            windows,
-            program,
-            Vec::new(),
-            &environment.items,
-        );
-        crate::launcher::direct::write_direct_launcher_for(&dir, &tool.name, blob, &sidecar, windows).await?;
+    // `manifest.tools` is the folded `exposed_names` answer, grouped by selection for the shared writer.
+    let mut by_selection: BTreeMap<&str, Vec<&Tool>> = BTreeMap::new();
+    for tool in manifest.tools.iter().filter(|tool| tool.launcher_path.is_some()) {
+        by_selection.entry(&tool.selection).or_default().push(tool);
+    }
+    for (selection, tools) in by_selection {
+        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
+        for tool in &tools {
+            let Some(launcher_path) = &tool.launcher_path else {
+                continue;
+            };
+            let environment = environment_of(manifest, &tool.environment)?;
+            sidecars.insert(
+                &tool.name,
+                sidecar_of(
+                    &manifest.vendor_id,
+                    launcher_path,
+                    windows,
+                    format!("{DIR_TOKEN}/{}", tool.target_path),
+                    Vec::new(),
+                    &environment.items,
+                ),
+            );
+        }
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(selection));
+        super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
+            sidecars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| VendorError::ValueUnrepresentable {
+                    reason: format!("the manifest lists no launcher for tool '{name}'"),
+                })
+        })
+        .await?;
     }
     Ok(())
 }
@@ -1125,9 +1169,12 @@ async fn resolve_program(
     windows: bool,
 ) -> Result<String, VendorError> {
     let names: Vec<String> = if windows {
-        [".exe", ".cmd", ".bat", ""]
-            .iter()
-            .map(|extension| format!("{command}{extension}"))
+        // The target host's PATHEXT is unknown here, so the default list; lowercased because the staged
+        // tree is probed on a case-sensitive filesystem where packages ship `tool.exe`.
+        ocx_config::env::pathext_extensions(None)
+            .into_iter()
+            .map(|extension| format!("{command}{}", extension.to_ascii_lowercase()))
+            .chain(std::iter::once(command.to_owned()))
             .collect()
     } else {
         vec![command.to_owned()]
@@ -1273,6 +1320,16 @@ pub(super) async fn list_tree(
                     .await
                     .map_err(|error| VendorError::Package(crate::Error::InternalFile(path.clone(), error)))?;
                 let target = target.to_str().ok_or_else(|| unrepresentable(&target))?.to_owned();
+                // `..` and `.` are the escape check's; every other segment must be a legal Windows name,
+                // so `..\x`, `C:\x` and device names cannot hide in a single Unix-legal segment.
+                if platform_is_windows
+                    && target
+                        .split('/')
+                        .filter(|segment| !matches!(*segment, "" | "." | ".."))
+                        .any(|segment| ocx_env_apply::windows_path::check_segment(segment).is_err())
+                {
+                    return Err(unrepresentable(Path::new(&target)));
+                }
                 directories_with_links.insert(relative_directory.clone());
                 links.push(LinkEntry { path: relative, target });
             } else if file_type.is_file() {
@@ -1282,7 +1339,7 @@ pub(super) async fn list_tree(
                     .map_err(|error| VendorError::Package(crate::Error::InternalFile(path.clone(), error)))?;
                 files.push(FileEntry {
                     path: relative,
-                    executable: is_executable(&metadata),
+                    executable: ocx_package::bin_scan::unix_is_executable(&metadata),
                 });
             } else {
                 return Err(unrepresentable(&path));
@@ -1346,17 +1403,6 @@ fn relative_path(layout: &VendorLayout, path: &Path, platform_is_windows: bool) 
     VendorLayout::check_relative_path(&relative, platform_is_windows)
         .map_err(|violation| unrepresentable(format!("{relative} ({violation:?})")))?;
     Ok(relative)
-}
-
-#[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn is_executable(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(test)]
@@ -1503,39 +1549,71 @@ mod tests {
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
     }
 
-    /// A Windows binary's target is the file the content holds, `.exe` only as the fallback guess.
-    #[tokio::test]
-    async fn a_windows_binary_target_is_the_file_the_content_holds() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = VendorLayout::new(dir.path());
-        std::fs::create_dir_all(layout.resolve("pkg/content/bin")).expect("bin dir");
-        std::fs::write(layout.resolve("pkg/content/bin/hello.bat"), b"@echo off").expect("batch file");
-        let tool = |name: &str, kind: ToolKind| Tool {
-            name: name.to_owned(),
+    fn binary_tool(target_path: &str, kind: ToolKind) -> Tool {
+        Tool {
+            name: "hello".to_owned(),
             selection: SELECTION_ID.to_owned(),
             kind,
             package: "sha256:0".to_owned(),
             environment: SELECTION_ENVIRONMENT.to_owned(),
-            target_path: format!("pkg/content/bin/{name}.exe"),
+            target_path: target_path.to_owned(),
             launcher_path: None,
-        };
-        let mut tools = vec![
-            tool("hello", ToolKind::Binary),
-            tool("missing", ToolKind::Binary),
-            tool("hello", ToolKind::Entrypoint),
-        ];
+        }
+    }
 
-        settle_windows_binary_targets(&layout, &mut tools).await;
+    /// A binary absent at its manifest path is refused, a batch file beside the `.exe` guess does not stand in
+    /// for it, and an entry point is never checked here.
+    #[tokio::test]
+    async fn a_binary_target_the_content_lacks_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = VendorLayout::new(dir.path());
+        std::fs::create_dir_all(layout.resolve("pkg/content/bin")).expect("bin dir");
+        std::fs::write(layout.resolve("pkg/content/bin/hello.cmd"), b"@echo off").expect("batch file");
+        std::fs::write(layout.resolve("pkg/content/bin/present"), b"x").expect("file");
 
-        assert_eq!(tools[0].target_path, "pkg/content/bin/hello.bat");
-        assert_eq!(
-            tools[1].target_path, "pkg/content/bin/missing.exe",
-            "nothing found keeps the guess"
+        let windows = binary_tool("pkg/content/bin/hello.exe", ToolKind::Binary);
+        let error = ensure_binary_targets_exist(&layout, &[windows])
+            .await
+            .expect_err("only hello.cmd exists");
+        assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("hello")
+                && message.contains("pkg/content/bin/hello.exe")
+                && message.contains("entry point"),
+            "{message}"
         );
-        assert_eq!(
-            tools[2].target_path, "pkg/content/bin/hello.exe",
-            "an entry point launcher is never re-pointed"
-        );
+
+        let unix = binary_tool("pkg/content/bin/hello", ToolKind::Binary);
+        assert!(ensure_binary_targets_exist(&layout, &[unix]).await.is_err());
+
+        let mut present = binary_tool("pkg/content/bin/present", ToolKind::Binary);
+        present.name = "present".to_owned();
+        let entrypoint = binary_tool("pkg/content/bin/hello.exe", ToolKind::Entrypoint);
+        ensure_binary_targets_exist(&layout, &[present, entrypoint])
+            .await
+            .expect("control: a present file passes and an entry point is skipped");
+    }
+
+    /// The manifest-only path for a binary is the path a full run checks, so both modes agree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_binary_target_is_the_same_path_the_full_run_accepts() {
+        let (_dir, _, manifest) = staged_tool(&[]).await;
+        let binary = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.kind == ToolKind::Binary)
+            .expect("the cmake binary");
+        let (_dir, layout, _) = staged_tool(std::slice::from_ref(&binary.target_path)).await;
+
+        ensure_binary_targets_exist(&layout, &manifest.tools)
+            .await
+            .expect("a file at the manifest-only path passes");
+        let (_dir, layout, _) = staged_tool(&[]).await;
+        let error = ensure_binary_targets_exist(&layout, &manifest.tools)
+            .await
+            .expect_err("no file at that path");
+        assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
     }
 
     /// `aux.h` is an ordinary file name everywhere but a Windows target.
@@ -1549,6 +1627,61 @@ mod tests {
         let error = list_tree(&layout, CONTENT, true).await.expect_err("a Windows target");
 
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+    }
+
+    /// Link targets a Unix host accepts as one plain segment are refused for a Windows target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_target_breaking_windows_rules_is_refused_only_for_a_windows_target() {
+        for target in ["..\\x", "C:\\x", "sub/CON", "a:b"] {
+            let (_root, layout) = tree_root(&["bin/tool", "bin/sub/x"]);
+            link(&layout, "bin/l", target);
+
+            list_tree(&layout, CONTENT, false)
+                .await
+                .unwrap_or_else(|error| panic!("a Linux target keeps {target:?}: {error:?}"));
+            let error = list_tree(&layout, CONTENT, true)
+                .await
+                .expect_err("a Windows target refuses it");
+            assert!(
+                matches!(error, VendorError::PathUnrepresentable { .. }),
+                "{target:?}: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plain_relative_link_target_is_accepted_on_both_platforms() {
+        for windows in [false, true] {
+            let (_root, layout) = tree_root(&["bin/tool", "share/doc/readme.txt"]);
+            link(&layout, "bin/up", "../share/doc/readme.txt");
+            link(&layout, "bin/same", "tool");
+
+            let tree = list_tree(&layout, CONTENT, windows).await.expect("plain targets list");
+
+            assert_eq!(tree.links.len(), 2, "windows={windows}");
+        }
+    }
+
+    /// A Windows entry point resolves in the default PATHEXT order (`.bat` before `.cmd`), the bare name last.
+    #[tokio::test]
+    async fn a_windows_program_resolves_in_the_default_pathext_order() {
+        let (_root, layout) = tree_root(&["bin/tool.cmd", "bin/tool.bat", "bin/other"]);
+        let items = [EnvironmentItem {
+            key: "PATH".to_owned(),
+            kind: ModifierKind::Path,
+            value: format!("{DIR_TOKEN}/{CONTENT}/bin"),
+            separator: None,
+        }];
+
+        let both = resolve_program(&layout, &items, "tool", true).await.expect("resolves");
+        let bare = resolve_program(&layout, &items, "other", true)
+            .await
+            .expect("bare name");
+
+        assert_eq!(both, format!("{DIR_TOKEN}/{CONTENT}/bin/tool.bat"));
+        assert_eq!(bare, format!("{DIR_TOKEN}/{CONTENT}/bin/other"));
     }
 
     // ── Selection half: closure, shared platforms, trust ─────────────────────
@@ -1567,7 +1700,7 @@ mod tests {
         "linux/amd64".parse().expect("platform")
     }
 
-    fn manager_over(root: &Path, source: FakeManifestSource) -> PackageManager {
+    fn manager_over(root: &Path, source: impl ocx_index::IndexImpl + 'static) -> PackageManager {
         let fs = FileStructure::with_root(root.to_path_buf());
         // As the CLI wires it: a fetched blob is kept in the home, which the closure read depends on.
         let index = Index::from_chained_with_content_store(
@@ -1895,6 +2028,119 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    /// A source that declares publishers for the repository `dep` only, as a fetched index root does.
+    #[derive(Clone)]
+    struct DeclaringSource(FakeManifestSource);
+
+    #[async_trait::async_trait]
+    impl ocx_index::IndexImpl for DeclaringSource {
+        async fn list_repositories(&self, registry: &str) -> ocx_index::error::Result<Vec<String>> {
+            self.0.list_repositories(registry).await
+        }
+        async fn list_tags(&self, identifier: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
+            self.0.list_tags(identifier).await
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &PackageRef,
+            op: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<(Digest, ocx_oci::Manifest)>> {
+            self.0.fetch_manifest(identifier, op).await
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &PackageRef,
+            op: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<Digest>> {
+            self.0.fetch_manifest_digest(identifier, op).await
+        }
+        async fn fetch_blob(&self, blob_ref: &PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
+            self.0.fetch_blob(blob_ref).await
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &PackageRef,
+        ) -> ocx_index::error::Result<Option<(Vec<u8>, Digest, ocx_oci::Manifest)>> {
+            self.0.fetch_manifest_raw_bytes(identifier).await
+        }
+        async fn declared_publishers(
+            &self,
+            identifier: &PackageRef,
+        ) -> ocx_index::error::Result<ocx_index::DeclaredPublishers> {
+            if identifier.repository() != "dep" {
+                return Ok(ocx_index::DeclaredPublishers::Undeclared);
+            }
+            Ok(ocx_index::DeclaredPublishers::Declared(serde_json::json!([{
+                "kind": "keyless", "identity": "publisher@example.com",
+                "oidc_issuer": "https://issuer.example.com",
+            }])))
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn source_kind(&self) -> ocx_index::SourceKind {
+            ocx_index::SourceKind::Published
+        }
+        fn box_clone(&self) -> Box<dyn ocx_index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A package reached both as a pinned dependency and as a tagged root still runs the publisher check its tag
+    /// owes, whichever the closure walk meets first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tagged_root_is_verified_though_it_is_also_a_pinned_dependency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, dependency) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let edge = serde_json::json!([{
+            "identifier": format!("{REGISTRY}/dep@{dependency}"), "visibility": "public", "name": "dep",
+        }]);
+        let (source, tool) = register_leaf(source, edge);
+        let source = register_index(source, "1.0", &tool, &[("linux", "amd64")]);
+        let source = DeclaringSource(register_index(source, "dep-1.0", &dependency, &[("linux", "amd64")]));
+        let manager = manager_over(dir.path(), source);
+        let config: ocx_config::Config = toml::from_str("").expect("config");
+        let verifying = manager
+            .clone()
+            .with_auto_verify(Some(crate::AutoVerify::new(crate::AutoVerifyInput {
+                operator_policies: Vec::new(),
+                project_policies: Vec::new(),
+                config,
+                registry_client: ocx_oci::Client::with_transport(Box::new(
+                    ocx_oci::client::test_transport::StubTransport::new(
+                        ocx_oci::client::test_transport::StubTransportData::new(),
+                    ),
+                )),
+                rekor_url: "http://127.0.0.1:3000".parse().expect("url"),
+                offline: true,
+                state: ocx_store::file_structure::StateStore::new(dir.path().join("state")),
+                trusted_root_env: None,
+                sigstore_trust: None,
+                home_trusted_root: None,
+                user_opted_out: false,
+            })));
+        let tagged_dep = || package("dep", "dep-1.0");
+
+        select(
+            &verifying,
+            &packages_request(vec![package("tool", "1.0")], linux_amd64()),
+        )
+        .await
+        .expect("control: a pinned dependency declares nothing, so the dependency alone passes");
+        select(&verifying, &packages_request(vec![tagged_dep()], linux_amd64()))
+            .await
+            .expect_err("control: the tagged request adopts the declared publishers and finds no signature");
+
+        for (order, roots) in [
+            ("dependency first", vec![package("tool", "1.0"), tagged_dep()]),
+            ("tagged root first", vec![tagged_dep(), package("tool", "1.0")]),
+        ] {
+            select(&verifying, &packages_request(roots, linux_amd64()))
+                .await
+                .expect_err(&format!("{order}: the tagged root's publisher check must run"));
+        }
     }
 
     /// A vendor run into an absent directory writes its manifest.
@@ -2235,6 +2481,77 @@ mod tests {
         assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
         assert!(output.join("keep").is_file(), "DIR is left as it was");
     }
+    async fn manifest_for_publish(dir: &Path) -> VendorManifest {
+        let (source, _, _) = registered_tool();
+        let manager = manager_over(&dir.join("home"), source);
+        let request = packages_request(vec![package("tool", "1.0")], linux_amd64());
+        let selection = select(&manager, &request).await.expect("the selection reads");
+        build_manifest(&manager, &request, &selection, &|_| true)
+            .await
+            .expect("manifest")
+    }
+
+    /// A `DIR` that gained content after the early check is the user's output-not-empty refusal and stays as it was.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dir_that_gains_a_file_before_publish_is_refused_and_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        let output = dir.path().join("out");
+        std::fs::create_dir(&output).expect("empty DIR passes the early check");
+        let staged = stage(&output).await.expect("stages");
+        std::fs::write(output.join("late"), "late").expect("the file arrives after the check");
+
+        let error = publish(&output, staged, &manifest)
+            .await
+            .expect_err("non-empty at publish");
+
+        assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
+        assert_eq!(error.classify(), Some(ExitCode::UsageError));
+        assert_eq!(std::fs::read(output.join("late")).expect("kept"), b"late");
+        assert_eq!(std::fs::read_dir(&output).expect("dir").count(), 1);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("parent")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".ocx-vendor-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging is removed: {leftovers:?}");
+    }
+
+    /// A file at `DIR` is the same refusal.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_at_dir_at_publish_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        let output = dir.path().join("out");
+        let staged = stage(&output).await.expect("stages");
+        std::fs::write(&output, "a file").expect("a file takes the name");
+
+        let error = publish(&output, staged, &manifest).await.expect_err("a file at DIR");
+
+        assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
+        assert_eq!(std::fs::read(&output).expect("kept"), b"a file");
+    }
+
+    /// An absent or empty `DIR` is published, and the empty one is replaced.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_absent_or_empty_dir_is_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = manifest_for_publish(dir.path()).await;
+        for name in ["absent", "empty"] {
+            let output = dir.path().join(name);
+            if name == "empty" {
+                std::fs::create_dir(&output).expect("dir");
+            }
+            publish(&output, stage(&output).await.expect("stages"), &manifest)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert!(output.join(MANIFEST_FILE).is_file(), "{name}");
+        }
+    }
+
     /// A symlink at `DIR` is refused even when it points at an empty directory; an absent `DIR` is free.
     #[cfg(unix)]
     #[tokio::test]
@@ -2309,7 +2626,7 @@ mod tests {
             serde_json::from_str(r#"{"hello":{"args":["--root","${installPath}/share"]}}"#).expect("entrypoints");
         let declared = HashMap::from([(package.digest.clone(), declared)]);
 
-        write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+        write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
             .await
             .expect("the launchers write");
 
@@ -2347,6 +2664,50 @@ mod tests {
         assert!(!sidecar.unset.is_empty(), "the writer fills the credential keys");
     }
 
+    /// A baked argument is held to the rules of an environment value: it never spells the vendor token itself.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_argument_spelling_the_vendor_token_is_unrepresentable() {
+        let files = {
+            let (_dir, _, manifest) = staged_tool(&[]).await;
+            let package = root_package(&manifest);
+            vec![format!("{}/bin/hello", package.content_dir)]
+        };
+        let (_dir, layout, manifest) = staged_tool(&files).await;
+        let package = root_package(&manifest);
+        let declared: Entrypoints =
+            serde_json::from_str(r#"{"hello":{"args":["--root=@VENDOR_DIR@/x"]}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
+            .await
+            .expect_err("the token is the writer's, not the author's");
+
+        assert!(matches!(error, VendorError::ValueUnrepresentable { .. }), "{error:?}");
+        assert!(!layout.resolve(&package.entrypoints[0].launcher_path).exists());
+    }
+
+    /// A baked argument naming this machine's home or `DIR` would leave the directory non-relocatable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entrypoint_argument_holding_a_host_path_is_unrepresentable() {
+        let files = {
+            let (_dir, _, manifest) = staged_tool(&[]).await;
+            let package = root_package(&manifest);
+            vec![format!("{}/bin/hello", package.content_dir)]
+        };
+        let (_dir, layout, manifest) = staged_tool(&files).await;
+        let package = root_package(&manifest);
+        let declared: Entrypoints =
+            serde_json::from_str(r#"{"hello":{"args":["--home=/home/me/.ocx/x"]}}"#).expect("entrypoints");
+        let declared = HashMap::from([(package.digest.clone(), declared)]);
+        let forbidden = ["/home/me/.ocx".to_owned()];
+
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &forbidden, b"blob", false)
+            .await
+            .expect_err("the host path survives the replacement");
+
+        assert!(matches!(error, VendorError::ValueUnrepresentable { .. }), "{error:?}");
+    }
+
     /// A command no `PATH` entry of the environment holds has no program to start.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_entrypoint_command_on_no_path_entry_is_unrepresentable() {
@@ -2355,7 +2716,7 @@ mod tests {
         let declared: Entrypoints = serde_json::from_str(r#"{"hello":{}}"#).expect("entrypoints");
         let declared = HashMap::from([(package.digest.clone(), declared)]);
 
-        let error = write_entrypoint_launchers(&layout, &manifest, &declared, b"blob", false)
+        let error = write_entrypoint_launchers(&layout, &manifest, &declared, &[], b"blob", false)
             .await
             .expect_err("nothing to start");
 

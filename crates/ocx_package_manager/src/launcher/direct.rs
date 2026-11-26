@@ -5,22 +5,12 @@
 
 use std::path::Path;
 
-use ocx_env::Propagation;
 use ocx_env_apply::direct::{DirectSidecar, SidecarError};
 use ocx_store::file_structure::normalise_written_file;
 
 use super::generate::write_launcher_file;
+use crate::exec_env::unforwarded_keys;
 use crate::tasks::vendor::VendorError;
-
-/// [`write_direct_launcher_for`] for the platform this process runs on.
-pub async fn write_direct_launcher(
-    dir: &Path,
-    name: &str,
-    blob: &[u8],
-    sidecar: &DirectSidecar,
-) -> Result<(), VendorError> {
-    write_direct_launcher_for(dir, name, blob, sidecar, cfg!(windows)).await
-}
 
 /// Writes the launcher `<name>` (`<name>.exe` for a Windows target) as a byte copy of `blob`, then `<name>.direct`.
 ///
@@ -40,6 +30,16 @@ pub async fn write_direct_launcher_for(
     sidecar: &DirectSidecar,
     windows: bool,
 ) -> Result<(), VendorError> {
+    // Launcher `X.direct` is the file tool `X`'s sidecar needs; case-folded for a case-insensitive target filesystem.
+    let suffix = b".direct";
+    if !windows
+        && name.len() >= suffix.len()
+        && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    {
+        return Err(VendorError::PathUnrepresentable {
+            path: format!("{name}: a launcher name ends in the sidecar suffix .direct"),
+        });
+    }
     let mut sidecar = sidecar.clone();
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
@@ -49,8 +49,7 @@ pub async fn write_direct_launcher_for(
             reason: other.to_string(),
         },
     })?;
-    let body = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| VendorError::ValueUnrepresentable { reason: e.to_string() })?;
+    let body = serde_json::to_string_pretty(&sidecar).map_err(crate::Error::from)?;
 
     let launcher = dir.join(if windows {
         format!("{name}.exe")
@@ -64,21 +63,27 @@ pub async fn write_direct_launcher_for(
     let sidecar_path = dir.join(format!("{name}.direct"));
     write_launcher_file(sidecar_path.clone(), body).await?;
     // The host umask and clock must not reach the vendored bytes.
+    let normalised = launcher.clone();
     tokio::task::spawn_blocking(move || {
         normalise_written_file(&launcher, 0o755)?;
         normalise_written_file(&sidecar_path, 0o644)
     })
     .await
-    .map_err(|e| VendorError::ValueUnrepresentable { reason: e.to_string() })?
+    .map_err(|e| join_failed(&normalised, e))?
     .map_err(|e| crate::error::file_error(&e.path, e.cause))?;
     Ok(())
 }
 
+fn join_failed(path: &Path, error: tokio::task::JoinError) -> VendorError {
+    VendorError::Package(crate::Error::InternalFile(
+        path.to_path_buf(),
+        std::io::Error::other(error),
+    ))
+}
+
 /// Keys removed from the child's environment, sorted for a reproducible sidecar.
 fn unset_keys() -> Vec<String> {
-    let mut keys: Vec<String> = [Propagation::Credential, Propagation::HookLocal, Propagation::State]
-        .into_iter()
-        .flat_map(ocx_env::keys_with)
+    let mut keys: Vec<String> = unforwarded_keys()
         .chain(["OCX_BINARY_PIN"])
         .map(str::to_owned)
         .collect();
@@ -91,7 +96,9 @@ fn unset_keys() -> Vec<String> {
 mod tests {
     use ocx_env_apply::direct::{DirectSidecar, EnvRecord};
 
-    use super::{write_direct_launcher, write_direct_launcher_for};
+    use ocx_exit::{ClassifyExitCode, ExitCode};
+
+    use super::{join_failed, write_direct_launcher_for};
     use crate::tasks::vendor::VendorError;
 
     fn sidecar(name: &str) -> DirectSidecar {
@@ -117,7 +124,7 @@ mod tests {
         let dir = tmp.path().join("bin");
         std::fs::create_dir_all(&dir).expect("create dir");
 
-        write_direct_launcher(&dir, "tool", &bytes, &sidecar("bin/tool"))
+        write_direct_launcher_for(&dir, "tool", &bytes, &sidecar("bin/tool"), cfg!(windows))
             .await
             .expect("writer succeeds");
 
@@ -135,8 +142,23 @@ mod tests {
 
     async fn write(sidecar: &DirectSidecar) -> (tempfile::TempDir, Result<(), VendorError>) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let result = write_direct_launcher(tmp.path(), "tool", b"blob", sidecar).await;
+        let result = write_direct_launcher_for(tmp.path(), "tool", b"blob", sidecar, cfg!(windows)).await;
         (tmp, result)
+    }
+
+    /// A name ending `.direct` would write its launcher over another tool's sidecar; a Windows launcher is `.exe`, so only a Unix one collides.
+    #[tokio::test]
+    async fn a_launcher_name_ending_in_the_sidecar_suffix_is_refused() {
+        for name in ["tool.direct", "tool.DIRECT"] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let result = write_direct_launcher_for(tmp.path(), name, b"blob", &sidecar("bin/tool"), false).await;
+            assert!(matches!(result, Err(VendorError::PathUnrepresentable { .. })), "{name}");
+            assert_eq!(std::fs::read_dir(tmp.path()).expect("dir").count(), 0, "{name}");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_direct_launcher_for(tmp.path(), "tool.direct", b"blob", &sidecar("bin/tool"), true)
+            .await
+            .expect("tool.direct.exe collides with no sidecar");
     }
 
     /// A `program` outside the root is refused with nothing written; a well-formed one is written.
@@ -241,5 +263,17 @@ mod tests {
             assert_eq!(metadata.permissions().mode() & 0o777, mode, "{file} mode");
             assert_eq!(metadata.modified().expect("mtime"), epoch, "{file} mtime");
         }
+    }
+
+    /// A panicked blocking task is an internal I/O failure naming the launcher, not a refused value.
+    #[tokio::test]
+    async fn join_failure_is_an_internal_file_error() {
+        let error = tokio::task::spawn_blocking(|| panic!("boom"))
+            .await
+            .expect_err("task panicked");
+        let failure = join_failed(std::path::Path::new("bin/tool"), error);
+        assert_eq!(failure.classify(), Some(ExitCode::IoError));
+        let text = failure.to_string();
+        assert!(text.contains("bin/tool") && text.contains("panic"), "{text}");
     }
 }

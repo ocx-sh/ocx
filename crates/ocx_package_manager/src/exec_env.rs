@@ -245,10 +245,16 @@ const SYSTEM_ROOT: &str = "SystemRoot";
 /// Removes what never reaches a child from the caller: credentials, hook-local bookkeeping and the
 /// received state, which [`project`] replaces with the one it encodes.
 fn remove_unforwarded(env: &mut Env) {
-    let unforwarded = [Propagation::Credential, Propagation::HookLocal, Propagation::State];
-    for key in unforwarded.into_iter().flat_map(ocx_env::keys_with) {
+    for key in unforwarded_keys() {
         env.remove(key);
     }
+}
+
+/// The variables no child inherits from the caller; shared with the direct launcher's sidecar.
+pub(crate) fn unforwarded_keys() -> impl Iterator<Item = &'static str> {
+    [Propagation::Credential, Propagation::HookLocal, Propagation::State]
+        .into_iter()
+        .flat_map(ocx_env::keys_with)
 }
 
 /// Sets `OCX_BINARY_PIN`, or removes it when the pin is unknown. Never writes an empty value.

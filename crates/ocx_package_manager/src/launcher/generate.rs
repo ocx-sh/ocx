@@ -13,7 +13,7 @@ use ocx_store::file_structure::{FileStructure, ShimBinStore};
 #[cfg(windows)]
 use super::body::shim_sidecar_body;
 use super::body::{unix_launcher_body, utf8_baked_path};
-use super::direct::write_direct_launcher;
+use super::direct::write_direct_launcher_for;
 use super::safety::LauncherSafeString;
 use crate::tasks::vendor::VendorError;
 use ocx_env_apply::direct::DirectSidecar;
@@ -82,17 +82,20 @@ pub async fn generate(
     Ok(())
 }
 
-/// Writes one direct launcher per entry point of a vendored package into `dest` (see [`write_direct_launcher`]);
-/// `sidecar_for` yields the sidecar of a name, its private environment already composed. Empty `entries` creates nothing.
+/// Writes one direct launcher per entry point of a vendored package into `dest` (see [`write_direct_launcher_for`]);
+/// `windows` is the target's. `sidecar_for` yields the sidecar of a name, its private environment already composed.
+/// Empty `entries` creates nothing.
 ///
 /// # Errors
 ///
-/// As [`write_direct_launcher`], or a failed `dest` creation as [`VendorError::Package`].
+/// As [`write_direct_launcher_for`], a failed `dest` creation as [`VendorError::Package`], or whatever `sidecar_for`
+/// returns.
 pub async fn generate_direct(
     entries: &Entrypoints,
     dest: &Path,
     blob: &[u8],
-    sidecar_for: &dyn Fn(&str) -> DirectSidecar,
+    windows: bool,
+    sidecar_for: &dyn Fn(&str) -> Result<DirectSidecar, VendorError>,
 ) -> Result<(), VendorError> {
     if entries.is_empty() {
         return Ok(());
@@ -101,7 +104,7 @@ pub async fn generate_direct(
         .await
         .map_err(|e| crate::error::file_error(dest, e))?;
     for (name, _entry) in entries.iter() {
-        write_direct_launcher(dest, name.as_str(), blob, &sidecar_for(name.as_str())).await?;
+        write_direct_launcher_for(dest, name.as_str(), blob, &sidecar_for(name.as_str())?, windows).await?;
     }
     Ok(())
 }
@@ -278,8 +281,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dest = tmp.path().join("entrypoints");
         let entries = Entrypoints::from_names(["alpha", "beta"]);
-        let sidecar_for = |name: &str| -> DirectSidecar {
-            serde_json::from_value(serde_json::json!({
+        let sidecar_for = |name: &str| -> Result<DirectSidecar, super::VendorError> {
+            Ok(serde_json::from_value(serde_json::json!({
                 "schema_version": 1,
                 "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
                 "self": format!("packages/p/entrypoints/{name}"),
@@ -288,10 +291,10 @@ mod tests {
                 "unset": [],
                 "env": [],
             }))
-            .expect("fixture decodes")
+            .expect("fixture decodes"))
         };
 
-        generate_direct(&entries, &dest, b"blob", &sidecar_for)
+        generate_direct(&entries, &dest, b"blob", cfg!(windows), &sidecar_for)
             .await
             .expect("generate succeeds");
 
@@ -314,6 +317,7 @@ mod tests {
             &Entrypoints::from_names::<[&str; 0], &str>([]),
             &empty,
             b"blob",
+            cfg!(windows),
             &sidecar_for,
         )
         .await

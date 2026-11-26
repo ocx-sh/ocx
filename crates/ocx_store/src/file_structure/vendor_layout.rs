@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use ocx_env_apply::windows_path::{SegmentViolation, check_segment};
 use ocx_oci::Digest;
 use ocx_oci::cas_path::{CAS_SHARD_PREFIX_LEN, CAS_SHARD_TOTAL_LEN};
 use ocx_util::error::FileError;
@@ -26,7 +27,7 @@ pub enum PathViolation {
     Backslash,
     /// Windows targets only: `:`.
     Colon,
-    /// Windows targets only: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension.
+    /// Windows targets only: `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with any extension.
     DeviceName,
     /// Windows targets only: a segment ending in `.` or a space.
     TrailingDotOrSpace,
@@ -108,25 +109,12 @@ impl VendorLayout {
 }
 
 fn check_windows_segment(segment: &str) -> Result<(), PathViolation> {
-    if segment.contains('\\') {
-        return Err(PathViolation::Backslash);
-    }
-    if segment.contains(':') {
-        return Err(PathViolation::Colon);
-    }
-    // Windows resolves `NUL.txt` to the device too, so only the part before the first dot names it.
-    let stem = segment.split('.').next().unwrap_or(segment).to_ascii_uppercase();
-    let is_numbered = |prefix: &str| {
-        stem.strip_prefix(prefix)
-            .is_some_and(|digit| matches!(digit.as_bytes(), [b'1'..=b'9']))
-    };
-    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || is_numbered("COM") || is_numbered("LPT") {
-        return Err(PathViolation::DeviceName);
-    }
-    if segment.ends_with(['.', ' ']) {
-        return Err(PathViolation::TrailingDotOrSpace);
-    }
-    Ok(())
+    check_segment(segment).map_err(|violation| match violation {
+        SegmentViolation::Backslash => PathViolation::Backslash,
+        SegmentViolation::Colon => PathViolation::Colon,
+        SegmentViolation::DeviceName => PathViolation::DeviceName,
+        SegmentViolation::TrailingDotOrSpace => PathViolation::TrailingDotOrSpace,
+    })
 }
 
 /// A fresh sibling directory of `DIR` that is built whole, then renamed onto `DIR` or removed.
@@ -176,18 +164,12 @@ impl StagedTree {
     /// # Errors
     ///
     /// The target is a non-empty directory, a symlink or a file, or the rename failed; the
-    /// staging directory is removed and `target` is as it was.
+    /// staging directory is removed and `target` is as it was. A refused target carries the
+    /// io kind `DirectoryNotEmpty`, `NotADirectory` or `AlreadyExists`.
     pub fn publish(self) -> Result<(), FileError> {
         normalise_tree(self.staging.path())?;
-        // `remove_dir` is the emptiness check and the removal in one call: a non-empty or
-        // non-directory target fails here untouched, where list-then-remove would race.
-        match std::fs::remove_dir(&self.target) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(FileError::new(&self.target, error)),
-        }
         let staging = self.staging.keep();
-        rename_tree(&staging, &self.target).map_err(|error| {
+        replace_target(&staging, &self.target).map_err(|error| {
             // The tree is ours alone; leaving it would strand a full copy beside `DIR`.
             let _ = std::fs::remove_dir_all(&staging);
             FileError::new(&self.target, error)
@@ -203,6 +185,31 @@ impl StagedTree {
         let staging = self.staging.path().to_path_buf();
         self.staging.close().map_err(|error| FileError::new(staging, error))
     }
+}
+
+/// `rename(2)` replaces an empty directory atomically and refuses a non-empty one, a file or a link,
+/// so nothing is removed first and a `DIR` created after the caller's check is never lost.
+#[cfg(not(windows))]
+fn replace_target(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_tree(from, to)
+}
+
+/// Windows cannot rename onto an existing directory, so an empty one is removed first; `remove_dir`
+/// is the emptiness check, and a link is refused beforehand because it would remove the link itself.
+#[cfg(windows)]
+fn replace_target(from: &Path, to: &Path) -> std::io::Result<()> {
+    if ocx_util::fs::symlink::is_link(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "the target is a symlink or junction",
+        ));
+    }
+    match std::fs::remove_dir(to) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    rename_tree(from, to)
 }
 
 #[expect(
@@ -386,8 +393,20 @@ mod tests {
 
     #[test]
     fn similar_names_are_not_device_names() {
-        for path in ["console", "com0", "com10", "lpt", "nul-x"] {
+        for path in ["console", "com10", "lpt", "nul-x"] {
             assert_eq!(VendorLayout::check_relative_path(path, true), Ok(()), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn numbered_device_names_include_zero() {
+        for path in ["COM0", "x/lpt0.txt"] {
+            assert_eq!(
+                VendorLayout::check_relative_path(path, true),
+                Err(PathViolation::DeviceName),
+                "{path:?}"
+            );
+            assert_eq!(VendorLayout::check_relative_path(path, false), Ok(()), "{path:?}");
         }
     }
 
@@ -465,6 +484,27 @@ mod tests {
             staging_siblings(parent.path()).is_empty(),
             "a failed publish removes staging"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_refuses_a_non_empty_target_and_a_file_with_a_distinguishable_kind() {
+        use std::io::ErrorKind;
+        let parent = tempfile::tempdir().unwrap();
+        let full = parent.path().join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("keep"), b"keep").unwrap();
+        let file = parent.path().join("file");
+        std::fs::write(&file, b"a file").unwrap();
+
+        for (target, kind) in [(&full, ErrorKind::DirectoryNotEmpty), (&file, ErrorKind::NotADirectory)] {
+            let error = StagedTree::create(target).unwrap().publish().unwrap_err();
+            assert_eq!(error.cause.kind(), kind, "{target:?}");
+        }
+
+        assert_eq!(std::fs::read(full.join("keep")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&file).unwrap(), b"a file");
+        assert!(staging_siblings(parent.path()).is_empty());
     }
 
     #[test]
