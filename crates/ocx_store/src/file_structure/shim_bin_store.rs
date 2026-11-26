@@ -2,28 +2,16 @@
 // Copyright 2026 The OCX Authors
 
 //! The embedded `ocx-shim` blob every Windows launcher hardlinks: one inode, one signature, one Defender scan.
+//!
+//! Content-addressed, so a blob per target triple needs no further key: each triple's bytes have their own digest.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
 /// Forces [`ShimBinStore::ensure`] down its lost-race leg; valued by store root so it reaches exactly one store.
 #[cfg(any(test, feature = "__testing"))]
 const LOST_PUBLISH_RACE_SEAM: &ocx_env::EnvVar = &ocx_env::__OCX_TESTING_SHIM_LOST_PUBLISH_RACE;
-
-/// Hashes [`crate::shim::SHIM_BYTES`] rather than reading `SHIM_SHA256`, which is `""` off Windows and names no file.
-fn shim_digest() -> &'static ocx_oci::Digest {
-    static SHIM_DIGEST: OnceLock<ocx_oci::Digest> = OnceLock::new();
-    SHIM_DIGEST.get_or_init(|| {
-        let digest = ocx_oci::Algorithm::Sha256.hash(crate::shim::SHIM_BYTES);
-        debug_assert!(
-            crate::shim::SHIM_SHA256.is_empty() || digest.hex() == crate::shim::SHIM_SHA256,
-            "sha256(SHIM_BYTES) must equal the recorded SHIM_SHA256 corruption canary"
-        );
-        digest
-    })
-}
 
 /// A seam because no black-box input reaches the lost-race leg: pre-check and re-check test the same condition.
 #[cfg(any(test, feature = "__testing"))]
@@ -83,7 +71,7 @@ fn publish_with(temp: tempfile::NamedTempFile, target: &Path, publish: Publish) 
     }
 }
 
-/// Flat `{root}/<sha256-hex>.exe`; outside the GC tiers, so a superseded blob stays as accepted litter.
+/// Flat `{root}/<sha256-hex>.exe`, one entry per target blob; outside the GC tiers, so a superseded blob stays as accepted litter.
 #[derive(Debug, Clone)]
 pub struct ShimBinStore {
     root: PathBuf,
@@ -98,25 +86,38 @@ impl ShimBinStore {
         &self.root
     }
 
-    /// `.exe` on every host: the blob is always a Windows PE.
+    /// `.exe` on every host: only the Windows exec launcher is published here, and its blob is a PE.
     pub fn path(&self, digest: &ocx_oci::Digest) -> PathBuf {
         self.root.join(format!("{}.exe", digest.hex()))
     }
 
-    /// Publishes the embedded blob when absent or torn and returns its path; idempotent and lock-free.
+    /// Publishes the embedded blob of the host's target triple; see [`ensure_blob`](Self::ensure_blob).
+    ///
+    /// # Errors
+    ///
+    /// The host has no launcher blob, or [`ensure_blob`](Self::ensure_blob) fails.
+    pub async fn ensure(&self) -> Result<PathBuf> {
+        let blob = crate::shim::host_blob().ok_or_else(|| {
+            ocx_util::error::FileError::new(&self.root, std::io::Error::other("no launcher blob for this host"))
+        })?;
+        self.ensure_blob(blob).await
+    }
+
+    /// Publishes `blob` (an embedded [`crate::shim::blob_for`] image) when absent or torn and returns its path;
+    /// idempotent and lock-free.
     ///
     /// # Errors
     ///
     /// Creating the root, staging, or publishing fails with the target still absent.
-    pub async fn ensure(&self) -> Result<PathBuf> {
-        let target = self.path(shim_digest());
+    async fn ensure_blob(&self, blob: &'static [u8]) -> Result<PathBuf> {
+        let target = self.path(&ocx_oci::Algorithm::Sha256.hash(blob));
         let lost_race = simulated_lost_race(&self.root);
         let mut publish = Publish::OnlyIfAbsent;
 
         // Length, not existence: a crash can leave a torn blob that every hardlinked `<name>.exe` would run.
         if !lost_race {
             match tokio::fs::metadata(&target).await {
-                Ok(metadata) if crate::shim::published_blob_is_intact(metadata.len(), crate::shim::SHIM_BYTES) => {
+                Ok(metadata) if crate::shim::published_blob_is_intact(metadata.len(), blob) => {
                     return Ok(target);
                 }
                 Ok(metadata) => {
@@ -124,7 +125,7 @@ impl ShimBinStore {
                         "Published shim blob {} is {} bytes, expected {}; republishing over the torn write.",
                         target.display(),
                         metadata.len(),
-                        crate::shim::SHIM_BYTES.len()
+                        blob.len()
                     );
                     publish = Publish::OverTornBlob;
                 }
@@ -143,7 +144,7 @@ impl ShimBinStore {
         let published = target.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let mut temp = tempfile::NamedTempFile::new_in(&root)?;
-            std::io::Write::write_all(&mut temp, crate::shim::SHIM_BYTES)?;
+            std::io::Write::write_all(&mut temp, blob)?;
             temp.as_file().sync_data()?;
 
             match publish_staged(temp, &published, lost_race, publish) {
@@ -172,7 +173,7 @@ mod tests {
     use super::*;
 
     /// An arbitrary valid SHA-256 hex. Deliberately **not**
-    /// [`crate::shim::SHIM_SHA256`] — the layout golden must not churn when the
+    /// a blob digest — the layout golden must not churn when the
     /// committed blob is refreshed.
     const SHA256_HEX: &str = "43567c07f1a6b07b5e8dc052108c9d4c4a32130e18bcbd8a78c53af3e90325d9";
 
@@ -180,21 +181,19 @@ mod tests {
     /// `ensure()` re-published over an already-present file.
     const SENTINEL: &[u8] = b"not-the-shim-blob";
 
-    /// [`SENTINEL`] padded to the embedded blob's length.
+    /// [`SENTINEL`] padded to the blob's length.
     ///
-    /// C-001 narrowed `ensure()`'s pre-check from "present" to "present and
-    /// intact", and intactness is a length comparison against
-    /// [`crate::shim::SHIM_BYTES`]. A bare 17-byte `SENTINEL` therefore reads
-    /// as a torn write on a build that embeds a blob (Windows), where
-    /// `ensure()` would then republish over it — correctly, but for a
-    /// different question than the one the test below asks. Padding restores
-    /// the healthy length while the *content* still differs from the embedded
-    /// blob, which is what keeps "`ensure()` did not re-publish" observable.
-    /// Off Windows nothing is embedded and this is `SENTINEL` unchanged.
+    /// `ensure()`'s pre-check reads a wrong length as a torn write and republishes. Padding keeps the file
+    /// healthy-looking while its *content* still differs, which keeps "`ensure()` did not re-publish" observable.
     fn intact_length_sentinel() -> Vec<u8> {
         let mut bytes = SENTINEL.to_vec();
-        bytes.resize(SENTINEL.len().max(crate::shim::SHIM_BYTES.len()), b'.');
+        bytes.resize(SENTINEL.len().max(blob().len()), b'.');
         bytes
+    }
+
+    /// The Windows x86_64 launcher: the blob the exec launcher publishes on its commonest host.
+    fn blob() -> &'static [u8] {
+        crate::shim::blob_for(&"windows/amd64".parse().unwrap()).unwrap()
     }
 
     fn digest() -> ocx_oci::Digest {
@@ -261,20 +260,8 @@ mod tests {
 
     // ── C-001: `ensure()` ─────────────────────────────────────────────────
     //
-    // These run on EVERY host, deliberately. `crate::shim::SHIM_BYTES` is empty
-    // off Windows, so the content assertions are weak there — but the publish
-    // mechanics they pin (root creation, single-blob publication, the pre-check
-    // that skips a re-write, race convergence) are platform-independent, and
-    // Windows is not a host this suite ever runs on. Off-Windows `ensure()`
-    // publishing a zero-byte blob is the behaviour these encode; if it is made
-    // to refuse there instead, C-001 keeps NO host-runnable coverage at all —
-    // that is a design decision to take deliberately, not by cfg-gating this
-    // module away.
-    //
-    // They do not assert the exact file name `ensure()` chooses: off Windows
-    // `SHIM_SHA256` is `""` while `sha256(SHIM_BYTES)` is the empty-input
-    // digest, so the two plausible implementations disagree on a host that
-    // embeds no blob. Only the invariants both satisfy are pinned here.
+    // These run on every host: the blobs are embedded everywhere, so the publish mechanics (root creation,
+    // single-blob publication, the pre-check that skips a re-write, race convergence) are platform-independent.
 
     #[tokio::test]
     async fn ensure_creates_the_root_and_publishes_one_blob() {
@@ -283,7 +270,7 @@ mod tests {
         let store = ShimBinStore::new(root.clone());
         assert!(!root.exists(), "precondition: the store root must not exist yet");
 
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
 
         assert!(
             published.is_file(),
@@ -307,13 +294,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_publishes_the_host_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ShimBinStore::new(tmp.path().join("ocx-shim"));
+
+        let published = store.ensure().await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&published).await.unwrap(),
+            crate::shim::host_blob().unwrap(),
+            "`ensure()` publishes the blob of the host's own target triple"
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("ocx-shim");
         let store = ShimBinStore::new(root.clone());
 
-        let first = store.ensure().await.unwrap();
-        let second = store.ensure().await.unwrap();
+        let first = store.ensure_blob(blob()).await.unwrap();
+        let second = store.ensure_blob(blob()).await.unwrap();
 
         assert_eq!(first, second, "both calls must return the same path");
         assert_eq!(entries(&root), vec![first], "a second call must not add a second file");
@@ -324,12 +325,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = ShimBinStore::new(tmp.path().join("ocx-shim"));
 
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
 
         assert_eq!(
             tokio::fs::read(&published).await.unwrap(),
-            crate::shim::SHIM_BYTES,
-            "the published blob is `crate::shim::SHIM_BYTES` verbatim — the \
+            blob(),
+            "the published blob is the embedded blob verbatim — the \
              Authenticode verbatim-copy property every hardlinked `<name>.exe` \
              inherits"
         );
@@ -340,19 +341,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = ShimBinStore::new(tmp.path().join("ocx-shim"));
 
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
         // C-001: the blob is written "only when absent". Overwriting the
         // published file with a sentinel makes the pre-check observable — an
-        // implementation that publishes unconditionally replaces the sentinel
-        // (off Windows it would truncate it to zero bytes). The sentinel
-        // carries the embedded blob's LENGTH so the intactness half of the
-        // pre-check reads it as healthy on every host; see
-        // `intact_length_sentinel`.
+        // implementation that publishes unconditionally replaces the sentinel.
+        // The sentinel carries the blob's LENGTH so the intactness half of the
+        // pre-check reads it as healthy; see `intact_length_sentinel`.
         let sentinel = intact_length_sentinel();
         tokio::fs::write(&published, &sentinel).await.unwrap();
 
         assert_eq!(
-            store.ensure().await.unwrap(),
+            store.ensure_blob(blob()).await.unwrap(),
             published,
             "a present blob is still reported at the same path"
         );
@@ -367,46 +366,30 @@ mod tests {
     /// C-001's corrupt-blob pre-check, at its call site rather than in the
     /// predicate alone.
     ///
-    /// Host-dependent by construction, and it says so instead of pretending
-    /// otherwise: `published_blob_is_intact` admits every length when nothing
-    /// is embedded, so off Windows there is no torn state to detect and the
-    /// pre-check stays existence-only — that inertness is C-001's accepted
-    /// design, not an omission. The expectation branches on whether this build
-    /// embeds a blob at all, so on a Windows build this asserts the republish
-    /// and on Linux it asserts the documented inertness.
+    /// A blob whose length is not the embedded blob's is a torn write: republished, never served.
     #[tokio::test]
     async fn ensure_republishes_a_blob_whose_length_is_not_the_embedded_blob() {
-        /// One byte: never the embedded blob's length on a host that embeds
-        /// one, and the realistic torn shape — created, barely written.
+        /// One byte: never the blob's length, and the realistic torn shape — created, barely written.
         const TORN: &[u8] = b"\0";
 
         let tmp = tempfile::tempdir().unwrap();
         let store = ShimBinStore::new(tmp.path().join("ocx-shim"));
 
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
         tokio::fs::write(&published, TORN).await.unwrap();
 
         assert_eq!(
-            store.ensure().await.unwrap(),
+            store.ensure_blob(blob()).await.unwrap(),
             published,
             "the blob is reported at the same content-addressed path either way"
         );
 
-        let after = tokio::fs::read(&published).await.unwrap();
-        if crate::shim::SHIM_BYTES.is_empty() {
-            assert_eq!(
-                after, TORN,
-                "with nothing embedded there is no length to compare against, so \
-                 the pre-check stays existence-only and serves the file as-is"
-            );
-        } else {
-            assert_eq!(
-                after,
-                crate::shim::SHIM_BYTES,
-                "a torn blob must be republished — existence alone cannot tell it \
-                 from a healthy one, and it is hardlinked into every launcher"
-            );
-        }
+        assert_eq!(
+            tokio::fs::read(&published).await.unwrap(),
+            blob(),
+            "a torn blob must be republished — existence alone cannot tell it \
+             from a healthy one, and it is hardlinked into every launcher"
+        );
     }
 
     /// C-001 (corrected 2026-08-10): concurrent callers must all converge on
@@ -435,7 +418,7 @@ mod tests {
         let mut callers = tokio::task::JoinSet::new();
         for _ in 0..CALLERS {
             let store = store.clone();
-            callers.spawn(async move { store.ensure().await });
+            callers.spawn(async move { store.ensure_blob(blob()).await });
         }
 
         let mut published = Vec::with_capacity(CALLERS);
@@ -459,7 +442,7 @@ mod tests {
         );
         assert_eq!(
             tokio::fs::read(&published[0]).await.unwrap(),
-            crate::shim::SHIM_BYTES,
+            blob(),
             "the surviving blob is intact: correctness rests on content \
              identity, so a loser must never leave a truncated or partial file"
         );
@@ -474,7 +457,7 @@ mod tests {
     /// when its own `ensure()` returned. The store then holds one record per
     /// caller instead of one record per store, which is the #301 property
     /// inverted. Byte-equality cannot see it: every record carries the same
-    /// `SHIM_BYTES`. An in-place mutation of the surviving blob can.
+    /// the blob. An in-place mutation of the surviving blob can.
     ///
     /// The shape is `launcher::generate`'s: publish, then immediately link,
     /// once per declared name, all concurrently, against a **cold** store —
@@ -504,7 +487,7 @@ mod tests {
             let store = store.clone();
             let link = links.join(format!("name-{caller}.exe"));
             callers.spawn(async move {
-                let published = store.ensure().await?;
+                let published = store.ensure_blob(blob()).await?;
                 crate::hardlink::create(&published, &link)?;
                 Result::Ok(link)
             });
@@ -519,7 +502,7 @@ mod tests {
             );
         }
 
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
         std::fs::write(&published, MUTATED).expect("the store blob must be writable in place");
 
         for link in linked {
@@ -554,16 +537,15 @@ mod tests {
         // ── Winner present: the losing publish converges on the winner ──
         let root = tmp.path().join("winner");
         let store = ShimBinStore::new(root.clone());
-        let published = store.ensure().await.unwrap();
+        let published = store.ensure_blob(blob()).await.unwrap();
         // Stand in for the winner's bytes with content this call cannot have
-        // written, so "the winner's file survived" is observable off Windows
-        // where `SHIM_BYTES` is empty and byte-equality proves nothing.
+        // written, so "the winner's file survived" is observable.
         tokio::fs::write(&published, SENTINEL).await.unwrap();
 
         let env = ocx_env::overrides::lock();
         let seam = LOST_PUBLISH_RACE_SEAM;
         env.set(seam, root.to_str().expect("temp path is utf-8"));
-        let converged = store.ensure().await;
+        let converged = store.ensure_blob(blob()).await;
         env.remove(seam);
 
         assert_eq!(
@@ -587,7 +569,7 @@ mod tests {
         let empty_store = ShimBinStore::new(empty_root.clone());
 
         env.set(seam, empty_root.to_str().expect("temp path is utf-8"));
-        let propagated = empty_store.ensure().await;
+        let propagated = empty_store.ensure_blob(blob()).await;
         env.remove(seam);
 
         assert!(

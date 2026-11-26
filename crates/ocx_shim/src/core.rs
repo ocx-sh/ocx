@@ -120,6 +120,22 @@ pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
     ("exec", parse_exec_sidecar),
 ];
 
+/// The vendored launcher's sidecar extension; a vendor set writes nothing else.
+pub(super) const DIRECT_EXTENSION: &str = "direct";
+
+/// The sidecar extensions a launcher probes, in precedence order.
+///
+/// Unix probes `.direct` alone, so a `.shim`, `.shimref` or `.exec` there is never read and the launcher exits 78;
+/// Windows probes the three existing kinds first, so a `.direct` never shadows one.
+pub(super) fn probe_extensions(windows: bool) -> Vec<&'static str> {
+    let mut order: Vec<&'static str> = Vec::new();
+    if windows {
+        order.extend(SIDECAR_PROBE_ORDER.iter().map(|(extension, _)| *extension));
+    }
+    order.push(DIRECT_EXTENSION);
+    order
+}
+
 /// Raw sidecar bytes in, a [`Sidecar`] or [`ShimError::MalformedSidecar`] (exit 78) out.
 type SidecarParser = fn(&[u8]) -> Result<Sidecar, ShimError>;
 
@@ -304,7 +320,7 @@ fn is_pinned_identifier(value: &str) -> bool {
 
 /// Host-independent absolute-path check (`C:\`, `C:/`, `\\server\share`, `\\?\`, or a leading `/`) for a `.shim`
 /// root or `.exec` home; `Path::is_absolute` would reject `C:\` on the Linux CI host.
-fn is_absolute_path(p: &str) -> bool {
+pub(super) fn is_absolute_path(p: &str) -> bool {
     let bytes = p.as_bytes();
     if p.starts_with("\\\\") {
         return true;
@@ -435,7 +451,7 @@ pub(super) fn use_std_handles(stdin_valid: bool, stdout_valid: bool, stderr_vali
 /// Appends `arg` quoted per the Win32 `CommandLineToArgvW` rules, as `std::process::Command` does.
 ///
 /// Quotes on any ASCII control byte, not just `\t`, or an embedded newline/CR is mis-split by a command-line consumer.
-fn append_quoted_arg(line: &mut String, arg: &str) {
+pub(super) fn append_quoted_arg(line: &mut String, arg: &str) {
     let needs_quotes = arg.is_empty()
         || arg
             .bytes()

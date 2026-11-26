@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P5 P8 running; CW P9 P3 P4 P1 P2 P6 merged
+- **Step:** /hex-execute → P7 running; CW P9 P3 P4 P1 P2 P6 P8 P5 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -62,6 +62,10 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-14 | CW touched files its step list did not name: `crates/ocx_test_support/tests/workspace_structure.rs` and crate READMEs (the structure test mirrors `crate_map.toml`), `ocx_cli/src/{app.rs,app/telemetry.rs,exit/detail_rows.txt}` (exhaustive matches, slug rows), `tasks/pull.rs` (passes `LinkMode::Hardlink`); `ocx_package` gained `sha2`/`hex` for `vendor_id`. `LauncherKind {Exec, Direct}` lives in `generate.rs`; `render_toolchain.rs` gets its arm in P6. | the wave must compile and keep the structure tests green; every Cargo edit stays in CW (DP-1) |
 | DP-15 | Each pipeline builds in its own `CARGO_TARGET_DIR` (`$SCRATCH/target-<pipeline>`), the feature branch in `target-feature`. Diverges from § Worker rules (one shared dir). | cargo hashes workspace crates by workspace-relative path, so a shared dir linked another worktree's `ocx_util` as fresh (a merge check failed on a module the branch has); retro entry written |
 | DP-16 | `ocx_store` gains the `filetime` crate (already in `Cargo.lock` via `tar`) in P3, an orchestrator commit outside CW. | C-008 normalises symlink mtimes; std sets a link's mtime only by following it |
+| DP-17 | P7 steps 1-3 run before P5 merges, from the branch with P1 P3 P4 P6; the feature branch is merged into P7 after P5 lands and before P7 step 4. | steps 1-3 call no launcher blob; file-disjoint from P5; shortens the critical path |
+| DP-18 | `tree.link_free_dirs` never lists `content_dir` itself: entries are the top-most link-free directories strictly under it. | design § 4.1 says "under `content_dir`" and its example lists `content/share`; P7 step 1 had included `content_dir` for a link-free package |
+| DP-19 | P5's security audit (step 4, opus) found two decoder findings in `crates/ocx_env_apply/src/direct.rs` (P1's merged file): a panic on a multibyte segment (Block) and a case-sensitive reserved-key check on Windows (Warn). P5 gains that file for a fix step 4b before the blob cut. `ocx exec` starts a `.bat`/`.cmd` whose path holds `%` the same way the audit made the launcher refuse; that existing behaviour is not changed here and is reported as a follow-up. | the blob cut must follow the last `ocx_env_apply` change; `ocx exec`'s batch path predates this plan and sits outside its contracts |
+| DP-20 | P7 step 2 reimplemented project selection over `LockedTool` because the CW request type carried no config or lock; step 3 undoes it and calls `select_tool_set` + `resolve_selected_tools`, with `VendorSelection::Project` carrying config and lock, and P7 gains `crates/ocx_cli/src/command/{vendor,package_vendor}.rs` for that glue. | V-23 (no new selection walk) and parity with what `ocx exec`/`ocx env` select |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
@@ -348,10 +352,10 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P2 | . | C-021; V-40 | `crates/ocx_schema/src/{lib,main}.rs`, `crates/ocx_schema/BUILD.bazel`, `crates/ocx_sdkgen/src/**`, `crates/ocx_sdkgen/tests/{compat_gate.rs,compat_corpus/**}`, `crates/ocx_sdkgen/BUILD.bazel`, `website/schema.taskfile.yml` | 1 | CW | | merged |
 | P3 | . | C-007 (copy half), C-008, C-009; S-015 unit half | `crates/ocx_store/src/file_structure/{assemble.rs,vendor_layout.rs}`, `crates/ocx_store/src/hardlink.rs` | 1 | CW | review | merged |
 | P4 | . | C-005 (lane), C-006, C-022 (lane); V-46 unit control | `crates/ocx_package_manager/src/composer.rs`, `crates/ocx_package/src/metadata/env/resolver.rs`, `crates/ocx_package_manager/src/tasks/resolve.rs` | 1 | CW | | merged |
-| P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
+| P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | merged |
 | P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | merged |
 | P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | pending |
-| P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | pending |
+| P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | merged |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
 | I1 | . | integration gate: hub files regenerated once (§ Hub files), `cargo check --workspace --all-targets --locked`, the touched crates' unit suites, `task website:reference:generate` | the § Hub files list (ocx side) | 4 | P1…P9 | | pending |
 | P10 | . | ocx proofs: every ocx V-row green locally, mut rows, V-66 | `.claude/artifacts/evidence/vendor_rules_ocx/P10.md`, `test/fixtures/vendor/windows_amd64.manifest.json` (V-46 golden, written on Linux); code fixes in any file of a merged ocx pipeline, each named in `P10.md`, never a test unless it contradicts a contract | 5 | I1 | | pending |
@@ -711,3 +715,17 @@ by line by the reviewer.
   `tasks::render_toolchain::render_direct_bin(bin, surface, blob, sidecar_for)`; P7 calls those. Open from P6:
   `render_direct_bin` applies no case-insensitive name fold (two names differing by case collide on a case-insensitive
   filesystem) — P7 decides. P5: orchestrator commit `d0f6792b` adds `libc` (Unix) to `ocx_shim` for `O_NONBLOCK` (DP-16 kind).
+- 2026-11-26 — P8 merged (four modules: `test_vendor.py` 27 cases, `test_package_vendor.py` 13, `test_vendor_parity.py` 9,
+  `test_vendor_launcher.py` 15; each run once against the stubs: every case that reaches `vendor` red on
+  `not implemented: PackageManager::vendor`, the no-`-o` usage cases green, macOS/Windows cases skipped with reasons).
+  For P10: V-67 kills nothing (a failed run instead; the kill is P10's mutation); V-63 expects exit 81, V-69 asserts 65 only;
+  V-46 golden must be written in the test's masked shape. For I1: `scripts/bazel_tag_guard.py` `HAND_DECLARED_READS` for
+  `test_vendor_launcher.py` (docker) and the schema-binary read of `test_vendor_parity.py`; `test/SUITE_FLOOR` (+64 cases).
+- 2026-11-26 — P5 merged `f1ca4227`: `.direct` lookup, decode, Unix exec, Windows batch spawn; security audit (opus) 2 Block,
+  2 Warn, 6 Suggest, all Blocks fixed (`41bb5d7a`, `5fc5f62f`; record `.claude/artifacts/evidence/vendor_rules_ocx/P5-security.md`);
+  six launcher blobs built locally with cargo-zigbuild + zig 0.16.0 (development bytes, no provenance; X step 0 replaces them),
+  each under 512 KiB, `LC_CODE_SIGNATURE` on aarch64-apple-darwin only (V-26 unit). Branch check and `launcher::direct` green.
+  V-66 timing (1000 runfiles entries): 3.8 ms release, 5.3 ms debug (P10 reruns with the size profile). For I1: stale two-blob
+  names in `test/tests/test_trampoline_exec.py` and `crates/ocx_store/CLAUDE.md`; `.claude/rules/subsystem-ci.md` § Windows Shim
+  Build Workflow; `rust-toolchain.toml` lists only the gnullvm targets; `crates/TEST_TARGET_MAP.toml` rows for
+  `//crates/ocx_shim:direct_launch`, `batch_spawn` and the new `ocx_shim_bin_test` count.

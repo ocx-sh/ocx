@@ -58,4 +58,36 @@ rust_test(
     ),
 )
 
+# The Unix `.direct` launcher end to end: the real launcher binary, a hand-written sidecar, a vendor-shaped tree.
+# `CARGO_BIN_EXE_ocx-shim` is what cargo sets for an integration test of a package with a `[[bin]]`; a `rootpath` is
+# relative to the runfiles root, the test's working directory.
+rust_test(
+    name = "direct_launch",
+    srcs = ["tests/direct_launch.rs"],
+    aliases = aliases(),
+    data = [":ocx_shim"],
+    edition = "2024",
+    rustc_env = {
+        "CARGO_BIN_EXE_ocx-shim": "$(rootpath :ocx_shim)",
+        "CARGO_MANIFEST_DIR": "crates/ocx_shim",
+    },
+    version = OCX_VERSION,
+    deps = all_crate_deps(normal_dev = True),
+)
+
+# The Windows `.direct` launcher with a batch target: compiles to an empty test off Windows, where the CI leg runs it.
+rust_test(
+    name = "batch_spawn",
+    srcs = ["tests/batch_spawn.rs"],
+    aliases = aliases(),
+    data = [":ocx_shim"],
+    edition = "2024",
+    rustc_env = {
+        "CARGO_BIN_EXE_ocx-shim": "$(rootpath :ocx_shim)",
+        "CARGO_MANIFEST_DIR": "crates/ocx_shim",
+    },
+    version = OCX_VERSION,
+    deps = all_crate_deps(normal_dev = True),
+)
+
 crate_tree()
