@@ -57,6 +57,8 @@ Each rule names the lint that enforces it. A rule with no lint is held by the se
 | A report field or root | the schema golden under `crates/ocx_schema/tests/golden/` | golden byte test |
 | An error slug or exit code | the `error.detail` docs and the registry | registry tests, `ocx_exit` tests |
 | A command's stdout | its `CONTRACT` entry (`command/contract.rs`) | the `CONTRACT` consistency test |
+| The `vendor-manifest` document (`crates/ocx_package/src/vendor.rs`), the fourth gated document beside `reports`, `errors` and `cli.json` | `crates/ocx_schema/tests/golden/vendor-manifest.json`, its baseline, `reference/vendor-manifest.md`; a break needs a ledger entry and a bumped `schema_version` | the compat gate, golden byte test |
+| `VendorReport` or the slugs `vendor_output_not_empty`, `vendor_value_unrepresentable`, `vendor_path_unrepresentable` | the `reports` golden and the slug registry | golden byte test, registry tests |
 | A deliberate exception | `crates/ocx_schema/contract/exemptions.toml` (cites a decision record) or a `waivers/<area>.toml` entry | the ratchet: a stale entry reds |
 
 ## Authorities

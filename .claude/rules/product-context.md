@@ -109,11 +109,11 @@ Distributing pre-built binaries across platforms and teams fragmented:
 
 1. **CI/CD tool setup** — pinned index snapshots guarantee deterministic tool versions across runners
 2. **GitHub Actions** — action bundle index snapshot; `ocx install` resolve right binary per runner
-3. **Bazel rules** — one rule version = fixed binary; no URL matrix maintenance per platform
+3. **Bazel rules** — one rule version = fixed binary; no URL matrix maintenance per platform; `ocx vendor` writes a relocatable directory a remote executor runs with no OCX installed
 4. **Devcontainer features** — tools resolved at build time without per-arch conditionals
 5. **Polyglot teams** — install Go, Python, Node, Rust, CMake, etc. with one tool, one command pattern
 6. **Internal tool distribution** — push proprietary CLI tools to private registry; `ocx install` from any team
-7. **Air-gapped machines** — `ocx package export` / `ocx export` write a directory; `ocx package import` / `ocx import` load it, or `--blob-dir` reads it in place, with no registry reachable
+7. **Air-gapped machines** — `ocx package export` / `ocx export` write a directory; `ocx package import` / `ocx import` load it, or `--blob-dir` reads it in place, with no registry reachable; `ocx vendor` writes the unpacked tools themselves
 
 ## CLI at a Glance
 
@@ -123,6 +123,7 @@ ocx package install nodejs/node:24 --select   # Also set as "current"
 ocx package exec nodejs/node:24 -- node --version   # Layer onto the caller's environment (--clean: package vars only)
 ocx package env nodejs/node:24                # Print resolved environment variables
 ocx package select nodejs/node:24             # Set "current" to this version
+ocx vendor -o ./tools -p linux/amd64 cmake    # Relocatable directory: manifest, packages, launchers
 ocx package push -p linux/amd64 -i acme/mytool:1.0.0 --cascade mytool.tar.xz  # Publish
 ocx package sign acme/mytool:1.0.0            # Keyless Sigstore sign via OCI Referrers
 ocx package verify acme/mytool:1.0.0 \        # Keyless verify (self-hosted stack: --sigstore-trusted-root or [trust.sigstore])
@@ -151,7 +152,7 @@ An export directory (`ocx package export`) holds `index/` + `blobs/` in the same
 ## Technical Overview
 
 - **Language**: Rust 2024 (async-native with Tokio)
-- **Workspace**: 22 `ocx_*` tier crates + `crates/ocx_cli` (CLI); the mirror tool lives in its own repo ([ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror))
+- **Workspace**: 23 `ocx_*` tier crates + `crates/ocx_cli` (CLI); the mirror tool lives in its own repo ([ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror))
 - **Default registry**: `ocx.sh` (configurable via `OCX_DEFAULT_REGISTRY`)
 - **Platform support**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64 (native); wasip1/wasm, wasip2/wasm (WebAssembly, explicit `--platform` only). `SUPPORTED_PAIRS` in `crates/ocx_oci/src/platform.rs` is the source of truth — a pairing outside it is refused at parse
 - **Testing**: pytest acceptance tests against real OCI registries via docker-compose — zot (OCI 1.1 Referrers API primary) + registry:2 (mirror / referrers-negative fixture)

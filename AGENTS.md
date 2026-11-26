@@ -14,7 +14,7 @@ Early stage. Core lib + CLI implemented.
 
 **Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. No `ocx_*` crate is a published library; the binary is the only consumer.
 
-**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_env`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `deep-repo.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
+**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_env`, `ocx_env_apply`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `deep-repo.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
 
 **Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`, the `--format json` reports and error document, the `OCX_*` environment variables, and the `ocx-sdkgen` CLI with its output layout. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
 
@@ -74,7 +74,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-25 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+26 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
 
 | Crate | Owns |
 |---|---|
@@ -82,6 +82,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 | `ocx_exit_derive` [internal] | `#[derive(Classify)]`: an error variant declares its exit code and `error.detail` slug (re-exported by `ocx_exit`) |
 | `ocx_env` [ecosystem] | Environment registry: every `OCX_*` / `__OCX_*` variable declared once with its doc, value kind, visibility, secrecy and child propagation, and the one read seam |
 | `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, extension traits, singleflight, TLS roots, archive, compression, path-context errors |
+| `ocx_env_apply` [ecosystem] | Std-only leaf: the environment apply functions (`move_to_front`, `remove_segment`, `append_unique`, `apply_one`) and the `.direct` launcher sidecar decoder |
 | `ocx_console` [ecosystem] | Presentation vocabulary: rendering, printer, theme, styles, progress, data interface |
 | `ocx_oci` [ecosystem] | Distribution-spec-generic registry work: references, digests, manifests, transport, referrers, SSRF guard, auth |
 | `ocx_trust` [ecosystem] | Signer-identity policy: `[[trust.policy]]`, tiered resolution, compiled identity rules |
