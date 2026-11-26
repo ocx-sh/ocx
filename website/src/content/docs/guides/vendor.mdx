@@ -92,7 +92,7 @@ Use it to learn which tools a selection exposes on a platform before paying for 
 
 ## macOS \{#vendor-macos\}
 
-Apple Silicon kills a binary whose signature no longer matches its bytes. The `aarch64-apple-darwin` launcher ships with an ad-hoc signature. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
+macOS on Apple silicon starts only a binary that carries a code signature. The `aarch64-apple-darwin` launcher ships with an ad-hoc signature. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
 
 A file that arrived through a browser or a mail client carries the quarantine attribute, and Gatekeeper blocks it. Clear it once on the copied directory.
 
@@ -104,7 +104,7 @@ xattr -dr com.apple.quarantine /work/tools
 
 </ShellSession>
 
-Do not patch or strip a launcher. One changed byte invalidates the signature and the process is killed.
+Do not patch or strip a launcher. A changed byte invalidates its signature, which `codesign --verify` reports.
 
 Darwin content vendored on Linux or Windows stays as published. OCX re-signs a Mach-O file only on a macOS host.
 
