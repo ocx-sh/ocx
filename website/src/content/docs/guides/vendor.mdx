@@ -1,0 +1,141 @@
+---
+title: "Vendor packages"
+description: "Write a toolchain into a plain directory that runs after a move, with no OCX and no network."
+---
+{/* doc_type: how-to */}
+{/* doc_tier: integration */}
+
+import ShellSession from '@ocx-sh/theme/components/ShellSession.astro'
+
+{/* doc-example: no-run, the commands need registry access and a project, which a docs test has none of */}
+
+Write the packages of a toolchain, and the launchers that run them, into one directory. The directory runs from any location once copied, and needs neither OCX nor a network on the machine that uses it.
+
+## Vendor a selection \{#vendor-selection\}
+
+A tool store under `~/.ocx` holds absolute paths, so a copy of it breaks. Build systems such as [Bazel][bazel] need the opposite: files they can hash, move into a sandbox and ship to a remote executor.
+
+[`ocx vendor`][cmd-vendor] resolves a selection the way [`ocx exec`][cmd-exec] does and writes it to `-o`. Names and `-g` groups come from the project's `ocx.toml` and `ocx.lock`.
+
+<ShellSession>
+
+```sh
+ocx vendor -o /work/tools -p linux/amd64 cmake ninja
+ocx vendor -o /work/tools-ci -p linux/amd64 -g ci
+```
+
+</ShellSession>
+
+For packages with no project, [`ocx package vendor`][cmd-package-vendor] takes identifiers.
+
+<ShellSession>
+
+```sh
+ocx package vendor -o /work/tools -p linux/amd64 ocx.sh/kitware/cmake:3.31
+```
+
+</ShellSession>
+
+`-o` must name an absolute path that does not exist or is an empty directory. Anything else exits 64 before any request, and the directory stays unchanged. The tree is built beside the target and renamed into place, so a failed run leaves no partial directory.
+
+`-p` takes one platform and defaults to the host. A binding with no build for that platform at the locked version exits 78.
+
+## What the directory holds \{#vendor-layout\}
+
+The directory carries three top-level entries, described in the [manifest reference][ref-manifest].
+
+| Entry | Content |
+|---|---|
+| `manifest.json` | Every package, environment, tool and file, with relative paths |
+| `packages/` | The package content, one directory per digest |
+| `selections/` | One launcher per tool, each with a `.direct` file beside it |
+
+A launcher is a copy of one fixed binary for the platform. Its `.direct` file names the program to start and the environment to apply, as paths relative to the directory.
+
+Add `--omit-links` to write no symlinks. The manifest still lists them, for consumers that recreate them. Use it where the target cannot hold symlinks, for example a Windows host without the privilege.
+
+## Run it \{#vendor-run\}
+
+Start a tool by its launcher. The launcher finds the directory from its own path, applies the recorded environment and replaces itself with the tool on Linux and macOS.
+
+<ShellSession>
+
+```sh
+/work/tools/selections/default/shells/default/bin/cmake --version
+```
+
+</ShellSession>
+
+The launcher runs with the caller's environment, minus the variables OCX treats as credentials or state. `ocx exec` strips the same ones. It writes nothing, so a read-only directory works.
+
+A launcher that cannot find its directory, or finds a `.direct` file it cannot accept, exits 78 and prints what it tried. A directory path that contains the platform's list separator (`:` on Unix, `;` on Windows) is refused for the same exit code.
+
+## Move it \{#vendor-move\}
+
+Copy the whole directory with `cp -r`, `rsync` or `tar`. Nothing inside refers to the old location, so any new location works, as long as launchers keep their place relative to `packages/`.
+
+Under Bazel the launcher also looks beside its own runfiles tree. Each `.direct` file carries the `vendor_id` of its directory, so a launcher never picks a tree of another set. On Windows, Bazel needs `--enable_runfiles` for that tree to exist, or the launcher exits 78 naming the flag.
+
+## Plan without downloading \{#vendor-manifest-only\}
+
+`--manifest-only` writes only `manifest.json`, with `content` set to `absent`. It downloads manifests and configs and no layer. It applies the same trust, yank and `allow_unverified` checks as a full run and fails with the same exit code.
+
+<ShellSession>
+
+```sh
+ocx vendor --manifest-only -o /work/plan -p windows/amd64 cmake
+```
+
+</ShellSession>
+
+Use it to learn which tools a selection exposes on a platform before paying for the download.
+
+## macOS \{#vendor-macos\}
+
+Apple Silicon kills a binary whose signature no longer matches its bytes. The `aarch64-apple-darwin` launcher ships with an ad-hoc signature. OCX copies it unchanged, so a copy, a rename and a `tar` round trip keep it valid.
+
+A file that arrived through a browser or a mail client carries the quarantine attribute, and Gatekeeper blocks it. Clear it once on the copied directory.
+
+<ShellSession>
+
+```sh
+xattr -dr com.apple.quarantine /work/tools
+```
+
+</ShellSession>
+
+Do not patch or strip a launcher. One changed byte invalidates the signature and the process is killed.
+
+Darwin content vendored on Linux or Windows stays as published. OCX re-signs a Mach-O file only on a macOS host.
+
+## Windows \{#vendor-windows\}
+
+Launchers are `.exe` files with a `.direct` file beside them. A tool whose program ends in `.bat` or `.cmd` starts through the standard library's batch-argument escaping. An argument it refuses makes the launcher exit 64 and name that argument.
+
+Every other program starts through `CreateProcessW` with the exit code passed through. Path rules for a `windows/*` platform are stricter than on Unix, listed in the [manifest reference][ref-manifest-paths].
+
+## Errors \{#vendor-errors\}
+
+| Exit | Slug | Meaning |
+|---|---|---|
+| 64 | `vendor_output_not_empty` | `-o` exists and is not an empty directory |
+| 65 | `vendor_value_unrepresentable` | A value holds `@VENDOR_DIR@`, a NUL byte, or an absolute path of the home or the output |
+| 65 | `vendor_path_unrepresentable` | A program, launcher or link target breaks the [path rules][ref-manifest-paths] |
+| 78 | existing resolution slug | A binding has no build for `-p` at the locked version |
+
+All other exit codes follow the [exit code reference][ref-exit-codes].
+
+{/* doc-example: end no-run */}
+
+{/* external */}
+[bazel]: https://bazel.build/
+
+{/* commands */}
+[cmd-vendor]: ../reference/command-line/commands.md#vendor-root
+[cmd-package-vendor]: ../reference/command-line/package-consuming.md#package-vendor
+[cmd-exec]: ../reference/command-line/commands.md#exec
+
+{/* internal */}
+[ref-manifest]: ../reference/vendor-manifest.md
+[ref-manifest-paths]: ../reference/vendor-manifest.md#vendor-manifest-paths
+[ref-exit-codes]: ../reference/exit-codes.md
