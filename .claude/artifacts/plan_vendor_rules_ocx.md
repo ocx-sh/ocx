@@ -3,12 +3,12 @@
 ## Status
 
 - **Plan:** plan_vendor_rules_ocx
-- **State:** plan-approved
+- **State:** executing
 - **Tier:** high
 - **Tier-grammar:** 5
-- **Updated:** 2026-11-26
+- **Updated:** 2026-11-27
 - **Active phase:** 0 — second run planned (§ Second run); first run landed (ocx `9c9e32d4`, rules_ocx `401c9c4`)
-- **Step:** /hex-plan → plan-approved (second run)
+- **Step:** /hex-execute → wave 0 (CW2)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx`, its worktree `/home/mherwig/dev/ocx-sh/rules_ocx/.agents/worktrees/hex-bazel-rbe-rules-ocx` shared by the rules_ocx pipelines of a wave (DP-43)
 - **Last update:** 2026-11-26 (after 3db147f6: decision record for the unified launcher model, with amendments)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
