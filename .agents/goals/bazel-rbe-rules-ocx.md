@@ -96,3 +96,10 @@ From the source, as pointers; the source's own text governs.
 - Related records: `.claude/artifacts/adr_package_export_import.md`, `.claude/artifacts/adr_bazel_build_adoption.md`, `.claude/artifacts/adr_crate_split_workspace.md`, `.claude/artifacts/adr_ocx_interface_contract.md`.
 - Related work: https://github.com/ocx-sh/ocx/pull/771 (export and import, merged) and https://github.com/ocx-sh/ocx/issues/679 (launchers of installed homes, not part of this run).
 - Second repository: `ocx-sh/rules_ocx`, a sibling checkout of this repository.
+
+Requirements the owner added during the run (2026-11-26), with where each landed:
+
+- Continuous checks that the committed launcher binaries are current and work: `.github/workflows/launcher-blobs.yml`, `scripts/launcher_blob_check.sh`, `scripts/shim_inputs.py` and `crates/ocx_store/src/shim_inputs.sha256` in this repository.
+- The Windows path-length limits and their workarounds documented in rules_ocx with links: `docs/guides/windows-path-length.md` there; the layout question is https://github.com/ocx-sh/ocx/issues/785.
+- rules_ocx supports only an `ocx` with `ocx vendor` and reads as designed for it: floor `0.6.8` as one constant (`MIN_OCX_VERSION`), the older integrations, their tests and their documentation removed.
+
