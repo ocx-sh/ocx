@@ -205,6 +205,13 @@ mod tests {
         );
     }
 
+    /// The manifest omits an unset optional (IC-04), so no field may admit `null`.
+    #[test]
+    fn vendor_manifest_schema_admits_no_null() {
+        let schema = schema_for("vendor-manifest").expect("vendor-manifest schema exists");
+        assert!(!schema.contains("\"null\""), "an optional field is absent, never null");
+    }
+
     /// The metadata schema is the published wire form plus exactly one
     /// relaxation: dependency identifiers are digest-optional (plain
     /// `PackageRef`, not `PinnedPackageRef`). Nothing build-time appears —

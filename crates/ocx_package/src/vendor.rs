@@ -62,8 +62,11 @@ pub struct VendorManifest {
 
 /// The identity of a vendored set: `sha256:` + hex SHA-256 of `platform`, `\n`, then the sorted package digests
 /// joined by `\n`. Two directories with equal ids hold the same files.
-pub fn vendor_id(_platform: &str, _package_digests: &[&str]) -> String {
-    unimplemented!("vendor_id")
+pub fn vendor_id(platform: &str, package_digests: &[&str]) -> String {
+    let mut digests = package_digests.to_vec();
+    digests.sort_unstable();
+    let text = std::iter::once(platform).chain(digests).collect::<Vec<_>>().join("\n");
+    ocx_oci::Algorithm::Sha256.hash(text.as_bytes()).to_string()
 }
 
 #[cfg(test)]
@@ -80,6 +83,24 @@ mod tests {
         assert_eq!(original, again);
         assert_eq!(manifest.schema_version, SCHEMA_VERSION);
         assert_eq!(manifest.dir_token, DIR_TOKEN);
+    }
+
+    /// Two directories with the same files carry one id, however the selection listed them.
+    #[test]
+    fn vendor_id_is_stable_under_input_order() {
+        let (a, b) = (
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        );
+        assert_eq!(
+            vendor_id("linux/amd64", &[a.as_str(), b.as_str()]),
+            vendor_id("linux/amd64", &[b.as_str(), a.as_str()])
+        );
+        assert_ne!(
+            vendor_id("linux/amd64", &[a.as_str()]),
+            vendor_id("linux/arm64", &[a.as_str()]),
+            "the platform is part of the identity"
+        );
     }
 
     #[test]

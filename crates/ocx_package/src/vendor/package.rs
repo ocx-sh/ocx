@@ -22,6 +22,7 @@ pub struct Package {
     /// The package's own launchers; sorted by `name`.
     pub entrypoints: Vec<EntryPoint>,
     /// Present iff `content` is `present`.
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree: Option<Tree>,
 }

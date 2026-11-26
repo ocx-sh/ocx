@@ -11,7 +11,20 @@ use ocx_env_apply::direct::{DirectSidecar, SidecarError};
 use super::generate::write_launcher_file;
 use crate::tasks::vendor::VendorError;
 
-/// Writes the launcher `<name>` (`<name>.exe` on Windows) as a byte copy of `blob`, then `<name>.direct`.
+/// [`write_direct_launcher_for`] for the platform this process runs on.
+pub async fn write_direct_launcher(
+    dir: &Path,
+    name: &str,
+    blob: &[u8],
+    sidecar: &DirectSidecar,
+) -> Result<(), VendorError> {
+    write_direct_launcher_for(dir, name, blob, sidecar, cfg!(windows)).await
+}
+
+/// Writes the launcher `<name>` (`<name>.exe` for a Windows target) as a byte copy of `blob`, then `<name>.direct`.
+///
+/// `windows` is the target's, not the host's: a Linux host vendoring for Windows writes `<name>.exe` and applies
+/// the Windows path rules, as the manifest records.
 ///
 /// The copy is never a hardlink: a vendored directory must survive its source being deleted or moved.
 ///
@@ -19,16 +32,17 @@ use crate::tasks::vendor::VendorError;
 ///
 /// [`VendorError::ValueUnrepresentable`] or [`VendorError::PathUnrepresentable`] when `sidecar` breaks a rule of
 /// [`DirectSidecar::validate`], before anything is written; [`VendorError::Package`] for a failed write.
-pub async fn write_direct_launcher(
+pub async fn write_direct_launcher_for(
     dir: &Path,
     name: &str,
     blob: &[u8],
     sidecar: &DirectSidecar,
+    windows: bool,
 ) -> Result<(), VendorError> {
     let mut sidecar = sidecar.clone();
     // The launcher's environment is never the caller's: every credential and every plumbing key is removed.
     sidecar.unset = unset_keys();
-    sidecar.validate(cfg!(windows)).map_err(|e| match e {
+    sidecar.validate(windows).map_err(|e| match e {
         SidecarError::PathNotInRoot(path) => VendorError::PathUnrepresentable { path },
         other => VendorError::ValueUnrepresentable {
             reason: other.to_string(),
@@ -37,7 +51,7 @@ pub async fn write_direct_launcher(
     let body = serde_json::to_string_pretty(&sidecar)
         .map_err(|e| VendorError::ValueUnrepresentable { reason: e.to_string() })?;
 
-    let launcher = dir.join(if cfg!(windows) {
+    let launcher = dir.join(if windows {
         format!("{name}.exe")
     } else {
         name.to_owned()
@@ -74,7 +88,7 @@ fn unset_keys() -> Vec<String> {
 mod tests {
     use ocx_env_apply::direct::{DirectSidecar, EnvRecord};
 
-    use super::write_direct_launcher;
+    use super::{write_direct_launcher, write_direct_launcher_for};
     use crate::tasks::vendor::VendorError;
 
     fn sidecar(name: &str) -> DirectSidecar {
@@ -163,5 +177,43 @@ mod tests {
             serde_json::from_slice(&std::fs::read(tmp.path().join("tool.direct")).expect("sidecar")).expect("json");
         assert!(written.unset.contains(&"OCX_BINARY_PIN".to_owned()));
         assert!(written.unset.contains(&"OCX_IDENTITY_TOKEN".to_owned()));
+    }
+
+    /// The launcher's name follows the target: `.exe` for Windows on any host, none for another target.
+    #[tokio::test]
+    async fn the_launcher_name_follows_the_target_not_the_host() {
+        for (windows, launcher) in [(true, "tool.exe"), (false, "tool")] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut target = sidecar("bin/tool");
+            target.program = "@VENDOR_DIR@/packages/p/content/bin/tool".into();
+
+            write_direct_launcher_for(tmp.path(), "tool", b"blob", &target, windows)
+                .await
+                .expect("writer succeeds");
+
+            assert!(tmp.path().join(launcher).is_file(), "windows={windows}: {launcher}");
+            let other = if windows { "tool" } else { "tool.exe" };
+            assert!(!tmp.path().join(other).exists(), "windows={windows}: no {other}");
+            assert!(tmp.path().join("tool.direct").is_file());
+        }
+    }
+
+    /// The target's rules apply, not the host's: a Windows device name is refused for a Windows target only.
+    #[tokio::test]
+    async fn the_windows_path_rules_follow_the_target() {
+        let mut device = sidecar("bin/tool");
+        device.program = "@VENDOR_DIR@/packages/p/content/bin/nul".into();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let refused = write_direct_launcher_for(tmp.path(), "tool", b"blob", &device, true).await;
+        assert!(
+            matches!(refused, Err(VendorError::PathUnrepresentable { .. })),
+            "{refused:?}"
+        );
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_direct_launcher_for(tmp.path(), "tool", b"blob", &device, false)
+            .await
+            .expect("control: another target allows the name");
     }
 }

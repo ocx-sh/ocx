@@ -400,7 +400,10 @@ async fn compose_gated(
             )?;
         } else {
             // First, so it resolves last (consumers prepend): `entrypoints/` > `bin/` > `shims/`.
-            emit_shim_slot(root, axes, &mut entries);
+            // Not in the vendor lane: a shim directory is a host path, and the vendor directory holds none.
+            if !paths.is_vendor() {
+                emit_shim_slot(root, axes, &mut entries);
+            }
             emit_root_path_block(
                 root.metadata(),
                 &root_pkg,
@@ -1288,13 +1291,28 @@ impl PackageManager {
         platform: ocx_oci::Platform,
     ) -> Result<(Arc<InstallInfo>, Vec<LazyAdvisory>), PackageErrorKind> {
         let prepared = self.prepare_lazy(package, platform).await?;
+        let root = self.closure_root(&prepared.closure, prepared.shim).await?;
+        Ok((root, prepared.advisories))
+    }
+
+    /// A compose root over a metadata-only `closure` (deps before dependents, the root last), its
+    /// members' carriers read back from their config blobs; no package directory is touched.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageErrorKind::Internal`] when `closure` has no root node or a member's config blob cannot be read.
+    pub(crate) async fn closure_root(
+        &self,
+        closure: &[ClosureNode],
+        shim: ShimDir,
+    ) -> Result<Arc<InstallInfo>, PackageErrorKind> {
         let store = &self.file_structure().packages;
 
         // The full closure in `resolve.json`'s shape: a truncated one silently disables the surface, collision and conflict gates.
-        let mut closure: Vec<Arc<InstallInfo>> = Vec::new();
+        let mut members: Vec<Arc<InstallInfo>> = Vec::new();
         let mut root_dependencies: Vec<ResolvedDependency> = Vec::new();
-        let mut root_node: Option<ClosureNode> = None;
-        for node in prepared.closure {
+        let mut root_node: Option<&ClosureNode> = None;
+        for node in closure {
             if node.is_root {
                 root_node = Some(node);
                 continue;
@@ -1303,16 +1321,16 @@ impl PackageManager {
                 identifier: node.identifier.clone(),
                 visibility: node.effective_visibility.unwrap_or(Visibility::SEALED),
             });
-            closure.push(Arc::new(self.closure_member(&node, store).await?));
+            members.push(Arc::new(self.closure_member(node, store).await?));
         }
 
         let root_node = root_node.ok_or_else(|| {
             PackageErrorKind::Internal(crate::error::file_error(
-                prepared.shim.root(),
+                shim.root(),
                 std::io::Error::other("shim closure carries no root node"),
             ))
         })?;
-        let metadata = self.closure_metadata(&root_node).await?;
+        let metadata = self.closure_metadata(root_node).await?;
         let root = InstallInfo::new(
             root_node.identifier.clone(),
             metadata,
@@ -1321,9 +1339,9 @@ impl PackageManager {
             },
             store.package_dir(&root_node.identifier),
         )
-        .with_deferred(DeferredComposition::new(prepared.shim, closure));
+        .with_deferred(DeferredComposition::new(shim, members));
 
-        Ok((Arc::new(root), prepared.advisories))
+        Ok(Arc::new(root))
     }
 
     /// One closure member as a compose-time [`InstallInfo`], carrying its declared dependency edges.
