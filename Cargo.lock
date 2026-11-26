@@ -4638,6 +4638,7 @@ name = "ocx_shim"
 version = "0.6.8"
 dependencies = [
  "dunce",
+ "libc",
  "ocx_env_apply",
  "serde",
  "serde_json",
