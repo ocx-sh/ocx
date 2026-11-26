@@ -362,19 +362,20 @@ async fn read_closures(
 ///
 /// Sequential: a closure is a handful of packages and the first refusal must be the same one on every run.
 async fn verify_selection(manager: &PackageManager, closures: &ClosureSet) -> Result<(), VendorError> {
-    let mut verified: Vec<PinnedPackageRef> = Vec::new();
+    let mut verified: Vec<(PinnedPackageRef, bool)> = Vec::new();
     for root in &closures.roots {
         for node in closures.nodes(root) {
-            let leaf = node.identifier.strip_advisory();
-            if verified.contains(&leaf) {
-                continue;
-            }
             // The request that named a root decides which declaration its publisher round reads; a dependency is pinned.
             let requested = if node.is_root {
                 &root.requested
             } else {
                 node.identifier.as_identifier()
             };
+            // A pinned sighting runs a weaker round than a tagged one, so it never stands in for a tagged sighting.
+            let leaf = (node.identifier.strip_advisory(), requested.digest().is_some());
+            if verified.contains(&leaf) {
+                continue;
+            }
             manager
                 .maybe_auto_verify_requested(node.identifier.as_identifier(), requested)
                 .await
@@ -1567,7 +1568,7 @@ mod tests {
         "linux/amd64".parse().expect("platform")
     }
 
-    fn manager_over(root: &Path, source: FakeManifestSource) -> PackageManager {
+    fn manager_over(root: &Path, source: impl ocx_index::IndexImpl + 'static) -> PackageManager {
         let fs = FileStructure::with_root(root.to_path_buf());
         // As the CLI wires it: a fetched blob is kept in the home, which the closure read depends on.
         let index = Index::from_chained_with_content_store(
@@ -1895,6 +1896,119 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    /// A source that declares publishers for the repository `dep` only, as a fetched index root does.
+    #[derive(Clone)]
+    struct DeclaringSource(FakeManifestSource);
+
+    #[async_trait::async_trait]
+    impl ocx_index::IndexImpl for DeclaringSource {
+        async fn list_repositories(&self, registry: &str) -> ocx_index::error::Result<Vec<String>> {
+            self.0.list_repositories(registry).await
+        }
+        async fn list_tags(&self, identifier: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
+            self.0.list_tags(identifier).await
+        }
+        async fn fetch_manifest(
+            &self,
+            identifier: &PackageRef,
+            op: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<(Digest, ocx_oci::Manifest)>> {
+            self.0.fetch_manifest(identifier, op).await
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &PackageRef,
+            op: ocx_index::IndexOperation,
+        ) -> ocx_index::error::Result<Option<Digest>> {
+            self.0.fetch_manifest_digest(identifier, op).await
+        }
+        async fn fetch_blob(&self, blob_ref: &PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
+            self.0.fetch_blob(blob_ref).await
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            identifier: &PackageRef,
+        ) -> ocx_index::error::Result<Option<(Vec<u8>, Digest, ocx_oci::Manifest)>> {
+            self.0.fetch_manifest_raw_bytes(identifier).await
+        }
+        async fn declared_publishers(
+            &self,
+            identifier: &PackageRef,
+        ) -> ocx_index::error::Result<ocx_index::DeclaredPublishers> {
+            if identifier.repository() != "dep" {
+                return Ok(ocx_index::DeclaredPublishers::Undeclared);
+            }
+            Ok(ocx_index::DeclaredPublishers::Declared(serde_json::json!([{
+                "kind": "keyless", "identity": "publisher@example.com",
+                "oidc_issuer": "https://issuer.example.com",
+            }])))
+        }
+        fn serves_registry(&self, registry: &str) -> bool {
+            registry == REGISTRY
+        }
+        fn source_kind(&self) -> ocx_index::SourceKind {
+            ocx_index::SourceKind::Published
+        }
+        fn box_clone(&self) -> Box<dyn ocx_index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A package reached both as a pinned dependency and as a tagged root still runs the publisher check its tag
+    /// owes, whichever the closure walk meets first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tagged_root_is_verified_though_it_is_also_a_pinned_dependency() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (source, dependency) = register_leaf(FakeManifestSource::default(), serde_json::json!([]));
+        let edge = serde_json::json!([{
+            "identifier": format!("{REGISTRY}/dep@{dependency}"), "visibility": "public", "name": "dep",
+        }]);
+        let (source, tool) = register_leaf(source, edge);
+        let source = register_index(source, "1.0", &tool, &[("linux", "amd64")]);
+        let source = DeclaringSource(register_index(source, "dep-1.0", &dependency, &[("linux", "amd64")]));
+        let manager = manager_over(dir.path(), source);
+        let config: ocx_config::Config = toml::from_str("").expect("config");
+        let verifying = manager
+            .clone()
+            .with_auto_verify(Some(crate::AutoVerify::new(crate::AutoVerifyInput {
+                operator_policies: Vec::new(),
+                project_policies: Vec::new(),
+                config,
+                registry_client: ocx_oci::Client::with_transport(Box::new(
+                    ocx_oci::client::test_transport::StubTransport::new(
+                        ocx_oci::client::test_transport::StubTransportData::new(),
+                    ),
+                )),
+                rekor_url: "http://127.0.0.1:3000".parse().expect("url"),
+                offline: true,
+                state: ocx_store::file_structure::StateStore::new(dir.path().join("state")),
+                trusted_root_env: None,
+                sigstore_trust: None,
+                home_trusted_root: None,
+                user_opted_out: false,
+            })));
+        let tagged_dep = || package("dep", "dep-1.0");
+
+        select(
+            &verifying,
+            &packages_request(vec![package("tool", "1.0")], linux_amd64()),
+        )
+        .await
+        .expect("control: a pinned dependency declares nothing, so the dependency alone passes");
+        select(&verifying, &packages_request(vec![tagged_dep()], linux_amd64()))
+            .await
+            .expect_err("control: the tagged request adopts the declared publishers and finds no signature");
+
+        for (order, roots) in [
+            ("dependency first", vec![package("tool", "1.0"), tagged_dep()]),
+            ("tagged root first", vec![tagged_dep(), package("tool", "1.0")]),
+        ] {
+            select(&verifying, &packages_request(roots, linux_amd64()))
+                .await
+                .expect_err(&format!("{order}: the tagged root's publisher check must run"));
+        }
     }
 
     /// A vendor run into an absent directory writes its manifest.
