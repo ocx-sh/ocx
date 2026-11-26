@@ -1126,9 +1126,12 @@ async fn resolve_program(
     windows: bool,
 ) -> Result<String, VendorError> {
     let names: Vec<String> = if windows {
-        [".exe", ".cmd", ".bat", ""]
-            .iter()
-            .map(|extension| format!("{command}{extension}"))
+        // The target host's PATHEXT is unknown here, so the default list; lowercased because the staged
+        // tree is probed on a case-sensitive filesystem where packages ship `tool.exe`.
+        ocx_config::env::pathext_extensions(None)
+            .into_iter()
+            .map(|extension| format!("{command}{}", extension.to_ascii_lowercase()))
+            .chain(std::iter::once(command.to_owned()))
             .collect()
     } else {
         vec![command.to_owned()]
@@ -1595,6 +1598,26 @@ mod tests {
 
             assert_eq!(tree.links.len(), 2, "windows={windows}");
         }
+    }
+
+    /// A Windows entry point resolves in the default PATHEXT order (`.bat` before `.cmd`), the bare name last.
+    #[tokio::test]
+    async fn a_windows_program_resolves_in_the_default_pathext_order() {
+        let (_root, layout) = tree_root(&["bin/tool.cmd", "bin/tool.bat", "bin/other"]);
+        let items = [EnvironmentItem {
+            key: "PATH".to_owned(),
+            kind: ModifierKind::Path,
+            value: format!("{DIR_TOKEN}/{CONTENT}/bin"),
+            separator: None,
+        }];
+
+        let both = resolve_program(&layout, &items, "tool", true).await.expect("resolves");
+        let bare = resolve_program(&layout, &items, "other", true)
+            .await
+            .expect("bare name");
+
+        assert_eq!(both, format!("{DIR_TOKEN}/{CONTENT}/bin/tool.bat"));
+        assert_eq!(bare, format!("{DIR_TOKEN}/{CONTENT}/bin/other"));
     }
 
     // ── Selection half: closure, shared platforms, trust ─────────────────────
