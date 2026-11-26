@@ -63,6 +63,7 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-15 | Each pipeline builds in its own `CARGO_TARGET_DIR` (`$SCRATCH/target-<pipeline>`), the feature branch in `target-feature`. Diverges from § Worker rules (one shared dir). | cargo hashes workspace crates by workspace-relative path, so a shared dir linked another worktree's `ocx_util` as fresh (a merge check failed on a module the branch has); retro entry written |
 | DP-16 | `ocx_store` gains the `filetime` crate (already in `Cargo.lock` via `tar`) in P3, an orchestrator commit outside CW. | C-008 normalises symlink mtimes; std sets a link's mtime only by following it |
 | DP-17 | P7 steps 1-3 run before P5 merges, from the branch with P1 P3 P4 P6; the feature branch is merged into P7 after P5 lands and before P7 step 4. | steps 1-3 call no launcher blob; file-disjoint from P5; shortens the critical path |
+| DP-18 | `tree.link_free_dirs` never lists `content_dir` itself: entries are the top-most link-free directories strictly under it. | design § 4.1 says "under `content_dir`" and its example lists `content/share`; P7 step 1 had included `content_dir` for a link-free package |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
