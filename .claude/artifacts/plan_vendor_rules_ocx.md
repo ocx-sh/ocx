@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P5 P8 running; CW P9 P3 P4 P1 P2 P6 merged
+- **Step:** /hex-execute → P5 P7 P8 running; CW P9 P3 P4 P1 P2 P6 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -62,6 +62,7 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-14 | CW touched files its step list did not name: `crates/ocx_test_support/tests/workspace_structure.rs` and crate READMEs (the structure test mirrors `crate_map.toml`), `ocx_cli/src/{app.rs,app/telemetry.rs,exit/detail_rows.txt}` (exhaustive matches, slug rows), `tasks/pull.rs` (passes `LinkMode::Hardlink`); `ocx_package` gained `sha2`/`hex` for `vendor_id`. `LauncherKind {Exec, Direct}` lives in `generate.rs`; `render_toolchain.rs` gets its arm in P6. | the wave must compile and keep the structure tests green; every Cargo edit stays in CW (DP-1) |
 | DP-15 | Each pipeline builds in its own `CARGO_TARGET_DIR` (`$SCRATCH/target-<pipeline>`), the feature branch in `target-feature`. Diverges from § Worker rules (one shared dir). | cargo hashes workspace crates by workspace-relative path, so a shared dir linked another worktree's `ocx_util` as fresh (a merge check failed on a module the branch has); retro entry written |
 | DP-16 | `ocx_store` gains the `filetime` crate (already in `Cargo.lock` via `tar`) in P3, an orchestrator commit outside CW. | C-008 normalises symlink mtimes; std sets a link's mtime only by following it |
+| DP-17 | P7 steps 1-3 run before P5 merges, from the branch with P1 P3 P4 P6; the feature branch is merged into P7 after P5 lands and before P7 step 4. | steps 1-3 call no launcher blob; file-disjoint from P5; shortens the critical path |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
