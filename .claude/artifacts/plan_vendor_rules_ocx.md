@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P7 running; CW P9 P3 P4 P1 P2 P6 P8 P5 merged
+- **Step:** /hex-execute → P7 (step 4) and I1a running; CW P9 P3 P4 P1 P2 P6 P8 P5 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -66,6 +66,7 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-18 | `tree.link_free_dirs` never lists `content_dir` itself: entries are the top-most link-free directories strictly under it. | design § 4.1 says "under `content_dir`" and its example lists `content/share`; P7 step 1 had included `content_dir` for a link-free package |
 | DP-19 | P5's security audit (step 4, opus) found two decoder findings in `crates/ocx_env_apply/src/direct.rs` (P1's merged file): a panic on a multibyte segment (Block) and a case-sensitive reserved-key check on Windows (Warn). P5 gains that file for a fix step 4b before the blob cut. `ocx exec` starts a `.bat`/`.cmd` whose path holds `%` the same way the audit made the launcher refuse; that existing behaviour is not changed here and is reported as a follow-up. | the blob cut must follow the last `ocx_env_apply` change; `ocx exec`'s batch path predates this plan and sits outside its contracts |
 | DP-20 | P7 step 2 reimplemented project selection over `LockedTool` because the CW request type carried no config or lock; step 3 undoes it and calls `select_tool_set` + `resolve_selected_tools`, with `VendorSelection::Project` carrying config and lock, and P7 gains `crates/ocx_cli/src/command/{vendor,package_vendor}.rs` for that glue. | V-23 (no new selection walk) and parity with what `ocx exec`/`ocx env` select |
+| DP-21 | I1 runs in two parts: I1a (bookkeeping the merges left: count literals, docs groups, lint tables, tag-guard reads, test-target map, stale blob names, AI-config rows) beside P7, I1b (hub regeneration, `cargo check`, unit suites) after P7. P7 step 3 did not call `compose_roots`: it installs or runs `prepare_lazy` (writes a shim tree, refuses packages declaring no names); roots are built from the closure (`closure_root`) and composed through `resolve_env(EnvScope::Vendor)`, and the vendor lane skips the shim slot. | I1a touches no P7 file and no generated file; the hub stays regenerated once. `compose_roots` has side effects the manifest-only contract (C-003) forbids |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
