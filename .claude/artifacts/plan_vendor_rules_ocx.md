@@ -8,10 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-execute → RV2 closed (review round 2's Block, every Warn and the cheap Suggests); awaiting the shim re-cut and a /hex-review re-check
+- **Step:** /hex-execute → RV2 closed, launcher blobs re-cut (`cd864016`); awaiting a /hex-review re-check
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
-- **Last update:** 2026-11-26 (after d8912cd3: test(vendor): the non-empty output refusal states its remedy)
-- **Next:** re-cut the six launcher blobs from the next shim run, then /hex-review .claude/artifacts/plan_vendor_rules_ocx.md
+- **Last update:** 2026-11-26 (after cd864016: build(shim): launcher blobs re-cut from the review round two sources)
+- **Next:** /hex-review .claude/artifacts/plan_vendor_rules_ocx.md
 - **Reviewed:** 9e3040cdfc9b2f7d76c61f63727c13c3ee100990
 
 ---
@@ -181,7 +181,7 @@ permanent control case in the same test (the check reports failure on a bad inpu
 | V-14 | P8 | in (direct start with relative `PATH` after `cd`) | local |
 | V-15 | R7 | in (no `index`) | rig |
 | V-16 | R7 | in (facts deleted) | rig |
-| V-17 | X | in (`--override_module` at `9648f93`) | local, recorded in PR body |
+| V-17 | X | in (`9648f93`: `unknown attribute 'platforms'`) — green, Linux, `@tools//...` only | local, Red-proof log |
 | V-18 | R5 | in (planted `ocx env` fixture) | rules_ocx lint |
 | V-19 | P8 | in (full run log; renamed fixture tool) | local |
 | V-20 | P8 | in (one mutated expected entry) | local + ocx-deep |
@@ -769,9 +769,17 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
 - V-73 — in: unit fold control (P1) and Windows fold mutation (P5) red; Windows case — CI: ocx-deep `Acceptance (windows)`
 - V-23 — rev: Reuse table held except where DP-20/DP-21 record why (`compose_roots` not called by the manifest path)
 - Windows long-path launcher (`batch_spawn` `a_direct_launcher_starts_a_program_past_max_path`,
-  `a_classic_launcher_starts_a_pinned_ocx_past_max_path`) — green only: CI head `93bd6bb8`, `repo / Unit Test (Windows)`,
-  `//crates/ocx_shim:batch_spawn passed=5`. Red: commit `6272e9ce` drops the prefix and `21878237` reverts it; the
-  red run of `repo / Unit Test (Windows)` on `6272e9ce` is the coordinator's push (CI, pending at RV2 close)
+  `a_classic_launcher_starts_a_pinned_ocx_past_max_path`) — in: red on commit `6272e9ce` (prefix dropped), run
+  45819208830, `repo / Unit Test (Windows)`: `FAIL //crates/ocx_shim:batch_spawn passed=3 failed=2`, the classic case with
+  `ocx-shim: pinned ocx not found: …` and the direct case with `ocx-shim: failed to start …`. Green: the same target
+  `passed=5` on `9e3040cd` (`21878237` reverts the mutation). This closes RV2's deferred Warn on
+  `crates/ocx_shim/tests/batch_spawn.rs` (a red never observed)
+- V-17 (this repository builds with the new rules_ocx) — in, Linux only, tool repositories only: a scratch copy of this
+  repository with `platforms = ["linux/amd64+libc.glibc"]` on the `ocx.project` tag and `register_toolchains("@tools//:all")`
+  in `MODULE.bazel`, rules_ocx overridden to its branch head, dev `ocx` `0.6.8-pr784_20261126120642`. Green:
+  `bazel build @tools//...` analysed 33 targets and succeeded; `shellcheck`, `uv`, `node`, `python3` and `zot` ran
+  through their launchers. Red: the same copy against rules_ocx `main` (`9648f93`) fails with
+  `unknown attribute 'platforms'`. Not covered: this workspace's own targets, and any host but Linux
 - RV2 Block 1 (`contract:rotate`) — in: `test/lint/test_contract_baseline.py` runs the task's own body on a scratch repository;
   red on the old line ("syntax error near unexpected token `printf'"), red without the removal (stale `vendor-manifest.json`) — local
 - RV2 Warn 2, 3 — in: `test_shim_inputs.py` red against the previous script for the release profile, `.cargo/config.toml`,
@@ -873,3 +881,7 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
   on a non-zero exit, as one `ocx-shim:` failure line. Gate: lint tier 808, `.claude/tests` 697, scripts 1059, vendor modules 59
   passed and 6 skipped, `ocx_shim` and `ocx_env_apply` units 223, Linux and Windows-target clippy clean, `cargo fmt` clean. Shim
   sources and inputs changed again: re-cut pending (External act 3).
+- 2026-11-26 — Launcher blobs re-cut (`cd864016`) from shim run 45820961401 on `cc24f08d`: all six digests changed, the input
+  digest stayed `e2fc4047`. `ocx_store` `shim::` units 21, `.claude/tests/test_workflows.py` 442, the musl x64 native check
+  4 cases. The long-path red is observed (run 45819208830, `passed=3 failed=2`), closing RV2's deferred Warn; V-17 green on
+  Linux for the tool repositories, red at `9648f93`. Both in the Red-proof log.
