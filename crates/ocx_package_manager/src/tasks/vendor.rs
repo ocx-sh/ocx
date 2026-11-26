@@ -527,7 +527,7 @@ async fn build_manifest(
             let directory = metadata_of(&roots, &owner.tool)
                 .map(|metadata| binary_directory(metadata, windows))
                 .unwrap_or_default();
-            // shortcut: a Windows binary is taken to be `<name>.exe`, never `.cmd` or `.bat`; the full run sees the tree.
+            // shortcut: a manifest-only Windows binary is taken to be `<name>.exe`; with content, `settle_windows_binary_targets` reads the tree.
             (
                 ToolKind::Binary,
                 format!("{}/{directory}{name}{}", package.content_dir, exe_suffix(windows)),
@@ -908,6 +908,9 @@ async fn write_content(
         }
     }
     manifest.content = Content::Present;
+    if windows {
+        settle_windows_binary_targets(&layout, &mut manifest.tools).await;
+    }
 
     // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
@@ -930,6 +933,27 @@ async fn write_content(
         }
     }
     Ok(())
+}
+
+/// Points each Windows binary at the file the content holds: `<name>.exe` is the manifest-only guess, and a
+/// package may ship `<name>.cmd` or `<name>.bat` instead. A target found under none keeps the guess.
+async fn settle_windows_binary_targets(layout: &VendorLayout, tools: &mut [Tool]) {
+    for tool in tools.iter_mut().filter(|tool| tool.kind == ToolKind::Binary) {
+        let Some(stem) = tool.target_path.strip_suffix(".exe") else {
+            continue;
+        };
+        // No bare name: `CreateProcessW` appends `.exe` to a program without an extension.
+        for extension in [".exe", ".cmd", ".bat"] {
+            let candidate = format!("{stem}{extension}");
+            if tokio::fs::metadata(layout.resolve(&candidate))
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+            {
+                tool.target_path = candidate;
+                break;
+            }
+        }
+    }
 }
 
 /// Pulls one package into the staging tree and lists what landed.
@@ -1453,6 +1477,41 @@ mod tests {
             .expect_err("an escaping target");
 
         assert!(matches!(error, VendorError::PathUnrepresentable { .. }), "{error:?}");
+    }
+
+    /// A Windows binary's target is the file the content holds, `.exe` only as the fallback guess.
+    #[tokio::test]
+    async fn a_windows_binary_target_is_the_file_the_content_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = VendorLayout::new(dir.path());
+        std::fs::create_dir_all(layout.resolve("pkg/content/bin")).expect("bin dir");
+        std::fs::write(layout.resolve("pkg/content/bin/hello.bat"), b"@echo off").expect("batch file");
+        let tool = |name: &str, kind: ToolKind| Tool {
+            name: name.to_owned(),
+            selection: SELECTION_ID.to_owned(),
+            kind,
+            package: "sha256:0".to_owned(),
+            environment: SELECTION_ENVIRONMENT.to_owned(),
+            target_path: format!("pkg/content/bin/{name}.exe"),
+            launcher_path: None,
+        };
+        let mut tools = vec![
+            tool("hello", ToolKind::Binary),
+            tool("missing", ToolKind::Binary),
+            tool("hello", ToolKind::Entrypoint),
+        ];
+
+        settle_windows_binary_targets(&layout, &mut tools).await;
+
+        assert_eq!(tools[0].target_path, "pkg/content/bin/hello.bat");
+        assert_eq!(
+            tools[1].target_path, "pkg/content/bin/missing.exe",
+            "nothing found keeps the guess"
+        );
+        assert_eq!(
+            tools[2].target_path, "pkg/content/bin/hello.exe",
+            "an entry point launcher is never re-pointed"
+        );
     }
 
     /// `aux.h` is an ordinary file name everywhere but a Windows target.
