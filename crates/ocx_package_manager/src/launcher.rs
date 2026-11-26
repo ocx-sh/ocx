@@ -13,7 +13,7 @@ mod generate;
 mod project_selector_tests;
 mod safety;
 
-pub use generate::{LauncherKind, binary_pin_value, generate, generate_kind};
+pub use generate::{binary_pin_value, generate, generate_direct};
 
 /// A `pub(crate)` item inside a private `mod` does not escape it, so the
 /// trampoline surface `crate::tasks::render_toolchain` calls needs this

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::PackageErrorKind;
+use crate::launcher::direct::write_direct_launcher;
 use crate::launcher::{TrampolineTarget, exec_sidecar_body, trampoline_ocx_binary, unix_trampoline_body};
 use ocx_project::{DEFAULT_GROUP, LockedTool, ProjectLock};
 use ocx_store::file_structure::{
@@ -32,6 +33,8 @@ use ocx_store::reference_manager::ReferenceManager;
 use super::super::PackageManager;
 use super::common::ClosureNode;
 use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insensitive};
+use super::vendor::VendorError;
+use ocx_env_apply::direct::DirectSidecar;
 
 /// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render between the first `bin/` entry
 /// write and the stamp write.
@@ -638,6 +641,33 @@ async fn reconcile_bin(
     }
 
     Ok(landed)
+}
+
+/// Writes one direct launcher per name `surface` exposes into `bin` (`selections/<id>/shells/default/bin` of a
+/// vendored directory), for `ocx vendor`; touches no home lock, stamp, `.gitignore` or `active` link.
+/// `sidecar_for` yields the selection's sidecar of a name. A package declaring no names creates nothing.
+///
+/// # Errors
+///
+/// [`PackageErrorKind::ShimNameInvalid`] for an invalid entry point name, as [`VendorError::Package`]; the
+/// errors of [`write_direct_launcher`].
+pub async fn render_direct_bin(
+    bin: &Path,
+    surface: &[ClosureNode],
+    blob: &[u8],
+    sidecar_for: &dyn Fn(&str) -> DirectSidecar,
+) -> Result<(), VendorError> {
+    let names = exposed_names(surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(bin)
+        .await
+        .map_err(|e| crate::error::file_error(bin, e))?;
+    for name in names.keys() {
+        write_direct_launcher(bin, name.as_str(), blob, &sidecar_for(name.as_str())).await?;
+    }
+    Ok(())
 }
 
 /// Publish one exposed name's `bin/` entry; `Ok(true)` when this call wrote. A runtime branch, not
@@ -1865,6 +1895,66 @@ mod tests {
         node.is_root = false;
         node.effective_visibility = Some(effective);
         node
+    }
+
+    fn direct_sidecar(name: &str) -> DirectSidecar {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
+            "self": format!("selections/default/shells/default/bin/{name}"),
+            "program": format!("@VENDOR_DIR@/packages/p/content/bin/{name}"),
+            "args": [],
+            "unset": [],
+            "env": [],
+        }))
+        .expect("fixture decodes")
+    }
+
+    /// A selection render writes one launcher and sidecar per declared name, with that name's sidecar.
+    #[tokio::test]
+    async fn direct_selection_writes_one_launcher_per_declared_name() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin = tmp.path().join("selections/default/shells/default/bin");
+        let surface = [node(pinned("tool", 'a'), Some(&["cmake", "ctest"]), &[])];
+
+        render_direct_bin(&bin, &surface, b"blob", &direct_sidecar)
+            .await
+            .expect("render succeeds");
+
+        for name in ["cmake", "ctest"] {
+            let launcher = bin.join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            });
+            assert_eq!(std::fs::read(&launcher).expect("launcher"), b"blob");
+            let sidecar: DirectSidecar =
+                serde_json::from_slice(&std::fs::read(bin.join(format!("{name}.direct"))).expect("sidecar"))
+                    .expect("json");
+            assert_eq!(sidecar.program, format!("@VENDOR_DIR@/packages/p/content/bin/{name}"));
+            assert_eq!(
+                sidecar.self_path,
+                format!("selections/default/shells/default/bin/{name}")
+            );
+        }
+        assert_eq!(std::fs::read_dir(&bin).expect("dir").count(), 4);
+    }
+
+    /// A package declaring no names writes nothing, not even the directory.
+    #[tokio::test]
+    async fn direct_selection_with_no_names_writes_nothing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin = tmp.path().join("bin");
+        let surface = [
+            node(pinned("tool", 'a'), Some(ASSERTED_EMPTY), &[]),
+            node(pinned("other", 'b'), None, &[]),
+        ];
+
+        render_direct_bin(&bin, &surface, b"blob", &direct_sidecar)
+            .await
+            .expect("render succeeds");
+
+        assert!(!bin.exists());
     }
 
     /// The publisher asserting **zero** executables, distinct from `None`
