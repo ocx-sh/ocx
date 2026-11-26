@@ -1,7 +1,8 @@
-# Builds + attests the committed Windows native launcher shims (issue #66,
-# adr_windows_exe_shim.md). The shim is cross-built on Linux via cargo-zigbuild
-# (no Windows runner needed for the build), so the per-arch matrix legs are
-# gated behind a cheap Linux gate job rather than a Windows runner.
+# Builds + attests the committed native launcher blobs (issue #66,
+# adr_windows_exe_shim.md): one per target triple, Linux, macOS and Windows on
+# both architectures. The launcher is cross-built on Linux via cargo-zigbuild
+# (no Windows or macOS runner needed for the build), so the per-target matrix
+# legs are gated behind a cheap Linux gate job rather than a Windows runner.
 #
 # This workflow does NOT sign the blob. Authenticode signing (SignPath
 # Foundation) is a documented Phase-2 step gated on operations work owned by
@@ -18,6 +19,7 @@ on:
     # the provenance gate (fresh hermetic build + SHA canary; Codex finding 2).
     paths:
       - 'crates/ocx_shim/**'
+      - 'crates/ocx_env_apply/**'
       - 'crates/ocx_store/src/shims/**'
       - 'crates/ocx_store/src/shim.rs'
       - 'Cargo.toml'
@@ -32,6 +34,7 @@ on:
     branches: [main]
     paths:
       - 'crates/ocx_shim/**'
+      - 'crates/ocx_env_apply/**'
       - 'crates/ocx_store/src/shims/**'
       - 'crates/ocx_store/src/shim.rs'
       - 'Cargo.toml'
@@ -105,11 +108,15 @@ jobs:
       id-token: write       # SLSA provenance (Sigstore/Rekor OIDC)
       attestations: write   # actions/attest-build-provenance
     strategy:
-      # Both arches are independent and both must pass the blob validation
-      # gate; fail-fast would mask one arch's status behind the other's.
+      # The six targets are independent and each must pass the blob validation
+      # gate; fail-fast would mask one target's status behind another's.
       fail-fast: false
       matrix:
         target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
           - x86_64-pc-windows-gnullvm
           - aarch64-pc-windows-gnullvm
     steps:
@@ -131,11 +138,13 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           target: ${{ matrix.target }}
-          # rust-toolchain.toml pins channel + rust-src (build-std) + the
-          # gnullvm targets; this only adds the per-matrix target redundantly.
+          # rust-toolchain.toml pins the channel and the gnullvm targets; this
+          # adds the per-matrix target, which is how the musl and darwin
+          # targets get installed.
 
       # Zig = the hermetic toolchain: it bundles clang, lld and the libc
-      # headers, so the build depends on no floating Microsoft SDK. The blob
+      # headers, so the build depends on no floating Microsoft or Apple SDK
+      # (the launcher links only libSystem on macOS, which zig stubs itself). The blob
       # is NOT byte-reproducible (see the provenance-gate step below), but the
       # Zig version does change the emitted bytes — bump it in a blob-refresh
       # PR, never on its own (see adr_shim_hermetic_zigbuild.md).
@@ -172,10 +181,15 @@ jobs:
 
       - name: Resolve blob paths
         id: paths
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
-          built="target/${{ matrix.target }}/shim/ocx-shim.exe"
-          committed="crates/ocx_store/src/shims/ocx-shim-${arch}.exe"
+          case "$TARGET" in
+            *-pc-windows-gnullvm) ext=".exe" ;;
+            *) ext="" ;;
+          esac
+          built="target/${TARGET}/shim/ocx-shim${ext}"
+          committed="crates/ocx_store/src/shims/ocx-shim-${TARGET}${ext}"
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           echo "committed=${committed}" >> "$GITHUB_OUTPUT"
 
@@ -208,40 +222,74 @@ jobs:
       #      build must still succeed + fit the budget; the refresh PR
       #      re-cuts the blob from the uploaded artifact above.
       # See adr_shim_hermetic_zigbuild.md §"gate redesign".
-      - name: Validate committed shim blob (provenance model)
+      - name: Validate shim blobs (provenance model)
         env:
+          TARGET: ${{ matrix.target }}
+          BUILT: ${{ steps.paths.outputs.built }}
           COMMITTED: ${{ steps.paths.outputs.committed }}
         run: |
-          committed="$COMMITTED"
-          arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
-          # 1. valid PE (MZ magic)
-          if [ "$(head -c2 "$committed")" != "MZ" ]; then
-            echo "::error::${committed} is not a PE image (missing MZ magic)"
-            exit 1
-          fi
-          # 2. within the fail-closed size budget declared in shim.rs
+          set -euo pipefail
+          case "$TARGET" in
+            *-pc-windows-gnullvm) magic="4d5a";     kind="PE" ;;
+            *-unknown-linux-musl) magic="7f454c46"; kind="ELF" ;;
+            *-apple-darwin)       magic="cffaedfe"; kind="64-bit Mach-O" ;;
+            *) echo "::error::no image format known for ${TARGET}"; exit 1 ;;
+          esac
+          # The fail-closed size budget declared in shim.rs, one budget for
+          # every blob (C-019).
           budget_kib="$(grep -oE 'SHIM_SIZE_BUDGET: usize = [0-9]+ \* 1024' \
             crates/ocx_store/src/shim.rs | grep -oE '^SHIM_SIZE_BUDGET: usize = [0-9]+' \
             | grep -oE '[0-9]+$')"
           max=$(( budget_kib * 1024 ))
-          size=$(stat -c%s "$committed")
-          if [ "$size" -gt "$max" ]; then
-            echo "::error::${committed} ${size}B exceeds SHIM_SIZE_BUDGET ${max}B"
+          # Fresh build and committed blob both: the fresh one fits the budget
+          # before any refresh PR exists, the committed one is what ships.
+          for blob in "$BUILT" "$COMMITTED"; do
+            # 1. the right image format for the target
+            got_magic="$(head -c"$(( ${#magic} / 2 ))" "$blob" | od -An -tx1 | tr -d ' \n')"
+            if [ "$got_magic" != "$magic" ]; then
+              echo "::error::${blob} is not a ${kind} image (magic ${got_magic}, want ${magic})"
+              exit 1
+            fi
+            # 2. within the size budget
+            size=$(stat -c%s "$blob")
+            if [ "$size" -gt "$max" ]; then
+              echo "::error::${blob} ${size}B exceeds SHIM_SIZE_BUDGET ${max}B"
+              exit 1
+            fi
+            # 3. the macOS code signature: arm64 refuses to run an unsigned
+            # image, x86_64 needs none (C-019). Presence is the load command,
+            # so a missing signature fails here, not on a user's machine.
+            case "$TARGET" in
+              *-apple-darwin)
+                python3 -I - "$blob" "$TARGET" <<'PY'
+          import struct, sys
+          LC_CODE_SIGNATURE = 0x1D
+          data = open(sys.argv[1], "rb").read()
+          ncmds = struct.unpack_from("<I", data, 16)[0]
+          off, signed = 32, False
+          for _ in range(ncmds):
+              cmd, size = struct.unpack_from("<II", data, off)
+              signed |= cmd == LC_CODE_SIGNATURE
+              off += size
+          want = sys.argv[2].startswith("aarch64-")
+          if signed != want:
+              sys.exit(f"::error::{sys.argv[1]} LC_CODE_SIGNATURE present={signed}, want {want}")
+          PY
+                ;;
+            esac
+            echo "OK: ${blob} valid ${kind}, ${size}B <= ${max}B"
+          done
+          # 4. corruption canary: the committed blob's digest is recorded in
+          # shim.rs. Looked up by value, not by position, so no blob order is
+          # assumed; a blob refreshed without its constant (or the constant
+          # without the blob) fails here.
+          got="$(sha256sum "$COMMITTED" | cut -d' ' -f1)"
+          if ! grep -q "\"${got}\"" crates/ocx_store/src/shim.rs; then
+            echo "::error::${COMMITTED} sha256 ${got} is not recorded in crates/ocx_store/src/shim.rs"
+            echo "::error::Refresh: download the ocx-shim-fresh-${TARGET} artifact, replace the blob, update its SHA-256 in crates/ocx_store/src/shim.rs."
             exit 1
           fi
-          # 3. corruption canary: committed blob == recorded SHIM_SHA256.
-          # File order in shim.rs is x86_64 then aarch64.
-          shas=$(grep -oE 'SHIM_SHA256: &str = "[0-9a-f]{64}"' \
-            crates/ocx_store/src/shim.rs | grep -oE '[0-9a-f]{64}')
-          if [ "$arch" = "x86_64" ]; then want="$(echo "$shas" | sed -n 1p)"; \
-            else want="$(echo "$shas" | sed -n 2p)"; fi
-          got="$(sha256sum "$committed" | cut -d' ' -f1)"
-          if [ "$got" != "$want" ]; then
-            echo "::error::${committed} sha256 ${got} != recorded SHIM_SHA256 ${want}"
-            echo "::error::Refresh: download the ocx-shim-fresh-${{ matrix.target }} artifact, replace the blob, update SHIM_SHA256 in crates/ocx_store/src/shim.rs."
-            exit 1
-          fi
-          echo "OK: ${committed} valid PE, ${size}B <= ${max}B, sha ${got} matches SHIM_SHA256"
+          echo "OK: ${COMMITTED} sha ${got} recorded in shim.rs"
 
       # SLSA Build provenance on the committed blob (real provenance leg; the
       # in-tree SHA is only a corruption canary — ADR §"SHA256 = corruption
@@ -289,7 +337,9 @@ jobs:
           # is not a source change. Everything else under the tree still is --
           # the exclusion names one file, not a glob, so a new `.rs` or a
           # `Cargo.toml` bump still reds here.
-          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ ':(exclude)crates/ocx_shim/BUILD.bazel')"
+          # `crates/ocx_env_apply/` is the shim's sidecar decoder: a change there
+          # changes the blob's bytes the same way.
+          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ crates/ocx_env_apply/ ':(exclude)crates/ocx_shim/BUILD.bazel' ':(exclude)crates/ocx_env_apply/BUILD.bazel')"
           last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_store/src/shims/)"
           if [ -z "$last_src" ]; then
             echo "no shim source history; nothing to compare"; exit 0
@@ -308,7 +358,7 @@ jobs:
           echo "last shim source change: $(git log -1 --format='%h %s' "$last_src")"
           echo "last blob re-cut:        $(git log -1 --format='%h %s' "$last_blob")"
           echo "Re-cut them from THIS run's ocx-shim-fresh-<target> artifacts and update"
-          echo "both SHIM_SHA256 constants in crates/ocx_store/src/shim.rs (ritual: its module doc)."
+          echo "every blob's SHA-256 in crates/ocx_store/src/shim.rs (ritual: its module doc)."
           exit 1
 
   # Windows acceptance: the genuinely Win32-dependent shim behaviours
