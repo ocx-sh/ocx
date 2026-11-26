@@ -27,6 +27,8 @@ on:
       - 'rust-toolchain.toml'
       - 'taskfiles/rust.taskfile.yml'
       - '.github/workflows/build-windows-shims.yml'
+      - '.github/workflows/launcher-blobs.yml'
+      - 'scripts/launcher_blob_check.sh'
       - 'test/tests/test_windows_shim.py'
       - 'test/tests/test_trampoline_exec.py'
       - 'test/conftest.py'
@@ -42,6 +44,8 @@ on:
       - 'rust-toolchain.toml'
       - 'taskfiles/rust.taskfile.yml'
       - '.github/workflows/build-windows-shims.yml'
+      - '.github/workflows/launcher-blobs.yml'
+      - 'scripts/launcher_blob_check.sh'
       - 'test/tests/test_windows_shim.py'
       - 'test/tests/test_trampoline_exec.py'
       - 'test/conftest.py'
@@ -418,6 +422,15 @@ jobs:
           # session hook (Docker registry is Linux-only — system_design §8).
           OCX_TESTS_NO_REGISTRY: "1"
         run: uv run pytest tests/test_windows_shim.py tests/test_trampoline_exec.py -v
+
+  # The committed blobs themselves, each on its own OS and architecture. `build` and
+  # `acceptance-windows` test fresh builds; only this job starts the bytes `ocx` embeds.
+  native-blobs:
+    name: Committed blobs (native)
+    needs: gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/launcher-blobs.yml
 
   # Phase-2 placeholder (NOT implemented): Authenticode signing via SignPath
   # Foundation. Prerequisites (ocx.sh /code-signing-policy page, maintainer

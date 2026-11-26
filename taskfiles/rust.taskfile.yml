@@ -608,6 +608,22 @@ tasks:
       RUSTFLAGS="-D warnings --remap-path-prefix={{.RUST_SRC_DIR}}=/rustc/{{.RUSTC_COMMIT_HASH}}"
       cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
 
+  shim:blob:check:
+    desc: Run one committed launcher blob natively from a hand-laid vendored directory
+    summary: |
+      Starts crates/ocx_store/src/shims/ocx-shim-<TARGET>[.exe] through
+      scripts/launcher_blob_check.sh: refusals, a started child, argument,
+      environment and exit-status pass-through, and on aarch64-apple-darwin the
+      code signature. Run it with the TARGET this host executes, e.g.
+      TARGET=x86_64-unknown-linux-musl. launcher-blobs.yml runs the same script
+      on every blob's own runner, calling it directly because those runners
+      carry no task.
+    requires:
+      vars: [TARGET]
+    vars:
+      EXT: '{{if contains "windows" .TARGET}}.exe{{end}}'
+    cmd: bash scripts/launcher_blob_check.sh crates/ocx_store/src/shims/ocx-shim-{{.TARGET}}{{.EXT}} {{.TARGET}}
+
   check:windows:
     desc: Cross-compile-check both Windows MSVC targets via Docker (cargo-xwin, cached)
     summary: |
