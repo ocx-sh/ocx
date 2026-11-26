@@ -43,4 +43,6 @@ pub(crate) mod toolchain_drift;
 pub(crate) mod toolchain_names;
 pub(crate) mod uninstall;
 pub(crate) mod update_check;
+// `pub`: the request and outcome vocabulary `ocx_cli` names.
+pub mod vendor;
 pub(crate) mod verify;

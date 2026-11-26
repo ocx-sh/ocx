@@ -565,6 +565,9 @@ unyank_tag_not_curated	Failure	A tag to unyank is not a curated tag
 update_section_in_project	ConfigError	ocx.toml declares an [update] section, which only config.toml may hold
 usage	UsageError	The command was invoked with arguments it cannot act on
 users_api_unavailable	UsageError	The forge offers no users API to resolve owners through
+vendor_output_not_empty	UsageError	The vendor output directory exists and is not an empty directory
+vendor_path_unrepresentable	DataError	A path cannot be written inside the vendor directory
+vendor_value_unrepresentable	DataError	A value cannot be written relative to the vendor directory
 version_invalid	DataError	A package version does not parse
 walked_digest_mismatch	DataError	A source answered a digest request with different content
 wrong_layer_count	DataError	An artifact carries other than exactly one layer
