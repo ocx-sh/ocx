@@ -25,6 +25,8 @@ pub enum CleanKind {
     // next prompt), and a `--dry-run` that did not name it would preview
     // everything except the part a user would want to stop.
     Consent,
+    /// A superseded launcher generation directory.
+    Launchers,
 }
 
 impl fmt::Display for CleanKind {
@@ -33,6 +35,7 @@ impl fmt::Display for CleanKind {
             CleanKind::Object => write!(f, "object"),
             CleanKind::Temp => write!(f, "temp"),
             CleanKind::Consent => write!(f, "consent"),
+            CleanKind::Launchers => write!(f, "launchers"),
         }
     }
 }
@@ -136,5 +139,16 @@ impl Printable for Clean {
                 &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_kind_launchers_displays_and_serializes_as_launchers() {
+        assert_eq!(CleanKind::Launchers.to_string(), "launchers");
+        assert_eq!(serde_json::to_string(&CleanKind::Launchers).unwrap(), "\"launchers\"");
     }
 }

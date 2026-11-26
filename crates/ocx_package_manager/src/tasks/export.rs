@@ -145,7 +145,7 @@ impl PackageManager {
                 .await
                 .map_err(|error| file_error(parent, error))?;
         }
-        let staging = export_archive::scratch(self.file_structure(), "export").await?;
+        let staging = self.file_structure().temp.scratch("export").await?;
         let staged = ExportRequest {
             output: staging.path().to_path_buf(),
             archive: false,

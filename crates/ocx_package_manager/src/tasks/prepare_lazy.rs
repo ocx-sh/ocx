@@ -76,6 +76,7 @@ impl PackageManager {
         let staged = stage_shim_dir(fs).await?;
         let staged_dir = ShimDir {
             dir: staged.path().to_path_buf(),
+            marker: "bin",
         };
         ocx_store::file_structure::write_digest_file(&staged_dir.digest_file(), &resolved.pinned.digest())
             .await
@@ -345,7 +346,10 @@ mod tests {
     }
 
     fn shim_dir_at(path: PathBuf) -> ShimDir {
-        ShimDir { dir: path }
+        ShimDir {
+            dir: path,
+            marker: "bin",
+        }
     }
 
     /// A scratch [`ocx_store::file_structure::ShimBinStore`] rooted under the

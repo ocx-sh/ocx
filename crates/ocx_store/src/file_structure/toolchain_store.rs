@@ -193,6 +193,18 @@ impl ToolchainHome {
         self.root.join(SHELLS_DIR).join(shell).join(TOOLCHAIN_BIN_DIR)
     }
 
+    /// `<root>/shells/<name>`: one published render directory, `default-<16 random hex>` under the unified launcher model.
+    ///
+    /// `name` is not validated; one read from a stamp or a link must be checked by the caller.
+    pub fn render_dir(&self, name: &str) -> PathBuf {
+        self.root.join(SHELLS_DIR).join(name)
+    }
+
+    /// The render directory name `active` currently links to, `None` when `active` is absent or names no `shells/` child.
+    pub fn active_target_name(&self) -> Option<String> {
+        unimplemented!("ToolchainHome::active_target_name")
+    }
+
     /// `active`'s one legal target; the heal and [`Self::active_is_valid`] both use this, never a second derivation.
     pub fn expected_active_target(&self, shell: &str) -> PathBuf {
         expected_active_target(&self.root, shell)
@@ -412,6 +424,33 @@ mod tests {
             sandbox.path().join("toolchain"),
             "the global home is $OCX_HOME/toolchain and no toolchain_dir tier moves it"
         );
+    }
+
+    #[test]
+    fn render_dir_is_a_named_child_of_shells() {
+        let home = ToolchainHome::new("/h/toolchain");
+
+        assert_eq!(
+            home.render_dir("default-8d41c2e07a95b3f6"),
+            PathBuf::from("/h/toolchain/shells/default-8d41c2e07a95b3f6")
+        );
+        assert_eq!(
+            home.render_dir(DEFAULT_SHELL),
+            home.shell_bin(DEFAULT_SHELL).parent().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contract_active_target_name_reads_the_link_and_is_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = ToolchainHome::new(tmp.path());
+        assert_eq!(home.active_target_name(), None, "no active link yet");
+
+        std::fs::create_dir_all(home.render_dir("default-8d41c2e07a95b3f6")).unwrap();
+        std::os::unix::fs::symlink("shells/default-8d41c2e07a95b3f6", home.active()).unwrap();
+
+        assert_eq!(home.active_target_name().as_deref(), Some("default-8d41c2e07a95b3f6"));
     }
 
     /// Component names D-V14 refuses, one per refusal reason, reused by the

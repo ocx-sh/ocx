@@ -1520,6 +1520,11 @@ const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "from_file_magic",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
+    // Launcher-directory publish helpers, public for the home launcher writers that land after
+    // them; drop each entry when its first caller lands.
+    "publish_dir",
+    "retarget_link",
+    "retire_dir",
     // Public for the package export and import verbs, which land after this item; drop the
     // entry when the first one calls it.
     "with_level",

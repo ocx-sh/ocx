@@ -25,9 +25,9 @@ pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageDirError, PackageStore, is_verified, record_origin, record_verified};
 pub use shim_bin_store::ShimBinStore;
 pub use shim_store::{ShimDir, ShimStore};
-pub use state_store::{BinEntryStamp, RenderStamp, RenderStampScope, RenderStampTarget, StateStore};
+pub use state_store::{BinEntryStamp, RenderStamp, RenderStampScope, RenderStampTarget, RenderStampV2, StateStore};
 pub use symlink_store::{SymlinkKind, SymlinkStore};
-pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
+pub use temp_store::{LockedScratch, StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
 pub use toolchain_store::{
     DEFAULT_SHELL, TREE_OWN_DEPTH1_NAMES, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
 };
@@ -77,7 +77,7 @@ impl FileStructure {
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
             shim_bin: ShimBinStore::new(root.join(".bin").join("ocx-shim")),
-            shims: ShimStore::new(root.join("shims")),
+            shims: ShimStore::new(root.join("shims"), shim_store::SHIM_BIN_DIRNAME),
             toolchain: ToolchainStore::new(root.join("toolchain")),
             locks,
             root,
@@ -86,6 +86,19 @@ impl FileStructure {
 
     pub fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// Deferred trees written under generation `generation`: `<root>/deferred/<G>/…/l/`.
+    pub fn deferred(&self, generation: &crate::launcher_generation::LauncherGeneration) -> ShimStore {
+        ShimStore::new(
+            self.deferred_root().join(generation.as_str()),
+            shim_store::DEFERRED_LAUNCHER_DIRNAME,
+        )
+    }
+
+    /// Parent of every generation's deferred trees; what a sweep of superseded generations walks.
+    pub fn deferred_root(&self) -> PathBuf {
+        self.root.join("deferred")
     }
 
     /// Machine-local patch-descriptor discovery state for `identifier`; never follows `--index` redirection.
@@ -231,5 +244,19 @@ mod tests {
                 "a GC-walked store must not live inside the toolchain tree ({walked:?})"
             );
         }
+    }
+
+    #[test]
+    fn deferred_trees_live_under_the_generation_with_an_l_marker() {
+        let structure = FileStructure::with_root(std::path::PathBuf::from("/ocx"));
+        let generation = crate::launcher_generation::LauncherGeneration::from_hex("0123456789abcdef").unwrap();
+
+        assert_eq!(structure.deferred_root(), Path::new("/ocx/deferred"));
+        let deferred = structure.deferred(&generation);
+        assert_eq!(deferred.root(), Path::new("/ocx/deferred/0123456789abcdef"));
+        assert!(
+            !deferred.root().starts_with(structure.shims.root()),
+            "a deferred tree never lands under shims/, which an older ocx owns"
+        );
     }
 }

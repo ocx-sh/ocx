@@ -11,12 +11,28 @@ pub use temp_dir::TempDir;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use ocx_util::fs::LockedFile;
+use ocx_util::fs::{DropFile, LockedFile};
 
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
 const LOCK_EXTENSION: &str = "lock";
+
+/// A scratch directory under `temp/` that `ocx clean` leaves alone while this value lives.
+pub struct LockedScratch {
+    // Field order is drop order: the directory goes first, then the lock, then the lock file.
+    _dir: DropFile,
+    _lock: LockedFile,
+    _lock_file: DropFile,
+    path: PathBuf,
+}
+
+impl LockedScratch {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// Deterministic staging directories for in-progress downloads.
 ///
@@ -67,6 +83,39 @@ impl TempStore {
 
     pub fn lock_path_for(dir: &Path) -> PathBuf {
         dir.with_extension(LOCK_EXTENSION)
+    }
+
+    /// Creates an empty `temp/<prefix>-…` directory, unique per call so two runs never wait on each other.
+    ///
+    /// The lock file exists before the directory and is held until the value drops, so `ocx clean` never sees a
+    /// lock-less directory to sweep.
+    ///
+    /// # Errors
+    ///
+    /// The lock file or the directory cannot be created.
+    pub async fn scratch(&self, prefix: &str) -> Result<LockedScratch> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let name = format!(
+            "{prefix}-{:x}-{nanos:x}-{:x}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = self.root.join(name);
+        let lock_path = Self::lock_path_for(&path);
+        let lock = LockedFile::open_exclusive(&lock_path).await?;
+        let lock_file = DropFile::new(&lock_path);
+        tokio::fs::create_dir_all(&path)
+            .await
+            .map_err(|error| ocx_util::error::FileError::new(&path, error))?;
+        Ok(LockedScratch {
+            _dir: DropFile::new(&path),
+            _lock: lock,
+            _lock_file: lock_file,
+            path,
+        })
     }
 
     /// Lists entries found as a `.lock` file, a directory, or both; empty if the root does not exist.
@@ -485,6 +534,53 @@ mod tests {
             "TempAcquireResult.lock must be a LockedFile over the sentinel .lock file"
         );
     }
+    /// C-126: `scratch` is removed with its lock file when it drops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scratch_is_removed_with_its_lock_file() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TempStore::new(home.path().join("temp"));
+        let held = store.scratch("probe").await.unwrap();
+        let path = held.path().to_path_buf();
+        assert!(path.is_dir());
+        assert!(path.file_name().unwrap().to_string_lossy().starts_with("probe-"));
+
+        drop(held);
+
+        assert!(!path.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(store.root()).unwrap().collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// C-126: a held scratch is never offered to the cleaner; a dropped one is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_scratch_is_not_offered_to_the_cleaner_and_a_dropped_one_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let store = TempStore::new(home.path().join("temp"));
+        let held = store.scratch("probe").await.unwrap();
+        let path = held.path().to_path_buf();
+
+        let offered: Vec<PathBuf> = store
+            .stale_entries()
+            .unwrap()
+            .into_iter()
+            .map(|entry| match entry {
+                StaleEntry::Locked(acquired) => acquired.dir.dir.clone(),
+                StaleEntry::Orphan(path) => path,
+            })
+            .collect();
+        assert!(
+            !offered.contains(&path),
+            "`ocx clean` was offered a live scratch: {offered:?}"
+        );
+        assert!(path.is_dir());
+
+        drop(held);
+
+        assert!(!path.exists());
+        assert!(!TempStore::lock_path_for(&path).exists());
+        assert!(store.stale_entries().unwrap().is_empty());
+    }
+
     /// Acquiring a scratch dir that still holds a crashed run's artifacts
     /// hands back a CLEAN dir, and says so.
     ///

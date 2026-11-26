@@ -5546,7 +5546,7 @@ mod tests {
     /// A shim directory rooted at `dir` — the shape `ShimStore::shim_dir`
     /// hands the composer.
     fn shim_dir_at(dir: std::path::PathBuf) -> ShimDir {
-        ShimDir { dir }
+        ShimDir { dir, marker: "bin" }
     }
 
     /// Bundle metadata carrying `vars` and `entrypoint_names`.

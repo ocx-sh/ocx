@@ -143,6 +143,25 @@ fn record_claim(
         });
 }
 
+/// Whether `name` ends in `.launch`, ASCII case-insensitively, and so would collide with a launcher's record file.
+///
+/// ASCII only, matching [`fold_case_insensitive`]: a filesystem folding more than ASCII is not modelled here.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the launcher writers that refuse such names land in a later step"
+    )
+)]
+pub(crate) fn is_record_name(name: &str) -> bool {
+    let extension = ocx_env_apply::launch::RECORD_EXTENSION.as_bytes();
+    let bytes = name.as_bytes();
+    let Some(split) = bytes.len().checked_sub(extension.len() + 1) else {
+        return false;
+    };
+    bytes[split] == b'.' && bytes[split + 1..].eq_ignore_ascii_case(extension)
+}
+
 /// Collapses [`exposed_names`]'s map onto ASCII-folded keys for the renderer; never Unicode `to_lowercase`,
 /// which merges characters (Turkish İ/i) a case-insensitive filesystem does not.
 pub(crate) fn fold_case_insensitive(names: BTreeMap<BinaryName, NameOwner>) -> BTreeMap<BinaryName, NameOwner> {
@@ -196,6 +215,32 @@ mod tests {
     use super::*;
     use ocx_package::metadata::visibility::Visibility;
     use ocx_package::metadata::{Binaries, EntrypointName};
+
+    #[test]
+    fn is_record_name_matches_the_launch_suffix_ascii_case_insensitively() {
+        for name in [
+            "cmake.launch",
+            "cmake.LAUNCH",
+            "X.LAUNCH",
+            "x.Launch",
+            ".launch",
+            "a.b.launch",
+        ] {
+            assert!(is_record_name(name), "{name:?}");
+        }
+        for name in [
+            "",
+            "launch",
+            "cmake",
+            "cmake.launcher",
+            "cmake.launch.exe",
+            "cmakelaunch",
+            "cmake.launc",
+            "é.launc",
+        ] {
+            assert!(!is_record_name(name), "{name:?}");
+        }
+    }
 
     // ── Fixtures ────────────────────────────────────────────────────────────
     //

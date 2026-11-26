@@ -1285,6 +1285,7 @@ mod tests {
         let deferred = info.with_deferred(ocx_package::install_info::DeferredComposition::new(
             ocx_store::file_structure::ShimDir {
                 dir: tempdir.path().join("shims").join("tool"),
+                marker: "bin",
             },
             Vec::new(),
         ));
