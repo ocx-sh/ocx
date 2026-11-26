@@ -21,6 +21,7 @@ Tier in brackets; tiers are defined in `AGENTS.md` § Stability tiers.
 | `ocx_exit_derive` [internal] | `#[derive(Classify)]`: a variant declares its exit code and slug in the crate that owns the type | — |
 | `ocx_env` [ecosystem] | The environment registry: every `OCX_*` / `__OCX_*` variable declared once (doc, value kind, visibility, secrecy, child propagation) and the one read seam | `ocx_exit` |
 | `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, singleflight, TLS roots, archive, compression | `ocx_exit` |
+| `ocx_env_apply` [ecosystem] | Env apply functions (`move_to_front`, `remove_segment`, `append_unique`, `apply_one`, Windows key fold) and the `.direct` sidecar types; std + `serde` | — |
 | `ocx_console` [ecosystem] | Rendering, printer, theme, styles, progress, data interface | `ocx_exit`, `ocx_util`, `ocx_env` |
 | `ocx_oci` [ecosystem] | Distribution-spec-generic registry work, SSRF guard, registry auth | `ocx_util`, `ocx_console`, `ocx_exit`, `ocx_env` |
 | `ocx_trust` [ecosystem] | Signer-identity policy and tiered resolution | `ocx_oci`, `ocx_util`, `ocx_env` |
@@ -248,8 +249,8 @@ These modules have no dedicated subsystem rule — serve multiple subsystems. Ea
 | Assemble layer's content tree into package (hardlinks + symlinks); layout-aware entrypoint applies per-layer strip + output prefix before the overlap merge | `file_structure::assemble_from_layer(s)` / `assemble_from_layers_with_layouts` + `LayerPlacement` | `file_structure/assemble.rs` |
 | Boolean-like env string (`true/1/yes/on`) | `ocx_util::boolean_string::BooleanString` | `ocx_util/src/boolean_string.rs` |
 | Forward child `ExitStatus` to process `ExitCode` (Unix passthrough, Windows saturate) | `ocx_util::child_process::propagate_exit_code` | `ocx_util/src/child_process.rs` |
-| Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `ocx_util::path::move_to_front` | `ocx_util/src/path.rs` |
-| Remove one segment from a `PATH`-style value (drop empties + the matching segment; the emit-parity inverse of `move_to_front`, same quote-strip/case-fold precondition as the emitted shell arms) | `ocx_util::path::remove_segment` | `ocx_util/src/path.rs` |
+| Move-to-front dedup of a `PATH`-style value (drop empties + existing occurrence, prepend; `OsStr`-native via `std::env::split_paths`) | `ocx_env_apply::move_to_front` | `ocx_env_apply/src/lib.rs` |
+| Remove one segment from a `PATH`-style value (drop empties + the matching segment; the emit-parity inverse of `move_to_front`, same quote-strip/case-fold precondition as the emitted shell arms) | `ocx_env_apply::remove_segment` | `ocx_env_apply/src/lib.rs` |
 | File error with path context | `ocx_util::error::FileError::new(path, io_err)` | `crates/ocx_util/src/error.rs` |
 | Seed a hand-rolled `reqwest::ClientBuilder` with the bundled Mozilla CA roots | `ocx_util::tls::seed_embedded_roots` | `ocx_util/src/tls.rs` |
 

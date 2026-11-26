@@ -392,4 +392,6 @@ Low-level primitives for file-level dedup during layer assembly:
 
 Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must sit on single volume — required by `temp → packages/` atomic rename.
 
+**Vendor layout**: `file_structure::vendor_layout` owns the path math of an `ocx vendor` directory and `StagedTree` (a `mkdtemp` 0700 directory beside `DIR`, renamed into place). The assembly walker takes `LinkMode::{Hardlink, Copy}`; vendoring uses `Copy`, writing data and the masked mode only and keeping the file mtime.
+
 **Assembly walker**: `file_structure::assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.
