@@ -369,8 +369,14 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
     }
 
     let named: Vec<&str> = rejected.iter().take(NAMED_CANDIDATES).map(String::as_str).collect();
+    // Bazel on Windows builds no runfiles tree unless asked, so the hint names the flag that creates one.
+    let hint = if windows {
+        "; under Bazel on Windows, build with --enable_runfiles"
+    } else {
+        ""
+    };
     Err(refuse(format!(
-        "no vendored root found for {}: {} candidate(s) rejected: {}",
+        "no vendored root found for {}: {} candidate(s) rejected: {}{hint}",
         sidecar.self_path,
         rejected.len(),
         if named.is_empty() {
@@ -969,6 +975,26 @@ mod tests {
             .with_file(&format!("/stale/runfiles/tree/{SELF_PATH}.direct"), &bytes);
         let message = refusal(locate("/own/tool", &unix(Some("/stale/runfiles")), &fs));
         assert!(message.contains("no vendored root"), "{message}");
+    }
+
+    /// With no runfiles tree on Windows the refusal names `--enable_runfiles`; elsewhere it does not.
+    #[test]
+    fn v45_no_root_on_windows_names_the_enable_runfiles_flag() {
+        let bytes = sidecar_json(VENDOR_A, SELF_PATH);
+        let fs = FakeFs::default().with_file("C:\\out\\bin\\tool.direct", &bytes);
+        let context = LookupContext {
+            cwd: "C:\\work",
+            runfiles_dir: None,
+            windows: true,
+        };
+        let message = refusal(locate("C:\\out\\bin\\tool.exe", &context, &fs));
+        assert!(message.contains("no vendored root found"), "{message}");
+        assert!(message.contains("--enable_runfiles"), "{message}");
+
+        let fs = FakeFs::default().with_file("/out/bin/tool.direct", &bytes);
+        let message = refusal(locate("/out/bin/tool", &unix(None), &fs));
+        assert!(message.contains("no vendored root found"), "{message}");
+        assert!(!message.contains("--enable_runfiles"), "{message}");
     }
 
     #[test]
