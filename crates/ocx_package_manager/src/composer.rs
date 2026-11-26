@@ -792,10 +792,9 @@ pub(crate) struct ComposePaths {
     vendor: Option<VendorLane>,
 }
 
-/// Where a vendor composition roots its paths and which platform it renders for.
+/// Where a vendor composition roots its paths.
 struct VendorLane {
     token_root: PathBuf,
-    windows_target: bool,
 }
 
 /// Components of a package root kept under the token: `packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.
@@ -836,39 +835,7 @@ impl ComposePaths {
             trusted: HashMap::new(),
             vendor: Some(VendorLane {
                 token_root: token_root.into(),
-                windows_target: false,
             }),
-        }
-    }
-
-    /// Renders for `platform` rather than this host; only the vendor lane has a target.
-    #[must_use]
-    pub(crate) fn targeting(mut self, platform: &ocx_oci::Platform) -> Self {
-        if let Some(lane) = &mut self.vendor {
-            lane.windows_target = matches!(
-                platform,
-                ocx_oci::Platform::Specific {
-                    os: ocx_oci::OperatingSystem::Windows,
-                    ..
-                }
-            );
-        }
-        self
-    }
-
-    /// The list separator of the target platform (`;` Windows, `:` otherwise), never this host's.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the vendor task renders list separators from it once the lane is wired"
-        )
-    )]
-    pub(crate) fn list_separator(&self) -> &'static str {
-        if self.vendor.as_ref().is_some_and(|lane| lane.windows_target) {
-            ";"
-        } else {
-            ":"
         }
     }
 
@@ -8210,28 +8177,5 @@ mod vendor_lane_tests {
         let installed = ComposePaths::digest_only().install_path_for(&package, PathLane::Digest);
 
         assert_eq!(installed.root(), package.root());
-    }
-
-    /// A Windows target composed on this Unix host renders `;`, not the host's `:`.
-    #[test]
-    fn windows_target_renders_its_own_list_separator() {
-        let windows: ocx_oci::Platform = "windows/amd64".parse().unwrap();
-        let linux: ocx_oci::Platform = "linux/amd64".parse().unwrap();
-
-        let rendered = ComposePaths::vendor("@VENDOR_DIR@")
-            .targeting(&windows)
-            .list_separator();
-
-        assert_eq!(rendered, ";");
-        assert_eq!(
-            ComposePaths::vendor("@VENDOR_DIR@").targeting(&linux).list_separator(),
-            ":"
-        );
-        // In-control: the same check fed the host separator reports a mismatch.
-        #[cfg(unix)]
-        assert_ne!(
-            ":", rendered,
-            "a host-native separator must differ from the Windows target's"
-        );
     }
 }
