@@ -501,11 +501,10 @@ mod tests {
     // Contract 2 postcondition (post-cutover): on Windows, each entry yields
     // THREE files — `<name>`, `<name>.exe`, `<name>.shim` — and explicitly
     // NO `<name>.cmd`. The `.exe` bytes must be BYTE-EQUAL to
-    // `ocx_store::shim::SHIM_BYTES` (the Authenticode verbatim-copy property —
+    // the embedded host blob (the Authenticode verbatim-copy property —
     // not mere existence; a transformed copy would invalidate the signature).
     // Gated `#[cfg(windows)]` because the `.exe` and `.shim` writes are
-    // themselves cfg-gated and `SHIM_BYTES` is only non-empty on a Windows
-    // target.
+    // themselves cfg-gated.
 
     #[cfg(windows)]
     #[tokio::test]
@@ -539,7 +538,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn generate_exe_is_byte_equal_to_shim_bytes() {
+    async fn generate_exe_is_byte_equal_to_the_host_blob() {
         let tmp = tempdir().unwrap();
         let pkg_root = tmp.path().join("pkg");
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
@@ -554,8 +553,8 @@ mod tests {
         let written = tokio::fs::read(dest.join("cmake.exe")).await.unwrap();
         assert_eq!(
             written.as_slice(),
-            ocx_store::shim::SHIM_BYTES,
-            "`.exe` must be a verbatim copy of `ocx_store::shim::SHIM_BYTES` — the \
+            ocx_store::shim::host_blob().unwrap(),
+            "`.exe` must be a verbatim copy of the embedded host blob — the \
              Authenticode verbatim-copy property (any transform invalidates the \
              signature). This is byte-equality, NOT mere existence."
         );
@@ -636,8 +635,7 @@ mod tests {
 
     // ── non-Windows emits only the Unix `<name>` launcher ─────────────────
     //
-    // On non-Windows the `.exe`/`.shim` emission is skipped via `cfg`, and
-    // `ocx_store::shim::SHIM_BYTES` is empty. Post-cutover, no `.cmd` is emitted
+    // On non-Windows the `.exe`/`.shim` emission is skipped via `cfg`. Post-cutover, no `.cmd` is emitted
     // on any platform either — this pins that only `<name>` exists off
     // Windows, and `.cmd`/`.exe`/`.shim` are all absent.
 
@@ -759,15 +757,6 @@ mod tests {
                 MUTATED.len()
             );
         }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn shim_bytes_empty_off_windows() {
-        assert!(
-            ocx_store::shim::SHIM_BYTES.is_empty(),
-            "`ocx` must carry zero shim weight off Windows (SHIM_BYTES empty)"
-        );
     }
 
     // ── The absolute `ocx` a trampoline re-enters through ──────────
