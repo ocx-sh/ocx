@@ -8,10 +8,10 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-review → round 2 (high, ocx side, head `9e3040cd`): Request Changes — 1 Block (`contract:rotate` does not parse), 8 Warn; convergence gap C-021 appended as RV2
+- **Step:** /hex-execute → RV2 closed (review round 2's Block, every Warn and the cheap Suggests); awaiting the shim re-cut and a /hex-review re-check
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
-- **Last update:** 2026-11-26 (after 9e3040cd: build(shim): re-cut the six launcher blobs from the CI build of the long-path diagnostics)
-- **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
+- **Last update:** 2026-11-26 (after d8912cd3: test(vendor): the non-empty output refusal states its remedy)
+- **Next:** re-cut the six launcher blobs from the next shim run, then /hex-review .claude/artifacts/plan_vendor_rules_ocx.md
 - **Reviewed:** 9e3040cdfc9b2f7d76c61f63727c13c3ee100990
 
 ---
@@ -77,6 +77,8 @@ Each is decided under the goal loop's authority; a divergence from the design or
 | DP-28 | The macOS control for V-27 and V-27c is the signature itself: `codesign --verify` passes on the intact darwin/arm64 launcher and fails on a copy with one byte changed and on a copy whose signature is removed. The intact launcher's run is asserted; the runs of the two copies are printed and never asserted, because the hosted macOS arm64 image starts unsigned native code (rules_ocx deep run 45805097584: a `codesign --remove-signature` copy, "code object is not signed at all", ran to the launcher's own exit 78). The property is unchanged: the darwin/arm64 launcher ships with a valid ad-hoc signature. Diverges from design § 9 V-27 and V-27c, whose red states read "byte-flipped copy → SIGKILL" and "byte-flipped launcher in the vendored repository → killed". | Observed twice on the hosted macOS arm64 runner (rules_ocx deep runs 45796931913 and 45801614932): a copy with the byte at the `LC_MAIN` entry offset (50640) changed fails `codesign --verify` ("invalid signature (code or signature have been modified)") and still runs to the launcher's own exit 78; the kernel does not kill a process over a lazily validated modified page of an ad-hoc, linker-signed binary. The intact launcher verifies (`flags=0x20002(adhoc,linker-signed)`, 90 page hashes) and runs, so a kill is not a claim a test can make reliably |
 | DP-29 | Owner requirement: CI keeps proving that the committed launcher blobs are current and run (V-74). Run: `launcher-blobs.yml` starts each of the six blobs from the checkout on its own hosted runner (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15-intel`, `macos-latest`, `windows-latest`, `windows-11-arm`) through `scripts/launcher_blob_check.sh`. The script lays out a vendored directory by hand and checks no-sidecar and malformed-sidecar refusals (78) and a started child. On POSIX it also checks baked and caller arguments, an expanded environment value and the exit status. On Windows it also checks the classic `.shim` mode. On `aarch64-apple-darwin` it runs `codesign --verify` on the blob and on a one-byte-changed copy (DP-28). The script reds when fewer cases ran than the target owes. Callers: `build-windows-shims.yml` (`native-blobs`, on a pull request or main push touching a blob or an input) and `deep-repo.yml` (`launcher-blobs`, the nightly tier; a red run opens the template's `nightly-red` issue). Current: `task rust:shim:inputs:check` in each `build` leg reds when `scripts/shim_inputs.py`'s digest of the non-source inputs differs from `crates/ocx_store/src/shim_inputs.sha256`. Those inputs are the toolchain file, the `shim` profile, the launcher's workspace dependency entries and registry lock closure, the `shim:build` command, and the Zig and cargo-zigbuild pins. | The recency step judged only `crates/ocx_shim/` and `crates/ocx_env_apply/`, so a toolchain, profile, dependency or Zig bump passed every gate with stale blobs. Before this, no CI job started a committed blob; `build` and `acceptance-windows` start fresh builds. The legs install nothing, and no ocx toolchain composes on macOS x64 or Windows arm64. So CI calls the script directly, and `task rust:shim:blob:check` is its local form. Workspace-member versions are left out of the digest, so a release bump needs no re-cut |
 | DP-30 | Windows long paths: the launcher gives a program path the `\\?\` prefix on spawn only at or past MAX_PATH (260 UTF-16 units), as Bazel 9.2 and Rust's std do. The vendored layout is not shortened now. A spawn failure a length limit plausibly caused gains one clause on the `ocx-shim:` line naming the length, the limit and what to shorten. That covers a working directory of 260 or more (errors 3, 87, 206, 267), and a batch or relative program path past the limit (errors 2, 3, 206). It also covers a batch target whose `cmd.exe` exits non-zero. Exit codes are unchanged. The guide's Windows section states the limits. | Research verdict. Bazel 9.2.0rc1 passes a `\\?\` `lpApplicationName` as fallback, keeps the original path as `argv[0]`, and limits it to absolute normalised paths of plain executables, batch files excluded. Microsoft's `CreateProcessW` page never states the exemption, so it holds de facto, not by documentation. A started program's `GetModuleFileNameW` can return the `\\?\` form, which a 2019 CPython start-up bug hit; past 260 the alternative is no start at all. No prefix, registry policy or manifest lifts the working-directory limit, as rules_go and CPython document. Under Bazel a test's working directory is its runfiles tree, so the case is real. The layout stays because the build system's prefix dominates the length: about 80 characters are ours before the file name. Consumers read paths from the manifest, so the layout can change later without breaking them. A test harness cannot start the launcher from a working directory of 260 or more, because its own `CreateProcessW` refuses the same way. The message selection is therefore a host unit test only |
+| DP-31 | V-01's red state is a rig case proving the executors have no network route, not the rules_ocx 0.5.1 baseline suite, which is removed. | Owner instruction: no test may target a retired integration. The property V-01 needs red is "the executors reach no network", and a case that tries a network address from an executor and must fail shows it without keeping 0.5.1 alive |
+| DP-32 | Recorded deferrals from review round 2, kept as they are. `assemble.rs:585`: a hardlink is placed on the async worker, where a copy moves to `spawn_blocking`; one metadata operation, not a byte move. `vendor_layout.rs:199-213`: on Windows the publish removes an empty target before the rename, leaving a window in which another process can create it; the rename then fails and the run reports it. | Both are Suggest findings outside RV2's convergence gap; neither is a correctness defect, and the run allows no further refinement cycle |
 | DP-12 | Tier stays `high` although Phase 3 classifies scope large (tier-high.md says re-run as `xhigh`). | the caller fixed the tier; every artifact large scope demands exists and is accepted; what `xhigh` adds (research breadth, panel) is never repeated on an accepted ADR. Retro entry written |
 
 ## The R-5 cut against the source's Requirements
@@ -163,7 +165,7 @@ permanent control case in the same test (the check reports failure on a bad inpu
 
 | V | Test owner | Red | Green at |
 |---|---|---|---|
-| V-01 | R7 | in (0.5.1 leg on network-less runner, baseline workspace) | rig both jobs |
+| V-01 | R7 | in (a rig case proving the executors have no network route; DP-31) | rig both jobs |
 | V-02 | R7 | in (`--extra_execution_platforms` with no toolchain) | rig |
 | V-03 | R7 | in (flag off leg) | rig |
 | V-04 | R7 | in (blocked without `bazel vendor`) | rig offline |
@@ -768,7 +770,14 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
 - V-23 — rev: Reuse table held except where DP-20/DP-21 record why (`compose_roots` not called by the manifest path)
 - Windows long-path launcher (`batch_spawn` `a_direct_launcher_starts_a_program_past_max_path`,
   `a_classic_launcher_starts_a_pinned_ocx_past_max_path`) — green only: CI head `93bd6bb8`, `repo / Unit Test (Windows)`,
-  `//crates/ocx_shim:batch_spawn passed=5`. Red state unobserved: no Windows run without the `\\?\` prefix was made
+  `//crates/ocx_shim:batch_spawn passed=5`. Red: commit `6272e9ce` drops the prefix and `21878237` reverts it; the
+  red run of `repo / Unit Test (Windows)` on `6272e9ce` is the coordinator's push (CI, pending at RV2 close)
+- RV2 Block 1 (`contract:rotate`) — in: `test/lint/test_contract_baseline.py` runs the task's own body on a scratch repository;
+  red on the old line ("syntax error near unexpected token `printf'"), red without the removal (stale `vendor-manifest.json`) — local
+- RV2 Warn 2, 3 — in: `test_shim_inputs.py` red against the previous script for the release profile, `.cargo/config.toml`,
+  workflow `env:`, the target list, a path and a `[patch]` dependency; `test_workflows.py` red with the digest dropped from the
+  recency pathspec — local
+- RV2 Warn 5, Suggest 10 — mut: a byte count in `extended_length_path` and a disabled reserved-character rule each red — local unit
 - V-74 — in: `scripts/tests/test_launcher_blob_check.py` (host Linux blob green; changed byte, accept-everything stand-in,
   missing blob and a dropped case red) and `test_shim_inputs.py` (each input changed red, release version bump green) — local;
   the six native legs of `launcher-blobs.yml` — CI, not yet run
@@ -856,3 +865,11 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
   seam ordering flake (passes alone) and the four `real_binary` cases (green with `SDK_TEST_OCX_BINARY`); vendor modules 59 passed,
   5 skipped (macOS/Windows); lint tier 807, `.claude/tests` 692, crate-map script tests 102, `test:rows:check` green. Shim sources
   (`crates/ocx_shim/**`, `crates/ocx_env_apply/**`) changed: the six blobs need the `build-windows-shims.yml` re-cut (External act 3).
+- 2026-11-26 — RV2 (review round 2: 1 Block, 8 Warn, 1 deferred Warn, 10 Suggest) closed in one cycle on base `1256eed3`. Red proof of
+  the long-path tests as commits `6272e9ce` (prefix dropped) and `21878237` (its revert). Block 1: `contract:rotate` parses, drops a
+  baseline copy the new tag lacks, and the lint tier runs its body. Warn 2-9 and Suggest 10 (Windows segment characters, escaped
+  program text), the `.direct` constant and the remedy assertion fixed; `assemble.rs:585` and `vendor_layout.rs:199-213` recorded
+  as DP-32 deferrals; DP-31 records V-01's new control. A long batch path: cmd.exe limits every path to MAX_PATH, so the hint stays
+  on a non-zero exit, as one `ocx-shim:` failure line. Gate: lint tier 808, `.claude/tests` 697, scripts 1059, vendor modules 59
+  passed and 6 skipped, `ocx_shim` and `ocx_env_apply` units 223, Linux and Windows-target clippy clean, `cargo fmt` clean. Shim
+  sources and inputs changed again: re-cut pending (External act 3).

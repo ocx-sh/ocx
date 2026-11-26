@@ -384,7 +384,7 @@ Every check of the source's `## Verification` (lines 726-772) is a row; a row th
 
 | ID | Check | Repo | Red (control) | Green | Where |
 |---|---|---|---|---|---|
-| V-01 | A build passes on executors with no network | rules_ocx | same build with rules_ocx 0.5.1 fails (launchers re-enter `ocx`) | passes, runner `network_mode: none` | rig, both jobs |
+| V-01 | A build passes on executors with no network | rules_ocx | a rig case on the same executors fails to reach any network address (plan DP-31) | passes, runner `network_mode: none` | rig, both jobs |
 | V-02 | Exec platform ≠ host: the exec platform's tool is used; the registry log shows only that platform's blobs (C-RO-08) | rules_ocx | `--extra_execution_platforms` at a platform no `toolchain()` matches → resolution error | log holds only the exec platform's blob digests | rig |
 | V-03 | (replaced 2026-11-25) A second output base takes the repository from the repo contents cache; with the remote repo contents cache on, a fresh client makes 0 registry requests | rules_ocx | flag off: rule run counter 1, 6+ `/v2/` lines | flag on: counter 0, 0 `/v2/` lines in that leg's log slice | rig |
 | V-04 | After `bazel vendor`, network blocked, the build passes | rules_ocx | blocked without `bazel vendor` fails in fetch | passes from `--vendor_dir` in a `network_mode: none` client container | rig `offline` |
