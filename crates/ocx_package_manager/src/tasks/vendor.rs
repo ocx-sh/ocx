@@ -461,8 +461,8 @@ async fn build_manifest(
     let mut entrypoint_environments = Vec::new();
     for (digest, node) in &nodes {
         let layout_digest = node.identifier.digest();
-        let package_dir = VendorLayout::relative_package_dir(node.identifier.registry(), &layout_digest);
-        let content_dir = VendorLayout::relative_content_dir(node.identifier.registry(), &layout_digest);
+        let package_dir = VendorLayout::legacy_relative_package_dir(node.identifier.registry(), &layout_digest);
+        let content_dir = VendorLayout::legacy_relative_content_dir(node.identifier.registry(), &layout_digest);
 
         let mut dependencies: Vec<String> = node
             .dependencies
@@ -524,7 +524,7 @@ async fn build_manifest(
     }
     entrypoint_environments.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let launcher_dir = VendorLayout::relative_launcher_dir(SELECTION_ID);
+    let launcher_dir = VendorLayout::legacy_relative_launcher_dir(SELECTION_ID);
     let mut exposed = exposed_names(&closures.surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
     // Windows and macOS default to case-folding filesystems: two names differing by case would share one launcher file.
     if folds_case(platform) {
@@ -1021,7 +1021,7 @@ async fn place_package(
     let info = setup_vendored(manager, &pinned, resolved, platform.clone(), groups, &target, None)
         .await
         .map_err(&pull_failed)?;
-    let content_dir = VendorLayout::relative_content_dir(node.identifier.registry(), &node.identifier.digest());
+    let content_dir = VendorLayout::legacy_relative_content_dir(node.identifier.registry(), &node.identifier.digest());
     let tree = list_tree(layout, &content_dir, is_windows(platform)).await?;
     Ok(PlacedPackage {
         digest,
@@ -1138,7 +1138,7 @@ async fn write_selection_launchers(
             );
         }
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(selection));
+        let dir = layout.resolve(&VendorLayout::legacy_relative_launcher_dir(selection));
         super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
             sidecars
                 .get(name)
@@ -2257,7 +2257,7 @@ mod tests {
 
         let actual = items(&manifest, "selection:default");
         assert_eq!(actual, expected);
-        let package_dir = |digest: &Digest| VendorLayout::relative_content_dir(REGISTRY, digest);
+        let package_dir = |digest: &Digest| VendorLayout::legacy_relative_content_dir(REGISTRY, digest);
         assert_eq!(
             actual,
             [
@@ -2274,7 +2274,7 @@ mod tests {
                     "PATH".to_owned(),
                     format!(
                         "{DIR_TOKEN}/{}/entrypoints",
-                        VendorLayout::relative_package_dir(REGISTRY, &root)
+                        VendorLayout::legacy_relative_package_dir(REGISTRY, &root)
                     )
                 ),
             ],

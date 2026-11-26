@@ -455,7 +455,7 @@ pub(crate) struct VendorTarget {
 impl VendorTarget {
     /// `pinned`'s package directory under `layout`.
     pub(crate) fn new(layout: &file_structure::VendorLayout, pinned: &ocx_oci::PinnedPackageRef) -> Self {
-        let relative = file_structure::VendorLayout::relative_package_dir(pinned.registry(), &pinned.digest());
+        let relative = file_structure::VendorLayout::legacy_relative_package_dir(pinned.registry(), &pinned.digest());
         Self {
             package_dir: layout.resolve(&relative),
         }
@@ -3575,7 +3575,8 @@ mod tests {
         outcome.expect("the package vendors");
 
         let layout = ocx_store::file_structure::VendorLayout::new(out.path());
-        let content = ocx_store::file_structure::VendorLayout::relative_content_dir(LOGICAL, &plain_pinned().digest());
+        let content =
+            ocx_store::file_structure::VendorLayout::legacy_relative_content_dir(LOGICAL, &plain_pinned().digest());
         let tree = crate::tasks::vendor::list_tree(&layout, &content, false)
             .await
             .expect("the tree lists");

@@ -16,6 +16,9 @@ use ocx_util::prelude::*;
 /// 1980-01-01T00:00:00Z: the mtime of every directory under `DIR`, the earliest a zip can store.
 const NORMALISED_MTIME_SECS: u64 = 315_532_800;
 
+/// Hex characters of a digest that name its package under `DIR/p/`.
+const PACKAGE_KEY_LEN: usize = 16;
+
 /// Why a manifest path field is refused; the writer maps it to `vendor_path_unrepresentable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathViolation {
@@ -79,7 +82,7 @@ impl VendorLayout {
     }
 
     /// `packages/<registry slug>/<algorithm>/<2 hex>/<30 hex>`.
-    pub fn relative_package_dir(registry: &str, digest: &Digest) -> String {
+    pub fn legacy_relative_package_dir(registry: &str, digest: &Digest) -> String {
         let (algorithm, hex) = digest.parts();
         format!(
             "packages/{}/{algorithm}/{}/{}",
@@ -90,12 +93,12 @@ impl VendorLayout {
     }
 
     /// `<package_dir>/content`.
-    pub fn relative_content_dir(registry: &str, digest: &Digest) -> String {
-        format!("{}/content", Self::relative_package_dir(registry, digest))
+    pub fn legacy_relative_content_dir(registry: &str, digest: &Digest) -> String {
+        format!("{}/content", Self::legacy_relative_package_dir(registry, digest))
     }
 
     /// `selections/<id>/shells/default/bin`.
-    pub fn relative_launcher_dir(selection: &str) -> String {
+    pub fn legacy_relative_launcher_dir(selection: &str) -> String {
         format!("selections/{selection}/shells/default/bin")
     }
 
@@ -109,15 +112,65 @@ impl VendorLayout {
         format!("p/{}/e/{name}.launch", key.as_str())
     }
 
+    /// `l`: the directory of the selection launchers.
+    pub fn relative_launcher_dir() -> &'static str {
+        "l"
+    }
+
+    /// `p/<HEX16>`.
+    pub fn relative_package_dir(key: &PackageKey) -> String {
+        format!("p/{}", key.as_str())
+    }
+
+    /// `p/<HEX16>/c`.
+    pub fn relative_content_dir(key: &PackageKey) -> String {
+        format!("p/{}/c", key.as_str())
+    }
+
+    /// `l/<name>`, plus `.exe` for a Windows platform.
+    pub fn relative_launcher(name: &str, windows: bool) -> String {
+        format!("l/{name}{}", exe_suffix(windows))
+    }
+
+    /// `p/<HEX16>/e`.
+    pub fn relative_entrypoint_dir(key: &PackageKey) -> String {
+        format!("p/{}/e", key.as_str())
+    }
+
+    /// `p/<HEX16>/e/<name>`, plus `.exe` for a Windows platform.
+    pub fn relative_entrypoint_launcher(key: &PackageKey, name: &str, windows: bool) -> String {
+        format!("p/{}/e/{name}{}", key.as_str(), exe_suffix(windows))
+    }
+
     /// Keys every digest by the first 16 hex characters of its hex part.
     ///
     /// # Errors
     ///
     /// [`PackageKeyClash`] naming two different digests that share a key.
     pub fn package_keys<'a>(
-        _digests: impl IntoIterator<Item = &'a Digest>,
+        digests: impl IntoIterator<Item = &'a Digest>,
     ) -> Result<BTreeMap<Digest, PackageKey>, PackageKeyClash> {
-        unimplemented!("package_keys: filled by the vendor layout step")
+        let mut owner_of_key: BTreeMap<String, &Digest> = BTreeMap::new();
+        let mut keys = BTreeMap::new();
+        for digest in digests {
+            let hex = digest.hex();
+            let key = hex.get(..PACKAGE_KEY_LEN).unwrap_or(hex).to_string();
+            // The same digest twice is one package; only two different digests can clash.
+            match owner_of_key.get(&key) {
+                Some(first) if *first != digest => {
+                    return Err(PackageKeyClash {
+                        first: (*first).clone(),
+                        second: digest.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    owner_of_key.insert(key.clone(), digest);
+                }
+            }
+            keys.insert(digest.clone(), PackageKey(key));
+        }
+        Ok(keys)
     }
 
     /// `DIR` joined with a validated relative path.
@@ -149,9 +202,19 @@ impl VendorLayout {
             if platform_is_windows {
                 check_windows_segment(segment)?;
             }
+            if Self::RESERVED_SEGMENTS
+                .iter()
+                .any(|reserved| segment.eq_ignore_ascii_case(reserved))
+            {
+                return Err(PathViolation::ReservedSegment);
+            }
         }
         Ok(())
     }
+}
+
+fn exe_suffix(windows: bool) -> &'static str {
+    if windows { ".exe" } else { "" }
 }
 
 fn check_windows_segment(segment: &str) -> Result<(), PathViolation> {
@@ -375,6 +438,101 @@ mod tests {
         assert_eq!(VendorLayout::check_relative_path("p/_ocx_reserved_x/y", false), Ok(()));
     }
 
+    /// One case per path rule of the manifest's path rules, in the order `check_relative_path` applies them.
+    #[test]
+    fn contract_check_relative_path_agrees_with_every_path_rule() {
+        use PathViolation as V;
+        // (path, platform_is_windows, expected)
+        let cases: &[(&str, bool, Result<(), V>)] = &[
+            ("", false, Err(V::Empty)),
+            ("", true, Err(V::Empty)),
+            ("/a", false, Err(V::Absolute)),
+            ("a//b", false, Err(V::EmptySegment)),
+            ("a/", false, Err(V::EmptySegment)),
+            ("a/./b", false, Err(V::DotSegment)),
+            ("a/../b", false, Err(V::ParentSegment)),
+            ("a\\b", true, Err(V::Backslash)),
+            ("a:b", true, Err(V::Colon)),
+            ("a\u{1}b", true, Err(V::ReservedCharacter)),
+            ("a\u{1f}b", true, Err(V::ReservedCharacter)),
+            ("a<b", true, Err(V::ReservedCharacter)),
+            ("a>b", true, Err(V::ReservedCharacter)),
+            ("a\"b", true, Err(V::ReservedCharacter)),
+            ("a|b", true, Err(V::ReservedCharacter)),
+            ("a?b", true, Err(V::ReservedCharacter)),
+            ("a*b", true, Err(V::ReservedCharacter)),
+            ("CON", true, Err(V::DeviceName)),
+            ("prn", true, Err(V::DeviceName)),
+            ("Aux", true, Err(V::DeviceName)),
+            ("nul.txt", true, Err(V::DeviceName)),
+            ("NUL .txt", true, Err(V::DeviceName)),
+            ("com1.tar.gz", true, Err(V::DeviceName)),
+            ("COM0", true, Err(V::DeviceName)),
+            ("LPT9", true, Err(V::DeviceName)),
+            ("COM\u{b9}", true, Err(V::DeviceName)),
+            ("COM\u{b2}", true, Err(V::DeviceName)),
+            ("LPT\u{b3}", true, Err(V::DeviceName)),
+            ("CONSOLE", true, Ok(())),
+            ("COM10", true, Ok(())),
+            ("my.CON", true, Ok(())),
+            ("a./b", true, Err(V::TrailingDotOrSpace)),
+            ("a /b", true, Err(V::TrailingDotOrSpace)),
+            ("_ocx_reserved", false, Err(V::ReservedSegment)),
+            ("_ocx_reserved", true, Err(V::ReservedSegment)),
+            ("p/_OCX_Reserved/c", true, Err(V::ReservedSegment)),
+            // Windows-only rules stay off for other targets; the reserved segment does not.
+            ("a\\b", false, Ok(())),
+            ("con", false, Ok(())),
+            ("a./b", false, Ok(())),
+            ("p/0123456789abcdef/c/bin/cmake", true, Ok(())),
+        ];
+        for (path, windows, expected) in cases {
+            assert_eq!(
+                VendorLayout::check_relative_path(path, *windows),
+                *expected,
+                "{path:?} windows={windows}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_order_puts_structure_before_windows_rules_before_the_reserved_segment() {
+        assert_eq!(
+            VendorLayout::check_relative_path("a/./con", true),
+            Err(PathViolation::DotSegment)
+        );
+        assert_eq!(
+            VendorLayout::check_relative_path("con/_ocx_reserved", true),
+            Err(PathViolation::DeviceName)
+        );
+    }
+
+    #[test]
+    fn short_layout_names() {
+        let key = PackageKey("1f2e3d4c5b6a7988".to_string());
+        assert_eq!(VendorLayout::relative_launcher_dir(), "l");
+        assert_eq!(VendorLayout::relative_package_dir(&key), "p/1f2e3d4c5b6a7988");
+        assert_eq!(VendorLayout::relative_content_dir(&key), "p/1f2e3d4c5b6a7988/c");
+        assert_eq!(VendorLayout::relative_launcher("cmake", false), "l/cmake");
+        assert_eq!(VendorLayout::relative_launcher("cmake", true), "l/cmake.exe");
+        assert_eq!(VendorLayout::relative_entrypoint_dir(&key), "p/1f2e3d4c5b6a7988/e");
+        assert_eq!(
+            VendorLayout::relative_entrypoint_launcher(&key, "npm", false),
+            "p/1f2e3d4c5b6a7988/e/npm"
+        );
+        assert_eq!(
+            VendorLayout::relative_entrypoint_launcher(&key, "npm", true),
+            "p/1f2e3d4c5b6a7988/e/npm.exe"
+        );
+    }
+
+    #[test]
+    fn the_same_digest_twice_is_not_a_clash() {
+        let digest = digest();
+        let keys = VendorLayout::package_keys([&digest, &digest]).expect("one digest, one key");
+        assert_eq!(keys.len(), 1);
+    }
+
     #[test]
     fn record_paths_sit_beside_their_launchers() {
         let key = PackageKey("1f2e3d4c5b6a7988".to_string());
@@ -388,7 +546,7 @@ mod tests {
     #[test]
     fn package_dir_is_registry_algorithm_shard() {
         assert_eq!(
-            VendorLayout::relative_package_dir("ocx.sh", &digest()),
+            VendorLayout::legacy_relative_package_dir("ocx.sh", &digest()),
             "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988"
         );
     }
@@ -396,7 +554,7 @@ mod tests {
     #[test]
     fn package_dir_slugs_a_registry_with_a_port() {
         assert_eq!(
-            VendorLayout::relative_package_dir("localhost:5000", &digest()),
+            VendorLayout::legacy_relative_package_dir("localhost:5000", &digest()),
             "packages/localhost_5000/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988"
         );
     }
@@ -404,7 +562,7 @@ mod tests {
     #[test]
     fn content_dir_sits_under_package_dir() {
         assert_eq!(
-            VendorLayout::relative_content_dir("ocx.sh", &digest()),
+            VendorLayout::legacy_relative_content_dir("ocx.sh", &digest()),
             "packages/ocx.sh/sha256/1f/2e3d4c5b6a79881f2e3d4c5b6a7988/content"
         );
     }
@@ -412,7 +570,7 @@ mod tests {
     #[test]
     fn launcher_dir_is_the_default_shell_bin() {
         assert_eq!(
-            VendorLayout::relative_launcher_dir("default"),
+            VendorLayout::legacy_relative_launcher_dir("default"),
             "selections/default/shells/default/bin"
         );
     }
