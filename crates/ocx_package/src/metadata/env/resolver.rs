@@ -27,6 +27,8 @@ pub enum ContentState {
     Materialized,
     /// Nothing under `content/` exists until the first invocation.
     Deferred,
+    /// Paths name a vendor directory token (`@VENDOR_DIR@/…`), never this host: no existence is checked.
+    Vendored,
 }
 
 /// Resolves package metadata env-var templates against an install path and
@@ -44,6 +46,16 @@ impl<'a> EnvResolver<'a> {
             dep_contexts,
             content_state: ContentState::Materialized,
         }
+    }
+
+    /// A vendored path is rooted at the token (`@VENDOR_DIR@`), the first component of every install path, though `Path` calls it relative.
+    fn starts_at_vendor_token(&self, path: &Path) -> bool {
+        self.content_state == ContentState::Vendored
+            && self
+                .install_path
+                .components()
+                .next()
+                .is_some_and(|token| path.starts_with(token))
     }
 
     /// Declares whether the package's content tree exists (default: materialized).
@@ -82,7 +94,8 @@ impl<'a> EnvResolver<'a> {
         };
 
         let resolver = TemplateResolver::new(self.install_path, self.dep_contexts).with_self_env(self_env);
-        let resolved = if emit_assertions {
+        // A vendored path names no file on this host, so a dependency cannot be probed.
+        let resolved = if emit_assertions && self.content_state != ContentState::Vendored {
             resolver.resolve(template)
         } else {
             resolver.resolve_without_existence_checks(template)
@@ -94,7 +107,7 @@ impl<'a> EnvResolver<'a> {
 
         if let Modifier::Path(path_modifier) = &var.modifier {
             let mut path = PathBuf::from(&value);
-            if path.is_relative() {
+            if path.is_relative() && !self.starts_at_vendor_token(&path) {
                 path = self.install_path.join(path);
             }
             // Strip the Windows `\\?\` verbatim prefix, which many consumers of the exported path reject.
@@ -785,5 +798,26 @@ mod tests {
             .unwrap()
             .expect("a constant var resolves to an entry");
         assert_eq!(entry.value, "alpha/x");
+    }
+
+    /// A token-rooted install path resolves with no file on this host: the required probe and the dependency probe are off.
+    #[test]
+    fn a_vendored_token_path_resolves_without_touching_the_filesystem() {
+        let token_root = std::path::Path::new("@VENDOR_DIR@/packages/ocx.sh/sha256/1f/aa");
+        let mut ctxs = HashMap::new();
+        ctxs.insert(
+            dep_name("python"),
+            DependencyContext::path_only(pinned("python"), token_root.join("content")),
+        );
+        let var = Var::new_path("TOOL", "${deps.python.installPath}/bin", /* required = */ true);
+
+        let materialized = EnvResolver::new(token_root, &ctxs);
+        materialized
+            .resolve(&var, &SelfEnvScope::new())
+            .expect_err("without the vendored state the absent dependency is refused");
+
+        let vendored = EnvResolver::new(token_root, &ctxs).with_content_state(ContentState::Vendored);
+        let entry = vendored.resolve(&var, &SelfEnvScope::new()).unwrap().unwrap();
+        assert_eq!(entry.value, format!("{}/bin", token_root.join("content").display()));
     }
 }

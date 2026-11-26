@@ -230,7 +230,9 @@ async fn compose_gated(
 
     for root in roots {
         // A deferred root's package directories do not exist yet, so the `required` path probe must not run.
-        let content_state = if root.deferred().is_some() {
+        let content_state = if paths.is_vendor() {
+            ContentState::Vendored
+        } else if root.deferred().is_some() {
             ContentState::Deferred
         } else {
             ContentState::Materialized
@@ -774,10 +776,6 @@ pub(crate) enum PathLane {
     Digest,
 
     /// `<token root>/packages/…` for `ocx vendor`; names a path inside the vendor directory, never one on this host.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
-    )]
     Vendor,
 }
 
@@ -786,7 +784,20 @@ pub(crate) enum PathLane {
 pub(crate) struct ComposePaths {
     /// Digest root → the link naming it; of two sharing a digest, the first in `groups`, then `lock.tools`, order.
     trusted: HashMap<PathBuf, PathBuf>,
+
+    /// Set by [`Self::vendor`]: every install path is rooted at the token, whatever lane the caller names.
+    vendor: Option<VendorLane>,
 }
+
+/// Where a vendor composition roots its paths and which platform it renders for.
+struct VendorLane {
+    token_root: PathBuf,
+    windows_target: bool,
+}
+
+/// Components of a package root kept under the token: `packages/<registry>/<algorithm>/<2 hex>/<30 hex>`.
+// The relative path `VendorLayout::relative_package_dir` names (design § 4.1), derived here so the composer needs no filesystem view.
+const VENDOR_PACKAGE_SUFFIX_COMPONENTS: usize = 5;
 
 /// The toolchain tree one composing invocation may follow, as the emitter resolved it.
 #[derive(Debug, Clone)]
@@ -812,6 +823,7 @@ impl ComposePaths {
     pub(crate) fn digest_only() -> Self {
         Self {
             trusted: HashMap::new(),
+            vendor: None,
         }
     }
 
@@ -820,8 +832,57 @@ impl ComposePaths {
         not(test),
         expect(dead_code, reason = "the vendor task constructs it once the lane is wired")
     )]
-    pub(crate) fn vendor(_token_root: impl Into<PathBuf>) -> Self {
-        unimplemented!("the vendor lane is implemented by the composer vendor-lane step")
+    pub(crate) fn vendor(token_root: impl Into<PathBuf>) -> Self {
+        Self {
+            trusted: HashMap::new(),
+            vendor: Some(VendorLane {
+                token_root: token_root.into(),
+                windows_target: false,
+            }),
+        }
+    }
+
+    /// Renders for `platform` rather than this host; only the vendor lane has a target.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the vendor task names its target platform once the lane is wired"
+        )
+    )]
+    pub(crate) fn targeting(mut self, platform: &ocx_oci::Platform) -> Self {
+        if let Some(lane) = &mut self.vendor {
+            lane.windows_target = matches!(
+                platform,
+                ocx_oci::Platform::Specific {
+                    os: ocx_oci::OperatingSystem::Windows,
+                    ..
+                }
+            );
+        }
+        self
+    }
+
+    /// The list separator of the target platform (`;` Windows, `:` otherwise), never this host's.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the vendor task renders list separators from it once the lane is wired"
+        )
+    )]
+    pub(crate) fn list_separator(&self) -> &'static str {
+        if self.vendor.as_ref().is_some_and(|lane| lane.windows_target) {
+            ";"
+        } else {
+            ":"
+        }
+    }
+
+    /// Whether this composition names paths inside a vendor directory.
+    pub(crate) fn is_vendor(&self) -> bool {
+        self.vendor.is_some()
     }
 
     /// Heal the selected groups, probe their entries, and keep the ones this composition may follow;
@@ -902,19 +963,43 @@ impl ComposePaths {
             HashMap::new()
         });
 
-        Ok(Self { trusted })
+        Ok(Self { trusted, vendor: None })
     }
 
     /// The install path one package composes to: its trusted link on the following lane, else its digest root.
     pub(crate) fn install_path_for(&self, package: &PackageDir, lane: PathLane) -> PackageDir {
+        // A vendor composition has no host paths, so no lane the caller names may reach one.
+        let lane = if self.is_vendor() { PathLane::Vendor } else { lane };
         match lane {
             PathLane::Digest => package.clone(),
-            PathLane::Vendor => unimplemented!("the vendor lane is implemented by the composer vendor-lane step"),
+            PathLane::Vendor => self
+                .vendor
+                .as_ref()
+                .map_or_else(|| package.clone(), |vendor| vendor.package_dir(package)),
             PathLane::Following => self
                 .trusted
                 .get(package.root())
                 .map_or_else(|| package.clone(), |link| PackageDir::with_root(link.clone())),
         }
+    }
+}
+
+impl VendorLane {
+    /// `<token root>/packages/…`, `/`-joined on every host because the manifest stores `/`.
+    fn package_dir(&self, package: &PackageDir) -> PackageDir {
+        let mut tail: Vec<String> = package
+            .root()
+            .components()
+            .rev()
+            .take(VENDOR_PACKAGE_SUFFIX_COMPONENTS)
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        tail.reverse();
+        PackageDir::with_root(PathBuf::from(format!(
+            "{}/{}",
+            self.token_root.to_string_lossy(),
+            tail.join("/")
+        )))
     }
 }
 
@@ -5019,6 +5104,7 @@ mod tests {
         let link = dir.path().join("toolchain").join("shared");
         let paths = crate::composer::ComposePaths {
             trusted: std::collections::HashMap::from([(shared_dir.clone(), link.clone())]),
+            vendor: None,
         };
         let base = compose(&[base_root], &store, false, &paths).await.unwrap();
         let base_value = base
@@ -8102,5 +8188,28 @@ mod vendor_lane_tests {
         let installed = ComposePaths::digest_only().install_path_for(&package, PathLane::Digest);
 
         assert_eq!(installed.root(), package.root());
+    }
+
+    /// V-46: a Windows target composed on this Unix host renders `;`, not the host's `:`.
+    #[test]
+    fn windows_target_renders_its_own_list_separator() {
+        let windows: ocx_oci::Platform = "windows/amd64".parse().unwrap();
+        let linux: ocx_oci::Platform = "linux/amd64".parse().unwrap();
+
+        let rendered = ComposePaths::vendor("@VENDOR_DIR@")
+            .targeting(&windows)
+            .list_separator();
+
+        assert_eq!(rendered, ";");
+        assert_eq!(
+            ComposePaths::vendor("@VENDOR_DIR@").targeting(&linux).list_separator(),
+            ":"
+        );
+        // In-control: the same check fed the host separator reports a mismatch.
+        #[cfg(unix)]
+        assert_ne!(
+            ":", rendered,
+            "a host-native separator must differ from the Windows target's"
+        );
     }
 }
