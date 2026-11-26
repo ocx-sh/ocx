@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** /hex-execute → P5 P6 P8 running; CW P9 P3 P4 P1 P2 merged
+- **Step:** /hex-execute → P5 P8 running; CW P9 P3 P4 P1 P2 P6 merged
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -349,7 +349,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | P3 | . | C-007 (copy half), C-008, C-009; S-015 unit half | `crates/ocx_store/src/file_structure/{assemble.rs,vendor_layout.rs}`, `crates/ocx_store/src/hardlink.rs` | 1 | CW | review | merged |
 | P4 | . | C-005 (lane), C-006, C-022 (lane); V-46 unit control | `crates/ocx_package_manager/src/composer.rs`, `crates/ocx_package/src/metadata/env/resolver.rs`, `crates/ocx_package_manager/src/tasks/resolve.rs` | 1 | CW | | merged |
 | P5 | . | C-012, C-013, C-014 (apply), C-016…C-020; V-26, V-52, V-58 (dispatch unit), V-59…V-61, V-66 timer, V-68 | `crates/ocx_shim/src/**`, `crates/ocx_shim/tests/**`, `crates/ocx_shim/BUILD.bazel`, `crates/ocx_store/src/{shim.rs,shims/**}`, `crates/ocx_store/src/file_structure/shim_bin_store.rs`, `.github/workflows/build-windows-shims.yml`, `taskfiles/rust.taskfile.yml` | 2 | P1 | hard | pending |
-| P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | pending |
+| P6 | . | C-015 (write); S-004 writer; V-62, V-72 writer | `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_env/src/vars/tests.rs` | 2 | P1 | | merged |
 | P7 | . | C-002…C-004, C-007, C-009…C-011, C-022…C-024 orchestration; S-007, S-013, S-014 | `crates/ocx_package_manager/src/tasks/{vendor.rs,pull.rs,toolchain_names.rs}`, `crates/ocx_package/src/vendor.rs`, `crates/ocx_package/src/vendor/*.rs` (`vendor_id` and any manifest-type fix) | 3 | P3, P4, P5, P6 | hard | pending |
 | P8 | . | acceptance for C-001…C-024 and S-004…S-007, S-013…S-015 | `test/tests/{test_vendor,test_package_vendor,test_vendor_launcher,test_vendor_parity}.py`, `test/src/vendor_fixtures.py`, `test/fixtures/vendor/**`, `test/BUILD.bazel` (`module_data`) | 1 | CW | | pending |
 | P9 | . | goal criterion 1 docs; AI-config upkeep | `website/src/content/docs/reference/vendor-manifest.md`, `website/src/content/docs/guides/vendor.mdx`, `website/astro.config.mjs`, `AGENTS.md`, `.claude/rules/{arch-principles,subsystem-cli-commands,subsystem-package-manager,subsystem-file-structure,subsystem-interface-contract,product-context}.md` | 1 | CW | | merged |
@@ -706,3 +706,8 @@ by line by the reviewer.
   golden. For I1: `test/lint/test_compat_corpus.py` `CODES_BY_KIND` lacks a `vendor-manifest` key. Pre-existing, not this branch:
   `managed_config::tests::a_deadline_cutting_a_companion_install_leaves_no_half_installed_state` fails on the branch before P1
   (file untouched by this plan; `ocx.sh` resolves through this host's hosts override).
+- 2026-11-26 — P6 merged `563c7051`. Contract change: P6 deleted the contract wave's unused `LauncherKind`/`generate_kind` and
+  ships two sibling writers instead, `launcher::generate_direct(entries, dest, blob, sidecar_for)` and
+  `tasks::render_toolchain::render_direct_bin(bin, surface, blob, sidecar_for)`; P7 calls those. Open from P6:
+  `render_direct_bin` applies no case-insensitive name fold (two names differing by case collide on a case-insensitive
+  filesystem) — P7 decides. P5: orchestrator commit `d0f6792b` adds `libc` (Unix) to `ocx_shim` for `O_NONBLOCK` (DP-16 kind).
