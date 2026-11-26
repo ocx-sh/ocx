@@ -18,6 +18,8 @@ pub struct Versions {
     pub errors: u32,
     /// Report root name → the `schema_version` const of its wrapper.
     pub reports: BTreeMap<String, u32>,
+    /// The vendor manifest's `schema_version` const; `None` while the documents hold no manifest.
+    pub vendor_manifest: Option<u32>,
     /// Command path, its words joined by one space (`"package push"`) → its `version`. Groups carry 0 and are absent.
     pub commands: BTreeMap<String, u32>,
 }
@@ -56,7 +58,13 @@ pub fn read(documents: &Documents) -> Result<Versions, VersionError> {
         errors: errors_version(&documents.errors)?,
         reports: report_versions(&documents.reports)?,
         commands: command_versions(&documents.cli)?,
+        vendor_manifest: documents.vendor_manifest.as_ref().map(manifest_version).transpose()?,
     })
+}
+
+fn manifest_version(manifest: &Value) -> Result<u32, VersionError> {
+    as_u32(manifest.pointer("/properties/schema_version/const"))
+        .ok_or_else(|| error("/properties/schema_version", "no integer `const`"))
 }
 
 fn errors_version(errors: &Value) -> Result<u32, VersionError> {
@@ -147,6 +155,7 @@ mod tests {
                     {"path": ["status"], "version": 1, "commands": []},
                 ]},
             }),
+            vendor_manifest: None,
         }
     }
 
@@ -206,6 +215,7 @@ mod tests {
             reports: golden("reports"),
             errors: golden("errors"),
             cli: golden("cli"),
+            vendor_manifest: None,
         };
         let versions = read(&documents).expect("the goldens carry every version");
         let roots = documents.reports["reports"].as_object().expect("root list").len();

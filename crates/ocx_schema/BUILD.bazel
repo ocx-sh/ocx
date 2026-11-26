@@ -68,7 +68,7 @@ rust_binary(
     deps = [":ocx_schema"],
 )
 
-# The eight published JSON Schemas, one `ocx_schema_bin <kind>` stdout each —
+# The nine published JSON Schemas, one `ocx_schema_bin <kind>` stdout each —
 # what `task schema:generate` copies into `website/src/public/schemas/`, so the
 # workspace is never compiled outside Bazel to produce them. The binary is in
 # `srcs`, not `tools`: `tools` would build its 19-crate closure a second time in
@@ -86,6 +86,7 @@ genrule(
         "schemas/patch/v1.json",
         "schemas/reports/v1.json",
         "schemas/execution-record/v1.json",
+        "schemas/vendor-manifest/v1.json",
         "schemas/errors/v1.json",
     ],
     cmd = " && ".join([
@@ -96,6 +97,7 @@ genrule(
         "$(location :ocx_schema_bin) patch > $(location schemas/patch/v1.json)",
         "$(location :ocx_schema_bin) reports > $(location schemas/reports/v1.json)",
         "$(location :ocx_schema_bin) execution-record > $(location schemas/execution-record/v1.json)",
+        "$(location :ocx_schema_bin) vendor-manifest > $(location schemas/vendor-manifest/v1.json)",
         "$(location :ocx_schema_bin) errors > $(location schemas/errors/v1.json)",
     ]),
 )

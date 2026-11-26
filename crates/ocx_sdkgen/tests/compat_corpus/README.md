@@ -6,7 +6,7 @@ and `expect.json` is what the differ must report.
 
 ```json
 {
-  "kind": "reports | errors | cli",
+  "kind": "reports | errors | cli | vendor-manifest",
   "verdict": "break | non_break",
   "change": "One sentence naming the mutation.",
   "findings": [{ "code": "B02", "pointer": "/$defs/PushReportRoot/properties/message", "subjects": ["PushReport"] }]
@@ -24,8 +24,8 @@ and `expect.json` is what the differ must report.
   change sits on the wrapper.
 - Reordering `x-ocx-enum` entries, union arms, named args or env entries is not a change; moving a positional is.
 - `subjects` are the roots (`reports`) or command paths (`cli`) that reach the pointer. Only versioned leaf
-  commands count, so a flag that stops being global names every command below it. `errors` and `cli`'s `env` and
-  `retired` sections are document-wide: `["*"]`.
+  commands count, so a flag that stops being global names every command below it. `errors`, `vendor-manifest`
+  and `cli`'s `env` and `retired` sections are document-wide: `["*"]`.
 - `verdict` is the semantic-break call. `break` needs a ledger entry and a version bump of every subject. A
   `non_break` case carries no finding or only `D01`, which is then a reworded description acknowledged by a `doc`
   entry. A `D01` that changes what the value means is a `break` acknowledged by a `semantic` entry.
