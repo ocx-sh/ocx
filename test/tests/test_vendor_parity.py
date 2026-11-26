@@ -224,6 +224,8 @@ def _tree_diff(installed: Path, vendored: Path, *, omit_links: bool) -> list[str
 
 
 def _installed_content(ocx: OcxRunner, package: dict[str, Any]) -> Path:
+    """`content/` of an ordinary pull of the vendored package: vendoring installs nothing in the home."""
+    _ocx(ocx, ocx.ocx_home, "package", "pull", *HOST, package["identifier"])
     return ocx.ocx_home / package["content_dir"]
 
 
@@ -540,10 +542,13 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _STORE_SPLIT = re.compile(r"/[0-9a-f]{2}/[0-9a-f]{30}")
 
 
-def _host_free(text: str, registry: str) -> str:
-    """The manifest text with the run's registry address and digests masked."""
-    text = text.replace(registry, "@REGISTRY@").replace(
-        registry_dir(registry), "@REGISTRY@"
+def _host_free(text: str, registry: str, repo: str) -> str:
+    """The manifest text with the run's registry address, repository name and digests masked."""
+    text = (
+        text.replace(registry, "@REGISTRY@")
+        .replace(registry_dir(registry), "@REGISTRY@")
+        .replace(repo, "@REPO@")
+        .replace(repo.upper(), "@REPO_UPPER@")
     )
     return _STORE_SPLIT.sub("/@XX@/@DIGEST30@", _HEX64.sub("@DIGEST64@", text))
 
@@ -562,7 +567,9 @@ def test_windows_amd64_manifest_equals_golden(
 
     _vendor(ocx, project, out, "-p", "windows/amd64")
 
-    actual = _host_free((out / "manifest.json").read_text(encoding="utf-8"), registry)
-    expected = _host_free(golden.read_text(encoding="utf-8"), registry)
+    actual = _host_free(
+        (out / "manifest.json").read_text(encoding="utf-8"), registry, unique_repo
+    )
+    expected = _host_free(golden.read_text(encoding="utf-8"), registry, unique_repo)
     assert json.loads(actual) == json.loads(expected)
     assert json.loads(actual)["platform"].startswith("windows/amd64")

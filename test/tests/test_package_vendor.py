@@ -38,7 +38,7 @@ pytestmark = pytest.mark.command("package vendor")
 
 EXIT_USAGE = 64
 EXIT_DATA = 65
-EXIT_CONFIG = 78
+EXIT_NOT_FOUND = 79
 
 HOST = ("-p", current_platform())
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
@@ -221,12 +221,12 @@ def test_package_manifest_only_fetches_no_layer_and_equals_full_run_without_cont
     assert layers <= set(recorder.blob_get_digests())
     full = _manifest(tmp_path / "f")
     assert full["content"] == "present"
-    assert _strip_content(full) == manifest_only
+    assert _strip_content(full) == _strip_content(manifest_only)
 
     # Control: a package with a renamed tool breaks the equality.
     other = _publish(ocx, f"{unique_repo}_renamed", tmp_path, "other", bins=["renamed"])
     _pvendor(ocx, tmp_path / "o", "--manifest-only", *HOST, other.fq)
-    assert _strip_content(_manifest(tmp_path / "o")) != manifest_only
+    assert _strip_content(_manifest(tmp_path / "o")) != _strip_content(manifest_only)
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +341,12 @@ def test_package_vendor_platform_without_host_leaf_vendors_only_when_named(
     pkg = windows_only_package(ocx, unique_repo, tmp_path / "win")
 
     host_default = _pvendor(ocx, tmp_path / "host", "--manifest-only", pkg.fq, check=False)
-    assert host_default.returncode == EXIT_CONFIG, host_default.stderr
+    # The package tier resolves the identifier itself, so a missing leaf is "package not found";
+    # exit 78 is the project tier's answer for a binding (design § 5.2).
+    assert host_default.returncode == EXIT_NOT_FOUND, host_default.stderr
+    # The same answer `ocx package pull` gives for the host platform.
+    pulled = ocx.run("package", "pull", pkg.fq, check=False)
+    assert pulled.returncode == host_default.returncode, pulled.stderr
 
     named = tmp_path / "named"
     _pvendor(ocx, named, "--manifest-only", "-p", "windows/amd64", pkg.fq)
@@ -360,7 +365,13 @@ def test_package_vendor_wasm_package_has_files_and_no_launcher(
 ) -> None:
     wasm_file = wasm_file_package(ocx, unique_repo, tmp_path / "file")
     wasm_tool = _publish(
-        ocx, f"{unique_repo}_tool", tmp_path, "tool", bins=["tool"], platform="wasip1/wasm"
+        ocx,
+        f"{unique_repo}_tool",
+        tmp_path,
+        "tool",
+        bins=["tool"],
+        binaries=["tool"],
+        platform="wasip1/wasm",
     )
     out = tmp_path / "out"
 

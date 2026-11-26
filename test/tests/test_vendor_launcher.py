@@ -157,8 +157,9 @@ def _script_package(
     )
 
 
-# `cd /` first: a root that was left relative breaks the next line.
-TOOL_BODY = 'cd /\ncat "$DATA_FILE"\necho "ran:$0"'
+# `cd /` first: a root that was left relative breaks the next line, and the script then exits 3
+# (the last command's status would otherwise hide the failed `cat`).
+TOOL_BODY = 'cd /\ncat "$DATA_FILE" || exit 3\necho "ran:$0"'
 
 
 @pytest.fixture()
@@ -469,18 +470,19 @@ def test_tool_starts_second_package_tool_through_path(
         ocx, tmp_path / "proj", {"first": first, "second": second}
     )
     first_launcher = _launcher(out, manifest, "first")
-    second_launcher = _launcher(out, manifest, "second")
 
-    found = _run(
-        [str(first_launcher)],
-        cwd=tmp_path,
-        env={"PATH": f"{second_launcher.parent}:{CLEAN_PATH}"},
-    )
+    # The selection's composed `PATH` already holds the second package's `bin/`.
+    found = _run([str(first_launcher)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
     assert found.returncode == 0, found.stderr
     assert "second-ran:" in found.stdout
 
-    # Control: without the second launcher's directory on `PATH` the bare name is not found.
-    missing = _run([str(first_launcher)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
+    # Control: a set that does not select the second package cannot find the bare name.
+    alone_out, alone_manifest = _vendor_project(ocx, tmp_path / "proj_alone", {"first": first})
+    missing = _run(
+        [str(_launcher(alone_out, alone_manifest, "first"))],
+        cwd=tmp_path,
+        env={"PATH": CLEAN_PATH},
+    )
     assert missing.returncode != 0
     assert "second-ran:" not in missing.stdout
 
@@ -496,19 +498,20 @@ def test_launcher_from_read_only_tree_leaves_tree_unchanged(
 ) -> None:
     out, manifest = vendored_tool
     launcher = _launcher(out, manifest, "tool")
-    snapshot_before = _snapshot(out)
 
     # Control: the snapshot sees a write beside the launcher.
     scratch = tmp_path / "scratch"
     shutil.copytree(out, scratch, symlinks=True)
+    scratch_before = _snapshot(scratch)
     (scratch / launcher.relative_to(out).parent / "written").write_text("x")
-    assert _snapshot(scratch) != _snapshot(out)
+    assert _snapshot(scratch) != scratch_before
 
     nodes = [out, *out.rglob("*")]
     for node in nodes:
         if not node.is_symlink():
             node.chmod(node.stat().st_mode & ~0o222)
     try:
+        snapshot_before = _snapshot(out)
         result = _run([str(launcher)], cwd=tmp_path, env={"PATH": CLEAN_PATH})
         snapshot_after = _snapshot(out)
     finally:

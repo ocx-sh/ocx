@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import shlex
 import stat
 import subprocess
@@ -43,7 +44,7 @@ pytestmark = pytest.mark.command("vendor")
 EXIT_USAGE = 64
 EXIT_DATA = 65
 EXIT_CONFIG = 78
-EXIT_POLICY = 81
+EXIT_NOT_FOUND = 79
 
 HOST = ("-p", current_platform())
 posix_only = pytest.mark.skipif(
@@ -157,7 +158,9 @@ def _bazel_findings(root: Path) -> list[str]:
     """Bazel files or terms outside package content and launcher bytes.
 
     Scans file names everywhere but package `content/`, and the text of the
-    manifest and every `.direct` sidecar (launchers are ocx's own blob).
+    manifest and every `.direct` sidecar (launchers are ocx's own blob). The
+    manifest's `packages[].tree` lists the names inside package content, which
+    the scan exempts, so it is dropped before the scan.
     """
     terms = ("bazel", "runfiles", "workspace", "BUILD")
     names = {"BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"}
@@ -170,6 +173,11 @@ def _bazel_findings(root: Path) -> list[str]:
             findings.append(f"file {rel.as_posix()}")
         if path.is_file() and (path.name == "manifest.json" or path.suffix == ".direct"):
             text = path.read_text(encoding="utf-8")
+            if path.name == "manifest.json" and rel.parent == Path("."):
+                document = json.loads(text)
+                for package in document.get("packages", []):
+                    package.pop("tree", None)
+                text = json.dumps(document)
             findings += [f"{rel.as_posix()} names {t!r}" for t in terms if t in text]
     return findings
 
@@ -371,13 +379,13 @@ def test_manifest_only_fetches_no_layer_and_equals_full_run_without_content(
     assert layers <= set(recorder.blob_get_digests())
     full = _manifest(tmp_path / "f")
     assert full["content"] == "present"
-    assert _strip_content(full) == manifest_only
+    assert _strip_content(full) == _strip_content(manifest_only)
 
     # Control: a renamed fixture tool breaks the equality.
     other = _publish(ocx, f"{unique_repo}_renamed", tmp_path, "other", bins=["renamed"])
     other_project = _project(ocx, tmp_path / "proj_other", {"tool": other})
     _vendor(ocx, other_project, tmp_path / "o", *HOST)
-    assert _strip_content(_manifest(tmp_path / "o")) != manifest_only
+    assert _strip_content(_manifest(tmp_path / "o")) != _strip_content(manifest_only)
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +407,12 @@ def test_trust_policy_refuses_in_both_modes(
         encoding="utf-8",
     )
 
+    # Both modes fail with the code `ocx package install` gives for the same policy
+    # (an unsigned package under a covering rule is `no_signatures_found`, 79).
+    installed = _ocx(ocx, tmp_path, "package", "install", pkg.fq, env=None, check=False)
+    assert installed.returncode == EXIT_NOT_FOUND, installed.stderr
     refused = _vendor(ocx, project, tmp_path / "refused", *mode, *HOST, check=False)
-    assert refused.returncode == EXIT_POLICY, refused.stderr
+    assert refused.returncode == installed.returncode, refused.stderr
     assert not (tmp_path / "refused").exists()
 
     # Control: with the rule removed the same vendor succeeds.
@@ -416,7 +428,8 @@ def test_trust_policy_refuses_in_both_modes(
 def test_vendor_output_carries_no_bazel_file_or_term(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    pkg = bazel_names_package(ocx, unique_repo, tmp_path / "pkg")
+    # The test's own name holds "bazel", and the repository name reaches the manifest.
+    pkg = bazel_names_package(ocx, unique_repo.replace("bazel", "neutral"), tmp_path / "pkg")
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
     out = tmp_path / "out"
     _vendor(ocx, project, out, *HOST)
@@ -430,7 +443,9 @@ def test_vendor_output_carries_no_bazel_file_or_term(
     # Control: a planted BUILD.bazel and a planted term are found.
     (out / "selections" / "BUILD.bazel").write_text("", encoding="utf-8")
     manifest = out / "manifest.json"
-    manifest.write_text(manifest.read_text(encoding="utf-8") + "\nrunfiles", encoding="utf-8")
+    planted = json.loads(manifest.read_text(encoding="utf-8"))
+    planted["note"] = "runfiles"
+    manifest.write_text(json.dumps(planted), encoding="utf-8")
     findings = _bazel_findings(out)
     assert "file selections/BUILD.bazel" in findings
     assert any("'runfiles'" in f for f in findings)
@@ -518,22 +533,46 @@ def test_value_already_holding_the_token_is_refused(
 
 
 @posix_only
-def test_symlinked_home_leaves_home_path_in_values_and_is_refused(
+def test_value_holding_the_real_home_is_refused_under_a_symlinked_home(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    pkg = env_template_package(ocx, unique_repo, tmp_path / "pkg")
-    project = _project(ocx, tmp_path / "proj", {"tpl": pkg})
+    """A value spelling the home survives token replacement under either spelling of the home."""
+    real_home = ocx.ocx_home.resolve()
+    literal_home = {
+        "key": "HOME_COPY",
+        "type": "constant",
+        "value": str(real_home),
+        "visibility": "public",
+    }
+    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["tool"], env=[PATH_ENTRY, literal_home])
+    project = _project(ocx, tmp_path / "proj", {"tool": pkg})
     home_link = tmp_path / "home-link"
-    os.symlink(ocx.ocx_home, home_link)
+    os.symlink(real_home, home_link)
 
+    # The home is named through the link; the value spells the canonical path.
     refused = _vendor(
         ocx, project, tmp_path / "out", *HOST, env={"OCX_HOME": str(home_link)}, check=False
     )
     assert refused.returncode == EXIT_DATA, refused.stderr
     assert _detail(refused) == "vendor_value_unrepresentable"
+    assert not (tmp_path / "out").exists()
 
-    # Control: the real home vendors the same project.
-    _vendor(ocx, project, tmp_path / "ok", *HOST)
+    # Control: the same project with a value that names no host path vendors.
+    clean = _publish(
+        ocx,
+        f"{unique_repo}_clean",
+        tmp_path,
+        "clean",
+        bins=["tool"],
+        env=[PATH_ENTRY, {**literal_home, "value": "/opt/elsewhere"}],
+    )
+    _vendor(
+        ocx,
+        _project(ocx, tmp_path / "proj_clean", {"tool": clean}),
+        tmp_path / "ok",
+        *HOST,
+        env={"OCX_HOME": str(home_link)},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -549,19 +588,21 @@ def test_setuid_bit_is_cleared_and_modes_and_mtimes_are_normalised(
     normal = _publish(ocx, f"{unique_repo}_n", tmp_path, "normal", bins=["plain"])
     ocx.plain("package", "pull", *HOST, setuid.fq)
     out = tmp_path / "out"
-    _vendor(
-        ocx, _project(ocx, tmp_path / "proj", {"suid": setuid, "plain": normal}), out, *HOST
-    )
 
-    # The bit must exist in the installed copy, or clearing it proves nothing.
+    # `package create` and extraction both clear the bit, so set it on the installed copy:
+    # without it in the source, clearing it in the output proves nothing.
     installed = [
         p
         for p in (ocx.ocx_home / "packages").rglob("tool")
         if p.parent.name == "bin" and not p.is_symlink()
     ]
     assert installed, "the setuid fixture was not installed"
-    assert all(stat.S_IMODE(p.stat().st_mode) & stat.S_ISUID for p in installed), (
-        "the fixture archive lost its setuid bit before vendoring"
+    for path in installed:
+        path.chmod(0o4755)
+    assert all(stat.S_IMODE(p.stat().st_mode) & stat.S_ISUID for p in installed)
+
+    _vendor(
+        ocx, _project(ocx, tmp_path / "proj", {"suid": setuid, "plain": normal}), out, *HOST
     )
 
     files = {
@@ -618,11 +659,19 @@ def test_links_package_vendors_relative_links(
     pkg = links_package(ocx, unique_repo, tmp_path / "pkg")
     out = tmp_path / "out"
     _vendor(ocx, _project(ocx, tmp_path / "proj", {"tool": pkg}), out, *HOST)
-    targets = sorted(
-        l["target"] for p in _manifest(out)["packages"] for l in p["tree"]["links"]
-    )
-    assert targets
-    assert all(not t.startswith("/") and ".." not in t.split("/")[:1] for t in targets)
+    links = [
+        (p["content_dir"], l)
+        for p in _manifest(out)["packages"]
+        for l in p["tree"]["links"]
+    ]
+    assert sorted(l["target"] for _, l in links) == ["../lib/real/data.txt", "real", "tool"]
+    # Relative, and resolving inside `content_dir` (`..` is allowed while it stays inside).
+    for content_dir, link in links:
+        assert not link["target"].startswith("/")
+        resolved = posixpath.normpath(
+            posixpath.join(posixpath.dirname(link["path"]), link["target"])
+        )
+        assert resolved.startswith(f"{content_dir}/"), link
 
 
 # ---------------------------------------------------------------------------

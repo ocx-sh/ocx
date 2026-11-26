@@ -295,7 +295,13 @@ def wasm_file_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 def windows_only_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
     """A package with a `windows/amd64` leaf only: no Linux leaf."""
     return make_package(
-        ocx, repo, "1.0.0", tmp_path, bins=["tool"], platform="windows/amd64"
+        ocx,
+        repo,
+        "1.0.0",
+        tmp_path,
+        bins=["tool"],
+        binaries=["tool"],
+        platform="windows/amd64",
     )
 
 
