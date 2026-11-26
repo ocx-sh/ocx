@@ -8,10 +8,11 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-execute → ocx pipelines done; awaiting rules_ocx pipelines, X, then the meta-orchestrator's closing gate, /hex-review and /hex-finalize
+- **Step:** /hex-review high (ocx side only, `origin/main...6da31abe`) → Request Changes; convergence gap row RV1 appended; rules_ocx side not yet reviewed
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
-- **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
+- **Last update:** 2026-11-26 (after 6da31abe: chore: the shim store's public docs name its private publish helper without linking it)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
+- **Reviewed:** 6da31abec8b1fb9ef2d901d77ae35de3f9e5d00a
 
 ---
 
@@ -373,6 +374,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | pending |
 | R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | pending |
 | X | . + rules_ocx | integration: attested blobs, V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`, `crates/ocx_store/src/shims/**` and the SHA canaries in `crates/ocx_store/src/shim.rs`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
+| RV1 | . | convergence gaps from /hex-review high 2026-11-26: C-004 (contradicts), C-009 (partial), C-017 (partial), C-021 (partial), V-23 (contradicts) | `crates/ocx_package_manager/src/tasks/vendor.rs`, `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_store/src/file_structure/vendor_layout.rs`, `crates/ocx_shim/src/direct.rs`, `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py`, the tests of each | 6 | P10 | | pending |
 
 ```mermaid
 graph TD
@@ -636,6 +638,20 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    commit `ci: test rules_ocx against the ocx pull request's dev build`.
 4. After External acts 2 and 6, fold CI results (ocx-deep macOS/Windows rows, rules_ocx `verify-basic`, `verify-rbe` both jobs, `verify-deep` three OS; V-44) into
    `X.md`; every V-row has its line in § Red-proof log.
+
+### RV1 — convergence gaps (appended by /hex-review high, 2026-11-26)
+1. C-004 contradicts: `settle_windows_binary_targets` rewrites `tools[].target_path` (`.exe` → `.cmd`/`.bat`) in a full run only, so the
+   manifest-only manifest differs; and `binary_directory` guesses the first interface `PATH` directory with no check that the binary is
+   there. Decide the binary target by one rule both modes share, and refuse (65) a full run whose target is absent.
+2. C-009 partial: `StagedTree::publish` removes an empty `DIR` before the rename, so a failed rename loses it, and a `DIR` created in
+   the window exits 74, not 64. Rename straight onto the empty directory (POSIX replaces it atomically) and map ENOTEMPTY/EEXIST/ENOTDIR
+   to `vendor_output_not_empty`.
+3. C-017 partial: a refused `.bat`/`.cmd` argument exits 64 naming the program, not the argument. Name the argument or amend C-017.
+4. C-021 partial: `contract:rotate` and `test/lint/test_contract_baseline.py` `BASELINE_FILES` omit `vendor-manifest.json`, so after
+   the first release the gate compares the manifest with itself and every later break passes. Add it to both, with a red case.
+5. V-23 contradicts (Reuse table rows P6.1, P7.4 launchers): `generate_direct` and `render_direct_bin` have no production caller and
+   `write_entrypoint_launchers`/`write_selection_launchers` in `tasks/vendor.rs` re-implement their loops. Route vendor through one
+   writer set and delete the other.
 
 ## Reuse table (V-23: each step's existing function; no new selection walk, assembly, composer or launcher writer)
 
