@@ -24,7 +24,7 @@ mod chkstk;
 enum ShimError {
     /// No sidecar exists. Exit 78 (`EX_CONFIG`).
     ///
-    /// `stem_path` is the shim's own path without `.exe`, so the message can name all three candidates.
+    /// `stem_path` is the shim's own path without `.exe`, so the message can name every candidate.
     SidecarNotFound { stem_path: String },
     /// A sidecar failed its grammar. Exit 78.
     MalformedSidecar { reason: String },
@@ -40,6 +40,21 @@ enum ShimError {
     OcxNotFound { pinned: Option<String> },
     /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
+    /// The `.direct` launcher refused: sidecar missing, unreadable, malformed, or no vendored root accepted. Exit 78.
+    ///
+    /// `reason` is the whole stderr line after the `ocx-shim:` prefix, so it names what the lookup tried.
+    DirectRefused { reason: String },
+    /// An argument cannot reach a batch target without the risk of command injection. Exit 64 (`EX_USAGE`).
+    ///
+    /// `reason` is the whole stderr line after the `ocx-shim:` prefix.
+    DirectArgumentRefused { reason: String },
+    /// The vendored tool could not be started. Exit 77 when permission was denied, else 74.
+    #[cfg(unix)]
+    DirectExecFailed {
+        program: String,
+        permission_denied: bool,
+        reason: String,
+    },
 }
 
 /// `ERROR_ACCESS_DENIED`; the non-Windows build mirrors the Win32 value so the exit-code mapping stays host-testable.
@@ -60,6 +75,16 @@ impl ShimError {
     fn exit_code(&self) -> i32 {
         match self {
             ShimError::SidecarNotFound { .. } | ShimError::MalformedSidecar { .. } => 78,
+            ShimError::DirectRefused { .. } => 78,
+            ShimError::DirectArgumentRefused { .. } => 64,
+            #[cfg(unix)]
+            ShimError::DirectExecFailed { permission_denied, .. } => {
+                if *permission_denied {
+                    77
+                } else {
+                    74
+                }
+            }
             ShimError::ContainmentViolation { .. } => 77,
             ShimError::SelfPathFailure => 74,
             ShimError::OcxNotFound { .. } => 69,
@@ -78,8 +103,8 @@ impl ShimError {
         match self {
             ShimError::SidecarNotFound { stem_path } => {
                 format!(
-                    "ocx-shim: sidecar not found: none of {stem_path}.shim, {stem_path}.shimref or {stem_path}.exec \
-                     (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
+                    "ocx-shim: sidecar not found: none of {stem_path}.shim, {stem_path}.shimref, {stem_path}.exec or \
+                     {stem_path}.direct (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
                 )
             }
             ShimError::MalformedSidecar { reason } => {
@@ -98,11 +123,19 @@ impl ShimError {
             ShimError::SpawnFailure { win32, program } => {
                 format!("ocx-shim: failed to start {program}: win32 error {win32}")
             }
+            ShimError::DirectRefused { reason } | ShimError::DirectArgumentRefused { reason } => {
+                format!("ocx-shim: {reason}")
+            }
+            #[cfg(unix)]
+            ShimError::DirectExecFailed { program, reason, .. } => {
+                format!("ocx-shim: failed to start {program}: {reason}")
+            }
         }
     }
 }
 
 mod core;
+mod direct;
 
 /// Entry point; always diverges via [`std::process::exit`].
 fn main() -> ! {
@@ -136,21 +169,9 @@ fn harden_dll_search_path() {
 fn run() -> Result<i32, ShimError> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, GetLastError, HANDLE,
-        INVALID_HANDLE_VALUE, WAIT_FAILED,
-    };
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-    use windows_sys::Win32::System::JobObjects::{
-        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, GetLastError,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
-    use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-        PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
-        UpdateProcThreadAttribute, WaitForSingleObject,
-    };
 
     // Grow the buffer until the length is below it: a fixed buffer silently truncates the path and picks the wrong
     // sidecar. `written == cap` means truncated even without `ERROR_INSUFFICIENT_BUFFER` (pre-Vista), so it grows too.
@@ -207,9 +228,17 @@ fn run() -> Result<i32, ShimError> {
             }
         }
     }
-    let sidecar = sidecar.ok_or_else(|| ShimError::SidecarNotFound {
-        stem_path: stem_path.display().to_string(),
-    })?;
+    // No existing kind beside the shim: the vendored kind, or nothing.
+    let Some(sidecar) = sidecar else {
+        let direct_sidecar = module_dir.join(format!("{stem}.{}", core::DIRECT_EXTENSION));
+        if !direct_sidecar.exists() {
+            return Err(ShimError::SidecarNotFound {
+                stem_path: stem_path.display().to_string(),
+            });
+        }
+        let started = module_path.to_str().ok_or(ShimError::SelfPathFailure)?;
+        return direct::run_windows(started);
+    };
 
     // Containment runs only when `OCX_HOME` resolves; `launcher exec`'s `validate_launcher_pkg_root` stays
     // authoritative. A `pkg_root` that fails to resolve under a good `OCX_HOME` is suspicious: delegate, but say so.
@@ -254,55 +283,99 @@ fn run() -> Result<i32, ShimError> {
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let command_line = core::build_child_command_line(&program.token, &sidecar, &stem, &argv);
-    let mut command_line_w: Vec<u16> = std::ffi::OsStr::new(&command_line)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
 
     // A pinned or baked program gets its own `lpApplicationName` buffer, so `CreateProcessW` neither parses it from
     // the command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches directories for it.
-    let app_name_w: Option<Vec<u16>> = program
-        .application_name()
-        .map(|p| std::ffi::OsStr::new(p).encode_wide().chain(Some(0)).collect());
+    spawn_child(program.application_name(), &command_line, None).map_err(|last| match last {
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => ShimError::OcxNotFound {
+            pinned: program.application_name().map(str::to_string),
+        },
+        other => ShimError::SpawnFailure {
+            win32: other,
+            program: program.token.clone(),
+        },
+    })
+}
+
+/// An anonymous job object that kills its processes when the last handle closes; null when setup failed.
+///
+/// Best-effort: on failure the shim warns and spawns without a job.
+#[cfg(windows)]
+fn create_kill_on_close_job() -> windows_sys::Win32::Foundation::HANDLE {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    // SAFETY: NULL security attrs + NULL name = an anonymous job object.
+    let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: job object setup failed: {last}");
+        return std::ptr::null_mut();
+    }
+    // SAFETY: all-zero is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `info` is initialised and the size argument matches its type.
+    let set = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(info).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if set == 0 {
+        // SAFETY: no pointers; reads thread-local last-error.
+        let last = unsafe { GetLastError() };
+        eprintln!("ocx-shim: job object setup failed: {last}");
+        // SAFETY: `job` is a valid handle, not used again on this path.
+        unsafe { CloseHandle(job) };
+        return std::ptr::null_mut();
+    }
+    job
+}
+
+/// Starts the child with `CreateProcessW` inside a kill-on-close job and returns its exit code, or the Win32 error of
+/// the failed spawn.
+///
+/// `environment` is a complete `CREATE_UNICODE_ENVIRONMENT` block; `None` inherits this process's.
+#[cfg(windows)]
+fn spawn_child(application_name: Option<&str>, command_line: &str, environment: Option<&[u16]>) -> Result<i32, u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+
+    let mut command_line_w: Vec<u16> = std::ffi::OsStr::new(command_line)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let app_name_w: Option<Vec<u16>> =
+        application_name.map(|p| std::ffi::OsStr::new(p).encode_wide().chain(Some(0)).collect());
     let app_name_ptr = app_name_w.as_ref().map_or(std::ptr::null(), |b| b.as_ptr());
+    let environment_ptr = environment.map_or(std::ptr::null(), |block| block.as_ptr().cast());
+    let environment_flag = if environment.is_some() {
+        CREATE_UNICODE_ENVIRONMENT
+    } else {
+        0
+    };
 
     // Before `CreateProcessW`: the child is born running, and a Ctrl+C before install kills the shim before it can
     // wait, losing the exit code and job cleanup.
     install_console_ctrl_handler();
 
     // Created before `CreateProcessW` so the child is born inside it via `JOB_LIST`, with no suspend-assign-resume
-    // race. Best-effort: on failure, spawn without a job, logged.
-    // SAFETY: NULL security attrs + NULL name = an anonymous job object.
-    let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    let job = if job.is_null() {
-        // SAFETY: no pointers; reads thread-local last-error.
-        let last = unsafe { GetLastError() };
-        eprintln!("ocx-shim: job object setup failed: {last}");
-        std::ptr::null_mut()
-    } else {
-        // SAFETY: all-zero is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`.
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `info` is initialised and the size argument matches its type.
-        let set = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                std::ptr::addr_of!(info).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if set == 0 {
-            // SAFETY: no pointers; reads thread-local last-error.
-            let last = unsafe { GetLastError() };
-            eprintln!("ocx-shim: job object setup failed: {last}");
-            // SAFETY: `job` is a valid handle, not used again on this path.
-            unsafe { CloseHandle(job) };
-            std::ptr::null_mut()
-        } else {
-            job
-        }
-    };
+    // race.
+    let job = create_kill_on_close_job();
 
     // `bInheritHandles=TRUE` alone leaks every inheritable handle (CWE-403): `HANDLE_LIST` whitelists the std handles,
     // and `JOB_LIST` assigns the job at creation.
@@ -438,8 +511,8 @@ fn run() -> Result<i32, ShimError> {
             std::ptr::null(),
             std::ptr::null(),
             1, // bInheritHandles = TRUE (required for the whitelisted set)
-            extended_present,
-            std::ptr::null(),
+            extended_present | environment_flag,
+            environment_ptr,
             std::ptr::null(),
             std::ptr::addr_of!(startup_ex.StartupInfo),
             &mut process_info,
@@ -480,8 +553,8 @@ fn run() -> Result<i32, ShimError> {
                 std::ptr::null(),
                 std::ptr::null(),
                 1,
-                0,
-                std::ptr::null(),
+                environment_flag,
+                environment_ptr,
                 std::ptr::null(),
                 std::ptr::addr_of!(startup_ex.StartupInfo),
                 &mut process_info,
@@ -498,15 +571,7 @@ fn run() -> Result<i32, ShimError> {
             // SAFETY: valid job handle, not used again.
             unsafe { CloseHandle(job) };
         }
-        return match last {
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Err(ShimError::OcxNotFound {
-                pinned: program.application_name().map(str::to_string),
-            }),
-            other => Err(ShimError::SpawnFailure {
-                win32: other,
-                program: program.token.clone(),
-            }),
-        };
+        return Err(last);
     }
     let child_process: HANDLE = process_info.hProcess;
     let child_thread: HANDLE = process_info.hThread;
@@ -558,10 +623,10 @@ fn install_console_ctrl_handler() {
     }
 }
 
-/// Keeps `cargo check --workspace` green on the Linux CI host, which never runs the shim.
-#[cfg(not(windows))]
+/// The Unix launcher runs the vendored (`.direct`) kind alone.
+#[cfg(unix)]
 fn run() -> Result<i32, ShimError> {
-    unimplemented!("ocx-shim has no non-Windows runtime")
+    direct::run()
 }
 
 // ── Specification tests ─────────────────────────────────────────────────────

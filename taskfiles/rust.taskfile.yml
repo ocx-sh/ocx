@@ -552,15 +552,19 @@ tasks:
         vars: { TOOL: cargo-zigbuild, CRATE: cargo-zigbuild@0.22.3 }
 
   shim:build:
-    desc: Cross-build the stripped Windows shim blob (issue #66)
+    desc: Cross-build the stripped native launcher blob for one target (issue #66)
     summary: |
       Hermetically cross-builds crates/ocx_shim with the size-tuned `shim`
-      profile for one *-pc-windows-gnullvm target via cargo-zigbuild and
-      writes the stripped binary to target/<TARGET>/shim/ocx-shim.exe. The
+      profile for one target via cargo-zigbuild and writes the stripped binary
+      to target/<TARGET>/shim/ocx-shim (ocx-shim.exe on Windows). The
       committed blobs under crates/ocx_store/src/shims/ and the SHIM_SHA256
       constants are refreshed from this output in a dedicated PR (see
       shim.rs module docs and adr_shim_hermetic_zigbuild.md). Required var:
-      TARGET (x86_64-pc-windows-gnullvm | aarch64-pc-windows-gnullvm).
+      TARGET, one of x86_64-unknown-linux-musl, aarch64-unknown-linux-musl,
+      x86_64-apple-darwin, aarch64-apple-darwin, x86_64-pc-windows-gnullvm,
+      aarch64-pc-windows-gnullvm. The aarch64-apple-darwin blob needs the
+      ad-hoc code signature zig's linker writes; the CI size and signature
+      gates are in build-windows-shims.yml.
     requires:
       vars: [TARGET]
     deps:
