@@ -40,7 +40,8 @@ pub enum KeyFold {
 
 /// Applies one record to the variable's `existing` value and returns the new value.
 ///
-/// `separator` is read for [`ApplyKind::List`] only; `fold` selects the segment comparison of [`ApplyKind::Path`].
+/// `separator` is read for [`ApplyKind::List`] only (an absent one reads as a space); `fold` selects the
+/// segment comparison of [`ApplyKind::Path`]. An absent `existing` yields `value`.
 pub fn apply_one(
     existing: Option<&OsStr>,
     kind: ApplyKind,
@@ -48,38 +49,174 @@ pub fn apply_one(
     separator: Option<&str>,
     fold: KeyFold,
 ) -> OsString {
-    let _ = (existing, kind, value, separator, fold);
-    unimplemented!("apply_one")
+    match kind {
+        ApplyKind::Constant => value.to_owned(),
+        ApplyKind::Path => match existing {
+            Some(existing) => move_to_front_with(existing, value, fold == KeyFold::AsciiCaseInsensitive),
+            None => value.to_owned(),
+        },
+        ApplyKind::List => {
+            // Lossy, as `ocx exec` reads the ambient value: the list fold is text-only.
+            let existing = existing.map(|v| v.to_string_lossy().into_owned());
+            OsString::from(append_unique(
+                existing.as_deref().unwrap_or_default(),
+                &value.to_string_lossy(),
+                separator.unwrap_or(" "),
+            ))
+        }
+    }
 }
 
 /// Whether two `PATH` elements name the same entry under the Windows rule (`windows`) or byte-exact.
+///
+/// The Windows rule folds ASCII case and treats `/` and `\` as one character: package metadata writes
+/// `${installPath}/bin` over a native install path, and the MSYS runtime hands the entry back all-backslash.
+/// Non-ASCII bytes compare exactly. The caller picks `windows`, so the rule is testable on any host.
 pub fn path_element_eq(left: &OsStr, right: &OsStr, windows: bool) -> bool {
-    let _ = (left, right, windows);
-    unimplemented!("path_element_eq")
+    if !windows {
+        return left == right;
+    }
+    let (left, right) = (left.as_encoded_bytes(), right.as_encoded_bytes());
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| fold_byte(*a) == fold_byte(*b))
 }
 
-/// The hashable form of [`path_element_eq`]'s equivalence class.
+/// The hashable form of [`path_element_eq`]'s equivalence class: equal under it iff equal here.
 pub fn path_element_norm(value: &str, windows: bool) -> String {
-    let _ = (value, windows);
-    unimplemented!("path_element_norm")
+    if windows {
+        value
+            .chars()
+            .map(|c| if c == '/' { '\\' } else { c.to_ascii_lowercase() })
+            .collect()
+    } else {
+        value.to_owned()
+    }
 }
 
-/// Drops every occurrence of `value` from a `PATH`-style `existing`.
+fn fold_byte(byte: u8) -> u8 {
+    if byte == b'/' { b'\\' } else { byte.to_ascii_lowercase() }
+}
+
+/// Strip one, and only one, surrounding pair of `"` from a `PATH` element.
+///
+/// Windows quotes space-bearing segments and `split_paths` unquotes them, so both spellings must compare equal.
+fn strip_one_quote_pair(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
+/// [`strip_one_quote_pair`] over an `OsStr`; a non-UTF-8 value is returned untouched.
+fn strip_one_quote_pair_os(value: &OsStr) -> &OsStr {
+    match value.to_str() {
+        Some(text) => OsStr::new(strip_one_quote_pair(text)),
+        None => value,
+    }
+}
+
+/// The form of `value` [`move_to_front`] compares against, never the form it writes.
+///
+/// Stripped on Windows only, where `split_paths` unquotes: without it `PATH` grows a copy per prompt.
+/// Not in the segment comparison, or [`remove_segment`]'s already-stripped operand loses a second pair.
+fn comparison_operand(value: &OsStr, windows: bool) -> &OsStr {
+    if windows { strip_one_quote_pair_os(value) } else { value }
+}
+
+/// Re-join `PATH` segments with [`std::env::join_paths`], the inverse of `split_paths`.
+///
+/// A bare join re-emits a Windows segment holding `;` unquoted, so the next split yields a relative segment (CWE-426).
+fn join_segments(segments: &[OsString]) -> OsString {
+    // Unreachable: `join_paths` rejects only what `split_paths` cannot emit.
+    std::env::join_paths(segments).unwrap_or_else(|_| {
+        let mut joined = OsString::new();
+        for segment in segments {
+            if !joined.is_empty() {
+                joined.push(PATH_SEPARATOR);
+            }
+            joined.push(segment);
+        }
+        joined
+    })
+}
+
+/// The non-empty segments of `existing` that are not `value`, re-joined.
+fn retained(existing: &OsStr, value: &OsStr, windows: bool) -> OsString {
+    // Raw bytes, not `Path` equality, which normalises trailing slashes and diverges from the emitted snippets.
+    // Must match every `Shell::export_path` / `remove_list_element` arm, or emitted and in-process `PATH`s diverge.
+    let segments: Vec<OsString> = std::env::split_paths(existing)
+        .map(std::path::PathBuf::into_os_string)
+        .filter(|segment| !segment.is_empty() && !path_element_eq(segment, value, windows))
+        .collect();
+    join_segments(&segments)
+}
+
+/// [`move_to_front`] minus the prepend: drops every occurrence of `value`.
+///
+/// Segment-exact, not containment: a differently spelled alias survives, so a fail-closed caller re-checks the resolved answer.
 pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
-    let _ = (existing, value);
-    unimplemented!("remove_segment")
+    // As `Shell::remove_list_element`: the live env spells a space-bearing Windows segment either way.
+    // Host rule, not the shell's: the process env and `$GITHUB_PATH` follow it even under MSYS.
+    retained(existing, strip_one_quote_pair_os(value), cfg!(windows))
 }
 
 /// Move-to-front dedup for a `PATH`-style value: drops empty segments and every copy of `value`, then prepends it.
+///
+/// Mirrors `shell::Shell::export_path`; infallible and idempotent.
+///
+/// **Precondition:** `value` is one directory with no `PATH_SEPARATOR` (nor `"` on Windows), or a re-apply does not round-trip.
 pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
-    let _ = (existing, value);
-    unimplemented!("move_to_front")
+    move_to_front_with(existing, value, cfg!(windows))
+}
+
+fn move_to_front_with(existing: &OsStr, value: &OsStr, windows: bool) -> OsString {
+    // Comparison only: `value` is prepended byte for byte, as `export_path`'s pwsh arm writes it.
+    let survivors = retained(existing, comparison_operand(value, windows), windows);
+    if value.is_empty() {
+        return survivors;
+    }
+
+    // Outside `join_segments`: a `"`-bearing `value` makes `join_paths` reject, dropping every survivor's re-quoting.
+    let mut result = OsString::with_capacity(value.len() + 1 + survivors.len());
+    result.push(value);
+    if !survivors.is_empty() {
+        result.push(PATH_SEPARATOR);
+        result.push(survivors);
+    }
+    result
 }
 
 /// Unique append for a separator-joined list value: moves `value` to the back.
+///
+/// Must match the emitted shell snippets (`adr_env_modifier_types.md § Decision`), or the in-process env and the shell env diverge.
+///
+/// **Precondition:** `value` is not flanked by `separator` and `separator` is non-empty, or `value` is cut out of other elements.
 pub fn append_unique(existing: &str, value: &str, separator: &str) -> String {
-    let _ = (existing, value, separator);
-    unimplemented!("append_unique")
+    if value.is_empty() {
+        return existing.to_string();
+    }
+
+    let mut wrapped = String::with_capacity(existing.len() + 2 * separator.len());
+    wrapped.push_str(separator);
+    wrapped.push_str(existing);
+    wrapped.push_str(separator);
+
+    let occurrence = format!("{separator}{value}{separator}");
+    // Loop to a fixpoint: one `replace` pass misses adjacent duplicates, which breaks idempotence.
+    while wrapped.contains(&occurrence) {
+        wrapped = wrapped.replace(&occurrence, separator);
+    }
+
+    // A fully collapsed list leaves one bare separator, which fails the strip and means empty.
+    let survivors = wrapped
+        .strip_prefix(separator)
+        .and_then(|inner| inner.strip_suffix(separator))
+        .unwrap_or("");
+
+    if survivors.is_empty() {
+        value.to_string()
+    } else {
+        format!("{survivors}{separator}{value}")
+    }
 }
 
 #[cfg(test)]
