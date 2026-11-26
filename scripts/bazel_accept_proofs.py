@@ -186,7 +186,7 @@ number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
 work order); `bazel_gate_proofs` is now the only place it is written down, and
 `prove_counts` below reads `test/tests/` to check even that."""
 
-SCOPED_ROWS = 24
+SCOPED_ROWS = 25
 """`[crates]` rows of `test/scoped_rows.toml` — one per workspace member but `ocx`."""
 
 SCOPED_ESCALATE_ROWS = 3

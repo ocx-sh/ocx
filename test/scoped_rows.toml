@@ -169,6 +169,13 @@ ocx_test_support = "escalate"
 ocx_python = "escalate"
 # the environment registry: every crate reads through it
 ocx_env = "escalate"
+# environment application shared by `exec`, `env` and the vendored launcher (a hub, so it escalates anyway)
+ocx_env_apply = [
+    "tests/test_vendor*.py",
+    "tests/test_package_vendor.py",
+    "tests/test_launcher_exec.py",
+    "tests/test_env*.py",
+]
 ocx_schema = ["tests/test_schema.py", "tests/test_execution_records.py", "tests/test_project_env.py"]
 ocx_shim = ["tests/test_windows_shim.py"]
 # the contract lint links no `ocx_*` crate; it reads the schema documents this module publishes

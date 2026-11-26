@@ -20,6 +20,7 @@ CRATES = [
     "ocx_config",
     "ocx_console",
     "ocx_env",
+    "ocx_env_apply",
     "ocx_exit",
     "ocx_exit_derive",
     "ocx_index",
