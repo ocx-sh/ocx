@@ -27,6 +27,8 @@ pub enum PathViolation {
     Backslash,
     /// Windows targets only: `:`.
     Colon,
+    /// Windows targets only: a control character or one of `<>"|?*`.
+    ReservedCharacter,
     /// Windows targets only: `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with any extension.
     DeviceName,
     /// Windows targets only: a segment ending in `.` or a space.
@@ -112,6 +114,7 @@ fn check_windows_segment(segment: &str) -> Result<(), PathViolation> {
     check_segment(segment).map_err(|violation| match violation {
         SegmentViolation::Backslash => PathViolation::Backslash,
         SegmentViolation::Colon => PathViolation::Colon,
+        SegmentViolation::ReservedCharacter => PathViolation::ReservedCharacter,
         SegmentViolation::DeviceName => PathViolation::DeviceName,
         SegmentViolation::TrailingDotOrSpace => PathViolation::TrailingDotOrSpace,
     })
@@ -367,6 +370,8 @@ mod tests {
             ("a\\b", PathViolation::Backslash),
             ("C:/x", PathViolation::Colon),
             ("a:b", PathViolation::Colon),
+            ("bin/to?l", PathViolation::ReservedCharacter),
+            ("bin/a\u{1b}b", PathViolation::ReservedCharacter),
             ("con", PathViolation::DeviceName),
             ("dir/NUL.txt", PathViolation::DeviceName),
             ("AUX.tar.gz", PathViolation::DeviceName),

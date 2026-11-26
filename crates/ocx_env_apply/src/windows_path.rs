@@ -10,6 +10,8 @@ pub enum SegmentViolation {
     Backslash,
     /// `:` names a drive or an alternate data stream.
     Colon,
+    /// A control character (U+0000 to U+001F) or one of `<>"|?*`, which no Windows file name holds.
+    ReservedCharacter,
     /// A reserved device name, with or without an extension.
     DeviceName,
     /// Windows drops a trailing `.` or space, so the name on disk differs.
@@ -27,6 +29,9 @@ pub fn check_segment(segment: &str) -> Result<(), SegmentViolation> {
     }
     if segment.contains(':') {
         return Err(SegmentViolation::Colon);
+    }
+    if segment.contains(|c: char| c < ' ' || "<>\"|?*".contains(c)) {
+        return Err(SegmentViolation::ReservedCharacter);
     }
     if is_reserved_device_name(segment) {
         return Err(SegmentViolation::DeviceName);
@@ -216,6 +221,28 @@ mod tests {
     fn segments_report_the_first_rule_they_break() {
         assert_eq!(check_segment("a\\b"), Err(SegmentViolation::Backslash));
         assert_eq!(check_segment("C:"), Err(SegmentViolation::Colon));
+        for reserved in [
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "a\u{1}b",
+            "a\u{1b}[31m",
+            "\u{1f}",
+        ] {
+            assert_eq!(
+                check_segment(reserved),
+                Err(SegmentViolation::ReservedCharacter),
+                "{reserved:?}"
+            );
+        }
+        assert_eq!(
+            check_segment("a\u{7f}b"),
+            Ok(()),
+            "DEL is a legal Windows file-name character"
+        );
         assert_eq!(check_segment("com1"), Err(SegmentViolation::DeviceName));
         assert_eq!(check_segment("name."), Err(SegmentViolation::TrailingDotOrSpace));
         assert_eq!(check_segment("name "), Err(SegmentViolation::TrailingDotOrSpace));
