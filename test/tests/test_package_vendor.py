@@ -105,7 +105,9 @@ def _tools(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {tool["name"]: tool for tool in manifest["tools"]}
 
 
-def _publish(ocx: OcxRunner, repo: str, tmp_path: Path, name: str, **kwargs: Any) -> PackageInfo:
+def _publish(
+    ocx: OcxRunner, repo: str, tmp_path: Path, name: str, **kwargs: Any
+) -> PackageInfo:
     kwargs["bins"] = host_bins(kwargs.get("bins"))
     return make_package(ocx, repo, "1.0.0", tmp_path / name, **kwargs)
 
@@ -210,8 +212,12 @@ def test_package_manifest_only_fetches_no_layer_and_equals_full_run_without_cont
     assert layers
 
     with record_requests() as recorder:
-        _pvendor(ocx, tmp_path / "m", "--manifest-only", *HOST, pkg.fq, env=recorder.env)
-    assert not layers & set(recorder.blob_get_digests()), "manifest-only fetched a layer"
+        _pvendor(
+            ocx, tmp_path / "m", "--manifest-only", *HOST, pkg.fq, env=recorder.env
+        )
+    assert not layers & set(recorder.blob_get_digests()), (
+        "manifest-only fetched a layer"
+    )
     assert sorted(p.name for p in (tmp_path / "m").iterdir()) == ["manifest.json"]
     manifest_only = _manifest(tmp_path / "m")
     assert manifest_only["content"] == "absent"
@@ -255,7 +261,8 @@ def test_package_vendor_brings_dependency_closure_and_path(
         if item["key"] == "PATH"
     ]
     assert any(
-        v.startswith(f"{VENDOR_TOKEN}/{ccache_package['content_dir']}/") for v in path_values
+        v.startswith(f"{VENDOR_TOKEN}/{ccache_package['content_dir']}/")
+        for v in path_values
     ), path_values
 
     # Control: naming ccache alone does not drag cmake in (the closure is directional).
@@ -293,7 +300,9 @@ def test_package_vendor_refuses_value_already_holding_the_token(
 
 
 @posix_only
-@pytest.mark.parametrize("omit", [False, True], ids=["control_links_written", "omit_links"])
+@pytest.mark.parametrize(
+    "omit", [False, True], ids=["control_links_written", "omit_links"]
+)
 def test_package_vendor_omit_links_writes_no_symlink_and_keeps_listed_links(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, omit: bool
 ) -> None:
@@ -303,7 +312,11 @@ def test_package_vendor_omit_links_writes_no_symlink_and_keeps_listed_links(
     _pvendor(ocx, out, *(["--omit-links"] if omit else []), *HOST, pkg.fq)
 
     links = [link for p in _manifest(out)["packages"] for link in p["tree"]["links"]]
-    assert sorted(link["target"] for link in links) == ["../lib/real/data.txt", "real", "tool"]
+    assert sorted(link["target"] for link in links) == [
+        "../lib/real/data.txt",
+        "real",
+        "tool",
+    ]
     on_disk = [p for p in out.rglob("*") if p.is_symlink()]
     if omit:
         assert on_disk == []
@@ -342,7 +355,9 @@ def test_package_vendor_platform_without_host_leaf_vendors_only_when_named(
         pytest.fail("the fixture has only a windows/amd64 leaf; the host must differ")
     pkg = windows_only_package(ocx, unique_repo, tmp_path / "win")
 
-    host_default = _pvendor(ocx, tmp_path / "host", "--manifest-only", pkg.fq, check=False)
+    host_default = _pvendor(
+        ocx, tmp_path / "host", "--manifest-only", pkg.fq, check=False
+    )
     # The package tier resolves the identifier itself, so a missing leaf is "package not found";
     # exit 78 is the project tier's answer for a binding (design § 5.2).
     assert host_default.returncode == EXIT_NOT_FOUND, host_default.stderr

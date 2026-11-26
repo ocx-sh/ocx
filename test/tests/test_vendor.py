@@ -69,7 +69,9 @@ PATH_ENTRY = {
 def _project(ocx: OcxRunner, root: Path, tools: dict[str, PackageInfo]) -> Path:
     """Write an `ocx.toml` declaring `tools`, lock it, return the project directory."""
     root.mkdir(parents=True)
-    body = "[tools]\n" + "".join(f'{name} = "{pkg.fq}"\n' for name, pkg in tools.items())
+    body = "[tools]\n" + "".join(
+        f'{name} = "{pkg.fq}"\n' for name, pkg in tools.items()
+    )
     (root / "ocx.toml").write_text(body, encoding="utf-8")
     _ocx(ocx, root, "lock", "--no-pull", env=None)
     return root
@@ -150,9 +152,7 @@ def _tools(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _env_values(manifest: dict[str, Any]) -> list[str]:
-    return [
-        item["value"] for env in manifest["environments"] for item in env["items"]
-    ]
+    return [item["value"] for env in manifest["environments"] for item in env["items"]]
 
 
 def _bazel_findings(root: Path) -> list[str]:
@@ -172,7 +172,9 @@ def _bazel_findings(root: Path) -> list[str]:
             continue
         if path.name in names:
             findings.append(f"file {rel.as_posix()}")
-        if path.is_file() and (path.name == "manifest.json" or path.suffix == ".direct"):
+        if path.is_file() and (
+            path.name == "manifest.json" or path.suffix == ".direct"
+        ):
             text = path.read_text(encoding="utf-8")
             if path.name == "manifest.json" and rel.parent == Path("."):
                 document = json.loads(text)
@@ -201,11 +203,22 @@ def _publish_with_link_target(
     os.symlink("tool", tree / "bin" / "alias")
     metadata = tmp_path / "metadata.json"
     metadata.write_text(
-        json.dumps({"type": "bundle", "version": 1, "env": [PATH_ENTRY]}), encoding="utf-8"
+        json.dumps({"type": "bundle", "version": 1, "env": [PATH_ENTRY]}),
+        encoding="utf-8",
     )
     bundle = tmp_path / "bundle.tar.xz"
     plat = current_platform()
-    ocx.plain("package", "create", "-m", str(metadata), "-o", str(bundle), "-p", plat, str(tree))
+    ocx.plain(
+        "package",
+        "create",
+        "-m",
+        str(metadata),
+        "-o",
+        str(bundle),
+        "-p",
+        plat,
+        str(tree),
+    )
     rewritten = tmp_path / "rewritten.tar.xz"
     with tarfile.open(bundle, "r:xz") as src, tarfile.open(rewritten, "w:xz") as dst:
         patched = 0
@@ -217,17 +230,32 @@ def _publish_with_link_target(
     assert patched == 1, "the link to rewrite was not found in the archive"
     fq = f"{ocx.registry}/{repo}:1.0.0"
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle)),
-        "--cascade", "-i", fq, str(rewritten),
+        "package",
+        "push",
+        "-p",
+        plat,
+        "-m",
+        str(resolved_metadata_path(bundle)),
+        "--cascade",
+        "-i",
+        fq,
+        str(rewritten),
     )
     ocx.plain("index", "update", repo)
     return PackageInfo(
-        repo=repo, tag="1.0.0", short=f"{repo}:1.0.0", fq=fq,
-        content_dir=tree, marker="", platform=plat,
+        repo=repo,
+        tag="1.0.0",
+        short=f"{repo}:1.0.0",
+        fq=fq,
+        content_dir=tree,
+        marker="",
+        platform=plat,
     )
 
 
-def _publish(ocx: OcxRunner, repo: str, tmp_path: Path, name: str, **kwargs: Any) -> PackageInfo:
+def _publish(
+    ocx: OcxRunner, repo: str, tmp_path: Path, name: str, **kwargs: Any
+) -> PackageInfo:
     kwargs["bins"] = host_bins(kwargs.get("bins"))
     return make_package(ocx, repo, "1.0.0", tmp_path / name, **kwargs)
 
@@ -346,7 +374,9 @@ def test_failed_vendor_leaves_target_as_it_was_and_no_staging(
     assert result.returncode == EXIT_DATA, result.stderr
     assert out.is_dir() is target_exists
     assert list(out.iterdir()) == [] if target_exists else True
-    assert sorted(p.name for p in parent.iterdir()) == (["out"] if target_exists else [])
+    assert sorted(p.name for p in parent.iterdir()) == (
+        ["out"] if target_exists else []
+    )
     # Control: the retry of a good selection into the same path succeeds.
     good = _publish(ocx, f"{unique_repo}_ok", tmp_path, "good")
     _vendor(ocx, _project(ocx, tmp_path / "proj2", {"hello": good}), out, *HOST)
@@ -368,8 +398,12 @@ def test_manifest_only_fetches_no_layer_and_equals_full_run_without_content(
     assert layers
 
     with record_requests() as recorder:
-        _vendor(ocx, project, tmp_path / "m", "--manifest-only", *HOST, env=recorder.env)
-    assert not layers & set(recorder.blob_get_digests()), "manifest-only fetched a layer"
+        _vendor(
+            ocx, project, tmp_path / "m", "--manifest-only", *HOST, env=recorder.env
+        )
+    assert not layers & set(recorder.blob_get_digests()), (
+        "manifest-only fetched a layer"
+    )
     assert sorted(p.name for p in (tmp_path / "m").iterdir()) == ["manifest.json"]
     manifest_only = _manifest(tmp_path / "m")
     assert manifest_only["content"] == "absent"
@@ -395,7 +429,9 @@ def test_manifest_only_fetches_no_layer_and_equals_full_run_without_content(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", [[], ["--manifest-only"]], ids=["full", "manifest_only"])
+@pytest.mark.parametrize(
+    "mode", [[], ["--manifest-only"]], ids=["full", "manifest_only"]
+)
 def test_trust_policy_refuses_in_both_modes(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, mode: list[str]
 ) -> None:
@@ -431,7 +467,9 @@ def test_vendor_output_carries_no_bazel_file_or_term(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     # The test's own name holds "bazel", and the repository name reaches the manifest.
-    pkg = bazel_names_package(ocx, unique_repo.replace("bazel", "neutral"), tmp_path / "pkg")
+    pkg = bazel_names_package(
+        ocx, unique_repo.replace("bazel", "neutral"), tmp_path / "pkg"
+    )
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
     out = tmp_path / "out"
     _vendor(ocx, project, out, *HOST)
@@ -477,7 +515,8 @@ def test_selection_brings_its_dependency_closure_and_path(
         if item["key"] == "PATH"
     ]
     assert any(
-        v.startswith(f"{VENDOR_TOKEN}/{ccache_package['content_dir']}/") for v in path_values
+        v.startswith(f"{VENDOR_TOKEN}/{ccache_package['content_dir']}/")
+        for v in path_values
     ), path_values
 
     # Control: selecting ccache alone does not drag cmake in (the closure is directional).
@@ -524,14 +563,20 @@ def test_value_already_holding_the_token_is_refused(
 ) -> None:
     bad = env_template_package(ocx, unique_repo, tmp_path / "bad", literal_token=True)
     result = _vendor(
-        ocx, _project(ocx, tmp_path / "proj", {"tpl": bad}), tmp_path / "out", *HOST, check=False
+        ocx,
+        _project(ocx, tmp_path / "proj", {"tpl": bad}),
+        tmp_path / "out",
+        *HOST,
+        check=False,
     )
     assert result.returncode == EXIT_DATA, result.stderr
     assert _detail(result) == "vendor_value_unrepresentable"
 
     # Control: the same fixture without the literal vendors.
     good = env_template_package(ocx, f"{unique_repo}_ok", tmp_path / "good")
-    _vendor(ocx, _project(ocx, tmp_path / "proj2", {"tpl": good}), tmp_path / "out2", *HOST)
+    _vendor(
+        ocx, _project(ocx, tmp_path / "proj2", {"tpl": good}), tmp_path / "out2", *HOST
+    )
 
 
 @posix_only
@@ -546,14 +591,21 @@ def test_value_holding_the_real_home_is_refused_under_a_symlinked_home(
         "value": str(real_home),
         "visibility": "public",
     }
-    pkg = _publish(ocx, unique_repo, tmp_path, "pkg", bins=["tool"], env=[PATH_ENTRY, literal_home])
+    pkg = _publish(
+        ocx, unique_repo, tmp_path, "pkg", bins=["tool"], env=[PATH_ENTRY, literal_home]
+    )
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
     home_link = tmp_path / "home-link"
     os.symlink(real_home, home_link)
 
     # The home is named through the link; the value spells the canonical path.
     refused = _vendor(
-        ocx, project, tmp_path / "out", *HOST, env={"OCX_HOME": str(home_link)}, check=False
+        ocx,
+        project,
+        tmp_path / "out",
+        *HOST,
+        env={"OCX_HOME": str(home_link)},
+        check=False,
     )
     assert refused.returncode == EXIT_DATA, refused.stderr
     assert _detail(refused) == "vendor_value_unrepresentable"
@@ -604,7 +656,10 @@ def test_setuid_bit_is_cleared_and_modes_and_mtimes_are_normalised(
     assert all(stat.S_IMODE(p.stat().st_mode) & stat.S_ISUID for p in installed)
 
     _vendor(
-        ocx, _project(ocx, tmp_path / "proj", {"suid": setuid, "plain": normal}), out, *HOST
+        ocx,
+        _project(ocx, tmp_path / "proj", {"suid": setuid, "plain": normal}),
+        out,
+        *HOST,
     )
 
     files = {
@@ -666,7 +721,11 @@ def test_links_package_vendors_relative_links(
         for p in _manifest(out)["packages"]
         for l in p["tree"]["links"]
     ]
-    assert sorted(l["target"] for _, l in links) == ["../lib/real/data.txt", "real", "tool"]
+    assert sorted(l["target"] for _, l in links) == [
+        "../lib/real/data.txt",
+        "real",
+        "tool",
+    ]
     # Relative, and resolving inside `content_dir` (`..` is allowed while it stays inside).
     for content_dir, link in links:
         assert not link["target"].startswith("/")
@@ -701,7 +760,9 @@ def test_package_without_declared_names_yields_no_tools(
     # Control: a fixture declaring one binary yields one tool and `true`.
     declared = _publish(ocx, f"{unique_repo}_d", tmp_path, "decl", bins=["one"])
     out2 = tmp_path / "out2"
-    _vendor(ocx, _project(ocx, tmp_path / "proj2", {"d": declared}), out2, *flags, *HOST)
+    _vendor(
+        ocx, _project(ocx, tmp_path / "proj2", {"d": declared}), out2, *flags, *HOST
+    )
     control = _manifest(out2)
     assert list(_tools(control)) == ["one"]
     assert control["packages"][0]["names_declared"] is True
@@ -749,7 +810,9 @@ def test_platform_without_host_leaf_vendors_only_when_named(
     pkg = windows_only_package(ocx, unique_repo, tmp_path / "win")
     project = _project(ocx, tmp_path / "proj", {"tool": pkg})
 
-    host_default = _vendor(ocx, project, tmp_path / "host", "--manifest-only", check=False)
+    host_default = _vendor(
+        ocx, project, tmp_path / "host", "--manifest-only", check=False
+    )
     assert host_default.returncode == EXIT_CONFIG, host_default.stderr
 
     named = tmp_path / "named"
@@ -850,7 +913,9 @@ def test_manifest_and_sidecars_are_byte_identical_across_hosts(
     other = _publish(ocx, f"{unique_repo}_other", tmp_path, "other", bins=["other"])
     third = tmp_path / "third"
     _vendor(ocx, _project(ocx, tmp_path / "proj3", {"o": other}), third, *HOST)
-    assert (third / "manifest.json").read_bytes() != (first / "manifest.json").read_bytes()
+    assert (third / "manifest.json").read_bytes() != (
+        first / "manifest.json"
+    ).read_bytes()
 
 
 def test_vendor_id_is_a_function_of_platform_and_digests(
