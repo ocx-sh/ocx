@@ -3,12 +3,12 @@
 ## Status
 
 - **Plan:** plan_vendor_rules_ocx
-- **State:** plan-approved
+- **State:** executing
 - **Tier:** high
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 0 — contract waves (CW, then CW-R)
-- **Step:** awaiting /hex-execute
+- **Step:** /hex-execute → contract wave CW (ocx side; rules_ocx side run by a second sub-orchestrator)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 73e2701d: chore: accept the vendor ADR under goal-loop authority)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -682,3 +682,7 @@ by line by the reviewer.
 (The orchestrator folds one line per V-row here at merge.)
 
 ## Schedule log
+
+- 2026-11-26 — /hex-execute (ocx side) started: CW, then P1 P2 P3 P4 P8 P9 (wave 1), P5 P6 (after P1), P7, I1, P10. Builders capped at
+  3 live, `CARGO_BUILD_JOBS=4` each (host memory). rules_ocx pipelines (CW-R, R1…R9) and X stay pending here: a second
+  sub-orchestrator runs them; the meta-orchestrator runs the closing gate, review and finalize.
