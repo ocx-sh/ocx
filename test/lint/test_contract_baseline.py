@@ -26,7 +26,10 @@ RELEASE_TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 GOLDEN_DIR = "crates/ocx_schema/tests/golden"
 CONTRACT_DIR = "crates/ocx_schema/contract"
 BASELINE_DIR = f"{CONTRACT_DIR}/baseline"
-BASELINE_FILES = ("cli.json", "errors.json", "reports.json")
+REQUIRED_FILES = ("cli.json", "errors.json", "reports.json")
+# A release cut before the vendor manifest shipped has no such golden; the baseline then omits it
+# and the compat gate reads the absent document as all additions.
+BASELINE_FILES = (*REQUIRED_FILES, "vendor-manifest.json")
 BOOTSTRAP_MARKER = f"{GOLDEN_DIR}/cli.json"
 FETCH_TAGS = "git fetch --no-tags origin '+refs/tags/v*:refs/tags/v*'"
 
@@ -110,18 +113,27 @@ def baseline_problems(repo: Path) -> list[str]:
             )
         ]
 
-    problems = []
-    present = sorted(entry.name for entry in baseline.iterdir())
-    expected = sorted(("RELEASE", *BASELINE_FILES))
-    if present != expected:
-        problems.append(f"{BASELINE_DIR}/ holds {present}, expected exactly {expected}")
-
     marker = baseline / "RELEASE"
     release = (
         marker.read_text(encoding="utf-8").removesuffix("\n")
         if marker.is_file()
         else ""
     )
+    problems = []
+    present = sorted(entry.name for entry in baseline.iterdir())
+    carried = [
+        name
+        for name in BASELINE_FILES
+        if name in REQUIRED_FILES
+        or (
+            RELEASE_TAG.fullmatch(release)
+            and blob_at(repo, release, f"{GOLDEN_DIR}/{name}") is not None
+        )
+    ]
+    expected = sorted(("RELEASE", *carried))
+    if present != expected:
+        problems.append(f"{BASELINE_DIR}/ holds {present}, expected exactly {expected}")
+
     if not RELEASE_TAG.fullmatch(release):
         return [*problems, f"RELEASE {release!r} is not a vX.Y.Z tag name"]
     commit = tag_commit(repo, release)
@@ -134,6 +146,8 @@ def baseline_problems(repo: Path) -> list[str]:
     for name in BASELINE_FILES:
         golden = blob_at(repo, release, f"{GOLDEN_DIR}/{name}")
         copy = baseline / name
+        if golden is None and name not in REQUIRED_FILES:
+            continue
         if golden is None:
             problems.append(f"{release} has no {GOLDEN_DIR}/{name}")
         elif not copy.is_file() or copy.read_bytes() != golden:
@@ -214,17 +228,22 @@ class Repo:
 
 GOLDENS = {
     f"{GOLDEN_DIR}/{name}": f'{{"doc": "{name}", "release": 1}}\n'
-    for name in BASELINE_FILES
+    for name in REQUIRED_FILES
+}
+VENDOR_GOLDEN = {
+    f"{GOLDEN_DIR}/vendor-manifest.json": '{"doc": "vendor-manifest.json", "release": 1}\n'
 }
 
 
 def rotate(repo: Repo, tag: str) -> None:
     """What `task contract:rotate TAG=<tag>` writes, committed."""
     files: dict[str, str | bytes | None] = {
-        f"{BASELINE_DIR}/{name}": git(
-            repo.path, "show", f"refs/tags/{tag}:{GOLDEN_DIR}/{name}"
-        ).stdout
+        f"{BASELINE_DIR}/{name}": golden.stdout
         for name in BASELINE_FILES
+        if (
+            golden := git(repo.path, "show", f"refs/tags/{tag}:{GOLDEN_DIR}/{name}")
+        ).returncode
+        == 0
     }
     files[f"{BASELINE_DIR}/RELEASE"] = f"{tag}\n"
     repo.commit(files, f"chore(contract): rotate the baseline to {tag}")
@@ -276,6 +295,32 @@ def test_the_bootstrap_release_commit_itself_is_green(tmp_path: Path) -> None:
 
 def test_a_fresh_rotation_is_green(tmp_path: Path) -> None:
     assert baseline_problems(released(tmp_path).path) == []
+
+
+def test_a_release_with_a_vendor_manifest_golden_rotates_it_in(tmp_path: Path) -> None:
+    repo = Repo(tmp_path)
+    repo.commit({**GOLDENS, **VENDOR_GOLDEN}, "release")
+    repo.tag("v1.0.0", annotated=True)
+    rotate(repo, "v1.0.0")
+    assert (repo.path / BASELINE_DIR / "vendor-manifest.json").is_file()
+    assert baseline_problems(repo.path) == []
+
+
+def test_a_baseline_missing_the_vendor_manifest_its_release_has_is_red(
+    tmp_path: Path,
+) -> None:
+    repo = Repo(tmp_path)
+    repo.commit({**GOLDENS, **VENDOR_GOLDEN}, "release")
+    repo.tag("v1.0.0", annotated=True)
+    rotate(repo, "v1.0.0")
+    repo.commit({f"{BASELINE_DIR}/vendor-manifest.json": None})
+    assert baseline_problems(repo.path) == [
+        (
+            f"{BASELINE_DIR}/ holds ['RELEASE', 'cli.json', 'errors.json', 'reports.json'], expected exactly "
+            "['RELEASE', 'cli.json', 'errors.json', 'reports.json', 'vendor-manifest.json']"
+        ),
+        f"{BASELINE_DIR}/vendor-manifest.json differs from v1.0.0's golden",
+    ]
 
 
 def test_a_byte_flip_in_the_baseline_is_red(tmp_path: Path) -> None:
