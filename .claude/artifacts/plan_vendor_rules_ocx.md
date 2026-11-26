@@ -8,7 +8,7 @@
 - **Tier-grammar:** 5
 - **Updated:** 2026-11-26
 - **Active phase:** 5 — ocx side landed (CW, P1-P10, I1); rules_ocx side and X with the other sub-orchestrator
-- **Step:** /hex-execute → review-fix RV1 (ocx side; 23 findings of /hex-review high on `origin/main...6da31abe`); contract wave `2e9605f3`, pipelines rvfix-pa…pf running
+- **Step:** /hex-execute → review-fix RV1 merged (ocx side, tip `ab5a35f8`); next a /hex-review round on `6da31abe..HEAD`; the six launcher blobs need a CI re-cut (shim and env_apply sources changed)
 - **Feature branch:** ocx `hex/bazel-rbe-rules-ocx` (pipelines on `hex/bazel-rbe-rules-ocx--<pipeline>`, worktrees under `.agents/worktrees/`); rules_ocx one branch `hex/bazel-rbe-rules-ocx` (§ rules_ocx branch mechanics)
 - **Last update:** 2026-11-26 (after 6da31abe: chore: the shim store's public docs name its private publish helper without linking it)
 - **Next:** /hex-execute .claude/artifacts/plan_vendor_rules_ocx.md
@@ -377,7 +377,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | pending |
 | R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | pending |
 | X | . + rules_ocx | integration: attested blobs, V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`, `crates/ocx_store/src/shims/**` and the SHA canaries in `crates/ocx_store/src/shim.rs`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
-| RV1 | . | convergence gaps from /hex-review high 2026-11-26: C-004 (contradicts), C-009 (partial), C-017 (partial), C-021 (partial), V-23 (contradicts) | `crates/ocx_package_manager/src/tasks/vendor.rs`, `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_store/src/file_structure/vendor_layout.rs`, `crates/ocx_shim/src/direct.rs`, `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py`, the tests of each | 6 | P10 | | pending |
+| RV1 | . | convergence gaps from /hex-review high 2026-11-26: C-004 (contradicts), C-009 (partial), C-017 (partial), C-021 (partial), V-23 (contradicts) | `crates/ocx_package_manager/src/tasks/vendor.rs`, `crates/ocx_package_manager/src/launcher/{direct,generate}.rs`, `crates/ocx_package_manager/src/tasks/render_toolchain.rs`, `crates/ocx_store/src/file_structure/vendor_layout.rs`, `crates/ocx_shim/src/direct.rs`, `taskfiles/contract.taskfile.yml`, `test/lint/test_contract_baseline.py`, the tests of each | 6 | P10 | | merged |
 
 ```mermaid
 graph TD
@@ -831,3 +831,11 @@ worktree, landed-grep, owner assertion red, reverted green; "CI" = not runnable 
   `hex/bazel-rbe-rules-ocx--rvfix-<p>`: pa (vendor task, launcher writer, vendor layout; findings 3-7, 12-14, 17, 18, 21), pb (env_apply,
   binary name, config dispatch, shim; 12, 15, 21), pc (store copy, shim comment, pull/composer dedup; 9, 17, 20), pd (CLI options; 16),
   pe (contract rotation, shim workflow; 8, 10), pf (docs, two acceptance modules, the 32-tool observation; 1, 2, 11, 19, 21, 22, 23).
+- 2026-11-26 — RV1 merged on the feature branch: pf `fc2f69ab`, pe `cc94c2ff` (+ rule text), pb `2d0ef5f7`, pc `60344f44`, pa `eeb141f7`,
+  pd `c52c83a9`; goldens `abd50871` (`cli.json` and the Rust SDK list vendor's `--output` after `--platform`; the compat gate matches
+  arguments by id), fixture `ab5a35f8` (the Windows-only fixture ships `tool.exe`; DP-26 red it in V-46). Not a defect: 23 (32 tools =
+  the default group's exposed names), `tree_size` (no original), two message items of 21f. Gate on `ab5a35f8`: `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` green; unit tests of the ten touched crates 6347 passed, the known
+  seam ordering flake (passes alone) and the four `real_binary` cases (green with `SDK_TEST_OCX_BINARY`); vendor modules 59 passed,
+  5 skipped (macOS/Windows); lint tier 807, `.claude/tests` 692, crate-map script tests 102, `test:rows:check` green. Shim sources
+  (`crates/ocx_shim/**`, `crates/ocx_env_apply/**`) changed: the six blobs need the `build-windows-shims.yml` re-cut (External act 3).
