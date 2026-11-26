@@ -340,7 +340,7 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
     }
     let Some((sidecar_path, raw)) = found else {
         return Err(refuse(format!(
-            "sidecar not found: none of {}",
+            "sidecar not found: none of {}; keep the launcher beside its .direct sidecar",
             probed_paths.join(", ")
         )));
     };
@@ -376,7 +376,7 @@ pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn Lookup
         ""
     };
     Err(refuse(format!(
-        "no vendored root found for {}: {} candidate(s) rejected: {}{hint}",
+        "no vendored root found for {}: {} candidate(s) rejected: {}{hint}; keep the launcher inside its vendored directory",
         sidecar.self_path,
         rejected.len(),
         if named.is_empty() {
@@ -708,11 +708,25 @@ fn spawn_batch(launch: &Launch) -> Result<i32, ShimError> {
             }
             // std refuses a batch argument it cannot quote safely with `InvalidInput`.
             return Err(if error.kind() == std::io::ErrorKind::InvalidInput {
+                // std refuses only a line break; name the argument by position, never its text, which may be a secret.
+                let line_break = launch.args.iter().position(|argument| {
+                    argument
+                        .as_encoded_bytes()
+                        .iter()
+                        .any(|byte| matches!(byte, b'\r' | b'\n'))
+                });
                 ShimError::DirectArgumentRefused {
-                    reason: format!(
-                        "an argument for {} cannot be passed to a batch file safely",
-                        launch.program
-                    ),
+                    reason: match line_break {
+                        Some(index) => format!(
+                            "argument {} for {} cannot be passed to a batch file safely: it holds a line break",
+                            index + 1,
+                            launch.program
+                        ),
+                        None => format!(
+                            "an argument for {} cannot be passed to a batch file safely",
+                            launch.program
+                        ),
+                    },
                 }
             } else {
                 ShimError::SpawnFailure {
@@ -995,6 +1009,20 @@ mod tests {
         let message = refusal(locate("/out/bin/tool", &unix(None), &fs));
         assert!(message.contains("no vendored root found"), "{message}");
         assert!(!message.contains("--enable_runfiles"), "{message}");
+        assert!(
+            message.ends_with("keep the launcher inside its vendored directory"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_missing_sidecar_message_names_the_remedy() {
+        let message = refusal(locate("/own/tool", &unix(None), &FakeFs::default()));
+        assert!(message.contains("sidecar not found: none of "), "{message}");
+        assert!(
+            message.ends_with("keep the launcher beside its .direct sidecar"),
+            "{message}"
+        );
     }
 
     #[test]
