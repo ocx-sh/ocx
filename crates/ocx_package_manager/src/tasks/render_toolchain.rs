@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::PackageErrorKind;
-use crate::launcher::direct::write_direct_launcher;
+use crate::launcher::direct::write_direct_launcher_for;
 use crate::launcher::{TrampolineTarget, exec_sidecar_body, trampoline_ocx_binary, unix_trampoline_body};
 use ocx_project::{DEFAULT_GROUP, LockedTool, ProjectLock};
 use ocx_store::file_structure::{
@@ -643,29 +643,31 @@ async fn reconcile_bin(
     Ok(landed)
 }
 
-/// Writes one direct launcher per name `surface` exposes into `bin` (`selections/<id>/shells/default/bin` of a
+/// Writes one direct launcher per name of `names` into `bin` (`selections/<id>/shells/default/bin` of a
 /// vendored directory), for `ocx vendor`; touches no home lock, stamp, `.gitignore` or `active` link.
-/// `sidecar_for` yields the selection's sidecar of a name. A package declaring no names creates nothing.
+/// `names` are the selection's [`exposed_names`] (case-folded by the caller where the target folds case), so the
+/// launchers match the manifest's tools; `windows` is the target's. `sidecar_for` yields the selection's sidecar
+/// of a name. No names creates nothing.
 ///
 /// # Errors
 ///
-/// [`PackageErrorKind::ShimNameInvalid`] for an invalid entry point name, as [`VendorError::Package`]; the
-/// errors of [`write_direct_launcher`].
+/// The errors of [`write_direct_launcher_for`], a failed `bin` creation as [`VendorError::Package`], or whatever
+/// `sidecar_for` returns.
 pub async fn render_direct_bin(
     bin: &Path,
-    surface: &[ClosureNode],
+    names: &[&str],
     blob: &[u8],
-    sidecar_for: &dyn Fn(&str) -> DirectSidecar,
+    windows: bool,
+    sidecar_for: &dyn Fn(&str) -> Result<DirectSidecar, VendorError>,
 ) -> Result<(), VendorError> {
-    let names = exposed_names(surface, NotEnumerablePolicy::Skip).map_err(crate::Error::from)?;
     if names.is_empty() {
         return Ok(());
     }
     tokio::fs::create_dir_all(bin)
         .await
         .map_err(|e| crate::error::file_error(bin, e))?;
-    for name in names.keys() {
-        write_direct_launcher(bin, name.as_str(), blob, &sidecar_for(name.as_str())).await?;
+    for name in names {
+        write_direct_launcher_for(bin, name, blob, &sidecar_for(name)?, windows).await?;
     }
     Ok(())
 }
@@ -1897,8 +1899,8 @@ mod tests {
         node
     }
 
-    fn direct_sidecar(name: &str) -> DirectSidecar {
-        serde_json::from_value(serde_json::json!({
+    fn direct_sidecar(name: &str) -> Result<DirectSidecar, VendorError> {
+        Ok(serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "vendor_id": "sha256:0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a0b5f2a4e9c7d3b1a",
             "self": format!("selections/default/shells/default/bin/{name}"),
@@ -1907,7 +1909,15 @@ mod tests {
             "unset": [],
             "env": [],
         }))
-        .expect("fixture decodes")
+        .expect("fixture decodes"))
+    }
+
+    fn surface_names(surface: &[ClosureNode]) -> Vec<String> {
+        exposed_names(surface, NotEnumerablePolicy::Skip)
+            .expect("names")
+            .keys()
+            .map(|name| name.as_str().to_owned())
+            .collect()
     }
 
     /// A selection render writes one launcher and sidecar per declared name, with that name's sidecar.
@@ -1917,7 +1927,9 @@ mod tests {
         let bin = tmp.path().join("selections/default/shells/default/bin");
         let surface = [node(pinned("tool", 'a'), Some(&["cmake", "ctest"]), &[])];
 
-        render_direct_bin(&bin, &surface, b"blob", &direct_sidecar)
+        let names = surface_names(&surface);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        render_direct_bin(&bin, &names, b"blob", cfg!(windows), &direct_sidecar)
             .await
             .expect("render succeeds");
 
@@ -1950,7 +1962,9 @@ mod tests {
             node(pinned("other", 'b'), None, &[]),
         ];
 
-        render_direct_bin(&bin, &surface, b"blob", &direct_sidecar)
+        let names = surface_names(&surface);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        render_direct_bin(&bin, &names, b"blob", cfg!(windows), &direct_sidecar)
             .await
             .expect("render succeeds");
 

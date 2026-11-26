@@ -1038,14 +1038,12 @@ async fn write_entrypoint_launchers(
         let Some(entries) = declared.get(&package.digest) else {
             continue;
         };
-        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|error| crate::error::file_error(&dir, error))?;
         // Baked arguments name the content directory; `${deps.*}` is refused by the usage gate, as at launch.
         let install_path = PathBuf::from(format!("{DIR_TOKEN}/{}", package.content_dir));
         let no_dependencies = HashMap::new();
         let resolver = TemplateResolver::new(&install_path, &no_dependencies).usage(Usage::EntryPointArgs);
+        // Program resolution is async, so every sidecar is built before the generator asks for one.
+        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
         for entry in &package.entrypoints {
             let environment = environment_of(manifest, &entry.environment)?;
             let program = resolve_program(
@@ -1068,16 +1066,28 @@ async fn write_entrypoint_launchers(
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let sidecar = sidecar_of(
-                &manifest.vendor_id,
-                &entry.launcher_path,
-                windows,
-                program,
-                args,
-                &environment.items,
+            sidecars.insert(
+                &entry.name,
+                sidecar_of(
+                    &manifest.vendor_id,
+                    &entry.launcher_path,
+                    windows,
+                    program,
+                    args,
+                    &environment.items,
+                ),
             );
-            crate::launcher::direct::write_direct_launcher_for(&dir, &entry.name, blob, &sidecar, windows).await?;
         }
+        let dir = layout.resolve(&format!("{}/entrypoints", package.package_dir));
+        crate::launcher::generate_direct(entries, &dir, blob, windows, &|name| {
+            sidecars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| VendorError::ValueUnrepresentable {
+                    reason: format!("the manifest lists no launcher for entry point '{name}'"),
+                })
+        })
+        .await?;
     }
     Ok(())
 }
@@ -1089,25 +1099,41 @@ async fn write_selection_launchers(
     blob: &[u8],
     windows: bool,
 ) -> Result<(), VendorError> {
-    for tool in &manifest.tools {
-        let Some(launcher_path) = &tool.launcher_path else {
-            continue;
-        };
-        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(&tool.selection));
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|error| crate::error::file_error(&dir, error))?;
-        let environment = environment_of(manifest, &tool.environment)?;
-        let program = format!("{DIR_TOKEN}/{}", tool.target_path);
-        let sidecar = sidecar_of(
-            &manifest.vendor_id,
-            launcher_path,
-            windows,
-            program,
-            Vec::new(),
-            &environment.items,
-        );
-        crate::launcher::direct::write_direct_launcher_for(&dir, &tool.name, blob, &sidecar, windows).await?;
+    // `manifest.tools` is the folded `exposed_names` answer, grouped by selection for the shared writer.
+    let mut by_selection: BTreeMap<&str, Vec<&Tool>> = BTreeMap::new();
+    for tool in manifest.tools.iter().filter(|tool| tool.launcher_path.is_some()) {
+        by_selection.entry(&tool.selection).or_default().push(tool);
+    }
+    for (selection, tools) in by_selection {
+        let mut sidecars: HashMap<&str, DirectSidecar> = HashMap::new();
+        for tool in &tools {
+            let Some(launcher_path) = &tool.launcher_path else {
+                continue;
+            };
+            let environment = environment_of(manifest, &tool.environment)?;
+            sidecars.insert(
+                &tool.name,
+                sidecar_of(
+                    &manifest.vendor_id,
+                    launcher_path,
+                    windows,
+                    format!("{DIR_TOKEN}/{}", tool.target_path),
+                    Vec::new(),
+                    &environment.items,
+                ),
+            );
+        }
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        let dir = layout.resolve(&VendorLayout::relative_launcher_dir(selection));
+        super::render_toolchain::render_direct_bin(&dir, &names, blob, windows, &|name| {
+            sidecars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| VendorError::ValueUnrepresentable {
+                    reason: format!("the manifest lists no launcher for tool '{name}'"),
+                })
+        })
+        .await?;
     }
     Ok(())
 }

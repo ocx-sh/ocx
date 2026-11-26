@@ -12,16 +12,6 @@ use super::generate::write_launcher_file;
 use crate::exec_env::unforwarded_keys;
 use crate::tasks::vendor::VendorError;
 
-/// [`write_direct_launcher_for`] for the platform this process runs on.
-pub async fn write_direct_launcher(
-    dir: &Path,
-    name: &str,
-    blob: &[u8],
-    sidecar: &DirectSidecar,
-) -> Result<(), VendorError> {
-    write_direct_launcher_for(dir, name, blob, sidecar, cfg!(windows)).await
-}
-
 /// Writes the launcher `<name>` (`<name>.exe` for a Windows target) as a byte copy of `blob`, then `<name>.direct`.
 ///
 /// `windows` is the target's, not the host's: a Linux host vendoring for Windows writes `<name>.exe` and applies
@@ -98,7 +88,7 @@ mod tests {
 
     use ocx_exit::{ClassifyExitCode, ExitCode};
 
-    use super::{join_failed, write_direct_launcher, write_direct_launcher_for};
+    use super::{join_failed, write_direct_launcher_for};
     use crate::tasks::vendor::VendorError;
 
     fn sidecar(name: &str) -> DirectSidecar {
@@ -124,7 +114,7 @@ mod tests {
         let dir = tmp.path().join("bin");
         std::fs::create_dir_all(&dir).expect("create dir");
 
-        write_direct_launcher(&dir, "tool", &bytes, &sidecar("bin/tool"))
+        write_direct_launcher_for(&dir, "tool", &bytes, &sidecar("bin/tool"), cfg!(windows))
             .await
             .expect("writer succeeds");
 
@@ -142,7 +132,7 @@ mod tests {
 
     async fn write(sidecar: &DirectSidecar) -> (tempfile::TempDir, Result<(), VendorError>) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let result = write_direct_launcher(tmp.path(), "tool", b"blob", sidecar).await;
+        let result = write_direct_launcher_for(tmp.path(), "tool", b"blob", sidecar, cfg!(windows)).await;
         (tmp, result)
     }
 
