@@ -788,6 +788,29 @@ def test_stale_lock_exits_data_error_until_relocked(
 
 
 @posix_only
+def _tree_listing(root: Path) -> list[tuple[str, str, int | None, int | None]]:
+    """Path, type, mode and mtime of every entry, links not followed.
+
+    C-008 normalises directories and links. A regular file's mtime is the archive's or, for the
+    launchers and sidecars ocx writes, the clock, so files carry no mtime; `manifest.json` and the
+    sidecars also take the host umask, so they carry no mode.
+    """
+    rows = []
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        mode, mtime = stat.S_IMODE(st.st_mode), st.st_mtime_ns
+        if stat.S_ISLNK(st.st_mode):
+            kind = "link"
+        elif stat.S_ISDIR(st.st_mode):
+            kind = "dir"
+        else:
+            kind, mtime = "file", None
+            if path.name == "manifest.json" or path.suffix == ".direct":
+                mode = None
+        rows.append((path.relative_to(root).as_posix(), kind, mode, mtime))
+    return rows
+
+
 def test_manifest_and_sidecars_are_byte_identical_across_hosts(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -822,6 +845,7 @@ def test_manifest_and_sidecars_are_byte_identical_across_hosts(
     assert sorted(p.relative_to(second) for p in second.rglob("*.direct")) == sidecars
     for rel in [Path("manifest.json"), *sidecars]:
         assert (first / rel).read_bytes() == (second / rel).read_bytes(), rel
+    assert _tree_listing(first) == _tree_listing(second)
 
     # Control: a different selection does not give equal bytes.
     other = _publish(ocx, f"{unique_repo}_other", tmp_path, "other", bins=["other"])
