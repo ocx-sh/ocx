@@ -22,7 +22,7 @@ use ocx_package::vendor::{
     vendor_id,
 };
 use ocx_project::{SelectedTool, ToolSource, resolve_selected_tools};
-use ocx_store::file_structure::{StagedTree, VendorLayout};
+use ocx_store::file_structure::{StagedTree, VendorLayout, normalise_written_file};
 use ocx_util::fs::{DirWalker, EmptyOrAbsentError, WalkDecision, ensure_empty_or_absent};
 
 use super::common::ClosureNode;
@@ -821,6 +821,12 @@ async fn publish(output: &Path, staged: StagedTree, manifest: &VendorManifest) -
     tokio::fs::write(&manifest_path, &bytes)
         .await
         .map_err(|error| crate::error::file_error(&manifest_path, error))?;
+    // The host umask and clock must not reach the vendored bytes.
+    let normalised = manifest_path.clone();
+    tokio::task::spawn_blocking(move || normalise_written_file(&normalised, 0o644))
+        .await
+        .map_err(|error| joined(output, error))?
+        .map_err(|error| crate::error::file_error(&error.path, error.cause))?;
     let written_size = tree_size(staged.path()).await?;
     tokio::task::spawn_blocking(move || staged.publish())
         .await
@@ -1804,6 +1810,14 @@ mod tests {
             .await
             .expect("vendor writes a manifest");
         assert!(outcome.manifest_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let metadata = std::fs::metadata(&outcome.manifest_path).expect("metadata");
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o644, "manifest mode");
+            let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(315_532_800);
+            assert_eq!(metadata.modified().expect("mtime"), epoch, "manifest mtime");
+        }
         assert_eq!(outcome.content, VendorContent::Absent);
     }
 

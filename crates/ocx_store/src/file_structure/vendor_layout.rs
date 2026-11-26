@@ -236,6 +236,24 @@ fn normalise_tree(root: &Path) -> Result<(), FileError> {
     normalise_dir(root).map_err(|error| FileError::new(root, error))
 }
 
+/// Sets a file ocx wrote into `DIR` to `mode` (Unix only) and the normalised mtime, so its bytes do not depend on the host umask or clock.
+///
+/// # Errors
+///
+/// The mode or mtime cannot be set.
+pub fn normalise_written_file(path: &Path, mode: u32) -> Result<(), FileError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| FileError::new(path, error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let mtime = filetime::FileTime::from_unix_time(NORMALISED_MTIME_SECS as i64, 0);
+    filetime::set_file_mtime(path, mtime).map_err(|error| FileError::new(path, error))
+}
+
 fn normalise_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {

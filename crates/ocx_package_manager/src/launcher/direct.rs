@@ -7,6 +7,7 @@ use std::path::Path;
 
 use ocx_env::Propagation;
 use ocx_env_apply::direct::{DirectSidecar, SidecarError};
+use ocx_store::file_structure::normalise_written_file;
 
 use super::generate::write_launcher_file;
 use crate::tasks::vendor::VendorError;
@@ -60,14 +61,16 @@ pub async fn write_direct_launcher_for(
     tokio::fs::write(&launcher, blob)
         .await
         .map_err(|e| crate::error::file_error(&launcher, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
-            .await
-            .map_err(|e| crate::error::file_error(&launcher, e))?;
-    }
-    write_launcher_file(dir.join(format!("{name}.direct")), body).await?;
+    let sidecar_path = dir.join(format!("{name}.direct"));
+    write_launcher_file(sidecar_path.clone(), body).await?;
+    // The host umask and clock must not reach the vendored bytes.
+    tokio::task::spawn_blocking(move || {
+        normalise_written_file(&launcher, 0o755)?;
+        normalise_written_file(&sidecar_path, 0o644)
+    })
+    .await
+    .map_err(|e| VendorError::ValueUnrepresentable { reason: e.to_string() })?
+    .map_err(|e| crate::error::file_error(&e.path, e.cause))?;
     Ok(())
 }
 
@@ -215,5 +218,28 @@ mod tests {
         write_direct_launcher_for(tmp.path(), "tool", b"blob", &device, false)
             .await
             .expect("control: another target allows the name");
+    }
+
+    /// Overwriting keeps a file's old mode, so pre-created restrictive files stand in for a host umask.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn written_files_carry_fixed_modes_and_the_normalised_mtime() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for file in ["tool", "tool.direct"] {
+            let path = tmp.path().join(file);
+            std::fs::write(&path, "old").expect("pre-create");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        write_direct_launcher_for(tmp.path(), "tool", b"blob", &sidecar("bin/tool"), false)
+            .await
+            .expect("writer succeeds");
+
+        let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(315_532_800);
+        for (file, mode) in [("tool", 0o755), ("tool.direct", 0o644)] {
+            let metadata = std::fs::metadata(tmp.path().join(file)).expect("metadata");
+            assert_eq!(metadata.permissions().mode() & 0o777, mode, "{file} mode");
+            assert_eq!(metadata.modified().expect("mtime"), epoch, "{file} mtime");
+        }
     }
 }
