@@ -205,7 +205,7 @@ def test_checker_reds_a_malformed_corpus(tmp_path: Path) -> None:
     assert corpus_problems(corpus) == []
 
     (corpus / "b02_property_removed" / "expect.json").unlink()
-    # B02 is also covered by the vendor-manifest case; drop it so the code is uncovered.
+    # The vendor-manifest case also covers the property-removed code; drop it so that code is uncovered.
     (corpus / "vendor_manifest_property_removed" / "expect.json").unlink()
     expect = corpus / "g15_stdin_secret_changed" / "expect.json"
     doc = json.loads(expect.read_text(encoding="utf-8"))

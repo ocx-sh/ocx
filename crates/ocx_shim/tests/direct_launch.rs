@@ -331,7 +331,7 @@ fn the_root_is_found_through_the_runfiles_tree_of_the_started_path() {
     assert_eq!(args[0], format!("{}/{PROGRAM}", vendor.root().display()));
 }
 
-/// V-66, measure only: the start-up cost the launcher adds when 1000 runfiles entries precede the matching one.
+/// Measure only: the start-up cost the launcher adds when 1000 runfiles entries precede the matching one.
 ///
 /// Run with `cargo test -p ocx_shim --test direct_launch -- --ignored --nocapture`; it prints the numbers and
 /// asserts nothing.

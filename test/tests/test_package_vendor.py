@@ -92,7 +92,7 @@ def _snapshot(root: Path) -> dict[str, bytes | None]:
 
 
 def _strip_content(manifest: dict[str, Any]) -> dict[str, Any]:
-    """The manifest minus `content` and every `packages[].tree` (C-004)."""
+    """The manifest minus `content` and every `packages[].tree`."""
     stripped = json.loads(json.dumps(manifest))
     stripped.pop("content", None)
     for package in stripped["packages"]:
@@ -137,7 +137,7 @@ def test_package_vendor_writes_manifest_content_and_launchers(
 
 
 # ---------------------------------------------------------------------------
-# C-001 / V-39: no `-o`, no identifier
+# No `-o`, no identifier
 # ---------------------------------------------------------------------------
 
 
@@ -168,7 +168,7 @@ def test_package_vendor_without_identifier_exits_usage_and_writes_nothing(
 
 
 # ---------------------------------------------------------------------------
-# C-002 / V-43: the target must be absent or empty
+# The target must be absent or empty
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +196,7 @@ def test_package_vendor_refuses_non_empty_target_before_any_request(
 
 
 # ---------------------------------------------------------------------------
-# C-003 / C-004 / V-19: --manifest-only
+# --manifest-only
 # ---------------------------------------------------------------------------
 
 
@@ -230,7 +230,7 @@ def test_package_manifest_only_fetches_no_layer_and_equals_full_run_without_cont
 
 
 # ---------------------------------------------------------------------------
-# C-022 / V-41: an identifier brings its closure
+# An identifier brings its closure
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +263,7 @@ def test_package_vendor_brings_dependency_closure_and_path(
 
 
 # ---------------------------------------------------------------------------
-# C-010 / V-42: bad values are refused
+# Bad values are refused
 # ---------------------------------------------------------------------------
 
 
@@ -286,7 +286,7 @@ def test_package_vendor_refuses_value_already_holding_the_token(
 
 
 # ---------------------------------------------------------------------------
-# C-011 / V-21: --omit-links
+# --omit-links
 # ---------------------------------------------------------------------------
 
 
@@ -312,7 +312,7 @@ def test_package_vendor_omit_links_writes_no_symlink_and_keeps_listed_links(
 
 
 # ---------------------------------------------------------------------------
-# C-023 / V-54 / V-57: available platforms and `-p`
+# Available platforms and `-p`
 # ---------------------------------------------------------------------------
 
 
@@ -351,7 +351,7 @@ def test_package_vendor_platform_without_host_leaf_vendors_only_when_named(
 
 
 # ---------------------------------------------------------------------------
-# V-08 (ocx half): a platform with no launcher blob vendors without one
+# A platform with no launcher blob vendors without one
 # ---------------------------------------------------------------------------
 
 

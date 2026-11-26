@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(append_unique("", "", ","), "");
     }
 
-    /// Named boundary, accepted by ADR D1: a contribution spanning two adjacent
+    /// Named boundary: a contribution spanning two adjacent
     /// prior elements is flanked by separators just like a single element, so
     /// the span is removed and re-appended as one. Asserted rather than fixed —
     /// the result is stable and idempotent, and detecting the case would mean

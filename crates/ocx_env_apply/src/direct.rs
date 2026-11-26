@@ -189,14 +189,14 @@ mod tests {
         assert!(serde_json::from_str::<DirectSidecar>(text).is_err());
     }
 
-    /// V-62 in-control: a well-formed `program` is accepted.
+    /// In control: a well-formed `program` is accepted.
     #[test]
     fn v62_well_formed_program_is_accepted() {
         assert_eq!(sidecar(WELL_FORMED, "PATH", &[]).validate(false), Ok(()));
         assert_eq!(sidecar(WELL_FORMED, "PATH", &[]).validate(true), Ok(()));
     }
 
-    /// V-62: `program` outside the token form is refused.
+    /// `program` outside the token form is refused.
     #[test]
     fn v62_program_outside_the_root_is_refused() {
         for program in ["/bin/sh", "@VENDOR_DIR@/../x", "@VENDOR_DIR@/a/@VENDOR_DIR@/b"] {
@@ -210,14 +210,14 @@ mod tests {
         }
     }
 
-    /// V-62: a Windows device name is not representable on Windows.
+    /// A Windows device name is not representable on Windows.
     #[test]
     fn v62_windows_device_name_is_refused_on_windows() {
         let con = sidecar("@VENDOR_DIR@/CON", "PATH", &[]);
         assert!(matches!(con.validate(true), Err(SidecarError::PathNotInRoot(_))));
     }
 
-    /// V-72 in-control: an ordinary key is accepted.
+    /// In control: an ordinary key is accepted.
     #[test]
     fn v72_ordinary_key_is_accepted() {
         assert_eq!(
@@ -226,7 +226,7 @@ mod tests {
         );
     }
 
-    /// V-72: reserved keys and keys named in `unset` are refused.
+    /// Reserved keys and keys named in `unset` are refused.
     #[test]
     fn v72_reserved_keys_are_refused() {
         for key in ["OCX_BINARY_PIN", "__OCX_ENV_STATE", "__OCX_ANYTHING"] {
@@ -244,7 +244,7 @@ mod tests {
         ));
     }
 
-    /// V-72: on Windows the `unset` collision folds ASCII case.
+    /// On Windows the `unset` collision folds ASCII case.
     #[test]
     fn v72_unset_collision_folds_case_on_windows() {
         assert!(matches!(
@@ -274,7 +274,7 @@ mod tests {
         }
     }
 
-    /// V-73: the Windows fold sees `PATH` and `Path` as one key; the exact control sees two.
+    /// The Windows fold sees `PATH` and `Path` as one key; the exact control sees two.
     #[test]
     fn v73_windows_fold_unifies_path_keys() {
         assert!(!key_eq("PATH", "Path", KeyFold::Exact));
@@ -302,7 +302,7 @@ mod tests {
         assert!(is_device_name("con.\u{e9}"));
     }
 
-    /// W-2: the `__OCX_` prefix folds ASCII case on Windows and stays exact on Unix.
+    /// The `__OCX_` prefix folds ASCII case on Windows and stays exact on Unix.
     #[test]
     fn reserved_prefix_folds_case_on_windows_only() {
         for key in ["__ocx_env_state", "Ocx_Binary_Pin"] {

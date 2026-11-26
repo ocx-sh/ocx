@@ -171,7 +171,7 @@ impl StagedTree {
         self.staging.path()
     }
 
-    /// Normalises the tree (C-008), then renames it onto `target`, absent or empty.
+    /// Normalises the tree, then renames it onto `target`, absent or empty.
     ///
     /// # Errors
     ///
@@ -213,7 +213,7 @@ fn rename_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Sets every directory under `root`, `root` included, to 0755 and mtime 1980-01-01 (C-008), children first.
+/// Sets every directory under `root`, `root` included, to 0755 and mtime 1980-01-01, children first.
 ///
 /// A symlink gets the same mtime on the link itself, never its target. Regular files keep what the copy gave them.
 ///

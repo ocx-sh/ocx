@@ -136,7 +136,7 @@ mod tests {
         (tmp, result)
     }
 
-    /// V-62 writer: a `program` outside the root is refused with nothing written; a well-formed one is written.
+    /// A `program` outside the root is refused with nothing written; a well-formed one is written.
     #[tokio::test]
     async fn program_outside_the_root_is_refused() {
         let mut bad = sidecar("bin/tool");
@@ -149,7 +149,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// V-72 writer: a reserved `env` key is refused; an ordinary key is written, with `unset` filled in.
+    /// A reserved `env` key is refused; an ordinary key is written, with `unset` filled in.
     #[tokio::test]
     async fn reserved_env_key_is_refused() {
         for key in ["OCX_BINARY_PIN", "__OCX_ENV_STATE", "OCX_IDENTITY_TOKEN"] {

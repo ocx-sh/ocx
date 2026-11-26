@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""The vendored launcher starts tools from a moved, read-only or runfiles tree (design § 4.2, C-012..C-020).
+"""The vendored launcher starts tools from a moved, read-only or runfiles tree (design § 4.2).
 
 The launcher is a copy of one blob plus a `.direct` sidecar; nothing else may
 be needed to start a tool. Each case runs the launcher with no `ocx` on `PATH`
@@ -157,7 +157,7 @@ def _script_package(
     )
 
 
-# `cd /` first: a root that was left relative breaks the next line (C-013).
+# `cd /` first: a root that was left relative breaks the next line.
 TOOL_BODY = 'cd /\ncat "$DATA_FILE"\necho "ran:$0"'
 
 
@@ -216,7 +216,7 @@ def _snapshot(root: Path) -> dict[str, tuple[Any, ...]]:
 
 
 # ---------------------------------------------------------------------------
-# V-14 / C-013: a relative started path still yields an absolute root
+# A relative started path still yields an absolute root
 # ---------------------------------------------------------------------------
 
 
@@ -255,7 +255,7 @@ def test_relative_path_entry_start_survives_tool_chdir(
 
 
 # ---------------------------------------------------------------------------
-# V-24 / S-006 / C-012: a moved directory runs with no `ocx`
+# A moved directory runs with no `ocx`
 # ---------------------------------------------------------------------------
 
 
@@ -286,7 +286,7 @@ def test_moved_vendored_directory_runs_without_ocx(
 
 
 # ---------------------------------------------------------------------------
-# V-59 / V-60 / V-61 / C-012: lookup is bound to the started image and the sidecar
+# Lookup is bound to the started image and the sidecar
 # ---------------------------------------------------------------------------
 
 
@@ -447,7 +447,7 @@ def test_path_hit_that_is_not_the_running_image_exits_78(
 
 
 # ---------------------------------------------------------------------------
-# V-30 / S-004 / C-012: one tool starts another by bare name
+# One tool starts another by bare name
 # ---------------------------------------------------------------------------
 
 
@@ -486,7 +486,7 @@ def test_tool_starts_second_package_tool_through_path(
 
 
 # ---------------------------------------------------------------------------
-# V-36 / S-006 / C-018: the launcher writes nothing
+# The launcher writes nothing
 # ---------------------------------------------------------------------------
 
 
@@ -522,7 +522,7 @@ def test_launcher_from_read_only_tree_leaves_tree_unchanged(
 
 
 # ---------------------------------------------------------------------------
-# V-28 / C-019: no shell on the image
+# No shell on the image
 # ---------------------------------------------------------------------------
 
 DISTROLESS = "gcr.io/distroless/static"
@@ -583,7 +583,7 @@ def test_launcher_starts_on_image_without_a_shell(
 
 
 # ---------------------------------------------------------------------------
-# V-27 / V-27b / S-005: Mach-O signature (macOS only)
+# Mach-O signature (macOS only)
 # ---------------------------------------------------------------------------
 
 
@@ -657,7 +657,7 @@ def test_stripped_launcher_copy_differs_from_the_signed_blob(
 
 
 # ---------------------------------------------------------------------------
-# V-58 / C-017, V-73 / C-014: Windows batch targets and case folding
+# Windows batch targets and case folding
 # ---------------------------------------------------------------------------
 
 INJECTION_MARK = "INJECTED_MARK_9f3a"

@@ -110,7 +110,7 @@ def _store_to_token(text: str, ocx: OcxRunner) -> str:
 
 
 def _expected_items(report: dict[str, Any], ocx: OcxRunner) -> list[dict[str, Any]]:
-    """A `ocx env` / `package env` report's items, store paths replaced by the vendor token (C-005)."""
+    """A `ocx env` / `package env` report's items, store paths replaced by the vendor token."""
     return [
         {**item, "value": _store_to_token(item["value"], ocx)}
         for item in report["items"]
@@ -126,7 +126,7 @@ def _environment(manifest: dict[str, Any], env_id: str) -> list[dict[str, Any]]:
 
 
 def _publish_probe(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """A tool that prints argv then its environment, with a path, a list and a constant entry (V-22)."""
+    """A tool that prints argv then its environment, with a path, a list and a constant entry."""
 
     def build(root: Path) -> None:
         (root / "bin").mkdir()
@@ -172,7 +172,7 @@ def _parse_probe(stdout: str) -> tuple[list[str], dict[str, str]]:
     return args, env
 
 
-# Only `ocx exec` writes these; the launcher is specified not to (design § 4.2, V-22).
+# Only `ocx exec` writes these; the launcher is specified not to (design § 4.2).
 _EXEC_ONLY = {"__OCX_ENV_STATE", "OCX_BINARY_PIN"}
 # Set by the probe's own shell, not by the launcher or `ocx exec`.
 _SHELL_NOISE = {"_", "SHLVL", "OLDPWD"}
@@ -228,7 +228,7 @@ def _installed_content(ocx: OcxRunner, package: dict[str, Any]) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# V-20 / C-005: environments equal `ocx env`
+# Environments equal `ocx env`
 # ---------------------------------------------------------------------------
 
 
@@ -274,7 +274,7 @@ def test_entrypoint_environment_equals_package_env_self(
 
 
 # ---------------------------------------------------------------------------
-# V-20b / C-006: patches never reach the manifest
+# Patches never reach the manifest
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +333,7 @@ def test_matching_patch_rule_leaves_manifest_byte_identical(
 
 
 # ---------------------------------------------------------------------------
-# V-21 / C-007, C-011: files and links equal the installed content
+# Files and links equal the installed content
 # ---------------------------------------------------------------------------
 
 
@@ -388,7 +388,7 @@ def test_vendored_links_follow_omit_links_flag(
     assert _tree_diff(installed, vendored, omit_links=omit_links) == []
     on_disk = {rel for rel, node in _tree(vendored).items() if node[0] == "link"}
     assert on_disk == (set() if omit_links else installed_links)
-    # C-011: the manifest still lists every link either way.
+    # The manifest still lists every link either way.
     listed = {
         link["path"].removeprefix(package["content_dir"] + "/")
         for link in package["tree"]["links"]
@@ -397,7 +397,7 @@ def test_vendored_links_follow_omit_links_flag(
 
 
 # ---------------------------------------------------------------------------
-# V-22 / C-014, C-016: a vendored launcher yields the child `ocx exec` yields
+# A vendored launcher yields the child `ocx exec` yields
 # ---------------------------------------------------------------------------
 
 
@@ -491,7 +491,7 @@ def test_launcher_child_matches_ocx_exec_child(
 
 
 # ---------------------------------------------------------------------------
-# V-40 / C-021: the manifest validates against the generated schema
+# The manifest validates against the generated schema
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +533,7 @@ def test_real_manifest_validates_against_published_schema(
 
 
 # ---------------------------------------------------------------------------
-# V-46 / C-008: a `windows/amd64` manifest written here equals the golden
+# A `windows/amd64` manifest written here equals the golden
 # ---------------------------------------------------------------------------
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
