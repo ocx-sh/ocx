@@ -716,7 +716,7 @@ impl PackageManager {
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
-        // Vendor lane (C-006): a patch names a host path, so none reaches a vendored environment.
+        // Vendor lane: a patch names a host path, so none reaches a vendored environment.
         let patch_set = if paths.is_vendor() {
             None
         } else {
@@ -3300,7 +3300,7 @@ mod phase4_spec_tests {
             },
         ));
 
-        // Vendor lane (C-006): the same rule, the same self view, and no overlay.
+        // Vendor lane: the same rule, the same self view, and no overlay.
         let vendored = manager
             .resolve_env(
                 std::slice::from_ref(&root),

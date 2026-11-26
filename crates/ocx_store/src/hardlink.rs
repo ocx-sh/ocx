@@ -139,7 +139,7 @@ mod tests {
         (dir, source, dest)
     }
 
-    /// V-70 half: setuid, setgid, sticky and group/other-write are cleared, other bits kept.
+    /// Setuid, setgid, sticky and group/other-write are cleared, other bits kept.
     #[cfg(unix)]
     #[test]
     fn copy_clears_special_and_group_other_write_bits() {
@@ -280,7 +280,7 @@ mod tests {
 
     // ── create: cross-device error ───────────────────────────────────────────
 
-    /// H5 (replaces create_or_copy): `create()` across filesystems must return
+    /// `create()` across filesystems must return
     /// a clear `CrossesDevices` error rather than silently degrading.
     ///
     /// Strategy: source lives under a tempdir in `/tmp` while the link

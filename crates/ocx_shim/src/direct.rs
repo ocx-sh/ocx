@@ -300,7 +300,7 @@ pub(super) fn started_path_unix(
 
 /// Finds the sidecar beside `started` and the vendor root it belongs to.
 ///
-/// The root is the first candidate, in C-012 order, whose own `<self>.direct` is byte-identical to the sidecar
+/// The root is the first candidate, in candidate order, whose own `<self>.direct` is byte-identical to the sidecar
 /// beside the started path, so a stale tree holding another `vendor_id` is never taken.
 pub(super) fn locate(started: &str, context: &LookupContext<'_>, fs: &dyn LookupFs) -> Result<Probed, ShimError> {
     let windows = context.windows;
@@ -813,7 +813,7 @@ mod tests {
         err.stderr_message()
     }
 
-    // ── V-52: kinds per platform ────────────────────────────────────────────
+    // ── Kinds per platform ────────────────────────────────────────────
 
     #[test]
     fn v52_unix_probes_the_direct_kind_alone() {
@@ -864,7 +864,7 @@ mod tests {
         ));
     }
 
-    // ── C-012 candidates ────────────────────────────────────────────────────
+    // ── Root candidates ────────────────────────────────────────────────────
 
     #[test]
     fn candidate_a_strips_the_launcher_path_from_the_started_path_on_windows() {
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(located.root, "/out/bin/tool.runfiles/aa");
     }
 
-    /// V-59: a `RUNFILES_DIR` that does not hold the started path is never consulted, even when its entry matches.
+    /// A `RUNFILES_DIR` that does not hold the started path is never consulted, even when its entry matches.
     #[test]
     fn v59_a_stale_runfiles_dir_is_not_used_when_the_started_path_is_outside_it() {
         let bytes = sidecar_json(VENDOR_A, SELF_PATH);
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(message.contains("/vendor/bin/cmake.direct"), "{message}");
     }
 
-    // ── C-013 / V-68: root shape ────────────────────────────────────────────
+    // ── Root shape ────────────────────────────────────────────
 
     fn root_under(dir: &str) -> Result<Probed, ShimError> {
         let started = format!("{dir}/{SELF_PATH}");
@@ -1041,7 +1041,7 @@ mod tests {
         }
     }
 
-    // ── started path (Unix) and V-61 ────────────────────────────────────────
+    // ── Started path (Unix) ────────────────────────────────────────
 
     #[test]
     #[cfg(unix)]
@@ -1070,7 +1070,7 @@ mod tests {
         );
     }
 
-    /// V-61: the `PATH` hit is a different file than the running image.
+    /// The `PATH` hit is a different file than the running image.
     #[test]
     #[cfg(unix)]
     fn v61_a_path_hit_that_is_not_the_running_image_is_refused() {
@@ -1175,7 +1175,7 @@ mod tests {
         assert!(message.contains("not a regular file"), "{message}");
     }
 
-    // ── launch plan: C-014, C-016 ───────────────────────────────────────────
+    // ── Launch plan ───────────────────────────────────────────
 
     fn located(json: &str, root: &str) -> Located {
         Located {
@@ -1253,7 +1253,7 @@ mod tests {
         assert_eq!(launch.env, pairs(&[("Path", "/x")]));
     }
 
-    // ── Windows: key fold (V-73), separators, batch dispatch (C-017) ────────
+    // ── Windows: key fold, separators, batch dispatch ────────
 
     #[test]
     fn v73_windows_unset_and_path_records_match_keys_case_insensitively() {
@@ -1340,7 +1340,7 @@ mod tests {
         assert!(err.stderr_message().contains("x.bat"));
     }
 
-    // ── real reads: V-60 ────────────────────────────────────────────────────
+    // ── Real reads ────────────────────────────────────────────────────
 
     fn scratch_dir(label: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1382,7 +1382,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// V-60: a FIFO at the sidecar path must not block the launcher; the read runs on a thread so a hang fails the test.
+    /// A FIFO at the sidecar path must not block the launcher; the read runs on a thread so a hang fails the test.
     #[cfg(unix)]
     #[test]
     #[expect(

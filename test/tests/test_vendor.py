@@ -49,7 +49,7 @@ HOST = ("-p", current_platform())
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX modes, symlinks and umask"
 )
-# C-008: 1980-01-01T00:00:00Z, the fixed mtime of every vendored directory.
+# 1980-01-01T00:00:00Z, the fixed mtime of every vendored directory.
 FIXED_MTIME = 315532800
 PATH_ENTRY = {
     "key": "PATH",
@@ -135,7 +135,7 @@ def _snapshot(root: Path) -> dict[str, bytes | None]:
 
 
 def _strip_content(manifest: dict[str, Any]) -> dict[str, Any]:
-    """The manifest minus `content` and every `packages[].tree` (C-004)."""
+    """The manifest minus `content` and every `packages[].tree`."""
     stripped = json.loads(json.dumps(manifest))
     stripped.pop("content", None)
     for package in stripped["packages"]:
@@ -154,7 +154,7 @@ def _env_values(manifest: dict[str, Any]) -> list[str]:
 
 
 def _bazel_findings(root: Path) -> list[str]:
-    """Bazel files or terms outside package content and launcher bytes (V-35).
+    """Bazel files or terms outside package content and launcher bytes.
 
     Scans file names everywhere but package `content/`, and the text of the
     manifest and every `.direct` sidecar (launchers are ocx's own blob).
@@ -252,7 +252,7 @@ def test_vendor_writes_manifest_content_and_launchers(
 
 
 # ---------------------------------------------------------------------------
-# C-001 / V-39: no `-o`
+# No `-o`
 # ---------------------------------------------------------------------------
 
 
@@ -272,7 +272,7 @@ def test_vendor_without_output_exits_usage_and_writes_nothing(
 
 
 # ---------------------------------------------------------------------------
-# C-002 / V-43 / V-67 / S-007: the target must be absent or empty
+# The target must be absent or empty
 # ---------------------------------------------------------------------------
 
 
@@ -345,7 +345,7 @@ def test_failed_vendor_leaves_target_as_it_was_and_no_staging(
 
 
 # ---------------------------------------------------------------------------
-# C-003 / C-004 / V-19 / V-38: --manifest-only
+# --manifest-only
 # ---------------------------------------------------------------------------
 
 
@@ -381,7 +381,7 @@ def test_manifest_only_fetches_no_layer_and_equals_full_run_without_content(
 
 
 # ---------------------------------------------------------------------------
-# C-024 / V-63: --manifest-only runs the trust checks
+# --manifest-only runs the trust checks
 # ---------------------------------------------------------------------------
 
 
@@ -409,7 +409,7 @@ def test_trust_policy_refuses_in_both_modes(
 
 
 # ---------------------------------------------------------------------------
-# V-35: no Bazel file or term in what ocx writes beside package content
+# No Bazel file or term in what ocx writes beside package content
 # ---------------------------------------------------------------------------
 
 
@@ -437,7 +437,7 @@ def test_vendor_output_carries_no_bazel_file_or_term(
 
 
 # ---------------------------------------------------------------------------
-# C-022 / V-41: a selection brings its closure
+# A selection brings its closure
 # ---------------------------------------------------------------------------
 
 
@@ -470,7 +470,7 @@ def test_selection_brings_its_dependency_closure_and_path(
 
 
 # ---------------------------------------------------------------------------
-# C-010 / V-25 / V-42 / V-70: values are resolved; only the token is non-literal
+# Values are resolved; only the token is non-literal
 # ---------------------------------------------------------------------------
 
 
@@ -537,7 +537,7 @@ def test_symlinked_home_leaves_home_path_in_values_and_is_refused(
 
 
 # ---------------------------------------------------------------------------
-# C-008 / V-70: modes and mtimes
+# Modes and mtimes
 # ---------------------------------------------------------------------------
 
 
@@ -581,7 +581,7 @@ def test_setuid_bit_is_cleared_and_modes_and_mtimes_are_normalised(
 
 
 # ---------------------------------------------------------------------------
-# C-007 / V-69: link targets are relative and stay inside content
+# Link targets are relative and stay inside content
 # ---------------------------------------------------------------------------
 
 
@@ -626,7 +626,7 @@ def test_links_package_vendors_relative_links(
 
 
 # ---------------------------------------------------------------------------
-# V-53: a package declaring no names yields no tools
+# A package declaring no names yields no tools
 # ---------------------------------------------------------------------------
 
 
@@ -657,7 +657,7 @@ def test_package_without_declared_names_yields_no_tools(
 
 
 # ---------------------------------------------------------------------------
-# C-023 / V-54 / V-57 / S-014: available platforms
+# Available platforms
 # ---------------------------------------------------------------------------
 
 
@@ -709,7 +709,7 @@ def test_platform_without_host_leaf_vendors_only_when_named(
 
 
 # ---------------------------------------------------------------------------
-# S-013: stale lock
+# Stale lock
 # ---------------------------------------------------------------------------
 
 
@@ -734,7 +734,7 @@ def test_stale_lock_exits_data_error_until_relocked(
 
 
 # ---------------------------------------------------------------------------
-# C-008 / V-09 (ocx half): manifest and sidecar bytes are host-independent
+# Manifest and sidecar bytes are host-independent
 # ---------------------------------------------------------------------------
 
 

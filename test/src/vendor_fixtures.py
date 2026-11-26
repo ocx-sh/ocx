@@ -31,7 +31,7 @@ from src.runner import OcxRunner, PackageInfo, current_platform
 
 VENDOR_FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "vendor"
 
-# The literal a package author must never smuggle in (C-010, V-42).
+# The literal a package author must never smuggle in.
 VENDOR_TOKEN = "@VENDOR_DIR@"
 
 
@@ -96,7 +96,7 @@ def multi_platform_package(
     tmp_path: Path,
     platforms: tuple[str, ...] = ("linux/amd64", "linux/arm64", "darwin/arm64"),
 ) -> list[PackageInfo]:
-    """One tag published for every platform: a multi-entry image index (V-54, V-57)."""
+    """One tag published for every platform: a multi-entry image index."""
     return [
         make_package(
             ocx, repo, "1.0.0", tmp_path / plat.replace("/", "_"), platform=plat
@@ -108,7 +108,7 @@ def multi_platform_package(
 def cmake_with_ccache(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[PackageInfo, PackageInfo]:
-    """`cmake` depending publicly on `ccache`: the closure fixture (C-022, S-003, V-41).
+    """`cmake` depending publicly on `ccache`: the closure fixture.
 
     Returns (cmake, ccache). ccache's PATH is public, so it reaches the consumer view.
     """
@@ -129,7 +129,7 @@ def cmake_with_ccache(
 
 
 def links_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """Relative symlinks in `content/`: file link, directory link, nested link (C-007, C-011, V-21, V-69).
+    """Relative symlinks in `content/`: file link, directory link, nested link.
 
     POSIX only: Windows hosts cannot create the links without a privilege.
     """
@@ -167,9 +167,9 @@ def links_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 def env_template_package(
     ocx: OcxRunner, repo: str, tmp_path: Path, *, literal_token: bool = False
 ) -> PackageInfo:
-    """`${installPath}` templates in constant, path and list-ish values (C-010, V-25).
+    """`${installPath}` templates in constant, path and list-ish values.
 
-    With `literal_token`, one value already holds `@VENDOR_DIR@`: vendoring must exit 65 (V-42).
+    With `literal_token`, one value already holds `@VENDOR_DIR@`: vendoring must exit 65.
     """
     env = [
         {
@@ -204,7 +204,7 @@ def env_template_package(
 
 
 def entrypoint_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """Entry points `alpha` and `gamma`; `gamma` also ships `bin/gamma.cmd` for the Windows launcher (C-017, V-58)."""
+    """Entry points `alpha` and `gamma`; `gamma` also ships `bin/gamma.cmd` for the Windows launcher."""
     return make_package_with_entrypoints(
         ocx,
         repo,
@@ -239,7 +239,7 @@ def _tool(root: Path, name: str = "tool") -> None:
 
 
 def bazel_names_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """Content holding `BUILD.bazel`, `BUILD` and a lower-case variant in a subdir (V-35).
+    """Content holding `BUILD.bazel`, `BUILD` and a lower-case variant in a subdir.
 
     The variant sits in `pkg/` so a case-insensitive host does not fold it into
     `BUILD.bazel` while the tree is written.
@@ -256,7 +256,7 @@ def bazel_names_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInf
 
 
 def empty_dir_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """Content with an empty directory `share/empty` next to one tool (V-21)."""
+    """Content with an empty directory `share/empty` next to one tool."""
 
     def build(root: Path) -> None:
         _tool(root)
@@ -266,7 +266,7 @@ def empty_dir_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 
 
 def wasm_file_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """A `wasip1/wasm` package holding one `.wasm` file and no launcher (V-08)."""
+    """A `wasip1/wasm` package holding one `.wasm` file and no launcher."""
 
     def build(root: Path) -> None:
         (root / "share").mkdir()
@@ -293,14 +293,14 @@ def wasm_file_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 
 
 def windows_only_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """A package with a `windows/amd64` leaf only: no Linux leaf (V-57, S-014)."""
+    """A package with a `windows/amd64` leaf only: no Linux leaf."""
     return make_package(
         ocx, repo, "1.0.0", tmp_path, bins=["tool"], platform="windows/amd64"
     )
 
 
 def no_names_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """Declares no binaries and no entry points; only an env constant (V-53)."""
+    """Declares no binaries and no entry points; only an env constant."""
     return make_package(
         ocx,
         repo,
@@ -320,7 +320,7 @@ def no_names_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 
 
 def setuid_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
-    """`bin/tool` archived with mode 04755; vendoring must clear the bit (C-008, V-70). POSIX only."""
+    """`bin/tool` archived with mode 04755; vendoring must clear the bit. POSIX only."""
 
     def build(root: Path) -> None:
         _tool(root)
@@ -332,7 +332,7 @@ def setuid_package(ocx: OcxRunner, repo: str, tmp_path: Path) -> PackageInfo:
 def partial_platform_pair(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[list[PackageInfo], list[PackageInfo]]:
-    """Two repos: `full` has darwin/arm64, `partial` lacks it (V-54, C-023).
+    """Two repos: `full` has darwin/arm64, `partial` lacks it.
 
     Selecting both must leave `darwin/arm64` out of `available_platforms`.
     """
@@ -347,7 +347,7 @@ def partial_platform_pair(
 
 
 class RequestRecorder:
-    """A forward proxy a test hands to `ocx` as `HTTP_PROXY`/`HTTPS_PROXY` (V-38, C-003).
+    """A forward proxy a test hands to `ocx` as `HTTP_PROXY`/`HTTPS_PROXY`.
 
     Pass `env` as `env_overrides` of the `ocx` call, then read what was fetched.
     Never `registry_guard.py`: it answers 503 instead of forwarding.

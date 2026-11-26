@@ -8197,7 +8197,7 @@ mod vendor_lane_tests {
         assert_eq!(installed.root(), package.root());
     }
 
-    /// V-46: a Windows target composed on this Unix host renders `;`, not the host's `:`.
+    /// A Windows target composed on this Unix host renders `;`, not the host's `:`.
     #[test]
     fn windows_target_renders_its_own_list_separator() {
         let windows: ocx_oci::Platform = "windows/amd64".parse().unwrap();

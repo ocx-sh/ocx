@@ -154,7 +154,7 @@ impl PackageManager {
     }
 }
 
-/// C-002: `DIR` is absent or an empty directory, and never a symlink, before any request is made.
+/// `DIR` is absent or an empty directory, and never a symlink, before any request is made.
 async fn ensure_output_is_free(output: &Path) -> Result<(), VendorError> {
     let refused = || VendorError::OutputNotEmpty {
         path: output.to_path_buf(),
@@ -178,7 +178,7 @@ async fn ensure_output_is_free(output: &Path) -> Result<(), VendorError> {
 #[derive(Debug)]
 struct Selection {
     closures: ClosureSet,
-    /// C-023: the platforms on which every root has a leaf, computed before any leaf was chosen.
+    /// The platforms on which every root has a leaf, computed before any leaf was chosen.
     available_platforms: Vec<String>,
 }
 
@@ -192,7 +192,7 @@ struct ClosureSet {
 }
 
 impl ClosureSet {
-    /// `root`'s closure: its dependencies first and the root last (C-022).
+    /// `root`'s closure: its dependencies first and the root last.
     fn nodes(&self, root: &SelectedRoot) -> &[ClosureNode] {
         &self.surface[root.nodes.clone()]
     }
@@ -334,7 +334,7 @@ async fn read_closures(
     Ok(ClosureSet { roots, surface })
 }
 
-/// C-024: the trust checks an install runs before it fetches a layer, once per package of the closure.
+/// The trust checks an install runs before it fetches a layer, once per package of the closure.
 ///
 /// Sequential: a closure is a handful of packages and the first refusal must be the same one on every run.
 async fn verify_selection(manager: &PackageManager, closures: &ClosureSet) -> Result<(), VendorError> {
@@ -404,7 +404,7 @@ fn is_windows(platform: &Platform) -> bool {
 ///
 /// # Errors
 ///
-/// [`VendorError::ValueUnrepresentable`] (C-010) for an environment value that is not a vendor-relative one,
+/// [`VendorError::ValueUnrepresentable`] for an environment value that is not a vendor-relative one,
 /// [`VendorError::PathUnrepresentable`] for a path breaking the manifest's path rules; resolution failures as
 /// [`VendorError::Package`].
 async fn build_manifest(
@@ -693,7 +693,7 @@ fn binary_directory(metadata: &ocx_package::metadata::Metadata, windows: bool) -
         .unwrap_or_else(|| "bin/".to_owned())
 }
 
-/// C-010: a package's own env value never spells the one token the manifest reserves.
+/// A package's own env value never spells the one token the manifest reserves.
 fn check_declared_values(roots: &[Arc<InstallInfo>], closures: &ClosureSet) -> Result<(), VendorError> {
     for node in &closures.surface {
         let Some(metadata) = metadata_of(roots, &node.identifier) else {
@@ -759,7 +759,7 @@ async fn environment_items(
         .collect()
 }
 
-/// C-010 on one composed item: the token is the only non-literal text, and no host path survives.
+/// On one composed item: the token is the only non-literal text, and no host path survives.
 fn check_item(item: &EnvironmentItem, forbidden: &[String]) -> Result<(), VendorError> {
     let unrepresentable = |reason: String| VendorError::ValueUnrepresentable {
         reason: format!("'{}': {reason}", item.key),
@@ -865,7 +865,7 @@ struct PlacedPackage {
 
 /// Copies every package of `manifest` into `staging`, then writes the launchers and sidecars the manifest names.
 ///
-/// Fills `packages[].tree` and sets `content` to `present`; nothing else of the manifest changes (C-004).
+/// Fills `packages[].tree` and sets `content` to `present`; nothing else of the manifest changes.
 async fn write_content(
     manager: &PackageManager,
     request: &VendorRequest,
@@ -903,7 +903,7 @@ async fn write_content(
     }
     manifest.content = Content::Present;
 
-    // C-019: no blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
+    // No blob for the platform means no launcher and no sidecar; the manifest then lists no `launcher_path`.
     if let Some(blob) = ocx_store::shim::blob_for(platform) {
         write_entrypoint_launchers(&layout, manifest, &entrypoints, blob, windows).await?;
         write_selection_launchers(&layout, manifest, blob, windows).await?;
@@ -1556,7 +1556,7 @@ mod tests {
         PackageRef::new_registry(repository, REGISTRY).clone_with_tag(tag)
     }
 
-    /// C-022: a selected package brings the dependency its edge admits, root last.
+    /// A selected package brings the dependency its edge admits, root last.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_selection_brings_its_dependency_closure() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1587,7 +1587,7 @@ mod tests {
         );
     }
 
-    /// C-023 and V-54: the platforms every root offers; one root lacking a platform leaves it out.
+    /// The platforms every root offers; one root lacking a platform leaves it out.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_available_platforms_leave_out_a_platform_one_root_lacks() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1710,7 +1710,7 @@ mod tests {
         assert_eq!(root.requested.digest(), Some(leaf));
     }
 
-    /// S-014: a lock holding only `windows/amd64` selects for it on any host; the lock's keys are the available set.
+    /// A lock holding only `windows/amd64` selects for it on any host; the lock's keys are the available set.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_foreign_only_lock_selects_for_its_platform() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1726,7 +1726,7 @@ mod tests {
         assert_eq!(selected.available_platforms, ["windows/amd64"]);
     }
 
-    /// C-024: the manifest-only path runs the auto-verify hook; `required` with no publisher refuses it.
+    /// The manifest-only path runs the auto-verify hook; `required` with no publisher refuses it.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_manifest_only_path_runs_auto_verify() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1779,7 +1779,7 @@ mod tests {
         );
     }
 
-    /// Red until P7: a vendor run into an absent directory writes its manifest.
+    /// A vendor run into an absent directory writes its manifest.
     #[tokio::test]
     async fn vendor_manifest_only_writes_manifest_json() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1847,7 +1847,7 @@ mod tests {
             .collect()
     }
 
-    /// C-005: the selection's environment is the composer's for the same roots, the install root swapped for the token.
+    /// The selection's environment is the composer's for the same roots, the install root swapped for the token.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_selection_environment_is_the_composers_with_the_install_root_swapped() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2016,7 +2016,7 @@ mod tests {
         assert!(!manifest.tools.is_empty());
     }
 
-    /// C-010: a package that spells the token itself is refused, where the token the composer writes is not.
+    /// A package that spells the token itself is refused, where the token the composer writes is not.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_package_spelling_the_token_is_unrepresentable() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2092,7 +2092,7 @@ mod tests {
         assert_eq!(parsed, manifest);
     }
 
-    /// C-002: a non-empty `DIR` is refused before the selection reads anything.
+    /// A non-empty `DIR` is refused before the selection reads anything.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_non_empty_output_is_refused_before_the_network() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2108,7 +2108,7 @@ mod tests {
         assert!(matches!(error, VendorError::OutputNotEmpty { .. }), "{error:?}");
         assert!(output.join("keep").is_file(), "DIR is left as it was");
     }
-    /// C-002: a symlink at `DIR` is refused even when it points at an empty directory; an absent `DIR` is free.
+    /// A symlink at `DIR` is refused even when it points at an empty directory; an absent `DIR` is free.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlink_at_the_output_is_refused() {
