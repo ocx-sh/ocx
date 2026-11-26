@@ -360,7 +360,7 @@ Commit `chore: vendor reader and set rule contract stubs`.
 | R7 | rules_ocx | rig tests for every rig V-row; S-001…S-003, S-008…S-010, S-012, S-014 | `e2e/rbe/tests/**`, `e2e/rbe/workspace/**` | 2 | R1 | | pending |
 | R8 | rules_ocx | rig green on both backends locally; rules mut rows; V-31, V-65 numbers; the CI lane | `.github/workflows/verify-rbe.yml`, `e2e/rbe/RESULTS.md` (new column); code fixes in any file of a merged rules_ocx pipeline, each named in the evidence | 4 | R2, R6, R7, P7 | | pending |
 | R9 | rules_ocx | examples, `e2e/bzlmod`, docs, invariants 1 and 3 (C-RO-11 text); V-11, V-27c, V-45 | `examples/**`, `e2e/bzlmod/**`, `README.md`, `docs/**`, `AGENTS.md`, `agent-config/**`, `.claude/rules/**` (generated copies) | 4 | R6, P7 | | pending |
-| X | . + rules_ocx | integration: V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
+| X | . + rules_ocx | integration: attested blobs, V-17, V-44, fixture parity, proof ledger, CI evidence | `.claude/artifacts/evidence/vendor_rules_ocx/X.md`, `crates/ocx_store/src/shims/**` and the SHA canaries in `crates/ocx_store/src/shim.rs`; rules_ocx `e2e/rbe/ocx-under-test.txt` | 6 | P10, R8, R9 | | pending |
 
 ```mermaid
 graph TD
@@ -468,9 +468,9 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    order removed). Local blobs are development bytes only: they carry no provenance attestation.
 6. Embedding: `shims/` holds six blobs; `shim.rs` `blob_for` via `include_bytes!` for all six (no cfg gate), per-blob budget, SHA
    canaries, the two-blob test assumptions removed; V-26 (`LC_CODE_SIGNATURE` on arm64 darwin, none on x86_64); `shim_bin_store.rs`
-   keyed per target. Commit `feat: one native launcher starts a vendored tool on every platform`. The committed blobs are replaced by
-   the CI-built, attested blobs of External act 3; any later `crates/ocx_shim/**` or `crates/ocx_env_apply/**` change (P10, X) re-cuts
-   them through the same act.
+   keyed per target. Commit `feat: one native launcher starts a vendored tool on every platform`. P5 merges with these locally built blobs and
+   never waits on an external act; X step 0 replaces them with the CI-built, attested blobs of External act 3, cut after the last
+   `crates/ocx_shim/**` or `crates/ocx_env_apply/**` change.
 
 ### P6 — launcher writers
 1. `launcher/direct.rs` `write_direct_launcher`: built on the existing `write_shim_exe_then_sidecar` (`generate.rs:225`) order; byte copy
@@ -615,13 +615,14 @@ Specify (red) → Implement (green), narrowest test per § Worker rules, its own
    `docs: vendor-based rules, examples and remote execution`.
 
 ### X — cross-repository integration
+0. After External act 3: commit the six attested blobs into `crates/ocx_store/src/shims/` with their SHA canaries; push (act 1).
 1. Local end to end: `ocx` from the ocx tip, rules_ocx tip, full rig on both backends; fixture parity (CW-R example equals ocx's bytes).
 2. V-17: in a scratch copy of this repository, `MODULE.bazel`'s `ocx.project` tag (lines 151-155) gains `platforms`; `bazel build //...`
    with `--override_module=rules_ocx=<rules_ocx tip>` is green, and at `9648f93` it is red on the unknown attribute `platforms`.
    Recorded for the ocx PR body; the committed move waits for the rules_ocx release (DV-10).
 3. After External acts 4 and 5: write `e2e/rbe/ocx-under-test.txt` with the dev identifier and digest,
    commit `ci: test rules_ocx against the ocx pull request's dev build`.
-4. After External acts 2, 6 and 7, fold CI results (ocx-deep macOS/Windows rows, rules_ocx `verify-basic`, `verify-rbe` both jobs, `verify-deep` three OS; V-44) into
+4. After External acts 2 and 6, fold CI results (ocx-deep macOS/Windows rows, rules_ocx `verify-basic`, `verify-rbe` both jobs, `verify-deep` three OS; V-44) into
    `X.md`; every V-row has its line in § Red-proof log.
 
 ## Reuse table (V-23: each step's existing function; no new selection walk, assembly, composer or launcher writer)
@@ -648,12 +649,13 @@ Numbered in the order X needs them.
 
 1. Push the ocx feature branch after each merged wave that CI must see (P5's blobs, I1, P10). The ocx draft pull request is open.
 2. Dispatch ocx `verify-deep.yml` on `hex/bazel-rbe-rules-ocx` after P10 (DP-5; also runs `task satellite:verify` in `deep-repo.yml`).
-3. Dispatch `build-windows-shims.yml` after P5 (and again after any later `crates/ocx_shim/**` or `crates/ocx_env_apply/**` change);
-   a step commits its attested blobs (P5 step 6).
+3. Dispatch `build-windows-shims.yml` after P10 (the last planned `crates/ocx_shim/**` change); X step 0 commits its attested blobs.
 4. Dispatch ocx `release.yml` with `mode=dev` on the branch after P10; hand the identifier and digest to X step 3.
-5. In rules_ocx: push `hex/bazel-rbe-rules-ocx` after X step 3 and open its pull request.
-6. Dispatch rules_ocx `verify-deep.yml` and `verify-rbe.yml` on that branch (`verify-basic.yml` runs on the pull request).
-7. Mark the ocx pull request ready for review (not a draft) once X step 4 is green; the same for rules_ocx if the goal asks.
+5. In rules_ocx: push `hex/bazel-rbe-rules-ocx` after X step 2 (it needs no `ocx-under-test.txt` to be pushed) and open its pull
+   request.
+6. After X step 3 is pushed, dispatch rules_ocx `verify-deep.yml` and `verify-rbe.yml` on that branch (`verify-basic.yml` runs on
+   the pull request).
+7. After X step 4 is green: mark the ocx pull request ready for review (not a draft); the same for rules_ocx if the goal asks.
 8. If `task satellite:verify` reds in ocx-mirror (no grant there): goal § Issue resolution.
 
 ## Open questions
@@ -670,8 +672,10 @@ applied in the commit after 32fc6cbb: F1 pipeline I1 added for the hub files; F2
 blobs by External act 3; F6 missing test rows added to P8 and R7; F7 P6 takes pre-composed items; F8 rig mut rows V-25, V-30; F9
 `DirWalker` and `write_shim_exe_then_sidecar` in the reuse table; F10 V-17's scratch `platforms` edit; F11 CW.2, P5.4, P7.2, P8.1,
 R1.1, R7.2 split; F12 R6's full deletion list; F13 fix scope of P10/R8 and the ready-for-review act; F14 Windows jobs named, V-58
-moved to an acceptance case with an in-control; F15-F17 notes. No re-validation round: the plan-artifact scope re-validates only after a
-fixed Block, and the three Blocks were ownership gaps closed by table edits, recorded here.
+moved to an acceptance case with an in-control; F15-F17 notes. Re-validation (same reviewer): F1-F3 closed; two new Blocks in the act ordering (N1 push after X step 3 while X step 3 waited on
+the push; N2 act 7 both before and after X step 4) and one Warn (P5 stalling on act 3) — all three fixed: the push precedes X step 3,
+act 7 follows X step 4, and the attested blobs land in X step 0 so P5 never waits. The renumbered step bodies were not re-checked line
+by line by the reviewer.
 
 ## Red-proof log
 
