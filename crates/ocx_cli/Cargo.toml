@@ -91,6 +91,7 @@ ocx_telemetry.workspace = true
 # The trust-policy tier: `package_sign_common.rs` builds a `CompiledPolicy`
 # from the resolved tiers.
 ocx_trust.workspace = true
+ocx_env_apply.workspace = true
 ocx_util.workspace = true
 
 # `AuthError::Helper` wraps `docker_credential::CredentialRetrievalError`; the

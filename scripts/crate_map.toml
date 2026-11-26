@@ -24,19 +24,22 @@ ocx_exit_derive = []
 # The environment registry: `ocx_exit` for its errors' classification, nothing else.
 ocx_env = ["ocx_exit"]
 ocx_util = ["ocx_exit"]
+# Apply semantics shared by `ocx` and the direct launcher: std + serde, no ocx_* edge.
+ocx_env_apply = []
 ocx_console = ["ocx_exit", "ocx_util", "ocx_env"]
 ocx_oci = ["ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
 ocx_trust = ["ocx_oci", "ocx_util", "ocx_env"]
 ocx_sign = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
-ocx_config = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_config = ["ocx_env_apply", "ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
-ocx_package = ["ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
+ocx_package = ["ocx_env_apply", "ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]
 # PEP 751 lock -> OCX package translation. `ocx` does not link it; its
 # consumer is ocx-mirror (a lockstep satellite), ocx-dist is planned.
 ocx_python = ["ocx_oci", "ocx_package"]
-ocx_shell = ["ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
+ocx_shell = ["ocx_env_apply", "ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit", "ocx_env"]
 ocx_project = [
+    "ocx_env_apply",
     "ocx_shell",
     "ocx_package",
     "ocx_index",
@@ -51,6 +54,7 @@ ocx_project = [
 # D-037: += ocx_trust (auto_verify's `TrustPolicy`), += ocx_shell (1.16 moves
 # `activation.rs` here and it drives `shell::reconcile`).
 ocx_package_manager = [
+    "ocx_env_apply",
     "ocx_project",
     "ocx_package",
     "ocx_index",
@@ -70,6 +74,7 @@ ocx_script = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_console", "
 # D-037: += ocx_index (setup.rs builds an `Index`), += ocx_package
 # (bootstrap's `Version`).
 ocx_setup = [
+    "ocx_env_apply",
     "ocx_package_manager",
     "ocx_shell",
     "ocx_config",
@@ -87,6 +92,7 @@ ocx_test_support = []
 # ---- transition rows: the crates that exist around the map today ----
 # The CLI (package `ocx`) is the application layer: everything.
 ocx = [
+    "ocx_env_apply",
     "ocx_exit",
     "ocx_util",
     "ocx_console",
@@ -108,8 +114,8 @@ ocx = [
 ]
 # Build-only schema generator (ADR map + C-067).
 ocx_schema = ["ocx", "ocx_oci", "ocx_config", "ocx_package", "ocx_project", "ocx_package_manager", "ocx_exit", "ocx_env"]
-# The Windows launcher shim: nothing.
-ocx_shim = []
+# The Windows launcher shim: the apply semantics only.
+ocx_shim = ["ocx_env_apply"]
 # The published-document contract lint: reads the documents as JSON, links nothing.
 ocx_sdkgen = []
 # The usage export: reads settings and variables, dials through the guarded

@@ -27,6 +27,7 @@ ocx_env.workspace = true
 # The classification vocabulary: error types declare their exit code and `error.detail` slug with `#[derive(Classify)]`.
 ocx_exit.workspace = true
 # `FileError`, the archive helpers, the extension-trait prelude.
+ocx_env_apply.workspace = true
 ocx_util.workspace = true
 
 async-trait.workspace = true

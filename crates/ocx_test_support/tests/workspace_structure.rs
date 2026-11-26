@@ -272,13 +272,21 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     ("ocx_exit_derive", &[]),
     ("ocx_env", &["ocx_exit"]),
     ("ocx_util", &["ocx_exit"]),
+    ("ocx_env_apply", &[]),
     ("ocx_console", &["ocx_exit", "ocx_util", "ocx_env"]),
     ("ocx_oci", &["ocx_util", "ocx_console", "ocx_exit", "ocx_env"]),
     ("ocx_trust", &["ocx_oci", "ocx_util", "ocx_env"]),
     ("ocx_sign", &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"]),
     (
         "ocx_config",
-        &["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit", "ocx_env"],
+        &[
+            "ocx_env_apply",
+            "ocx_trust",
+            "ocx_oci",
+            "ocx_util",
+            "ocx_exit",
+            "ocx_env",
+        ],
     ),
     (
         "ocx_store",
@@ -291,6 +299,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     (
         "ocx_package",
         &[
+            "ocx_env_apply",
             "ocx_index",
             "ocx_store",
             "ocx_config",
@@ -304,6 +313,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     (
         "ocx_shell",
         &[
+            "ocx_env_apply",
             "ocx_package",
             "ocx_config",
             "ocx_store",
@@ -317,6 +327,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     (
         "ocx_project",
         &[
+            "ocx_env_apply",
             "ocx_shell",
             "ocx_package",
             "ocx_index",
@@ -333,6 +344,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     (
         "ocx_package_manager",
         &[
+            "ocx_env_apply",
             "ocx_project",
             "ocx_package",
             "ocx_index",
@@ -375,6 +387,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     (
         "ocx_setup",
         &[
+            "ocx_env_apply",
             "ocx_package_manager",
             "ocx_shell",
             "ocx_config",
@@ -396,6 +409,7 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
     (
         "ocx",
         &[
+            "ocx_env_apply",
             "ocx_exit",
             "ocx_util",
             "ocx_console",
@@ -429,7 +443,7 @@ const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
             "ocx_env",
         ],
     ),
-    ("ocx_shim", &[]),
+    ("ocx_shim", &["ocx_env_apply"]),
     ("ocx_sdkgen", &[]),
     // The usage export: settings, variables and the guarded resolver, nothing else.
     ("ocx_telemetry", &["ocx_config", "ocx_env", "ocx_oci", "ocx_util"]),
