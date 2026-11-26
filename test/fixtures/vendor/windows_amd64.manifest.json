@@ -19,7 +19,7 @@
       "tree": {
         "files": [
           {
-            "path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool",
+            "path": "packages/@REGISTRY@/sha256/@XX@/@DIGEST30@/content/bin/tool.exe",
             "executable": true
           }
         ],
