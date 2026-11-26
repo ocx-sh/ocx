@@ -21,7 +21,7 @@ use ocx_package::vendor::{
     MANIFEST_FILE, Package, SCHEMA_VERSION, Selection as ManifestSelection, Tool, ToolKind, Tree, VendorManifest,
     vendor_id,
 };
-use ocx_project::{SelectedTool, ToolSource, resolve_selected_tools};
+use ocx_project::{LockedTool, SelectedTool, ToolSource, resolve_selected_tools};
 use ocx_store::file_structure::{StagedTree, VendorLayout, normalise_written_file};
 use ocx_util::fs::{DirWalker, EmptyOrAbsentError, WalkDecision, ensure_empty_or_absent};
 
@@ -223,9 +223,9 @@ async fn select(manager: &PackageManager, request: &VendorRequest) -> Result<Sel
     let (picked, available_platforms) = match &request.selection {
         VendorSelection::Project { selected, .. } => {
             // From the lock's keys, before a leaf is chosen for `request.platform`, so every `-p` sees the same set.
-            let available = shared_platforms(selected.iter().map(|tool| match &tool.source {
-                ToolSource::Locked(bound) => bound.locked().platforms.keys().cloned().collect::<BTreeSet<_>>(),
-                ToolSource::Explicit(_) => BTreeSet::from([Platform::any().to_string()]),
+            let available = locked_platforms(selected.iter().filter_map(|tool| match &tool.source {
+                ToolSource::Locked(bound) => Some(bound.locked()),
+                ToolSource::Explicit(_) => None,
             }));
             // The `no_host_leaf` (78) refusal `ocx exec` raises, before the network.
             let picked = resolve_selected_tools(selected, &request.platform)
@@ -269,6 +269,30 @@ fn shared_platforms(offers: impl IntoIterator<Item = BTreeSet<String>>) -> Vec<S
         });
     }
     shared.map_or_else(|| vec![any], |shared| shared.into_iter().collect())
+}
+
+/// The platforms a `-p` request can name: those on which every locked tool has the leaf `ocx exec` would pick.
+///
+/// Candidates are the lock's own keys, each tried through [`LockedTool::host_leaf`], so a `linux/amd64` leaf serves a
+/// `linux/amd64+libc.glibc` request as it does on a glibc host. An `any` leaf and an explicit tool narrow nothing.
+fn locked_platforms<'a>(tools: impl IntoIterator<Item = &'a LockedTool>) -> Vec<String> {
+    let any = Platform::any().to_string();
+    let tools: Vec<_> = tools
+        .into_iter()
+        .filter(|tool| !tool.platforms.contains_key(&any))
+        .collect();
+    if tools.is_empty() {
+        return vec![any];
+    }
+    let candidates: BTreeSet<&String> = tools.iter().flat_map(|tool| tool.platforms.keys()).collect();
+    candidates
+        .into_iter()
+        .filter(|key| {
+            key.parse::<Platform>()
+                .is_ok_and(|platform| tools.iter().all(|tool| tool.host_leaf(&platform).is_ok()))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The platforms `packages` serve together, from their image indexes; a flat image manifest serves every platform.
@@ -1698,6 +1722,35 @@ mod tests {
         select(&manager, &packages_request(vec![package("tool", "1.0")], linux_amd64()))
             .await
             .expect("linux leaf");
+    }
+
+    /// A lock mixing `linux/amd64` and `linux/amd64+libc.glibc` leaves offers the glibc spelling, not the bare one.
+    #[test]
+    fn locked_platforms_follow_the_host_leaf_match_not_the_literal_keys() {
+        let tool = |keys: &[&str]| LockedTool {
+            declared: None,
+            name: "tool".to_owned(),
+            group: "default".to_owned(),
+            repository: ocx_oci::Repository::new(REGISTRY, "tool"),
+            platforms: keys
+                .iter()
+                .map(|key| ((*key).to_owned(), Digest::Sha256("a".repeat(64))))
+                .collect(),
+        };
+        let plain = tool(&["linux/amd64", "darwin/arm64"]);
+        let glibc = tool(&["linux/amd64+libc.glibc", "darwin/arm64"]);
+        // `plain` serves a glibc request, `glibc` does not serve a bare one: only the glibc spelling is common.
+        assert_eq!(
+            locked_platforms([&plain, &glibc]),
+            ["darwin/arm64", "linux/amd64+libc.glibc"]
+        );
+        assert_eq!(locked_platforms([&plain]), ["darwin/arm64", "linux/amd64"]);
+        assert_eq!(
+            locked_platforms([&tool(&["any"]), &plain]),
+            ["darwin/arm64", "linux/amd64"]
+        );
+        assert_eq!(locked_platforms([]), ["any"]);
+        assert!(locked_platforms([&tool(&["linux/amd64"]), &tool(&["windows/amd64"])]).is_empty());
     }
 
     #[test]
