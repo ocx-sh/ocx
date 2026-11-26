@@ -114,3 +114,5 @@ as contracts here. No GitHub issue was filed from this step; B-2 and W-2 are for
 - `cargo test -p ocx_shim --locked`: 152 + 9 passed, 1 ignored (the timing row, ignored before this step).
 - `cargo clippy -p ocx_shim --all-targets --locked -- -D warnings`: no issues.
 - `cargo check -p ocx_shim --all-targets --locked --target x86_64-pc-windows-gnullvm`: finished, no warnings.
+
+Fixed in 5fc5f62f: B-2 (device-name check is byte-wise, no panic on multi-byte segments); W-2 (`__OCX_` prefix folds ASCII case on Windows, exact on Unix); NUL byte in env value, args, program or self refused by `validate` (`SidecarError::NulByte`, 65 writer / 78 decoder).
